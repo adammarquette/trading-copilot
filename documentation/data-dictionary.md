@@ -45,6 +45,7 @@ erDiagram
   Operator      ||--o{ Trade                  : owns
   Operator      ||--o{ Conversation           : owns
   Operator      ||--o{ Invitation             : issues
+  Operator      ||--o{ SoftSignalFeedback     : rates
   Firm          ||--o{ Connection            : provides
   TradingVenue  ||--o{ Connection            : "platform for"
   TradingVenue  ||--o{ Instrument            : lists
@@ -56,6 +57,7 @@ erDiagram
   Account       ||--o{ Trade                 : "journaled on"
 
   DataSource    ||--o{ SoftSignal            : feeds
+  SoftSignal    ||--o{ SoftSignalFeedback     : "rated by"
   Instrument    ||--o{ Bar                    : "OHLCV"
   Instrument    ||--o{ IndicatorValue         : projections
   Instrument    ||--o{ Position               : "held as"
@@ -181,7 +183,8 @@ News is the reference template; other non-market feeds reuse this shape (R-2).
 |---|---|---|---|
 | **SoftSignal (NewsItem)** | source, type (news / social / …), published + crawl ts, title, content, url, tickers, **matched instruments / topics** (relevance), tags, **dedup key**, **provenance (source feeds[])**; sentiment **deferred** | REL + VEC | R-2 |
 | **NewsTopic** | name, tags / keywords / embedding, scope (instrument \| global) | REL + VEC | R-2 |
-| **RelevanceConfig / TopicMap** | ticker↔instrument maps (SPY→ES), per-instrument topics, global topics; **AI-suggested + user-curated** (config panel) | REL | R-2, R-6/R-7 |
+| **RelevanceConfig / TopicMap** | ticker↔instrument maps (SPY→ES), per-instrument topics, global topics; **AI-suggested + user-curated** (config panel); **personalized importance weights** learned from `SoftSignalFeedback` stars (per-dimension salience multipliers, ADR-0014) | REL | R-2, R-6/R-7, ADR-0014 |
+| **SoftSignalFeedback** | per-user feedback on a soft-signal / news item: **kind** (**important / star** \| sentiment 👍/👎 \| **mute**), value / weight, ts, **user**; a **star** raises the personalized **salience** of similar future items (aggregated into `RelevanceConfig` weights) — a **soft signal, never a risk control**; transparent + adjustable (un-star / mute, salience floor) | REL | R-2, R-6, R-9, ADR-0014, ADR-0011 |
 
 ## 10. Vectors & retrieval
 | Entity | Key fields | Storage | Traces |
@@ -208,7 +211,7 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
   TradingVenue, DataSource, Firm (§1), all market series (§2), and raw SoftSignal / news (§9) — is **shared / global**.
   **All operator-owned data** — Connection, Account, Position, AccountSnapshot, RiskProfile, GateDecision, Suggestion
   (+ disposition / snapshot), Order / Fill / StopPlan / ConditionalOrder / Bracket, Trade / TradeFeedback / Outcome,
-  Rule / Trigger, RelevanceConfig, Embedding, Conversation / ChatMessage, AuditRecord, AIUsage — carries an **owning
+  Rule / Trigger, RelevanceConfig, Embedding, Conversation / ChatMessage, AuditRecord, AIUsage, SoftSignalFeedback — carries an **owning
   `user_id`** and is **filtered by the authenticated user at the data layer** (row-level scoping); **no cross-user
   access**, enforced below the UI. *(Event-log tenancy — a mix of shared market + per-user decision events — is an
   open item; see [ADR-0011](adr/0011-multi-user-tenancy.md).)*
