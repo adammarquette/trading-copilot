@@ -44,6 +44,8 @@ erDiagram
   Operator      ||--o{ Suggestion             : owns
   Operator      ||--o{ Trade                  : owns
   Operator      ||--o{ Conversation           : owns
+  Operator      ||--o{ Invitation             : issues
+  Operator      ||--o{ SoftSignalFeedback     : rates
   Firm          ||--o{ Connection            : provides
   TradingVenue  ||--o{ Connection            : "platform for"
   TradingVenue  ||--o{ Instrument            : lists
@@ -55,6 +57,7 @@ erDiagram
   Account       ||--o{ Trade                 : "journaled on"
 
   DataSource    ||--o{ SoftSignal            : feeds
+  SoftSignal    ||--o{ SoftSignalFeedback     : "rated by"
   Instrument    ||--o{ Bar                    : "OHLCV"
   Instrument    ||--o{ IndicatorValue         : projections
   Instrument    ||--o{ Position               : "held as"
@@ -99,6 +102,7 @@ erDiagram
 | **Strategy / Setup** | name (VWAP-reclaim, opening-drive…), description, enabled, **template lineage** (source StrategyTemplate + version, if installed from one) — the **per-user, editable instance** | REL | R-4, R-9, R-21 |
 | **StrategyTemplate** (“playbook”) | name (e.g. 13/48 EMA-crossover, an ICT model), version, methodology tag, **source** (platform-curated / user-authored), **required features / indicators**, **setup definitions** (→ triggers), **suggestion shape** (entry / stop / target / size derivation), **risk defaults** (R-5), packaged **rules** (R-7); **install → instantiates** per-user Strategy + Rule + Trigger + defaults, tracked by lineage. Platform templates are global; user-authored are per-user (R-20) | REL + VEC | R-21, R-7, R-4, R-5 |
 | **User (Operator)** — *tenant root* | id, **email**, credential (hashed, server-side), display name, created ts, status, claims / roles (RBAC-capable); **owns an isolated workspace** — every operator-owned entity references its owning user (R-20) | REL | R-18, R-20, ADR-0003, ADR-0011 |
+| **Invitation** | id, **invited email**, token (hashed), **issued-by** user (operator / admin), status (pending / accepted / revoked / expired), created + **expires** ts, accepted-user (once used); **single-use**, **gates onboarding** (R-18) — no open sign-up | REL | R-18, R-20, ADR-0011 |
 | **Firm / account provider** | a **prop firm** (Topstep, Apex, …) **or a brokerage**; the **platform** it runs on (TopstepX/ProjectX; Tradovate; a broker API); super-account concept (prop) | REL | R-17 |
 | **Connection** (a firm login) | operator, **firm** (Topstep, Apex, Take Profit Trader, …) + its **platform / venue** (ProjectX-TopstepX \| Tradovate), credentials (server-side ref), status — **one per firm** (several firms share a platform → **several logins**, e.g. multiple Tradovate logins); exposes many accounts | REL | R-17, R-18 |
 
@@ -179,7 +183,8 @@ News is the reference template; other non-market feeds reuse this shape (R-2).
 |---|---|---|---|
 | **SoftSignal (NewsItem)** | source, type (news / social / …), published + crawl ts, title, content, url, tickers, **matched instruments / topics** (relevance), tags, **dedup key**, **provenance (source feeds[])**; sentiment **deferred** | REL + VEC | R-2 |
 | **NewsTopic** | name, tags / keywords / embedding, scope (instrument \| global) | REL + VEC | R-2 |
-| **RelevanceConfig / TopicMap** | ticker↔instrument maps (SPY→ES), per-instrument topics, global topics; **AI-suggested + user-curated** (config panel) | REL | R-2, R-6/R-7 |
+| **RelevanceConfig / TopicMap** | ticker↔instrument maps (SPY→ES), per-instrument topics, global topics; **AI-suggested + user-curated** (config panel); **personalized importance weights** learned from `SoftSignalFeedback` stars (per-dimension salience multipliers, ADR-0014) | REL | R-2, R-6/R-7, ADR-0014 |
+| **SoftSignalFeedback** | per-user feedback on a soft-signal / news item: **kind** (**important / star** \| sentiment 👍/👎 \| **mute**), value / weight, ts, **user**; a **star** raises the personalized **salience** of similar future items (aggregated into `RelevanceConfig` weights) — a **soft signal, never a risk control**; transparent + adjustable (un-star / mute, salience floor) | REL | R-2, R-6, R-9, ADR-0014, ADR-0011 |
 
 ## 10. Vectors & retrieval
 | Entity | Key fields | Storage | Traces |
@@ -199,14 +204,14 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 |---|---|---|---|
 | **Conversation / ChatMessage** | role, content, tool invocations, grounding refs, ts — persists across sessions | REL + VEC | R-6 |
 | **AuditRecord** | actor, action (order / guardrail / kill / flatten / **connection-loss**), **placement (native / synthetic)** + **`synthetic_risk`** (a live position resting on an in-app synthetic stop / bracket — an **orphan risk** if the connection drops), before → after, ts — immutable | REL / TS | eng §9, ADR-0007 |
-| **AIUsage** | invocation: feature (suggestion / follow-up / backtest / triage / embed), model + tier, tokens in/out, **est. $ cost**, latency, trace id, ts — spend tracking + governor input | REL / TS | ADR-0008, ADR-0002, Q-10 |
+| **AIUsage** | invocation: feature (suggestion / follow-up / backtest / triage / embed), model + tier, tokens in/out, **est. $ cost**, latency, trace id, ts, **user** — spend tracking + governor input. **Operator / platform-facing:** aggregated in **Grafana** (ADR-0002), **not a user surface** (R-20); the per-user tag supports operator attribution | REL / TS | ADR-0008, ADR-0002, Q-10 |
 
 ## Cross-cutting
 - **Multi-user tenancy (R-20).** The **User** is the **tenant root**. **Reference & market data** — Instrument,
   TradingVenue, DataSource, Firm (§1), all market series (§2), and raw SoftSignal / news (§9) — is **shared / global**.
   **All operator-owned data** — Connection, Account, Position, AccountSnapshot, RiskProfile, GateDecision, Suggestion
   (+ disposition / snapshot), Order / Fill / StopPlan / ConditionalOrder / Bracket, Trade / TradeFeedback / Outcome,
-  Rule / Trigger, RelevanceConfig, Embedding, Conversation / ChatMessage, AuditRecord, AIUsage — carries an **owning
+  Rule / Trigger, RelevanceConfig, Embedding, Conversation / ChatMessage, AuditRecord, AIUsage, SoftSignalFeedback — carries an **owning
   `user_id`** and is **filtered by the authenticated user at the data layer** (row-level scoping); **no cross-user
   access**, enforced below the UI. *(Event-log tenancy — a mix of shared market + per-user decision events — is an
   open item; see [ADR-0011](adr/0011-multi-user-tenancy.md).)*
