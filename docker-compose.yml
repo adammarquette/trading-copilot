@@ -1,0 +1,47 @@
+# docker-compose — local development environment.
+# `docker compose up -d` from the repo root stands up the local stack.
+# See ADR-0012 (containerization & local development) and engineering §8.
+#
+# App services run as the SAME containerized artifact as Railway (the multi-stage
+# Dockerfile). The DATABASE is config-driven: the app reads its connection string from
+# config (ConnectionStrings__* / appsettings), so it can use the `db` service below OR an
+# external / managed Postgres -- swapping is a config change, not a code change.
+#
+# Scaffold: services are added as the src/ solution is built (only `db` is concrete today).
+services:
+  db:
+    # TimescaleDB (time-series) + pgvector (vectors) -- the two Postgres extensions the app uses.
+    # NOTE: confirm image tag + PGDATA volume path (ADR-0012 follow-up); the -ha image bundles both.
+    image: timescale/timescaledb-ha:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-copilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-copilot}   # local dev only -- real secrets never committed
+      POSTGRES_DB: ${POSTGRES_DB:-tradingcopilot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-copilot} -d ${POSTGRES_DB:-tradingcopilot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # app: the .NET BFF + agents. Uncomment once the project + Dockerfile exist (engineering §3, §8):
+  # app:
+  #   build:
+  #     context: .
+  #     dockerfile: src/TradingCopilot/<Bff>/Dockerfile   # multi-stage sdk -> aspnet, binds $PORT
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #   environment:
+  #     ASPNETCORE_ENVIRONMENT: Development
+  #     # Point at the compose db, or override to an external / managed Postgres:
+  #     ConnectionStrings__Default: "Host=db;Port=5432;Database=${POSTGRES_DB:-tradingcopilot};Username=${POSTGRES_USER:-copilot};Password=${POSTGRES_PASSWORD:-copilot}"
+  #   ports:
+  #     - "8080:8080"
+  #   # API keys / secrets via env or a gitignored .env -- never committed
+
+volumes:
+  db-data:
