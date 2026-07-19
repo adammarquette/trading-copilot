@@ -1,0 +1,69 @@
+# ADR-0013: Failure & recovery model
+
+**Status:** Accepted · **Date:** 2026-07-19 · **Deciders:** Adam (operator)
+**Relates to:** PRD `R-1` (ingestion recovery), `R-4` (suggestion lifecycle / recovery), `R-12` (execution
+re-validation), `R-13` (auto-flatten — safety-critical), `R-19` (PWA), `R-20` (tenancy); engineering §2 (SignalR
+resume), §9 (safety-critical); [ADR-0001](0001-event-backbone.md) (event log / clean-historical),
+[ADR-0007](0007-order-execution-model.md) (execution / orphan handling), [ADR-0010](0010-progressive-web-app.md),
+[ADR-0011](0011-multi-user-tenancy.md).
+
+## Context
+Things fail: the user's client drops, the backend restarts, the venue connection breaks, or — worst — the cloud tier
+is unreachable near the flatten deadline. The recovery behaviour for each already exists, but **spread across
+R-4 / R-12 / R-13 / ADR-0001 / ADR-0007** — no single place states the whole model, and one part (the auto-flatten
+guarantee) is a known-hard open item. This ADR **consolidates the recovery model for visibility** and names the piece
+that still needs engineering design. It records *what already holds*; it does not invent new mechanisms (each stays
+owned by its requirement / ADR).
+
+## Decision — a layered recovery model
+- **The client is presentation-only; it loses nothing.** All state lives server-side; the PWA (ADR-0010) resumes on
+  reconnect via the **SignalR outbox + monotonic-sequence + idempotent-resume** pattern (engineering §2), catching up
+  missed updates. A crashed / closed / slept client is a non-event.
+- **On backend restart, state is rehydrated, not replayed live.** Decision state (suggestions, orders, positions,
+  rules, templates) **rehydrates from its persisted store**; market / indicator state **rebuilds from the
+  clean-historical** store, *not* the short-retention event log (ADR-0001 — "rebuild = reprocess clean-historical");
+  ingestion **backfills gaps on reconnect** (R-1). Rehydration **preserves per-user isolation** (R-20).
+- **No-risk state fails safe by expiring.** A **suggestion carries no risk** (nothing at the broker until taken). On
+  any recovery, suggestions apply their normal lifecycle: past the **validity window** or with broken drift / thesis
+  → **stale → expired / void**; a survivor must still pass **R-12** before it can be taken; **nothing is auto-taken or
+  silently resumed**; a re-formed setup is a **new** suggestion (R-4). Same for a **pending conditional order** (its
+  cancel-if / expiry, R-11).
+- **At-risk state is protected independently of client and app.** A live position always has a **native, exchange-held
+  safety stop** (ADR-0007) — it survives *any* app / backend / connection failure. On **venue-connection loss**, in-app
+  **synthetic** orders (hidden entries, un-promoted stops) go **orphaned → emergency** with an operator alert; on
+  reconnect the system **re-validates and re-arms** — nothing silently resumes (ADR-0007).
+- **The hard case — the auto-flatten guarantee (R-13).** Flattening before the 3:00 PM CST close is **safety-critical
+  and must fire even if the primary tier is degraded**. This is the **one piece still to design**: a **redundant /
+  independent trigger** (a watchdog separate from the main scheduler), a defined behaviour if a flatten order is
+  *rejected* at 2:59 PM, and possibly a **local fallback flatten path**. Until proven on practice, it is the **gating
+  risk** for live trading (PRD §6 open question).
+
+**Principles (invariants).** Never present **stale data / risk state as live** (R-19); never **auto-act on rehydrated
+state** (re-validate first, R-12); keep **no-risk state (expire) separate from at-risk state (protect + recover)**;
+the **exchange-held stop is the physical floor**; every recovery transition is **audited** (§9, ADR-0007).
+
+## Alternatives considered
+- **Hold critical state on the client.** Rejected — the client is presentation-only and unreliable (offline, evicted,
+  asleep); safety can't depend on it (ADR-0010 / ADR-0011).
+- **Auto-resume suggestions / orders after an outage as-was.** Rejected — acting on unmonitored, possibly-stale state
+  is unsafe; **expire + re-validate** instead.
+- **Trust the venue to hold all protection.** Rejected — synthetic orders are in-app by design (to hide entries); the
+  native safety stop + orphan handling cover the gap.
+- **A single durable scheduler for auto-flatten.** Insufficient alone — a tier outage takes it down too; hence a
+  **redundant / independent** trigger (to be designed).
+
+## Consequences
+**Positive** — one coherent, auditable recovery story; client failures are non-events; proposals fail safe; live risk
+is protected server / exchange-side; the hard problem (auto-flatten guarantee) is **named and isolated**, not buried.
+**Negative / costs** — the **auto-flatten watchdog / fallback is real safety-critical engineering** (high-rigor suites,
+§5 / §9) and **gates live trading**; **state rehydration needs deterministic-eval coverage** (incl. cross-user
+isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-valid setups after an outage
+(accepted — they re-form as new suggestions).
+
+## Follow-ups
+- **Design the auto-flatten guarantee** (R-13): redundant scheduler / independent watchdog, rejected-order behaviour,
+  a local fallback path — the gating safety-critical item (PRD §6). Prove on practice before live.
+- **State-rehydration tests:** suggestions / orders / positions / templates rehydrate correctly and **per-user
+  isolation holds** through a restart (R-20).
+- **Reconnect / backfill** verification (R-1 gap detection) and **recovery event / audit** records (ADR-0001, §9).
+- Client **resume** edge cases (dedup, ordering) under the SignalR idempotent-resume pattern.
