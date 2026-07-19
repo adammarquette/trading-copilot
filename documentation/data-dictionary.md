@@ -44,6 +44,7 @@ erDiagram
   Operator      ||--o{ Suggestion             : owns
   Operator      ||--o{ Trade                  : owns
   Operator      ||--o{ Conversation           : owns
+  Operator      ||--o{ Invitation             : issues
   Firm          ||--o{ Connection            : provides
   TradingVenue  ||--o{ Connection            : "platform for"
   TradingVenue  ||--o{ Instrument            : lists
@@ -99,6 +100,7 @@ erDiagram
 | **Strategy / Setup** | name (VWAP-reclaim, opening-drive…), description, enabled, **template lineage** (source StrategyTemplate + version, if installed from one) — the **per-user, editable instance** | REL | R-4, R-9, R-21 |
 | **StrategyTemplate** (“playbook”) | name (e.g. 13/48 EMA-crossover, an ICT model), version, methodology tag, **source** (platform-curated / user-authored), **required features / indicators**, **setup definitions** (→ triggers), **suggestion shape** (entry / stop / target / size derivation), **risk defaults** (R-5), packaged **rules** (R-7); **install → instantiates** per-user Strategy + Rule + Trigger + defaults, tracked by lineage. Platform templates are global; user-authored are per-user (R-20) | REL + VEC | R-21, R-7, R-4, R-5 |
 | **User (Operator)** — *tenant root* | id, **email**, credential (hashed, server-side), display name, created ts, status, claims / roles (RBAC-capable); **owns an isolated workspace** — every operator-owned entity references its owning user (R-20) | REL | R-18, R-20, ADR-0003, ADR-0011 |
+| **Invitation** | id, **invited email**, token (hashed), **issued-by** user (operator / admin), status (pending / accepted / revoked / expired), created + **expires** ts, accepted-user (once used); **single-use**, **gates onboarding** (R-18) — no open sign-up | REL | R-18, R-20, ADR-0011 |
 | **Firm / account provider** | a **prop firm** (Topstep, Apex, …) **or a brokerage**; the **platform** it runs on (TopstepX/ProjectX; Tradovate; a broker API); super-account concept (prop) | REL | R-17 |
 | **Connection** (a firm login) | operator, **firm** (Topstep, Apex, Take Profit Trader, …) + its **platform / venue** (ProjectX-TopstepX \| Tradovate), credentials (server-side ref), status — **one per firm** (several firms share a platform → **several logins**, e.g. multiple Tradovate logins); exposes many accounts | REL | R-17, R-18 |
 
@@ -199,7 +201,7 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 |---|---|---|---|
 | **Conversation / ChatMessage** | role, content, tool invocations, grounding refs, ts — persists across sessions | REL + VEC | R-6 |
 | **AuditRecord** | actor, action (order / guardrail / kill / flatten / **connection-loss**), **placement (native / synthetic)** + **`synthetic_risk`** (a live position resting on an in-app synthetic stop / bracket — an **orphan risk** if the connection drops), before → after, ts — immutable | REL / TS | eng §9, ADR-0007 |
-| **AIUsage** | invocation: feature (suggestion / follow-up / backtest / triage / embed), model + tier, tokens in/out, **est. $ cost**, latency, trace id, ts — spend tracking + governor input | REL / TS | ADR-0008, ADR-0002, Q-10 |
+| **AIUsage** | invocation: feature (suggestion / follow-up / backtest / triage / embed), model + tier, tokens in/out, **est. $ cost**, latency, trace id, ts, **user** — spend tracking + governor input. **Operator / platform-facing:** aggregated in **Grafana** (ADR-0002), **not a user surface** (R-20); the per-user tag supports operator attribution | REL / TS | ADR-0008, ADR-0002, Q-10 |
 
 ## Cross-cutting
 - **Multi-user tenancy (R-20).** The **User** is the **tenant root**. **Reference & market data** — Instrument,
