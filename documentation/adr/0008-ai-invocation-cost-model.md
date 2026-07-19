@@ -40,7 +40,9 @@ discipline to **how and when the LLM is invoked at all**, so cost is bounded and
   this worth surfacing?" and only **escalates to the top model** for genuinely hard synthesis. Triggers are
   **debounced / rate-limited** so a flickering condition can't fan out many reviews. An optional **AI-spend
   governor** — mirroring the daily *risk* governor (R-5 / ADR-0007) — can cap or throttle agent invocations against
-  a budget (`Q-10`). Every invocation is **traced** ([ADR-0002](0002-observability.md)) so cost and latency are
+  a budget (`Q-10`); in the **multi-user** model (R-20) it is a **platform-level** cap the **operator** sets — one
+  shared LLM + embeddings account funds every user, so usage & spend is reported in **Grafana, not surfaced to end
+  users** *(revisit per-user if invitees later bring their own LLM accounts; gh#4)*. Every invocation is **traced** ([ADR-0002](0002-observability.md)) so cost and latency are
   observable.
 - **The strategy-agent → executor flow attaches here.** Strategy agents are the "review / enrich on fire"
   consumers; the executor synthesizes their outputs into a timely suggestion — invoked **on triggers, not
