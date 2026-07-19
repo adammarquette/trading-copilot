@@ -1,0 +1,1805 @@
+<title>Trading Co-Pilot — UI Wireframes</title>
+<style>
+  :root{
+    /* Dark-first Material 3 tokens — cool near-black neutrals biased toward the blue accent */
+    --bg:#101318; --surface-1:#161A20; --surface-2:#1C212A; --surface-3:#222834; --surface-4:#29313F;
+    --on-hi:#E5E8EE; --on-med:#A6AEBB; --on-dim:#6C7482;
+    --outline:#333B48; --outline-soft:#242A34;
+    --primary:#9DC3FF; --primary-ctr:#223A5C; --on-primary:#0A2745;
+    --long:#4FBF7B; --long-ctr:#123021; --short:#F0655C; --short-ctr:#3A1714;
+    --warn:#F2B450; --warn-ctr:#33270B; --critical:#FF5A4E; --critical-ctr:#40130F;
+    --font:Roboto,"Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+    --mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,monospace;
+    --r-s:8px; --r-m:12px; --r-l:16px;
+    --e1:0 1px 2px rgba(0,0,0,.5); --e2:0 4px 12px rgba(0,0,0,.5); --e3:0 10px 28px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--on-hi);font-family:var(--font);line-height:1.5;
+    -webkit-font-smoothing:antialiased;font-size:14px}
+  .wrap{max-width:1240px;margin:0 auto;padding:40px 24px 72px}
+  h1,h2,h3,p{margin:0}
+  .num,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  :focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-radius:4px}
+  button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+
+  /* ---------- masthead ---------- */
+  .eyebrow{font-size:11.5px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--primary)}
+  .masthead{display:flex;flex-direction:column;gap:12px;margin-bottom:32px}
+  .masthead h1{font-size:clamp(26px,4vw,38px);font-weight:700;letter-spacing:-.02em;text-wrap:balance;max-width:22ch}
+  .lede{color:var(--on-med);max-width:70ch;font-size:15px}
+  .lede b{color:var(--on-hi);font-weight:600}
+
+  /* ---------- design-token legend ---------- */
+  .tokens{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;margin:8px 0 40px;
+    padding:20px;background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-l)}
+  .tk h3{font-size:11.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--on-dim);margin-bottom:12px}
+  .sw{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:12.5px;color:var(--on-med)}
+  .sw i{width:26px;height:26px;border-radius:7px;flex:none;border:1px solid rgba(255,255,255,.08)}
+  .sw code{font-family:var(--mono);font-size:11px;color:var(--on-dim);margin-left:auto}
+  .type-row{display:flex;align-items:baseline;gap:10px;margin-bottom:9px}
+  .type-row span:last-child{color:var(--on-dim);font-size:11px;font-family:var(--mono);margin-left:auto}
+  .t-disp{font-size:22px;font-weight:700;letter-spacing:-.01em}
+  .t-title{font-size:15px;font-weight:600}.t-body{font-size:13.5px;color:var(--on-med)}
+  .t-label{font-size:11.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--on-med)}
+  .t-num{font-family:var(--mono);font-size:14px}
+  .elev{display:flex;gap:10px;flex-wrap:wrap}
+  .elev i{width:52px;height:36px;border-radius:8px;border:1px solid var(--outline-soft);display:flex;align-items:flex-end;
+    justify-content:center;font-size:10px;color:var(--on-dim);padding-bottom:3px;font-family:var(--mono)}
+
+  /* ---------- frame shell ---------- */
+  .frames{display:flex;flex-direction:column;gap:36px}
+  .cap{display:flex;align-items:baseline;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+  .cap h2{font-size:18px;font-weight:700;letter-spacing:-.01em}
+  .cap .muted{color:var(--on-dim);font-size:12.5px}
+  .cap .bp{font-family:var(--mono);font-size:11px;color:var(--primary);background:var(--primary-ctr);
+    padding:2px 8px;border-radius:20px}
+  .scrollx{overflow-x:auto;padding-bottom:6px}
+  .frame{background:var(--bg);border:1px solid var(--outline);border-radius:var(--r-l);overflow:hidden;box-shadow:var(--e3)}
+  .frame.desktop{min-width:1080px}
+  .frame.tablet{width:760px;max-width:100%}
+  .frame.phone{width:376px;max-width:100%}
+  .frames-row{display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start}
+
+  /* ---------- app bar ---------- */
+  .appbar{display:flex;align-items:center;gap:14px;padding:10px 14px;background:var(--surface-3);
+    border-bottom:1px solid var(--outline-soft)}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:14.5px;white-space:nowrap}
+  .brand .glyph{width:22px;height:22px;flex:none;display:block}
+  .instr{display:flex;align-items:center;gap:8px;background:var(--surface-1);border:1px solid var(--outline-soft);
+    border-radius:8px;padding:6px 10px;font-size:12.5px;white-space:nowrap}
+  .instr b{font-weight:600}.instr .car{color:var(--on-dim);font-size:10px}
+  .hud{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
+  .stat{display:flex;align-items:center;gap:7px;background:var(--surface-1);border:1px solid var(--outline-soft);
+    padding:5px 10px;border-radius:8px;font-size:12px;white-space:nowrap}
+  .stat .k{color:var(--on-dim);font-size:10.5px;letter-spacing:.04em;text-transform:uppercase}
+  .stat .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600}
+  .stat.count{background:var(--warn-ctr);border-color:transparent;color:var(--warn)}
+  .stat.count .v{color:var(--warn)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--long);box-shadow:0 0 0 3px rgba(79,191,123,.18)}
+  .pos{color:var(--long)}.neg{color:var(--short)}
+  .killbtn{display:flex;align-items:center;gap:7px;background:var(--critical-ctr);color:#FFB4AC;
+    border:1px solid rgba(255,90,78,.4);padding:7px 12px;border-radius:8px;font-weight:700;font-size:12px;
+    letter-spacing:.03em;white-space:nowrap}
+  .killbtn .sq{width:9px;height:9px;border-radius:2px;background:var(--critical)}
+  .killbtn:hover{background:#511710}
+  .iconbtn{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:var(--on-med);font-size:15px}
+  .iconbtn:hover{background:var(--surface-1);color:var(--on-hi)}
+  .modechip{font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--warn);background:var(--warn-ctr);
+    padding:2px 7px;border-radius:5px;text-transform:uppercase}
+  .acctchip{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;letter-spacing:.05em;color:var(--warn);background:var(--warn-ctr);padding:3px 9px;border-radius:5px;text-transform:uppercase;border:1px solid transparent}
+  .acctchip:hover{border-color:rgba(242,180,80,.45)}
+  .acctchip .car2{font-size:8px;opacity:.85}
+
+  /* ---------- body grid ---------- */
+  .body{display:flex;min-height:560px}
+  .rail{width:96px;flex:none;background:var(--surface-2);border-right:1px solid var(--outline-soft);
+    display:flex;flex-direction:column;padding:10px 6px;gap:2px}
+  .rail.icons{width:60px}
+  .rail__item{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 4px;border-radius:12px;
+    color:var(--on-dim);font-size:10.5px;text-align:center}
+  .rail__item .ic{width:34px;height:26px;border-radius:14px;display:grid;place-items:center;font-size:16px}
+  .rail__item.on{color:var(--primary)}
+  .rail__item.on .ic{background:var(--primary-ctr)}
+  .rail__item:hover:not(.on){color:var(--on-med)}
+  .rail .spacer{flex:1}
+
+  .center{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)}
+  .charttools{display:flex;align-items:center;gap:6px;padding:9px 12px;border-bottom:1px solid var(--outline-soft);
+    background:var(--surface-1)}
+  .tf{display:flex;gap:2px;background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:2px}
+  .tf span{padding:3px 9px;border-radius:6px;font-size:11.5px;color:var(--on-dim);font-family:var(--mono)}
+  .tf span.on{background:var(--surface-3);color:var(--on-hi)}
+  .ct-tool{color:var(--on-dim);font-size:12px;padding:4px 8px;border-radius:6px}
+  .ct-tool:hover{background:var(--bg);color:var(--on-med)}
+  .ct-legend{margin-left:auto;display:flex;gap:12px;font-size:11px;color:var(--on-med);align-items:center;flex-wrap:wrap}
+  .ct-legend .lg{display:flex;align-items:center;gap:5px}
+  .ct-legend .ln{width:16px;height:0;border-top:2px solid}
+
+  .chart{flex:1;display:flex;flex-direction:column;padding:8px 10px;gap:6px;position:relative}
+  .pane{position:relative;border:1px solid var(--outline-soft);border-radius:8px;background:linear-gradient(180deg,var(--surface-1),var(--bg));overflow:hidden}
+  .pane.price{flex:1;min-height:210px}
+  .pane.ind{height:64px;flex:none}
+  .pane .lab{position:absolute;top:6px;left:8px;font-size:10.5px;color:var(--on-dim);font-family:var(--mono);z-index:2}
+  .pane svg{display:block}
+  .ov-lab{position:absolute;right:8px;font-family:var(--mono);font-size:10px;padding:1px 5px;border-radius:4px;z-index:3;transform:translateY(-50%)}
+
+  /* ---------- right dock ---------- */
+  .dock{width:308px;flex:none;background:var(--surface-2);border-left:1px solid var(--outline-soft);
+    display:flex;flex-direction:column}
+  .dock.narrow{width:272px}
+  .tabs{display:flex;padding:8px 8px 0;gap:2px;border-bottom:1px solid var(--outline-soft)}
+  .tabs .tab{flex:1;text-align:center;padding:9px 6px;font-size:12px;font-weight:600;color:var(--on-dim);
+    border-bottom:2px solid transparent}
+  .tabs .tab.on{color:var(--primary);border-bottom-color:var(--primary)}
+  .dock__body{padding:14px;display:flex;flex-direction:column;gap:12px;overflow:auto}
+
+  .sugg{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:14px;
+    display:flex;flex-direction:column;gap:12px}
+  .sugg__top{display:flex;align-items:center;gap:8px}
+  .side{font-weight:800;font-size:15px;letter-spacing:.02em}
+  .side.long{color:var(--long)}
+  .chip{font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+  .chip.good{background:var(--long-ctr);color:var(--long)}
+  .chip.bad{background:var(--short-ctr);color:var(--short)}
+  .chip.warn{background:var(--warn-ctr);color:var(--warn)}
+  .chip.info{background:var(--primary-ctr);color:var(--primary)}
+  .chip.ghost{background:var(--surface-3);color:var(--on-med)}
+  .levels{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+  .lvl{background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:8px}
+  .lvl .k{font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--on-dim)}
+  .lvl .v{font-family:var(--mono);font-weight:600;font-size:14px;margin-top:2px}
+  .lvl .s{font-size:10px;margin-top:1px}
+  .lvl.tgt .v{color:var(--long)}.lvl.stp .v{color:var(--short)}
+  .why{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--on-med)}
+  .why div{display:flex;gap:7px;align-items:flex-start}
+  .why .b{color:var(--primary);font-size:13px;line-height:1.3}
+  .gate{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--long);background:var(--long-ctr);
+    padding:7px 10px;border-radius:8px}
+  .btns{display:flex;gap:8px}
+  .btn{padding:9px 14px;border-radius:10px;font-weight:600;font-size:12.5px;display:inline-flex;align-items:center;
+    justify-content:center;gap:6px}
+  .btn.fill{background:var(--primary);color:var(--on-primary);flex:1}
+  .btn.fill:hover{filter:brightness(1.08)}
+  .btn.tonal{background:var(--primary-ctr);color:var(--primary)}
+  .btn.out{border:1px solid var(--outline);color:var(--on-med)}
+  .btn.text{color:var(--on-med)}
+  .btn.text:hover{background:var(--surface-1)}
+
+  .mini-h{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--on-dim);margin:2px 0}
+  .table{display:flex;flex-direction:column;font-size:12px}
+  .table .tr{display:grid;grid-template-columns:1fr auto auto;gap:8px;padding:7px 2px;border-bottom:1px solid var(--outline-soft)}
+  .table .tr.h{color:var(--on-dim);font-size:10px;text-transform:uppercase;letter-spacing:.05em}
+  .table .tr .mono{font-variant-numeric:tabular-nums}
+
+  /* ---------- bottom dock ---------- */
+  .bottomdock{display:grid;grid-template-columns:1.4fr 1fr;border-top:1px solid var(--outline-soft);height:172px}
+  .bd{display:flex;flex-direction:column;min-width:0}
+  .bd+.bd{border-left:1px solid var(--outline-soft)}
+  .bd__h{display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:11px;font-weight:700;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--on-dim);background:var(--surface-1);border-bottom:1px solid var(--outline-soft)}
+  .chat{flex:1;display:flex;flex-direction:column;padding:10px 12px;gap:8px;overflow:auto}
+  .msg{max-width:80%;font-size:12px;padding:7px 10px;border-radius:12px;line-height:1.4}
+  .msg.ai{background:var(--surface-2);color:var(--on-med);border-bottom-left-radius:4px}
+  .msg.me{background:var(--primary-ctr);color:#dfe9ff;align-self:flex-end;border-bottom-right-radius:4px}
+  .chat__in{display:flex;align-items:center;gap:8px;margin:0 12px 12px;padding:8px 12px;background:var(--surface-1);
+    border:1px solid var(--outline-soft);border-radius:22px;color:var(--on-dim);font-size:12px}
+  .chat__in .send{margin-left:auto;color:var(--primary)}
+  .news{flex:1;overflow:auto;padding:4px 0}
+  .ni{display:flex;flex-direction:column;gap:3px;padding:8px 12px;border-bottom:1px solid var(--outline-soft)}
+  .ni__t{font-size:12px;color:var(--on-hi);line-height:1.35}
+  .ni__m{display:flex;align-items:center;gap:7px;font-size:10px;color:var(--on-dim);font-family:var(--mono)}
+  .src{font-weight:700;letter-spacing:.03em}
+
+  /* region tag */
+  .tag{font-family:var(--mono);font-size:9.5px;font-weight:600;color:var(--primary);background:var(--primary-ctr);
+    padding:1px 6px;border-radius:5px;white-space:nowrap}
+
+  /* ---------- tablet specifics ---------- */
+  .frame.tablet .body{min-height:440px}
+  .frame.tablet .hud .hide-md{display:none}
+
+  /* ---------- phone ---------- */
+  .frame.phone .body{flex-direction:column;min-height:auto}
+  .phone .appbar{padding:9px 12px;gap:10px}
+  .phone .stack{display:flex;flex-direction:column;background:var(--bg)}
+  .phone .chart{padding:8px}
+  .phone .pane.price{min-height:158px}
+  .phone .sugg{margin:12px;border-radius:var(--r-m)}
+  .phone .posrow{display:flex;gap:8px;padding:0 12px 12px;flex-wrap:wrap}
+  .phone .navbar{display:flex;justify-content:space-around;align-items:center;background:var(--surface-3);
+    border-top:1px solid var(--outline-soft);padding:6px 4px 8px}
+  .navbar__item{display:flex;flex-direction:column;align-items:center;gap:3px;color:var(--on-dim);font-size:10px}
+  .navbar__item .ic{width:44px;height:26px;border-radius:14px;display:grid;place-items:center;font-size:16px}
+  .navbar__item.on{color:var(--primary)}.navbar__item.on .ic{background:var(--primary-ctr)}
+  .phone .fab{position:absolute;right:14px;bottom:70px;width:46px;height:46px;border-radius:16px;background:var(--primary);
+    color:var(--on-primary);display:grid;place-items:center;font-size:19px;box-shadow:var(--e2)}
+  .phone-wrap{position:relative}
+
+  /* legend / key */
+  .key{margin-top:44px;padding:22px;background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-l)}
+  .key h3{font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--on-dim);margin-bottom:14px}
+  .key-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px 22px}
+  .key-grid div{display:flex;gap:9px;font-size:12.5px;color:var(--on-med);align-items:baseline}
+  .foot{margin-top:32px;color:var(--on-dim);font-size:12px;max-width:70ch}
+
+  @media (prefers-reduced-motion: no-preference){
+    .frame{opacity:0;transform:translateY(8px);animation:rise .5s ease forwards}
+    .frames-row .frame{animation-delay:.08s}
+    @keyframes rise{to{opacity:1;transform:none}}
+  }
+  @media (max-width:720px){
+    .wrap{padding:28px 14px 56px}
+    .bottomdock{grid-template-columns:1fr}
+  }
+
+  /* ---------- detached multi-screen desk ---------- */
+  .ms{margin-top:48px}
+  .desk{display:flex;gap:16px;align-items:stretch;flex-wrap:wrap;padding:22px 20px;border-radius:var(--r-l);
+    background:radial-gradient(120% 150% at 50% -25%,#171c24,#0c0e12);border:1px solid var(--outline-soft)}
+  .mon{flex:1 1 240px;min-width:236px;display:flex;flex-direction:column;background:var(--bg);
+    border:1px solid var(--outline);border-radius:10px;overflow:hidden;box-shadow:var(--e2)}
+  .mon.primary{flex:1.35 1 300px;box-shadow:0 0 0 1px var(--primary-ctr),var(--e3)}
+  .winbar{display:flex;align-items:center;gap:8px;padding:7px 9px;background:var(--surface-3);border-bottom:1px solid var(--outline-soft)}
+  .dots{display:flex;gap:5px;flex:none}.dots i{width:9px;height:9px;border-radius:50%;background:var(--outline)}
+  .wtitle{font-size:11px;color:var(--on-med);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:6px}
+  .wsafety{margin-left:auto;display:flex;align-items:center;gap:5px;flex:none}
+  .wsafety .c{font-family:var(--mono);font-size:9.5px;color:var(--warn);background:var(--warn-ctr);padding:1px 5px;border-radius:4px}
+  .wsafety .k{font-size:8.5px;font-weight:800;color:#FFB4AC;background:var(--critical-ctr);padding:2px 5px;border-radius:4px;letter-spacing:.03em}
+  .mon__body{flex:1;padding:9px;display:flex;flex-direction:column;gap:8px}
+  .mon .pane.price{min-height:132px}
+  .monlabel{display:flex;align-items:center;gap:7px;font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--on-dim);font-weight:700}
+  .badge-later{margin-left:auto;font-size:8px;letter-spacing:.05em;text-transform:uppercase;color:var(--on-dim);border:1px solid var(--outline);border-radius:4px;padding:1px 5px}
+  .dom{border:1px solid var(--outline-soft);border-radius:8px;overflow:hidden}
+  .dom .drow{display:grid;grid-template-columns:1fr 62px 1fr;align-items:center;height:17px;border-bottom:1px solid var(--outline-soft);font-family:var(--mono);font-size:10px}
+  .dom .drow:last-child{border-bottom:0}
+  .dom .bid,.dom .ask{position:relative;height:100%;display:flex;align-items:center}
+  .dom .bid{justify-content:flex-end}.dom .ask{justify-content:flex-start}
+  .dom .bidbar,.dom .askbar{position:absolute;top:2px;bottom:2px;border-radius:2px}
+  .dom .bidbar{right:0;background:var(--long);opacity:.26}.dom .askbar{left:0;background:var(--short);opacity:.26}
+  .dom .sz{position:relative;z-index:1;padding:0 7px}
+  .dom .bid .sz{color:var(--long)}.dom .ask .sz{color:var(--short)}
+  .dom .px{text-align:center;color:var(--on-med);border-left:1px solid var(--outline-soft);border-right:1px solid var(--outline-soft)}
+  .dom .drow.last{background:var(--surface-2)}.dom .drow.last .px{color:var(--on-hi);font-weight:700}
+  .tape{display:flex;flex-direction:column;font-family:var(--mono);font-size:10px}
+  .tape .tt{display:grid;grid-template-columns:1fr 28px 1fr;padding:2px 4px;color:var(--on-dim)}
+  .tape .tt b{text-align:center}.tape .tt span:last-child{text-align:right}
+  .tape .tt.b{color:var(--long)}.tape .tt.s{color:var(--short)}
+  .msmini{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:8px;padding:8px 10px}
+  .msmini h4{margin:0 0 5px;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--on-dim);font-weight:700}
+  .msmini .li{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--on-med);padding:3px 0}
+  .msj{font-size:11px;color:var(--on-med);line-height:1.45}
+  .mslink{display:flex;align-items:center;justify-content:center;gap:9px;margin-top:16px;flex-wrap:wrap}
+  .mslink .pill{display:inline-flex;align-items:center;gap:7px;background:var(--surface-1);border:1px solid var(--outline-soft);padding:6px 12px;border-radius:20px;font-size:11.5px;color:var(--on-med)}
+  .mslink .pill b{color:var(--on-hi);font-weight:600}
+  .mslink .pill .d{width:7px;height:7px;border-radius:50%;background:var(--primary);flex:none}
+
+  /* ---------- strategy performance ---------- */
+  .perf{margin-top:48px}
+  .perf-sum{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+  .pstat{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:14px}
+  .pstat .k{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--on-dim)}
+  .pstat .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:22px;font-weight:700;margin-top:4px}
+  .pstat .s{font-size:11px;color:var(--on-med);margin-top:3px}
+  .pstat.delta{border-color:var(--long-ctr);background:linear-gradient(180deg,var(--long-ctr),var(--surface-1))}
+  .pstat.delta .v{color:var(--long)}
+  .perf-grid{display:grid;grid-template-columns:1.7fr 1fr;gap:16px;align-items:start}
+  .ptbl-wrap{overflow-x:auto;background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m)}
+  .ptbl{width:100%;border-collapse:collapse;font-size:12px;min-width:440px}
+  .ptbl th,.ptbl td{padding:9px 10px;text-align:right;border-bottom:1px solid var(--outline-soft);white-space:nowrap}
+  .ptbl th{font-size:9px;letter-spacing:.04em;text-transform:uppercase;color:var(--on-dim);font-weight:700;background:var(--surface-2)}
+  .ptbl th:first-child,.ptbl td:first-child{text-align:left}
+  .ptbl td{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--on-med)}
+  .ptbl td:first-child{font-family:var(--font);color:var(--on-hi);font-weight:600}
+  .ptbl tr:last-child td{border-bottom:0}
+  .disc{font-weight:700}.disc.up{color:var(--long)}.disc.down{color:var(--short)}
+  .calib{font-family:var(--font);font-size:9.5px;padding:2px 7px;border-radius:10px;white-space:nowrap}
+  .calib.ok{background:var(--long-ctr);color:var(--long)}
+  .calib.over{background:var(--warn-ctr);color:var(--warn)}
+  .calib.under{background:var(--primary-ctr);color:var(--primary)}
+  .reasons{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:14px}
+  .reasons h4{margin:0 0 12px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--on-dim);font-weight:700;display:flex;gap:7px;align-items:center}
+  .rbar{display:flex;align-items:center;gap:10px;margin-bottom:9px;font-size:11.5px}
+  .rbar .lab2{width:92px;flex:none;color:var(--on-med)}
+  .rbar .track{flex:1;height:8px;background:var(--surface-3);border-radius:5px;overflow:hidden}
+  .rbar .fill2{height:100%;background:var(--short);opacity:.65;border-radius:5px}
+  .rbar .pct{width:32px;text-align:right;font-family:var(--mono);color:var(--on-dim);flex:none}
+
+  /* ---------- pass feedback ---------- */
+  .rej{margin-top:44px}
+  .rejcard{max-width:440px;background:var(--surface-2);border:1px solid var(--outline);border-radius:var(--r-l);padding:16px;display:flex;flex-direction:column;gap:13px;box-shadow:var(--e2)}
+  .rej-head{display:flex;align-items:center;gap:9px}
+  .rej-old{font-size:11.5px;color:var(--on-dim);text-decoration:line-through}
+  .rej-q{font-size:12.5px;color:var(--on-hi);font-weight:600}
+  .rej-q span{color:var(--on-dim);font-weight:400}
+  .chipset{display:flex;flex-wrap:wrap;gap:7px}
+  .rchip{font-size:11.5px;padding:6px 11px;border-radius:18px;border:1px solid var(--outline);color:var(--on-med)}
+  .rchip.sel{background:var(--primary-ctr);border-color:var(--primary);color:var(--primary);font-weight:600}
+  .note{background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:10px 11px;font-size:12px;color:var(--on-dim)}
+  .rej-why{font-size:11px;color:var(--on-dim);line-height:1.5}
+
+  @media (max-width:720px){
+    .perf-sum{grid-template-columns:1fr}
+    .perf-grid{grid-template-columns:1fr}
+  }
+
+  /* ---------- split button + arm/edit/send flow ---------- */
+  .splitbtn{display:inline-flex;flex:1;border-radius:10px;overflow:hidden}
+  .splitbtn .main{background:var(--primary);color:var(--on-primary);font-weight:600;font-size:12.5px;padding:9px 12px;flex:1}
+  .splitbtn .car{background:var(--primary);color:var(--on-primary);padding:0 9px;border-left:1px solid rgba(0,0,0,.28);display:grid;place-items:center;font-size:11px}
+  .splitbtn .main:hover,.splitbtn .car:hover{filter:brightness(1.08)}
+  .flow{margin-top:44px}
+  .flow-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start}
+  .flow-step{display:flex;flex-direction:column;gap:11px}
+  .step-h{display:flex;align-items:center;gap:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--on-dim);font-weight:700}
+  .step-n{width:18px;height:18px;border-radius:50%;background:var(--primary-ctr);color:var(--primary);display:grid;place-items:center;font-size:10px;font-weight:700;flex:none}
+  .menu{background:var(--surface-3);border:1px solid var(--outline);border-radius:10px;box-shadow:var(--e2);padding:5px;max-width:280px}
+  .menu .mi{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:7px}
+  .menu .mi:hover{background:var(--surface-4)}
+  .menu .mi .t{font-size:12.5px;font-weight:600;color:var(--on-hi)}
+  .menu .mi .d2{font-size:10.5px;color:var(--on-dim);line-height:1.4}
+  .menu .mi.def{background:var(--primary-ctr)}.menu .mi.def .t{color:var(--primary)}
+  .ticket{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:9px}
+  .ticket .th{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--on-dim);font-weight:700;display:flex;justify-content:space-between;align-items:center}
+  .trow{display:flex;justify-content:space-between;align-items:center;font-size:12px}
+  .trow .k{color:var(--on-med);display:flex;align-items:center;gap:6px}
+  .trow .v{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--on-hi)}
+  .trow.edited{background:var(--warn-ctr);margin:0 -7px;padding:5px 7px;border-radius:6px}
+  .trow.edited .v{color:var(--warn);font-weight:700}
+  .trow .was{color:var(--on-dim);text-decoration:line-through;margin-right:7px;font-family:var(--mono)}
+  .warnbn{display:flex;gap:9px;background:var(--warn-ctr);border:1px solid rgba(242,180,80,.35);border-radius:9px;padding:10px 11px;font-size:11.5px;color:var(--warn);line-height:1.5}
+  .warnbn .ic{font-size:14px;flex:none;line-height:1.3}.warnbn b{color:#ffd98a}
+  @media (max-width:720px){.flow-grid{grid-template-columns:1fr}}
+
+  /* ---------- send modes ---------- */
+  .send{margin-top:44px}
+  .send-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .sendopt{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:16px;display:flex;flex-direction:column;gap:10px}
+  .sendopt.sel{border-color:var(--primary-ctr);box-shadow:0 0 0 1px var(--primary-ctr)}
+  .sendopt p{margin:0;font-size:12.5px;color:var(--on-med);line-height:1.55}
+  .sendopt b{color:var(--on-hi);font-weight:600}
+  .so-h{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .trigger{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11.5px;background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:8px 10px;margin-top:auto}
+  .trigger .k{font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--on-dim)}
+  .trigger .v{font-family:var(--mono);color:var(--on-med)}
+  @media(max-width:720px){.send-grid{grid-template-columns:1fr}}
+
+  /* ---------- staged stop protection ---------- */
+  .stop{margin-top:44px}
+  .stop-grid{display:grid;grid-template-columns:264px 1fr;gap:22px;align-items:stretch}
+  .scale{position:relative;background:linear-gradient(180deg,var(--surface-1),var(--bg));border:1px solid var(--outline-soft);border-radius:var(--r-m);min-height:288px}
+  .lvl-line{position:absolute;left:0;right:0;display:flex;align-items:center;gap:8px;padding:0 12px;transform:translateY(-50%)}
+  .lvl-line .ln2{flex:1;height:0;border-top:2px solid}
+  .lvl-line .tagp{font-family:var(--mono);font-size:10px;white-space:nowrap;font-weight:600}
+  .lvl-line .nm{font-size:9px;color:var(--on-dim);white-space:nowrap}
+  .band{position:absolute;left:0;right:0;background:var(--warn);opacity:.13}
+  .band-lab{position:absolute;right:12px;font-size:8.5px;color:var(--warn);transform:translateY(-50%);font-weight:700;letter-spacing:.04em}
+  .price-mark{position:absolute;left:12px;display:flex;align-items:center;gap:7px;transform:translateY(-50%);font-family:var(--mono);font-size:10px;color:var(--on-hi);z-index:2}
+  .price-mark .pd{width:9px;height:9px;border-radius:50%;background:var(--on-hi);box-shadow:0 0 0 3px rgba(255,255,255,.14)}
+  .stop-states{display:flex;flex-direction:column;gap:11px}
+  .sstate{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:10px;padding:12px 14px}
+  .sstate.key-state{border-color:rgba(255,84,73,.4)}
+  .sstate h4{margin:0 0 5px;font-size:12px;font-weight:700;display:flex;align-items:center;gap:8px}
+  .sstate p{margin:0;font-size:11.5px;color:var(--on-med);line-height:1.5}
+  .sstate p b{color:var(--on-hi);font-weight:600}
+  .dotm{width:9px;height:9px;border-radius:50%;flex:none}
+  @media(max-width:720px){.stop-grid{grid-template-columns:1fr}}
+
+  /* ---------- daily risk governor ---------- */
+  .gov{margin-top:44px}
+  .gov-grid{display:grid;grid-template-columns:1.3fr 1fr;gap:22px;align-items:center}
+  .gov-meter{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:16px 18px}
+  .meter-h{display:flex;justify-content:space-between;font-size:11.5px;color:var(--on-med);margin-bottom:8px}
+  .track2{position:relative;height:14px;background:var(--surface-3);border-radius:7px;margin:26px 0 30px}
+  .track2 .used{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,var(--warn),var(--short));border-radius:7px;opacity:.85}
+  .track2 .mark{position:absolute;top:-7px;bottom:-7px;width:2px}
+  .track2 .mark.gov-mark{background:var(--warn)}
+  .track2 .mark.hard-mark{background:var(--critical)}
+  .track2 .mark span{position:absolute;top:-17px;left:50%;transform:translateX(-50%);font-size:8.5px;font-family:var(--mono);white-space:nowrap;color:var(--on-med)}
+  .track2 .mark.hard-mark span{left:auto;right:0;transform:none}
+  .meter-f{display:flex;gap:8px;flex-wrap:wrap}
+  .gov-states{display:flex;flex-direction:column;gap:10px}
+  .gstate{font-size:12px;color:var(--on-med);display:flex;align-items:center;gap:10px}
+  .gstate .chip{flex:none}
+  @media(max-width:720px){.gov-grid{grid-template-columns:1fr}}
+
+  /* ---------- suggestion lifecycle ---------- */
+  .life{margin-top:44px}
+  .life-row{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap}
+  .lstate{flex:1;min-width:172px;background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:13px 14px}
+  .lstate h4{margin:0 0 6px;font-size:12px;font-weight:700;display:flex;align-items:center;gap:8px}
+  .lstate p{margin:0;font-size:11px;color:var(--on-med);line-height:1.5}
+  .lstate p b{color:var(--on-hi);font-weight:600}
+  .lstate.active{border-color:rgba(79,191,123,.45)}
+  .lstate.stale{border-color:rgba(242,180,80,.45)}
+  .lstate.dead{opacity:.72}
+  .larrow{display:flex;align-items:center;color:var(--on-dim);font-size:16px;flex:none;padding:0 2px}
+  .pending2{margin-top:14px;background:var(--surface-1);border:1px dashed var(--outline);border-radius:var(--r-m);padding:13px 15px;display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+  .pending2 .txt{flex:1;min-width:220px;font-size:12px;color:var(--on-med);line-height:1.5}
+  .pending2 .txt b{color:var(--on-hi);font-weight:600}
+  @media(max-width:720px){.larrow{transform:rotate(90deg);align-self:center}}
+
+  /* ---------- journal — P&L by day ---------- */
+  .jnl{margin-top:44px}
+  .jnl-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px}
+  .jstat{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:12px 13px}
+  .jstat .k{font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--on-dim)}
+  .jstat .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:17px;font-weight:700;margin-top:4px}
+  .jnl-grid{display:grid;grid-template-columns:1.55fr 1fr;gap:18px;align-items:start}
+  .cal{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:14px}
+  .cal-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+  .cal-h .m{font-size:13px;font-weight:700}
+  .cal-h .nav{color:var(--on-dim);font-size:13px;letter-spacing:2px}
+  .cal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin-bottom:6px}
+  .cal-dow span{text-align:center;font-size:8.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--on-dim)}
+  .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
+  .cell{aspect-ratio:1 / .82;border-radius:6px;border:1px solid var(--outline-soft);padding:4px 5px;display:flex;flex-direction:column;justify-content:space-between;background:var(--bg);min-height:40px}
+  .cell.empty{background:transparent;border-color:transparent}
+  .cell .dn{font-size:8px;color:var(--on-dim);font-family:var(--mono)}
+  .cell .pn{font-size:9.5px;font-family:var(--mono);font-weight:700}
+  .cell.win .pn{color:var(--long)}.cell.loss .pn{color:var(--short)}
+  .cell.win{border-color:rgba(79,191,123,.3)}.cell.loss{border-color:rgba(240,101,92,.3)}
+  .jnl-side{display:flex;flex-direction:column;gap:14px}
+  .eqbox{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:14px}
+  .eqbox h4{margin:0 0 8px;font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--on-dim);font-weight:700}
+  @media(max-width:720px){.jnl-stats{grid-template-columns:repeat(2,1fr)}.jnl-grid{grid-template-columns:1fr}}
+
+  /* ---------- journal — day detail & feedback ---------- */
+  .day{margin-top:44px}
+  .day-h{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;padding:12px 14px;background:var(--surface-2);border:1px solid var(--outline-soft);border-radius:var(--r-m)}
+  .day-h .dt{font-size:14px;font-weight:700}
+  .day-h .sub{font-size:11.5px;color:var(--on-med);font-family:var(--mono)}
+  .blotter{display:flex;flex-direction:column;gap:10px}
+  .trade{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:13px 15px;display:flex;flex-direction:column;gap:9px}
+  .trade.review{border-color:rgba(242,180,80,.4)}
+  .trade-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .trade-top .sym{font-weight:700;font-size:13px}
+  .trade-top .lv{font-family:var(--mono);font-size:11px;color:var(--on-med)}
+  .trade-top .pnl{margin-left:auto;font-family:var(--mono);font-weight:700;font-size:13px}
+  .fb{display:flex;gap:10px;align-items:flex-start;font-size:11.5px;color:var(--on-med);background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:8px 11px;line-height:1.5}
+  .fb .who{color:var(--on-dim);font-size:9px;letter-spacing:.05em;text-transform:uppercase;flex:none;padding-top:2px}
+  .fb-add{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .fb-add .prompt{font-size:11px;color:var(--on-dim)}
+  .followup{background:linear-gradient(180deg,var(--primary-ctr),var(--surface-1));border:1px solid var(--primary-ctr);border-radius:var(--r-m);padding:14px 15px;display:flex;flex-direction:column;gap:11px;margin-top:12px}
+  .followup .q{font-size:12.5px;color:var(--on-hi);line-height:1.55}
+  .followup .q b{color:var(--primary)}
+
+  /* ---------- news relevance — mapping, topics & feedback ---------- */
+  .nr{margin-top:44px}
+  .nr-grid{display:grid;grid-template-columns:1fr 1.45fr;gap:18px;align-items:start}
+  .nrcard{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:15px}
+  .nrcard h4{margin:0 0 12px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--on-dim);font-weight:700}
+  .maprow{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--outline-soft)}
+  .maprow:last-of-type{border-bottom:0}
+  .maprow .tk{font-family:var(--mono);font-weight:600;color:var(--on-hi)}
+  .maprow .arw{color:var(--on-dim)}
+  .maprow .inst{font-family:var(--mono);color:var(--primary);font-weight:600}
+  .maprow .nm2{color:var(--on-dim);font-size:11px;margin-left:auto}
+  .addrow{margin-top:11px;font-size:11.5px;color:var(--primary)}
+  .selrow{display:flex;align-items:center;gap:8px;margin-bottom:11px;font-size:12px;color:var(--on-med)}
+  .selrow .pick{font-family:var(--mono);font-weight:600;color:var(--on-hi);background:var(--surface-3);border:1px solid var(--outline-soft);border-radius:7px;padding:3px 10px}
+  .topics{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:12px}
+  .tp{font-size:11.5px;padding:5px 10px;border-radius:16px;background:var(--surface-3);color:var(--on-med);border:1px solid var(--outline-soft);display:inline-flex;align-items:center;gap:7px}
+  .tp .x{color:var(--on-dim);font-size:10px}
+  .tp.global{background:var(--primary-ctr);color:var(--primary);border-color:transparent}
+  .tp.suggested{background:transparent;border:1px dashed var(--primary);color:var(--primary)}
+  .tp.suggested .add{font-weight:700}
+  .sugg-row{display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+  .sugg-row .lab3{font-size:10.5px;color:var(--on-dim);width:100%;margin-bottom:1px}
+  .nr-news{margin-top:16px;background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:13px 15px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .nr-news .nt{flex:1;min-width:220px;font-size:12.5px;color:var(--on-hi);line-height:1.45}
+  .nr-news .nm3{font-size:10px;color:var(--on-dim);font-family:var(--mono)}
+  .senti{display:flex;align-items:center;gap:7px}
+  .senti .lab4{font-size:10px;color:var(--on-dim)}
+  .tup,.tdn{width:32px;height:27px;border-radius:8px;border:1px solid var(--outline);display:grid;place-items:center;font-size:13px;background:none}
+  .tup.on{background:var(--long-ctr);border-color:transparent}
+  .tdn.on{background:var(--short-ctr);border-color:transparent}
+  @media(max-width:720px){.nr-grid{grid-template-columns:1fr}}
+
+  /* ---------- the order ticket ---------- */
+  .otk{margin-top:44px}
+  .otk-grid{display:grid;grid-template-columns:344px 1fr;gap:24px;align-items:start}
+  .seg{display:inline-flex;background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:2px;gap:2px}
+  .seg button{padding:5px 11px;border-radius:6px;font-size:11.5px;color:var(--on-dim);background:none;font-weight:600}
+  .seg button.on{background:var(--surface-3);color:var(--on-hi)}
+  .seg button.on.buy{background:var(--long-ctr);color:var(--long)}
+  .seg button.on.sell{background:var(--short-ctr);color:var(--short)}
+  .orow{display:flex;align-items:center;gap:10px;font-size:12px}
+  .orow>.k{color:var(--on-med);width:46px;flex:none}
+  .stepper{display:inline-flex;align-items:center;border:1px solid var(--outline-soft);border-radius:8px;background:var(--bg)}
+  .stepper button{width:26px;height:26px;color:var(--on-med);font-size:14px;background:none}
+  .stepper .val{width:30px;text-align:center;font-family:var(--mono);font-weight:600;color:var(--on-hi)}
+  .autosz{font-size:11px;color:var(--primary);margin-left:auto}
+  .blk{background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:10px 11px;display:flex;flex-direction:column;gap:7px}
+  .blk .bh{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--on-dim);font-weight:700}
+  .stp-line{display:flex;align-items:center;gap:8px;font-size:11.5px}
+  .stp-line .lbl{width:46px;color:var(--on-med);flex:none}
+  .stp-line .px{font-family:var(--mono);font-weight:600}
+  .stp-line .meta{color:var(--on-dim);font-size:10px}
+  .stp-line .tagx{margin-left:auto}
+  .riskblk{background:var(--primary-ctr);border-radius:8px;padding:10px 12px;font-size:11px;color:#dfe9ff;display:flex;flex-direction:column;gap:5px}
+  .riskblk .rr{display:flex;justify-content:space-between;gap:8px}
+  .riskblk b{color:#fff;font-family:var(--mono)}
+  .ann{display:flex;flex-direction:column;gap:13px}
+  .annitem{font-size:12px;color:var(--on-med);line-height:1.55;padding-left:13px;border-left:2px solid var(--primary-ctr)}
+  .annitem b{color:var(--on-hi);font-weight:600}
+  @media(max-width:720px){.otk-grid{grid-template-columns:1fr}}
+
+  /* ---------- account switcher ---------- */
+  .acct{margin-top:44px}
+  .acct-drop{max-width:540px;background:var(--surface-2);border:1px solid var(--outline);border-radius:var(--r-l);overflow:hidden;box-shadow:var(--e2)}
+  .acct-group + .acct-group{border-top:6px solid var(--bg)}
+  .acct-gh{display:flex;align-items:center;gap:8px;padding:9px 14px;background:var(--surface-3);font-size:11px;font-weight:700;letter-spacing:.03em}
+  .acct-gh .plat{color:var(--on-hi)}
+  .acct-gh .firm{color:var(--on-dim);font-weight:400}
+  .arow{display:flex;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid var(--outline-soft)}
+  .arow.sel{background:var(--primary-ctr)}
+  .arow .chk{width:14px;flex:none;color:var(--primary);font-size:12px}
+  .arow .ai{flex:1;min-width:0}
+  .arow .an{font-family:var(--mono);font-size:12px;color:var(--on-hi);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .arow .am{font-size:10px;color:var(--on-dim);display:flex;gap:8px;flex-wrap:wrap;margin-top:3px;align-items:center}
+  .arow .abal{font-family:var(--mono);font-weight:700;font-size:12.5px;flex:none}
+  .acct-grid{display:grid;grid-template-columns:390px 1fr;gap:22px;align-items:start}
+  .acct-col-h{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--on-dim);font-weight:700;margin-bottom:9px}
+  .acct-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 14px;background:var(--surface-3);border-top:1px solid var(--outline-soft);font-size:10.5px;color:var(--on-dim)}
+  .acct-foot b{color:var(--on-med);font-weight:700}
+  .acct-foot .mlink{color:var(--primary);font-weight:600;white-space:nowrap}
+  .acct-full{background:var(--surface-1);border:1px solid var(--outline);border-radius:var(--r-l);overflow:hidden}
+  .mrow{display:flex;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid var(--outline-soft)}
+  .mrow.off{opacity:.5}
+  .mrow .ai{flex:1;min-width:0}
+  .mrow .an{font-family:var(--mono);font-size:12px;color:var(--on-hi);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mrow .am{font-size:10px;color:var(--on-dim);display:flex;gap:7px;flex-wrap:wrap;margin-top:3px;align-items:center}
+  .mrow .abal{font-family:var(--mono);font-weight:700;font-size:12px;flex:none;width:76px;text-align:right}
+  .vtog{flex:none;display:flex;flex-direction:column;align-items:center;gap:3px;width:44px}
+  .vtog .vl{font-size:8px;letter-spacing:.04em;text-transform:uppercase;color:var(--on-dim)}
+  .sw2{width:34px;height:19px;border-radius:12px;background:var(--surface-3);position:relative;border:1px solid var(--outline-soft)}
+  .sw2 i{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--on-dim)}
+  .sw2.on{background:var(--primary-ctr);border-color:transparent}
+  .sw2.on i{left:16px;background:var(--primary)}
+  .sw2.dis{opacity:.4}
+  @media(max-width:720px){.acct-grid{grid-template-columns:1fr}}
+  /* ---------- settings / configuration ---------- */
+  .set{margin-top:44px}
+  .set-grid{display:grid;grid-template-columns:212px 1fr;border:1px solid var(--outline-soft);border-radius:var(--r-l);overflow:hidden;background:var(--surface-1)}
+  .set-nav{background:var(--surface-2);border-right:1px solid var(--outline-soft);padding:10px 8px;display:flex;flex-direction:column;gap:2px}
+  .set-nav .sn{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:9px;font-size:12.5px;color:var(--on-med)}
+  .set-nav .sn .ic{width:20px;text-align:center;color:var(--on-dim);font-size:13px}
+  .set-nav .sn.on{background:var(--primary-ctr);color:var(--primary);font-weight:600}
+  .set-nav .sn.on .ic{color:var(--primary)}
+  .set-body{padding:20px 22px}
+  .set-body h3{margin:0 0 4px;font-size:15px;font-weight:700}
+  .set-body .sub{font-size:12px;color:var(--on-med);margin-bottom:16px}
+  .field{display:flex;align-items:center;gap:14px;padding:13px 0;border-bottom:1px solid var(--outline-soft)}
+  .field:last-child{border-bottom:0}
+  .field .fl{flex:1}
+  .field .fl .fn{font-size:13px;color:var(--on-hi);font-weight:600}
+  .field .fl .fd{font-size:11px;color:var(--on-dim);margin-top:2px;line-height:1.4}
+  .field .fc{flex:none}
+  .inp{background:var(--bg);border:1px solid var(--outline);border-radius:8px;padding:7px 12px;font-family:var(--mono);font-weight:600;color:var(--on-hi);min-width:78px;text-align:right;display:inline-block}
+  .rr-inp{display:inline-flex;align-items:center;gap:5px;background:var(--bg);border:1px solid var(--outline);border-radius:8px;padding:6px 13px;font-family:var(--mono);font-weight:600;color:var(--on-hi)}
+  .rr-inp .accent2{color:var(--primary)}
+  .toggle2{display:inline-flex;background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:2px;gap:2px}
+  .toggle2 button{padding:5px 12px;border-radius:6px;font-size:11.5px;color:var(--on-dim);background:none;font-weight:600}
+  .toggle2 button.on{background:var(--surface-3);color:var(--on-hi)}
+  @media(max-width:720px){.set-grid{grid-template-columns:1fr}.set-nav{flex-direction:row;overflow-x:auto}}
+
+  /* ---------- backtest surface ---------- */
+  .bt{margin-top:44px}
+  .bt-cfg{display:flex;align-items:center;gap:18px;flex-wrap:wrap;background:var(--surface-2);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:13px 16px;margin-bottom:14px}
+  .cfg-item{display:flex;flex-direction:column;gap:2px}
+  .cfg-item .cl{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--on-dim)}
+  .cfg-item .cv{font-size:12.5px;color:var(--on-hi);font-family:var(--mono)}
+  .jstat .s{font-size:9px;color:var(--on-dim);margin-top:2px}
+  /* ---------- AI spend meter ---------- */
+  .spend .rbar .pct{width:44px}
+  /* ---------- consistency / daily-target ---------- */
+  .cons{margin-top:44px}
+  .cons .track2 .used{background:linear-gradient(90deg,var(--long),#6fd39a)}
+  .consbig{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:24px;font-weight:700;margin-top:2px}
+  .cons-read{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+  .cons-read .ci{background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:8px 11px;flex:1;min-width:84px}
+  .cons-read .ck{font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--on-dim)}
+  .cons-read .cv{font-family:var(--mono);font-weight:700;font-size:15px;margin-top:3px}
+  .cons .rbar .track{position:relative}
+  .rbar .fill2.ok{background:var(--long);opacity:.8}
+  .rbar .capmark{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--warn)}
+  /* ---------- onboarding (connection setup) ---------- */
+  .onb{margin-top:44px}
+  .credfield{display:flex;justify-content:space-between;align-items:center;background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:8px 11px;font-size:12px;margin-top:8px}
+  .credfield .ck2{color:var(--on-med)}
+  .credfield .cval{font-family:var(--mono);color:var(--on-hi)}
+  .onb-sync{font-size:11px;color:var(--on-med);margin:12px 0;font-family:var(--mono)}
+  /* ---------- rulebook & triggers ---------- */
+  .rb{margin-top:44px}
+  .rb-grid{display:flex;flex-direction:column;gap:12px}
+  .rulecard{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:14px;display:flex;flex-direction:column;gap:10px}
+  .rulecard.proposed{border-color:var(--primary-ctr);background:linear-gradient(180deg,var(--primary-ctr),var(--surface-1))}
+  .rule-intent{font-size:13px;color:var(--on-hi);line-height:1.5}
+  .rule-intent .q2{color:var(--on-dim)}
+  .dsl{font-family:var(--mono);font-size:11.5px;color:var(--primary);background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:9px 11px;line-height:1.55;overflow-x:auto}
+  .rule-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--on-dim)}
+  .rule-meta .sw2{margin-left:auto}
+  /* ---------- AI refinement loop ---------- */
+  .ail{margin-top:44px}
+  .ail-log{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:4px 14px;margin-top:14px}
+  .ail-log .li2{display:flex;gap:10px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--outline-soft);font-size:11.5px;color:var(--on-med)}
+  .ail-log .li2:last-child{border-bottom:0}
+  .ail-log .li2 .dt2{font-family:var(--mono);font-size:10px;color:var(--on-dim);white-space:nowrap;flex:none}
+  .ail-log .li2 b{color:var(--on-hi);font-weight:600}
+  /* ---------- kill switch & auto-flatten ---------- */
+  .kill{margin-top:44px}
+  .kill-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start}
+  .lstate.crit{border-color:rgba(255,84,73,.5)}
+  .killbig{display:flex;align-items:center;gap:12px;background:var(--critical-ctr);border:1px solid rgba(255,90,78,.4);border-radius:var(--r-m);padding:14px;margin-top:12px}
+  .killbig .sq2{width:20px;height:20px;border-radius:4px;background:var(--critical);flex:none}
+  .killbig .kt{font-size:12px;color:#FFB4AC;line-height:1.5}
+  .killbig .kt b{color:#fff}
+  .audit{font-family:var(--mono);font-size:11px;display:flex;flex-direction:column;margin-top:4px}
+  .audit .ar2{display:grid;grid-template-columns:52px 1fr;gap:9px;padding:6px 0;border-bottom:1px solid var(--outline-soft);color:var(--on-med)}
+  .audit .ar2:last-child{border-bottom:0}
+  .audit .ar2 .ts2{color:var(--on-dim)}
+  @media(max-width:720px){.kill-grid{grid-template-columns:1fr}}
+  /* ---------- auth: register & sign in ---------- */
+  .auth{margin-top:44px}
+  .auth-stage{display:flex;gap:24px;flex-wrap:wrap;justify-content:center;padding:32px 20px;border-radius:var(--r-l);background:radial-gradient(120% 150% at 50% -20%,#171c24,#0c0e12);border:1px solid var(--outline-soft)}
+  .authcard{width:320px;max-width:100%;background:var(--surface-2);border:1px solid var(--outline);border-radius:var(--r-l);box-shadow:var(--e3);padding:22px 20px;display:flex;flex-direction:column;gap:13px}
+  .auth-brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:14.5px;justify-content:center}
+  .auth-brand .glyph{width:22px;height:22px;flex:none;display:block}
+  .auth-h{font-size:16px;font-weight:700;text-align:center}
+  .auth-sub{font-size:11px;color:var(--on-dim);text-align:center;margin-top:-9px}
+  .infield{display:flex;flex-direction:column;gap:5px}
+  .infield .il{font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--on-med)}
+  .infield .box{background:var(--bg);border:1px solid var(--outline);border-radius:8px;padding:9px 11px;font-size:12.5px;color:var(--on-hi);font-family:var(--mono)}
+  .infield .box.ph{color:var(--on-dim);font-family:var(--font)}
+  .auth-alt{font-size:11px;color:var(--on-dim);text-align:center}
+  .auth-link{color:var(--primary);font-weight:600}
+  @media(max-width:720px){.auth-stage{padding:20px 12px}}
+  /* ---------- strategy templates / playbooks ---------- */
+  .pb{margin-top:44px}
+  .pb-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px}
+  .pbcard{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:14px;display:flex;flex-direction:column;gap:9px}
+  .pbcard.sel{border-color:var(--primary-ctr);box-shadow:0 0 0 1px var(--primary-ctr)}
+  .pbcard .pbh{display:flex;align-items:baseline;gap:8px;justify-content:space-between}
+  .pbcard .pbn{font-size:13.5px;font-weight:700;color:var(--on-hi)}
+  .pbcard .pbc{font-size:11px;color:var(--on-med);line-height:1.5}
+  .pbcard .pbc b{color:var(--on-hi);font-weight:600}
+  .pb-detail{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:16px}
+  .pb-detail .pdh{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+  .pb-detail .pdn{font-size:14px;font-weight:700}
+  .pb-layer{display:grid;grid-template-columns:150px 1fr;gap:12px;padding:10px 0;border-top:1px solid var(--outline-soft);font-size:12px}
+  .pb-layer:first-of-type{border-top:0}
+  .pb-layer .pl{color:var(--on-dim);font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;display:flex;gap:7px;align-items:baseline}
+  .pb-layer .pln{width:16px;height:16px;border-radius:50%;background:var(--primary-ctr);color:var(--primary);display:grid;place-items:center;font-size:9px;font-weight:700;flex:none}
+  .pb-layer .pv{color:var(--on-med);line-height:1.55}
+  .pb-layer .pv b{color:var(--on-hi);font-weight:600}
+  .over{background:var(--warn-ctr);color:var(--warn);padding:1px 6px;border-radius:5px;font-weight:600;font-family:var(--mono);font-size:11px}
+  @media(max-width:720px){.pb-layer{grid-template-columns:1fr;gap:3px}}
+</style>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="tc-logo" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#101318"/><rect x=".5" y=".5" width="63" height="63" rx="13.5" fill="none" stroke="#29313F"/><g fill="none" stroke="#9DC3FF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" opacity=".5"><path d="M17.5 25 L17.5 17.5 L25 17.5"/><path d="M39 17.5 L46.5 17.5 L46.5 25"/><path d="M17.5 39 L17.5 46.5 L25 46.5"/><path d="M46.5 39 L46.5 46.5 L39 46.5"/></g><g stroke="#9DC3FF" stroke-width="2" stroke-linecap="round"><g opacity=".4"><path d="M27 31 V40"/><rect x="25" y="33.5" width="4" height="5" rx="1.3" fill="#9DC3FF" stroke="none"/></g><g opacity=".7"><path d="M32 28 V38"/><rect x="30" y="30" width="4" height="6" rx="1.3" fill="#9DC3FF" stroke="none"/></g><g><path d="M37 25 V35"/><rect x="35" y="27" width="4" height="6.5" rx="1.3" fill="#9DC3FF" stroke="none"/></g></g></symbol></svg>
+
+<div class="wrap">
+  <header class="masthead">
+    <span class="eyebrow">Trading Co-Pilot · UI direction</span>
+    <h1>A dark, Material, adaptive trading workspace</h1>
+    <p class="lede">Wireframes for the single-operator futures co-pilot. The <b>chart is the central surface</b> (R-10);
+    everything else orbits it — the AI suggestion and approve/pass flow, the order ticket, live positions, the
+    journal, and the co-pilot chat + news feed. Two safety controls stay visible at every size: the
+    <b>time-to-flat countdown</b> (R-13) and the <b>kill switch</b>. Assumed desktop-primary; Material adaptive
+    navigation carries it down to tablet and phone.</p>
+  </header>
+
+  <section class="tokens" aria-label="Design language">
+    <div class="tk">
+      <h3>Surfaces &amp; neutrals</h3>
+      <div class="sw"><i style="background:#101318"></i>Ground <code>#101318</code></div>
+      <div class="sw"><i style="background:#161A20"></i>Surface <code>#161A20</code></div>
+      <div class="sw"><i style="background:#222834"></i>Elevated <code>#222834</code></div>
+      <div class="sw"><i style="background:#29313F"></i>Selected <code>#29313F</code></div>
+    </div>
+    <div class="tk">
+      <h3>Accent &amp; semantics</h3>
+      <div class="sw"><i style="background:#9DC3FF"></i>Primary <code>#9DC3FF</code></div>
+      <div class="sw"><i style="background:#4FBF7B"></i>Long / profit <code>#4FBF7B</code></div>
+      <div class="sw"><i style="background:#F0655C"></i>Short / loss <code>#F0655C</code></div>
+      <div class="sw"><i style="background:#F2B450"></i>Time-to-flat <code>#F2B450</code></div>
+      <div class="sw"><i style="background:#FF5A4E"></i>Kill / critical <code>#FF5A4E</code></div>
+    </div>
+    <div class="tk">
+      <h3>Type — Roboto</h3>
+      <div class="type-row"><span class="t-disp">Aa</span><span>Display 28/700</span></div>
+      <div class="type-row"><span class="t-title">Suggestion</span><span>Title 15/600</span></div>
+      <div class="type-row"><span class="t-body">Body copy &amp; labels</span><span>Body 13.5</span></div>
+      <div class="type-row"><span class="t-num">5230.25</span><span>Mono · tabular</span></div>
+    </div>
+    <div class="tk">
+      <h3>Elevation &amp; nav</h3>
+      <div class="elev">
+        <i style="background:#161A20">0</i><i style="background:#1C212A;box-shadow:var(--e1)">+1</i>
+        <i style="background:#222834;box-shadow:var(--e2)">+2</i><i style="background:#29313F;box-shadow:var(--e3)">+3</i>
+      </div>
+      <p style="font-size:11.5px;color:var(--on-dim);margin-top:12px;line-height:1.5">Adaptive navigation:
+      rail (desktop) → icon rail (tablet) → bottom bar (phone).</p>
+    </div>
+  </section>
+
+  <div class="frames">
+
+    <!-- ============ DESKTOP ============ -->
+    <div>
+      <div class="cap"><h2>Trading workspace</h2><span class="bp">Expanded · desktop ≥ 1240dp</span>
+        <span class="muted">navigation rail · chart-central · right dock · chat + news</span></div>
+      <div class="scrollx">
+        <div class="frame desktop">
+          <!-- app bar -->
+          <div class="appbar">
+            <div class="brand"><svg class="glyph" viewBox="0 0 64 64" aria-hidden="true"><use href="#tc-logo"/></svg>Trading Co-Pilot <button class="acctchip">Practice · 50K <span class="car2">▾</span></button></div>
+            <div class="instr"><b>ES</b> · E-mini S&amp;P 500 <span class="car">▾</span></div>
+            <div class="hud">
+              <span class="stat"><span class="dot"></span>Live</span>
+              <span class="stat count"><span class="k">to flat</span><span class="v">02:14:36</span></span>
+              <span class="stat"><span class="k">Day P&amp;L</span><span class="v pos">+$1,240 ▲</span></span>
+              <span class="stat"><span class="k">Balance</span><span class="v">$52,300</span></span>
+              <span class="stat"><span class="k">Headroom</span><span class="v">$1,800</span></span>
+              <button class="killbtn"><span class="sq"></span>KILL</button>
+              <button class="iconbtn" aria-label="Theme">☾</button>
+              <button class="iconbtn" aria-label="Settings">⚙</button>
+              <button class="iconbtn" aria-label="Account">◍</button>
+            </div>
+          </div>
+          <!-- body -->
+          <div class="body">
+            <nav class="rail">
+              <div class="rail__item on"><span class="ic">▤</span>Workspace</div>
+              <div class="rail__item"><span class="ic">▦</span>Journal</div>
+              <div class="rail__item"><span class="ic">▣</span>Rulebook</div>
+              <div class="rail__item"><span class="ic">☰</span>Watchlist</div>
+              <div class="rail__item"><span class="ic">✦</span>News</div>
+              <div class="spacer"></div>
+              <div class="rail__item"><span class="ic">⚙</span>Settings</div>
+            </nav>
+
+            <div class="center">
+              <div class="charttools">
+                <div class="tf"><span>1m</span><span class="on">5m</span><span>15m</span><span>1h</span><span>D</span></div>
+                <button class="ct-tool">Indicators</button>
+                <button class="ct-tool">Draw</button>
+                <div class="ct-legend">
+                  <span class="lg"><span class="ln" style="border-color:var(--primary)"></span>Entry</span>
+                  <span class="lg"><span class="ln" style="border-color:var(--long);border-top-style:dashed"></span>Target</span>
+                  <span class="lg"><span class="ln" style="border-color:var(--short);border-top-style:dashed"></span>Stop</span>
+                  <span class="lg"><span class="ln" style="border-color:var(--on-dim)"></span>SPY corr.</span>
+                  <span class="tag">R-10</span>
+                </div>
+              </div>
+              <div class="chart">
+                <div class="pane price"><span class="lab">ES · 5m — order flow, positions, fills overlaid</span>
+                  <div class="js-price" data-h="240" data-overlay="1"></div></div>
+                <div class="pane ind"><span class="lab">RSI 14 · 58</span><div class="js-rsi" data-h="64"></div></div>
+                <div class="pane ind"><span class="lab">MACD 12/26/9</span><div class="js-macd" data-h="64"></div></div>
+              </div>
+              <div class="bottomdock">
+                <div class="bd">
+                  <div class="bd__h">Co-Pilot chat <span class="tag">R-6</span></div>
+                  <div class="chat">
+                    <div class="msg ai">ES held VWAP with rising buy delta; SPY is leading. A long scalp sets up here.</div>
+                    <div class="msg me">What's my risk if I take it?</div>
+                    <div class="msg ai">−$412 to the 5222 stop — inside your $1,800 headroom and the 3-contract cap.</div>
+                  </div>
+                  <div class="chat__in">Ask the co-pilot — quotes, journal, edit a rule… <span class="send">➤</span></div>
+                </div>
+                <div class="bd">
+                  <div class="bd__h">News &amp; signals <span class="tag">R-2</span></div>
+                  <div class="news">
+                    <div class="ni"><div class="ni__t">Fed's Barkin: policy “moderately restrictive,” data-dependent</div>
+                      <div class="ni__m"><span class="src">TIINGO</span> · 2m · <span class="pos">ES ▲</span> ES,SPY</div></div>
+                    <div class="ni"><div class="ni__t">NVDA extends gains as AI capex commentary lifts semis</div>
+                      <div class="ni__m"><span class="src">FINNHUB</span> · 6m · NQ,NVDA</div></div>
+                    <div class="ni"><div class="ni__t">Crude inventories draw larger than expected</div>
+                      <div class="ni__m"><span class="src">TIINGO</span> · 11m · CL</div></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <aside class="dock">
+              <div class="tabs"><span class="tab on">Suggestion</span><span class="tab">Order</span><span class="tab">Positions</span></div>
+              <div class="dock__body">
+                <div class="sugg">
+                  <div class="sugg__top"><span class="side long">LONG ES</span>
+                    <span class="chip info">conf 72%</span><span class="chip warn">valid 0:48</span>
+                    <span class="tag" style="margin-left:auto">R-4</span></div>
+                  <div class="levels">
+                    <div class="lvl"><div class="k">Entry</div><div class="v">5230.25</div><div class="s" style="color:var(--on-dim)">market</div></div>
+                    <div class="lvl stp"><div class="k">Stop</div><div class="v">5222.00</div><div class="s neg">−$412</div></div>
+                    <div class="lvl tgt"><div class="k">Target</div><div class="v">5248.50</div><div class="s pos">+$912 · 2.2R</div></div>
+                  </div>
+                  <div class="why">
+                    <div><span class="b">›</span>Buy-side delta positive over last 12 bars</div>
+                    <div><span class="b">›</span>SPY leading; NQ confirming (cross-asset)</div>
+                    <div><span class="b">›</span>Reclaimed session VWAP, holding</div>
+                  </div>
+                  <div class="gate">✓ Passes risk gate &amp; sanity caps <span class="tag" style="margin-left:auto">R-5 · R-16</span></div>
+                  <div class="btns"><div class="splitbtn"><button class="main">Approve &amp; arm</button><button class="car" aria-label="Send options">▾</button></div><button class="btn out">Pass</button></div>
+                </div>
+                <div class="mini-h">Working &amp; positions <span class="tag">R-11 · R-8</span></div>
+                <div class="table">
+                  <div class="tr h"><span>Instrument</span><span>Qty</span><span>uPnL</span></div>
+                  <div class="tr"><span>ES · long</span><span class="mono">+2 @ 5228.5</span><span class="mono pos">+$150</span></div>
+                  <div class="tr"><span>NQ · limit</span><span class="mono">buy 1 @ 18420</span><span class="mono" style="color:var(--on-dim)">working</span></div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ TABLET + PHONE side by side ============ -->
+    <div class="frames-row">
+      <!-- TABLET -->
+      <div>
+        <div class="cap"><h2>Tablet</h2><span class="bp">Medium · 600–1240dp</span></div>
+        <div class="frame tablet">
+          <div class="appbar">
+            <div class="brand"><svg class="glyph" viewBox="0 0 64 64" aria-hidden="true"><use href="#tc-logo"/></svg>Co-Pilot</div>
+            <div class="instr"><b>ES</b> <span class="car">▾</span></div>
+            <div class="hud">
+              <span class="stat count"><span class="k">flat</span><span class="v">02:14</span></span>
+              <span class="stat"><span class="v pos">+$1,240</span></span>
+              <span class="stat hide-md"><span class="k">Head</span><span class="v">$1,800</span></span>
+              <button class="killbtn"><span class="sq"></span>KILL</button>
+              <button class="iconbtn" aria-label="More">⋯</button>
+            </div>
+          </div>
+          <div class="body">
+            <nav class="rail icons">
+              <div class="rail__item on"><span class="ic">▤</span></div>
+              <div class="rail__item"><span class="ic">▦</span></div>
+              <div class="rail__item"><span class="ic">▣</span></div>
+              <div class="rail__item"><span class="ic">☰</span></div>
+              <div class="rail__item"><span class="ic">✦</span></div>
+              <div class="spacer"></div>
+              <div class="rail__item"><span class="ic">⚙</span></div>
+            </nav>
+            <div class="center">
+              <div class="charttools">
+                <div class="tf"><span>1m</span><span class="on">5m</span><span>15m</span><span>1h</span></div>
+                <button class="ct-tool">Indicators</button>
+                <div class="ct-legend"><span class="tag">R-10</span></div>
+              </div>
+              <div class="chart">
+                <div class="pane price"><span class="lab">ES · 5m</span><div class="js-price" data-h="188" data-overlay="1"></div></div>
+                <div class="pane ind"><span class="lab">RSI · 58</span><div class="js-rsi" data-h="52"></div></div>
+              </div>
+              <div class="bottomdock" style="grid-template-columns:1fr;height:120px">
+                <div class="bd"><div class="bd__h">Chat · News <span class="chip ghost">2 tabs</span> <span class="tag" style="margin-left:auto">R-6 · R-2</span></div>
+                  <div class="chat"><div class="msg ai">SPY leading; long scalp sets up at 5230.</div></div>
+                </div>
+              </div>
+            </div>
+            <aside class="dock narrow">
+              <div class="tabs"><span class="tab on">Suggestion</span><span class="tab">Order</span><span class="tab">Pos</span></div>
+              <div class="dock__body">
+                <div class="sugg">
+                  <div class="sugg__top"><span class="side long">LONG</span><span class="chip info">72%</span>
+                    <span class="chip warn">0:48</span></div>
+                  <div class="levels">
+                    <div class="lvl"><div class="k">Entry</div><div class="v">5230.25</div></div>
+                    <div class="lvl stp"><div class="k">Stop</div><div class="v">5222.0</div></div>
+                    <div class="lvl tgt"><div class="k">Tgt</div><div class="v">5248.5</div></div>
+                  </div>
+                  <div class="gate">✓ Risk gate</div>
+                  <div class="btns"><button class="btn fill">Approve</button><button class="btn out">Pass</button></div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+
+      <!-- PHONE -->
+      <div>
+        <div class="cap"><h2>Phone</h2><span class="bp">Compact · &lt; 600dp</span></div>
+        <div class="frame phone">
+          <div class="phone-wrap">
+            <div class="appbar">
+              <div class="brand"><svg class="glyph" viewBox="0 0 64 64" aria-hidden="true"><use href="#tc-logo"/></svg>ES</div>
+              <div class="hud">
+                <span class="stat count"><span class="v">02:14</span></span>
+                <span class="stat"><span class="v pos">+$1,240</span></span>
+                <button class="killbtn"><span class="sq"></span></button>
+                <button class="iconbtn" aria-label="More">⋯</button>
+              </div>
+            </div>
+            <div class="stack">
+              <div class="chart">
+                <div class="pane price"><span class="lab">ES · 5m</span><div class="js-price" data-h="150" data-overlay="1"></div></div>
+              </div>
+              <div class="sugg">
+                <div class="sugg__top"><span class="side long">LONG ES</span><span class="chip info">72%</span>
+                  <span class="chip warn">0:48</span><span class="tag" style="margin-left:auto">R-4</span></div>
+                <div class="levels">
+                  <div class="lvl"><div class="k">Entry</div><div class="v">5230.25</div></div>
+                  <div class="lvl stp"><div class="k">Stop</div><div class="v">5222.0</div><div class="s neg">−$412</div></div>
+                  <div class="lvl tgt"><div class="k">Tgt</div><div class="v">5248.5</div><div class="s pos">2.2R</div></div>
+                </div>
+                <div class="gate">✓ Passes risk gate &amp; caps</div>
+                <div class="btns"><button class="btn fill">Approve &amp; arm</button><button class="btn out">Pass</button></div>
+              </div>
+              <div class="posrow">
+                <span class="chip good">ES +2 · +$150</span><span class="chip ghost">NQ working</span>
+                <span class="chip ghost">Headroom $1,800</span>
+              </div>
+            </div>
+            <div class="fab" aria-label="Co-Pilot chat">✦</div>
+            <nav class="navbar">
+              <div class="navbar__item on"><span class="ic">▤</span>Chart</div>
+              <div class="navbar__item"><span class="ic">◈</span>Suggest</div>
+              <div class="navbar__item"><span class="ic">▦</span>Orders</div>
+              <div class="navbar__item"><span class="ic">✦</span>News</div>
+              <div class="navbar__item"><span class="ic">⋯</span>More</div>
+            </nav>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section class="ms">
+    <div class="cap"><h2>Detached — multi-screen desk</h2><span class="bp">ADR-0006 · pop-out windows</span>
+      <span class="muted">web-native, no install — spread panels across monitors</span></div>
+    <div class="desk">
+      <!-- LEFT monitor: order flow -->
+      <div class="mon">
+        <div class="winbar"><div class="dots"><i></i><i></i><i></i></div>
+          <span class="wtitle">Co-Pilot · Order flow — ES</span>
+          <span class="wsafety"><span class="c">02:14</span><span class="k">KILL</span></span></div>
+        <div class="mon__body">
+          <div class="monlabel">DOM &amp; tape <span class="badge-later">Phase 3</span></div>
+          <div class="dom">
+            <div class="drow"><div class="bid"></div><div class="px">5231.25</div><div class="ask"><span class="askbar" style="width:55%"></span><span class="sz">340</span></div></div>
+            <div class="drow"><div class="bid"></div><div class="px">5231.00</div><div class="ask"><span class="askbar" style="width:83%"></span><span class="sz">512</span></div></div>
+            <div class="drow"><div class="bid"></div><div class="px">5230.75</div><div class="ask"><span class="askbar" style="width:34%"></span><span class="sz">210</span></div></div>
+            <div class="drow"><div class="bid"></div><div class="px">5230.50</div><div class="ask"><span class="askbar" style="width:15%"></span><span class="sz">88</span></div></div>
+            <div class="drow last"><div class="bid"></div><div class="px">5230.25</div><div class="ask"></div></div>
+            <div class="drow"><div class="bid"><span class="bidbar" style="width:24%"></span><span class="sz">145</span></div><div class="px">5230.00</div><div class="ask"></div></div>
+            <div class="drow"><div class="bid"><span class="bidbar" style="width:65%"></span><span class="sz">402</span></div><div class="px">5229.75</div><div class="ask"></div></div>
+            <div class="drow"><div class="bid"><span class="bidbar" style="width:100%"></span><span class="sz">618</span></div><div class="px">5229.50</div><div class="ask"></div></div>
+            <div class="drow"><div class="bid"><span class="bidbar" style="width:44%"></span><span class="sz">275</span></div><div class="px">5229.25</div><div class="ask"></div></div>
+          </div>
+          <div class="tape">
+            <div class="tt b"><span>5230.25</span><b>4</b><span>▲ buy</span></div>
+            <div class="tt s"><span>5230.00</span><b>2</b><span>▼ sell</span></div>
+            <div class="tt b"><span>5230.25</span><b>7</b><span>▲ buy</span></div>
+          </div>
+        </div>
+      </div>
+      <!-- CENTER monitor: primary workspace -->
+      <div class="mon primary">
+        <div class="winbar"><div class="dots"><i></i><i></i><i></i></div>
+          <span class="wtitle">Co-Pilot · Workspace — ES <span class="chip info" style="padding:0 6px;font-size:9px">primary</span></span>
+          <span class="wsafety"><span class="c">02:14</span><span class="k">KILL</span></span></div>
+        <div class="mon__body">
+          <div class="monlabel">Chart + suggestion <span class="tag" style="margin-left:auto">R-10 · R-4</span></div>
+          <div class="pane price"><div class="js-price" data-h="150" data-overlay="1"></div></div>
+          <div class="sugg" style="padding:10px">
+            <div class="sugg__top"><span class="side long">LONG ES</span><span class="chip info">72%</span>
+              <span class="chip warn">0:48</span></div>
+            <div class="levels">
+              <div class="lvl"><div class="k">Entry</div><div class="v">5230.25</div></div>
+              <div class="lvl stp"><div class="k">Stop</div><div class="v">5222.0</div></div>
+              <div class="lvl tgt"><div class="k">Tgt</div><div class="v">5248.5</div></div>
+            </div>
+            <div class="btns"><button class="btn fill">Approve &amp; arm</button><button class="btn out">Pass</button></div>
+          </div>
+        </div>
+      </div>
+      <!-- RIGHT monitor: review -->
+      <div class="mon">
+        <div class="winbar"><div class="dots"><i></i><i></i><i></i></div>
+          <span class="wtitle">Co-Pilot · Journal · News — ES</span>
+          <span class="wsafety"><span class="c">02:14</span><span class="k">KILL</span></span></div>
+        <div class="mon__body">
+          <div class="monlabel">Positions · News · Journal <span class="tag" style="margin-left:auto">R-8 · R-2</span></div>
+          <div class="msmini"><h4>Positions</h4>
+            <div class="li"><span>ES · long</span><span class="mono pos">+2 · +$150</span></div>
+            <div class="li"><span>NQ · limit</span><span class="mono" style="color:var(--on-dim)">working</span></div></div>
+          <div class="msmini"><h4>News &amp; signals</h4>
+            <div class="li"><span>Barkin: “moderately restrictive”</span><span class="mono pos">ES▲</span></div>
+            <div class="li"><span>NVDA extends AI-capex gains</span><span class="mono" style="color:var(--on-dim)">NQ</span></div></div>
+          <div class="msmini"><h4>Journal</h4>
+            <div class="msj">Long ES 5228.5 → +6.5 pts · VWAP reclaim + SPY lead. Rule tag: “ES-with-SPY confirm”.</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="mslink">
+      <span class="pill"><span class="d"></span><b>3 pop-out windows</b> — one per monitor</span>
+      <span class="pill"><span class="d"></span>each a <b>SignalR client</b> — live &amp; consistent</span>
+      <span class="pill"><span class="d"></span>linked by <b>BroadcastChannel</b> — same ES &amp; crosshair</span>
+      <span class="pill"><span class="d"></span><b>Kill + countdown</b> in every window</span>
+      <span class="pill"><span class="d"></span>execution stays <b>server-side</b></span>
+    </div>
+  </section>
+
+  <section class="perf">
+    <div class="cap"><h2>Strategy performance — taken vs. suggested</h2><span class="bp">R-9</span>
+      <span class="muted">per strategy, over taken trades and simulated passes — does discretion add edge?</span></div>
+    <div class="perf-sum">
+      <div class="pstat"><div class="k">Taken expectancy</div><div class="v pos">+0.41R</div><div class="s">avg / trade · n = 182 taken</div></div>
+      <div class="pstat"><div class="k">Suggested expectancy</div><div class="v">+0.29R</div><div class="s">all suggestions incl. passed · n = 610</div></div>
+      <div class="pstat delta"><div class="k">Discretion (taken − suggested)</div><div class="v">+0.12R</div><div class="s">your selection is adding edge</div></div>
+      <div class="pstat"><div class="k">Avg R:R vs target</div><div class="v pos">1.7</div><div class="s">target 1.5 (reward:risk) · ✓ holding</div></div>
+    </div>
+    <div class="perf-grid">
+      <div class="ptbl-wrap">
+        <table class="ptbl">
+          <thead><tr><th>Strategy / setup</th><th>Taken</th><th>Sugg.</th><th>Win%</th><th>Exp (R)</th><th>PF</th><th>Max DD</th><th>Disc.</th><th>Calib.</th></tr></thead>
+          <tbody>
+            <tr><td>VWAP reclaim</td><td>64</td><td>190</td><td>58%</td><td class="pos">+0.52</td><td>1.9</td><td>−4.2R</td><td class="disc up">▲ +0.18</td><td><span class="calib ok">well-cal</span></td></tr>
+            <tr><td>SPY-lead scalp</td><td>41</td><td>128</td><td>61%</td><td class="pos">+0.47</td><td>1.8</td><td>−3.1R</td><td class="disc up">▲ +0.22</td><td><span class="calib ok">well-cal</span></td></tr>
+            <tr><td>Opening drive</td><td>34</td><td>96</td><td>52%</td><td class="pos">+0.33</td><td>1.5</td><td>−5.0R</td><td class="disc down">▼ −0.09</td><td><span class="calib over">overconf</span></td></tr>
+            <tr><td>Momentum break</td><td>27</td><td>118</td><td>46%</td><td class="pos">+0.21</td><td>1.3</td><td>−6.4R</td><td class="disc down">▼ −0.15</td><td><span class="calib over">overconf</span></td></tr>
+            <tr><td>Range fade</td><td>16</td><td>78</td><td>55%</td><td class="pos">+0.30</td><td>1.4</td><td>−3.8R</td><td class="disc up">▲ +0.05</td><td><span class="calib under">underconf</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="reasons">
+        <h4>Top pass reasons <span class="tag">R-4</span></h4>
+        <div class="rbar"><span class="lab2">Weak R:R</span><span class="track"><span class="fill2" style="width:34%"></span></span><span class="pct">34%</span></div>
+        <div class="rbar"><span class="lab2">News risk</span><span class="track"><span class="fill2" style="width:21%"></span></span><span class="pct">21%</span></div>
+        <div class="rbar"><span class="lab2">Chased / late</span><span class="track"><span class="fill2" style="width:17%"></span></span><span class="pct">17%</span></div>
+        <div class="rbar"><span class="lab2">Against a rule</span><span class="track"><span class="fill2" style="width:15%"></span></span><span class="pct">15%</span></div>
+        <div class="rbar"><span class="lab2">Sizing</span><span class="track"><span class="fill2" style="width:8%"></span></span><span class="pct">8%</span></div>
+        <div class="rbar"><span class="lab2">Low conviction</span><span class="track"><span class="fill2" style="width:5%"></span></span><span class="pct">5%</span></div>
+        <div class="rej-why" style="margin-top:10px">Passed setups that later worked: <b style="color:var(--warn)">38%</b> — where discretion may be leaving edge on the table.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="bt">
+    <div class="cap"><h2>Backtest — test-run &amp; refine</h2><span class="bp">ADR-0009</span>
+      <span class="muted">same engine as live · cheaper-model, news-light beyond ~3 months</span></div>
+    <div class="bt-cfg">
+      <div class="cfg-item"><span class="cl">Range</span><span class="cv">2024-07 → 2026-07 · 2y</span></div>
+      <div class="cfg-item"><span class="cl">Instruments</span><span class="cv">ES · NQ</span></div>
+      <div class="cfg-item"><span class="cl">Strategies</span><span class="cv">VWAP-reclaim · Momentum-break · +2</span></div>
+      <div class="cfg-item"><span class="cl">Model</span><span class="cv">Cheaper · Sonnet</span></div>
+      <button class="btn fill" style="margin-left:auto">Run backtest</button>
+    </div>
+    <div class="jnl-stats" style="grid-template-columns:repeat(6,1fr)">
+      <div class="jstat"><div class="k">Net</div><div class="v pos">+$14.2k</div></div>
+      <div class="jstat"><div class="k">Expectancy</div><div class="v pos">+0.38R</div></div>
+      <div class="jstat"><div class="k">Win rate</div><div class="v">54%</div></div>
+      <div class="jstat"><div class="k">Avg R:R</div><div class="v pos">1.6</div><div class="s">target 1.5 ✓</div></div>
+      <div class="jstat"><div class="k">Max DD</div><div class="v neg">−$3.1k</div></div>
+      <div class="jstat"><div class="k">Run cost</div><div class="v">$7.80</div></div>
+    </div>
+    <div class="followup">
+      <div class="q"><b>Refinements from this run:</b> VWAP-reclaim improves if the confidence gate rises <b>0.65 → 0.70</b> (+0.1R, fewer weak entries); Momentum-break <b>underperforms before 9:45 ET</b> — draft a skip rule?</div>
+      <div class="btns"><button class="btn fill">Apply + draft rule (R-7)</button><button class="btn out">Review each</button><button class="btn text">Dismiss</button></div>
+    </div>
+  </section>
+
+  <section class="jnl">
+    <div class="cap"><h2>Journal — P&amp;L by day</h2><span class="bp">R-8 · R-9</span>
+      <span class="muted">realized daily P&amp;L; the trader’s review surface (illustrative month)</span></div>
+    <div class="jnl-stats">
+      <div class="jstat"><div class="k">Net (month)</div><div class="v" id="j-net">—</div></div>
+      <div class="jstat"><div class="k">Green / red days</div><div class="v" id="j-days">—</div></div>
+      <div class="jstat"><div class="k">Best day</div><div class="v pos" id="j-best">—</div></div>
+      <div class="jstat"><div class="k">Worst day</div><div class="v neg" id="j-worst">—</div></div>
+      <div class="jstat"><div class="k">Avg / day</div><div class="v" id="j-avg">—</div></div>
+    </div>
+    <div class="jnl-grid">
+      <div class="cal">
+        <div class="cal-h"><span class="m">Illustrative month</span><span class="nav">‹ ›</span></div>
+        <div class="cal-dow"><span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span></div>
+        <div class="cal-grid" id="j-cal"></div>
+      </div>
+      <div class="jnl-side">
+        <div class="eqbox"><h4>Equity curve — cumulative P&amp;L</h4><div id="j-eq"></div></div>
+        <div class="eqbox" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <span class="chip good">Live</span><span class="chip ghost">Practice</span><span class="chip ghost">All instruments</span>
+          <span style="font-size:10px;color:var(--on-dim)">filters · optional suggested-P&amp;L overlay</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="day">
+    <div class="cap"><h2>Drill into a day — trades &amp; feedback</h2><span class="bp">R-8 · R-6</span>
+      <span class="muted">today by default · add feedback anytime — trades can arm and run unattended</span></div>
+    <div class="day-h"><span class="dt">Today · Jul 18</span><span class="sub">3 trades · net +$775 · 1W / 2L</span>
+      <span class="chip warn" style="margin-left:auto">1 awaiting review</span></div>
+    <div class="blotter">
+      <div class="trade">
+        <div class="trade-top"><span class="side long" style="font-size:13px">LONG</span><span class="sym">ES</span>
+          <span class="lv">+2 @ 5228.5 → 5241.0</span><span class="chip ghost">VWAP-reclaim</span>
+          <span class="pnl pos">+$1,250 · +2.2R</span></div>
+        <div class="fb"><span class="who">You</span><div>Good read — SPY led the move and I waited for the VWAP reclaim. Followed the plan.</div></div>
+      </div>
+      <div class="trade review">
+        <div class="trade-top"><span class="side" style="font-size:13px;color:var(--short);font-weight:800">SHORT</span><span class="sym">NQ</span>
+          <span class="lv">−1 @ 18,450 → 18,470 (stopped)</span><span class="chip ghost">Momentum-break</span>
+          <span class="pnl neg">−$400 · −1.0R</span></div>
+        <div class="fb-add"><span class="chip warn">Armed &amp; ran — awaiting review</span>
+          <span class="prompt">Add feedback:</span>
+          <span class="rchip">Chased</span><span class="rchip">Wrong session time</span><span class="rchip">Good loss — followed plan</span>
+          <button class="btn text" style="padding:4px 8px">＋ comment</button></div>
+      </div>
+      <div class="trade">
+        <div class="trade-top"><span class="side long" style="font-size:13px">LONG</span><span class="sym">ES</span>
+          <span class="lv">+1 @ 5233.0 → 5231.5 (scratch)</span><span class="chip ghost">Range-fade</span>
+          <span class="pnl neg">−$75 · −0.2R</span></div>
+        <div class="fb"><span class="who">You</span><div>Cut it early — didn’t like the tape. Fine by me.</div></div>
+      </div>
+    </div>
+    <div class="followup">
+      <div class="q"><b>Co-pilot:</b> Two of this week’s losses were <b>momentum-breaks in the first 15 minutes</b> — including today’s NQ. Want me to draft a rule to skip momentum-breaks before 9:45 ET, or just size them smaller?</div>
+      <div class="btns"><button class="btn fill">Draft the rule (R-7)</button><button class="btn out">Ask me later</button><button class="btn text">Dismiss</button></div>
+    </div>
+  </section>
+
+  <section class="otk">
+    <div class="cap"><h2>The order ticket — where it comes together</h2><span class="bp">R-11 · R-5 · ADR-0007</span>
+      <span class="muted">the dock's Order tab · manual or armed from a suggestion — same panel</span></div>
+    <div class="otk-grid">
+      <div class="ticket">
+        <div class="th"><span>Order · ES</span><span class="chip info" style="padding:1px 7px">armed from suggestion</span></div>
+        <div class="orow"><span class="k">Side</span><div class="seg"><button class="on buy">Buy</button><button>Sell</button></div></div>
+        <div class="orow"><span class="k">Type</span><div class="seg"><button class="on">Market</button><button>Limit</button><button>Stop</button><button>Trail</button></div></div>
+        <div class="orow"><span class="k">Size</span><div class="stepper"><button>−</button><span class="val">2</span><button>＋</button></div><span class="autosz">seeded · 1% risk · override</span></div>
+        <div class="blk">
+          <div class="bh">Bracket</div>
+          <div class="stp-line"><span class="lbl">Entry</span><span class="px">5230.25</span><span class="meta">market</span></div>
+          <div class="stp-line"><span class="lbl">Stop</span><span class="px neg">5222.00</span><span class="meta">−8.25 pt · −$412</span><span class="chip warn tagx" style="padding:0 6px;font-size:8.5px">synthetic→native</span></div>
+          <div class="stp-line"><span class="lbl">Target</span><span class="px pos">5248.50</span><span class="meta">+18.25 pt · +$912 · 2.2R</span></div>
+          <div class="stp-line"><span class="lbl">Safety</span><span class="px" style="color:#ff8a80">5216.00</span><span class="meta">−$700 · = max-DD/trade</span><span class="chip ghost tagx" style="padding:0 6px;font-size:8.5px">always native</span></div>
+        </div>
+        <div class="riskblk">
+          <div class="rr"><span>Size · binding layer</span><b>2 · 1% risk</b></div>
+          <div class="rr"><span>Risk — stop / safety</span><b>$412 / $700 · 1.4%</b></div>
+          <div class="rr"><span>R:R · target 1.5</span><b>2.2 ✓</b></div>
+        </div>
+        <div class="gate">✓ Within risk gate &amp; sanity caps <span class="tag" style="margin-left:auto">R-5 · R-16</span></div>
+        <div class="btns"><div class="splitbtn"><button class="main">Send now</button><button class="car" aria-label="Send options">▾</button></div><button class="btn text">Reset</button></div>
+        <div class="rej-why">▾ menu: <b>Send when conditions met</b> — held local, off the book until it triggers.</div>
+      </div>
+      <div class="ann">
+        <div class="annitem"><b>One panel, two entries.</b> A blank <b>manual</b> ticket, or <b>armed from a suggestion</b> (pre-filled + editable). Taking a suggestion just fills this — same fields, same gate.</div>
+        <div class="annitem"><b>Risk-seeded sizing.</b> Size seeds from your per-trade risk % (risk tolerance), then you override — your usual manual mode. The R-5 gate shows the binding layer, <b>R:R vs. target</b>, and can resize you.</div>
+        <div class="annitem"><b>Stops built in.</b> The actual stop is hidden until price nears it (then native), behind an always-native <b>safety stop</b> = your max-DD-per-trade (ADR-0007).</div>
+        <div class="annitem"><b>Send now, or on trigger.</b> A native working order, or a synthetic on-trigger order that stays off the book. Edit anything → live re-check; a breach blocks or resizes, not just warns.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="flow">
+    <div class="cap"><h2>Taking a suggestion — arm, edit, send</h2><span class="bp">R-11 · R-12</span>
+      <span class="muted">review is the default; “send as-is” is opt-in and still gated</span></div>
+    <div class="flow-grid">
+      <div class="flow-step">
+        <div class="step-h"><span class="step-n">1</span> Approve — a split action</div>
+        <div class="splitbtn" style="max-width:270px"><button class="main">Approve &amp; arm</button><button class="car" aria-label="Send options">▾</button></div>
+        <div class="menu">
+          <div class="mi def"><span class="t">Approve &amp; arm · default</span><span class="d2">opens the editable ticket to review before sending</span></div>
+          <div class="mi"><span class="t">Send as-is</span><span class="d2">skip the review — still passes the risk gate, sanity caps &amp; re-validation</span></div>
+        </div>
+        <div class="rej-why">The safe path is the default click; the fast path is a deliberate extra step, so an instant send can’t be fat-fingered. <b>Which one is the default is a preference</b> — flip it to “Send as-is” if you trust the co-pilot.</div>
+      </div>
+      <div class="flow-step">
+        <div class="step-h"><span class="step-n">2</span> Armed ticket — edited, re-checked live</div>
+        <div class="ticket">
+          <div class="th"><span>Order ticket · from suggestion</span><span class="chip good" style="padding:1px 7px">LONG ES</span></div>
+          <div class="trow"><span class="k">Size</span><span class="v">2</span></div>
+          <div class="trow"><span class="k">Type</span><span class="v">Market</span></div>
+          <div class="trow"><span class="k">Entry</span><span class="v">5230.25</span></div>
+          <div class="trow edited"><span class="k">Stop <span class="chip warn" style="padding:0 6px;font-size:9px">edited</span></span><span><span class="was">5222.0</span><span class="v">5218.0</span></span></div>
+          <div class="trow"><span class="k">Target</span><span class="v">5248.5</span></div>
+          <div class="warnbn"><span class="ic">⚠</span><div>Risk changed — <b>$412 → $610</b> (stop widened 6.5 → 12.25 pts). Now <b>1.4%</b> of account (was 0.9%; limit 2%); R:R 2.2 → 1.5.</div></div>
+          <div class="btns"><button class="btn fill">Acknowledge &amp; send</button><button class="btn text">Revert</button></div>
+        </div>
+        <div class="rej-why">A breach of a risk layer or a sanity cap (R-5 / R-16) is <b>blocked or resized</b> instead — never a warning you can click past.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="send">
+    <div class="cap"><h2>Send now — or when conditions are met</h2><span class="bp">R-11 · R-12</span>
+      <span class="muted">keep entries off the book until they trigger</span></div>
+    <div class="send-grid">
+      <div class="sendopt">
+        <div class="so-h"><span class="chip info">Send now</span><span class="chip ghost">native</span></div>
+        <p>Transmits immediately. A resting limit/stop becomes a <b>working order at the broker</b> — held by the exchange and visible in the book until filled or cancelled.</p>
+        <div class="trigger"><span class="k">Survives</span><span class="v">platform / connection outage (exchange-held)</span></div>
+      </div>
+      <div class="sendopt sel">
+        <div class="so-h"><span class="chip good">Send when conditions met</span><span class="chip ghost">synthetic · local</span></div>
+        <p>The platform <b>holds the order</b> and fires it when the trigger hits — <b>not shown as a standing order</b> at the broker until it does. Keeps the entry off the book (no order anticipation / stop-hunting).</p>
+        <div class="trigger"><span class="k">Trigger</span><span class="v">price crosses <b>5230.25</b> · suggestion entry</span><span class="chip ghost">editable</span></div>
+      </div>
+    </div>
+    <div class="warnbn" style="margin-top:14px"><span class="ic">⚠</span><div><b>Reliability tradeoff:</b> a synthetic order needs the platform live to fire. So <b>protective stops default to native</b> (exchange-held) placement — a disconnect can’t leave a position unprotected. Hidden synthetic stops are an explicit opt-in (safety-critical path, engineering §9).</div></div>
+  </section>
+
+  <section class="stop">
+    <div class="cap"><h2>Stop protection — hidden until it matters, always insured</h2><span class="bp">R-11 · R-5</span>
+      <span class="muted">a synthetic stop that goes native near the level, behind an always-native safety stop</span></div>
+    <div class="stop-grid">
+      <div class="scale">
+        <div class="lvl-line" style="top:20px"><span class="tagp pos">TGT 5248.50</span><span class="ln2" style="border-color:var(--long);border-top-style:dashed"></span></div>
+        <div class="price-mark" style="top:100px"><span class="pd"></span>price 5233.0</div>
+        <div class="lvl-line" style="top:118px"><span class="tagp" style="color:var(--primary)">ENTRY 5230.25</span><span class="ln2" style="border-color:var(--primary)"></span></div>
+        <div class="band" style="top:176px;height:34px"></div>
+        <div class="band-lab" style="top:184px">promotion band</div>
+        <div class="lvl-line" style="top:210px"><span class="tagp neg">STOP 5222.00</span><span class="ln2" style="border-color:var(--short);border-top-style:dashed"></span><span class="nm">synthetic → native</span></div>
+        <div class="lvl-line" style="top:258px"><span class="tagp" style="color:#ff8a80">SAFETY 5216.00</span><span class="ln2" style="border-color:#ff5449"></span><span class="nm">always native</span></div>
+      </div>
+      <div class="stop-states">
+        <div class="sstate"><h4><span class="dotm" style="background:var(--on-dim)"></span>Far from the stop</h4>
+          <p>The actual stop is <b>synthetic / hidden</b> — nothing rests on the book, so there's nothing to hunt. (Price is currently above entry.)</p></div>
+        <div class="sstate"><h4><span class="dotm" style="background:var(--warn)"></span>Within the band</h4>
+          <p>Price comes within a configurable proximity of the stop (ticks / ATR / % of the entry→stop distance) → the actual stop is <b>promoted to a native working order</b>, now exchange-held for the moment it might fill.</p></div>
+        <div class="sstate key-state"><h4><span class="dotm" style="background:#ff5449"></span>Safety stop — always native</h4>
+          <p>A catastrophic stop rests <b>beyond</b> the actual stop, <b>always at the broker</b>, placed at your <b>configurable max drawdown per trade</b>. It catches gaps, fast moves, and platform/connection outages — the position is <b>never without a real stop</b>, and its loss stays inside your account limits (R-5).</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="gov">
+    <div class="cap"><h2>Daily risk governor — filters suggestions before the gate</h2><span class="bp">R-5 · R-4</span>
+      <span class="muted">a personal daily cap set inside the hard prop limit (shown on a drawdown day)</span></div>
+    <div class="gov-grid">
+      <div class="gov-meter">
+        <div class="meter-h"><span>Today’s realized P&amp;L</span><span class="mono neg">−$520</span></div>
+        <div class="track2">
+          <div class="used" style="width:35%"></div>
+          <div class="mark gov-mark" style="left:60%"><span>governor −$900</span></div>
+          <div class="mark hard-mark" style="left:100%"><span>hard −$1,500</span></div>
+        </div>
+        <div class="meter-f"><span class="chip warn">$380 headroom to governor</span><span class="chip ghost">$980 to hard limit</span></div>
+      </div>
+      <div class="gov-states">
+        <div class="gstate"><span class="chip good">Full</span> normal suggestions, full size</div>
+        <div class="gstate"><span class="chip warn">Near governor</span> throttled — fewer, smaller, higher-conviction only</div>
+        <div class="gstate"><span class="chip bad">Governor reached</span> no new entries — manage / flatten only</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="cons">
+    <div class="cap"><h2>Consistency target — the daily-profit discipline</h2><span class="bp">R-5 · R-9</span>
+      <span class="muted">a personal <b>daily profit target</b>; hit it and the co-pilot <b>stands down</b> — the prop consistency rule, enforced</span></div>
+    <div class="gov-grid">
+      <div class="gov-meter">
+        <div class="meter-h"><span>Daily target · <b style="color:var(--on-hi)">50KTC…40482537</b></span><span>consistency cap <b style="color:var(--on-hi)">50% of target</b></span></div>
+        <div class="consbig pos">+$1,180 <span style="font-size:12px;color:var(--on-dim);font-weight:400">/ $1,500 target</span></div>
+        <div class="track2">
+          <div class="used" style="width:79%"></div>
+          <div class="mark gov-mark" style="left:79%"><span>now 79%</span></div>
+          <div class="mark hard-mark" style="left:100%"><span>target</span></div>
+        </div>
+        <div class="cons-read">
+          <div class="ci"><div class="ck">Best day</div><div class="cv">$1,180</div></div>
+          <div class="ci"><div class="ck">Total profit</div><div class="cv">$2,940</div></div>
+          <div class="ci"><div class="ck">Consistency</div><div class="cv pos">40%</div></div>
+          <div class="ci"><div class="ck">Cap</div><div class="cv">50%</div></div>
+        </div>
+        <div class="rbar" style="margin-top:14px">
+          <span class="lab2">Cap used</span>
+          <span class="track"><span class="fill2 ok" style="width:80%"></span><span class="capmark" style="left:100%"></span></span>
+          <span class="pct">40/50</span>
+        </div>
+      </div>
+      <div class="gov-states">
+        <div class="gstate"><span class="chip good">under target</span> Normal — full suggestion flow, size per risk tolerance</div>
+        <div class="gstate"><span class="chip warn">≥ 90%</span> Approaching — governor <b>tightens</b>: higher-conviction only, smaller size</div>
+        <div class="gstate"><span class="chip info">target hit</span> <b>Standing down</b> — new suggestions <b>suppressed</b>; a “one more breaks consistency” warning shows</div>
+        <div class="gstate"><span class="chip bad">stop for day</span> Optional — <b>flatten &amp; lock</b> until next session (opt-in per account)</div>
+      </div>
+    </div>
+    <div class="rej-why" style="margin-top:12px">Consistency = <b>best day ÷ total net profit</b>, kept under the cap (Topstep Combine <b>50% of target</b> / Express <b>40%</b>, TPT <b>50%</b>, Apex <b>~30%</b>). The habit traders use — <b>set a daily target and stop</b> — becomes a first-class control: on reach, the <b>R-5 governor stands down</b> (suppress suggestions, optional stop-for-day + flatten). Shown only on accounts that carry a consistency rule. Wiki: <b>prop-firm rules › Consistency</b>.</div>
+  </section>
+
+  <section class="rej">
+    <div class="cap"><h2>Suggestion passed — anything worth noting?</h2><span class="bp">R-4</span>
+      <span class="muted">optional, one tap — a pass is neutral; it just trains the co-pilot and feeds the breakdown above</span></div>
+    <div class="rejcard">
+      <div class="rej-head"><span class="chip ghost">Passed</span><span class="rej-old">LONG ES · 5230.25 · conf 72% · 2.2R</span></div>
+      <div class="rej-q">Anything worth noting? <span>(optional — a pass isn't a rejection)</span></div>
+      <div class="chipset">
+        <span class="rchip sel">News risk</span><span class="rchip sel">Wrong time</span><span class="rchip">Already positioned</span>
+        <span class="rchip">Waiting / better level</span><span class="rchip">Weak R:R</span><span class="rchip">Against a rule</span>
+        <span class="rchip">Sizing</span><span class="rchip">Low conviction</span>
+      </div>
+      <div class="note">Add a note — e.g. “CPI print in 10 min, not worth the gap risk.”</div>
+      <div class="btns"><button class="btn tonal">Save feedback</button><button class="btn text">Skip</button></div>
+      <div class="rej-why">Disposition + reason land on the suggestion record (R-8) and feed the R-9 feedback loop — so <b>passed-but-winning</b> setups surface in the taken-vs-suggested breakdown, and repeated reasons can tune future suggestions.</div>
+    </div>
+  </section>
+
+  <section class="spend">
+    <div class="cap"><h2>AI usage &amp; spend</h2><span class="bp">§7 · ADR-0008</span>
+      <span class="muted">tracked by feature · the spend governor caps it vs. your budget (Q-10)</span></div>
+    <div class="gov-grid">
+      <div class="gov-meter">
+        <div class="meter-h"><span>This month · LLM + Cohere</span><span class="mono">$18.40</span></div>
+        <div class="track2">
+          <div class="used" style="width:37%"></div>
+          <div class="mark gov-mark" style="left:80%"><span>governor $40</span></div>
+          <div class="mark hard-mark" style="left:100%"><span>budget $50</span></div>
+        </div>
+        <div class="meter-f"><span class="chip good">$21.60 to governor</span><span class="chip ghost">$31.60 to budget</span></div>
+      </div>
+      <div class="reasons">
+        <h4>By feature</h4>
+        <div class="rbar"><span class="lab2">Backtests</span><span class="track"><span class="fill2" style="width:100%"></span></span><span class="pct">$7.80</span></div>
+        <div class="rbar"><span class="lab2">Suggestions</span><span class="track"><span class="fill2" style="width:79%"></span></span><span class="pct">$6.20</span></div>
+        <div class="rbar"><span class="lab2">Follow-ups</span><span class="track"><span class="fill2" style="width:27%"></span></span><span class="pct">$2.10</span></div>
+        <div class="rbar"><span class="lab2">Embeddings</span><span class="track"><span class="fill2" style="width:15%"></span></span><span class="pct">$1.20</span></div>
+        <div class="rbar"><span class="lab2">Triage</span><span class="track"><span class="fill2" style="width:14%"></span></span><span class="pct">$1.10</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="life">
+    <div class="cap"><h2>Suggestion lifecycle — when the setup doesn’t come</h2><span class="bp">R-4 · R-9</span>
+      <span class="muted">price drifts away → scratched, not chased</span></div>
+    <div class="life-row">
+      <div class="lstate active"><h4><span class="dotm" style="background:var(--long)"></span>Active</h4>
+        <p>Valid 0:48 · price within tolerance of the entry — takeable now.</p></div>
+      <div class="larrow">→</div>
+      <div class="lstate stale"><h4><span class="dotm" style="background:var(--warn)"></span>Stale</h4>
+        <p>Price drifted past the entry tolerance — the take is blocked at the gate (R-12); shown greyed, one tap to re-request.</p></div>
+      <div class="larrow">→</div>
+      <div class="lstate dead"><h4><span class="dotm" style="background:var(--on-dim)"></span>Expired / void</h4>
+        <p>Validity window elapsed, or the thesis broke — <b>scratched as a no-trade</b>.</p></div>
+    </div>
+    <div class="pending2"><span class="chip ghost">Pending · on-trigger</span>
+      <div class="txt">Waiting for <b class="mono">5230.25</b> — <b>cancels if</b> price drifts a set amount against it, or the window / session ends. It never fires on a stale setup.</div></div>
+    <div class="rej-why" style="margin-top:12px">A scratch resolves as <b>no-fill — not a loss</b> (R-9), and it feeds the <b>trigger-rate</b> metric. If the setup re-forms, the engine issues a <b>new superseding suggestion</b> rather than chasing price.</div>
+  </section>
+
+  <section class="acct">
+    <div class="cap"><h2>Account switcher — active accounts only</h2><span class="bp">R-17 · R-14</span>
+      <span class="muted">the dropdown lists only <b>active + visible</b> accounts · the complete roster (with finished &amp; hidden) lives in Settings › Account &amp; venue</span></div>
+    <div class="acct-grid">
+
+      <!-- switcher dropdown: filtered to active + visible -->
+      <div>
+        <div class="acct-col-h">From the top-bar account chip</div>
+        <div class="acct-drop">
+          <div class="acct-group">
+            <div class="acct-gh"><span class="plat">TopstepX</span><span class="firm">· Topstep · ProjectX</span><span class="chip good" style="margin-left:auto">connected</span></div>
+            <div class="arow"><span class="chk"></span><div class="ai"><div class="an">PRAC-V2-7035-51681811</div><div class="am"><span class="chip ghost">150K</span><span>Practice</span></div></div><span class="abal pos">$149,850</span></div>
+            <div class="arow sel"><span class="chk">✓</span><div class="ai"><div class="an">50KTC-V2-DLL-7035-40482537</div><div class="am"><span class="chip ghost">50K</span><span>Evaluation</span><span>DLL $1,000</span></div></div><span class="abal">$51,990</span></div>
+          </div>
+          <div class="acct-group">
+            <div class="acct-gh"><span class="plat">Tradovate</span><span class="firm">· Apex · super-account</span><span class="chip good" style="margin-left:auto">connected</span></div>
+            <div class="arow"><span class="chk"></span><div class="ai"><div class="an">APEX-247820</div><div class="am"><span class="chip ghost">100K</span><span>Funded</span></div></div><span class="abal pos">$103,200</span></div>
+          </div>
+          <div class="acct-group">
+            <div class="acct-gh"><span class="plat">Tradovate</span><span class="firm">· Take Profit Trader · super-account</span><span class="chip good" style="margin-left:auto">connected</span></div>
+            <div class="arow"><span class="chk"></span><div class="ai"><div class="an">TPT-88213</div><div class="am"><span class="chip ghost">50K</span><span>Funded</span></div></div><span class="abal pos">$52,700</span></div>
+          </div>
+          <div class="acct-foot"><span>Active &amp; visible only — <b>1 passed</b>, <b>1 hidden</b> filtered out</span><span class="mlink">Manage all →</span></div>
+        </div>
+      </div>
+
+      <!-- complete roster: the management view -->
+      <div>
+        <div class="acct-col-h">Settings › Account &amp; venue — complete roster</div>
+        <div class="acct-full">
+          <div class="acct-group">
+            <div class="acct-gh"><span class="plat">TopstepX</span><span class="firm">· Topstep · ProjectX</span></div>
+            <div class="mrow"><div class="ai"><div class="an">PRAC-V2-7035-51681811</div><div class="am"><span class="chip ghost">150K</span><span>Practice</span><span class="chip good">active</span></div></div><span class="abal pos">$149,850</span><div class="vtog"><span class="sw2 on"><i></i></span><span class="vl">shown</span></div></div>
+            <div class="mrow"><div class="ai"><div class="an">50KTC-V2-DLL-7035-40482537</div><div class="am"><span class="chip ghost">50K</span><span>Evaluation</span><span class="chip good">active</span><span class="chip info">selected</span></div></div><span class="abal">$51,990</span><div class="vtog"><span class="sw2 on"><i></i></span><span class="vl">shown</span></div></div>
+            <div class="mrow off"><div class="ai"><div class="an">50KTC-V2-7035-38073594</div><div class="am"><span class="chip ghost">50K</span><span>Evaluation</span><span class="chip info">passed</span></div></div><span class="abal">$53,003</span><div class="vtog"><span class="sw2 dis"><i></i></span><span class="vl">inactive</span></div></div>
+          </div>
+          <div class="acct-group">
+            <div class="acct-gh"><span class="plat">Tradovate</span><span class="firm">· Apex · super-account</span></div>
+            <div class="mrow"><div class="ai"><div class="an">APEX-247820</div><div class="am"><span class="chip ghost">100K</span><span>Funded</span><span class="chip good">active</span></div></div><span class="abal pos">$103,200</span><div class="vtog"><span class="sw2 on"><i></i></span><span class="vl">shown</span></div></div>
+            <div class="mrow off"><div class="ai"><div class="an">APEX-251044</div><div class="am"><span class="chip ghost">50K</span><span>Evaluation</span><span class="chip good">active</span><span class="chip ghost">hidden</span></div></div><span class="abal">$51,400</span><div class="vtog"><span class="sw2"><i></i></span><span class="vl">hidden</span></div></div>
+          </div>
+          <div class="acct-group">
+            <div class="acct-gh"><span class="plat">Tradovate</span><span class="firm">· Take Profit Trader · super-account</span></div>
+            <div class="mrow"><div class="ai"><div class="an">TPT-88213</div><div class="am"><span class="chip ghost">50K</span><span>Funded</span><span class="chip good">active</span></div></div><span class="abal pos">$52,700</span><div class="vtog"><span class="sw2 on"><i></i></span><span class="vl">shown</span></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="rej-why" style="margin-top:12px">Mirrors the ProjectX <code>Account/search</code> contract — <b>onlyActiveAccounts</b> + <b>canTrade</b> + <b>isVisible</b>: the switcher lists only accounts you can trade and haven't hidden; <b>passed / failed / closed</b> and operator-<b>hidden</b> accounts stay in the complete roster (a toggle there returns one to the switcher). Opens from the <b>account chip</b> next to the instrument selector; you hold <b>several logins per platform</b> — one Tradovate login <b>per firm</b> (Apex, Take Profit Trader, TradeDay, …); size / stage / practice-vs-live are <b>derived from the account name</b>.</div>
+  </section>
+
+  <section class="set">
+    <div class="cap"><h2>Settings — configuration</h2><span class="bp">config</span>
+      <span class="muted">one place for the settings that live across features · risk tolerance front and center</span></div>
+    <div class="set-grid">
+      <nav class="set-nav">
+        <div class="sn on"><span class="ic">◆</span>Risk tolerance</div>
+        <div class="sn"><span class="ic">◈</span>Entry defaults</div>
+        <div class="sn"><span class="ic">✦</span>News &amp; relevance</div>
+        <div class="sn"><span class="ic">☰</span>Watchlist &amp; data</div>
+        <div class="sn"><span class="ic">▤</span>Layout &amp; display</div>
+        <div class="sn"><span class="ic">◪</span>Account &amp; venue</div>
+      </nav>
+      <div class="set-body">
+        <h3>Risk tolerance</h3>
+        <div class="sub">Seeds position sizing (R-11) and benchmarks the R:R KPI (R-9); enforced by the R-5 gate.</div>
+        <div class="field"><div class="fl"><div class="fn">Risk per trade</div><div class="fd">% of account risked to the actual stop — seeds the ticket size</div></div><div class="fc"><span class="inp">1.0 %</span></div></div>
+        <div class="field"><div class="fl"><div class="fn">Target reward : risk</div><div class="fd">reward 1.5× the risk — your R:R discipline and the central KPI benchmark</div></div><div class="fc"><span class="rr-inp"><span class="accent2">1.5</span> : 1</span></div></div>
+        <div class="field"><div class="fl"><div class="fn">Max drawdown / trade</div><div class="fd">the per-trade hard cap — where the always-native safety stop sits</div></div><div class="fc"><span class="inp">$700</span></div></div>
+        <div class="field"><div class="fl"><div class="fn">Account max-loss (floor)</div><div class="fd">firm-set on prop accounts; on a live / brokerage account, your <b>self-imposed</b> floor — breach halts + flattens</div></div><div class="fc"><span class="inp">$10,000</span></div></div>
+        <div class="field"><div class="fl"><div class="fn">Daily governor</div><div class="fd">personal daily cap inside the hard prop limit ($1,500) — throttles suggestions</div></div><div class="fc"><span class="inp">$900</span></div></div>
+        <div class="field"><div class="fl"><div class="fn">Sizing basis</div><div class="fd">size to the actual stop (normal R:R) or the safety stop (strict worst case)</div></div><div class="fc"><div class="toggle2"><button class="on">Actual</button><button>Safety</button></div></div></div>
+        <div class="field"><div class="fl"><div class="fn">Kill-switch action</div><div class="fd">what the panic button does to open positions — flatten all (default) or halt orders only</div></div><div class="fc"><div class="toggle2"><button class="on">Flatten all</button><button>Halt only</button></div></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="nr">
+    <div class="cap"><h2>News relevance — mapping, topics &amp; feedback</h2><span class="bp">R-2</span>
+      <span class="muted">what news attaches to what you trade · the co-pilot suggests, you curate</span></div>
+    <div class="nr-grid">
+      <div class="nrcard">
+        <h4>Ticker → instrument</h4>
+        <div class="maprow"><span class="tk">SPY</span><span class="arw">→</span><span class="inst">ES</span><span class="nm2">S&amp;P 500</span></div>
+        <div class="maprow"><span class="tk">QQQ</span><span class="arw">→</span><span class="inst">NQ</span><span class="nm2">Nasdaq-100</span></div>
+        <div class="maprow"><span class="tk">IWM</span><span class="arw">→</span><span class="inst">RTY</span><span class="nm2">Russell 2000</span></div>
+        <div class="maprow"><span class="tk">NVDA</span><span class="arw">→</span><span class="inst">NQ</span><span class="nm2">megacap → index</span></div>
+        <div class="addrow">＋ add mapping</div>
+      </div>
+      <div class="nrcard">
+        <div class="selrow">Topics for <span class="pick">ES ▾</span></div>
+        <div class="topics">
+          <span class="tp">Fed policy <span class="x">✕</span></span>
+          <span class="tp">Rates / yields <span class="x">✕</span></span>
+          <span class="tp">S&amp;P 500 earnings <span class="x">✕</span></span>
+          <span class="tp">SPX options flow <span class="x">✕</span></span>
+        </div>
+        <div class="sugg-row">
+          <span class="lab3">Co-pilot suggests for ES:</span>
+          <span class="tp suggested"><span class="add">＋</span> Debt ceiling</span>
+          <span class="tp suggested"><span class="add">＋</span> VIX regime</span>
+          <span class="tp suggested"><span class="add">＋</span> Dollar (DXY)</span>
+        </div>
+        <h4 style="margin-top:16px">Global topics · market-wide</h4>
+        <div class="topics">
+          <span class="tp global">FOMC</span><span class="tp global">CPI</span><span class="tp global">NFP / jobs</span>
+          <span class="tp global">Geopolitics</span><span class="tp global">Crude oil</span><span class="tp global">Treasury auctions</span>
+        </div>
+      </div>
+    </div>
+    <div class="nr-news">
+      <div class="nt">Fed’s Barkin: policy “moderately restrictive,” data-dependent <span class="nm3">· TIINGO · ES, SPY</span></div>
+      <div class="senti"><span class="lab4">Sentiment (deferred — rate it):</span>
+        <button class="tup on" aria-label="Bullish">👍</button><button class="tdn" aria-label="Bearish">👎</button></div>
+    </div>
+    <div class="rej-why" style="margin-top:10px">Sentiment isn’t on the free feeds — for now a <b>subagent</b> tags it, or you rate it 👍/👎; your rating feeds the learning loop (R-9).</div>
+  </section>
+
+  <section class="auth">
+    <div class="cap"><h2>Register &amp; sign in — multi-user</h2><span class="bp">R-18 · R-20</span>
+      <span class="muted">each user registers their own login and owns an isolated workspace — accounts, rules &amp; journal are private to them</span></div>
+    <div class="auth-stage">
+      <div class="authcard">
+        <div class="auth-brand"><svg class="glyph" viewBox="0 0 64 64" aria-hidden="true"><use href="#tc-logo"/></svg>Trading Co-Pilot</div>
+        <div class="auth-h">Welcome back</div>
+        <div class="auth-sub">Sign in to your workspace</div>
+        <div class="infield"><span class="il">Email</span><span class="box ph">you@email.com</span></div>
+        <div class="infield"><span class="il">Password</span><span class="box">••••••••••</span></div>
+        <div class="btn fill" style="justify-content:center">Sign in</div>
+        <div class="auth-alt">New here? <span class="auth-link">Create an account</span></div>
+      </div>
+      <div class="authcard">
+        <div class="auth-brand"><svg class="glyph" viewBox="0 0 64 64" aria-hidden="true"><use href="#tc-logo"/></svg>Trading Co-Pilot</div>
+        <div class="auth-h">Create your account</div>
+        <div class="auth-sub">Your own isolated trading workspace</div>
+        <div class="infield"><span class="il">Email</span><span class="box ph">you@email.com</span></div>
+        <div class="infield"><span class="il">Display name</span><span class="box ph">e.g. Adam M.</span></div>
+        <div class="infield"><span class="il">Password</span><span class="box">••••••••••</span></div>
+        <div class="infield"><span class="il">Confirm password</span><span class="box">••••••••••</span></div>
+        <div class="btn fill" style="justify-content:center">Create account</div>
+        <div class="auth-alt">Already registered? <span class="auth-link">Sign in</span></div>
+      </div>
+    </div>
+    <div class="warnbn" style="margin-top:14px"><span class="ic">🔒</span><div>Credentials are <b>hashed server-side</b> — never stored or echoed in the browser; the session carries a <b>JWT</b> (R-18). After sign-in you land in <b>your</b> workspace only: prop-firm connections, accounts, rules, risk profiles, and journal are <b>isolated per user</b>, enforced at the data layer (R-20, ADR-0011) — no user can see another's data or positions.</div></div>
+    <div class="rej-why" style="margin-top:12px">In the app this is <b>one card with a Sign in / Create account toggle</b> (shown here as two for clarity). Registration is <b>self-service</b>; broker / prop-firm logins are added <b>after</b> sign-in via <b>Connection &amp; account onboarding</b> (each user connects their own TopstepX / Tradovate accounts). Billing / paid plans are out of scope for now.</div>
+  </section>
+
+  <section class="onb">
+    <div class="cap"><h2>Connection &amp; account onboarding — add a firm login</h2><span class="bp">R-17 · R-18</span>
+      <span class="muted">one login per firm · credentials stay <b>server-side</b> · the login discovers its own accounts</span></div>
+    <div class="flow-grid">
+      <div class="flow-step">
+        <div class="step-h"><span class="step-n">1</span>Platform</div>
+        <div class="seg"><button class="on">TopstepX · ProjectX</button><button>Tradovate</button></div>
+        <div class="step-h" style="margin-top:4px"><span class="step-n">2</span>Firm</div>
+        <div class="chipset"><span class="rchip">Topstep</span><span class="rchip sel">Apex</span><span class="rchip">Take Profit Trader</span><span class="rchip">TradeDay</span></div>
+        <div class="step-h" style="margin-top:4px"><span class="step-n">3</span>Credentials<span class="tag" style="margin-left:auto">server-side</span></div>
+        <div class="credfield"><span class="ck2">Username</span><span class="cval">adam.mq</span></div>
+        <div class="credfield"><span class="ck2">API key</span><span class="cval">•••••••••••• ✎</span></div>
+        <div class="warnbn"><span class="ic">🔒</span><div>Stored <b>encrypted server-side</b> (Options + secret store) — <b>never</b> sent to or held in the browser (R-18, eng §8).</div></div>
+      </div>
+      <div class="flow-step">
+        <div class="step-h"><span class="step-n">4</span>Discover accounts<span class="chip good" style="margin-left:auto">connected</span></div>
+        <div class="acct-full">
+          <div class="mrow"><div class="ai"><div class="an">APEX-247820</div><div class="am"><span class="chip ghost">100K</span><span>Funded</span><span class="chip good">active</span></div></div><span class="abal pos">$103,200</span><div class="vtog"><span class="sw2 on"><i></i></span><span class="vl">add</span></div></div>
+          <div class="mrow"><div class="ai"><div class="an">APEX-251044</div><div class="am"><span class="chip ghost">50K</span><span>Evaluation</span><span class="chip good">active</span></div></div><span class="abal">$51,400</span><div class="vtog"><span class="sw2 on"><i></i></span><span class="vl">add</span></div></div>
+          <div class="mrow off"><div class="ai"><div class="an">APEX-233310</div><div class="am"><span class="chip ghost">50K</span><span>Evaluation</span><span class="chip info">passed</span></div></div><span class="abal">$53,010</span><div class="vtog"><span class="sw2 dis"><i></i></span><span class="vl">inactive</span></div></div>
+        </div>
+        <div class="onb-sync">3 accounts fetched · onlyActiveAccounts honored · first snapshot synced 2s ago</div>
+        <div class="btns"><span class="btn fill">Finish &amp; add to switcher</span><span class="btn out">Add another firm</span></div>
+      </div>
+    </div>
+    <div class="rej-why" style="margin-top:12px">Structure is <b>operator → login (per firm) → accounts</b> (R-17). The login authenticates <b>server-side</b> (R-18); the adapter calls <code>Account/search</code> to <b>discover</b> accounts (name → size / stage / practice-vs-live). New <b>active</b> accounts join the switcher; <b>passed / failed</b> stay in the full roster. Repeat per firm — several Tradovate logins (Apex, TPT, TradeDay, …).</div>
+  </section>
+
+  <section class="pb">
+    <div class="cap"><h2>Strategy templates — “playbooks”</h2><span class="bp">R-21 · R-7</span>
+      <span class="muted">package a methodology once (indicators → setups → suggestion shape → risk); install &amp; personalize — your outcomes tune it (R-9 / R-6)</span></div>
+    <div class="pb-grid">
+      <div class="pbcard sel">
+        <div class="pbh"><span class="pbn">13 / 48 EMA-Crossover</span><span class="chip good">installed</span></div>
+        <div class="pbc"><b>MA crossover</b> · 13 &amp; 48 EMAs + VWAP · <b>2 setups</b> · R:R 2.0 default</div>
+        <div class="pbc" style="color:var(--on-dim)">personalized · v1.3 → <span style="color:var(--warn)">v1.4 update</span></div>
+      </div>
+      <div class="pbcard">
+        <div class="pbh"><span class="pbn">ICT — Silver Bullet</span><span class="chip info">SMC</span></div>
+        <div class="pbc"><b>Smart-money concepts</b> · kill-zones · FVG · order blocks · liquidity · <b>3 setups</b></div>
+        <div class="pbc" style="color:var(--on-dim)">needs custom detectors (R-21)</div>
+      </div>
+      <div class="pbcard">
+        <div class="pbh"><span class="pbn">VWAP Reclaim</span><span class="chip ghost">mean-reversion</span></div>
+        <div class="pbc"><b>Fade + reclaim</b> · VWAP · volume · <b>1 setup</b></div>
+      </div>
+      <div class="pbcard">
+        <div class="pbh"><span class="pbn">Opening Drive</span><span class="chip ghost">momentum</span></div>
+        <div class="pbc"><b>Session open</b> · opening range · delta · <b>2 setups</b></div>
+      </div>
+    </div>
+    <div class="pb-detail">
+      <div class="pdh"><span class="pdn">13 / 48 EMA-Crossover</span><span class="tag">v1.3</span><span class="chip ghost">platform-curated</span><span class="chip good" style="margin-left:auto">installed · personalized</span></div>
+      <div class="pb-layer"><span class="pl"><span class="pln">1</span>Indicators / features</span><span class="pv">13 EMA, 48 EMA, VWAP (trend filter) — R-1 / R-3</span></div>
+      <div class="pb-layer"><span class="pl"><span class="pln">2</span>Setups → triggers</span><span class="pv">“13 crosses 48 <b>up</b>, price &gt; VWAP” → long · “…crosses <b>down</b>, price &lt; VWAP” → short (compile to triggers, R-7 / ADR-0008)</span></div>
+      <div class="pb-layer"><span class="pl"><span class="pln">3</span>Suggestion shape</span><span class="pv">entry on the cross / first pullback · stop beyond the last swing · target <span class="over">2.5R</span> <span style="color:var(--on-dim)">(template 2.0R — yours)</span> — R-4</span></div>
+      <div class="pb-layer"><span class="pl"><span class="pln">4</span>Risk defaults</span><span class="pv"><span class="over">1.0%</span>/trade · R:R 2.5 · RTH only — seeds R-5 (your risk tolerance wins)</span></div>
+      <div class="pb-layer"><span class="pl"><span class="pln">5</span>Rules</span><span class="pv">“no counter-trend crosses in the first 5 min” · “skip if ADR is exhausted” — R-7 (rationale + suppression)</span></div>
+      <div class="btns" style="margin-top:14px"><span class="btn fill">Update to v1.4</span><span class="btn out">Personalize</span><span class="btn text">Duplicate as my template</span></div>
+    </div>
+    <div class="rej-why" style="margin-top:12px">A template is a methodology's <b>runnable form</b>; the methodology <b>knowledge</b> lives in the wiki (grounded from a course / source, not invented). <b>Install</b> instantiates per-user, <b>editable</b> strategies / rules / triggers (R-20); your edits <span class="over">override</span> the template but keep its <b>lineage</b> (opt-in updates). Outcomes feed <b>per-strategy analytics</b> (R-9) + the <b>AI refinement loop</b> (R-6) — so “13/48” gets tuned to <b>you</b>. <b>ICT</b>'s FVG / order-block / liquidity are <b>custom detectors</b>, not stock indicators (R-21).</div>
+  </section>
+
+  <section class="rb">
+    <div class="cap"><h2>Rulebook &amp; triggers — plain rules compile to deterministic triggers</h2><span class="bp">R-7 · ADR-0008</span>
+      <span class="muted">state intent in words → the co-pilot compiles a structured trigger you confirm → it runs deterministically (no LLM in the hot loop)</span></div>
+    <div class="rb-grid">
+      <div class="rulecard">
+        <div class="rule-intent">“Warn me if <b>ES</b> breaks the <b>overnight low</b> on rising sell volume.”</div>
+        <div class="dsl">WHEN instrument = ES AND price &lt; level(ON_LOW) AND delta(volume,1m) &lt; 0 THEN alert</div>
+        <div class="rule-meta"><span class="chip info">mechanical alert</span><span>debounce 60s</span><span class="tag">from chat · Jul 12</span><span class="sw2 on"><i></i></span></div>
+      </div>
+      <div class="rulecard">
+        <div class="rule-intent">“When <b>VWAP reclaims</b> after a flush, <b>ask me</b> if it's a long.”</div>
+        <div class="dsl">WHEN reclaim(VWAP) AFTER flush(≥1.5σ) THEN agent-review(“long?”)</div>
+        <div class="rule-meta"><span class="chip warn">agent review</span><span>rate-limit 1 / 5m</span><span class="tag">from chat · Jul 15</span><span class="sw2 on"><i></i></span></div>
+      </div>
+      <div class="rulecard proposed">
+        <div class="rule-intent"><span class="q2">Proposed from your journal —</span> “You've <b>passed 6 of 7</b> opening-drive counter-trend fades in the first 5 min. <b>Suppress</b> those suggestions?”</div>
+        <div class="dsl">WHEN strategy = opening-drive AND counter_trend AND since_open &lt; 5m THEN suppress</div>
+        <div class="btns"><span class="btn fill">Confirm rule</span><span class="btn out">Edit</span><span class="btn text">Dismiss</span></div>
+      </div>
+    </div>
+    <div class="rej-why" style="margin-top:12px">Rules are <b>data the LLM proposes</b>; the compiled <b>trigger is deterministic</b> and runs on the event stream — the LLM is <b>never in the continuous loop</b> (ADR-0008). Each trigger routes to <b>mechanical-alert</b> (just tell me) or <b>agent-review</b> (spend a cheap-model look), with debounce / rate-limits. You <b>confirm</b> every rule before it goes live; the source conversation is kept (R-7).</div>
+  </section>
+
+  <section class="ail">
+    <div class="cap"><h2>AI refinement loop — feedback &amp; backtests sharpen the co-pilot</h2><span class="bp">R-6 · ADR-0009</span>
+      <span class="muted">your journal notes + backtest results feed the co-pilot's follow-ups → confirmed refinements to rules &amp; strategy</span></div>
+    <div class="life-row">
+      <div class="lstate"><h4>Signals</h4><p><b>Journal feedback</b> + <b>2-yr backtest</b> results (R-8 / R-9, ADR-0009)</p></div>
+      <div class="larrow">→</div>
+      <div class="lstate"><h4>Analyze</h4><p>Cheaper-model pass finds a <b>pattern</b> across taken + passed trades</p></div>
+      <div class="larrow">→</div>
+      <div class="lstate active"><h4>Follow-up</h4><p>Co-pilot <b>asks</b> a targeted question (R-6)</p></div>
+      <div class="larrow">→</div>
+      <div class="lstate"><h4>You answer</h4><p>Confirm / correct — your call stays in the loop</p></div>
+      <div class="larrow">→</div>
+      <div class="lstate"><h4>Refine</h4><p>Proposed <b>rule / strategy</b> change → your confirm → rulebook (R-7)</p></div>
+    </div>
+    <div class="followup">
+      <div class="q">Your <b>VWAP-reclaim longs win 61%</b> (avg +1.7R) but <b>opening-drive fades win 38%</b> (−5.0R over 2 yrs). Want me to <b>stop suggesting counter-trend in the first 5 min</b> and tighten VWAP-reclaim sizing?</div>
+      <div class="btns"><span class="btn fill">Make it a rule</span><span class="btn tonal">Show the backtest</span><span class="btn text">Not now</span></div>
+    </div>
+    <div class="ail-log">
+      <div class="li2"><span class="dt2">Jul 17</span><div>Backtest (2 yr, news-light) confirmed <b>opening-drive fade −5.0R</b> → proposed suppression rule · <b>confirmed ✓</b></div></div>
+      <div class="li2"><span class="dt2">Jul 14</span><div>You noted <b>“chased the entry”</b> on 3 losers → co-pilot tightened <b>entry tolerance</b> on VWAP-reclaim</div></div>
+      <div class="li2"><span class="dt2">Jul 09</span><div>Suggested raising <b>target R:R</b> to 1.7 after scratches near 1.3 — you <b>declined</b>, kept 1.5 (remembered)</div></div>
+    </div>
+    <div class="rej-why" style="margin-top:12px">The loop is <b>human-in-the-loop</b>: the co-pilot <b>proposes</b> from evidence (journal + reproducible backtests, ADR-0009), <b>asks</b> before changing anything (R-6), and only a <b>confirmed</b> refinement reaches the rulebook (R-7). Declines are remembered too — they train what <b>not</b> to suggest.</div>
+  </section>
+
+  <section class="kill">
+    <div class="cap"><h2>Kill switch &amp; auto-flatten — the safety floor</h2><span class="bp">R-13</span>
+      <span class="muted">two always-visible controls; the countdown <b>auto-flattens before the CME close</b>; the kill switch is manual &amp; instant</span></div>
+    <div class="kill-grid">
+      <div>
+        <div class="mini-h">Time-to-flat — escalation</div>
+        <div class="life-row">
+          <div class="lstate active"><h4><span class="dotm" style="background:var(--long)"></span>Normal</h4><p>T‑flat &gt; 15m — full trading</p></div>
+          <div class="larrow">→</div>
+          <div class="lstate stale"><h4><span class="dotm" style="background:var(--warn)"></span>Warn · T‑5m</h4><p>New entries <b>blocked</b>; countdown amber</p></div>
+          <div class="larrow">→</div>
+          <div class="lstate crit"><h4><span class="dotm" style="background:var(--critical)"></span>Critical · T‑1m</h4><p>Reduce-only; final banner</p></div>
+          <div class="larrow">→</div>
+          <div class="lstate"><h4>Auto‑flatten · T‑0</h4><p>Closed at market, orders cancelled, <b>locked</b> to next session</p></div>
+        </div>
+        <div class="killbig"><span class="sq2"></span><div class="kt"><b>Kill switch — confirm.</b> Mode: <b>flatten all</b> (Settings). Cancels <b>4 working orders</b> and market-flattens <b>2 positions</b> (−$180 est.), native + synthetic. <b>Hold to confirm.</b></div></div>
+      </div>
+      <div>
+        <div class="mini-h">Flatten sequence &amp; audit</div>
+        <div class="sstate key-state">
+          <h4>Deterministic, native-first</h4>
+          <p>1 · <b>cancel</b> all working orders → 2 · <b>market-flatten</b> each position (native) → 3 · <b>verify flat</b> (poll positions = 0) → 4 · <b>lock</b> the session. Retries on the venue; the gate can't be talked out of it.</p>
+        </div>
+        <div class="audit">
+          <div class="ar2"><span class="ts2">14:59:00</span><span>auto-flatten armed · T‑1m critical</span></div>
+          <div class="ar2"><span class="ts2">15:00:00</span><span>CANCEL 4 orders → ok</span></div>
+          <div class="ar2"><span class="ts2">15:00:00</span><span>FLATTEN ES ×2 @ mkt → filled 5231.25</span></div>
+          <div class="ar2"><span class="ts2">15:00:01</span><span>VERIFY positions = 0 ✓ · session LOCKED</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="mini-h" style="margin-top:20px">Connection-loss — synthetic orphan handling (ADR-0007)</div>
+    <div class="life-row">
+      <div class="lstate active"><h4><span class="dotm" style="background:var(--long)"></span>Link OK</h4><p>Heartbeat healthy — synthetics managed in-app as normal</p></div>
+      <div class="larrow">→</div>
+      <div class="lstate stale"><h4><span class="dotm" style="background:var(--warn)"></span>Link dropped</h4><p>Heartbeat timeout — reconnecting; new sends paused</p></div>
+      <div class="larrow">→</div>
+      <div class="lstate crit"><h4><span class="dotm" style="background:var(--critical)"></span>Orphaned · emergency</h4><p><b>2 synthetics</b> (hidden entry + un-promoted stop) can't be managed → <b>emergency</b>; operator <b>alerted</b></p></div>
+      <div class="larrow">→</div>
+      <div class="lstate"><h4>Reconnect</h4><p><b>Re-validate &amp; re-arm</b> — nothing resumes silently</p></div>
+    </div>
+    <div class="killbig" style="margin-top:12px;background:linear-gradient(90deg,var(--critical-ctr),var(--warn-ctr))">
+      <span class="sq2" style="background:var(--warn)"></span>
+      <div class="kt"><b>The native safety stop still holds.</b> Synthetic orders live in the app, so a dropped link orphans them — but the always-native safety stop rests at the exchange and caps the position regardless. The <code>AuditRecord</code> flags <span class="tag">synthetic_risk</span> so the exposure stays queryable after the fact.</div>
+    </div>
+    <div class="rej-why" style="margin-top:12px">Auto-flatten is <b>safety-critical</b> (R-13): it runs from a <b>deterministic timer</b>, prefers <b>native</b> (exchange-held) actions so a connection blip can't strand a position, <b>verifies flat</b>, and writes an <b>immutable audit record</b> (eng §9). The manual <b>kill switch</b> is the same sequence on demand — always visible at every breakpoint.</div>
+  </section>
+
+  <section class="key">
+    <h3>Region → requirement</h3>
+    <div class="key-grid">
+      <div><span class="tag">R-10</span> Central chart — candles, RSI/MACD panes, suggestion &amp; position overlays</div>
+      <div><span class="tag">R-4</span> AI suggestion — levels, confidence, rationale, validity</div>
+      <div><span class="tag">R-11</span> Order ticket &amp; take-suggestion — explicit, human-in-the-loop</div>
+      <div><span class="tag">R-5 · R-16</span> Risk gate &amp; sanity caps — shown before arming</div>
+      <div><span class="tag">R-13</span> Time-to-flat countdown — auto-flatten before CME close</div>
+      <div><span class="tag">R-14</span> Practice / live mode chip — safety surface</div>
+      <div><span class="tag">R-6</span> Co-pilot chat — invokes platform tools</div>
+      <div><span class="tag">R-2</span> News &amp; signals — Finnhub + Tiingo feed</div>
+      <div><span class="tag">R-8 · R-9</span> Positions, fills, journal</div>
+      <div><span class="tag">Kill</span> Kill switch — always visible, all breakpoints</div>
+      <div><span class="tag">ADR-0006</span> Multi-screen — detachable pop-out windows, one per monitor (web-native)</div>
+      <div><span class="tag">R-9</span> Strategy performance — per-setup expectancy/calibration over taken + suggested</div>
+      <div><span class="tag">R-4</span> Pass feedback — optional, neutral reason when a suggestion is passed</div>
+      <div><span class="tag">R-11 · R-5</span> Order ticket — side / size / type, bracket + safety stop, live risk, send now / on-trigger</div>
+      <div><span class="tag">R-11 · R-12</span> Approve = arm an editable ticket; “send as-is” opt-in; edits re-checked before send</div>
+      <div><span class="tag">R-11</span> Send now (native, on the book) vs. send-on-trigger (synthetic/local, hidden until it fires)</div>
+      <div><span class="tag">R-11 · R-5</span> Staged stop — synthetic far, native near the level; always-native safety stop; risk sized to worst case</div>
+      <div><span class="tag">R-5 · R-4</span> Daily risk governor — personal cap inside the hard prop limit; throttles suggestions as headroom depletes</div>
+      <div><span class="tag">R-5 · R-9</span> Consistency target — personal daily profit target; on reach the governor stands down (suppress + optional stop-for-day)</div>
+      <div><span class="tag">R-4 · R-9</span> Suggestion lifecycle — active → stale → expired; a scratched setup resolves as no-fill, not a loss</div>
+      <div><span class="tag">R-8 · R-9</span> Journal — P&amp;L by day (calendar + equity curve); the trader’s review surface</div>
+      <div><span class="tag">R-8 · R-6</span> Day detail — drill into a day’s trades; add feedback anytime; co-pilot asks follow-ups → rules</div>
+      <div><span class="tag">R-17 · R-14</span> Account switcher — active + visible accounts only (full roster in Settings); a login per platform; the active account drives everything</div>
+      <div><span class="tag">config</span> Settings — risk tolerance (risk %, target R:R, max-DD, governor), entry defaults, news, watchlist, layout, account</div>
+      <div><span class="tag">ADR-0009</span> Backtest — test-run over ~2y (same engine, cheaper-model, news-light); refinements → rules</div>
+      <div><span class="tag">§7 · ADR-0008</span> AI usage &amp; spend — tracked by feature; governor caps vs. budget</div>
+      <div><span class="tag">R-17 · R-18</span> Onboarding — add a firm login (creds server-side); discover its accounts; active ones join the switcher</div>
+      <div><span class="tag">R-21 · R-7</span> Strategy templates (“playbooks”) — package a methodology (13/48, ICT) as installable, personalizable rules + setups + risk</div>
+      <div><span class="tag">R-7 · ADR-0008</span> Rulebook &amp; triggers — plain-language rules compile to confirmed deterministic triggers (alert vs. agent-review)</div>
+      <div><span class="tag">R-6 · ADR-0009</span> AI refinement loop — journal + backtest → follow-up questions → confirmed rule / strategy refinements</div>
+      <div><span class="tag">R-13 · ADR-0007</span> Kill switch &amp; auto-flatten — countdown escalation, native-first flatten sequence, immutable audit; connection-loss → synthetic-orphan emergency</div>
+      <div><span class="tag">R-18 · R-20</span> Register &amp; sign in — multi-user; self-service registration + login; each user's workspace isolated per user (ADR-0011)</div>
+      <div><span class="tag">R-2</span> News relevance — ticker↔instrument maps, per-instrument + global topics (AI-suggested); sentiment thumbs</div>
+    </div>
+  </section>
+
+  <p class="foot">Mid-fidelity wireframes — structure, dark Material language, and adaptive behavior, not final visuals.
+  Type shown in a system stack; production uses <b>Roboto</b> / <b>Roboto Mono</b>. Committed to the dark theme
+  (the product's default); a light variant would reuse the same tokens. Order-flow / DOM (Bookmap-style) is a later
+  bespoke pane and isn't drawn here.</p>
+</div>
+
+<script>
+  (function(){
+    var UP="#4FBF7B", DN="#F0655C", PRI="#9DC3FF", GRID="#242A34", DIM="#6C7482";
+    var closes=[5182,5179,5186,5183,5190,5195,5192,5199,5205,5201,5208,5214,5210,5217,5223,5219,5226,5231,5228,5235,5233,5229,5234,5230,5227,5231];
+    var LO=5171, HI=5252;
+    function candles(w,h,overlay){
+      var n=closes.length, step=w/n, bw=Math.max(3,step*0.5);
+      function y(v){return (h-((v-LO)/(HI-LO))*h);}
+      var s='<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="'+h+'" preserveAspectRatio="none" role="img" aria-label="ES price chart">';
+      for(var g=1;g<4;g++){var gy=h*g/4;s+='<line x1="0" y1="'+gy+'" x2="'+w+'" y2="'+gy+'" stroke="'+GRID+'"/>';}
+      // faint SPY correlation line
+      var pts='';for(var k=0;k<n;k++){pts+=(k*step+step/2)+','+(y(closes[k])-9+Math.sin(k/2)*4)+' ';}
+      s+='<polyline points="'+pts+'" fill="none" stroke="'+DIM+'" stroke-width="1" opacity="0.5" stroke-dasharray="2 3"/>';
+      if(overlay){
+        var yE=y(5230.25), yS=y(5222), yT=y(5248.5);
+        s+='<rect x="0" y="'+yT+'" width="'+w+'" height="'+(yE-yT)+'" fill="'+UP+'" opacity="0.09"/>';
+        s+='<rect x="0" y="'+yE+'" width="'+w+'" height="'+(yS-yE)+'" fill="'+DN+'" opacity="0.09"/>';
+        s+='<line x1="0" y1="'+yT+'" x2="'+w+'" y2="'+yT+'" stroke="'+UP+'" stroke-width="1.3" stroke-dasharray="6 4"/>';
+        s+='<line x1="0" y1="'+yE+'" x2="'+w+'" y2="'+yE+'" stroke="'+PRI+'" stroke-width="1.5"/>';
+        s+='<line x1="0" y1="'+yS+'" x2="'+w+'" y2="'+yS+'" stroke="'+DN+'" stroke-width="1.3" stroke-dasharray="6 4"/>';
+      }
+      var prev=closes[0];
+      for(var i=0;i<n;i++){
+        var c=closes[i], o=prev, hv=Math.max(o,c)+(1.5+(i*7%5)*0.7), lv=Math.min(o,c)-(1.5+(i*5%4)*0.7);
+        var up=c>=o, col=up?UP:DN, x=i*step+step/2;
+        s+='<line x1="'+x+'" y1="'+y(hv)+'" x2="'+x+'" y2="'+y(lv)+'" stroke="'+col+'" stroke-width="1.1"/>';
+        var bt=y(Math.max(o,c)), bb=y(Math.min(o,c));
+        s+='<rect x="'+(x-bw/2)+'" y="'+bt+'" width="'+bw+'" height="'+Math.max(1.4,bb-bt)+'" fill="'+col+'" rx="0.8"/>';
+        prev=c;
+      }
+      if(overlay){var yF=y(5228.5);s+='<path d="M'+(w*0.9)+' '+(yF-5)+' l6 5 -6 5 z" fill="'+PRI+'"/>';}
+      return s+'</svg>';
+    }
+    function rsi(w,h){
+      var s='<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="'+h+'" preserveAspectRatio="none">';
+      s+='<line x1="0" y1="'+h*0.3+'" x2="'+w+'" y2="'+h*0.3+'" stroke="'+GRID+'" stroke-dasharray="3 3"/>';
+      s+='<line x1="0" y1="'+h*0.7+'" x2="'+w+'" y2="'+h*0.7+'" stroke="'+GRID+'" stroke-dasharray="3 3"/>';
+      var p='';for(var i=0;i<=40;i++){var x=i/40*w;var v=0.5+Math.sin(i/3)*0.16+Math.sin(i/7)*0.08;p+=x+','+(v*h)+' ';}
+      return s+'<polyline points="'+p+'" fill="none" stroke="'+PRI+'" stroke-width="1.5"/></svg>';
+    }
+    function macd(w,h){
+      var s='<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="'+h+'" preserveAspectRatio="none">';
+      s+='<line x1="0" y1="'+h/2+'" x2="'+w+'" y2="'+h/2+'" stroke="'+GRID+'"/>';
+      var n=32,bw=w/n*0.6;
+      for(var i=0;i<n;i++){var v=Math.sin(i/4)*Math.min(1,i/10)*(h*0.34);var x=i*(w/n)+ (w/n-bw)/2;
+        var col=v>=0?UP:DN;var yy=v>=0?h/2-v:h/2;s+='<rect x="'+x+'" y="'+yy+'" width="'+bw+'" height="'+Math.abs(v)+'" fill="'+col+'" opacity="0.75" rx="0.6"/>';}
+      var p1='',p2='';for(var j=0;j<=32;j++){var xx=j/32*w;p1+=xx+','+(h/2-Math.sin(j/4)*h*0.28)+' ';p2+=xx+','+(h/2-Math.sin((j-3)/4)*h*0.24)+' ';}
+      s+='<polyline points="'+p1+'" fill="none" stroke="'+PRI+'" stroke-width="1.2"/>';
+      s+='<polyline points="'+p2+'" fill="none" stroke="'+DIM+'" stroke-width="1.2"/>';
+      return s+'</svg>';
+    }
+    document.querySelectorAll('.js-price').forEach(function(el){el.innerHTML=candles(600,+el.dataset.h||220,el.dataset.overlay==='1');});
+    document.querySelectorAll('.js-rsi').forEach(function(el){el.innerHTML=rsi(600,+el.dataset.h||60);});
+    document.querySelectorAll('.js-macd').forEach(function(el){el.innerHTML=macd(600,+el.dataset.h||60);});
+
+    // --- journal: P&L by day (illustrative month) ---
+    var jpnl=[320,-140,210,480,-220,90,640,-80,150,305,-410,260,120,-180,540,75,-95,430,210,-260,180,90,150];
+    var jlayout=[0,0,0,1,1,1,0, 0,1,1,1,1,1,0, 0,1,1,1,1,1,0, 0,1,1,1,1,1,0, 0,1,1,1,1,1,0];
+    var jdays=[null,null,null,1,2,3,null, null,6,7,8,9,10,null, null,13,14,15,16,17,null, null,20,21,22,23,24,null, null,27,28,29,30,31,null];
+    var jmax=Math.max.apply(null,jpnl.map(function(v){return Math.abs(v);}));
+    function jmoney(v){return (v>=0?'+$':'-$')+Math.abs(v).toLocaleString('en-US');}
+    var chtml='', jp=0;
+    for(var ci=0;ci<35;ci++){
+      if(jlayout[ci]===0){chtml+='<div class="cell empty"></div>';continue;}
+      var cv=jpnl[jp++], ca=(0.14+0.34*Math.min(1,Math.abs(cv)/jmax)).toFixed(2);
+      var cbg=cv>=0?'rgba(79,191,123,'+ca+')':'rgba(240,101,92,'+ca+')';
+      chtml+='<div class="cell '+(cv>=0?'win':'loss')+'" style="background:'+cbg+'"><span class="dn">'+jdays[ci]+'</span><span class="pn">'+jmoney(cv)+'</span></div>';
+    }
+    var jcal=document.getElementById('j-cal'); if(jcal)jcal.innerHTML=chtml;
+    var jnet=jpnl.reduce(function(a,b){return a+b;},0);
+    var jgreen=jpnl.filter(function(v){return v>0;}).length, jred=jpnl.filter(function(v){return v<0;}).length;
+    function jset(id,t){var e=document.getElementById(id);if(e)e.textContent=t;}
+    jset('j-net',jmoney(jnet)); jset('j-days',jgreen+' / '+jred);
+    jset('j-best',jmoney(Math.max.apply(null,jpnl))); jset('j-worst',jmoney(Math.min.apply(null,jpnl)));
+    jset('j-avg',jmoney(Math.round(jnet/jpnl.length)));
+    var jne=document.getElementById('j-net'); if(jne)jne.className='v '+(jnet>=0?'pos':'neg');
+    var jc=0, jcum=jpnl.map(function(v){jc+=v;return jc;});
+    var eW=340,eH=118, emn=Math.min(0,Math.min.apply(null,jcum)), emx=Math.max.apply(null,jcum);
+    function eyy(v){return eH-6-((v-emn)/((emx-emn)||1))*(eH-16);}
+    function exx(i){return 4+i/(jcum.length-1)*(eW-8);}
+    var eline='', earea='M'+exx(0).toFixed(1)+' '+eyy(0).toFixed(1);
+    for(var ek=0;ek<jcum.length;ek++){eline+=exx(ek).toFixed(1)+','+eyy(jcum[ek]).toFixed(1)+' '; earea+=' L'+exx(ek).toFixed(1)+' '+eyy(jcum[ek]).toFixed(1);}
+    earea+=' L'+exx(jcum.length-1).toFixed(1)+' '+eH+' L'+exx(0).toFixed(1)+' '+eH+' Z';
+    var esvg='<svg viewBox="0 0 '+eW+' '+eH+'" width="100%" height="'+eH+'" preserveAspectRatio="none">';
+    esvg+='<line x1="0" y1="'+eyy(0).toFixed(1)+'" x2="'+eW+'" y2="'+eyy(0).toFixed(1)+'" stroke="'+GRID+'" stroke-dasharray="3 3"/>';
+    esvg+='<path d="'+earea+'" fill="'+UP+'" opacity="0.10"/>';
+    esvg+='<polyline points="'+eline+'" fill="none" stroke="'+UP+'" stroke-width="1.6"/>';
+    esvg+='<circle cx="'+exx(jcum.length-1).toFixed(1)+'" cy="'+eyy(jcum[jcum.length-1]).toFixed(1)+'" r="3" fill="'+UP+'"/></svg>';
+    var jeq=document.getElementById('j-eq'); if(jeq)jeq.innerHTML=esvg;
+  })();
+</script>
