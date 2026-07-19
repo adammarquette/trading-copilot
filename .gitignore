@@ -62,3 +62,6 @@ nunit-*.xml
 *.user
 *.userosscache
 *.sln.docstates
+
+# Obsidian (local wiki-vault config)
+.obsidian/
