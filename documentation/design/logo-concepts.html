@@ -1,0 +1,527 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trading Co-Pilot — logo / app-icon concepts</title>
+<style>
+  :root{
+    --bg:#101318; --surface-1:#161A20; --surface-2:#1C212A; --surface-3:#222834; --surface-4:#29313F;
+    --text:#E4E8EF; --text-dim:#98A2B3; --text-faint:#6B7686;
+    --primary:#9DC3FF; --primary-ctr:#223A5C; --on-primary:#0A2745;
+    --primary-light:#2E5FA6;
+    --long:#4FBF7B; --short:#F0655C; --warn:#F2B450; --critical:#FF5A4E;
+    --font:"Roboto","Segoe UI",system-ui,-apple-system,sans-serif;
+    --mono:"Roboto Mono",ui-monospace,"Cascadia Mono","Consolas",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);
+       font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:40px 28px 80px}
+  h1{font-size:26px;font-weight:600;margin:0 0 6px;letter-spacing:-.01em}
+  h2{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;
+     color:var(--text-dim);margin:52px 0 16px;padding-bottom:9px;border-bottom:1px solid var(--surface-4)}
+  h3{font-size:17px;font-weight:600;margin:0 0 2px}
+  p{margin:0 0 10px;color:var(--text-dim);max-width:78ch}
+  a{color:var(--primary)}
+  code,.mono{font-family:var(--mono);font-size:.92em}
+  .lede{color:var(--text-dim);max-width:80ch;margin-bottom:22px}
+
+  .note{background:var(--surface-1);border:1px solid var(--surface-4);border-left:3px solid var(--primary);
+        border-radius:8px;padding:14px 18px;margin:18px 0}
+  .note p:last-child{margin-bottom:0}
+  .note strong{color:var(--text)}
+
+  /* token strip */
+  .tokens{display:flex;flex-wrap:wrap;gap:10px;margin:16px 0 4px}
+  .tok{background:var(--surface-1);border:1px solid var(--surface-4);border-radius:8px;
+       padding:9px 12px;display:flex;align-items:center;gap:10px;min-width:172px}
+  .sw{width:26px;height:26px;border-radius:6px;border:1px solid rgba(255,255,255,.14);flex:none}
+  .tok b{display:block;font-size:12px;font-weight:600;color:var(--text)}
+  .tok span{display:block;font-family:var(--mono);font-size:11px;color:var(--text-faint)}
+
+  /* concept card */
+  .concept{background:var(--surface-1);border:1px solid var(--surface-4);border-radius:14px;
+           padding:26px;margin-bottom:22px}
+  .chead{display:flex;align-items:flex-start;gap:26px;flex-wrap:wrap}
+  .hero{width:132px;height:132px;flex:none;border-radius:28px;overflow:hidden;
+        box-shadow:0 10px 34px rgba(0,0,0,.55)}
+  .hero svg{display:block;width:100%;height:100%}
+  .cmeta{flex:1;min-width:290px}
+  .tag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;
+       background:var(--primary-ctr);color:var(--primary);border-radius:5px;padding:3px 8px;margin-bottom:9px}
+  .verdict{font-size:12.5px;color:var(--text-faint);margin-top:10px}
+  .verdict b{color:var(--text-dim);font-weight:600}
+
+  /* test rows */
+  .tests{display:flex;flex-wrap:wrap;gap:14px;margin-top:24px;padding-top:22px;
+         border-top:1px solid var(--surface-4)}
+  .panel{background:var(--surface-2);border:1px solid var(--surface-4);border-radius:10px;padding:14px 16px}
+  .plabel{font-size:10px;font-weight:700;letter-spacing:.085em;text-transform:uppercase;
+          color:var(--text-faint);margin-bottom:12px}
+  .ladder{display:flex;align-items:flex-end;gap:16px}
+  .rung{text-align:center}
+  .rung svg{display:block;border-radius:22%;margin:0 auto 6px}
+  .rung em{font-style:normal;font-family:var(--mono);font-size:10px;color:var(--text-faint)}
+
+  .lightchip{background:#F3F5F8;border-radius:10px;padding:14px 18px;display:flex;
+             align-items:center;gap:14px;color:var(--primary-light)}
+  .lightchip svg{display:block}
+  .lightchip b{color:#1A2230;font-size:13px;font-weight:600;letter-spacing:-.01em}
+
+  .maskwrap{position:relative;width:104px;height:104px}
+  .maskwrap svg.icn{width:104px;height:104px;border-radius:22%;display:block}
+  .maskring{position:absolute;inset:0;pointer-events:none}
+
+  /* lockup */
+  .lockup{display:flex;align-items:center;gap:12px}
+  .lockup svg{display:block;flex:none}
+  .lockup .wm{font-size:16px;font-weight:600;letter-spacing:-.015em;color:var(--text);line-height:1.15}
+  .lockup .wm small{display:block;font-size:9.5px;font-weight:500;letter-spacing:.16em;
+                    text-transform:uppercase;color:var(--text-faint);margin-top:2px}
+
+  /* context mocks */
+  .ctx{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start}
+  .tabbar{background:var(--surface-3);border-radius:10px 10px 4px 4px;padding:8px 8px 0;width:340px}
+  .tab{background:var(--bg);border-radius:8px 8px 0 0;padding:9px 12px;display:flex;align-items:center;gap:9px;
+       font-size:12px;color:var(--text-dim);white-space:nowrap;overflow:hidden}
+  .tab svg{flex:none;border-radius:3px}
+  .phone{width:216px;background:var(--surface-2);border:1px solid var(--surface-4);
+         border-radius:22px;padding:16px 14px 20px}
+  .phgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:13px 10px;margin-top:12px}
+  .app{text-align:center}
+  .app .ph{width:100%;aspect-ratio:1;border-radius:12px;background:var(--surface-4);opacity:.5}
+  .app svg{width:100%;height:auto;border-radius:12px;display:block}
+  .app em{font-style:normal;display:block;font-size:8.5px;color:var(--text-dim);margin-top:4px;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .statusbar{display:flex;justify-content:space-between;font-family:var(--mono);
+             font-size:9px;color:var(--text-faint);padding:0 3px}
+
+  /* app bar mock */
+  .appbar{background:var(--surface-2);border:1px solid var(--surface-4);border-radius:10px;
+          padding:10px 14px;display:flex;align-items:center;gap:14px;width:100%}
+  .appbar .sp{flex:1}
+  .chip{font-size:10.5px;font-weight:600;border-radius:20px;padding:4px 10px;white-space:nowrap}
+  .chip.practice{background:var(--primary-ctr);color:var(--primary)}
+  .chip.clock{background:#33270B;color:var(--warn);font-family:var(--mono)}
+  .chip.kill{background:#40130F;color:var(--critical)}
+
+  table{border-collapse:collapse;width:100%;margin-top:14px;font-size:13px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--surface-4);vertical-align:top}
+  th{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-faint);font-weight:600}
+  td b{color:var(--text)}
+  .foot{margin-top:46px;padding-top:20px;border-top:1px solid var(--surface-4);
+        font-size:12px;color:var(--text-faint)}
+</style>
+
+<!-- ══ symbol library ══ -->
+<svg style="display:none" aria-hidden="true">
+  <!-- full app icons -->
+  <symbol id="ic-a" viewBox="0 0 64 64">
+    <rect width="64" height="64" rx="14" fill="#101318"/>
+    <rect x=".5" y=".5" width="63" height="63" rx="13.5" fill="none" stroke="#29313F"/>
+    <g fill="none" stroke="#9DC3FF" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 31 L32 19.5 L45 31"/><path d="M19 45 L32 33.5 L45 45" opacity=".45"/>
+    </g>
+  </symbol>
+  <symbol id="ic-b" viewBox="0 0 64 64">
+    <rect width="64" height="64" rx="14" fill="#101318"/>
+    <rect x=".5" y=".5" width="63" height="63" rx="13.5" fill="none" stroke="#29313F"/>
+    <g stroke="#9DC3FF" stroke-width="2.5" stroke-linecap="round">
+      <g opacity=".35"><path d="M21 32.5 V46.5"/><rect x="17.5" y="35" width="7" height="10" rx="2" fill="#9DC3FF" stroke="none"/></g>
+      <g opacity=".65"><path d="M32 24.5 V39.5"/><rect x="28.5" y="27" width="7" height="11" rx="2" fill="#9DC3FF" stroke="none"/></g>
+      <g><path d="M43 16.5 V32.5"/><rect x="39.5" y="19" width="7" height="11" rx="2" fill="#9DC3FF" stroke="none"/></g>
+    </g>
+  </symbol>
+  <symbol id="ic-c" viewBox="0 0 64 64">
+    <rect width="64" height="64" rx="14" fill="#101318"/>
+    <rect x=".5" y=".5" width="63" height="63" rx="13.5" fill="none" stroke="#29313F"/>
+    <path d="M23.97 20.53 A14 14 0 1 0 40.03 20.53" fill="none" stroke="#9DC3FF" stroke-width="5" stroke-linecap="round" opacity=".5"/>
+    <path d="M24.5 34 L32 24.5 L39.5 34" fill="none" stroke="#9DC3FF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="ic-d" viewBox="0 0 64 64">
+    <rect width="64" height="64" rx="14" fill="#101318"/>
+    <rect x=".5" y=".5" width="63" height="63" rx="13.5" fill="none" stroke="#29313F"/>
+    <g fill="none" stroke="#9DC3FF" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity=".5">
+      <path d="M17.5 26 L17.5 17.5 L26 17.5"/><path d="M38 17.5 L46.5 17.5 L46.5 26"/>
+      <path d="M17.5 38 L17.5 46.5 L26 46.5"/><path d="M46.5 38 L46.5 46.5 L38 46.5"/>
+    </g>
+    <path d="M25 36 L32 27.5 L39 36" fill="none" stroke="#9DC3FF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+
+  <!-- marks only, inherit currentColor -->
+  <symbol id="mk-a" viewBox="0 0 64 64">
+    <g fill="none" stroke="currentColor" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 31 L32 19.5 L45 31"/><path d="M19 45 L32 33.5 L45 45" opacity=".45"/>
+    </g>
+  </symbol>
+  <symbol id="mk-b" viewBox="0 0 64 64">
+    <g stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+      <g opacity=".35"><path d="M21 32.5 V46.5"/><rect x="17.5" y="35" width="7" height="10" rx="2" fill="currentColor" stroke="none"/></g>
+      <g opacity=".65"><path d="M32 24.5 V39.5"/><rect x="28.5" y="27" width="7" height="11" rx="2" fill="currentColor" stroke="none"/></g>
+      <g><path d="M43 16.5 V32.5"/><rect x="39.5" y="19" width="7" height="11" rx="2" fill="currentColor" stroke="none"/></g>
+    </g>
+  </symbol>
+  <symbol id="mk-c" viewBox="0 0 64 64">
+    <path d="M23.97 20.53 A14 14 0 1 0 40.03 20.53" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" opacity=".5"/>
+    <path d="M24.5 34 L32 24.5 L39.5 34" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="mk-d" viewBox="0 0 64 64">
+    <g fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity=".5">
+      <path d="M17.5 26 L17.5 17.5 L26 17.5"/><path d="M38 17.5 L46.5 17.5 L46.5 26"/>
+      <path d="M17.5 38 L17.5 46.5 L26 46.5"/><path d="M46.5 38 L46.5 46.5 L38 46.5"/>
+    </g>
+    <path d="M25 36 L32 27.5 L39 36" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="ic-e" viewBox="0 0 64 64">
+    <rect width="64" height="64" rx="14" fill="#101318"/>
+    <rect x=".5" y=".5" width="63" height="63" rx="13.5" fill="none" stroke="#29313F"/>
+    <g fill="none" stroke="#9DC3FF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" opacity=".5">
+      <path d="M17.5 25 L17.5 17.5 L25 17.5"/><path d="M39 17.5 L46.5 17.5 L46.5 25"/>
+      <path d="M17.5 39 L17.5 46.5 L25 46.5"/><path d="M46.5 39 L46.5 46.5 L39 46.5"/>
+    </g>
+    <g stroke="#9DC3FF" stroke-width="2" stroke-linecap="round">
+      <g opacity=".4"><path d="M27 31 V40"/><rect x="25" y="33.5" width="4" height="5" rx="1.3" fill="#9DC3FF" stroke="none"/></g>
+      <g opacity=".7"><path d="M32 28 V38"/><rect x="30" y="30" width="4" height="6" rx="1.3" fill="#9DC3FF" stroke="none"/></g>
+      <g><path d="M37 25 V35"/><rect x="35" y="27" width="4" height="6.5" rx="1.3" fill="#9DC3FF" stroke="none"/></g>
+    </g>
+  </symbol>
+  <symbol id="mk-e" viewBox="0 0 64 64">
+    <g fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" opacity=".5">
+      <path d="M17.5 25 L17.5 17.5 L25 17.5"/><path d="M39 17.5 L46.5 17.5 L46.5 25"/>
+      <path d="M17.5 39 L17.5 46.5 L25 46.5"/><path d="M46.5 39 L46.5 46.5 L39 46.5"/>
+    </g>
+    <g stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <g opacity=".4"><path d="M27 31 V40"/><rect x="25" y="33.5" width="4" height="5" rx="1.3" fill="currentColor" stroke="none"/></g>
+      <g opacity=".7"><path d="M32 28 V38"/><rect x="30" y="30" width="4" height="6" rx="1.3" fill="currentColor" stroke="none"/></g>
+      <g><path d="M37 25 V35"/><rect x="35" y="27" width="4" height="6.5" rx="1.3" fill="currentColor" stroke="none"/></g>
+    </g>
+  </symbol>
+</svg>
+
+<div class="wrap">
+
+<h1>Logo / app-icon concepts</h1>
+<p class="lede">
+  Four directions for the Trading Co-Pilot brand mark and PWA app icon. Drawn in the
+  <a href="../adr/0005-ui-design-language.md">ADR-0005</a> tokens — cool near-black ground, the reserved accent
+  blue — for the installable client in <a href="../adr/0010-progressive-web-app.md">ADR-0010</a> (R-19).
+  Mid-fidelity: shape and story, not final vector polish.
+</p>
+
+<div class="note">
+  <p><strong>The governing constraint.</strong> ADR-0005 keeps <em>semantic trading colors separate from the
+  accent</em> — green/red/amber mean long, short, and time-to-flat, and nothing else. So the mark is built in the
+  accent blue <code>#9DC3FF</code>, <strong>not</strong> the green up-and-to-the-right every other trading app
+  uses. That's a constraint worth leaning into: it makes the icon read as an <em>instrument</em>, not a
+  bull-market sticker, and it means the icon never competes with live position status.</p>
+</div>
+
+<h2>Palette</h2>
+<div class="tokens">
+  <div class="tok"><span class="sw" style="background:#101318"></span><div><b>Ground</b><span>--bg #101318</span></div></div>
+  <div class="tok"><span class="sw" style="background:#9DC3FF"></span><div><b>Accent / mark</b><span>--primary #9DC3FF</span></div></div>
+  <div class="tok"><span class="sw" style="background:#223A5C"></span><div><b>Accent container</b><span>--primary-ctr #223A5C</span></div></div>
+  <div class="tok"><span class="sw" style="background:#29313F"></span><div><b>Hairline</b><span>--surface-4 #29313F</span></div></div>
+  <div class="tok" style="opacity:.55"><span class="sw" style="background:#4FBF7B"></span><div><b>Reserved — state only</b><span>--long / --short / --warn</span></div></div>
+</div>
+
+<!-- ════════ A ════════ -->
+<h2>Concept A — Co-Pilot Chevron</h2>
+<div class="concept">
+  <div class="chead">
+    <div class="hero"><svg viewBox="0 0 64 64"><use href="#ic-a"/></svg></div>
+    <div class="cmeta">
+      <span class="tag">Safest · most legible</span>
+      <h3>Two chevrons, one leading</h3>
+      <p>Aviation rank insignia read as a pair — pilot and co-pilot — and a chevron is also the cleanest
+      abstraction of a move in your favour. The lead chevron is solid, the second dimmed: <em>the AI proposes,
+      the human commands</em>, which is the actual product thesis (R-4 suggest → R-11 approve). No literal
+      candlestick, so it stays calm at any size.</p>
+      <div class="verdict"><b>Strength:</b> survives 16&nbsp;px intact — the only concept here that truly does.
+      &nbsp;·&nbsp; <b>Risk:</b> double-chevron is common shorthand; distinctiveness comes from palette, not silhouette.</div>
+    </div>
+  </div>
+  <div class="tests">
+    <div class="panel"><div class="plabel">Size ladder</div><div class="ladder">
+      <div class="rung"><svg width="96" height="96"><use href="#ic-a"/></svg><em>96</em></div>
+      <div class="rung"><svg width="48" height="48"><use href="#ic-a"/></svg><em>48</em></div>
+      <div class="rung"><svg width="32" height="32"><use href="#ic-a"/></svg><em>32</em></div>
+      <div class="rung"><svg width="24" height="24"><use href="#ic-a"/></svg><em>24</em></div>
+      <div class="rung"><svg width="16" height="16"><use href="#ic-a"/></svg><em>16</em></div>
+    </div></div>
+    <div class="panel"><div class="plabel">Light surface</div>
+      <div class="lightchip"><svg width="40" height="40" viewBox="0 0 64 64"><use href="#mk-a"/></svg><b>Trading Co-Pilot</b></div>
+    </div>
+    <div class="panel"><div class="plabel">Maskable safe zone</div>
+      <div class="maskwrap">
+        <svg class="icn" viewBox="0 0 64 64"><use href="#ic-a"/></svg>
+        <svg class="maskring" viewBox="0 0 64 64"><circle cx="32" cy="32" r="25.6" fill="none" stroke="#F2B450" stroke-width="1" stroke-dasharray="3 2.5" opacity=".85"/></svg>
+      </div>
+    </div>
+    <div class="panel" style="flex:1;min-width:270px"><div class="plabel">Header lockup</div>
+      <div class="lockup"><svg width="38" height="38" viewBox="0 0 64 64"><use href="#ic-a"/></svg>
+        <div class="wm">Trading Co-Pilot<small>Futures · human in the loop</small></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ B ════════ -->
+<h2>Concept B — Candle Sequence</h2>
+<div class="concept">
+  <div class="chead">
+    <div class="hero"><svg viewBox="0 0 64 64"><use href="#ic-b"/></svg></div>
+    <div class="cmeta">
+      <span class="tag">Most literal</span>
+      <h3>Three candles, gaining conviction</h3>
+      <p>An ascending three-bar sequence rendered in the accent, with opacity climbing left to right — the past
+      is faint, the current bar is bright. Instantly says "futures trading" with zero explanation, and the
+      opacity ramp carries a second meaning: <em>evidence accumulating into a decision</em>.</p>
+      <div class="verdict"><b>Strength:</b> unambiguous category signal; the chart <em>is</em> the product (R-10).
+      &nbsp;·&nbsp; <b>Risk:</b> three bodies plus wicks is a lot of detail — the gaps close up below ~24&nbsp;px.
+      Would need a simplified two-candle variant for favicon use.</div>
+    </div>
+  </div>
+  <div class="tests">
+    <div class="panel"><div class="plabel">Size ladder</div><div class="ladder">
+      <div class="rung"><svg width="96" height="96"><use href="#ic-b"/></svg><em>96</em></div>
+      <div class="rung"><svg width="48" height="48"><use href="#ic-b"/></svg><em>48</em></div>
+      <div class="rung"><svg width="32" height="32"><use href="#ic-b"/></svg><em>32</em></div>
+      <div class="rung"><svg width="24" height="24"><use href="#ic-b"/></svg><em>24</em></div>
+      <div class="rung"><svg width="16" height="16"><use href="#ic-b"/></svg><em>16</em></div>
+    </div></div>
+    <div class="panel"><div class="plabel">Light surface</div>
+      <div class="lightchip"><svg width="40" height="40" viewBox="0 0 64 64"><use href="#mk-b"/></svg><b>Trading Co-Pilot</b></div>
+    </div>
+    <div class="panel"><div class="plabel">Maskable safe zone</div>
+      <div class="maskwrap">
+        <svg class="icn" viewBox="0 0 64 64"><use href="#ic-b"/></svg>
+        <svg class="maskring" viewBox="0 0 64 64"><circle cx="32" cy="32" r="25.6" fill="none" stroke="#F2B450" stroke-width="1" stroke-dasharray="3 2.5" opacity=".85"/></svg>
+      </div>
+    </div>
+    <div class="panel" style="flex:1;min-width:270px"><div class="plabel">Header lockup</div>
+      <div class="lockup"><svg width="38" height="38" viewBox="0 0 64 64"><use href="#ic-b"/></svg>
+        <div class="wm">Trading Co-Pilot<small>Futures · human in the loop</small></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ C ════════ -->
+<h2>Concept C — Governor Arc</h2>
+<div class="concept">
+  <div class="chead">
+    <div class="hero"><svg viewBox="0 0 64 64"><use href="#ic-c"/></svg></div>
+    <div class="cmeta">
+      <span class="tag">Most on-thesis</span>
+      <h3>Upside, bounded by a gauge</h3>
+      <p>An open dial — the daily <em>risk governor</em> and the AI-spend meter both already live in the
+      wireframes as gauges — with a chevron rising through the gap at its top. The story is the whole product in
+      one shape: <strong>upside contained by a limit</strong>. The arc is the risk gate (R-5), the chevron is the
+      trade, and the gap is the only way through. It also reads as a "C".</p>
+      <div class="verdict"><b>Strength:</b> the only mark here that encodes the safety thesis rather than just the
+      category. &nbsp;·&nbsp; <b>Risk:</b> the thin arc softens at small sizes; needs a heavier-stroke small variant.</div>
+    </div>
+  </div>
+  <div class="tests">
+    <div class="panel"><div class="plabel">Size ladder</div><div class="ladder">
+      <div class="rung"><svg width="96" height="96"><use href="#ic-c"/></svg><em>96</em></div>
+      <div class="rung"><svg width="48" height="48"><use href="#ic-c"/></svg><em>48</em></div>
+      <div class="rung"><svg width="32" height="32"><use href="#ic-c"/></svg><em>32</em></div>
+      <div class="rung"><svg width="24" height="24"><use href="#ic-c"/></svg><em>24</em></div>
+      <div class="rung"><svg width="16" height="16"><use href="#ic-c"/></svg><em>16</em></div>
+    </div></div>
+    <div class="panel"><div class="plabel">Light surface</div>
+      <div class="lightchip"><svg width="40" height="40" viewBox="0 0 64 64"><use href="#mk-c"/></svg><b>Trading Co-Pilot</b></div>
+    </div>
+    <div class="panel"><div class="plabel">Maskable safe zone</div>
+      <div class="maskwrap">
+        <svg class="icn" viewBox="0 0 64 64"><use href="#ic-c"/></svg>
+        <svg class="maskring" viewBox="0 0 64 64"><circle cx="32" cy="32" r="25.6" fill="none" stroke="#F2B450" stroke-width="1" stroke-dasharray="3 2.5" opacity=".85"/></svg>
+      </div>
+    </div>
+    <div class="panel" style="flex:1;min-width:270px"><div class="plabel">Header lockup</div>
+      <div class="lockup"><svg width="38" height="38" viewBox="0 0 64 64"><use href="#ic-c"/></svg>
+        <div class="wm">Trading Co-Pilot<small>Futures · human in the loop</small></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ D ════════ -->
+<h2>Concept D — HUD Reticle</h2>
+<div class="concept">
+  <div class="chead">
+    <div class="hero"><svg viewBox="0 0 64 64"><use href="#ic-d"/></svg></div>
+    <div class="cmeta">
+      <span class="tag">Most distinctive</span>
+      <h3>A cockpit sight, framing the setup</h3>
+      <p>ADR-0005 calls the UI a "single-operator, information-dense, safety-critical <em>cockpit</em>" — this
+      takes that literally. Four corner brackets frame a chevron: a heads-up targeting reticle locked onto a
+      setup. Leans hardest into the co-pilot/aviation half of the name and looks least like a fintech template.</p>
+      <div class="verdict"><b>Strength:</b> nothing else in the category looks like this; the frame is reusable as
+      a UI motif (focus states, the suggestion card). &nbsp;·&nbsp; <b>Risk:</b> highest detail count — the
+      brackets go to mush at 16&nbsp;px and need a bracket-free small variant.</div>
+    </div>
+  </div>
+  <div class="tests">
+    <div class="panel"><div class="plabel">Size ladder</div><div class="ladder">
+      <div class="rung"><svg width="96" height="96"><use href="#ic-d"/></svg><em>96</em></div>
+      <div class="rung"><svg width="48" height="48"><use href="#ic-d"/></svg><em>48</em></div>
+      <div class="rung"><svg width="32" height="32"><use href="#ic-d"/></svg><em>32</em></div>
+      <div class="rung"><svg width="24" height="24"><use href="#ic-d"/></svg><em>24</em></div>
+      <div class="rung"><svg width="16" height="16"><use href="#ic-d"/></svg><em>16</em></div>
+    </div></div>
+    <div class="panel"><div class="plabel">Light surface</div>
+      <div class="lightchip"><svg width="40" height="40" viewBox="0 0 64 64"><use href="#mk-d"/></svg><b>Trading Co-Pilot</b></div>
+    </div>
+    <div class="panel"><div class="plabel">Maskable safe zone</div>
+      <div class="maskwrap">
+        <svg class="icn" viewBox="0 0 64 64"><use href="#ic-d"/></svg>
+        <svg class="maskring" viewBox="0 0 64 64"><circle cx="32" cy="32" r="25.6" fill="none" stroke="#F2B450" stroke-width="1" stroke-dasharray="3 2.5" opacity=".85"/></svg>
+      </div>
+    </div>
+    <div class="panel" style="flex:1;min-width:270px"><div class="plabel">Header lockup</div>
+      <div class="lockup"><svg width="38" height="38" viewBox="0 0 64 64"><use href="#ic-d"/></svg>
+        <div class="wm">Trading Co-Pilot<small>Futures · human in the loop</small></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ E ════════ -->
+<h2>Concept E — Candle Reticle (a cockpit locked on a setup)</h2>
+<div class="concept">
+  <div class="chead">
+    <div class="hero"><svg viewBox="0 0 64 64"><use href="#ic-e"/></svg></div>
+    <div class="cmeta">
+      <span class="tag">Hybrid · B + D · operator's lean</span>
+      <h3>The setup, framed by the sight</h3>
+      <p>The candle sequence (B — the setup, evidence accumulating) sits inside the HUD reticle (D — the cockpit
+      sight locked onto it). <em>"A cockpit locked on a setup"</em>: category recognition <strong>and</strong> the
+      co-pilot / aviation half of the name in one mark, still accent-blue-only. The reticle frame is reusable as a
+      UI focus motif (suggestion card, focus states).</p>
+      <div class="verdict"><b>Strength:</b> says futures <em>and</em> co-pilot at once; distinctive without a literal
+      bull-market cliché. &nbsp;·&nbsp; <b>Risk:</b> highest detail here — both the brackets and the candle gaps
+      soften below ~24&nbsp;px; wants a simplified small variant (drop to two candles / heavier brackets).</div>
+    </div>
+  </div>
+  <div class="tests">
+    <div class="panel"><div class="plabel">Size ladder</div><div class="ladder">
+      <div class="rung"><svg width="96" height="96"><use href="#ic-e"/></svg><em>96</em></div>
+      <div class="rung"><svg width="48" height="48"><use href="#ic-e"/></svg><em>48</em></div>
+      <div class="rung"><svg width="32" height="32"><use href="#ic-e"/></svg><em>32</em></div>
+      <div class="rung"><svg width="24" height="24"><use href="#ic-e"/></svg><em>24</em></div>
+      <div class="rung"><svg width="16" height="16"><use href="#ic-e"/></svg><em>16</em></div>
+    </div></div>
+    <div class="panel"><div class="plabel">Light surface</div>
+      <div class="lightchip"><svg width="40" height="40" viewBox="0 0 64 64"><use href="#mk-e"/></svg><b>Trading Co-Pilot</b></div>
+    </div>
+    <div class="panel"><div class="plabel">Maskable safe zone</div>
+      <div class="maskwrap">
+        <svg class="icn" viewBox="0 0 64 64"><use href="#ic-e"/></svg>
+        <svg class="maskring" viewBox="0 0 64 64"><circle cx="32" cy="32" r="25.6" fill="none" stroke="#F2B450" stroke-width="1" stroke-dasharray="3 2.5" opacity=".85"/></svg>
+      </div>
+    </div>
+    <div class="panel" style="flex:1;min-width:270px"><div class="plabel">Header lockup</div>
+      <div class="lockup"><svg width="38" height="38" viewBox="0 0 64 64"><use href="#ic-e"/></svg>
+        <div class="wm">Trading Co-Pilot<small>Futures · human in the loop</small></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ in context ════════ -->
+<h2>In context</h2>
+<p>Where the icon actually gets judged: a browser tab at 16&nbsp;px, an installed home-screen icon (R-19 /
+ADR-0010), and the app bar beside the two persistent safety controls (R-13 countdown, kill switch).</p>
+
+<div class="ctx">
+  <div>
+    <div class="plabel" style="margin-bottom:8px">Browser tab · 16 px</div>
+    <div class="tabbar">
+      <div class="tab"><svg width="16" height="16"><use href="#ic-a"/></svg> Trading Co-Pilot</div>
+    </div>
+    <div class="tabbar" style="margin-top:8px">
+      <div class="tab"><svg width="16" height="16"><use href="#ic-c"/></svg> Trading Co-Pilot</div>
+    </div>
+  </div>
+
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span>▮▮▮</span></div>
+    <div class="plabel" style="margin:10px 0 0">Installed · home screen</div>
+    <div class="phgrid">
+      <div class="app"><div class="ph"></div><em>&nbsp;</em></div>
+      <div class="app"><svg viewBox="0 0 64 64"><use href="#ic-a"/></svg><em>Co-Pilot</em></div>
+      <div class="app"><div class="ph"></div><em>&nbsp;</em></div>
+      <div class="app"><div class="ph"></div><em>&nbsp;</em></div>
+      <div class="app"><div class="ph"></div><em>&nbsp;</em></div>
+      <div class="app"><svg viewBox="0 0 64 64"><use href="#ic-c"/></svg><em>Co-Pilot</em></div>
+      <div class="app"><svg viewBox="0 0 64 64"><use href="#ic-d"/></svg><em>Co-Pilot</em></div>
+      <div class="app"><div class="ph"></div><em>&nbsp;</em></div>
+    </div>
+  </div>
+
+  <div style="flex:1;min-width:330px">
+    <div class="plabel" style="margin-bottom:8px">App bar · beside the safety controls</div>
+    <div class="appbar">
+      <svg width="26" height="26" viewBox="0 0 64 64"><use href="#ic-a"/></svg>
+      <b style="font-size:13px;font-weight:600">Trading Co-Pilot</b>
+      <span class="sp"></span>
+      <span class="chip practice">PRACTICE</span>
+      <span class="chip clock">FLAT IN 12:04</span>
+      <span class="chip kill">KILL</span>
+    </div>
+    <div class="appbar" style="margin-top:10px">
+      <svg width="26" height="26" viewBox="0 0 64 64"><use href="#ic-c"/></svg>
+      <b style="font-size:13px;font-weight:600">Trading Co-Pilot</b>
+      <span class="sp"></span>
+      <span class="chip practice">PRACTICE</span>
+      <span class="chip clock">FLAT IN 12:04</span>
+      <span class="chip kill">KILL</span>
+    </div>
+    <p style="margin-top:12px;font-size:12.5px">A blue mark sits quietly next to the amber countdown and red kill
+    chip — which is the point of holding the accent off the trading semantics. A green logo would fight them.</p>
+  </div>
+</div>
+
+<!-- ════════ comparison ════════ -->
+<h2>Trade-offs at a glance</h2>
+<table>
+  <tr><th>Concept</th><th>Says</th><th>16 px</th><th>Distinctive</th><th>Best if…</th></tr>
+  <tr>
+    <td><b>A · Co-Pilot Chevron</b></td><td>Pilot + co-pilot; a move in your favour</td>
+    <td>Excellent</td><td>Low–medium</td><td>you want it to just work, everywhere, now</td>
+  </tr>
+  <tr>
+    <td><b>B · Candle Sequence</b></td><td>Futures trading, unmistakably</td>
+    <td>Weak</td><td>Low</td><td>category recognition matters more than story</td>
+  </tr>
+  <tr>
+    <td><b>C · Governor Arc</b></td><td>Upside bounded by a risk limit</td>
+    <td>Fair</td><td>High</td><td>you want the mark to carry the safety thesis</td>
+  </tr>
+  <tr>
+    <td><b>D · HUD Reticle</b></td><td>A cockpit locked on a setup</td>
+    <td>Poor</td><td>Highest</td><td>you want a mark nobody will mistake for a fintech template</td>
+  </tr>
+</table>
+
+<div class="note" style="margin-top:26px">
+  <p><strong>Recommendation: C (Governor Arc), with A as the fallback.</strong> <em>(Update — the operator likes the
+  <strong>B + D hybrid, E · Candle Reticle</strong> ("a cockpit locked on a setup"); it's now wired as the
+  provisional <code>app-icon.svg</code>. Still open — its small-size variant is the same fixable weakness as C's.)</em> C is the only one whose shape
+  argues the product's actual thesis — bounded upside, a limit you go through rather than around — and it reuses
+  the gauge language already in the wireframes. Its one weakness (small-size softening) is fixable with a
+  heavier-stroke ≤24&nbsp;px variant, which is standard practice. Pick A instead if you'd rather not maintain
+  two optical weights.</p>
+</div>
+
+<h2>If you pick one, next steps</h2>
+<table>
+  <tr><th>#</th><th>Step</th></tr>
+  <tr><td>1</td><td>Optical-weight pass on the chosen mark, plus a simplified ≤24&nbsp;px variant.</td></tr>
+  <tr><td>2</td><td>Export the PWA set — <code>192</code>, <code>512</code>, a <code>maskable</code> 512 with the mark scaled into the 80% safe circle, <code>apple-touch-icon</code> 180, and a multi-size <code>favicon.ico</code> (ADR-0010 follow-up: "author the manifest + icon set").</td></tr>
+  <tr><td>3</td><td>Wire <code>manifest.webmanifest</code> — <code>theme_color</code> / <code>background_color</code> = <code>#101318</code>, <code>display: standalone</code>.</td></tr>
+  <tr><td>4</td><td>Record the mark in <a href="../adr/0005-ui-design-language.md">ADR-0005</a> (brand mark is design language) and add it to the design-token file when that lands.</td></tr>
+</table>
+
+<div class="foot">
+  Trading Co-Pilot · design-time artifact · concepts drawn in ADR-0005 tokens ·
+  source SVGs in <code>documentation/design/logo/</code> · lockup type shown in a system stack, final uses Roboto per ADR-0005.
+</div>
+
+</div>
