@@ -488,6 +488,8 @@
   .nr-news{margin-top:16px;background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:13px 15px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
   .nr-news .nt{flex:1;min-width:220px;font-size:12.5px;color:var(--on-hi);line-height:1.45}
   .nr-news .nm3{font-size:10px;color:var(--on-dim);font-family:var(--mono)}
+  .nr-news .star{background:none;border:none;cursor:pointer;font-size:16px;line-height:1;color:var(--on-dim);padding:0 6px 0 0}
+  .nr-news .star.on{color:var(--warn)}
   .senti{display:flex;align-items:center;gap:7px}
   .senti .lab4{font-size:10px;color:var(--on-dim)}
   .tup,.tdn{width:32px;height:27px;border-radius:8px;border:1px solid var(--outline);display:grid;place-items:center;font-size:13px;background:none}
@@ -1420,8 +1422,8 @@
   </section>
 
   <section class="nr">
-    <div class="cap"><h2>News relevance — mapping, topics &amp; feedback</h2><span class="bp">R-2</span>
-      <span class="muted">what news attaches to what you trade · the co-pilot suggests, you curate</span></div>
+    <div class="cap"><h2>News relevance — mapping, topics &amp; feedback</h2><span class="bp">R-2 · ADR-0014</span>
+      <span class="muted">what news attaches to what you trade · <b>star what matters</b> to weight similar future items · the co-pilot suggests, you curate</span></div>
     <div class="nr-grid">
       <div class="nrcard">
         <h4>Ticker → instrument</h4>
@@ -1454,10 +1456,17 @@
     </div>
     <div class="nr-news">
       <div class="nt">Fed’s Barkin: policy “moderately restrictive,” data-dependent <span class="nm3">· TIINGO · ES, SPY</span></div>
-      <div class="senti"><span class="lab4">Sentiment (deferred — rate it):</span>
+      <div class="senti"><button class="star on" aria-label="Important" title="Important — weight similar news higher">★</button>
+        <span class="lab4">Sentiment:</span>
         <button class="tup on" aria-label="Bullish">👍</button><button class="tdn" aria-label="Bearish">👎</button></div>
     </div>
-    <div class="rej-why" style="margin-top:10px">Sentiment isn’t on the free feeds — for now a <b>subagent</b> tags it, or you rate it 👍/👎; your rating feeds the learning loop (R-9).</div>
+    <div class="nr-news">
+      <div class="nt">ISM services 52.1, above consensus <span class="nm3">· FINNHUB · ES · <span style="color:var(--long)">↑ weighted — you star macro prints</span></span></div>
+      <div class="senti"><button class="star" aria-label="Important" title="Important — weight similar news higher">☆</button>
+        <span class="lab4">Sentiment:</span>
+        <button class="tup" aria-label="Bullish">👍</button><button class="tdn" aria-label="Bearish">👎</button></div>
+    </div>
+    <div class="rej-why" style="margin-top:10px"><b>★ Star = important</b> (distinct from 👍/👎 direction): starring raises the <b>salience of similar future news</b> — by instrument / topic, source, entity &amp; semantic similarity — in what surfaces and how much it informs suggestions. A <b>soft weight, not a risk control</b>; adjustable (un-star; <b>mute</b> down-weights, with a floor so material items aren’t hidden). Feeds personalization (R-6 / R-9, ADR-0014). Sentiment stays deferred — a subagent tags it or you rate 👍/👎.</div>
   </section>
 
   <section class="auth">
