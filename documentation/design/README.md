@@ -43,7 +43,7 @@ Design-time UI artifacts for the trading co-pilot's **React SPA**. The **UI desi
   - **kill switch & auto-flatten** — the time-to-flat escalation, native-first flatten sequence, immutable audit trail, and the **connection-loss → synthetic-orphan emergency** state (R-13 / ADR-0007).
 
 ## Direction (see [ADR-0005](../adr/0005-ui-design-language.md))
-- **Material Design (Material 3)**, **dark theme first** — a light theme is a later **token** swap, not a redesign.
+- **Material Design (Material 3)**, **dark theme first** — a light theme is a **token** swap, not a redesign; now **demonstrated** via a top-right toggle in the wireframe (gh#28).
 - **Adaptive layout** on Material's window size classes (compact / medium / expanded); **adaptive navigation**
   bottom bar → icon rail → labelled navigation rail; docks reflow panels → tabs → single column.
 - **Chart-central** (R-10, [ADR-0004](../adr/0004-charting.md)) — the AI suggestion + approve/reject flow, order
