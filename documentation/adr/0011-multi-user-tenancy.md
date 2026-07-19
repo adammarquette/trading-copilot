@@ -7,7 +7,7 @@
 [ADR-0007](0007-order-execution-model.md) (execution). Data model: [data-dictionary](../data-dictionary.md).
 
 ## Context
-The product moved from single-operator to **multi-user**: each user registers a login and owns an **isolated** set
+The product moved from single-operator to **multi-user**: each user **joins by invitation** to create a login and owns an **isolated** set
 of prop-firm connections, accounts, rules, risk profiles, suggestions, orders, and journal (R-18 / R-20). The auth
 foundation (ADR-0003) was deliberately built **RBAC-ready** — a claims / policy layer, not hard-coded operator
 checks — so identity was never the hard part. The hard part is **isolation**: with real money and real broker
@@ -25,7 +25,7 @@ credentials per user, one user reaching another's data or orders is a **critical
 - **Per-user broker credentials.** Each user connects their **own** TopstepX / Tradovate logins (Connection is
   per-user, R-17); credentials stay **server-side** (R-18). **No shared broker session** — execution, positions, and
   the kill switch / auto-flatten act only on the acting user's accounts.
-- **Self-service registration + login** (R-18): email + credential hashed server-side; the JWT carries the user
+- **Invitation-only onboarding + login** (R-18): the operator invites; the invitee **accepts to create an account** (email + credential hashed server-side) — **no open sign-up**; the JWT carries the user
   identity and every request authorizes against it.
 - **Safety stays per-user and server-side.** The risk gate (R-5), auto-flatten (R-13), and kill switch (ADR-0007)
   operate within one user's tenancy; a user's kill switch never touches another's positions.

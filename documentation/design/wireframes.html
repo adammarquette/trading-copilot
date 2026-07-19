@@ -488,6 +488,8 @@
   .nr-news{margin-top:16px;background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:13px 15px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
   .nr-news .nt{flex:1;min-width:220px;font-size:12.5px;color:var(--on-hi);line-height:1.45}
   .nr-news .nm3{font-size:10px;color:var(--on-dim);font-family:var(--mono)}
+  .nr-news .star{background:none;border:none;cursor:pointer;font-size:16px;line-height:1;color:var(--on-dim);padding:0 6px 0 0}
+  .nr-news .star.on{color:var(--warn)}
   .senti{display:flex;align-items:center;gap:7px}
   .senti .lab4{font-size:10px;color:var(--on-dim)}
   .tup,.tdn{width:32px;height:27px;border-radius:8px;border:1px solid var(--outline);display:grid;place-items:center;font-size:13px;background:none}
@@ -639,7 +641,7 @@
   .audit .ar2:last-child{border-bottom:0}
   .audit .ar2 .ts2{color:var(--on-dim)}
   @media(max-width:720px){.kill-grid{grid-template-columns:1fr}}
-  /* ---------- auth: register & sign in ---------- */
+  /* ---------- auth: sign in & accept invite ---------- */
   .auth{margin-top:44px}
   .auth-stage{display:flex;gap:24px;flex-wrap:wrap;justify-content:center;padding:32px 20px;border-radius:var(--r-l);background:radial-gradient(120% 150% at 50% -20%,#171c24,#0c0e12);border:1px solid var(--outline-soft)}
   .authcard{width:320px;max-width:100%;background:var(--surface-2);border:1px solid var(--outline);border-radius:var(--r-l);box-shadow:var(--e3);padding:22px 20px;display:flex;flex-direction:column;gap:13px}
@@ -1319,27 +1321,9 @@
   </section>
 
   <section class="spend">
-    <div class="cap"><h2>AI usage &amp; spend</h2><span class="bp">§7 · ADR-0008</span>
-      <span class="muted">tracked by feature · the spend governor caps it vs. your budget (Q-10)</span></div>
-    <div class="gov-grid">
-      <div class="gov-meter">
-        <div class="meter-h"><span>This month · LLM + Cohere</span><span class="mono">$18.40</span></div>
-        <div class="track2">
-          <div class="used" style="width:37%"></div>
-          <div class="mark gov-mark" style="left:80%"><span>governor $40</span></div>
-          <div class="mark hard-mark" style="left:100%"><span>budget $50</span></div>
-        </div>
-        <div class="meter-f"><span class="chip good">$21.60 to governor</span><span class="chip ghost">$31.60 to budget</span></div>
-      </div>
-      <div class="reasons">
-        <h4>By feature</h4>
-        <div class="rbar"><span class="lab2">Backtests</span><span class="track"><span class="fill2" style="width:100%"></span></span><span class="pct">$7.80</span></div>
-        <div class="rbar"><span class="lab2">Suggestions</span><span class="track"><span class="fill2" style="width:79%"></span></span><span class="pct">$6.20</span></div>
-        <div class="rbar"><span class="lab2">Follow-ups</span><span class="track"><span class="fill2" style="width:27%"></span></span><span class="pct">$2.10</span></div>
-        <div class="rbar"><span class="lab2">Embeddings</span><span class="track"><span class="fill2" style="width:15%"></span></span><span class="pct">$1.20</span></div>
-        <div class="rbar"><span class="lab2">Triage</span><span class="track"><span class="fill2" style="width:14%"></span></span><span class="pct">$1.10</span></div>
-      </div>
-    </div>
+    <div class="cap"><h2>AI usage &amp; spend — operator-only, in Grafana</h2><span class="bp">§7 · ADR-0008 · ADR-0002</span>
+      <span class="muted">not a user surface in the multi-user model — see why</span></div>
+    <div class="warnbn"><span class="ic">📊</span><div>AI usage &amp; spend is an <b>operator</b> concern — one shared Anthropic / Cohere account funds every user — so it is reported in <b>Grafana</b> (observability, ADR-0002) and <b>not shown to end users</b>. The <b>AI-spend governor</b> is a <b>platform-level</b> cost control the operator configures; invited users never see or manage spend. <b>If</b> the operator later has invitees bring <b>their own LLM accounts</b>, per-user spend returns as a user surface. <span class="muted">(Was a user-facing meter; moved to operator observability when the app became multi-user — gh#4.)</span></div></div>
   </section>
 
   <section class="life">
@@ -1438,8 +1422,8 @@
   </section>
 
   <section class="nr">
-    <div class="cap"><h2>News relevance — mapping, topics &amp; feedback</h2><span class="bp">R-2</span>
-      <span class="muted">what news attaches to what you trade · the co-pilot suggests, you curate</span></div>
+    <div class="cap"><h2>News relevance — mapping, topics &amp; feedback</h2><span class="bp">R-2 · ADR-0014</span>
+      <span class="muted">what news attaches to what you trade · <b>star what matters</b> to weight similar future items · the co-pilot suggests, you curate</span></div>
     <div class="nr-grid">
       <div class="nrcard">
         <h4>Ticker → instrument</h4>
@@ -1472,15 +1456,22 @@
     </div>
     <div class="nr-news">
       <div class="nt">Fed’s Barkin: policy “moderately restrictive,” data-dependent <span class="nm3">· TIINGO · ES, SPY</span></div>
-      <div class="senti"><span class="lab4">Sentiment (deferred — rate it):</span>
-        <button class="tup on" aria-label="Bullish">👍</button><button class="tdn" aria-label="Bearish">👎</button></div>
+      <div class="senti"><button type="button" class="star on" aria-label="Important" aria-pressed="true" title="Important — weight similar news higher">★</button>
+        <span class="lab4">Sentiment:</span>
+        <button type="button" class="tup on" aria-label="Bullish" aria-pressed="true">👍</button><button type="button" class="tdn" aria-label="Bearish" aria-pressed="false">👎</button></div>
     </div>
-    <div class="rej-why" style="margin-top:10px">Sentiment isn’t on the free feeds — for now a <b>subagent</b> tags it, or you rate it 👍/👎; your rating feeds the learning loop (R-9).</div>
+    <div class="nr-news">
+      <div class="nt">ISM services 52.1, above consensus <span class="nm3">· FINNHUB · ES · <span style="color:var(--long)">↑ weighted — you star macro prints</span></span></div>
+      <div class="senti"><button type="button" class="star" aria-label="Important" aria-pressed="false" title="Important — weight similar news higher">☆</button>
+        <span class="lab4">Sentiment:</span>
+        <button type="button" class="tup" aria-label="Bullish" aria-pressed="false">👍</button><button type="button" class="tdn" aria-label="Bearish" aria-pressed="false">👎</button></div>
+    </div>
+    <div class="rej-why" style="margin-top:10px"><b>★ Star = important</b> (distinct from 👍/👎 direction): starring raises the <b>salience of similar future news</b> — by instrument / topic, source, entity &amp; semantic similarity — in what surfaces and how much it informs suggestions. A <b>soft weight, not a risk control</b>; adjustable (un-star; <b>mute</b> down-weights, with a floor so material items aren’t hidden). Feeds personalization (R-6 / R-9, ADR-0014). Sentiment stays deferred — a subagent tags it or you rate 👍/👎.</div>
   </section>
 
   <section class="auth">
-    <div class="cap"><h2>Register &amp; sign in — multi-user</h2><span class="bp">R-18 · R-20</span>
-      <span class="muted">each user registers their own login and owns an isolated workspace — accounts, rules &amp; journal are private to them</span></div>
+    <div class="cap"><h2>Sign in &amp; accept an invite — multi-user</h2><span class="bp">R-18 · R-20</span>
+      <span class="muted">onboarding is <b>invitation-only</b> — each user joins by invite and owns an isolated workspace; accounts, rules &amp; journal are private to them</span></div>
     <div class="auth-stage">
       <div class="authcard">
         <div class="auth-brand"><svg class="glyph" viewBox="0 0 64 64" aria-hidden="true"><use href="#tc-logo"/></svg>Trading Co-Pilot</div>
@@ -1489,22 +1480,22 @@
         <div class="infield"><span class="il">Email</span><span class="box ph">you@email.com</span></div>
         <div class="infield"><span class="il">Password</span><span class="box">••••••••••</span></div>
         <div class="btn fill" style="justify-content:center">Sign in</div>
-        <div class="auth-alt">New here? <span class="auth-link">Create an account</span></div>
+        <div class="auth-alt">Have an invite? <span class="auth-link">Accept it</span></div>
       </div>
       <div class="authcard">
         <div class="auth-brand"><svg class="glyph" viewBox="0 0 64 64" aria-hidden="true"><use href="#tc-logo"/></svg>Trading Co-Pilot</div>
-        <div class="auth-h">Create your account</div>
-        <div class="auth-sub">Your own isolated trading workspace</div>
-        <div class="infield"><span class="il">Email</span><span class="box ph">you@email.com</span></div>
+        <div class="auth-h">Accept your invitation</div>
+        <div class="auth-sub">🎟️ Invited by the operator — set up your workspace</div>
+        <div class="infield"><span class="il">Email · from your invite</span><span class="box">adam@email.com</span></div>
         <div class="infield"><span class="il">Display name</span><span class="box ph">e.g. Adam M.</span></div>
         <div class="infield"><span class="il">Password</span><span class="box">••••••••••</span></div>
         <div class="infield"><span class="il">Confirm password</span><span class="box">••••••••••</span></div>
-        <div class="btn fill" style="justify-content:center">Create account</div>
-        <div class="auth-alt">Already registered? <span class="auth-link">Sign in</span></div>
+        <div class="btn fill" style="justify-content:center">Accept invite &amp; create account</div>
+        <div class="auth-alt">Already have an account? <span class="auth-link">Sign in</span></div>
       </div>
     </div>
     <div class="warnbn" style="margin-top:14px"><span class="ic">🔒</span><div>Credentials are <b>hashed server-side</b> — never stored or echoed in the browser; the session carries a <b>JWT</b> (R-18). After sign-in you land in <b>your</b> workspace only: prop-firm connections, accounts, rules, risk profiles, and journal are <b>isolated per user</b>, enforced at the data layer (R-20, ADR-0011) — no user can see another's data or positions.</div></div>
-    <div class="rej-why" style="margin-top:12px">In the app this is <b>one card with a Sign in / Create account toggle</b> (shown here as two for clarity). Registration is <b>self-service</b>; broker / prop-firm logins are added <b>after</b> sign-in via <b>Connection &amp; account onboarding</b> (each user connects their own TopstepX / Tradovate accounts). Billing / paid plans are out of scope for now.</div>
+    <div class="rej-why" style="margin-top:12px">In the app this is <b>one card with a Sign in / Accept-invite toggle</b> (shown here as two for clarity). Onboarding is <b>invitation-only</b> — the operator sends an invite (bound to your email, single-use, expiring); accepting it creates your account. There is <b>no open sign-up</b>. Broker / prop-firm logins are added <b>after</b> sign-in via <b>Connection &amp; account onboarding</b> (each user connects their own TopstepX / Tradovate accounts). Billing / paid plans are out of scope for now.</div>
   </section>
 
   <section class="onb">
@@ -1695,13 +1686,13 @@
       <div><span class="tag">R-17 · R-14</span> Account switcher — active + visible accounts only (full roster in Settings); a login per platform; the active account drives everything</div>
       <div><span class="tag">config</span> Settings — risk tolerance (risk %, target R:R, max-DD, governor), entry defaults, news, watchlist, layout, account</div>
       <div><span class="tag">ADR-0009</span> Backtest — test-run over ~2y (same engine, cheaper-model, news-light); refinements → rules</div>
-      <div><span class="tag">§7 · ADR-0008</span> AI usage &amp; spend — tracked by feature; governor caps vs. budget</div>
+      <div><span class="tag">§7 · ADR-0008 · ADR-0002</span> AI usage &amp; spend — <b>operator-only</b>, reported in Grafana (not a user surface)</div>
       <div><span class="tag">R-17 · R-18</span> Onboarding — add a firm login (creds server-side); discover its accounts; active ones join the switcher</div>
       <div><span class="tag">R-21 · R-7</span> Strategy templates (“playbooks”) — package a methodology (13/48, ICT) as installable, personalizable rules + setups + risk</div>
       <div><span class="tag">R-7 · ADR-0008</span> Rulebook &amp; triggers — plain-language rules compile to confirmed deterministic triggers (alert vs. agent-review)</div>
       <div><span class="tag">R-6 · ADR-0009</span> AI refinement loop — journal + backtest → follow-up questions → confirmed rule / strategy refinements</div>
       <div><span class="tag">R-13 · ADR-0007</span> Kill switch &amp; auto-flatten — countdown escalation, native-first flatten sequence, immutable audit; connection-loss → synthetic-orphan emergency</div>
-      <div><span class="tag">R-18 · R-20</span> Register &amp; sign in — multi-user; self-service registration + login; each user's workspace isolated per user (ADR-0011)</div>
+      <div><span class="tag">R-18 · R-20</span> Sign in &amp; accept-invite — multi-user; <b>invitation-only</b> onboarding + login; each user's workspace isolated per user (ADR-0011)</div>
       <div><span class="tag">R-2</span> News relevance — ticker↔instrument maps, per-instrument + global topics (AI-suggested); sentiment thumbs</div>
     </div>
   </section>
