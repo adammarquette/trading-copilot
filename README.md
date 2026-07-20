@@ -14,10 +14,12 @@ loop. Its one autonomous action is risk-reducing: **auto-flattening open positio
 
 ## Run it locally
 
-Requires Docker. From the repo root:
+Requires Docker, and a **recursive** clone — the ProjectX client is a submodule under `external/`, and both the
+solution and the image build against it:
 
 ```bash
-docker compose up -d --build      # builds the API image, starts Postgres + the app
+git clone --recursive …            # or, in an existing clone: git submodule update --init
+docker compose up -d --build       # builds the API image, starts Postgres + the app
 ```
 
 The API comes up on **http://localhost:8080**, applies the EF migrations, and seeds a first operator
@@ -57,6 +59,7 @@ The PRD is *what* the product does; the engineering guide is *how* we build it; 
 |---|---|
 | [`documentation/`](documentation/) | All specs & design docs — the substance today (PRD + engineering guide; a `wiki/` companion knowledge base to come) |
 | `src/` | .NET solution (`MarqSpec.TradingCopilot.slnx`, base namespace `MarqSpec.TradingCopilot.*`) — projects build out under `src/` per the roadmap (`Domain`, `Data`, the `Api` BFF, + test projects so far); naming per engineering guide §3 |
+| `external/` | Vendored submodules — [`MarqSpec.Client.ProjectX`](https://github.com/adammarquette/MarqSpec.Client.ProjectX), the ProjectX/TopstepX gateway client the v1 venue adapter builds on. Outside `src/` so this solution's build settings aren't imposed on it |
 | `AGENTS.md` · `CLAUDE.md` | Orientation for AI coding agents (root); `CLAUDE.md` is a shim that imports `AGENTS.md` |
 | [`documentation/AGENT-MEMORY.md`](documentation/AGENT-MEMORY.md) | Agents' catch-all — practices and cross-agent notes that don't fit any formal document |
 

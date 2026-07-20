@@ -3,6 +3,9 @@
 > **Trust tier:** authoritative
 > **Verified:** against vendor docs, 2026-07-18 · **Sources:** https://gateway.docs.projectx.com/docs/intro
 > **Informs:** R-1, R-3, R-11, R-13, R-17, Q-1, Q-2, Q-4
+> **Corrected 2026-07-20** (gh#9, building the adapter): the account model **does** carry a required `simulated`
+> flag — this page previously stated it did not. Verified against the gateway's own **`swagger.json`** (vendored in
+> `MarqSpec.Client.ProjectX`), which outranks the prose docs this page was first written from.
 
 The REST + realtime API behind prop firms on the **ProjectX Gateway** (TopstepX is one firm on it). This is the
 v1 trading venue behind `MarqSpec.Client.ProjectX` (see [engineering §3](../../trading-platform-engineering.md)).
@@ -11,8 +14,8 @@ v1 trading venue behind `MarqSpec.Client.ProjectX` (see [engineering §3](../../
 - **REST:** `https://api.topstepx.com`
 - **Realtime (SignalR over WebSocket):** `https://rtc.topstepx.com/hubs/user`, `https://rtc.topstepx.com/hubs/market`
 - Hosts are **firm-branded** (`…topstepx.com`); other ProjectX firms likely use different hostnames — the R-17
-  venue abstraction must accommodate per-firm hosts. Practice vs. live appears **account-level** (by `accountId`),
-  not URL-level (docs list no separate sandbox host) → still open for **Q-4**.
+  venue abstraction must accommodate per-firm hosts. Practice vs. live is **account-level** — the account's
+  `simulated` flag — and **not** URL-level: there is no separate sandbox host (**Q-4 answered**; see Accounts).
 
 ## Authentication
 - **Session token (JWT)**, valid **24h**; validate / refresh via the session endpoints. Passed as
@@ -38,11 +41,14 @@ v1 trading venue behind `MarqSpec.Client.ProjectX` (see [engineering §3](../../
 - **Positions:** search + close endpoints → R-13 auto-flatten. **Trades:** search. **Account:** search (balance / P&L) → R-5 risk layer.
 
 ## Accounts — one login, many (Q-4, R-17)
-`POST /api/Account/search` (`{ onlyActiveAccounts }`) lists the login's trading accounts; **verified**, each account
-is **just** `{ id, name, balance, canTrade, isVisible }` — **nothing prop-firm-specific**. **Buying power
-(50K/100K/150K), evaluation vs. funded stage, status (active/passed/failed), daily-loss limit, and even
-practice-vs-live** are **encoded in the account `name`** (`50KTC-V2-DLL-0000-…`, `PRAC-…`) or the firm portal — the
-**adapter derives them from the name** (there is no mode / `simulated` field). **TopstepX is Topstep's own platform**
+`POST /api/Account/search` (`{ onlyActiveAccounts }`) lists the login's trading accounts. Each account is
+`{ id, name, balance, canTrade, isVisible, simulated }` — **nothing prop-firm-specific**. **Buying power
+(50K/100K/150K), evaluation vs. funded stage, status (active/passed/failed), and daily-loss limit** are **encoded
+in the account `name`** (`50KTC-V2-DLL-0000-…`, `PRAC-…`) or the firm portal — the **adapter derives those from the
+name**. **Practice-vs-live is *not* among them:** `simulated` is a **required boolean** on the account model, so
+the mode is read, never inferred (corrected 2026-07-20 — see the header note). The adapter deliberately ignores a
+`PRAC-` prefix: trusting the name could only reclassify a **live** account as practice, the one direction that
+risks real money (R-14). **TopstepX is Topstep's own platform**
 on the ProjectX gateway, so the login *is* the TopstepX login; other ProjectX firms run their own branded hosts
 (R-17). Live account state also streams on the user hub (`GatewayUserAccount`).
 
@@ -53,7 +59,7 @@ risk layer (R-5).
 
 ## Open items
 - Rate limits documented at `/docs/getting-started/rate-limits` — not yet extracted.
-- **Q-4 (clarified):** practice vs. live is **name/account-level, derived** — account-search returns no mode / `simulated` flag; `PRAC-…` vs. `50KTC-…` in the `name` is the signal. Not URL-level.
+- **Q-4 (answered):** practice vs. live is **account-level and explicit** — account-search returns a required `simulated` boolean. Not URL-level (there is no sandbox host), and not name-derived as this page first claimed.
 - **Q-3 (auto-flatten guarantee):** a position-close endpoint exists; the failure-mode design is still ours.
 
 ## Relevant-link index

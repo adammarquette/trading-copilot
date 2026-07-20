@@ -16,6 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # external/MarqSpec.Client.ProjectX is a submodule the ProjectX adapter builds against.
+          submodules: true
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -25,8 +28,9 @@ jobs:
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 
+      # external/ is a vendored submodule with its own conventions -- we verify our code, not its.
       - name: Format (verify)
-        run: dotnet format src/MarqSpec.TradingCopilot.slnx --verify-no-changes --no-restore
+        run: dotnet format src/MarqSpec.TradingCopilot.slnx --verify-no-changes --no-restore --exclude external/
 
       - name: Build
         run: dotnet build src/MarqSpec.TradingCopilot.slnx --configuration Release --no-restore
