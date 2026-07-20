@@ -32,11 +32,19 @@ owned by its requirement / ADR).
   safety stop** (ADR-0007) — it survives *any* app / backend / connection failure. On **venue-connection loss**, in-app
   **synthetic** orders (hidden entries, un-promoted stops) go **orphaned → emergency** with an operator alert; on
   reconnect the system **re-validates and re-arms** — nothing silently resumes (ADR-0007).
-- **The hard case — the auto-flatten guarantee (R-13).** Flattening before the 3:00 PM CST close is **safety-critical
-  and must fire even if the primary tier is degraded**. This is the **one piece still to design**: a **redundant /
-  independent trigger** (a watchdog separate from the main scheduler), a defined behaviour if a flatten order is
-  *rejected* at 2:59 PM, and possibly a **local fallback flatten path**. Until proven on practice, it is the **gating
-  risk** for live trading (PRD §6 open question).
+- **The hard case — the auto-flatten guarantee (R-13).** The auto-flatten is **our system feature**, fired at a
+  **configurable deadline (default ~2:30 PM CT, ahead of MOC)** — **earlier than any venue-forced flatten** (Topstep
+  ~3:10 PM CT), and a **live brokerage has none**, so we **cannot lean on the venue** as the net. It is
+  **safety-critical and must fire even if the primary tier is degraded** → a **redundant / independent trigger** (a
+  watchdog separate from the main scheduler), a defined behaviour if a flatten order is *rejected* near the deadline,
+  and possibly a **local fallback flatten path**. Still the **one piece to design in full**; until proven on practice
+  it is the **gating risk** for live trading. See [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md).
+- **The end-of-day / settlement boundary (R-13 companion).** The CME's **daily maintenance / settlement**
+  (~4:00–5:00 PM CT) **re-marks** any position carried through it at the **settlement price** — the mark on return
+  isn't the last trade seen. So end-of-day handling **leans on resiliency + fail-over, not on a live price**: on any
+  disconnect / restart near the close, **reconcile positions / fills from the venue as source of truth** (never local
+  state), stay **aware of the maintenance window**, and **reconcile the settlement re-mark** rather than presenting a
+  stale pre-settlement mark as live.
 
 **Principles (invariants).** Never present **stale data / risk state as live** (R-19); never **auto-act on rehydrated
 state** (re-validate first, R-12); keep **no-risk state (expire) separate from at-risk state (protect + recover)**;
@@ -49,7 +57,8 @@ the **exchange-held stop is the physical floor**; every recovery transition is *
   is unsafe; **expire + re-validate** instead.
 - **Trust the venue to hold all protection.** Rejected — synthetic orders are in-app by design (to hide entries); the
   native safety stop + orphan handling cover the gap.
-- **A single durable scheduler for auto-flatten.** Insufficient alone — a tier outage takes it down too; hence a
+- **A single durable scheduler for auto-flatten.** Insufficient alone — a tier outage takes it down too, and the
+  flatten fires **ahead of the venue's forced-flatten backstop** (so the venue can't cover a miss); hence a
   **redundant / independent** trigger (to be designed).
 
 ## Consequences
@@ -62,7 +71,10 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
 
 ## Follow-ups
 - **Design the auto-flatten guarantee** (R-13): redundant scheduler / independent watchdog, rejected-order behaviour,
-  a local fallback path — the gating safety-critical item (PRD §6). Prove on practice before live.
+  a local fallback path — fired at the **configurable pre-MOC deadline**, **ahead of the venue backstop** — the gating
+  safety-critical item. Prove on practice before live.
+- **End-of-day / settlement reconciliation:** venue-as-source-of-truth position reconcile on reconnect,
+  maintenance-window awareness, and settlement re-mark handling (wiki: [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md)).
 - **State-rehydration tests:** suggestions / orders / positions / templates rehydrate correctly and **per-user
   isolation holds** through a restart (R-20).
 - **Reconnect / backfill** verification (R-1 gap detection) and **recovery event / audit** records (ADR-0001, §9).
