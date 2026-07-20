@@ -1,4 +1,5 @@
 using System.Text;
+using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Tenancy;
@@ -41,8 +42,11 @@ builder.Services.AddAuthorization();
 
 WebApplication app = builder.Build();
 
+await StartupTasks.MigrateAndBootstrapAsync(app);
+
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapAuthEndpoints();
+app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 app.Run();
