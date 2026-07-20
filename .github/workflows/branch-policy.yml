@@ -1,0 +1,74 @@
+name: Branch policy
+
+# Enforces the promotion ladder documented in CONTRIBUTING.md: develop -> staging -> main,
+# with exactly one allowed source per step.
+#
+# NOTE: this check is ADVISORY until branch protection is available on the repo (it is
+# plan-gated on private repos -- see gh#45). A red check here does not currently block a
+# merge. Once protection is enabled, mark "ladder" as a required check and this becomes a
+# hard gate with no changes to this file.
+
+on:
+  pull_request:
+    branches: [staging, main]
+    # `labeled` / `unlabeled` so adding the exception label re-runs the check.
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled]
+
+concurrency:
+  group: branch-policy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ladder:
+    name: ladder
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate the base/head pair
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+          # `head_ref` is only the short branch name, so on its own a fork branch *named* `staging`
+          # or `develop` would satisfy the ladder. Identity of the head repository is checked too.
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          # Whether the PR carries the documented escape hatch for staging.
+          HAS_EXCEPTION: ${{ contains(github.event.pull_request.labels.*.name, 'ladder-exception') }}
+        run: |
+          set -euo pipefail
+          echo "PR: $HEAD -> $BASE (head repo: ${HEAD_REPO:-unknown})"
+
+          # The ladder governs *this* repository's promoted history. A fork's `staging` is a
+          # different lineage, so this is checked before the branch name and carries no exception:
+          # the label exists to excuse a branch deviation, not a foreign repository. Fork
+          # contributions target `develop`, which has no ladder constraint.
+          if [ "${HEAD_REPO:-}" != "$REPO" ]; then
+            echo "::error::'$BASE' accepts merges from branches in '$REPO' only — got '$HEAD' on '${HEAD_REPO:-an unknown repository}'. Open fork contributions against 'develop' instead. See CONTRIBUTING.md 'Branching model'."
+            exit 1
+          fi
+
+          case "$BASE" in
+            main)
+              # No exception. Production history stays single-source so every release
+              # traces back through staging.
+              if [ "$HEAD" != "staging" ]; then
+                echo "::error::'main' accepts merges from 'staging' only — got '$HEAD'. There is no exception for main; promote through staging instead. See CONTRIBUTING.md 'Branching model'."
+                exit 1
+              fi
+              echo "OK: staging -> main."
+              ;;
+
+            staging)
+              if [ "$HEAD" = "develop" ]; then
+                echo "OK: develop -> staging."
+              elif [ "$HAS_EXCEPTION" = "true" ]; then
+                echo "::warning::'staging' normally accepts 'develop' only, but this PR carries the 'ladder-exception' label — allowing '$HEAD'. The reason must be stated in the PR description."
+              else
+                echo "::error::'staging' accepts merges from 'develop' only — got '$HEAD'. If this is a justified exception, state the reason in the PR description and add the 'ladder-exception' label. See CONTRIBUTING.md 'Branching model'."
+                exit 1
+              fi
+              ;;
+
+            *)
+              echo "No ladder constraint for base '$BASE'."
+              ;;
+          esac
