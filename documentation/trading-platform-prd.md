@@ -9,11 +9,11 @@
 
 ## 1. Problem Statement
 
-A discretionary futures day trader operating under prop-firm constraints (TopstepX: mandatory flat by CME close at 3:00 PM CST, daily loss limits, trailing drawdown) must synthesize technical indicators, order-flow signals (tape, footprint/delta, volume profile), news, and soft social signals (X/Twitter, YouTube influencers) into precise trade decisions — in real time, alone, every session. Today this synthesis is manual, inconsistent across sessions, and leaves no structured record connecting *why* a trade was expected to work with *whether it actually did*. The cost is missed setups, undisciplined risk sizing, and no compounding improvement loop.
+A discretionary futures day trader operating under prop-firm constraints (TopstepX: mandatory flat by the venue's forced-flatten ~3:10 PM CT, daily loss limits, trailing drawdown) must synthesize technical indicators, order-flow signals (tape, footprint/delta, volume profile), news, and soft social signals (X/Twitter, YouTube influencers) into precise trade decisions — in real time, alone, every session. Today this synthesis is manual, inconsistent across sessions, and leaves no structured record connecting *why* a trade was expected to work with *whether it actually did*. The cost is missed setups, undisciplined risk sizing, and no compounding improvement loop.
 
 This platform is a **decision-support and execution system with a human in the loop**: it ingests all relevant feeds, generates fully specified trade suggestions (direction, entry, stop, targets, size), explains its reasoning, converses with the trader, **lets the trader place and manage those trades through the system itself**, and journals every suggestion and every trade against its actual outcome — so that both the trader and the system get measurably better over time. Making the system the execution surface is what closes the loop: intent (the suggestion) and outcome (the fill) are captured natively in one place rather than reconciled after the fact.
 
-The trader always initiates entries. The system's only autonomous action is a **risk-reducing** one: auto-flattening open positions before the CME close so the flatten rule can never be busted.
+The trader always initiates entries. The system's only autonomous action is a **risk-reducing** one: auto-flattening open positions at the operator's **configurable deadline (default ~2:30 PM CT, ahead of MOC — well before the CME close)** so the flatten rule can never be busted.
 
 It is also deliberately a **learning vehicle for agentic AI development**: persistent memory (the rulebook), multi-source signal synthesis, feedback loops, tool-using agents, and a verify-before-act execution gate are first-class design goals, not incidental implementation details.
 
@@ -38,10 +38,10 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 
 ## 4. Users & Context
 
-**Persona (the individual user):** Senior software engineer and active futures day trader. Trades CME products through TopstepX. Both scalps (seconds–minutes) and intraday moves (minutes–hours). Hard constraint: flat by 3:00 PM CST daily. Decision inputs: technical indicators, chart reading, order flow, news, and soft signals from social sources. The app is **multi-user**: this describes the **individual** user — many such traders each register their own login and own an isolated workspace (R-18 / R-20).
+**Persona (the individual user):** Senior software engineer and active futures day trader. Trades CME products through TopstepX. Both scalps (seconds–minutes) and intraday moves (minutes–hours). Hard constraint: flat by the venue's forced-flatten (~3:10 PM CT) daily. Decision inputs: technical indicators, chart reading, order flow, news, and soft signals from social sources. The app is **multi-user**: this describes the **individual** user — many such traders each register their own login and own an isolated workspace (R-18 / R-20).
 
 **Operating context:**
-- **Session-aware and self-enforcing.** Every suggestion carries time-to-close context, and the system *enforces* the flatten deadline by auto-closing open positions before 3:00 PM CST (R-13). New-entry cutoffs shrink as close approaches.
+- **Session-aware and self-enforcing.** Every suggestion carries time-to-close context, and the system *enforces* the flatten deadline by auto-closing open positions at the **configurable deadline (default ~2:30 PM CT, pre-MOC)** (R-13). New-entry cutoffs shrink as the deadline approaches.
 - **Prop-rule aware and enforcing.** Daily loss limit and trailing drawdown are live constraints that can block or resize an actual order (R-5), not report-time footnotes.
 - **Practice-first, behavior-identical.** The trader will begin on a practice account. The system behaves identically to live in every respect except safety display and guardrails, so lessons and stats transfer directly when live trading begins.
 
@@ -51,7 +51,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 - As a day trader, I want fully specified trade suggestions (direction, entry, stop, target(s), size) with rationale and confidence, so I can evaluate and execute quickly without reconstructing the analysis myself.
 - As a day trader, I want continuous market scanning across my watchlist with proactive alerts when a qualifying setup forms, so I don't miss opportunities while focused on another chart.
 - As a day trader, I want to ask for a suggestion on demand ("what's the setup on NQ right now?") and get an answer grounded in live data.
-- As a trader near the close, I want suggestions to account for time remaining until the 3:00 PM CST flatten deadline (adjusted targets, shrinking validity, entry cutoffs), so I'm never nudged into a position I can't responsibly hold.
+- As a trader near the close, I want suggestions to account for time remaining until the **flatten deadline (default ~2:30 PM CT)** (adjusted targets, shrinking validity, entry cutoffs), so I'm never nudged into a position I can't responsibly hold.
 
 **Execution**
 - As a trader, I want to build an order ticket manually and send it through the system, so the trade is captured natively in the journal with full context.
@@ -61,7 +61,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 - As a trader, I want a kill switch that instantly hard-stops the system in one action — cancelling orders and (by default) flattening all positions, or halting-only if I've set that preference — so I can abort if something looks wrong.
 
 **Flatten enforcement**
-- As a trader, I want the system to automatically flatten all open positions before the 3:00 PM CST close, so I can never bust the flatten rule even if I'm distracted or away from the desk.
+- As a trader, I want the system to automatically flatten all open positions at my **configurable deadline (default ~2:30 PM CT, ahead of MOC)**, so I can never bust the flatten rule even if I'm distracted or away from the desk.
 - As a trader, I want loud escalating warnings as the flatten window approaches, and confirmation that the auto-flatten actually closed everything, so I'm never left guessing about my exposure at the close.
 
 **Practice vs. live**
@@ -119,7 +119,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 **R-4: Suggestion engine.** Generates fully specified suggestions: direction, entry, stop, target(s), size, plus rationale (signals cited), confidence, and a validity window.
 - [ ] Triggered both **on demand** (via chat) and by **continuous scanning** — a **deterministic trigger layer** evaluates conditions over pre-computed indicators / order-flow and, on a fire, emits a mechanical alert or wakes an agent to review; the LLM is **not** in the scan loop ([ADR-0008](adr/0008-ai-invocation-cost-model.md))
 - [ ] Rationale cites contributing signals: indicators, order flow, news/social events, and rulebook entries applied
-- [ ] Session-clock aware: validity windows respect the 3:00 PM CST deadline; configurable no-new-entry cutoffs per trade style
+- [ ] Session-clock aware: validity windows respect the **flatten deadline (default ~2:30 PM CT, pre-MOC)**; configurable no-new-entry cutoffs per trade style
 - [ ] **Risk-headroom aware:** as **daily-drawdown headroom** (R-5) depletes, the engine **throttles** suggestions (fewer / smaller / higher-conviction only) and **suppresses** new ones once the personal daily governor is reached — a proactive, suggestion-time governor ahead of the execution gate
 - [ ] Suggestions are versioned/immutable once issued (updates issue a superseding suggestion, preserving journal integrity)
 - [ ] **Lifecycle & invalidation:** a suggestion runs `active → stale → expired/void`. It invalidates on **time** (validity window / session deadline), **drift** (price beyond a configurable tolerance of the entry — surfaced **stale** *before* execution, not only re-checked at take-time per R-12), or **thesis break** (its premise fails — a later refinement). A scratched setup is **not chased**: if it re-forms, the engine issues a **new superseding suggestion**
@@ -197,10 +197,11 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 - [ ] A stale or breached suggestion is blocked; the system shows *why* (expired, price drifted, risk changed) and requires a fresh decision — never silently transmits a stale ticket
 - [ ] The validity/tolerance parameters are configurable
 
-**R-13: Auto-flatten at close (safety-critical).** The system automatically flattens all open positions before the 3:00 PM CST CME close. This is the only order action the system performs without per-trade confirmation, and it only reduces/closes exposure.
-- [ ] Fires at a configurable lead time before close; escalating warnings precede it
+**R-13: Auto-flatten (safety-critical).** The system automatically flattens all open positions at a **configurable per-account deadline** — **default ~2:30 PM CT**, ~30 min before the **3:00 PM CT cash-equity EOD**, to be out ahead of **market-on-close (MOC)** volatility (well before the **4:00 PM CT CME futures close / settlement**). It is the only order action the system performs without per-trade confirmation, and it only reduces/closes exposure. Because it fires **ahead of any venue-forced flatten** (e.g. Topstep ~3:10 PM CT) — and a **live brokerage has none** — it must be reliable **on its own** (redundancy; see [ADR-0013](adr/0013-failure-recovery-model.md) + [market sessions & settlement](wiki/pages/market-sessions-and-settlement.md)).
+- [ ] Fires at a **configurable per-account deadline** (default ~2:30 PM CT, pre-MOC); escalating warnings precede it
 - [ ] After firing, the system **verifies positions are actually flat** and retries/escalates loudly if any position remains
-- [ ] Redundant trigger with a defined failure mode if the primary path is unavailable at close (see Open Questions Q-3)
+- [ ] **Redundant / independent trigger** with a defined failure mode if the primary path is degraded at the deadline — it fires **without leaning on the venue's later forced-flatten backstop** (see [ADR-0013](adr/0013-failure-recovery-model.md), Q-3)
+- [ ] Across the **CME settlement / maintenance window** (~4:00–5:00 PM CT), positions **reconcile from the venue as source of truth** (never local state); a position carried through settlement is reconciled to the **settlement re-mark**, never shown as a stale live price (ADR-0013)
 - [ ] Auto-flatten cannot be silently disabled; disabling it is a deliberate, clearly-warned action
 - [ ] Every auto-flatten action is journaled
 
@@ -286,7 +287,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 **Evaluation points:** 30 / 60 / 90 days after v1 is live in daily use.
 
 **Safety (hard criteria — pass/fail, not trends):**
-- **Zero busted flattens.** Auto-flatten closes all positions before 3:00 PM CST in 100% of sessions; any residual position at close is a Sev-1 defect.
+- **Zero busted flattens.** Auto-flatten closes all positions by the **configured deadline (default ~2:30 PM CT)** in 100% of sessions; any residual position past it is a Sev-1 defect.
 - **Zero unconfirmed entries.** No order is ever transmitted without explicit user confirmation (auto-flatten excepted).
 - **100% risk-gate coverage.** No order reaches the broker without passing the R-5 risk gate and R-16 caps.
 
