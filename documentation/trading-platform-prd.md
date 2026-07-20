@@ -202,7 +202,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 - [ ] After firing, the system **verifies positions are actually flat** and retries/escalates loudly if any position remains
 - [ ] **Redundant / independent trigger** with a defined failure mode if the primary path is degraded at the deadline — it fires **without leaning on the venue's later forced-flatten backstop** (see [ADR-0013](adr/0013-failure-recovery-model.md), Q-3)
 - [ ] Across the **CME settlement / maintenance window** (~4:00–5:00 PM CT), positions **reconcile from the venue as source of truth** (never local state); a position carried through settlement is reconciled to the **settlement re-mark**, never shown as a stale live price (ADR-0013)
-- [ ] Auto-flatten cannot be silently disabled; disabling it is a deliberate, clearly-warned action
+- [ ] Auto-flatten is **on by default, per market** (best practice) and **cannot be silently disabled**; disabling a market is a **deliberate, clearly-warned** override (at the operator's own risk — on prop the venue's forced flatten still backstops, on a live account it does not)
 - [ ] Every auto-flatten action is journaled
 
 **R-14: Practice/live parity + mode safety.** Practice and live accounts use an identical data, journaling, and learning pipeline. They differ only in safety surface.
