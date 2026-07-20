@@ -68,6 +68,34 @@ two separate sockets), auth scheme, and how practice-vs-live is expressed (Proje
 `TradingMode`. `TradingModePolicy` then enforces **R-14 — practice accounts only outside production** — in code,
 below the model.
 
+### Risk gate — the enforcing checkpoint (R-5, R-16)
+Every order funnels through one gate before transmission — manual ticket, taken suggestion, edited take, or a
+conditional order firing. The LLM proposes; this decides. It lives in `MarqSpec.TradingCopilot.Domain/Risk/`,
+deterministic and dependency-free, because a limit that can be talked around is not a limit (ADR-0007).
+
+Size is the **most restrictive** of independently-sized layers, and the decision names the one that bound it:
+
+| Layer | Budget | Measured at |
+|---|---|---|
+| `DrawdownFloor` | headroom to the trailing floor | safety stop |
+| `DailyLossLimit` | the account's hard daily limit, where one exists | safety stop |
+| `DailyGovernor` | the operator's personal governor, inside that limit | safety stop |
+| `PerTradeRisk` | a fraction of **headroom** (not account size) | configurable: working or safety stop |
+| `MaxDrawdownPerTrade` | the per-trade hard cap | safety stop |
+| `ManualCap` | contract caps, overall and per instrument | — |
+| `SanityCap` | contracts, notional, fat-finger band (R-16) | — |
+
+**The worst case is the safety stop, not the working stop.** Hard account limits are measured against the
+catastrophic exit, which bounds how wide that stop can sit and keeps the disaster case inside the account.
+
+**Buying power is not the risk budget.** `TrailingDrawdown` models the floor that ends an account — end-of-day or
+intraday trailing, a property of the *account* rather than the firm. Intraday floors follow the real-time peak
+**including unrealized P&L**, so an open winner lifts the floor and giving it back can breach at an unchanged
+realized balance.
+
+Outcomes are `Allowed` / `Resized` / `Blocked`, always with a binding layer and a reason — including the gate's
+"no trade" when the layers leave room for zero contracts.
+
 ### Ingestion service — live market data (R-1)
 Connects via **websocket** and processes every event on the wire, then **publishes onto the event pipeline** for
 uniform downstream handling. (ProjectX exposes this as SignalR hubs — see the wiki's

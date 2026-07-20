@@ -109,6 +109,34 @@ Constraints:
 - **Gate / re-validation latency is on the hot path** — must stay low for scalping.
 - A **config surface** (limits, defaults, proximity, governor) to design and validate-on-start.
 
+## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
+
+The follow-up *"define the risk-gate interface — inputs, outputs"* below is closed. It lives in
+`MarqSpec.TradingCopilot.Domain/Risk/`:
+
+- **In:** `OrderProposal` (instrument spec, side, requested size, entry, working stop, **safety stop**, reference
+  price) plus `RiskContext` (live `AccountRiskState`, the account's `TrailingDrawdown`, its hard
+  `AccountRiskRules`, and the operator's `RiskProfile`, `ManualCaps`, `SanityCaps`).
+- **Out:** `GateDecision` — outcome (allowed / resized / **blocked**), the approved quantity, the **binding
+  `RiskLayer`**, and a reason string that is always populated.
+- **How:** each layer is sized independently and the **most restrictive wins**. The hard account limits (drawdown
+  floor, daily loss limit, governor) are all measured at the **safety stop**, so it is the catastrophic case —
+  not the expected one — that can never breach the account.
+
+Two decisions worth recording:
+
+- **Per-trade risk % is a fraction of _headroom to the floor_, not of account size.** R-5 is explicit that "the
+  risk budget is headroom to the (trailing) drawdown floor — not the account size," so the percentage is applied
+  there. This gives sizing a useful property — it tightens by itself as the floor is approached — but it also
+  means realistic values are **~10–25%**, not the ~1% of a traditional account-size rule. *Flagged for operator
+  confirmation.*
+- **The `acknowledge` outcome is deferred.** This ADR lists "block / resize / acknowledge" as gate outputs, but
+  acknowledgement is about *editing an armed order* relative to an already-approved baseline — state that belongs
+  to the execution flow (S3), not to a stateless evaluation. `GateOutcome` therefore ships with three values.
+
+Not in this slice: **R-12 re-validation** (validity window, price-drift tolerance) rides with the
+take-a-suggestion path in S3, and the **consistency %** rule needs P&L-by-day history from the journal (R-9).
+
 ## Follow-ups
 - Define the **order-state machine** + per-transition **journal / event records** (R-8/R-9, ADR-0001).
 - Spec the **synthetic / conditional engine**: trigger types, promotion-band metric + **default**, OCO
