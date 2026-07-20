@@ -18,7 +18,7 @@ Operator preferences (settled): a **dark theme**, **Material Design**, and an **
 ## Decision
 - **Material Design (Material 3 / "Material You")** is the component + interaction language for the SPA.
 - **Dark theme first.** The palette is expressed as **tokens** — surfaces + tonal elevation, one accent, on-colors;
-  a **light theme is a later token swap**, not a redesign. Neutrals are a **cool near-black biased toward the
+  a **light theme is a token swap**, not a redesign — now **demonstrated in the wireframe** (dark default + a `[data-theme="light"]` toggle, gh#28). Neutrals are a **cool near-black biased toward the
   accent** (a chosen neutral, not flat grey).
 - **Adaptive layout** on Material's **window size classes — compact / medium / expanded** — with **adaptive
   navigation**: **bottom navigation bar** (compact/phone) → **icon navigation rail** (medium/tablet) →
@@ -45,7 +45,7 @@ Operator preferences (settled): a **dark theme**, **Material Design**, and an **
 
 ## Consequences
 **Positive**
-- A familiar, accessible, **token-driven** language; theming (including a future light mode) is a token change.
+- A familiar, accessible, **token-driven** language; theming (light mode included — gh#28) is a token change.
 - Adaptive navigation + reflow are a **solved Material pattern**; the cockpit works desktop → phone.
 - Status reads at a glance because **semantic color is reserved for state**, not decoration.
 
@@ -62,6 +62,6 @@ Operator preferences (settled): a **dark theme**, **Material Design**, and an **
 - **Theme the Lightweight Charts panes** to the tokens (grid / candle / overlay colors).
 - **Decide multi-monitor / detachable panels** (a desk trader may want pop-out panels) and whether phone is
   monitor-and-approve only.
-- Build the **light theme** token variant when needed.
+- **Light theme token variant — demonstrated** in the wireframe (`documentation/design/wireframes.html`: a `[data-theme="light"]` palette + targeted overrides for hardcoded on-container colors + a top-right ☀/☾ toggle; charts read the tokens, gh#28). Carry the same token variant into the **production SPA** (gh#23 / U1).
 - Turn the wireframes into a **component inventory** — define the suggestion card, order ticket, and app-bar HUD
   as the first components.
