@@ -25,8 +25,15 @@ Readers are both humans and LLMs — favor **dense cross-links and explicit cont
 ```
 > **Trust tier:** authoritative | curated | unverified
 > **Verified:** <how / when> · **Sources:** <primary URLs>
+> **Access:** <how the source was obtained, and anything its terms impose>
 > **Informs:** <R-# / Q-# it grounds>
 ```
+
+**`Access:` records the terms posture**, because copyright is not the only constraint — a site's Terms can
+restrict automated access or redistribution regardless of what fair use allows. State how the source was
+obtained (direct fetch, web search, vendor portal, manual reading) and any restriction that follows. It matters
+most when a source **refused** the fetch: a `403` is the site declining, and grounding the page another way is a
+decision to make deliberately rather than by default (gh#53).
 
 ## Trust tiers (load-bearing — never mix silently)
 - **authoritative** — vendor docs, exchange specs, filings. Citable as grounds.
