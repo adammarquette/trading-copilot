@@ -3,7 +3,7 @@
 The **Coding Agent** contract, governing all production code and its unit tests under `src/`. Takes precedence
 over the root `AGENTS.md` for this subtree (root rules still apply unless overridden here). The **QA Agent** owns
 the integration/smoke tests separately — see
-[`TradingCopilot/TradingCopilot.IntegrationTests/AGENTS.md`](TradingCopilot/TradingCopilot.IntegrationTests/AGENTS.md).
+[`MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md`](MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md).
 
 ## Role
 Write **production code** and the **unit tests** that drive it. You do **not** write integration or smoke tests —
@@ -12,7 +12,7 @@ QA does that *independently*, so intent and implementation are verified separate
 ## Test-first (mandatory)
 - Write the **failing unit test before** the implementation (red → green → refactor). No new public method
   without a failing test written first; bug fixes are regression-first.
-- Unit tests go in **`TradingCopilot.UnitTests`** — one folder per product project mirroring the namespace,
+- Unit tests go in **`MarqSpec.TradingCopilot.UnitTests`** — one folder per product project mirroring the namespace,
   **every public method covered**, fully mocked with FakeItEasy (no I/O / DB / network), whole suite runs in
   seconds. Name: `MethodUnderTest_Should{ExpectedBehavior}_When{condition}`. (Engineering guide §5.)
 

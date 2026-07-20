@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="MarqSpec.TradingCopilot.Domain/MarqSpec.TradingCopilot.Domain.csproj" />
+  <Project Path="MarqSpec.TradingCopilot.UnitTests/MarqSpec.TradingCopilot.UnitTests.csproj" />
+  <Project Path="MarqSpec.TradingCopilot.IntegrationTests/MarqSpec.TradingCopilot.IntegrationTests.csproj" />
+</Solution>
