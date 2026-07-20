@@ -1,0 +1,3 @@
+[submodule "external/MarqSpec.Client.ProjectX"]
+	path = external/MarqSpec.Client.ProjectX
+	url = https://github.com/adammarquette/MarqSpec.Client.ProjectX
