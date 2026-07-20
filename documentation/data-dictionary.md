@@ -2,7 +2,7 @@
 
 The authoritative catalog of the platform's **data entities, key fields, and storage**. This is a **design-time
 model** derived from the [PRD](trading-platform-prd.md) + [ADRs](adr/) — the schema itself is not built yet; the
-dictionary is kept **in lockstep with the `TradingCopilot.Data` entities and `dotnet ef` migrations** as they land
+dictionary is kept **in lockstep with the `MarqSpec.TradingCopilot.Data` entities and `dotnet ef` migrations** as they land
 (see *Maintenance* below). Companion to [engineering §2](trading-platform-engineering.md) (storage) and the
 [architecture](trading-platform-architecture.md).
 
@@ -32,7 +32,7 @@ dictionary is kept **in lockstep with the `TradingCopilot.Data` entities and `do
 The relational **spine** — entities and how they relate. The **User (Operator)** is the **tenant root**: every
 operator-owned entity is scoped to it (R-20); reference & market data is shared. Attributes live in the section tables below; this diagram
 is the **map, not a second copy** of the fields, so it stays cheap to maintain. Kept **in lockstep** with the tables
-+ `TradingCopilot.Data`: update it in the **same PR** as any entity/relationship change (universal same-PR doc rule;
++ `MarqSpec.TradingCopilot.Data`: update it in the **same PR** as any entity/relationship change (universal same-PR doc rule;
 engineering §10, *Maintenance* below). Time-series detail (Quote / Tick / DepthLevel), the event backbone (Event /
 ConsumerCursor), the polymorphic Embedding, and AuditRecord / AIUsage are cataloged in §2 / §10–§12 and omitted here
 for legibility.
@@ -242,7 +242,7 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 - Fees / commission model; multi-currency.
 
 ## Maintenance
-This dictionary is kept **in lockstep with `TradingCopilot.Data`**: when a `dotnet ef` migration adds, renames, or
+This dictionary is kept **in lockstep with `MarqSpec.TradingCopilot.Data`**: when a `dotnet ef` migration adds, renames, or
 removes an entity or a load-bearing field, update the matching row here **in the same PR** (cite the migration). It
 is the **one authoritative catalog** of the data model — link here rather than re-describing entities elsewhere. As
 domains deepen, split a section into its own page and leave a pointer.
