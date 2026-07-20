@@ -41,5 +41,12 @@ place. **Not read by the product.** Conventions + trust tiers: [`SCHEMA.md`](SCH
 - *(order-flow theory, instrument specs — to come)*
 
 ## Ingest & sources
-- [`ingest/`](ingest/) — drop-zone for sources awaiting ingestion: URL-list files (like [`ingest/urls`](ingest/urls)) or documents. Living/editable — never deleted or moved. Workflow in [`SCHEMA.md`](SCHEMA.md).
-- [`sources/`](sources/) — each source *as last ingested*; diff against `ingest/` to see what still needs ingesting.
+**Both folders are local-only — deliberately untracked** (`.gitignore`), so they exist on the machine doing the
+ingesting and not in a clone. They hold working material, not knowledge: raw drop-zone inputs and third-party
+documents, some of it large or not ours to redistribute. Everything worth keeping is promoted into `pages/`,
+which *is* tracked, and each ingest is recorded in [`log.md`](log.md) with its source URL — so the provenance
+trail survives even though the raw material does not.
+
+- `ingest/` — drop-zone for sources awaiting ingestion: URL-list files or documents. Living/editable — never
+  deleted or moved. Workflow in [`SCHEMA.md`](SCHEMA.md).
+- `sources/` — each source *as last ingested*; diff against `ingest/` to see what still needs ingesting.

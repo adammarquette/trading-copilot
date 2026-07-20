@@ -12,6 +12,12 @@
 .claude/settings.local.json
 .claude/worktrees/
 
+# Wiki working material -- the ingest drop-zone and the raw sources as last ingested. Local to whoever runs an
+# ingest: bulky, sometimes third-party material we shouldn't redistribute, and superseded by the curated pages.
+# The knowledge itself lives in documentation/wiki/pages/ and the provenance in documentation/wiki/log.md.
+documentation/wiki/ingest/
+documentation/wiki/sources/
+
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/
