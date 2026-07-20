@@ -93,6 +93,18 @@ Software here is built with AI agents as first-class engineering participants. T
 - **`MarqSpec.Client.ProjectX`** — the ProjectX / TopstepX client used for market data, account state, and order
   execution.
 
+## License
+
+Copyright © 2026 Adam Marquette. Licensed under the **GNU Affero General Public License v3.0** — see
+[`LICENSE`](LICENSE).
+
+AGPL is a deliberate choice over a permissive licence. Its distinguishing term is **network use**: run a modified
+copy as a service and you must publish that modified source, which the GPL alone does not require. As sole
+copyright holder the project also keeps the option to grant separate commercial terms.
+
+Dependencies are permissive — the `MarqSpec.Client.ProjectX` submodule is MIT — and combine with AGPL without
+friction.
+
 ---
 
 *Multi-user decision-support and execution tooling — for each user's own trading, not investment advice for
