@@ -150,20 +150,67 @@ public class ProjectXMappingTests
         ProjectXMapping.ToPositionSnapshot(position, Venue).IsFlat.Should().BeTrue();
     }
 
+    [Fact]
+    public void ToPositionSnapshot_ShouldThrow_WhenTheDirectionIsUndefinedButSizeIsNot()
+    {
+        // Calling this flat would tell the risk gate and auto-flatten there is nothing open while real exposure
+        // sits on the account. Refuse to map it rather than manufacture a zero.
+        ClientModels.Position position = new()
+        {
+            AccountId = 9001,
+            ContractId = "CON.F.US.EP.M25",
+            Type = ClientModels.PositionType.Undefined,
+            Size = 2,
+        };
+
+        Action act = () => ProjectXMapping.ToPositionSnapshot(position, Venue);
+
+        act.Should().Throw<ProjectXVenueException>();
+    }
+
     // --- Account keys cross the seam as strings, but ProjectX wants an int ---
 
     [Fact]
     public void ToAccountId_ShouldParseTheVenueAccountKey()
     {
-        ProjectXMapping.ToAccountId(VenueAccountId.Create(Venue, "9001")).Should().Be(9001);
+        ProjectXMapping.ToAccountId(VenueAccountId.Create(Venue, "9001"), Venue).Should().Be(9001);
     }
 
     [Fact]
     public void ToAccountId_ShouldThrow_WhenTheKeyIsNotAProjectXAccountNumber()
     {
-        Action act = () => ProjectXMapping.ToAccountId(VenueAccountId.Create(Venue, "not-a-number"));
+        Action act = () => ProjectXMapping.ToAccountId(VenueAccountId.Create(Venue, "not-a-number"), Venue);
 
         act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void ToAccountId_ShouldThrow_WhenTheAccountBelongsToAnotherVenue()
+    {
+        // Account handles are bare integers that collide across venues -- tradovate:9001 must never be sent to
+        // ProjectX account 9001, which is a different and possibly real-money account.
+        VenueAccountId foreign = VenueAccountId.Create(VenueId.Parse("tradovate"), "9001");
+
+        Action act = () => ProjectXMapping.ToAccountId(foreign, Venue);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*tradovate*");
+    }
+
+    [Fact]
+    public void ToContractKey_ShouldUnwrapTheHandle_WhenTheContractBelongsToThisVenue()
+    {
+        ProjectXMapping.ToContractKey(VenueContractId.Create(Venue, "CON.F.US.EP.M25"), Venue)
+            .Should().Be("CON.F.US.EP.M25");
+    }
+
+    [Fact]
+    public void ToContractKey_ShouldThrow_WhenTheContractBelongsToAnotherVenue()
+    {
+        VenueContractId foreign = VenueContractId.Create(VenueId.Parse("tradovate"), "ESM25");
+
+        Action act = () => ProjectXMapping.ToContractKey(foreign, Venue);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*tradovate*");
     }
 
     // --- Orders ---

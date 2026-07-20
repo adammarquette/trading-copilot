@@ -7,6 +7,11 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/Dotnet.gitignore
 
+# Agent workspace -- local settings and git worktrees. Worktrees are embedded git repos and must never be
+# committed; a shared .claude/settings.json stays trackable.
+.claude/settings.local.json
+.claude/worktrees/
+
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/

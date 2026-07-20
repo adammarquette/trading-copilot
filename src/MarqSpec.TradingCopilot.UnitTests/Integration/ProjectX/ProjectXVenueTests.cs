@@ -50,12 +50,65 @@ public class ProjectXVenueTests
     }
 
     [Fact]
-    public void Capabilities_ShouldDeclareWhatTheGatewaySupports()
+    public void Capabilities_ShouldDeclareWhatTheAdapterCanActuallyDeliver()
     {
         _venue.Capabilities.Supports(VenueCapability.HistoricalBars).Should().BeTrue();
         _venue.Capabilities.Supports(VenueCapability.Quotes).Should().BeTrue();
-        _venue.Capabilities.Supports(VenueCapability.BracketOrders).Should().BeTrue();
         _venue.Capabilities.Supports(VenueCapability.ClosePosition).Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(VenueCapability.BracketOrders)]
+    [InlineData(VenueCapability.TrailingStops)]
+    [InlineData(VenueCapability.ModifyOrder)]
+    [InlineData(VenueCapability.MarketDepth)]
+    [InlineData(VenueCapability.AccountStreaming)]
+    public void Capabilities_ShouldNotAdvertiseWhatTheNeutralContractCannotReach(VenueCapability capability)
+    {
+        // ProjectX does all of these; ITradingVenue exposes none of them yet. Advertising them would send a
+        // caller down a path it cannot take -- the opposite of the graceful degradation the model exists for.
+        _venue.Capabilities.Supports(capability).Should().BeFalse();
+    }
+
+    // --- Venue tagging is enforced, not assumed ---
+
+    [Fact]
+    public async Task PlaceOrderAsync_ShouldThrow_WhenTheContractBelongsToAnotherVenue()
+    {
+        OrderRequest foreign = MarketBuy() with
+        {
+            Contract = VenueContractId.Create(VenueId.Parse("tradovate"), ContractKey),
+        };
+
+        Func<Task> act = async () => await _venue.PlaceOrderAsync(foreign, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        A.CallTo(() => _api.PlaceOrderAsync(A<ClientModels.PlaceOrderRequest>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ClosePositionAsync_ShouldThrow_WhenTheContractBelongsToAnotherVenue()
+    {
+        // Especially dangerous on the flatten path: a colliding key would close the wrong position.
+        VenueContractId foreign = VenueContractId.Create(VenueId.Parse("tradovate"), ContractKey);
+
+        Func<Task> act = async () => await _venue.ClosePositionAsync(Account, foreign, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        A.CallTo(() => _api.ClosePositionAsync(A<int>._, A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task PlaceOrderAsync_ShouldRefuseATrailingStop_WhileTheTicketCarriesNoTrailDistance()
+    {
+        OrderRequest trailing = MarketBuy() with { Type = OrderType.TrailingStop };
+
+        Func<Task> act = async () => await _venue.PlaceOrderAsync(trailing, CancellationToken.None);
+
+        await act.Should().ThrowAsync<VenueCapabilityNotSupportedException>();
+        A.CallTo(() => _api.PlaceOrderAsync(A<ClientModels.PlaceOrderRequest>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
     }
 
     // --- Accounts ---
@@ -280,14 +333,41 @@ public class ProjectXVenueTests
     // --- Streaming: two SignalR hubs behind an IAsyncEnumerable ---
 
     [Fact]
+    public void StreamQuotesAsync_ShouldNotSubscribe_WhenTheSequenceIsNeverEnumerated()
+    {
+        // Registration lives inside the iterator, so an unconsumed stream leaves no handler or subscription
+        // behind to accumulate ticks for the life of the process.
+        _ = _venue.StreamQuotesAsync(Contract, CancellationToken.None);
+
+        A.CallTo(() => _webSocket.SubscribeToPriceUpdatesAsync(A<string>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public void StreamQuotesAsync_ShouldThrow_WhenTheContractBelongsToAnotherVenue()
+    {
+        VenueContractId foreign = VenueContractId.Create(VenueId.Parse("tradovate"), ContractKey);
+
+        Action act = () => _venue.StreamQuotesAsync(foreign, CancellationToken.None);
+
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
     public async Task StreamQuotesAsync_ShouldYieldMappedQuotes_WhenTheMarketHubPublishes()
     {
         using CancellationTokenSource cts = new();
         cts.CancelAfter(TimeSpan.FromSeconds(10));
 
-        // Subscribing eagerly means a tick published before the first read is buffered, not lost.
-        IAsyncEnumerable<Quote> stream = _venue.StreamQuotesAsync(Contract, cts.Token);
+        TaskCompletionSource subscribed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        A.CallTo(() => _webSocket.SubscribeToPriceUpdatesAsync(ContractKey, A<CancellationToken>._))
+            .Invokes(() => subscribed.TrySetResult());
 
+        IAsyncEnumerator<Quote> quotes = _venue.StreamQuotesAsync(Contract, cts.Token).GetAsyncEnumerator(cts.Token);
+        ValueTask<bool> next = quotes.MoveNextAsync();
+
+        // The handler is attached before the subscribe call, so once that has run a published tick is captured.
+        await subscribed.Task;
         _webSocket.PriceUpdateReceived += Raise.With(new ClientModels.PriceUpdate
         {
             Symbol = ContractKey,
@@ -296,15 +376,14 @@ public class ProjectXVenueTests
             Timestamp = new DateTime(2026, 7, 20, 14, 30, 0, DateTimeKind.Utc),
         });
 
-        await foreach (Quote quote in stream.WithCancellation(cts.Token))
-        {
-            quote.Bid.Should().Be(new Price(5_000m));
-            quote.Ask.Should().Be(new Price(5_000.25m));
-            quote.BidSize.Should().BeNull();
-            break;
-        }
+        (await next).Should().BeTrue();
+        quotes.Current.Bid.Should().Be(new Price(5_000m));
+        quotes.Current.Ask.Should().Be(new Price(5_000.25m));
+        quotes.Current.BidSize.Should().BeNull();
 
-        A.CallTo(() => _webSocket.SubscribeToPriceUpdatesAsync(ContractKey, A<CancellationToken>._)).MustHaveHappened();
+        await quotes.DisposeAsync();
+        A.CallTo(() => _webSocket.UnsubscribeFromPriceUpdatesAsync(ContractKey, A<CancellationToken>._))
+            .MustHaveHappened();
     }
 
     [Fact]
@@ -313,20 +392,23 @@ public class ProjectXVenueTests
         using CancellationTokenSource cts = new();
         cts.CancelAfter(TimeSpan.FromSeconds(10));
 
-        IAsyncEnumerable<Quote> stream = _venue.StreamQuotesAsync(Contract, cts.Token);
+        TaskCompletionSource subscribed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        A.CallTo(() => _webSocket.SubscribeToPriceUpdatesAsync(ContractKey, A<CancellationToken>._))
+            .Invokes(() => subscribed.TrySetResult());
 
-        _webSocket.PriceUpdateReceived += Raise.With(new ClientModels.PriceUpdate { Symbol = "CON.F.US.ENQ.M25", BestBid = 1m, BestAsk = 2m });
-        _webSocket.PriceUpdateReceived += Raise.With(new ClientModels.PriceUpdate
-        {
-            Symbol = ContractKey,
-            BestBid = 5_000m,
-            BestAsk = 5_000.25m,
-        });
+        IAsyncEnumerator<Quote> quotes = _venue.StreamQuotesAsync(Contract, cts.Token).GetAsyncEnumerator(cts.Token);
+        ValueTask<bool> next = quotes.MoveNextAsync();
+        await subscribed.Task;
 
-        await foreach (Quote quote in stream.WithCancellation(cts.Token))
-        {
-            quote.Bid.Should().Be(new Price(5_000m));
-            break;
-        }
+        // One hub carries every subscribed contract, so the wrong instrument must not leak into this stream.
+        _webSocket.PriceUpdateReceived += Raise.With(
+            new ClientModels.PriceUpdate { Symbol = "CON.F.US.ENQ.M25", BestBid = 1m, BestAsk = 2m });
+        _webSocket.PriceUpdateReceived += Raise.With(
+            new ClientModels.PriceUpdate { Symbol = ContractKey, BestBid = 5_000m, BestAsk = 5_000.25m });
+
+        (await next).Should().BeTrue();
+        quotes.Current.Bid.Should().Be(new Price(5_000m));
+
+        await quotes.DisposeAsync();
     }
 }

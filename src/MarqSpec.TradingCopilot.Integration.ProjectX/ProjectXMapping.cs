@@ -72,8 +72,14 @@ public static class ProjectXMapping
             ClientModels.PositionType.Long => position.Size,
             ClientModels.PositionType.Short => -position.Size,
 
-            // An undefined direction carries no exposure we can act on -- treat it as flat.
-            _ => 0,
+            // A directionless position with no size is genuinely flat.
+            _ when position.Size == 0 => 0,
+
+            // Anything else is exposure we cannot describe. Reporting it as flat would tell the risk gate and
+            // auto-flatten there is nothing open -- fail loudly instead.
+            _ => throw new ProjectXVenueException(
+                $"ProjectX reported {position.Size} contracts on {position.ContractId} with direction "
+                + $"'{position.Type}', which cannot be mapped to a signed exposure."),
         };
 
         return new PositionSnapshot(
@@ -116,13 +122,48 @@ public static class ProjectXMapping
 
     /// <summary>Parses the venue-neutral account key back into the integer id the gateway expects.</summary>
     /// <param name="account">The venue-qualified account.</param>
+    /// <param name="venue">This adapter's venue — the account must belong to it.</param>
     /// <returns>The gateway's account id.</returns>
-    /// <exception cref="ArgumentException">The key is not a ProjectX account number.</exception>
-    public static int ToAccountId(VenueAccountId account)
+    /// <exception cref="ArgumentException">
+    /// The account belongs to another venue, or its key is not a ProjectX account number.
+    /// </exception>
+    /// <remarks>
+    /// The qualifier is checked, not assumed. Account handles are bare integers that collide freely across
+    /// venues, so a <c>tradovate:9001</c> reaching this adapter would otherwise be sent to <i>ProjectX</i>
+    /// account 9001 — a different, possibly real-money account (R-17).
+    /// </remarks>
+    public static int ToAccountId(VenueAccountId account, VenueId venue)
     {
+        EnsureBelongsTo(account.Venue, venue, account.ToString());
+
         return int.TryParse(account.Key, NumberStyles.Integer, CultureInfo.InvariantCulture, out int id)
             ? id
             : throw new ArgumentException($"'{account.Key}' is not a ProjectX account number.", nameof(account));
+    }
+
+    /// <summary>Unwraps a venue-qualified contract to the bare handle the gateway expects.</summary>
+    /// <param name="contract">The venue-qualified contract.</param>
+    /// <param name="venue">This adapter's venue — the contract must belong to it.</param>
+    /// <returns>The gateway's contract handle.</returns>
+    /// <exception cref="ArgumentException">The contract belongs to another venue.</exception>
+    /// <remarks>
+    /// Every path that strips the qualifier goes through here, so a foreign contract can never reach the gateway
+    /// on a colliding key — which on the flatten path would mean closing the wrong position.
+    /// </remarks>
+    public static string ToContractKey(VenueContractId contract, VenueId venue)
+    {
+        EnsureBelongsTo(contract.Venue, venue, contract.ToString());
+
+        return contract.Key;
+    }
+
+    private static void EnsureBelongsTo(VenueId actual, VenueId expected, string qualified)
+    {
+        if (actual != expected)
+        {
+            throw new ArgumentException(
+                $"'{qualified}' belongs to venue '{actual}', not '{expected}'.", nameof(qualified));
+        }
     }
 
     /// <summary>Parses a venue order handle back into the integer id the gateway expects.</summary>

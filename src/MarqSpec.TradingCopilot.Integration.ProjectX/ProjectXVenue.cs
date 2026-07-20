@@ -16,6 +16,12 @@ namespace MarqSpec.TradingCopilot.Integration.ProjectX;
 /// </summary>
 public sealed class ProjectXVenue : ITradingVenue
 {
+    /// <summary>
+    /// How many quotes may queue for a slow consumer before the oldest are dropped. A quote is a snapshot of the
+    /// current best bid/ask, so shedding stale ones beats growing without bound on a live tick stream.
+    /// </summary>
+    private const int QuoteBufferSize = 1_024;
+
     private readonly IProjectXApiClient _api;
     private readonly IProjectXWebSocketClient _webSocket;
 
@@ -31,15 +37,15 @@ public sealed class ProjectXVenue : ITradingVenue
     /// <inheritdoc />
     public VenueId Id { get; } = VenueId.Parse("projectx");
 
-    /// <inheritdoc />
+    /// <summary>
+    /// What this adapter can actually deliver <b>through <see cref="ITradingVenue"/></b>. The gateway itself does
+    /// more — depth, account streaming, OCO brackets, order modify, trailing stops — but none of that is
+    /// reachable through the venue-neutral contract yet, and advertising it would defeat the purpose of the
+    /// capability model: a caller checking before it commits would pick a path that cannot work.
+    /// </summary>
     public VenueCapabilities Capabilities { get; } = VenueCapabilities.Of(
         VenueCapability.HistoricalBars
         | VenueCapability.Quotes
-        | VenueCapability.MarketDepth
-        | VenueCapability.AccountStreaming
-        | VenueCapability.BracketOrders
-        | VenueCapability.TrailingStops
-        | VenueCapability.ModifyOrder
         | VenueCapability.ClosePosition);
 
     /// <inheritdoc />
@@ -68,10 +74,11 @@ public sealed class ProjectXVenue : ITradingVenue
     {
         Capabilities.Require(VenueCapability.HistoricalBars);
 
+        string contractKey = ProjectXMapping.ToContractKey(contract, Id);
         (ClientModels.AggregateBarUnit unit, int number) = ProjectXMapping.ToBarUnit(barSize);
 
         IEnumerable<ClientModels.AggregateBar> bars = await _api.GetHistoricalBarsAsync(
-            contract.Key,
+            contractKey,
             from.UtcDateTime,
             to.UtcDateTime,
             unit,
@@ -86,23 +93,11 @@ public sealed class ProjectXVenue : ITradingVenue
         VenueContractId contract,
         CancellationToken cancellationToken = default)
     {
+        // Validate eagerly, so a bad capability or a foreign contract fails at the call rather than on the first
+        // read, long after the caller has moved on.
         Capabilities.Require(VenueCapability.Quotes);
 
-        Channel<Quote> quotes = Channel.CreateUnbounded<Quote>(new UnboundedChannelOptions { SingleReader = true });
-
-        void OnPriceUpdate(object? sender, ClientModels.PriceUpdate update)
-        {
-            // One hub carries every subscribed contract, so updates are filtered back down to this one.
-            if (string.Equals(update.Symbol, contract.Key, StringComparison.Ordinal))
-            {
-                quotes.Writer.TryWrite(ProjectXMapping.ToQuote(update));
-            }
-        }
-
-        // Attached before the caller begins enumerating, so ticks arriving in between are buffered, not dropped.
-        _webSocket.PriceUpdateReceived += OnPriceUpdate;
-
-        return ReadQuotesAsync(quotes, contract, OnPriceUpdate, cancellationToken);
+        return ReadQuotesAsync(ProjectXMapping.ToContractKey(contract, Id), cancellationToken);
     }
 
     /// <inheritdoc />
@@ -121,7 +116,7 @@ public sealed class ProjectXVenue : ITradingVenue
         CancellationToken cancellationToken = default)
     {
         IEnumerable<ClientModels.Position> positions =
-            await _api.GetOpenPositionsAsync(ProjectXMapping.ToAccountId(account), cancellationToken);
+            await _api.GetOpenPositionsAsync(ProjectXMapping.ToAccountId(account, Id), cancellationToken);
 
         return [.. positions.Select(position => ProjectXMapping.ToPositionSnapshot(position, Id))];
     }
@@ -129,10 +124,17 @@ public sealed class ProjectXVenue : ITradingVenue
     /// <inheritdoc />
     public async Task<PlacedOrder> PlaceOrderAsync(OrderRequest request, CancellationToken cancellationToken = default)
     {
+        if (request.Type == OrderType.TrailingStop)
+        {
+            // The neutral ticket carries no trail distance, so the gateway's trailPrice would go unset and the
+            // order would arrive malformed. Refuse through the capability seam rather than send it.
+            Capabilities.Require(VenueCapability.TrailingStops);
+        }
+
         ClientModels.PlaceOrderRequest payload = new()
         {
-            AccountId = ProjectXMapping.ToAccountId(request.Account),
-            ContractId = request.Contract.Key,
+            AccountId = ProjectXMapping.ToAccountId(request.Account, Id),
+            ContractId = ProjectXMapping.ToContractKey(request.Contract, Id),
             Side = ProjectXMapping.ToClientSide(request.Side),
             Type = ProjectXMapping.ToClientType(request.Type),
             Size = request.Quantity,
@@ -168,7 +170,7 @@ public sealed class ProjectXVenue : ITradingVenue
         CancellationToken cancellationToken = default)
     {
         ClientModels.CancelOrderResponse response = await _api.CancelOrderAsync(
-            ProjectXMapping.ToAccountId(account),
+            ProjectXMapping.ToAccountId(account, Id),
             ProjectXMapping.ToOrderId(venueOrderId),
             cancellationToken);
 
@@ -188,10 +190,11 @@ public sealed class ProjectXVenue : ITradingVenue
     {
         Capabilities.Require(VenueCapability.ClosePosition);
 
-        int accountId = ProjectXMapping.ToAccountId(account);
+        int accountId = ProjectXMapping.ToAccountId(account, Id);
+        string contractKey = ProjectXMapping.ToContractKey(contract, Id);
 
         ClientModels.ClosePositionResponse response =
-            await _api.ClosePositionAsync(accountId, contract.Key, cancellationToken);
+            await _api.ClosePositionAsync(accountId, contractKey, cancellationToken);
 
         if (!response.Success)
         {
@@ -204,7 +207,7 @@ public sealed class ProjectXVenue : ITradingVenue
         // whether we are flat, and auto-flatten reconciles against exactly this (ADR-0013).
         IEnumerable<ClientModels.Position> remaining = await _api.GetOpenPositionsAsync(accountId, cancellationToken);
         ClientModels.Position? open = remaining.FirstOrDefault(
-            position => string.Equals(position.ContractId, contract.Key, StringComparison.Ordinal));
+            position => string.Equals(position.ContractId, contractKey, StringComparison.Ordinal));
 
         return open is null
             ? new PositionSnapshot(account, contract, 0, new Price(0m))
@@ -212,15 +215,34 @@ public sealed class ProjectXVenue : ITradingVenue
     }
 
     private async IAsyncEnumerable<Quote> ReadQuotesAsync(
-        Channel<Quote> quotes,
-        VenueContractId contract,
-        EventHandler<ClientModels.PriceUpdate> handler,
+        string contractKey,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        Channel<Quote> quotes = Channel.CreateBounded<Quote>(new BoundedChannelOptions(QuoteBufferSize)
+        {
+            // A stale best bid/ask is worth less than the current one, so shed the oldest under back-pressure
+            // rather than let a slow consumer grow the buffer without limit.
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+        });
+
+        void OnPriceUpdate(object? sender, ClientModels.PriceUpdate update)
+        {
+            // One hub carries every subscribed contract, so updates are filtered back down to this one.
+            if (string.Equals(update.Symbol, contractKey, StringComparison.Ordinal))
+            {
+                quotes.Writer.TryWrite(ProjectXMapping.ToQuote(update));
+            }
+        }
+
+        // Registration and cleanup share this iterator's lifecycle: attaching here means a sequence that is never
+        // enumerated cannot leave a handler and a filling channel behind.
+        _webSocket.PriceUpdateReceived += OnPriceUpdate;
+
         try
         {
             await _webSocket.ConnectMarketHubAsync(cancellationToken);
-            await _webSocket.SubscribeToPriceUpdatesAsync(contract.Key, cancellationToken);
+            await _webSocket.SubscribeToPriceUpdatesAsync(contractKey, cancellationToken);
 
             await foreach (Quote quote in quotes.Reader.ReadAllAsync(cancellationToken))
             {
@@ -229,9 +251,9 @@ public sealed class ProjectXVenue : ITradingVenue
         }
         finally
         {
-            // Detach on any exit -- cancellation included -- so a dropped subscription cannot leak a handler.
-            _webSocket.PriceUpdateReceived -= handler;
-            await _webSocket.UnsubscribeFromPriceUpdatesAsync(contract.Key, CancellationToken.None);
+            // Runs on every exit, cancellation included, so a dropped subscription cannot leak a handler.
+            _webSocket.PriceUpdateReceived -= OnPriceUpdate;
+            await _webSocket.UnsubscribeFromPriceUpdatesAsync(contractKey, CancellationToken.None);
         }
     }
 }

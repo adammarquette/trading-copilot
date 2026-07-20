@@ -14,8 +14,8 @@ v1 trading venue behind `MarqSpec.Client.ProjectX` (see [engineering §3](../../
 - **REST:** `https://api.topstepx.com`
 - **Realtime (SignalR over WebSocket):** `https://rtc.topstepx.com/hubs/user`, `https://rtc.topstepx.com/hubs/market`
 - Hosts are **firm-branded** (`…topstepx.com`); other ProjectX firms likely use different hostnames — the R-17
-  venue abstraction must accommodate per-firm hosts. Practice vs. live appears **account-level** (by `accountId`),
-  not URL-level (docs list no separate sandbox host) → still open for **Q-4**.
+  venue abstraction must accommodate per-firm hosts. Practice vs. live is **account-level** — the account's
+  `simulated` flag — and **not** URL-level: there is no separate sandbox host (**Q-4 answered**; see Accounts).
 
 ## Authentication
 - **Session token (JWT)**, valid **24h**; validate / refresh via the session endpoints. Passed as
