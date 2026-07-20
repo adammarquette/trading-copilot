@@ -1,10 +1,21 @@
 # Trading Co-Pilot
 
-A **multi-user futures day-trading co-pilot** — a decision-support *and* execution system with a
+An **open-source futures day-trading co-pilot** — a decision-support *and* execution system with a
 human in the loop. It ingests market data, order flow, news, and social signals; generates fully specified trade
 suggestions (direction, entry, stop, targets, size) with cited reasoning; lets the trader execute *through* the
 system so intent and outcome are captured natively; and journals every suggestion and trade to close the learning
 loop. Its one autonomous action is risk-reducing: **auto-flattening open positions before the CME close.**
+
+**You run your own instance.** Fork it, deploy it, point it at your own broker credentials — broker API keys are
+tied to an individual login, so the system is built to be operated by the person whose account it trades. It is
+multi-user *capable* (authenticated, with per-user data isolation), but each deployment belongs to whoever runs it.
+
+> ### ⚠️ No warranty. Not financial advice.
+> This software places **real orders against a real broker account**. It is provided **as-is, without warranty of
+> any kind**. **You alone are responsible** for your trading decisions and their outcomes, for how you configure
+> and operate your deployment, and for complying with your broker's and prop firm's terms. Nothing here is
+> investment advice or a recommendation to trade. **Prove it on a practice account first** — a defect in a system
+> like this can cost you an account.
 
 > **Status: `v0.1.0` (pre-release) — early / scaffolding.** The **`documentation/` folder is the current source of truth** — the product
 > requirements and engineering practices live there. The `src/` foundation is building out (solution + CI, data layer + multi-user tenancy, auth) and **runs locally via `docker compose up`** (see below). Built
@@ -63,6 +74,27 @@ The PRD is *what* the product does; the engineering guide is *how* we build it; 
 | `AGENTS.md` · `CLAUDE.md` | Orientation for AI coding agents (root); `CLAUDE.md` is a shim that imports `AGENTS.md` |
 | [`documentation/AGENT-MEMORY.md`](documentation/AGENT-MEMORY.md) | Agents' catch-all — practices and cross-agent notes that don't fit any formal document |
 
+## Built to be swapped — the component seams
+
+The architecture is deliberately component-driven: every external dependency sits behind an interface you can
+implement yourself. Fork it, write an adapter, and the rest of the system doesn't change.
+
+| Seam | Contract | State |
+|---|---|---|
+| **Trading venue** (R-17) | `ITradingVenue` — composed of `IMarketDataSource` · `IAccountSource` · `IOrderExecutor` | **built**; ProjectX/TopstepX adapter shipped, Tradovate is the next adapter |
+| **Data-only provider** | `IMarketDataSource` alone — no accounts, no execution | **built**; the slice a quotes/news source implements |
+| **Risk enforcement** (R-5) | `IRiskGate` → `GateDecision` | **built**; layered limits, most-restrictive wins |
+| **LLM provider** | `ILlmProvider` | planned — one provider behind a seam, never prompt-enforced limits |
+| **Event log** (ADR-0001) | `IEventLog` | planned — Timescale today, swappable later |
+
+Two properties fall out of the decomposition. A **data-only source implements just the market-data slice**, so
+adding equities context alongside futures is an adapter rather than a second pipeline. And **venue capabilities
+are explicit** — an adapter declares what it actually supports, so a missing capability fails loudly at the seam
+instead of surfacing mid-execution.
+
+The discipline that keeps the seams honest: **enforcement lives below the model.** The LLM proposes; a
+deterministic risk gate decides. No limit is ever held in prompt text.
+
 ## Stack (planned)
 
 - **C# / .NET 10 (LTS)** — nullable on, warnings-as-errors, file-scoped namespaces, Central Package Management.
@@ -87,6 +119,18 @@ Software here is built with AI agents as first-class engineering participants. T
 - **Conventional Commits**; add an `Assisted-by:` trailer for AI-authored changes.
 - **Work tracked in GitHub issues & PRs** — issue-first, no orphaned PRs.
 - **Contributing:** branch off `develop`, name branches **`<type>/<work-item-id>_<title>`**, rebase/squash before merge — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## Contributing & governance
+
+Contributions are welcome — issues, adapters for other venues, fixes. See [`CONTRIBUTING.md`](CONTRIBUTING.md)
+for the branching model, commit conventions, and the test-first Definition of Done.
+
+**Direction is maintainer-led.** Adam Marquette is the final authority on scope, architecture, and what merges.
+Contributions are reviewed on their merits and on fit with the direction here; there is no obligation to accept
+any change, and a declined PR is not a judgement on its quality. If you want the project to go somewhere it
+isn't going, **fork it** — the licence exists so you can, and a fork is a legitimate outcome rather than a
+failure. Safety-critical areas (the risk gate, execution, auto-flatten, the kill switch) carry a higher bar:
+expect design discussion before implementation.
 
 ## Related projects
 
