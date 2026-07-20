@@ -61,7 +61,7 @@ Constraints:
   per a **user preference** (`kill-switch mode`) — **flattens all open positions by default** (the same
   **native-first flatten sequence** as auto-flatten, gated by a **hold-to-confirm**) or, in **halt-only** mode,
   leaves them on their native safety stops. **Auto-flatten (R-13)** remains the only order action **without**
-  per-trade confirmation (reduce/close only, before the CME close) — the kill switch's flatten is *confirmed* by the
+  per-trade confirmation (reduce/close only, at the configured flatten deadline) — the kill switch's flatten is *confirmed* by the
   hold. Both sit above the normal flow.
 - **Connection-liveness monitoring + orphan handling.** The platform continuously watches the venue connection. On a
   **drop**, every **synthetic / in-app** order (conditional entries, un-promoted hidden stops, brackets) moves to an
