@@ -24,6 +24,12 @@
   <ItemGroup>
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Domain\MarqSpec.TradingCopilot.Domain.csproj" />
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Data\MarqSpec.TradingCopilot.Data.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Api\MarqSpec.TradingCopilot.Api.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The Api is a Web SDK project; loading its types in tests needs the ASP.NET shared framework. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
 </Project>

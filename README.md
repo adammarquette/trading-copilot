@@ -31,7 +31,7 @@ The PRD is *what* the product does; the engineering guide is *how* we build it; 
 | Path | What's there |
 |---|---|
 | [`documentation/`](documentation/) | All specs & design docs — the substance today (PRD + engineering guide; a `wiki/` companion knowledge base to come) |
-| `src/` | .NET solution (`MarqSpec.TradingCopilot.slnx`, base namespace `MarqSpec.TradingCopilot.*`) — the `Domain` project + unit/integration test projects are scaffolded (F1); the rest build out here (naming per engineering guide §3) |
+| `src/` | .NET solution (`MarqSpec.TradingCopilot.slnx`, base namespace `MarqSpec.TradingCopilot.*`) — projects build out under `src/` per the roadmap (`Domain`, `Data`, the `Api` BFF, + test projects so far); naming per engineering guide §3 |
 | `AGENTS.md` · `CLAUDE.md` | Orientation for AI coding agents (root); `CLAUDE.md` is a shim that imports `AGENTS.md` |
 | [`documentation/AGENT-MEMORY.md`](documentation/AGENT-MEMORY.md) | Agents' catch-all — practices and cross-agent notes that don't fit any formal document |
 
