@@ -44,6 +44,11 @@ services:
       Jwt__SigningKey: "${Jwt__SigningKey:-local-dev-signing-key-change-me-at-least-32-bytes}"
       Bootstrap__Email: "${Bootstrap__Email:-operator@local}"
       Bootstrap__Password: "${Bootstrap__Password:-changeme-local}"
+      # Broker credentials, passed through from .env. Deliberately NO local-dev default: a made-up
+      # value would let the app start and fail obscurely at the first venue call. Empty is honest.
+      # Practice accounts only outside production (R-14).
+      ProjectX__ApiKey: "${ProjectX__ApiKey:-}"
+      ProjectX__ApiSecret: "${ProjectX__ApiSecret:-}"
     ports:
       - "8080:8080"
 
