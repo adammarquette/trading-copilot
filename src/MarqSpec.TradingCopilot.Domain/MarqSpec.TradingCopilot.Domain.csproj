@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Domain primitives (parse-don't-validate types) for the trading co-pilot core.
+       Common settings come from ../Directory.Build.props. -->
+
+</Project>

@@ -1,5 +1,0 @@
-<Solution>
-  <Project Path="TradingCopilot.IntegrationTests/TradingCopilot.IntegrationTests.csproj" />
-  <Project Path="TradingCopilot.StubProject/TradingCopilot.StubProject.csproj" />
-  <Project Path="TradingCopilot.UnitTests/TradingCopilot.UnitTests.csproj" />
-</Solution>
