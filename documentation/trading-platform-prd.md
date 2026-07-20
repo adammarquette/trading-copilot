@@ -323,7 +323,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 10. *(Engineering)* Cloud host and monthly cost ceiling for the always-on tier (Railway is a natural candidate).
 11. *(Product)* Rulebook representation: structured DSL vs. natural-language rules interpreted at suggestion time.
 12. *(Product)* Alert taxonomy and noise budget (max alerts/hour; measuring alert fatigue).
-13. *(Legal/personal)* Scraping posture per news site (ToS review before adding).
+13. *(Legal/personal)* **Ingestion posture per source — ToS review before adding.** Originally scoped to news sites (R-2), but it applies to **every** ingested source, vendor documentation included: copyright is not the only constraint, and a site's Terms can restrict automated access or redistribution regardless of what fair use allows. Two sources already returned **403** to a direct fetch and were grounded by web search instead (Apex; Take Profit Trader's Zendesk) — a decision taken implicitly that should be taken deliberately. Posture is now recorded per page in the wiki's `Access:` header (gh#53); the one wholesale third-party document has been removed (gh#52).
 14. *(Engineering)* Venue capability matrix (R-17): which trading APIs beyond ProjectX (Tradovate named), and how they differ in order types, order-flow granularity, and account model — defining what the venue-neutral interface must abstract. **Partly settled (S1, gh#9):** the interface and the capability model now exist in code — three slices (market-data / account / execution), venue-tagged identifiers, and explicit `VenueCapability` flags each adapter declares, with an unsupported capability failing loudly at the seam. What remains is populating the per-venue rows as each adapter lands.
 
 ## 9. Phasing
