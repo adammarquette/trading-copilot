@@ -1550,10 +1550,10 @@
       <span class="muted">one login per firm · credentials stay <b>server-side</b> · the login discovers its own accounts</span></div>
     <div class="flow-grid">
       <div class="flow-step">
-        <div class="step-h"><span class="step-n">1</span>Platform</div>
-        <div class="seg"><button class="on">TopstepX · ProjectX</button><button>Tradovate</button></div>
-        <div class="step-h" style="margin-top:4px"><span class="step-n">2</span>Firm</div>
-        <div class="chipset"><span class="rchip">Topstep</span><span class="rchip sel">Apex</span><span class="rchip">Take Profit Trader</span><span class="rchip">TradeDay</span></div>
+        <div class="step-h"><span class="step-n">1</span>Firm<span class="tag" style="margin-left:auto">from your firms</span></div>
+        <div class="chipset"><span class="rchip">Topstep</span><span class="rchip sel">Apex</span><span class="rchip">Take Profit Trader</span><span class="rchip">TradeDay</span><span class="rchip" style="color:var(--on-dim)">+ define a firm</span></div>
+        <div class="step-h" style="margin-top:4px"><span class="step-n">2</span>Platform<span class="tag" style="margin-left:auto">Apex offers 2</span></div>
+        <div class="seg"><button class="on">Tradovate</button><button>Rithmic</button></div>
         <div class="step-h" style="margin-top:4px"><span class="step-n">3</span>Credentials<span class="tag" style="margin-left:auto">server-side</span></div>
         <div class="credfield"><span class="ck2">Username</span><span class="cval">adam.mq</span></div>
         <div class="credfield"><span class="ck2">API key</span><span class="cval">•••••••••••• ✎</span></div>
@@ -1570,36 +1570,41 @@
         <div class="btns"><span class="btn fill">Finish &amp; add to switcher</span><span class="btn out">Add another firm</span></div>
       </div>
     </div>
-    <div class="rej-why" style="margin-top:12px">Structure is <b>operator → login (per firm) → accounts</b> (R-17). The login authenticates <b>server-side</b> (R-18); the adapter calls <code>Account/search</code> to <b>discover</b> accounts — the name gives <b>size and stage</b>, and nothing more. It does <b>not</b> establish practice-vs-live: that is declared per firm in the next step, because the venue's own flag describes execution rather than stake (gh#60). New <b>active</b> accounts join the switcher; <b>passed / failed</b> stay in the full roster. Repeat per firm — several Tradovate logins (Apex, TPT, TradeDay, …).</div>
+    <div class="rej-why" style="margin-top:12px">Structure is <b>operator → login (per firm × platform) → accounts</b> (R-17). <b>Firm comes first</b> because the firm decides which platforms are on offer — Apex gives you Tradovate or Rithmic, Topstep owns ProjectX and gives you only that — and both lists are read from the firms you have defined, not hard-coded. A firm you have not defined cannot be connected. The login authenticates <b>server-side</b> (R-18); the adapter calls the platform's account search to <b>discover</b> accounts — the name gives <b>size and stage</b>, and nothing more. It does <b>not</b> establish practice-vs-live: that comes from the firm's declared conventions (gh#60), because the venue's flag describes execution rather than stake. New <b>active</b> accounts join the switcher; <b>passed / failed</b> stay in the full roster. Repeat per firm <i>and</i> per platform — trading Apex on both Tradovate and Rithmic is two logins.</div>
   </section>
 
   <section class="onb">
-    <div class="cap"><h2>Firm conventions — declare what “practice” means, before trading</h2><span class="bp">R-14 · R-17 · gh#60</span>
-      <span class="muted">the venue flag describes <b>execution</b>, not <b>stake</b> · firms differ · an undeclared stage cannot be traded</span></div>
+    <div class="cap"><h2>Firms — define a firm before you can connect to it</h2><span class="bp">R-14 · R-17 · gh#60</span>
+      <span class="muted">a firm offers <b>one or more platforms</b> · conventions belong to the <b>firm</b>, not the platform · an undeclared stage cannot be traded</span></div>
     <div class="flow-grid">
       <div class="flow-step">
-        <div class="step-h"><span class="step-n">5</span>What the venue reports<span class="tag" style="margin-left:auto">read-only</span></div>
-        <div class="credfield"><span class="ck2">Platform · firm</span><span class="cval">Tradovate · Apex</span></div>
-        <div class="credfield"><span class="ck2">venue mode flag</span><span class="cval">simulated — all 3 accounts</span></div>
-        <div class="warnbn"><span class="ic">⚠</span><div>The venue reports <b>where orders execute</b>, not <b>what is at stake</b>. Every account here is simulated execution — <b>including the funded one</b>, which still pays out and can still be lost to a trailing drawdown.</div></div>
+        <div class="step-h"><span class="step-n">1</span>The firm<span class="chip ghost" style="margin-left:auto">Apex</span></div>
+        <div class="credfield"><span class="ck2">Name</span><span class="cval">Apex Trader Funding ✎</span></div>
 
-        <div class="step-h" style="margin-top:12px"><span class="step-n">6</span>What each stage means <i>at this firm</i></div>
+        <div class="step-h" style="margin-top:12px"><span class="step-n">2</span>Platforms it offers<span class="tag" style="margin-left:auto">pick 1 or more</span></div>
+        <div class="mrow"><div class="ai"><div class="an">Tradovate</div><div class="am"><span class="chip good">available</span><span>demo / live by host</span></div></div><span class="sw2 on"><i></i></span></div>
+        <div class="mrow"><div class="ai"><div class="an">Rithmic</div><div class="am"><span class="chip warn">no adapter</span><span>needs code — fork and build it</span></div></div><span class="sw2 dis"><i></i></span></div>
+        <div class="mrow off"><div class="ai"><div class="an">ProjectX</div><div class="am"><span class="chip good">available</span><span>Topstep’s gateway — Apex doesn’t offer it</span></div></div><span class="sw2 dis"><i></i></span></div>
+        <div class="onb-sync">Apex offers <b>Tradovate</b> and <b>Rithmic</b>; Topstep owns ProjectX and offers only that. You connect one login <b>per firm × platform</b>.</div>
+
+        <div class="step-h" style="margin-top:12px"><span class="step-n">3</span>What each stage means <i>at this firm</i></div>
         <div class="mrow"><div class="ai"><div class="an">Evaluation</div><div class="am"><span>fee paid · pass / fail</span></div></div><div class="seg"><button class="on">practice</button><button>at risk</button></div></div>
         <div class="mrow"><div class="ai"><div class="an">Funded</div><div class="am"><span>payout · trailing drawdown</span></div></div><div class="seg"><button>practice</button><button class="on">at risk</button></div></div>
-        <div class="onb-sync">Declared per firm — Topstep, TradeDay, … each get their own, even on the same platform</div>
+        <div class="warnbn"><span class="ic">⚠</span><div>These apply to <b>every platform this firm offers</b>. An Apex evaluation is the same money whether you reach it through Tradovate or Rithmic — the platform only changes <b>how the account is reported</b>, never <b>what it costs you</b>.</div></div>
       </div>
       <div class="flow-step">
-        <div class="step-h"><span class="step-n">7</span>Resulting classification<span class="chip warn" style="margin-left:auto">1 undeclared</span></div>
+        <div class="step-h"><span class="step-n">4</span>How your accounts land<span class="chip warn" style="margin-left:auto">1 undeclared</span></div>
         <div class="acct-full">
-          <div class="mrow"><div class="ai"><div class="an">APEX-251044</div><div class="am"><span class="chip ghost">50K</span><span>Evaluation</span></div></div><span class="chip good">practice</span></div>
-          <div class="mrow"><div class="ai"><div class="an">APEX-247820</div><div class="am"><span class="chip ghost">100K</span><span>Funded</span></div></div><span class="chip bad">at risk</span></div>
-          <div class="mrow off"><div class="ai"><div class="an">APEX-260191</div><div class="am"><span class="chip ghost">150K</span><span>Static — new stage</span></div></div><span class="chip warn">undeclared</span></div>
+          <div class="mrow"><div class="ai"><div class="an">APEX-251044</div><div class="am"><span class="chip ghost">Tradovate</span><span class="chip ghost">50K</span><span>Evaluation</span></div></div><span class="chip good">practice</span></div>
+          <div class="mrow"><div class="ai"><div class="an">APEX-247820</div><div class="am"><span class="chip ghost">Tradovate</span><span class="chip ghost">100K</span><span>Funded</span></div></div><span class="chip bad">at risk</span></div>
+          <div class="mrow off"><div class="ai"><div class="an">APEX-260191</div><div class="am"><span class="chip ghost">Tradovate</span><span class="chip ghost">150K</span><span>Static — new stage</span></div></div><span class="chip warn">undeclared</span></div>
         </div>
+        <div class="onb-sync">Same rules would apply to Apex accounts reached over <b>Rithmic</b> — one firm, one set of conventions, however many platforms</div>
         <div class="killbig"><span class="sq2"></span><div class="kt"><b>APEX-260191 cannot be traded.</b> A stage you haven’t declared for this firm is treated as <b>at risk</b>, and accounts at risk can’t be traded outside production. Declare it above to enable — the fallback never silently opens an account up.</div></div>
-        <div class="btns"><span class="btn fill">Save conventions</span><span class="btn out">Review later</span></div>
+        <div class="btns"><span class="btn fill">Save firm</span><span class="btn out">Add another firm</span></div>
       </div>
     </div>
-    <div class="rej-why" style="margin-top:12px">Why the <b>operator declares</b> this instead of the adapter deriving it: a venue's mode flag (ProjectX <code>simulated</code>, Tradovate's demo/live <b>host</b>) says where an order executes, not whether money is at stake — and prop firms map their stages onto it differently. Several firms share one platform (Apex, TPT, TradeDay all on Tradovate), so the <i>same</i> flag means different things per login (R-17). The adapter therefore surfaces what the venue said and stops; the classification is the operator's, per firm, and feeds <code>TradingMode</code> → <code>TradingModePolicy</code> (R-14). An <b>undeclared stage falls back to “at risk”</b> — the one direction that cannot lose money — so a firm adding a new account type <b>blocks</b> rather than quietly becoming tradable in dev. <b>Open:</b> whether “operator” is still the right word now every user connects their own logins (R-18); and whether declaring per <b>stage</b> (as shown) is enough, or whether individual accounts need an override.</div>
+    <div class="rej-why" style="margin-top:12px"><b>Three tiers, and only the middle one is yours to add.</b> An <b>adapter</b> (ProjectX, Tradovate, Rithmic) is <i>code</i> behind <code>ITradingVenue</code> (R-17) — it ships with the deployment, and adding one means forking and building it, which is why Rithmic shows as unavailable rather than as a checkbox. A <b>firm</b> is <i>configuration</i>: you name it, say which of the available platforms it offers, and declare its conventions. Its <b>accounts</b> are then discovered per login.<br><br><b>Firm → platform is one-to-many.</b> Apex offers <b>Tradovate</b> and <b>Rithmic</b>; Topstep <b>owns</b> ProjectX and offers only that. So you hold one login per <b>firm × platform</b>, and the onboarding flow asks for the firm first — the firm determines which platforms are even on offer.<br><br><b>Conventions belong to the firm, not the platform</b>, and that is the whole argument. An Apex evaluation is the same fee, the same pass/fail and the same trailing drawdown whether it is reached over Tradovate or Rithmic; only the <i>reporting</i> differs (ProjectX exposes a <code>simulated</code> flag, Tradovate splits by <b>host</b>). Deriving stake from the platform would give one account two answers. So the adapter surfaces what the venue said and stops, and the declaration feeds <code>TradingMode</code> → <code>TradingModePolicy</code> (R-14). An <b>undeclared stage falls back to “at risk”</b> — the one direction that cannot lose money — so a firm adding a new account type <b>blocks</b> rather than quietly becoming tradable in dev.<br><br><b>Open:</b> whether “operator” is still the right word now every user connects their own logins (R-18); whether declaring per <b>stage</b> is enough or individual accounts need an override; and whether a firm's platform list should ship as seed data (Apex → Tradovate + Rithmic) rather than being typed in by hand.</div>
   </section>
 
   <section class="pb">
