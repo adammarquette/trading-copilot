@@ -5,6 +5,9 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /repo
 COPY .editorconfig ./
 COPY src/ ./src/
+# The ProjectX client submodule -- referenced by the venue adapter. Requires a recursive clone
+# (`git submodule update --init`) before building the image.
+COPY external/ ./external/
 RUN dotnet publish src/MarqSpec.TradingCopilot.Api/MarqSpec.TradingCopilot.Api.csproj \
     -c Release -o /app /p:UseAppHost=false
 
