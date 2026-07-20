@@ -21,3 +21,4 @@ rewritten — a later ADR **supersedes** it. Referenced from the
 | [0012](0012-containerization-local-dev.md) | Containerization & local development — Docker images (local ≡ Railway); `docker compose up`; DB config-driven | Accepted |
 | [0013](0013-failure-recovery-model.md) | Failure & recovery model — client resume, state rehydration, suggestions expire, native-stop + orphan handling, the auto-flatten watchdog (open) | Accepted |
 | [0014](0014-news-importance-feedback.md) | News importance feedback & personalized weighting — per-user star raises salience of similar future news; soft weight, not a risk control | Accepted |
+| [0015](0015-distribution-licensing-governance.md) | Distribution, licensing & governance — self-hosted fork-first; Apache-2.0; maintainer-led; AI-first authorship disclosed | Accepted · refines [0011](0011-multi-user-tenancy.md) |

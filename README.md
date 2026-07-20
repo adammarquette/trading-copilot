@@ -139,15 +139,27 @@ expect design discussion before implementation.
 
 ## License
 
-Copyright © 2026 Adam Marquette. Licensed under the **GNU Affero General Public License v3.0** — see
-[`LICENSE`](LICENSE).
+Copyright © 2026 Adam Marquette. Licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE) and
+[`NOTICE`](NOTICE).
 
-AGPL is a deliberate choice over a permissive licence. Its distinguishing term is **network use**: run a modified
-copy as a service and you must publish that modified source, which the GPL alone does not require. As sole
-copyright holder the project also keeps the option to grant separate commercial terms.
+Permissive on purpose: fork it, run it, build on it, commercially or otherwise. Apache-2.0 over MIT for the
+**express patent grant** and the **explicit trademark non-grant** — meaningful for software that executes
+financial transactions, and it keeps the project's name with the maintainer while a fork keeps everything else.
+Reasoning in [ADR-0015](documentation/adr/0015-distribution-licensing-governance.md).
 
-Dependencies are permissive — the `MarqSpec.Client.ProjectX` submodule is MIT — and combine with AGPL without
-friction.
+### An AI-first engineering project
+
+**The great majority of this codebase was written by AI coding agents** — source, tests, and documentation —
+working under human direction, review, and acceptance. Comparatively little was hand-written.
+
+That is stated plainly because it is the honest description of the work, and because *how* it was built is part
+of what it demonstrates: the requirements traceability (`R-#`), the ADR trail, the test-first discipline, and the
+cross-referenced knowledge base exist so that agents can reconstruct context and build against a specification
+rather than a vibe. Judge it on the architecture, the test suites, and whether the safety-critical paths hold.
+
+One practical consequence: copyright in AI-generated work is unsettled, so the strength of any claim here — and
+with it the enforceability of any licence — is uncertain. A permissive licence asks little, which makes the
+question largely academic. It would not be under a restrictive one.
 
 ---
 
