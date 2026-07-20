@@ -7,6 +7,9 @@
 > https://help.topstep.com/en/collections/5836609-topstep-program ,
 > https://apextraderfunding.com/help-center/eod-trailing-drawdown-accounts/eod-evaluations ,
 > https://apextraderfunding.com/help-center/eod-trailing-drawdown-accounts/eod-drawdown-explained/
+> **Access:** Topstep's help centre read directly; **Apex refused a direct fetch (403)** and its figures are
+> restated from web-search results, not taken from the site. No help-centre text is reproduced. **Apex's terms not
+> yet reviewed — grounding the page this way was an implicit decision and is open (gh#53).**
 > **Informs:** R-5 (the enforcing risk model must **implement** these), R-14 (mode/account), R-17 / Q-14 (firm
 > differences), the account model (data dictionary), [topstep-brokerage.md](topstep-brokerage.md) (self-imposed floors).
 

@@ -5,6 +5,14 @@ order-flow theory, instrument specifics — the reasoning behind the product req
 place. **Not read by the product.** Conventions + trust tiers: [`SCHEMA.md`](SCHEMA.md). History:
 [`log.md`](log.md). Read this file first at query time.
 
+> **On third-party material.** These pages are **original summaries** — endpoint names, parameters, limits,
+> rules, session times — written in our own words from publicly documented sources, each cited by URL and, where
+> a claim is load-bearing, marked to confirm against the vendor. Facts and functional API details are summarised,
+> **not reproduced**: no page carries substantial verbatim text, and no vendor document is redistributed here
+> (the one that was has been removed). Short quotes are attributed inline. Trademarks belong to their owners and
+> are used only to identify what is being described. Per-source terms posture is recorded in each page's
+> `Access:` header — see [`SCHEMA.md`](SCHEMA.md) and gh#53.
+
 ## Pages
 | Page | Authoritative for | Trust | Informs |
 |---|---|---|---|
