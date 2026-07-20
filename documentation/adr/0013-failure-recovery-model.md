@@ -33,7 +33,7 @@ owned by its requirement / ADR).
   **synthetic** orders (hidden entries, un-promoted stops) go **orphaned → emergency** with an operator alert; on
   reconnect the system **re-validates and re-arms** — nothing silently resumes (ADR-0007).
 - **The hard case — the auto-flatten guarantee (R-13).** The auto-flatten is **our system feature**, fired at a
-  **configurable deadline (default ~2:30 PM CT, ahead of MOC)** — **earlier than any venue-forced flatten** (Topstep
+  **configurable, per-instrument deadline** (equity-index default ~2:30 PM CT ahead of MOC; **crude / gold settle earlier**) — **earlier than any venue-forced flatten** (Topstep
   ~3:10 PM CT), and a **live brokerage has none**, so we **cannot lean on the venue** as the net. It is
   **safety-critical and must fire even if the primary tier is degraded** → a **redundant / independent trigger** (a
   watchdog separate from the main scheduler), a defined behaviour if a flatten order is *rejected* near the deadline,
