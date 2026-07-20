@@ -22,7 +22,7 @@ public class ProjectXVenueTests
 
     public ProjectXVenueTests()
     {
-        _venue = new ProjectXVenue(_api, _webSocket);
+        _venue = new ProjectXVenue(_api, _webSocket, ProjectXDataTier.Simulated);
     }
 
     private VenueAccountId Account => VenueAccountId.Create(_venue.Id, "9001");
@@ -68,6 +68,57 @@ public class ProjectXVenueTests
         // ProjectX does all of these; ITradingVenue exposes none of them yet. Advertising them would send a
         // caller down a path it cannot take -- the opposite of the graceful degradation the model exists for.
         _venue.Capabilities.Supports(capability).Should().BeFalse();
+    }
+
+    // --- The data tier: asking the wrong universe returns nothing, not an error ---
+
+    [Fact]
+    public async Task ResolveContractAsync_ShouldQueryTheSimulatedUniverse_WhenTheTierIsSimulated()
+    {
+        // Practice credentials against live:true return an EMPTY contract list rather than an error, which
+        // surfaces later as "no contract matches ES". Verified against a live practice account.
+        A.CallTo(() => _api.SearchContractsAsync("ES", false, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Contract>>(
+                [new ClientModels.Contract { Id = ContractKey, ActiveContract = true }]);
+
+        VenueContractId resolved = await _venue.ResolveContractAsync(InstrumentId.Parse("ES"), CancellationToken.None);
+
+        resolved.Key.Should().Be(ContractKey);
+        A.CallTo(() => _api.SearchContractsAsync("ES", true, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ResolveContractAsync_ShouldQueryTheLiveUniverse_WhenTheTierIsLive()
+    {
+        ProjectXVenue live = new(_api, _webSocket, ProjectXDataTier.Live);
+        A.CallTo(() => _api.SearchContractsAsync("ES", true, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Contract>>(
+                [new ClientModels.Contract { Id = ContractKey, ActiveContract = true }]);
+
+        await live.ResolveContractAsync(InstrumentId.Parse("ES"), CancellationToken.None);
+
+        A.CallTo(() => _api.SearchContractsAsync("ES", false, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task GetBarsAsync_ShouldRequestTheConfiguredTier()
+    {
+        A.CallTo(() => _api.GetHistoricalBarsAsync(
+                A<string>._, A<DateTime>._, A<DateTime>._, A<ClientModels.AggregateBarUnit>._,
+                A<int>._, A<int>._, false, A<bool>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.AggregateBar>>([]);
+
+        await _venue.GetBarsAsync(
+            Contract,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch.AddHours(1),
+            TimeSpan.FromMinutes(5),
+            CancellationToken.None);
+
+        A.CallTo(() => _api.GetHistoricalBarsAsync(
+                A<string>._, A<DateTime>._, A<DateTime>._, A<ClientModels.AggregateBarUnit>._,
+                A<int>._, A<int>._, true, A<bool>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
     }
 
     // --- Venue tagging is enforced, not assumed ---

@@ -24,14 +24,21 @@ public sealed class ProjectXVenue : ITradingVenue
 
     private readonly IProjectXApiClient _api;
     private readonly IProjectXWebSocketClient _webSocket;
+    private readonly bool _live;
 
     /// <summary>Creates the adapter over a configured gateway client.</summary>
     /// <param name="api">The gateway's REST client.</param>
     /// <param name="webSocket">The gateway's realtime client.</param>
-    public ProjectXVenue(IProjectXApiClient api, IProjectXWebSocketClient webSocket)
+    /// <param name="dataTier">
+    /// Which market-data universe these credentials are entitled to. Required rather than defaulted: the wrong
+    /// tier returns an <b>empty</b> contract universe rather than an error, so a silent default would surface
+    /// much later as an unresolvable instrument.
+    /// </param>
+    public ProjectXVenue(IProjectXApiClient api, IProjectXWebSocketClient webSocket, ProjectXDataTier dataTier)
     {
         _api = api;
         _webSocket = webSocket;
+        _live = dataTier == ProjectXDataTier.Live;
     }
 
     /// <inheritdoc />
@@ -54,7 +61,7 @@ public sealed class ProjectXVenue : ITradingVenue
         CancellationToken cancellationToken = default)
     {
         List<ClientModels.Contract> matches =
-            [.. await _api.SearchContractsAsync(instrument.Symbol, cancellationToken: cancellationToken)];
+            [.. await _api.SearchContractsAsync(instrument.Symbol, _live, cancellationToken)];
 
         // Prefer the front month the gateway marks active; a search can also return expired or back months.
         ClientModels.Contract? contract = matches.Find(c => c.ActiveContract) ?? matches.FirstOrDefault();
@@ -83,6 +90,9 @@ public sealed class ProjectXVenue : ITradingVenue
             to.UtcDateTime,
             unit,
             number,
+            limit: 1000,
+            live: _live,
+            includePartialBar: false,
             cancellationToken: cancellationToken);
 
         return [.. bars.Select(ProjectXMapping.ToBar)];
