@@ -1570,7 +1570,36 @@
         <div class="btns"><span class="btn fill">Finish &amp; add to switcher</span><span class="btn out">Add another firm</span></div>
       </div>
     </div>
-    <div class="rej-why" style="margin-top:12px">Structure is <b>operator → login (per firm) → accounts</b> (R-17). The login authenticates <b>server-side</b> (R-18); the adapter calls <code>Account/search</code> to <b>discover</b> accounts (name → size / stage / practice-vs-live). New <b>active</b> accounts join the switcher; <b>passed / failed</b> stay in the full roster. Repeat per firm — several Tradovate logins (Apex, TPT, TradeDay, …).</div>
+    <div class="rej-why" style="margin-top:12px">Structure is <b>operator → login (per firm) → accounts</b> (R-17). The login authenticates <b>server-side</b> (R-18); the adapter calls <code>Account/search</code> to <b>discover</b> accounts — the name gives <b>size and stage</b>, and nothing more. It does <b>not</b> establish practice-vs-live: that is declared per firm in the next step, because the venue's own flag describes execution rather than stake (gh#60). New <b>active</b> accounts join the switcher; <b>passed / failed</b> stay in the full roster. Repeat per firm — several Tradovate logins (Apex, TPT, TradeDay, …).</div>
+  </section>
+
+  <section class="onb">
+    <div class="cap"><h2>Firm conventions — declare what “practice” means, before trading</h2><span class="bp">R-14 · R-17 · gh#60</span>
+      <span class="muted">the venue flag describes <b>execution</b>, not <b>stake</b> · firms differ · an undeclared stage cannot be traded</span></div>
+    <div class="flow-grid">
+      <div class="flow-step">
+        <div class="step-h"><span class="step-n">5</span>What the venue reports<span class="tag" style="margin-left:auto">read-only</span></div>
+        <div class="credfield"><span class="ck2">Platform · firm</span><span class="cval">Tradovate · Apex</span></div>
+        <div class="credfield"><span class="ck2">venue mode flag</span><span class="cval">simulated — all 3 accounts</span></div>
+        <div class="warnbn"><span class="ic">⚠</span><div>The venue reports <b>where orders execute</b>, not <b>what is at stake</b>. Every account here is simulated execution — <b>including the funded one</b>, which still pays out and can still be lost to a trailing drawdown.</div></div>
+
+        <div class="step-h" style="margin-top:12px"><span class="step-n">6</span>What each stage means <i>at this firm</i></div>
+        <div class="mrow"><div class="ai"><div class="an">Evaluation</div><div class="am"><span>fee paid · pass / fail</span></div></div><div class="seg"><button class="on">practice</button><button>at risk</button></div></div>
+        <div class="mrow"><div class="ai"><div class="an">Funded</div><div class="am"><span>payout · trailing drawdown</span></div></div><div class="seg"><button>practice</button><button class="on">at risk</button></div></div>
+        <div class="onb-sync">Declared per firm — Topstep, TradeDay, … each get their own, even on the same platform</div>
+      </div>
+      <div class="flow-step">
+        <div class="step-h"><span class="step-n">7</span>Resulting classification<span class="chip warn" style="margin-left:auto">1 undeclared</span></div>
+        <div class="acct-full">
+          <div class="mrow"><div class="ai"><div class="an">APEX-251044</div><div class="am"><span class="chip ghost">50K</span><span>Evaluation</span></div></div><span class="chip good">practice</span></div>
+          <div class="mrow"><div class="ai"><div class="an">APEX-247820</div><div class="am"><span class="chip ghost">100K</span><span>Funded</span></div></div><span class="chip bad">at risk</span></div>
+          <div class="mrow off"><div class="ai"><div class="an">APEX-260191</div><div class="am"><span class="chip ghost">150K</span><span>Static — new stage</span></div></div><span class="chip warn">undeclared</span></div>
+        </div>
+        <div class="killbig"><span class="sq2"></span><div class="kt"><b>APEX-260191 cannot be traded.</b> A stage this firm hasn’t been declared for falls back to <b>at risk</b>, which R-14 permits in production only. Declare it to enable — the fallback never silently opens an account up.</div></div>
+        <div class="btns"><span class="btn fill">Save conventions</span><span class="btn out">Review later</span></div>
+      </div>
+    </div>
+    <div class="rej-why" style="margin-top:12px">Why the <b>operator declares</b> this instead of the adapter deriving it: a venue's mode flag (ProjectX <code>simulated</code>, Tradovate's demo/live <b>host</b>) says where an order executes, not whether money is at stake — and prop firms map their stages onto it differently. Several firms share one platform (Apex, TPT, TradeDay all on Tradovate), so the <i>same</i> flag means different things per login (R-17). The adapter therefore surfaces what the venue said and stops; the classification is the operator's, per firm, and feeds <code>TradingMode</code> → <code>TradingModePolicy</code> (R-14). An <b>undeclared stage falls back to “at risk”</b> — the one direction that cannot lose money — so a firm adding a new account type <b>blocks</b> rather than quietly becoming tradable in dev. <b>Open:</b> whether “operator” is still the right word now every user connects their own logins (R-18); and whether declaring per <b>stage</b> (as shown) is enough, or whether individual accounts need an override.</div>
   </section>
 
   <section class="pb">
