@@ -63,10 +63,20 @@ each hand out account `9001`, and an `ESM25` on one is not the other's, so nothi
 Finnhub, order types vary — so a gap fails loudly at the seam instead of surfacing mid-execution (**Q-14**).
 
 **What must not leak across it:** transport shape (ProjectX = one realtime host, two SignalR hubs; Tradovate =
-two separate sockets), auth scheme, and how practice-vs-live is expressed (ProjectX exposes a required
-**`simulated`** flag per account; Tradovate splits it by **host**). The adapter resolves it; the core sees only
-`TradingMode`. `TradingModePolicy` then enforces **R-14 — practice accounts only outside production** — in code,
-below the model.
+two separate sockets), auth scheme, and how the venue expresses its **execution mode** (ProjectX exposes a
+required **`simulated`** flag per account; Tradovate splits it by **host**). The adapter normalizes that raw
+signal; the core sees only `TradingMode`, and `TradingModePolicy` enforces **R-14** in code, below the model.
+
+> **How `TradingMode` is derived is under revision — gh#60.** The venue's flag says **where an order executes**,
+> not **whether capital is at risk**. A Topstep *funded* account reports `simulated: true` — it is copy-traded on
+> a simulated matching engine — yet real payouts ride on it, and breaching it costs the operator money. Deriving
+> `TradingMode` from that flag alone therefore classifies a funded account as **practice**, and R-14 would permit
+> trading it outside production: the gate failing in the dangerous direction.
+>
+> This is **live in the shipped adapter** (`ProjectXMapping.ToVenueAccount` maps `simulated → Practice`), and a
+> run against a real login classified **all 293 accounts as practice — `EXPRESS-…` funded stages included**. The
+> design under review keeps the adapter reporting only the venue's raw signal and adds a **per-firm, per-stage
+> operator declaration** of what counts as at-risk. This paragraph and the seam settle together when gh#60 does.
 
 ### Risk gate — the enforcing checkpoint (R-5, R-16)
 Every order funnels through one gate before transmission — manual ticket, taken suggestion, edited take, or a
