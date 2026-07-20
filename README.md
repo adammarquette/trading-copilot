@@ -70,7 +70,7 @@ The PRD is *what* the product does; the engineering guide is *how* we build it; 
 |---|---|
 | [`documentation/`](documentation/) | All specs & design docs — the substance today (PRD + engineering guide; a `wiki/` companion knowledge base to come) |
 | `src/` | .NET solution (`MarqSpec.TradingCopilot.slnx`, base namespace `MarqSpec.TradingCopilot.*`) — projects build out under `src/` per the roadmap (`Domain`, `Data`, the `Api` BFF, + test projects so far); naming per engineering guide §3 |
-| `external/` | Vendored submodules — [`MarqSpec.Client.ProjectX`](https://github.com/adammarquette/MarqSpec.Client.ProjectX), the ProjectX/TopstepX gateway client the v1 venue adapter builds on. Outside `src/` so this solution's build settings aren't imposed on it |
+| `external/` | Vendored submodules, pinned per venue client: [`MarqSpec.Client.ProjectX`](https://github.com/adammarquette/MarqSpec.Client.ProjectX) (the v1 adapter builds against it) and [`MarqSpec.Client.Tradovate`](https://github.com/adammarquette/MarqSpec.Client.Tradovate) (requirements only so far — carried for reference, nothing builds against it yet). Outside `src/` so this solution's build settings aren't imposed on them |
 | `AGENTS.md` · `CLAUDE.md` | Orientation for AI coding agents (root); `CLAUDE.md` is a shim that imports `AGENTS.md` |
 | [`documentation/AGENT-MEMORY.md`](documentation/AGENT-MEMORY.md) | Agents' catch-all — practices and cross-agent notes that don't fit any formal document |
 
