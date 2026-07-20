@@ -7,8 +7,19 @@ the root [`AGENTS.md`](AGENTS.md) (agent contract). Source-control practices dra
 (wiki: [source-control practices](documentation/wiki/pages/source-control-practices.md)).
 
 ## Branching model
-**Branch off `develop`** (the default branch). Promote `develop` → `staging` → `main`; **never** branch off or PR
-directly into `main`. Each long-lived branch deploys to its environment (engineering §8 / §10).
+**All new work branches off `develop`** and PRs back into it — `develop` is the sole integration branch.
+Changes then promote up a one-way ladder, and **each step has exactly one allowed source**:
+
+| Target | Allowed source | Exception |
+|---|---|---|
+| `develop` | any `feature` / `bug` branch | — |
+| `staging` | **`develop` only** | allowed with a stated, good reason recorded in the PR |
+| `main` | **`staging` only** | **none** |
+
+**Never** branch off `main`, and never PR into it from anything but `staging` — production history stays
+single-source, so every release traces back through `staging`. Note the asymmetry: `staging` has an escape
+hatch for the occasional justified exception; `main` does not. Each long-lived branch deploys to its
+environment (engineering §8 / §10).
 
 ## Branch naming
 Name every working branch:
