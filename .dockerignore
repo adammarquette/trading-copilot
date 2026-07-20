@@ -1,0 +1,9 @@
+# Keep the Docker build context small and clean (the Dockerfile only needs src/ + .editorconfig).
+**/bin/
+**/obj/
+**/.vs/
+.git/
+.github/
+documentation/
+*.md
+.env
