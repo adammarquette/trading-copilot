@@ -110,3 +110,9 @@ dotnet_naming_style.camel_style.capitalization = camel_case
 # There is NO first-party Roslyn analyzer that bans query-comprehension syntax, so this
 # rule is enforced by CODE REVIEW (and, later, a candidate custom analyzer / architecture
 # test). Documented in engineering §4 and wiki/pages/dotnet-coding-conventions.md.
+
+# EF Core migrations are generated code — exempt from style / doc / format enforcement.
+[**/Migrations/*.cs]
+generated_code = true
+dotnet_diagnostic.IDE0161.severity = none
+dotnet_diagnostic.CS1591.severity = none
