@@ -606,6 +606,16 @@
   .toggle2 button{padding:5px 12px;border-radius:6px;font-size:11.5px;color:var(--on-dim);background:none;font-weight:600}
   .toggle2 button.on{background:var(--surface-3);color:var(--on-hi)}
   @media(max-width:720px){.set-grid{grid-template-columns:1fr}.set-nav{flex-direction:row;overflow-x:auto}}
+  .af-field{flex-direction:column;align-items:stretch;gap:10px}
+  .af-tbl{display:flex;flex-direction:column;gap:6px;background:var(--bg);border:1px solid var(--outline-soft);border-radius:8px;padding:10px 12px}
+  .af-row{display:grid;grid-template-columns:1.1fr 1.3fr 1fr;align-items:center;gap:10px;font-size:12px}
+  .af-row.af-head{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--on-dim);border-bottom:1px solid var(--outline-soft);padding-bottom:6px}
+  .af-row .af-m{color:var(--on-hi);font-weight:600;font-family:var(--mono)}
+  .af-row .af-d{color:var(--on-med);font-family:var(--mono)}
+  .af-row .af-d i{color:var(--on-dim);font-style:normal;font-size:10px}
+  .af-row .af-in{font-family:var(--mono);color:var(--on-hi);background:var(--surface-2);border:1px solid var(--outline);border-radius:6px;padding:3px 8px;text-align:center;justify-self:start}
+  .af-row .af-in.ph{color:var(--on-dim);border-style:dashed;background:transparent}
+  .af-add{font-size:11px;color:var(--primary);cursor:pointer}
 
   /* ---------- backtest surface ---------- */
   .bt{margin-top:44px}
@@ -1439,6 +1449,14 @@
         <div class="field"><div class="fl"><div class="fn">Daily governor</div><div class="fd">personal daily cap inside the hard prop limit ($1,500) — throttles suggestions</div></div><div class="fc"><span class="inp">$900</span></div></div>
         <div class="field"><div class="fl"><div class="fn">Sizing basis</div><div class="fd">size to the actual stop (normal R:R) or the safety stop (strict worst case)</div></div><div class="fc"><div class="toggle2"><button class="on">Actual</button><button>Safety</button></div></div></div>
         <div class="field"><div class="fl"><div class="fn">Kill-switch action</div><div class="fd">what the panic button does to open positions — flatten all (default) or halt orders only</div></div><div class="fc"><div class="toggle2"><button class="on">Flatten all</button><button>Halt only</button></div></div></div>
+        <div class="field af-field"><div class="fl"><div class="fn">Auto-flatten times — per market</div><div class="fd">the R-13 flatten deadline, set <b>per market</b> — products close / settle at different times; <b>empty = the market’s default</b> (from its session close). Auto-flatten itself can’t be disabled (R-13).</div></div>
+          <div class="af-tbl">
+            <div class="af-row af-head"><span>Market</span><span>Default · session close</span><span>Your time · empty = default</span></div>
+            <div class="af-row"><span class="af-m">ES · NQ</span><span class="af-d">2:30 PM CT <i>pre-MOC</i></span><span class="af-in ph">— default</span></div>
+            <div class="af-row"><span class="af-m">CL</span><span class="af-d">~1:20 PM CT</span><span class="af-in">1:10 PM CT</span></div>
+            <div class="af-row"><span class="af-m">GC</span><span class="af-d">~12:20 PM CT</span><span class="af-in ph">— default</span></div>
+            <div class="af-add">＋ add market</div>
+          </div></div>
       </div>
     </div>
   </section>
@@ -1706,7 +1724,7 @@
       <div><span class="tag">R-8 · R-9</span> Journal — P&amp;L by day (calendar + equity curve); the trader’s review surface</div>
       <div><span class="tag">R-8 · R-6</span> Day detail — drill into a day’s trades; add feedback anytime; co-pilot asks follow-ups → rules</div>
       <div><span class="tag">R-17 · R-14</span> Account switcher — active + visible accounts only (full roster in Settings); a login per platform; the active account drives everything</div>
-      <div><span class="tag">config</span> Settings — risk tolerance (risk %, target R:R, max-DD, governor), entry defaults, news, watchlist, layout, account</div>
+      <div><span class="tag">config</span> Settings — risk tolerance (risk %, target R:R, max-DD, governor, per-market auto-flatten times), entry defaults, news, watchlist, layout, account</div>
       <div><span class="tag">ADR-0009</span> Backtest — test-run over ~2y (same engine, cheaper-model, news-light); refinements → rules</div>
       <div><span class="tag">§7 · ADR-0008 · ADR-0002</span> AI usage &amp; spend — <b>operator-only</b>, reported in Grafana (not a user surface)</div>
       <div><span class="tag">R-17 · R-18</span> Onboarding — add a firm login (creds server-side); discover its accounts; active ones join the switcher</div>
