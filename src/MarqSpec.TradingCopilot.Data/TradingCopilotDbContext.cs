@@ -22,6 +22,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>The tenant-root users.</summary>
     public DbSet<User> Users => Set<User>();
 
+    /// <summary>Onboarding invitations (R-18) — not user-owned; accepted anonymously by token hash.</summary>
+    public DbSet<Invitation> Invitations => Set<Invitation>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -32,6 +35,13 @@ public class TradingCopilotDbContext : TenantDbContext
             user.HasIndex(u => u.Email).IsUnique();
             user.Property(u => u.Email).HasMaxLength(320);
             user.Property(u => u.DisplayName).HasMaxLength(128);
+        });
+
+        modelBuilder.Entity<Invitation>(invitation =>
+        {
+            invitation.HasIndex(i => i.TokenHash).IsUnique();
+            invitation.Property(i => i.Email).HasMaxLength(320);
+            invitation.Property(i => i.TokenHash).HasMaxLength(128);
         });
     }
 }
