@@ -40,6 +40,34 @@ alternatives (Kafka / NATS / Redis Streams), and consequences: [ADR-0001](adr/00
 
 ## Components
 
+### Venue abstraction — the broker seam (R-17)
+Everything below depends on venue-neutral interfaces, never on a broker SDK. They live in
+`MarqSpec.TradingCopilot.Domain/Venue/`; each venue ships an adapter behind them (v1: ProjectX/TopstepX).
+
+**Decomposed into three slices**, so a component depends on the narrowest one that does its job:
+
+| Slice | Interface | Who implements it |
+|---|---|---|
+| Market data | `IMarketDataSource` — resolve contract, historical bars, quote stream | every source, **including data-only providers** (Finnhub) |
+| Accounts | `IAccountSource` — discover accounts, read positions | trading venues; the risk layer (R-5) reads without execution rights |
+| Execution | `IOrderExecutor` — place, cancel, **close position** | trading venues only |
+
+`ITradingVenue` composes all three. A **data-only provider implements the market-data slice and nothing else** —
+that's what makes "more than just futures data" (SPY/QQQ context) the same pipeline rather than a special case.
+
+**Venue-tagged end-to-end.** `VenueId` plus `VenueAccountId` / `VenueContractId` (`venue:key`) — two venues can
+each hand out account `9001`, and an `ESM25` on one is not the other's, so nothing is identified by a bare handle.
+
+**Capabilities are explicit** (`VenueCapability` flags on each adapter; `Require(…)` throws
+`VenueCapabilityNotSupportedException`). Venues really do differ — historical bars sit behind a paid tier on
+Finnhub, order types vary — so a gap fails loudly at the seam instead of surfacing mid-execution (**Q-14**).
+
+**What must not leak across it:** transport shape (ProjectX = one realtime host, two SignalR hubs; Tradovate =
+two separate sockets), auth scheme, and how practice-vs-live is expressed (ProjectX derives it from the account
+**name**, `PRAC-…` vs `50KTC-…`; Tradovate splits it by **host**). The adapter derives it; the core sees only
+`TradingMode`. `TradingModePolicy` then enforces **R-14 — practice accounts only outside production** — in code,
+below the model.
+
 ### Ingestion service — live market data (R-1)
 Connects via **websocket** and processes every event on the wire, then **publishes onto the event pipeline** for
 uniform downstream handling. (ProjectX exposes this as SignalR hubs — see the wiki's

@@ -312,7 +312,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 1. *(Engineering)* **ProjectX order API capabilities.** Which order types are supported (market, limit, stop, bracket/OCO)? Are modify and cancel exposed? What is position-query latency? This gates both R-11 execution design and R-13 auto-flatten reliability.
 2. *(Engineering)* **ProjectX order-flow granularity.** Do the streams expose trade-by-trade data with aggressor side (or bid/ask context) sufficient for footprint reconstruction — or is aggregation/inference required?
 3. *(Engineering — safety-critical)* **Auto-flatten guarantee & failure mode.** How is the flatten *guaranteed* to fire — redundant scheduler, independent watchdog? What happens if the cloud tier is unreachable or a flatten order is rejected at 2:59 PM? Does the local UI hold a fallback flatten path? Define the failure mode explicitly before any live trading. Consolidated in [ADR-0013](adr/0013-failure-recovery-model.md) (the gating safety-critical item).
-4. *(Engineering)* **Practice vs. live account handling in ProjectX.** How does the API distinguish them (separate credentials/endpoints)? Can both be connected at once? How is an accidental live connection prevented?
+4. *(Engineering)* **Practice vs. live account handling in ProjectX.** How does the API distinguish them (separate credentials/endpoints)? Can both be connected at once? **Answered:** neither — ProjectX has no mode field and no sandbox host; practice-vs-live is **derived from the account name** (`PRAC-…` vs `50KTC-…`), while Tradovate splits it by **host**. Both are adapter-side; the core sees only `TradingMode` ([wiki](wiki/pages/projectx-gateway-api.md)). *How is an accidental live connection prevented?* **Settled (S1, gh#9):** `TradingModePolicy` refuses a live account outside production (R-14), enforced in code rather than by configuration convention.
 5. *(Engineering)* **Untaken-suggestion simulation rules.** Fill assumptions (touch vs. trade-through, slippage, partial-target handling) so simulated R is consistent and honest.
 6. *(Engineering)* **X/Twitter access method.** Official API tiers vs. scraping — cost, ToS exposure, reliability.
 
@@ -324,7 +324,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 11. *(Product)* Rulebook representation: structured DSL vs. natural-language rules interpreted at suggestion time.
 12. *(Product)* Alert taxonomy and noise budget (max alerts/hour; measuring alert fatigue).
 13. *(Legal/personal)* Scraping posture per news site (ToS review before adding).
-14. *(Engineering)* Venue capability matrix (R-17): which trading APIs beyond ProjectX (Tradovate named), and how they differ in order types, order-flow granularity, and account model — defining what the venue-neutral interface must abstract.
+14. *(Engineering)* Venue capability matrix (R-17): which trading APIs beyond ProjectX (Tradovate named), and how they differ in order types, order-flow granularity, and account model — defining what the venue-neutral interface must abstract. **Partly settled (S1, gh#9):** the interface and the capability model now exist in code — three slices (market-data / account / execution), venue-tagged identifiers, and explicit `VenueCapability` flags each adapter declares, with an unsupported capability failing loudly at the seam. What remains is populating the per-venue rows as each adapter lands.
 
 ## 9. Phasing
 
