@@ -2,6 +2,18 @@
 
 Chronological ingest / lint history. Prefix: `## [YYYY-MM-DD] <op> | <title>`.
 
+## [2026-07-19] operator-input | Auto-flatten timing + end-of-day settlement resiliency
+**Source:** operator (Adam) — session / close mechanics; no external URL (exact times flagged **confirm** vs. CME rulebook / venue help).
+**Created:** `pages/market-sessions-and-settlement.md`. **Updated:** R-13 + several stale "3:00 PM CST" refs (PRD), ADR-0013 (auto-flatten guarantee + a settlement bullet), ADR-0007, data-dictionary RiskProfile (`auto-flatten deadline`) + time note, engineering §7, wireframe safety-control copy, index.
+**Why:** operator corrected the auto-flatten model — it is **our feature**, fires **ahead of** the venue's forced flatten, and the hard problem is **resiliency / fail-over** across the CME settlement close.
+
+**Key takeaways:**
+- **Times (CT):** ~**2:30** our default flatten (pre-**MOC**) · **3:00** cash-equity EOD (MOC volatility) · ~**3:10** venue forced flatten (Topstep — prop-only backstop) · **4:00** CME futures close → **4–5 settlement / maintenance** (settlement price struck).
+- **Auto-flatten is a configurable system feature** (default ~2:30 CT), fired **before** the venue backstop — and a live brokerage has **none** — so it needs **redundancy** (the ADR-0013 watchdog earns its keep), not a lean on the venue.
+- **Per instrument:** the deadline is set **per instrument** (GC / CL / ES / NQ) — **crude & gold settle earlier** than equities — defaulting from each instrument's session close (Instrument gains a `settlement/close time`; RiskProfile deadline is per-instrument).
+- **Carryover trap:** a position held through settlement is **re-marked** at the settlement price → end-of-day handling **reconciles from the venue as source of truth**, is maintenance-window aware, and reconciles the re-mark (ADR-0013).
+- **Doc correction:** 3 PM CT is the **equity EOD**, *not* the CME close (4 PM) — fixed the mislabelled references.
+
 ## [2026-07-19] ingest | Microsoft source-control playbook — branch-naming convention
 **Source:** https://microsoft.github.io/code-with-engineering-playbook/source-control/ (WebFetch ✓, copied to `sources/urls`).
 **Created:** `pages/source-control-practices.md` + root **`CONTRIBUTING.md`**. **Updated:** engineering §10, `AGENTS.md`, index.
