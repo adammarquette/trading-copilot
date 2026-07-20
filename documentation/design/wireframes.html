@@ -323,7 +323,8 @@
   .rbar{display:flex;align-items:center;gap:10px;margin-bottom:9px;font-size:11.5px}
   .rbar .lab2{width:92px;flex:none;color:var(--on-med)}
   .rbar .track{flex:1;height:8px;background:var(--surface-3);border-radius:5px;overflow:hidden}
-  .rbar .fill2{height:100%;background:var(--short);opacity:.65;border-radius:5px}
+  /* display:block is load-bearing — .fill2 is a <span>, and a percentage width has no effect on an inline box. */
+  .rbar .fill2{display:block;height:100%;background:var(--short);opacity:.65;border-radius:5px}
   .rbar .pct{width:32px;text-align:right;font-family:var(--mono);color:var(--on-dim);flex:none}
 
   /* ---------- pass feedback ---------- */
@@ -1359,9 +1360,21 @@
   </section>
 
   <section class="spend">
-    <div class="cap"><h2>AI usage &amp; spend — operator-only, in Grafana</h2><span class="bp">§7 · ADR-0008 · ADR-0002</span>
-      <span class="muted">not a user surface in the multi-user model — see why</span></div>
-    <div class="warnbn"><span class="ic">📊</span><div>AI usage &amp; spend is an <b>operator</b> concern — one shared Anthropic / Cohere account funds every user — so it is reported in <b>Grafana</b> (observability, ADR-0002) and <b>not shown to end users</b>. The <b>AI-spend governor</b> is a <b>platform-level</b> cost control the operator configures; invited users never see or manage spend. <b>If</b> the operator later has invitees bring <b>their own LLM accounts</b>, per-user spend returns as a user surface. <span class="muted">(Was a user-facing meter; moved to operator observability when the app became multi-user — gh#4.)</span></div></div>
+    <div class="cap"><h2>AI usage &amp; spend — your keys, your bill</h2><span class="bp">ADR-0015 · ADR-0008 · ADR-0002 · gh#62</span>
+      <span class="muted">self-hosted: one operator per deployment, so spend is the user's own — back in the app, still reported to Grafana</span></div>
+    <div class="meter-h"><span>AI spend — <b style="color:var(--on-hi)">July</b> · Anthropic + Cohere</span><span class="mono">$34.10 <span style="color:var(--on-dim)">of $60 cap</span></span></div>
+    <div class="rbar"><span class="lab2">Suggestions</span><span class="track"><span class="fill2 ok" style="width:46%"></span></span><span class="pct">$18.40</span></div>
+    <div class="rbar"><span class="lab2">Co-pilot chat</span><span class="track"><span class="fill2 ok" style="width:27%"></span></span><span class="pct">$10.85</span></div>
+    <div class="rbar"><span class="lab2">Embeddings</span><span class="track"><span class="fill2 ok" style="width:12%"></span></span><span class="pct">$4.85</span></div>
+    <div class="meter-f"><span class="chip good">$25.90 left this month</span><span class="chip ghost">tracking ~$47 by month end</span><span class="chip ghost">cap resets 1 Aug</span></div>
+    <div class="cons-read">
+      <div class="ci"><div class="ck">per suggestion</div><div class="cv">$0.021</div></div>
+      <div class="ci"><div class="ck">suggestions</div><div class="cv">876</div></div>
+      <div class="ci"><div class="ck">taken</div><div class="cv">41</div></div>
+      <div class="ci"><div class="ck">cost per taken</div><div class="cv">$0.45</div></div>
+    </div>
+    <div class="warnbn" style="margin-top:14px"><span class="ic">💳</span><div>Spend is billed to <b>your own</b> Anthropic and Cohere keys. At the cap the co-pilot <b>stops proposing</b> and says so — it never keeps spending quietly, and it never blocks you from trading manually. Raise or remove the cap in Settings.</div></div>
+    <div class="rej-why" style="margin-top:12px">Restored as a user surface (gh#62). It was moved to Grafana under `gh#4` because one shared Anthropic / Cohere account funded every user, making spend an operator concern — but ADR-0015 settled distribution as <b>self-hosted, fork-first</b>: each person runs their own instance against their own LLM keys and pays their own bill, so an instance is <b>multi-user capable, single-operator by default</b>. Hiding a user's own spend behind a Grafana they'd also have to run is backwards. The old panel anticipated exactly this — “<i>if the operator later has invitees bring their own LLM accounts, per-user spend returns as a user surface</i>”. Grafana reporting is <b>unchanged</b> (ADR-0002); this is an addition, not a move back. <b>Open:</b> whether the cap is a hard stop or a warn-then-continue, and whether taken-vs-suggested cost belongs here or in the journal.</div>
   </section>
 
   <section class="life">
@@ -1631,15 +1644,23 @@
       </div>
     </div>
     <div class="pb-detail">
-      <div class="pdh"><span class="pdn">13 / 48 EMA-Crossover</span><span class="tag">v1.3</span><span class="chip ghost">platform-curated</span><span class="chip good" style="margin-left:auto">installed · personalized</span></div>
+      <div class="pdh"><span class="pdn">13 / 48 EMA-Crossover</span><span class="tag">v1.3</span><span class="chip ghost">bundled</span><span class="chip good" style="margin-left:auto">installed · personalized</span></div>
       <div class="pb-layer"><span class="pl"><span class="pln">1</span>Indicators / features</span><span class="pv">13 EMA, 48 EMA, VWAP (trend filter)</span></div>
       <div class="pb-layer"><span class="pl"><span class="pln">2</span>Setups → triggers</span><span class="pv">“13 crosses 48 <b>up</b>, price &gt; VWAP” → long · “…crosses <b>down</b>, price &lt; VWAP” → short (compiled into triggers)</span></div>
       <div class="pb-layer"><span class="pl"><span class="pln">3</span>Suggestion shape</span><span class="pv">entry on the cross / first pullback · stop beyond the last swing · target <span class="over">2.5R</span> <span style="color:var(--on-dim)">(template 2.0R — yours)</span></span></div>
       <div class="pb-layer"><span class="pl"><span class="pln">4</span>Risk defaults</span><span class="pv"><span class="over">1.0%</span>/trade · R:R 2.5 · RTH only — seeds the risk gate (your risk tolerance wins)</span></div>
       <div class="pb-layer"><span class="pl"><span class="pln">5</span>Rules</span><span class="pv">“no counter-trend crosses in the first 5 min” · “skip if ADR is exhausted” — each with its rationale, and the option to suppress</span></div>
-      <div class="btns" style="margin-top:14px"><span class="btn fill">Update to v1.4</span><span class="btn out">Personalize</span><span class="btn text">Duplicate as my template</span></div>
+      <div class="btns" style="margin-top:14px"><span class="btn fill">Update to v1.4</span><span class="btn out">Personalize</span><span class="btn out">Share…</span><span class="btn text">Duplicate as my template</span></div>
     </div>
-    <div class="rej-why" style="margin-top:12px">A template is a methodology's <b>runnable form</b>; the methodology <b>knowledge</b> lives in the wiki (grounded from a course / source, not invented). <b>Install</b> instantiates per-user, <b>editable</b> strategies / rules / triggers (R-20); your edits <span class="over">override</span> the template but keep its <b>lineage</b> (opt-in updates). Outcomes feed <b>per-strategy analytics</b> (R-9) + the <b>AI refinement loop</b> (R-6) — so “13/48” gets tuned to <b>you</b>. <b>ICT</b>'s FVG / order-block / liquidity are <b>custom detectors</b>, not stock indicators (R-21).</div>
+    <div class="pb-detail" style="margin-top:16px">
+      <div class="pdh"><span class="pdn">Share a playbook</span><span class="chip ghost">between deployments</span><span class="chip info" style="margin-left:auto">export · import</span></div>
+      <div class="pb-layer"><span class="pl"><span class="pln">1</span>Export</span><span class="pv">writes a single <b>playbook file</b> — indicators, setups, suggestion shape, risk defaults, rules. Your <b>personalizations, journal and account details are not included</b>.</span></div>
+      <div class="pb-layer"><span class="pl"><span class="pln">2</span>Send</span><span class="pv">email it, or hand over the file however you like — everyone runs their <b>own</b> deployment, so there is no shared library to publish into</span></div>
+      <div class="pb-layer"><span class="pl"><span class="pln">3</span>Import</span><span class="pv">the recipient drops the file into their instance; it lands as <b>received</b>, alongside <b>bundled</b> and <b>your own</b></span></div>
+      <div class="warnbn" style="margin-top:12px"><span class="ic">⚠</span><div>A received playbook is <b>someone else's material</b>. It arrives <b>inactive</b>, with its rules and risk defaults shown for review — nothing runs, and nothing is proposed from it, until you read it through and turn it on. Its risk defaults never override yours.</div></div>
+      <div class="btns" style="margin-top:12px"><span class="btn fill">Export playbook</span><span class="btn out">Import a file…</span></div>
+    </div>
+    <div class="rej-why" style="margin-top:12px">A template is a methodology's <b>runnable form</b>; the methodology <b>knowledge</b> lives in the wiki (grounded from a course / source, not invented). <b>Install</b> instantiates per-user, <b>editable</b> strategies / rules / triggers (R-20); your edits <span class="over">override</span> the template but keep its <b>lineage</b> (opt-in updates). Outcomes feed <b>per-strategy analytics</b> (R-9) + the <b>AI refinement loop</b> (R-6) — so “13/48” gets tuned to <b>you</b>. <b>ICT</b>'s FVG / order-block / liquidity are <b>custom detectors</b>, not stock indicators (R-21). <b>Sharing is cross-deployment (gh#62).</b> ADR-0015 makes distribution fork-first, so there is no shared platform to publish into and no user directory to share with — a playbook travels as a <b>file</b>, by email or any other means, between two people running their own instances. That gives three provenances rather than two: <b>bundled</b> (ships with the repo — “platform-curated” no longer describes anything), <b>your own</b>, and <b>received</b>. The third is the one that matters: an imported playbook is <b>untrusted input</b> and must not inherit the standing of one that shipped with the code, so it arrives inactive and proposes nothing until read and enabled. <b>Open:</b> whether export should be signed or versioned for provenance, and whether receiving should diff against a bundled ancestor when one exists.</div>
   </section>
 
   <section class="rb">
