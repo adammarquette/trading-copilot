@@ -96,7 +96,7 @@ erDiagram
 ## 1. Reference & identity
 | Entity | Key fields | Storage | Traces |
 |---|---|---|---|
-| **Instrument** | symbol, venue/source, asset class (future/equity/index/etf), exchange, tick size, point value, currency, session hours, contract/expiry | REL | R-1, R-17 |
+| **Instrument** | symbol, venue/source, asset class (future/equity/index/etf), exchange, tick size, point value, currency, session hours, **settlement / close time** (drives the per-instrument R-13 flatten default), contract/expiry | REL | R-1, R-13, R-17 |
 | **TradingVenue** | name (ProjectX / Tradovate), kind = execution, capabilities (order types, data streams), hosts/endpoints, mode support | REL | R-17, ADR-0007 |
 | **DataSource** | name (Finnhub / Tiingo), kind = data-only, capabilities (ws / rest, market / news), free-tier limits | REL | R-1, R-2, R-17 |
 | **Strategy / Setup** | name (VWAP-reclaim, opening-drive…), description, enabled, **template lineage** (source StrategyTemplate + version, if installed from one) — the **per-user, editable instance** | REL | R-4, R-9, R-21 |
@@ -153,7 +153,7 @@ a **self-imposed** max-loss (R-5) that reuses the same trailing-floor machinery.
 ## 5. Risk
 | Entity | Key fields | Storage | Traces |
 |---|---|---|---|
-| **RiskProfile / Limits** (risk tolerance) | prop rules (daily loss, trailing DD), fixed **%-risk per trade**, **target R:R** (reward:risk, e.g. 1.5 : 1), manual (max contracts, per-instrument caps, **max-DD-per-trade**), **daily governor**, **daily profit target** + **consistency target** (max best-day % of total profit → **stand-down on reach**: suppress suggestions + optional stop-for-day), sizing basis (actual / safety), **kill-switch mode** (flatten-all | halt-only; default flatten-all), **auto-flatten deadline** (default ~2:30 PM CT — pre-MOC; R-13 / ADR-0013) — all configurable; **seeds sizing + the R:R KPI** | REL | R-5, R-9, R-13, ADR-0007, ADR-0013 |
+| **RiskProfile / Limits** (risk tolerance) | prop rules (daily loss, trailing DD), fixed **%-risk per trade**, **target R:R** (reward:risk, e.g. 1.5 : 1), manual (max contracts, per-instrument caps, **max-DD-per-trade**), **daily governor**, **daily profit target** + **consistency target** (max best-day % of total profit → **stand-down on reach**: suppress suggestions + optional stop-for-day), sizing basis (actual / safety), **kill-switch mode** (flatten-all | halt-only; default flatten-all), **auto-flatten deadline — per instrument** (GC / CL / ES / NQ close/settle at different times; defaults from each instrument's session close — equity-index ~2:30 PM CT pre-MOC, crude/gold earlier; R-13 / ADR-0013) — all configurable; **seeds sizing + the R:R KPI** | REL | R-5, R-9, R-13, ADR-0007, ADR-0013 |
 | **GateDecision** | suggestion / order, computed size, **binding layer**, outcome (allow / block / resize / acknowledge), ts — auditable | REL | R-5, R-16, ADR-0007 |
 
 ## 6. Suggestions
