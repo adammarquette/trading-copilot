@@ -31,7 +31,7 @@ Design-time UI artifacts for the trading co-pilot's **React SPA**. The **UI desi
   - the **journal — P&L by day** — calendar + equity curve of realized daily P&L (R-8/R-9); and
   - **day detail & feedback** — drill into a day's trades, add feedback anytime, co-pilot asks follow-ups → rules (R-8/R-6); and
   - **account switcher** — one operator's many trading accounts grouped by platform login; the dropdown shows **only active + visible** accounts, with the complete roster + per-account hide toggle in Settings (R-17/R-14);
-  - **settings — configuration** — a two-pane config surface gathering the cross-feature settings (risk tolerance / target R:R front and center, entry defaults, news, watchlist, layout, account); and
+  - **settings — configuration** — a two-pane config surface gathering the cross-feature settings (risk tolerance / target R:R front and center, **per-market auto-flatten times** (null = the market's default), entry defaults, news, watchlist, layout, account); and
   - **news relevance & feedback** — the mapping / topics config panel (ticker↔instrument, per-instrument + global topics, AI-suggested) and per-item sentiment thumbs (R-2);
   - **backtest** — config (range / instruments / strategies / model) → summary metrics + refinement suggestions (ADR-0009); and
   - **AI usage & spend** — **operator-only**, reported in **Grafana** (not a user surface) in the multi-user model (§7 / ADR-0008 / ADR-0002); and
