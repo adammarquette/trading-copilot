@@ -20,9 +20,11 @@ dictionary is kept **in lockstep with the `MarqSpec.TradingCopilot.Data` entitie
   instrument carries **tick size** + **point value** for P&L math.
 - **Identity:** surrogate PK (GUID or `bigint` — *Decide*) plus natural keys where stable.
 - **Venue / source tagging (R-17):** instruments, accounts, orders, and fills carry a **venue** (execution) and/or
-  **source** (data) tag end-to-end, so cross-source joins stay honest.
+  **source** (data) tag end-to-end, so cross-source joins stay honest. These columns persist the domain vocabulary
+  in `MarqSpec.TradingCopilot.Domain/Venue/` — `VenueId`, `VenueAccountId`, `VenueContractId` (`venue:key`).
 - **Mode (R-14):** account / order / trade records carry **practice | live** — an identical pipeline, distinguished
-  only for safety and display.
+  only for safety and display. Persists `TradingMode`; `TradingModePolicy` refuses a live account outside
+  production.
 - **Exclusion & soft-delete (R-15) — three orthogonal flags:** `training_excluded` (drop from the AI learning set),
   `hidden_from_user` (hide from journal / reports), and `deleted` (soft-delete; hard delete is a separate operation).
   A losing trade can stay **visible to the operator** while **excluded from training** — the two are set independently.
