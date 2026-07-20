@@ -14,7 +14,7 @@ dictionary is kept **in lockstep with the `TradingCopilot.Data` entities and `do
 - Listed fields are **key / representative**, not exhaustive; exact types firm up with the EF model.
 
 ## Conventions
-- **Time:** every timestamp is `timestamptz` in **UTC**; session logic converts to CME/CST (R-13). **Trading day**
+- **Time:** every timestamp is `timestamptz` in **UTC**; session logic converts to CME/CT (R-13). **Trading day**
   vs. **calendar day** are tracked distinctly.
 - **Money & prices:** `numeric` / decimal — **never float**. Quantities are contracts (integer) or `numeric`; each
   instrument carries **tick size** + **point value** for P&L math.
@@ -153,7 +153,7 @@ a **self-imposed** max-loss (R-5) that reuses the same trailing-floor machinery.
 ## 5. Risk
 | Entity | Key fields | Storage | Traces |
 |---|---|---|---|
-| **RiskProfile / Limits** (risk tolerance) | prop rules (daily loss, trailing DD), fixed **%-risk per trade**, **target R:R** (reward:risk, e.g. 1.5 : 1), manual (max contracts, per-instrument caps, **max-DD-per-trade**), **daily governor**, **daily profit target** + **consistency target** (max best-day % of total profit → **stand-down on reach**: suppress suggestions + optional stop-for-day), sizing basis (actual / safety), **kill-switch mode** (flatten-all | halt-only; default flatten-all) — all configurable; **seeds sizing + the R:R KPI** | REL | R-5, R-9, ADR-0007 |
+| **RiskProfile / Limits** (risk tolerance) | prop rules (daily loss, trailing DD), fixed **%-risk per trade**, **target R:R** (reward:risk, e.g. 1.5 : 1), manual (max contracts, per-instrument caps, **max-DD-per-trade**), **daily governor**, **daily profit target** + **consistency target** (max best-day % of total profit → **stand-down on reach**: suppress suggestions + optional stop-for-day), sizing basis (actual / safety), **kill-switch mode** (flatten-all | halt-only; default flatten-all), **auto-flatten deadline** (default ~2:30 PM CT — pre-MOC; R-13 / ADR-0013) — all configurable; **seeds sizing + the R:R KPI** | REL | R-5, R-9, R-13, ADR-0007, ADR-0013 |
 | **GateDecision** | suggestion / order, computed size, **binding layer**, outcome (allow / block / resize / acknowledge), ts — auditable | REL | R-5, R-16, ADR-0007 |
 
 ## 6. Suggestions
