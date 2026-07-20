@@ -81,7 +81,7 @@ The stack below is the settled default; diverge only with a reason.
 - **Domain primitives at the boundary (parse, don't validate):** `InstrumentId`, `AccountId`, and money/size types — errors here move real contracts.
 - **Decide (trading-specific, early):**
   - **Money & prices:** `decimal`, tick-size-aware — **never** binary floating point for prices, sizes, or P&L.
-  - **Time:** one canonical representation (UTC internally) with explicit CME/CST session boundaries and the 3:00 PM CST flatten deadline as first-class domain concepts.
+  - **Time:** one canonical representation (UTC internally) with explicit CME/CT session boundaries and the **configurable flatten deadline (default ~2:30 PM CT, pre-MOC)** as first-class domain concepts.
 
 ## 5. Testing & Verification Strategy
 
