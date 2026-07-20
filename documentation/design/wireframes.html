@@ -13,6 +13,28 @@
     --r-s:8px; --r-m:12px; --r-l:16px;
     --e1:0 1px 2px rgba(0,0,0,.5); --e2:0 4px 12px rgba(0,0,0,.5); --e3:0 10px 28px rgba(0,0,0,.55);
   }
+  /* ---- Light theme: the ADR-0005 "token swap", + targeted overrides for hardcoded on-container colors ---- */
+  :root[data-theme="light"]{
+    --bg:#E9EDF4; --surface-1:#FFFFFF; --surface-2:#F1F4F9; --surface-3:#E3E9F2; --surface-4:#D4DCE8;
+    --on-hi:#111826; --on-med:#48536A; --on-dim:#79839A;
+    --outline:#C3CBD9; --outline-soft:#E1E6EF;
+    --primary:#2D6BD6; --primary-ctr:#D8E4FB; --on-primary:#FFFFFF;
+    --long:#1E9A56; --long-ctr:#D4F0DE; --short:#D8443A; --short-ctr:#FBDAD6;
+    --warn:#B07414; --warn-ctr:#FBEDC9; --critical:#D6352A; --critical-ctr:#FBD4CF;
+    --e1:0 1px 2px rgba(17,24,38,.10); --e2:0 4px 12px rgba(17,24,38,.10); --e3:0 10px 28px rgba(17,24,38,.12);
+  }
+  :root[data-theme="light"] .killbtn{color:#8A1C13}
+  :root[data-theme="light"] .killbtn:hover{background:#F6C3BD}
+  :root[data-theme="light"] .msg.me{color:#123863}
+  :root[data-theme="light"] .wsafety .k{color:#8A1C13}
+  :root[data-theme="light"] .warnbn b{color:#6B4A0E}
+  :root[data-theme="light"] .riskblk{color:#123863}
+  :root[data-theme="light"] .riskblk b{color:#111826}
+  :root[data-theme="light"] .killbig .kt{color:#8A1C13}
+  :root[data-theme="light"] .killbig .kt b{color:#111826}
+  :root[data-theme="light"] .mon{background:radial-gradient(120% 150% at 50% -25%,#F1F4F9,#E9EDF4)}
+  :root[data-theme="light"] .auth-stage{background:radial-gradient(120% 150% at 50% -20%,#F1F4F9,#E9EDF4)}
+  :root[data-theme="light"] [style*="#ff8a80"]{color:#D8443A !important}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--on-hi);font-family:var(--font);line-height:1.5;
     -webkit-font-smoothing:antialiased;font-size:14px}
@@ -1699,13 +1721,16 @@
 
   <p class="foot">Mid-fidelity wireframes — structure, dark Material language, and adaptive behavior, not final visuals.
   Type shown in a system stack; production uses <b>Roboto</b> / <b>Roboto Mono</b>. Committed to the dark theme
-  (the product's default); a light variant would reuse the same tokens. Order-flow / DOM (Bookmap-style) is a later
+  (the product's default); the theme toggle (top-right, sun / moon) previews the light variant — the same tokens, swapped (ADR-0005). Order-flow / DOM (Bookmap-style) is a later
   bespoke pane and isn't drawn here.</p>
 </div>
 
 <script>
   (function(){
     var UP="#4FBF7B", DN="#F0655C", PRI="#9DC3FF", GRID="#242A34", DIM="#6C7482";
+    function readTheme(){try{var c=getComputedStyle(document.documentElement);function t(n,f){var v=c.getPropertyValue(n);return (v&&v.trim())||f;}
+      UP=t('--long',UP);DN=t('--short',DN);PRI=t('--primary',PRI);GRID=t('--outline-soft',GRID);DIM=t('--on-dim',DIM);}catch(e){}}
+    readTheme();
     var closes=[5182,5179,5186,5183,5190,5195,5192,5199,5205,5201,5208,5214,5210,5217,5223,5219,5226,5231,5228,5235,5233,5229,5234,5230,5227,5231];
     var LO=5171, HI=5252;
     function candles(w,h,overlay){
@@ -1754,9 +1779,12 @@
       s+='<polyline points="'+p2+'" fill="none" stroke="'+DIM+'" stroke-width="1.2"/>';
       return s+'</svg>';
     }
-    document.querySelectorAll('.js-price').forEach(function(el){el.innerHTML=candles(600,+el.dataset.h||220,el.dataset.overlay==='1');});
-    document.querySelectorAll('.js-rsi').forEach(function(el){el.innerHTML=rsi(600,+el.dataset.h||60);});
-    document.querySelectorAll('.js-macd').forEach(function(el){el.innerHTML=macd(600,+el.dataset.h||60);});
+    function drawCharts(){readTheme();
+      document.querySelectorAll('.js-price').forEach(function(el){el.innerHTML=candles(600,+el.dataset.h||220,el.dataset.overlay==='1');});
+      document.querySelectorAll('.js-rsi').forEach(function(el){el.innerHTML=rsi(600,+el.dataset.h||60);});
+      document.querySelectorAll('.js-macd').forEach(function(el){el.innerHTML=macd(600,+el.dataset.h||60);});
+    }
+    window.__drawCharts=drawCharts; drawCharts();
 
     // --- journal: P&L by day (illustrative month) ---
     var jpnl=[320,-140,210,480,-220,90,640,-80,150,305,-410,260,120,-180,540,75,-95,430,210,-260,180,90,150];
@@ -1792,5 +1820,23 @@
     esvg+='<polyline points="'+eline+'" fill="none" stroke="'+UP+'" stroke-width="1.6"/>';
     esvg+='<circle cx="'+exx(jcum.length-1).toFixed(1)+'" cy="'+eyy(jcum[jcum.length-1]).toFixed(1)+'" r="3" fill="'+UP+'"/></svg>';
     var jeq=document.getElementById('j-eq'); if(jeq)jeq.innerHTML=esvg;
+  })();
+</script>
+
+<button id="tcTheme" type="button" aria-label="Toggle light or dark theme"
+  style="position:fixed;top:14px;right:14px;z-index:9999;display:inline-flex;align-items:center;gap:7px;background:var(--surface-3);color:var(--on-hi);border:1px solid var(--outline);border-radius:20px;padding:7px 13px;font:600 12px/1 Roboto,system-ui,sans-serif;cursor:pointer;box-shadow:var(--e2)">
+  <span id="tcThemeIcon">☀</span><span id="tcThemeLbl">Light</span></button>
+<script>
+  (function(){
+    var r=document.documentElement, b=document.getElementById('tcTheme'),
+        ic=document.getElementById('tcThemeIcon'), lb=document.getElementById('tcThemeLbl');
+    function sync(){var light=r.getAttribute('data-theme')==='light';
+      ic.textContent=light?'☾':'☀'; lb.textContent=light?'Dark':'Light';}
+    sync();
+    b.addEventListener('click',function(){
+      var light=r.getAttribute('data-theme')==='light';
+      r.setAttribute('data-theme', light?'dark':'light'); sync();
+      if(window.__drawCharts){window.__drawCharts();}
+    });
   })();
 </script>
