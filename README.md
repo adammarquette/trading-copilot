@@ -95,7 +95,7 @@ Software here is built with AI agents as first-class engineering participants. T
 
 ## License
 
-Copyright © 2026 Marquette Specifications. Licensed under the **GNU Affero General Public License v3.0** — see
+Copyright © 2026 Adam Marquette. Licensed under the **GNU Affero General Public License v3.0** — see
 [`LICENSE`](LICENSE).
 
 AGPL is a deliberate choice over a permissive licence. Its distinguishing term is **network use**: run a modified
