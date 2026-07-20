@@ -63,8 +63,8 @@ each hand out account `9001`, and an `ESM25` on one is not the other's, so nothi
 Finnhub, order types vary — so a gap fails loudly at the seam instead of surfacing mid-execution (**Q-14**).
 
 **What must not leak across it:** transport shape (ProjectX = one realtime host, two SignalR hubs; Tradovate =
-two separate sockets), auth scheme, and how practice-vs-live is expressed (ProjectX derives it from the account
-**name**, `PRAC-…` vs `50KTC-…`; Tradovate splits it by **host**). The adapter derives it; the core sees only
+two separate sockets), auth scheme, and how practice-vs-live is expressed (ProjectX exposes a required
+**`simulated`** flag per account; Tradovate splits it by **host**). The adapter resolves it; the core sees only
 `TradingMode`. `TradingModePolicy` then enforces **R-14 — practice accounts only outside production** — in code,
 below the model.
 
