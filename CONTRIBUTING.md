@@ -13,8 +13,12 @@ Changes then promote up a one-way ladder, and **each step has exactly one allowe
 | Target | Allowed source | Exception |
 |---|---|---|
 | `develop` | any `feature` / `bug` branch | — |
-| `staging` | **`develop` only** | allowed with a stated, good reason recorded in the PR |
+| `staging` | **`develop` only** | state the reason in the PR **and** add the `ladder-exception` label |
 | `main` | **`staging` only** | **none** |
+
+The `ladder` CI check (`.github/workflows/branch-policy.yml`) validates the base/head pair on every PR into
+`staging` or `main`. The `ladder-exception` label is the escape hatch made explicit and auditable — it exists
+for `staging` and deliberately has **no equivalent for `main`**.
 
 **Never** branch off `main`, and never PR into it from anything but `staging` — production history stays
 single-source, so every release traces back through `staging`. Note the asymmetry: `staging` has an escape
@@ -62,8 +66,11 @@ task** plus an independent **QA task** (engineering §10).
 - Before a PR: `dotnet format --verify-no-changes` + **unit tests green**. **Test-first is the Definition of Done**
   (no new public method without a failing test first). Query code uses **fluent / method syntax, never LINQ
   query-comprehension** (engineering §4).
-- **Branch protection** on `develop` / `staging` / `main` requires status checks (build / test / eval) before merge.
-  Production deploy and any rollback are **human-approved**.
+- **Merge gate — currently advisory.** GitHub branch protection is **not available on this repo**: it is plan-gated
+  on private repositories, so the protection and rulesets APIs both refuse. CI (`build & unit tests`, `ladder`)
+  therefore reports violations but **cannot block a merge** — treat a red check as blocking by convention. Enabling
+  real protection (GitHub Pro, or making the repo public) is tracked in `gh#45`; the required-check wiring is ready
+  the moment it lands. Production deploy and any rollback are **human-approved**.
 
 ## Local development
 `docker compose up -d` from the repo root (ADR-0012 / engineering §8); the database connection string is
