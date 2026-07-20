@@ -73,6 +73,16 @@ public class ProjectXVenueTests
     // --- The data tier: asking the wrong universe returns nothing, not an error ---
 
     [Fact]
+    public void Constructor_ShouldThrow_WhenTheDataTierIsNotRecognized()
+    {
+        // Falling through to simulated would silently recreate the empty-universe failure the
+        // required parameter exists to prevent.
+        Action act = () => new ProjectXVenue(_api, _webSocket, (ProjectXDataTier)99);
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
     public async Task ResolveContractAsync_ShouldQueryTheSimulatedUniverse_WhenTheTierIsSimulated()
     {
         // Practice credentials against live:true return an EMPTY contract list rather than an error, which

@@ -38,7 +38,16 @@ public sealed class ProjectXVenue : ITradingVenue
     {
         _api = api;
         _webSocket = webSocket;
-        _live = dataTier == ProjectXDataTier.Live;
+        _live = dataTier switch
+        {
+            ProjectXDataTier.Simulated => false,
+            ProjectXDataTier.Live => true,
+
+            // An unrecognized tier must not fall through to simulated: that would silently recreate
+            // the empty-universe failure this parameter exists to prevent.
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(dataTier), dataTier, "Unrecognized ProjectX market-data tier."),
+        };
     }
 
     /// <inheritdoc />
