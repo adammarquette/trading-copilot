@@ -19,6 +19,8 @@ public static class AuthEndpoints
         RouteGroupBuilder group = endpoints.MapGroup("/auth");
         group.MapPost("/login", LoginAsync).AllowAnonymous();
         group.MapGet("/me", MeAsync).RequireAuthorization();
+        group.MapPost("/invitations", IssueInvitationAsync).RequireAuthorization();
+        group.MapPost("/accept-invite", AcceptInviteAsync).AllowAnonymous();
         return endpoints;
     }
 
@@ -52,5 +54,67 @@ public static class AuthEndpoints
         return user is null
             ? Results.NotFound()
             : Results.Ok(new { user.Id, user.Email, user.DisplayName });
+    }
+
+    private static async Task<IResult> IssueInvitationAsync(
+        IssueInvitationRequest request,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        CancellationToken cancellationToken)
+    {
+        (string token, string tokenHash) = InvitationTokens.Generate();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+
+        Invitation invitation = new()
+        {
+            Id = Guid.NewGuid(),
+            Email = request.Email,
+            TokenHash = tokenHash,
+            IssuedByUserId = currentUser.UserId,
+            Status = InvitationStatus.Pending,
+            CreatedUtc = now,
+            ExpiresUtc = now.AddDays(7),
+        };
+
+        database.Invitations.Add(invitation);
+        await database.SaveChangesAsync(cancellationToken);
+
+        // The plaintext token is returned once — only its hash is stored.
+        return Results.Ok(new { invitation.Id, token, expiresUtc = invitation.ExpiresUtc });
+    }
+
+    private static async Task<IResult> AcceptInviteAsync(
+        AcceptInviteRequest request,
+        TradingCopilotDbContext database,
+        IPasswordHasher passwordHasher,
+        ITokenIssuer tokenIssuer,
+        CancellationToken cancellationToken)
+    {
+        string tokenHash = InvitationTokens.Hash(request.Token);
+        Invitation? invitation = await database.Invitations
+            .FirstOrDefaultAsync(i => i.TokenHash == tokenHash, cancellationToken);
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        if (invitation is null || !invitation.CanBeAcceptedAt(now))
+        {
+            return Results.BadRequest(new { error = "This invitation is invalid, already used, or expired." });
+        }
+
+        User user = new()
+        {
+            Id = Guid.NewGuid(),
+            Email = invitation.Email,
+            PasswordHash = passwordHasher.Hash(request.Password),
+            DisplayName = request.DisplayName,
+            Status = UserStatus.Active,
+            CreatedUtc = now,
+        };
+
+        database.Users.Add(user);
+        invitation.Status = InvitationStatus.Accepted;
+        invitation.AcceptedByUserId = user.Id;
+        await database.SaveChangesAsync(cancellationToken);
+
+        return Results.Ok(new { token = tokenIssuer.Issue(user) });
     }
 }
