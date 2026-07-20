@@ -9,7 +9,7 @@ their subtree**:
 ## What this repo is
 A **multi-user futures day-trading co-pilot** — a human-in-the-loop decision-support **and** execution
 system with a safety-critical **auto-flatten** before the CME close. C# / .NET, integrating with the broker via
-`MarqSpec.Client.ProjectX`. The `src/` solution is scaffolded — **`MarqSpec.TradingCopilot.slnx`** (base namespace `MarqSpec.TradingCopilot.*`) with a `Domain` project + unit/integration test projects (F1); read the docs before building.
+`MarqSpec.Client.ProjectX`. The `src/` solution (**`MarqSpec.TradingCopilot.slnx`**, base namespace `MarqSpec.TradingCopilot.*`) builds out per the roadmap — `Domain`, `Data` (EF Core), the `Api` (BFF), + test projects so far; read the docs before building.
 
 ## Source of truth (read before coding)
 **Start at `README.md`, then the `documentation/` folder** — it is authoritative; this file only summarizes and
@@ -56,7 +56,7 @@ it there instead — `AGENT-MEMORY.md` is overflow, not a substitute.
 - **Practice accounts only outside production.** dev/staging connect to ProjectX **practice** accounts (real execution path, no real money); a live real-money account is **production-only** — never wire one into a lower environment.
 
 ## Build / test
-- Solution: `src/MarqSpec.TradingCopilot.slnx` (base namespace `MarqSpec.TradingCopilot.*`) — a `Domain` project + unit/integration test projects (F1). Build: `dotnet build src/MarqSpec.TradingCopilot.slnx`.
+- Solution: `src/MarqSpec.TradingCopilot.slnx` (base namespace `MarqSpec.TradingCopilot.*`) — `Domain`, `Data`, `Api` + test projects so far. Build: `dotnet build src/MarqSpec.TradingCopilot.slnx`.
 - Test tiers, as they're added: **unit** (mocked) · **integration** (real deps in **staging**) ·
   **deterministic evals**. Before a PR: `dotnet format --verify-no-changes` + unit tests green.
 - **Unit tests → `MarqSpec.TradingCopilot.UnitTests`:** xUnit + FakeItEasy + FluentAssertions, fully mocked (suite runs

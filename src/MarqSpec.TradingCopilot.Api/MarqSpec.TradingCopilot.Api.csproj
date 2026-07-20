@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!-- The BFF host (R-18 auth, R-10 API). Minimal API + JWT bearer. Common settings from ../Directory.Build.props. -->
+
+  <ItemGroup>
+    <!-- Identity's PasswordHasher comes from the ASP.NET shared framework (Web SDK); only JWT bearer needs a package. -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Data\MarqSpec.TradingCopilot.Data.csproj" />
+  </ItemGroup>
+
+</Project>
