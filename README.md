@@ -7,8 +7,33 @@ system so intent and outcome are captured natively; and journals every suggestio
 loop. Its one autonomous action is risk-reducing: **auto-flattening open positions before the CME close.**
 
 > **Status: `v0.1.0` (pre-release) — early / scaffolding.** The **`documentation/` folder is the current source of truth** — the product
-> requirements and engineering practices live there. The .NET solution under `src/` is a stub today. This project is built
+> requirements and engineering practices live there. The `src/` foundation is building out (solution + CI, data layer + multi-user tenancy, auth) and **runs locally via `docker compose up`** (see below). Built
 > with an AI-Engineering-first approach.
+
+---
+
+## Run it locally
+
+Requires Docker. From the repo root:
+
+```bash
+docker compose up -d --build      # builds the API image, starts Postgres + the app
+```
+
+The API comes up on **http://localhost:8080**, applies the EF migrations, and seeds a first operator
+(`operator@local` / `changeme-local` — local-dev defaults; override in `.env`). The invitation-only flow works end
+to end:
+
+```
+POST /auth/login          {email, password}            -> JWT
+POST /auth/invitations    {email}   (Bearer)           -> an invite token (shown once)
+POST /auth/accept-invite  {token, password, displayName} -> a new account + JWT
+GET  /auth/me             (Bearer)                     -> your user
+```
+
+Config — the DB connection string, `Jwt:SigningKey`, and the bootstrap operator — comes from env / `.env` (see
+[`.env.example`](.env.example)); real secrets are never committed (ADR-0012, engineering §8). `docker compose down -v`
+tears it down.
 
 ---
 
