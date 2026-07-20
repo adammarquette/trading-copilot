@@ -44,6 +44,14 @@ services:
       Jwt__SigningKey: "${Jwt__SigningKey:-local-dev-signing-key-change-me-at-least-32-bytes}"
       Bootstrap__Email: "${Bootstrap__Email:-operator@local}"
       Bootstrap__Password: "${Bootstrap__Password:-changeme-local}"
+      # Broker credentials, passed through from .env. Deliberately NO local-dev default: a made-up
+      # value would let the app start and fail obscurely at the first venue call. Empty is honest.
+      # Practice accounts only outside production (R-14).
+      ProjectX__ApiKey: "${ProjectX__ApiKey:-}"
+      ProjectX__ApiSecret: "${ProjectX__ApiSecret:-}"
+      # Defaulted, not passed through empty: this map is an allowlist, and an empty value would BIND
+      # over the client's own default and point the app at nowhere. Override in .env for other firms.
+      ProjectX__BaseUrl: "${ProjectX__BaseUrl:-https://api.topstepx.com}"
     ports:
       - "8080:8080"
 

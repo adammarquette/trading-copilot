@@ -30,6 +30,26 @@ v1 trading venue behind `MarqSpec.Client.ProjectX` (see [engineering §3](../../
   gives DOM. So **footprint / delta is reconstructable** from trade direction + depth — there is no separate
   explicit aggressor field, but the buy/sell classification + DOM suffice. Feeds R-3. The stream also carries **trade volume**, so it supplies the data for **Bookmap-style** DOM / order-flow displays (a later feature).
 
+## The `live` flag — a market-data tier, distinct from account mode
+Contract search and bar retrieval take a **`live` boolean** selecting which market-data universe answers. It is
+**not** the same axis as an account's `simulated` flag: that says what an *account* is, this says which *data*
+you are entitled to see. Measured against the gateway with **practice** credentials (2026-07-20, gh#9):
+
+| call | `live: true` | `live: false` |
+|---|---|---|
+| `SearchContracts("ES")` | **0** | **6** — incl. `CON.F.US.EP.U26` (ESU6) |
+| `AvailableContracts` | **0** | **51** |
+
+**The wrong tier returns an empty result, not an error.** Nothing 4xxs; the universe is simply empty, and the
+failure surfaces far away as "no contract matches ES". Practice credentials must pass `live: false`. The adapter
+therefore takes the tier as a **required** constructor argument (`ProjectXDataTier`) rather than defaulting it —
+a silent default here is indistinguishable from a missing instrument.
+
+**Known broken:** `Retrieve Bars` currently **400s for every parameter combination** — the gateway rejects the
+`unit` field (`"The JSON value could not be converted to …AggregateBarUnit"`), so the whole body fails to bind.
+Ruled out: unit, window, limit, partial-bar flag, and the tier. Tracked in **gh#56**; the fix belongs in
+`MarqSpec.Client.ProjectX`'s serialization, not in the adapter.
+
 ## Orders / execution (Q-1)
 - `POST /api/Order/place` — params: `accountId`, `contractId`, `size`, `limitPrice?`, `stopPrice?`,
   `trailPrice?`, `customTag?`.
