@@ -27,11 +27,24 @@ jobs:
         env:
           BASE: ${{ github.base_ref }}
           HEAD: ${{ github.head_ref }}
+          # `head_ref` is only the short branch name, so on its own a fork branch *named* `staging`
+          # or `develop` would satisfy the ladder. Identity of the head repository is checked too.
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
           # Whether the PR carries the documented escape hatch for staging.
           HAS_EXCEPTION: ${{ contains(github.event.pull_request.labels.*.name, 'ladder-exception') }}
         run: |
           set -euo pipefail
-          echo "PR: $HEAD -> $BASE"
+          echo "PR: $HEAD -> $BASE (head repo: ${HEAD_REPO:-unknown})"
+
+          # The ladder governs *this* repository's promoted history. A fork's `staging` is a
+          # different lineage, so this is checked before the branch name and carries no exception:
+          # the label exists to excuse a branch deviation, not a foreign repository. Fork
+          # contributions target `develop`, which has no ladder constraint.
+          if [ "${HEAD_REPO:-}" != "$REPO" ]; then
+            echo "::error::'$BASE' accepts merges from branches in '$REPO' only — got '$HEAD' on '${HEAD_REPO:-an unknown repository}'. Open fork contributions against 'develop' instead. See CONTRIBUTING.md 'Branching model'."
+            exit 1
+          fi
 
           case "$BASE" in
             main)

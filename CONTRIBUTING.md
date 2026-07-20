@@ -7,8 +7,9 @@ the root [`AGENTS.md`](AGENTS.md) (agent contract). Source-control practices dra
 (wiki: [source-control practices](documentation/wiki/pages/source-control-practices.md)).
 
 ## Branching model
-**All new work branches off `develop`** and PRs back into it — `develop` is the sole integration branch.
-Changes then promote up a one-way ladder, and **each step has exactly one allowed source**:
+**All new work branches off `develop`** and PRs back into it — `develop` is the sole integration branch
+(`hotfix` is the one unsettled case; see below). Changes then promote up a one-way ladder, and **each step has
+exactly one allowed source**:
 
 | Target | Allowed source | Exception |
 |---|---|---|
@@ -17,8 +18,17 @@ Changes then promote up a one-way ladder, and **each step has exactly one allowe
 | `main` | **`staging` only** | **none** |
 
 The `ladder` CI check (`.github/workflows/branch-policy.yml`) validates the base/head pair on every PR into
-`staging` or `main`. The `ladder-exception` label is the escape hatch made explicit and auditable — it exists
-for `staging` and deliberately has **no equivalent for `main`**.
+`staging` or `main`, and requires the head branch to live in **this** repository — a fork branch merely *named*
+`staging` is a different lineage, so fork contributions go to `develop`, which carries no ladder constraint. The
+`ladder-exception` label is the escape hatch made explicit and auditable — it excuses a **branch** deviation into
+`staging`, never a foreign repository, and deliberately has **no equivalent for `main`**.
+
+**`hotfix` is deliberately absent from the table above.** What it branches from, and what it merges into, is
+**undecided** ([gh#43](https://github.com/adammarquette/trading-copilot/issues/43)): an emergency fix that must
+reach production without waiting out the full ladder is precisely what the `staging` exception and the
+no-exception-for-`main` rule would have to arbitrate, and that trade-off has not been made. Nothing is in
+production yet, so the question isn't live — **settle it before the first production deploy**, and until then
+raise a hotfix on its issue rather than assuming a route.
 
 **Never** branch off `main`, and never PR into it from anything but `staging` — production history stays
 single-source, so every release traces back through `staging`. Note the asymmetry: `staging` has an escape
