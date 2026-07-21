@@ -48,8 +48,14 @@ public sealed class OrderExecutionService : IOrderExecutionService
     /// <inheritdoc />
     public async Task<ExecutionResult> SendAsync(ExecutionRequest request, CancellationToken cancellationToken)
     {
-        // R-14 first, before the order is even priced: an account this environment may not trade should be
-        // refused outright rather than sized and then rejected.
+        // R-14's *environment* restriction -- practice accounts only outside production -- first, before the
+        // order is even priced: an account this environment may not trade should be refused outright rather
+        // than sized and then rejected.
+        //
+        // This is not R-14's other obligation, the "mode guard" of PRD R-14: that an Order or Suggestion cannot
+        // be *persisted* with a mode conflicting with its parent Account. That one is about journal integrity,
+        // belongs to the repository layer plus a DB check constraint, and has nothing to enforce here -- the
+        // venue ticket carries no mode, and nothing is persisted on this path yet.
         if (!TradingModePolicy.IsAllowed(request.Account.Mode, _environment))
         {
             return ExecutionResult.RefusedByMode(
@@ -77,8 +83,13 @@ public sealed class OrderExecutionService : IOrderExecutionService
 
         GateDecision decision = _gate.Evaluate(request.Proposal, request.Risk);
 
-        // Blocked, or resized to nothing -- the gate's "no trade". Either way nothing is transmitted.
-        if (decision.Outcome == GateOutcome.Blocked || decision.ApprovedQuantity <= 0)
+        // Whitelist, not "anything but Blocked". GateDecision has a public constructor and IRiskGate is
+        // replaceable, so an unrecognized or later-added outcome must not become authorization by default --
+        // a new outcome opts in here deliberately. A zero approved quantity is the gate's "no trade" whatever
+        // outcome accompanies it.
+        bool authorized = decision.Outcome is GateOutcome.Allowed or GateOutcome.Resized;
+
+        if (!authorized || decision.ApprovedQuantity <= 0)
         {
             return ExecutionResult.RefusedByRisk(decision);
         }

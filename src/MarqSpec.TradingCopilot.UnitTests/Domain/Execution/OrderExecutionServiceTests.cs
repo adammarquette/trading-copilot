@@ -371,6 +371,34 @@ public class OrderExecutionServiceTests
     }
 
     [Fact]
+    public async Task SendAsync_ShouldNotTransmit_WhenTheGateReturnsAnUnrecognizedOutcome()
+    {
+        // "Anything but Blocked" would make a later-added outcome authorization by default. GateDecision has a
+        // public constructor and IRiskGate is replaceable, so this is reachable without editing the enum.
+        GateReturns(new GateDecision((GateOutcome)99, ApprovedQuantity: 4, RiskLayer.SanityCap, "unknown"));
+
+        ExecutionResult result = await _service.SendAsync(
+            Request(Account(TradingMode.Practice)), CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByRisk);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Theory]
+    [InlineData(GateOutcome.Allowed)]
+    [InlineData(GateOutcome.Resized)]
+    public async Task SendAsync_ShouldTransmit_ForEveryOutcomeThatIsAuthorization(GateOutcome outcome)
+    {
+        GateReturns(new GateDecision(outcome, ApprovedQuantity: 2, RiskLayer.PerTradeRisk, "sized"));
+        VenueAccepts();
+
+        ExecutionResult result = await _service.SendAsync(
+            Request(Account(TradingMode.Practice)), CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.Placed);
+    }
+
+    [Fact]
     public async Task SendAsync_ShouldCarryNoGateDecision_ForEveryPreGateRefusal()
     {
         // Consumers must read Outcome, not infer the reason from a null Decision -- four different guards

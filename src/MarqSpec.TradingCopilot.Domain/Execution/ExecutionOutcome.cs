@@ -7,9 +7,15 @@ public enum ExecutionOutcome
     Placed,
 
     /// <summary>
-    /// Refused by the R-14 mode guard: this account may not be traded from this environment. Nothing was sized
-    /// and nothing was sent.
+    /// Refused by R-14's <b>environment restriction</b>: this account's mode may not be traded from this
+    /// deployment environment. Nothing was sized and nothing was sent.
     /// </summary>
+    /// <remarks>
+    /// Not to be confused with R-14's <i>mode guard</i> (PRD R-14), which forbids <b>persisting</b> an
+    /// <c>Order</c> or <c>Suggestion</c> whose mode conflicts with its parent account's. That is a journal
+    /// integrity rule enforced at the repository layer and by a DB check constraint; it is not this guard, and
+    /// it has nothing to act on until orders are persisted.
+    /// </remarks>
     RefusedByMode,
 
     /// <summary>

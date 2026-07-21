@@ -117,7 +117,7 @@ Guards run in a deliberate order, and each refusal is a distinct outcome rather 
 
 | Order | Guard | Outcome on refusal |
 | --- | --- | --- |
-| 1 | **R-14 mode** — may this account be traded from this environment? | `RefusedByMode` |
+| 1 | **R-14 environment** — may this account's mode be traded from this environment? | `RefusedByMode` |
 | 2 | **Account state** — does the venue itself report the account as tradable? | `RefusedByAccountState` |
 | 3 | **Coherence** — does the request describe one trade, at this venue? | `RefusedByMismatch` |
 | 4 | **Representability** — can the ticket express this order type? | `RefusedByUnsupportedType` |
@@ -127,9 +127,17 @@ Everything before the gate runs *first* on purpose: an authorization computed fr
 not describe what gets sent. Every pre-gate refusal carries **no** `GateDecision` — nothing was sized — so
 consumers read the outcome rather than inferring a reason from a null decision.
 
-**Guards are whitelists, not blacklists.** The order-type check names the four types the ticket can express and
-refuses everything else, so a value arriving from deserialization or a cast — or a type added later without
-revisiting price selection — cannot fall through and be transmitted with its prices left unset.
+**Guards are whitelists, not blacklists.** The order-type check names the four types the ticket can express, and
+the gate check names the two outcomes that constitute authorization (`Allowed`, `Resized`) — everything else is
+refused. A value arriving from deserialization or a cast, or an enum member added later without revisiting this
+path, cannot fall through into a transmitted order. A new order type or gate outcome opts in here deliberately.
+
+**R-14 has two obligations, and this path discharges one.** The *environment restriction* — practice accounts
+only outside production — is enforced here, in code, below the model. The *mode guard* is a different rule: an
+`Order` or `Suggestion` may not be **persisted** with a mode conflicting with its parent `Account.mode`. That is
+journal integrity rather than transmission safety, it is enforced at the **repository layer and by a DB check
+constraint** (PRD R-14), and it belongs to the data layer — the venue ticket carries no mode, and nothing on this
+path is persisted yet.
 
 **Two pairings are enforced rather than assumed**, because nothing structural forces them and both fail in the
 same direction — the gate authorizes one thing, the venue receives another:
