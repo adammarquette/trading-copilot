@@ -36,13 +36,35 @@ public sealed record FirmConventions
     /// <param name="firm">The firm's name.</param>
     /// <param name="declarations">Each stage the operator has classified, and whether capital is at risk there.</param>
     /// <returns>The conventions.</returns>
-    /// <exception cref="ArgumentException">A stage is declared more than once.</exception>
+    /// <exception cref="ArgumentException">
+    /// A stage is declared more than once, is <see cref="AccountStage.Unknown"/>, or is not a defined
+    /// <see cref="AccountStage"/>.
+    /// </exception>
     public static FirmConventions For(string firm, params (AccountStage Stage, bool CapitalAtRisk)[] declarations)
     {
         Dictionary<AccountStage, bool> map = [];
 
         foreach ((AccountStage stage, bool atRisk) in declarations)
         {
+            // A stage outside the enum would be stored and then resolved to Practice or Live by ModeFor --
+            // something the domain cannot identify becoming tradeable. Refuse it at the door.
+            if (!Enum.IsDefined(stage))
+            {
+                throw new ArgumentException(
+                    $"'{(int)stage}' is not a defined account stage (firm '{firm}').", nameof(declarations));
+            }
+
+            // Unknown means the stage could not be read, so declaring what it means is incoherent. Accepting it
+            // silently is worse than refusing: ModeFor ignores Unknown, so the operator would believe they had
+            // classified something that still resolves to Undeclared.
+            if (stage == AccountStage.Unknown)
+            {
+                throw new ArgumentException(
+                    $"Stage '{AccountStage.Unknown}' cannot be declared — it means the stage could not be "
+                    + $"identified (firm '{firm}').",
+                    nameof(declarations));
+            }
+
             // Two answers for one stage is an ambiguous safety input, not something to merge or last-write-wins.
             if (!map.TryAdd(stage, atRisk))
             {
@@ -59,7 +81,7 @@ public sealed record FirmConventions
     /// <returns><see langword="true"/> if declared. Distinguishes an explicit "practice" from silence.</returns>
     public bool IsDeclared(AccountStage stage)
     {
-        return stage != AccountStage.Unknown && _capitalAtRisk.ContainsKey(stage);
+        return IsDeclarable(stage) && _capitalAtRisk.ContainsKey(stage);
     }
 
     /// <summary>Resolves what an account at this stage means economically.</summary>
@@ -70,8 +92,9 @@ public sealed record FirmConventions
     /// </returns>
     public TradingMode ModeFor(AccountStage stage)
     {
-        // An unreadable stage cannot inherit whatever the firm declared for something else.
-        if (stage == AccountStage.Unknown)
+        // An unreadable or unrecognised stage cannot inherit whatever the firm declared for something else.
+        // For() already refuses to store either, so this is defence in depth rather than the only guard.
+        if (!IsDeclarable(stage))
         {
             return TradingMode.Undeclared;
         }
@@ -79,5 +102,10 @@ public sealed record FirmConventions
         return _capitalAtRisk.TryGetValue(stage, out bool capitalAtRisk)
             ? capitalAtRisk ? TradingMode.Live : TradingMode.Practice
             : TradingMode.Undeclared;
+    }
+
+    private static bool IsDeclarable(AccountStage stage)
+    {
+        return stage != AccountStage.Unknown && Enum.IsDefined(stage);
     }
 }

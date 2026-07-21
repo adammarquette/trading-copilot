@@ -73,4 +73,40 @@ public class FirmConventionsTests
 
         act.Should().Throw<ArgumentException>();
     }
+
+    // --- What may be declared at all ---
+
+    [Fact]
+    public void For_ShouldRejectADeclarationAgainstUnknown()
+    {
+        // Unknown means "we could not read the stage", so declaring what it means is incoherent. Accepting it
+        // silently would be worse than refusing: ModeFor ignores Unknown, so the operator would believe they
+        // had classified something that still resolves to Undeclared.
+        Action act = () => FirmConventions.For("Topstep", (AccountStage.Unknown, false));
+
+        act.Should().Throw<ArgumentException>().Which.Message.Should().Contain("Unknown");
+    }
+
+    [Fact]
+    public void For_ShouldRejectAStageThatIsNotADefinedValue()
+    {
+        // Config or a cast can produce a value outside the enum. Storing it would let ModeFor hand back
+        // Practice or Live for a stage the domain does not recognise -- an unknown thing becoming tradeable,
+        // which is the exact failure direction this type exists to prevent.
+        Action act = () => FirmConventions.For("Topstep", ((AccountStage)99, false));
+
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void ModeFor_ShouldBeUndeclared_WhenTheStageIsNotADefinedValue()
+    {
+        Topstep().ModeFor((AccountStage)99).Should().Be(TradingMode.Undeclared);
+    }
+
+    [Fact]
+    public void IsDeclared_ShouldBeFalse_WhenTheStageIsNotADefinedValue()
+    {
+        Topstep().IsDeclared((AccountStage)99).Should().BeFalse();
+    }
 }

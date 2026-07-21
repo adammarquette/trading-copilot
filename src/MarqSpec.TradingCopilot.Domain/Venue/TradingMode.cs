@@ -10,9 +10,14 @@ namespace MarqSpec.TradingCopilot.Domain.Venue;
 /// funded Topstep account executes on a simulated engine yet a breach costs a real payout.
 /// </para>
 /// <para>
-/// So the venue reports its signal, the adapter surfaces it without interpreting it as economic stake, and the
-/// <b>operator declares</b> what each stage means at each firm (<see cref="FirmConventions"/>). Firms sharing one
-/// platform can and do differ.
+/// So the venue's own flag is <b>not consulted</b> here at all, and the <b>operator declares</b> what each stage
+/// means at each firm (<see cref="FirmConventions"/>). Firms sharing one platform can and do differ.
+/// </para>
+/// <para>
+/// The raw execution-routing fact is presently <b>discarded</b> by the adapters rather than carried on
+/// <see cref="VenueAccount"/> — nothing consumes it yet. The firm-onboarding surface will want to show it
+/// ("this platform reports the account as simulated"), which is when it earns a field; until then a value
+/// nothing reads is one more thing to mistake for the mode.
 /// </para>
 /// </remarks>
 public enum TradingMode

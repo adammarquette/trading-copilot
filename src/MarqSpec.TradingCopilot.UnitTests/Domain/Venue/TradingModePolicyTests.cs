@@ -113,4 +113,37 @@ public class TradingModePolicyTests
         act.Should().Throw<TradingModeNotAllowedException>()
             .Which.Message.Should().Contain("Undeclared");
     }
+
+    [Fact]
+    public void EnsureAllowed_ShouldNotBlameTheEnvironment_WhenTheModeIsUndeclared()
+    {
+        // "practice accounts only outside production" is the wrong reason and points at the wrong fix: it reads
+        // as though production would have been fine. The operator has to classify the account, not change
+        // environment.
+        Action act = () => TradingModePolicy.EnsureAllowed(TradingMode.Undeclared, DeploymentEnvironment.Production);
+
+        string message = act.Should().Throw<TradingModeNotAllowedException>().Which.Message;
+
+        message.Should().NotContain("practice accounts only outside production");
+        message.Should().Contain("Classify the account's stage");
+    }
+
+    [Fact]
+    public void EnsureAccountAllowed_ShouldNameTheAccountAndAskForClassification_WhenItIsUndeclared()
+    {
+        VenueAccount account = new(
+            VenueAccountId.Create(VenueId.Parse("projectx"), "9003"),
+            "EXPRESS-50K-9003",
+            Balance: 50_000m,
+            CanTrade: true,
+            IsVisible: true,
+            Mode: TradingMode.Undeclared);
+
+        Action act = () => TradingModePolicy.EnsureAllowed(account, DeploymentEnvironment.Production);
+
+        string message = act.Should().Throw<TradingModeNotAllowedException>().Which.Message;
+
+        message.Should().Contain("EXPRESS-50K-9003").And.Contain("Classify the account's stage");
+        message.Should().NotContain("practice accounts only outside production");
+    }
 }
