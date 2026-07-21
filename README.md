@@ -142,11 +142,6 @@ expect design discussion before implementation.
 Copyright © 2026 Adam Marquette. Licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE) and
 [`NOTICE`](NOTICE).
 
-Permissive on purpose: fork it, run it, build on it, commercially or otherwise. Apache-2.0 over MIT for the
-**express patent grant** and the **explicit trademark non-grant** — meaningful for software that executes
-financial transactions, and it keeps the project's name with the maintainer while a fork keeps everything else.
-Reasoning in [ADR-0015](documentation/adr/0015-distribution-licensing-governance.md).
-
 ### An AI-first engineering project
 
 **The great majority of this codebase was written by AI coding agents** — source, tests, and documentation —
