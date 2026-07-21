@@ -46,8 +46,16 @@ production deploy and a failure flags the release for rollback.
 Environments map to branches — dev ← `develop`, staging ← `staging`, production ← `main` — and the promotion
 ladder is one-way with exactly one allowed source per step (`CONTRIBUTING.md`, `gh#45`).
 
-Two constraints that bite in CI: the repo has a **submodule** under `external/` (checkout needs
-`submodules: true`), and `dotnet format` must be run with `--exclude external/` or it reformats vendored code.
+Three constraints that bite in CI:
+
+- The repo has a **submodule** under `external/` — checkout needs `submodules: true`.
+- `dotnet format` must be run with `--exclude external/`, or it reformats vendored code.
+- **Line endings are LF everywhere**, pinned in both `.gitattributes` and `.editorconfig`. They have to agree:
+  `dotnet format` otherwise defaults to the host's line ending, so a Windows contributor sees whitespace
+  violations that CI (`ubuntu-latest`) does not, and the local pre-PR check stops predicting the gate.
+
+**A local check that disagrees with CI is worse than no local check** — it burns time on phantom failures and
+teaches people to ignore it. When they diverge, fix the divergence, not the symptom.
 
 ## Choosing a target platform
 Railway is where this runs today (ADR-0012). When a move is on the table, the job is a **recommendation with
