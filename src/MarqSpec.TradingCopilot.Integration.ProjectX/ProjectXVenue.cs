@@ -11,8 +11,10 @@ namespace MarqSpec.TradingCopilot.Integration.ProjectX;
 
 /// <summary>
 /// The v1 venue adapter: ProjectX / TopstepX behind <see cref="ITradingVenue"/> (R-17). Every ProjectX-specific
-/// detail stops here — the two SignalR hubs, the success-flag error convention, integer account ids, and how
-/// practice-vs-live is expressed — so the core sees only the venue-neutral model.
+/// detail stops here — the two SignalR hubs, the success-flag error convention, integer account ids, and the
+/// gateway's <c>simulated</c> execution-routing flag — so the core sees only the venue-neutral model.
+/// The flag is <b>not</b> read as practice-vs-live: that is the operator's declaration, not the gateway's
+/// (<see cref="TradingMode"/>, gh#60).
 /// </summary>
 public sealed class ProjectXVenue : ITradingVenue
 {
@@ -65,7 +67,7 @@ public sealed class ProjectXVenue : ITradingVenue
         | VenueCapability.ClosePosition);
 
     /// <inheritdoc />
-    public async Task<VenueContractId> ResolveContractAsync(
+    public async Task<ResolvedContract> ResolveContractAsync(
         InstrumentId instrument,
         CancellationToken cancellationToken = default)
     {
@@ -75,9 +77,10 @@ public sealed class ProjectXVenue : ITradingVenue
         // Prefer the front month the gateway marks active; a search can also return expired or back months.
         ClientModels.Contract? contract = matches.Find(c => c.ActiveContract) ?? matches.FirstOrDefault();
 
+        // The instrument travels with the handle: this method is the only place that knows they belong together.
         return contract is null
             ? throw new ProjectXVenueException($"No ProjectX contract matches instrument '{instrument}'.")
-            : VenueContractId.Create(Id, contract.Id);
+            : new ResolvedContract(VenueContractId.Create(Id, contract.Id), instrument);
     }
 
     /// <inheritdoc />
@@ -126,7 +129,15 @@ public sealed class ProjectXVenue : ITradingVenue
         IEnumerable<ClientModels.TradingAccount> accounts =
             await _api.GetAccountsAsync(onlyActiveAccounts: false, cancellationToken);
 
-        return [.. accounts.Select(account => ProjectXMapping.ToVenueAccount(account, Id))];
+        // Nothing declares stages or firm conventions yet, so every account maps to Undeclared and is tradeable
+        // nowhere until the operator classifies it. That is the intended failure direction (gh#60): "classify
+        // this before trading it" beats "assumed practice, then traded a funded account". Wiring the operator's
+        // declaration through configuration is its own change.
+        return
+        [
+            .. accounts.Select(account =>
+                ProjectXMapping.ToVenueAccount(account, Id, FirmConventions.None, AccountStage.Unknown)),
+        ];
     }
 
     /// <inheritdoc />

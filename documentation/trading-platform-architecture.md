@@ -64,19 +64,36 @@ Finnhub, order types vary — so a gap fails loudly at the seam instead of surfa
 
 **What must not leak across it:** transport shape (ProjectX = one realtime host, two SignalR hubs; Tradovate =
 two separate sockets), auth scheme, and how the venue expresses its **execution mode** (ProjectX exposes a
-required **`simulated`** flag per account; Tradovate splits it by **host**). The adapter normalizes that raw
-signal; the core sees only `TradingMode`, and `TradingModePolicy` enforces **R-14** in code, below the model.
+required **`simulated`** flag per account; Tradovate splits it by **host**). The core sees only `TradingMode`,
+and `TradingModePolicy` enforces **R-14** in code, below the model.
 
-> **How `TradingMode` is derived is under revision — gh#60.** The venue's flag says **where an order executes**,
-> not **whether capital is at risk**. A Topstep *funded* account reports `simulated: true` — it is copy-traded on
-> a simulated matching engine — yet real payouts ride on it, and breaching it costs the operator money. Deriving
-> `TradingMode` from that flag alone therefore classifies a funded account as **practice**, and R-14 would permit
-> trading it outside production: the gate failing in the dangerous direction.
->
-> This is **live in the shipped adapter** (`ProjectXMapping.ToVenueAccount` maps `simulated → Practice`), and a
-> run against a real login classified **all 293 accounts as practice — `EXPRESS-…` funded stages included**. The
-> design under review keeps the adapter reporting only the venue's raw signal and adds a **per-firm, per-stage
-> operator declaration** of what counts as at-risk. This paragraph and the seam settle together when gh#60 does.
+#### `TradingMode` is declared, not derived (R-14, gh#60)
+
+A venue's mode flag says **where an order executes**, not **whether capital is at risk** — on a prop platform the
+two are close to orthogonal. A Topstep *funded* account reports `simulated: true` (it is copy-traded on a
+simulated matching engine) yet real payouts ride on it, and breaching it costs the operator money. The shipped
+adapter originally mapped `simulated → Practice`; a run against a real login classified **all 293 accounts as
+practice — `EXPRESS-…` funded stages included**, which R-14 would then have permitted trading outside
+production. The gate failed in the dangerous direction.
+
+So the derivation is gone. Three pieces replace it:
+
+| Piece | Owns | Where |
+| --- | --- | --- |
+| `AccountStage` | Where an account sits in a programme — `Practice` · `Evaluation` · `Funded` · `Unknown` | reported by the venue |
+| `FirmConventions` | What each stage **means economically** at one firm, declared by the operator | operator configuration |
+| `TradingMode` | Whether capital is at risk — `Practice` · `Live` · **`Undeclared`** | resolved from the two above |
+
+Conventions belong to the **firm**, not the platform: several firms share a platform, the operator holds one
+login per firm, and they classify their stages differently. An **undeclared** stage resolves to
+`TradingMode.Undeclared`, which `TradingModePolicy` refuses in **every** environment — production included, since
+that is where guessing costs most. Silence is not consent: the failure mode is "classify this before trading it",
+never "assumed practice, then traded a funded account". Both enums make the unsafe reading their zero value, so an
+uninitialised mode fails closed rather than defaulting to something tradeable.
+
+> **Open seam:** nothing wires the operator's declaration through configuration yet, so `ProjectXVenue` reports
+> every account as `Undeclared` and none are tradeable. That gap is deliberate and visible rather than papered
+> over with a plausible default — see ADR-0016 for where the declaration will live.
 
 ### Risk gate — the enforcing checkpoint (R-5, R-16)
 Every order funnels through one gate before transmission — manual ticket, taken suggestion, edited take, or a
@@ -105,6 +122,60 @@ realized balance.
 
 Outcomes are `Allowed` / `Resized` / `Blocked`, always with a binding layer and a reason — including the gate's
 "no trade" when the layers leave room for zero contracts.
+
+### Gated send path — one way to a broker (R-11, R-14)
+
+`OrderExecutionService` (`Domain/Execution/`) is the **only** thing that reaches an executor. Manual tickets,
+taken suggestions and edited takes all funnel through it, so the guards cannot be routed around (ADR-0007). The
+size transmitted is always the one the **gate approved**, never the one asked for — sending the requested
+quantity after a resize would make the gate advisory.
+
+Guards run in a deliberate order, and each refusal is a distinct outcome rather than an exception:
+
+| Order | Guard | Outcome on refusal |
+| --- | --- | --- |
+| 1 | **R-14 environment** — may this account's mode be traded from this environment? | `RefusedByMode` |
+| 2 | **Account state** — does the venue itself report the account as tradable? | `RefusedByAccountState` |
+| 3 | **Coherence** — does the request describe one trade, at this venue? | `RefusedByMismatch` |
+| 4 | **Representability** — can the ticket express this order type? | `RefusedByUnsupportedType` |
+| 5 | **Risk gate** — blocked, or resized to nothing | `RefusedByRisk` |
+
+Everything before the gate runs *first* on purpose: an authorization computed from an incoherent request would
+not describe what gets sent. Every pre-gate refusal carries **no** `GateDecision` — nothing was sized — so
+consumers read the outcome rather than inferring a reason from a null decision.
+
+**Guards are whitelists, not blacklists.** The order-type check names the four types the ticket can express, and
+the gate check names the two outcomes that constitute authorization (`Allowed`, `Resized`) — everything else is
+refused. A value arriving from deserialization or a cast, or an enum member added later without revisiting this
+path, cannot fall through into a transmitted order. A new order type or gate outcome opts in here deliberately.
+
+**R-14 has two obligations, and this path discharges one.** The *environment restriction* — practice accounts
+only outside production — is enforced here, in code, below the model. The *mode guard* is a different rule: an
+`Order` or `Suggestion` may not be **persisted** with a mode conflicting with its parent `Account.mode`. That is
+journal integrity rather than transmission safety, it is enforced at the **repository layer and by a DB check
+constraint** (PRD R-14), and it belongs to the data layer — the venue ticket carries no mode, and nothing on this
+path is persisted yet.
+
+**Two pairings are enforced rather than assumed**, because nothing structural forces them and both fail in the
+same direction — the gate authorizes one thing, the venue receives another:
+
+- **Account.** `RiskContext` carries the `VenueAccountId` it describes. Equity, drawdown floor and daily limits
+  are account-specific, so sizing against one account and transmitting to another approves a quantity the target
+  account never justified.
+- **Instrument.** `ResolveContractAsync` returns a `ResolvedContract` — the venue's opaque handle **paired with
+  the instrument it was resolved for** — so an `ES`-sized proposal cannot be sent as an `NQ` contract. The venue
+  that performed the lookup is the only party that knows the pairing, so that is where it is established.
+- **Venue.** The account and contract must both be tagged for the executor's own venue. Handles collide freely
+  across brokers — a bare `9001` is a different account at every one — and relying on each adapter to notice
+  means an adapter exception rather than a refusal, from adapters that happen to check.
+
+**The environment is fixed at construction**, from trusted host configuration, never passed per send. R-14 is an
+enforcement boundary; a caller able to name its own environment could walk a live account through it from a
+development host.
+
+`TrailingStop` is **refused outright**: the neutral ticket carries no trail distance, so no venue could receive it
+correctly. That is a property of the request, not of any venue's capabilities — refusing it here makes the answer
+the same whichever adapter is wired in. Trail distance arrives with staged stops.
 
 ### Ingestion service — live market data (R-1)
 Connects via **websocket** and processes every event on the wire, then **publishes onto the event pipeline** for

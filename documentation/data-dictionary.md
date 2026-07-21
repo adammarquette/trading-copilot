@@ -22,9 +22,11 @@ dictionary is kept **in lockstep with the `MarqSpec.TradingCopilot.Data` entitie
 - **Venue / source tagging (R-17):** instruments, accounts, orders, and fills carry a **venue** (execution) and/or
   **source** (data) tag end-to-end, so cross-source joins stay honest. These columns persist the domain vocabulary
   in `MarqSpec.TradingCopilot.Domain/Venue/` — `VenueId`, `VenueAccountId`, `VenueContractId` (`venue:key`).
-- **Mode (R-14):** account / order / trade records carry **practice | live** — an identical pipeline, distinguished
-  only for safety and display. Persists `TradingMode`; `TradingModePolicy` refuses a live account outside
-  production.
+- **Mode (R-14):** account / order / trade records carry **practice | live | undeclared** — an identical pipeline, distinguished
+  only for safety and display. Persists `TradingMode`. **Mode is declared, not derived** (gh#60): the venue reports
+  execution routing, the operator declares what each firm stage *means*, and an unclassified stage persists as
+  **`undeclared`**. `TradingModePolicy` refuses a live account outside production and an **undeclared account
+  everywhere, production included**.
 - **Exclusion & soft-delete (R-15) — three orthogonal flags:** `training_excluded` (drop from the AI learning set),
   `hidden_from_user` (hide from journal / reports), and `deleted` (soft-delete; hard delete is a separate operation).
   A losing trade can stay **visible to the operator** while **excluded from training** — the two are set independently.
@@ -121,7 +123,7 @@ Live stream and clean-historical are **distinct paths** (R-1); the historical se
 ## 3. Account & positions
 | Entity | Key fields | Storage | Traces |
 |---|---|---|---|
-| **Account** (a *trading account*) | **connection** (a firm login → operator + venue + firm; one login → **many** accounts); venue **account-id / sub-id** + **name** (`50KTC-V2-…`); **size / buying power** (50K / 100K / 150K — *notional, not the risk budget*), **type** (funded / evaluation / practice / **live-brokerage**), **stage** (evaluation / practice / funded), **status** (active / passed / failed / closed), **canTrade** + **isVisible** (broker flags) + **hidden-from-switcher** (operator preference) → **switcher-eligible = canTrade ∧ isVisible ∧ ¬hidden**, **mode** (practice / live), **simulated** flag; balance, daily P&L, **max-loss limit** + **drawdown floor** — **trailing mode** (EOD | intraday), amount, current floor, **source** (**firm-imposed** → account-fail; *or* **self-imposed** on live/brokerage → halt + flatten), **daily-loss limit (DLL)**, currency. The floor fields are modeled by `Domain/Risk/TrailingDrawdown` (mode, amount, lock, current floor) + `AccountRiskRules` | REL | R-1, R-5, R-14, R-17 |
+| **Account** (a *trading account*) | **connection** (a firm login → operator + venue + firm; one login → **many** accounts); venue **account-id / sub-id** + **name** (`50KTC-V2-…`); **size / buying power** (50K / 100K / 150K — *notional, not the risk budget*), **type** (funded / evaluation / practice / **live-brokerage**), **stage** (evaluation / practice / funded), **status** (active / passed / failed / closed), **canTrade** + **isVisible** (broker flags) + **hidden-from-switcher** (operator preference) → **switcher-eligible = canTrade ∧ isVisible ∧ ¬hidden**, **mode** (practice / live / **undeclared** — declared per firm × stage, never derived; gh#60), **simulated** flag (the venue’s *execution-routing* fact, not the mode); balance, daily P&L, **max-loss limit** + **drawdown floor** — **trailing mode** (EOD | intraday), amount, current floor, **source** (**firm-imposed** → account-fail; *or* **self-imposed** on live/brokerage → halt + flatten), **daily-loss limit (DLL)**, currency. The floor fields are modeled by `Domain/Risk/TrailingDrawdown` (mode, amount, lock, current floor) + `AccountRiskRules` | REL | R-1, R-5, R-14, R-17 |
 | **Position** | account, instrument, size, avg price, unrealized P&L, opened ts | REL | R-1, R-5 |
 | **AccountSnapshot** | account, ts, balance / P&L / headroom, **derived values** (buying power / stage / status), **`adapter_logic_version`** — the version of the adapter-derivation logic (Q-4) that computed the derived fields, so a past snapshot stays interpretable (and backtests / audits stay correct) when that logic later changes — intraday history feeding the risk layer + P&L-by-day | TS | R-5, R-9, ADR-0009 |
 
@@ -131,8 +133,8 @@ accounts. **Topstep runs its own platform (TopstepX)**, while **Apex, Take Profi
 Trader, …** are separate firms **on Tradovate** — so the operator can have **several logins on one platform** (one
 Tradovate login *per firm*). One operator therefore has **many trading accounts** (a practice account plus
 several funded / evaluation accounts), the **same shape on both** — keep it **venue-neutral** (R-17). The ProjectX
-API returns only `id / name / balance / canTrade / isVisible`; **buying power, stage, status, daily-loss limit, and
-practice-vs-live are name- or portal-derived** by the adapter (Q-4). **Risk (R-5) applies per account** (each has
+API returns only `id / name / balance / canTrade / isVisible`; **buying power, stage, status and daily-loss limit are
+name- or portal-derived** by the adapter (Q-4) — **practice-vs-live is not**: it comes from the operator’s firm conventions (gh#60). **Risk (R-5) applies per account** (each has
 its own daily-loss + trailing drawdown); the operator **selects the active account**. The **account switcher lists only switcher-eligible accounts** —
 `onlyActiveAccounts` ∧ `canTrade` ∧ `isVisible`, minus operator-**hidden** — while **passed / failed / closed and
 hidden accounts stay in the full roster** (Settings › Account & venue), where a per-account toggle returns one to
@@ -222,9 +224,11 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 - **Practice vs. live** is a **tag**, not a separate schema (R-14) — identical ingestion / journaling / learning —
   **but mode-guarded:** an `Order` / `Suggestion` `mode` **must equal its `Account.mode`**, enforced at the
   **repository + a DB check constraint** (not only the service layer), so a live order can never be journaled against
-  a practice account, or vice versa.
+  a practice account, or vice versa. An **`undeclared`** account produces no orders at all — `TradingModePolicy`
+  refuses it in every environment — so the constraint never sees that mode on an `Order` (gh#60).
 - **Adapter-derived values are versioned (Q-4).** Fields the adapter *computes* from a raw venue API (buying power,
-  stage, status, practice-vs-live) are stamped with the **`adapter_logic_version`** that produced them and historized
+  stage, status — but **not** practice-vs-live, which is declared rather than computed) are stamped with the
+  **`adapter_logic_version`** that produced them and historized
   in `AccountSnapshot`, so a past snapshot stays interpretable — and backtests / audits stay correct — after the
   derivation logic changes (ADR-0009, eng §9).
 - **Exclusion & soft-delete (R-15) are three orthogonal flags** — `training_excluded` (AI learning set),

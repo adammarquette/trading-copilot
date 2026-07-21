@@ -19,14 +19,27 @@ public static class ProjectXMapping
     /// <summary>Maps a gateway trading account onto the venue-neutral account.</summary>
     /// <param name="account">The gateway's account.</param>
     /// <param name="venue">The venue to tag it with.</param>
+    /// <param name="conventions">What the firm holding this account has declared each stage to mean.</param>
+    /// <param name="stage">Which stage this account sits at.</param>
     /// <returns>The venue-neutral account.</returns>
     /// <remarks>
-    /// <see cref="TradingMode"/> comes from the gateway's <c>simulated</c> flag, which is a required field on the
-    /// account model. The account <i>name</i> is deliberately <b>not</b> consulted: honouring a "PRAC-" prefix
-    /// could only ever reclassify a live account as practice, which is the one direction that risks real money
-    /// (R-14).
+    /// <para>
+    /// <see cref="TradingMode"/> is resolved through <paramref name="conventions"/> — <b>not</b> from the
+    /// gateway's <c>simulated</c> flag. That flag says where an order executes, which on a prop platform is
+    /// close to orthogonal to what is at stake: a funded account reports <c>simulated=true</c> and executes on
+    /// a simulated engine, yet a breach costs a real payout. Reading it as economic stake classified exactly
+    /// the account that matters most as harmless (gh#60).
+    /// </para>
+    /// <para>
+    /// Both inputs are required rather than defaulted. An account whose stage is unknown, or whose firm has
+    /// declared nothing, comes back <see cref="TradingMode.Undeclared"/> and is tradeable nowhere (R-14).
+    /// </para>
     /// </remarks>
-    public static VenueAccount ToVenueAccount(ClientModels.TradingAccount account, VenueId venue)
+    public static VenueAccount ToVenueAccount(
+        ClientModels.TradingAccount account,
+        VenueId venue,
+        FirmConventions conventions,
+        AccountStage stage)
     {
         return new VenueAccount(
             VenueAccountId.Create(venue, account.Id.ToString(CultureInfo.InvariantCulture)),
@@ -34,7 +47,7 @@ public static class ProjectXMapping
             account.Balance,
             account.CanTrade,
             account.IsVisible,
-            account.Simulated ? TradingMode.Practice : TradingMode.Live);
+            conventions.ModeFor(stage));
     }
 
     /// <summary>Maps a gateway contract onto the instrument spec the money math needs.</summary>

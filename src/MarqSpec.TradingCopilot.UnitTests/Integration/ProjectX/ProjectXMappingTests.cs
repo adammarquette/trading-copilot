@@ -13,34 +13,52 @@ public class ProjectXMappingTests
 {
     private static VenueId Venue => VenueId.Parse("projectx");
 
-    // --- Practice vs. live: the R-14 input ---
+    // --- Practice vs. live: the R-14 input (gh#60) ---
+
+    private static FirmConventions Topstep => FirmConventions.For(
+        "Topstep",
+        (AccountStage.Practice, false),
+        (AccountStage.Evaluation, false),
+        (AccountStage.Funded, true));
 
     [Fact]
-    public void ToVenueAccount_ShouldBePractice_WhenTheAccountIsSimulated()
+    public void ToVenueAccount_ShouldBeLiveForAFundedAccount_EvenThoughTheVenueMarksItSimulated()
+    {
+        // The bug gh#60 exists for. A funded Topstep account really does report simulated=true -- it executes on
+        // the firm's simulated engine -- while a breach costs a real payout. Reading the flag as economic stake
+        // classified exactly the account that matters most as harmless.
+        ClientModels.TradingAccount account = new() { Id = 9002, Name = "50KTC-V2-DLL-0000", Simulated = true };
+
+        ProjectXMapping.ToVenueAccount(account, Venue, Topstep, AccountStage.Funded)
+            .Mode.Should().Be(TradingMode.Live);
+    }
+
+    [Fact]
+    public void ToVenueAccount_ShouldBePractice_WhenTheFirmDeclaresThatStageCarriesNoRisk()
     {
         ClientModels.TradingAccount account = new() { Id = 9001, Name = "PRAC-50K-1234", Simulated = true };
 
-        ProjectXMapping.ToVenueAccount(account, Venue).Mode.Should().Be(TradingMode.Practice);
+        ProjectXMapping.ToVenueAccount(account, Venue, Topstep, AccountStage.Practice)
+            .Mode.Should().Be(TradingMode.Practice);
     }
 
     [Fact]
-    public void ToVenueAccount_ShouldBeLive_WhenTheAccountIsNotSimulated()
+    public void ToVenueAccount_ShouldBeUndeclared_WhenTheStageCannotBeIdentified()
     {
-        // Fail-safe direction: anything the venue does not mark simulated is treated as real money, which
-        // TradingModePolicy then refuses outside production.
-        ClientModels.TradingAccount account = new() { Id = 9002, Name = "50KTC-V2-DLL-0000", Simulated = false };
+        ClientModels.TradingAccount account = new() { Id = 9003, Name = "SOMETHING-UNFAMILIAR", Simulated = false };
 
-        ProjectXMapping.ToVenueAccount(account, Venue).Mode.Should().Be(TradingMode.Live);
+        ProjectXMapping.ToVenueAccount(account, Venue, Topstep, AccountStage.Unknown)
+            .Mode.Should().Be(TradingMode.Undeclared);
     }
 
     [Fact]
-    public void ToVenueAccount_ShouldIgnoreAPracticeLookingName_WhenTheVenueSaysNotSimulated()
+    public void ToVenueAccount_ShouldBeUndeclared_WhenTheFirmHasDeclaredNothing()
     {
-        // The name is not authoritative. Honouring "PRAC-" here could only reclassify a live account as
-        // practice -- the one direction that risks real money.
-        ClientModels.TradingAccount account = new() { Id = 9003, Name = "PRAC-LOOKING-NAME", Simulated = false };
+        // Silence is not consent. Nothing is tradeable until the operator says what the stage means.
+        ClientModels.TradingAccount account = new() { Id = 9004, Name = "50KTC-V2-DLL-0000", Simulated = false };
 
-        ProjectXMapping.ToVenueAccount(account, Venue).Mode.Should().Be(TradingMode.Live);
+        ProjectXMapping.ToVenueAccount(account, Venue, FirmConventions.None, AccountStage.Funded)
+            .Mode.Should().Be(TradingMode.Undeclared);
     }
 
     [Fact]
@@ -56,7 +74,7 @@ public class ProjectXMappingTests
             Simulated = true,
         };
 
-        VenueAccount mapped = ProjectXMapping.ToVenueAccount(account, Venue);
+        VenueAccount mapped = ProjectXMapping.ToVenueAccount(account, Venue, Topstep, AccountStage.Practice);
 
         mapped.Id.Should().Be(VenueAccountId.Create(Venue, "9001"));
         mapped.Name.Should().Be("PRAC-50K-1234");
@@ -69,7 +87,8 @@ public class ProjectXMappingTests
     {
         ClientModels.TradingAccount account = new() { Id = 9004, Name = "PRAC", CanTrade = false, IsVisible = true };
 
-        ProjectXMapping.ToVenueAccount(account, Venue).IsSelectable.Should().BeFalse();
+        ProjectXMapping.ToVenueAccount(account, Venue, Topstep, AccountStage.Practice)
+            .IsSelectable.Should().BeFalse();
     }
 
     // --- Contract money math ---
