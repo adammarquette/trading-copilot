@@ -10,8 +10,9 @@ namespace MarqSpec.TradingCopilot.Domain.Execution;
 /// <param name="Outcome">Placed, or refused — and by which guard.</param>
 /// <param name="Order">The venue's acknowledgement when placed; otherwise <see langword="null"/>.</param>
 /// <param name="Decision">
-/// The gate's decision, including the binding layer. <see langword="null"/> only when the mode guard refused
-/// first, in which case the order was never sized.
+/// The gate's decision, including the binding layer. <see langword="null"/> for <b>any</b> pre-gate refusal —
+/// mode, account state, mismatch, or an unrepresentable order type — in which case the order was never sized.
+/// Do not read a null decision as "the mode guard refused"; read <see cref="Outcome"/> for that.
 /// </param>
 /// <param name="Reason">A human-readable explanation, always populated.</param>
 public sealed record ExecutionResult(
@@ -43,6 +44,14 @@ public sealed record ExecutionResult(
     public static ExecutionResult RefusedByRisk(GateDecision decision)
     {
         return new ExecutionResult(ExecutionOutcome.RefusedByRisk, Order: null, decision, decision.Reason);
+    }
+
+    /// <summary>The venue reports the account as not tradable.</summary>
+    /// <param name="reason">Which account, and what the venue said about it.</param>
+    /// <returns>A refused result carrying no gate decision — nothing was sized.</returns>
+    public static ExecutionResult RefusedByAccountState(string reason)
+    {
+        return new ExecutionResult(ExecutionOutcome.RefusedByAccountState, Order: null, Decision: null, reason);
     }
 
     /// <summary>The request contradicted itself, so it was refused before the gate ran.</summary>

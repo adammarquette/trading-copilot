@@ -20,6 +20,10 @@ public class OrderExecutionServiceTests
 
     public OrderExecutionServiceTests()
     {
+        // The executor has to say who it is: the service now refuses a request tagged for another venue, and an
+        // unconfigured fake would report the default id and fail every case for the wrong reason.
+        A.CallTo(() => _venue.Id).Returns(Venue);
+
         _service = ServiceIn(DeploymentEnvironment.Development);
     }
 
@@ -297,6 +301,98 @@ public class OrderExecutionServiceTests
         sent!.Type.Should().Be(type);
         sent.LimitPrice.Should().Be(expectedLimit is null ? null : new Price(expectedLimit.Value));
         sent.StopPrice.Should().Be(expectedStop is null ? null : new Price(expectedStop.Value));
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldRefuse_WhenTheVenueReportsTheAccountAsNotTradable()
+    {
+        // A passed, failed or closed prop account reports CanTrade false. Leaving the broker to reject it would
+        // mean the ticket left the enforcing path before anything refused it.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+        VenueAccount closed = Account(TradingMode.Practice) with { CanTrade = false };
+
+        ExecutionResult result = await _service.SendAsync(Request(closed), CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByAccountState);
+        A.CallTo(() => _gate.Evaluate(A<OrderProposal>._, A<RiskContext>._)).MustNotHaveHappened();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldRefuse_WhenTheAccountBelongsToAnotherVenue()
+    {
+        // Account handles collide across venues -- a bare "9001" exists at every broker. Relying on the adapter
+        // to notice gives an exception from its mapping rather than the refusal this path promises.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+        VenueAccountId foreign = VenueAccountId.Create(VenueId.Parse("tradovate"), "9001");
+        VenueAccount account = Account(TradingMode.Practice) with { Id = foreign };
+
+        ExecutionRequest request = Request(account) with { Risk = Context(foreign) };
+
+        ExecutionResult result = await _service.SendAsync(request, CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByMismatch);
+        A.CallTo(() => _gate.Evaluate(A<OrderProposal>._, A<RiskContext>._)).MustNotHaveHappened();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldRefuse_WhenTheContractBelongsToAnotherVenue()
+    {
+        // Especially dangerous because a colliding contract key would name a real, different instrument.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+
+        ExecutionRequest request = Request(Account(TradingMode.Practice)) with
+        {
+            Contract = new ResolvedContract(
+                VenueContractId.Create(VenueId.Parse("tradovate"), "CON.F.US.EP.U26"), InstrumentId.Parse("ES")),
+        };
+
+        ExecutionResult result = await _service.SendAsync(request, CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByMismatch);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldRefuseAnUnrecognizedOrderType_RatherThanTransmitItWithNoPrices()
+    {
+        // A numeric deserialization or a cast produces a value no switch here handles. Falling through would
+        // send a ticket with every price left null -- the venue either rejects it or fills it somewhere
+        // unintended. Whitelist, not blacklist.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+
+        ExecutionRequest request = Request(Account(TradingMode.Practice)) with { Type = (OrderType)99 };
+
+        ExecutionResult result = await _service.SendAsync(request, CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByUnsupportedType);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldCarryNoGateDecision_ForEveryPreGateRefusal()
+    {
+        // Consumers must read Outcome, not infer the reason from a null Decision -- four different guards
+        // return before the gate runs.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+
+        ExecutionRequest[] refused =
+        [
+            Request(Account(TradingMode.Practice) with { CanTrade = false }),
+            Request(Account(TradingMode.Practice)) with { Risk = Context(VenueAccountId.Create(Venue, "9999")) },
+            Request(Account(TradingMode.Practice)) with { Type = OrderType.TrailingStop },
+            Request(Account(TradingMode.Practice)) with { Type = (OrderType)99 },
+        ];
+
+        foreach (ExecutionRequest request in refused)
+        {
+            ExecutionResult result = await _service.SendAsync(request, CancellationToken.None);
+
+            result.Decision.Should().BeNull();
+            result.Outcome.Should().NotBe(ExecutionOutcome.Placed);
+            result.Reason.Should().NotBeNullOrWhiteSpace();
+        }
     }
 
     [Fact]

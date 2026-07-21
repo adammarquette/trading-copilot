@@ -19,10 +19,18 @@ public enum ExecutionOutcome
     RefusedByRisk,
 
     /// <summary>
+    /// Refused because the venue itself reports the account as not tradable. Distinct from
+    /// <see cref="RefusedByMode"/>, which is about this <i>environment</i>: here the account is ineligible
+    /// everywhere, and letting the broker reject the ticket would mean it left the enforcing path first.
+    /// </summary>
+    RefusedByAccountState,
+
+    /// <summary>
     /// Refused because the request contradicts itself: the risk snapshot describes a different account than the
-    /// one being traded, or the contract was resolved for a different instrument than the proposal is sized for.
-    /// Refused <b>before</b> the gate runs — evaluating an incoherent request would produce an authorization for
-    /// something other than what would be sent.
+    /// one being traded, the contract was resolved for a different instrument than the proposal is sized for, or
+    /// the account and contract belong to a different venue than the executor. Refused <b>before</b> the gate
+    /// runs — evaluating an incoherent request would produce an authorization for something other than what
+    /// would be sent.
     /// </summary>
     RefusedByMismatch,
 

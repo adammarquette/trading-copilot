@@ -57,19 +57,22 @@ public sealed class OrderExecutionService : IOrderExecutionService
                 + $"{_environment} (R-14).");
         }
 
+        if (!request.Account.CanTrade)
+        {
+            // The venue's own eligibility statement -- a passed, failed or closed prop account reports it.
+            // Leaving this to the broker would mean the ticket left the enforcing path before being refused.
+            return ExecutionResult.RefusedByAccountState(
+                $"The venue reports account '{request.Account.Name}' ({request.Account.Id}) as not tradable.");
+        }
+
         if (Mismatch(request) is { } mismatch)
         {
             return ExecutionResult.RefusedByMismatch(mismatch);
         }
 
-        if (request.Type == OrderType.TrailingStop)
+        if (Unrepresentable(request.Type) is { } unrepresentable)
         {
-            // Not a venue capability question -- the neutral ticket has nowhere to put a trail distance, so no
-            // venue could receive this correctly. Refused here so the answer is the same everywhere rather than
-            // depending on which adapter happens to be wired in.
-            return ExecutionResult.RefusedByUnsupportedType(
-                "A trailing stop cannot be expressed: the ticket carries no trail distance. Stop management "
-                + "arrives with staged stops (gh#11).");
+            return ExecutionResult.RefusedByUnsupportedType(unrepresentable);
         }
 
         GateDecision decision = _gate.Evaluate(request.Proposal, request.Risk);
@@ -99,8 +102,18 @@ public sealed class OrderExecutionService : IOrderExecutionService
     /// structurally enforced, and both fail in the same direction: the gate authorizes one thing and the venue
     /// receives another.
     /// </summary>
-    private static string? Mismatch(ExecutionRequest request)
+    private string? Mismatch(ExecutionRequest request)
     {
+        // Handles collide freely across venues -- a bare "9001" is a different account at every broker. Letting
+        // a foreign request through means relying on each adapter to notice: ProjectX throws from its mapping,
+        // which is an exception rather than the refusal this path promises, and another executor need not check
+        // at all.
+        if (request.Account.Id.Venue != _venue.Id || request.Contract.Contract.Venue != _venue.Id)
+        {
+            return $"The request is tagged for venue '{request.Account.Id.Venue}' / "
+                + $"'{request.Contract.Contract.Venue}' but the executor is '{_venue.Id}'. Nothing was sized.";
+        }
+
         // Equity, drawdown floor and daily limits are all account-specific. Sizing against one account and
         // transmitting to another produces a quantity the target account never justified.
         if (request.Account.Id != request.Risk.Account)
@@ -115,6 +128,26 @@ public sealed class OrderExecutionService : IOrderExecutionService
             ? $"The proposal is sized for '{request.Proposal.Instrument.Id}' but the contract was resolved for "
                 + $"'{request.Contract.Instrument}'. Nothing was sized."
             : null;
+    }
+
+    /// <summary>
+    /// Whether the neutral ticket can express this order type, and why not if it cannot. A <b>whitelist</b>:
+    /// an unrecognized value — a numeric deserialization, a cast, a type added later without revisiting the
+    /// price selection — must be refused rather than transmitted with whatever prices the switches happen to
+    /// leave unset.
+    /// </summary>
+    private static string? Unrepresentable(OrderType type)
+    {
+        return type switch
+        {
+            OrderType.Market or OrderType.Limit or OrderType.Stop or OrderType.StopLimit => null,
+
+            OrderType.TrailingStop =>
+                "A trailing stop cannot be expressed: the ticket carries no trail distance. Stop management "
+                + "arrives with staged stops (gh#11).",
+
+            _ => $"Order type '{(int)type}' is not a recognized type and cannot be expressed.",
+        };
     }
 
     private static Price? LimitPriceFor(ExecutionRequest request)

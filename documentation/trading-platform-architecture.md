@@ -118,12 +118,18 @@ Guards run in a deliberate order, and each refusal is a distinct outcome rather 
 | Order | Guard | Outcome on refusal |
 | --- | --- | --- |
 | 1 | **R-14 mode** — may this account be traded from this environment? | `RefusedByMode` |
-| 2 | **Coherence** — does the request describe one trade? | `RefusedByMismatch` |
-| 3 | **Representability** — can the ticket express this order type? | `RefusedByUnsupportedType` |
-| 4 | **Risk gate** — blocked, or resized to nothing | `RefusedByRisk` |
+| 2 | **Account state** — does the venue itself report the account as tradable? | `RefusedByAccountState` |
+| 3 | **Coherence** — does the request describe one trade, at this venue? | `RefusedByMismatch` |
+| 4 | **Representability** — can the ticket express this order type? | `RefusedByUnsupportedType` |
+| 5 | **Risk gate** — blocked, or resized to nothing | `RefusedByRisk` |
 
 Everything before the gate runs *first* on purpose: an authorization computed from an incoherent request would
-not describe what gets sent.
+not describe what gets sent. Every pre-gate refusal carries **no** `GateDecision` — nothing was sized — so
+consumers read the outcome rather than inferring a reason from a null decision.
+
+**Guards are whitelists, not blacklists.** The order-type check names the four types the ticket can express and
+refuses everything else, so a value arriving from deserialization or a cast — or a type added later without
+revisiting price selection — cannot fall through and be transmitted with its prices left unset.
 
 **Two pairings are enforced rather than assumed**, because nothing structural forces them and both fail in the
 same direction — the gate authorizes one thing, the venue receives another:
@@ -134,6 +140,9 @@ same direction — the gate authorizes one thing, the venue receives another:
 - **Instrument.** `ResolveContractAsync` returns a `ResolvedContract` — the venue's opaque handle **paired with
   the instrument it was resolved for** — so an `ES`-sized proposal cannot be sent as an `NQ` contract. The venue
   that performed the lookup is the only party that knows the pairing, so that is where it is established.
+- **Venue.** The account and contract must both be tagged for the executor's own venue. Handles collide freely
+  across brokers — a bare `9001` is a different account at every one — and relying on each adapter to notice
+  means an adapter exception rather than a refusal, from adapters that happen to check.
 
 **The environment is fixed at construction**, from trusted host configuration, never passed per send. R-14 is an
 enforcement boundary; a caller able to name its own environment could walk a live account through it from a
