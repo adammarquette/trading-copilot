@@ -5,7 +5,11 @@ co-pilot. This root file holds the rules that apply everywhere; **three role-spe
 for their role**:
 - **Coding Agent** — [`src/AGENTS.md`](src/AGENTS.md): production code + unit tests (test-first).
 - **QA Agent** — [`src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md`](src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md): integration + smoke tests, written *independently* of the coding work.
-- **Code Reviewer Agent** — [`.github/AGENTS.md`](.github/AGENTS.md): reviewing changes anywhere in the repo. Reports defects; does not fix them. **Role-scoped, not subtree-scoped** — the first two apply to the directory you are editing, this one applies to what you are doing.
+- **Code Reviewer Agent** — [`.github/AGENTS.md`](.github/AGENTS.md): reviewing changes anywhere in the repo. Reports defects; does not fix them.
+- **Platform Agent** — [`.github/workflows/AGENTS.md`](.github/workflows/AGENTS.md): CI/CD, the container image, the local stack, and the deploy target. Owns the pipeline; writes no product code.
+
+The first two are **subtree-scoped** — they apply to the directory you are editing. The last two are
+**role-scoped**: they apply to what you are doing, wherever the file happens to live.
 
 ## What this repo is
 A **self-hosted futures day-trading co-pilot** — a human-in-the-loop decision-support **and** execution
