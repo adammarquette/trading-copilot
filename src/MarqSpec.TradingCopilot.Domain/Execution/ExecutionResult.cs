@@ -1,0 +1,47 @@
+using MarqSpec.TradingCopilot.Domain.Risk;
+using MarqSpec.TradingCopilot.Domain.Venue;
+
+namespace MarqSpec.TradingCopilot.Domain.Execution;
+
+/// <summary>
+/// What happened to a send, and why. Every order action is journaled (R-8), so the reason and the gate's
+/// decision travel with the result rather than being reconstructed afterwards.
+/// </summary>
+/// <param name="Outcome">Placed, or refused — and by which guard.</param>
+/// <param name="Order">The venue's acknowledgement when placed; otherwise <see langword="null"/>.</param>
+/// <param name="Decision">
+/// The gate's decision, including the binding layer. <see langword="null"/> only when the mode guard refused
+/// first, in which case the order was never sized.
+/// </param>
+/// <param name="Reason">A human-readable explanation, always populated.</param>
+public sealed record ExecutionResult(
+    ExecutionOutcome Outcome,
+    PlacedOrder? Order,
+    GateDecision? Decision,
+    string Reason)
+{
+    /// <summary>The venue accepted the order.</summary>
+    /// <param name="order">The venue's acknowledgement.</param>
+    /// <param name="decision">The gate decision that authorized it.</param>
+    /// <returns>A placed result.</returns>
+    public static ExecutionResult Placed(PlacedOrder order, GateDecision decision)
+    {
+        return new ExecutionResult(ExecutionOutcome.Placed, order, decision, decision.Reason);
+    }
+
+    /// <summary>The R-14 mode guard refused before anything was sized.</summary>
+    /// <param name="reason">Why the account may not be traded here.</param>
+    /// <returns>A refused result carrying no gate decision.</returns>
+    public static ExecutionResult RefusedByMode(string reason)
+    {
+        return new ExecutionResult(ExecutionOutcome.RefusedByMode, Order: null, Decision: null, reason);
+    }
+
+    /// <summary>The risk gate refused — blocked, or resized to nothing.</summary>
+    /// <param name="decision">The gate's decision, naming the binding layer.</param>
+    /// <returns>A refused result.</returns>
+    public static ExecutionResult RefusedByRisk(GateDecision decision)
+    {
+        return new ExecutionResult(ExecutionOutcome.RefusedByRisk, Order: null, decision, decision.Reason);
+    }
+}
