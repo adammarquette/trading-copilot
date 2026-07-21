@@ -71,10 +71,19 @@ the adapter.
 `{ id, name, balance, canTrade, isVisible, simulated }` — **nothing prop-firm-specific**. **Buying power
 (50K/100K/150K), evaluation vs. funded stage, status (active/passed/failed), and daily-loss limit** are **encoded
 in the account `name`** (`50KTC-V2-DLL-0000-…`, `PRAC-…`) or the firm portal — the **adapter derives those from the
-name**. **Practice-vs-live is *not* among them:** `simulated` is a **required boolean** on the account model, so
-the mode is read, never inferred (corrected 2026-07-20 — see the header note). The adapter deliberately ignores a
-`PRAC-` prefix: trusting the name could only reclassify a **live** account as practice, the one direction that
-risks real money (R-14). **TopstepX is Topstep's own platform**
+name**. `simulated` is a **required boolean** on the account model, so what the gateway reports is read, never
+inferred (corrected 2026-07-20 — see the header note).
+
+> **What `simulated` does *not* answer (corrected 2026-07-21, gh#60).** This page previously called `simulated`
+> the practice-vs-live signal, and the adapter mapped it straight onto `TradingMode`. It is not that signal. It
+> reports **where an order executes**, which on a prop platform is close to orthogonal to **whether capital is at
+> risk**: a *funded* account reports `simulated: true` and executes on a simulated engine while a real payout
+> rides on it. Against a real login this classified **all 293 accounts as practice**, funded stages included.
+> Economic stake is now **declared by the operator per firm × stage**, never derived from the gateway
+> (architecture § *`TradingMode` is declared, not derived*). `simulated` remains accurate about execution
+> routing — just don't read stake into it.
+
+**TopstepX is Topstep's own platform**
 on the ProjectX gateway, so the login *is* the TopstepX login; other ProjectX firms run their own branded hosts
 (R-17). Live account state also streams on the user hub (`GatewayUserAccount`).
 
@@ -85,7 +94,7 @@ risk layer (R-5).
 
 ## Open items
 - Rate limits documented at `/docs/getting-started/rate-limits` — not yet extracted.
-- **Q-4 (answered):** practice vs. live is **account-level and explicit** — account-search returns a required `simulated` boolean. Not URL-level (there is no sandbox host), and not name-derived as this page first claimed.
+- **Q-4 (answered, then narrowed):** *execution routing* is **account-level and explicit** — account-search returns a required `simulated` boolean, not URL-level (there is no sandbox host), and not name-derived as this page first claimed. But routing is **not** practice-vs-live in the R-14 sense: economic stake is declared by the operator, not reported by the gateway (gh#60, see Accounts).
 - **Q-3 (auto-flatten guarantee):** a position-close endpoint exists; the failure-mode design is still ours.
 
 ## Relevant-link index

@@ -89,4 +89,28 @@ public class TradingModePolicyTests
 
         act.Should().NotThrow();
     }
+
+    // --- Undeclared: stricter than Live, because we do not know what it is ---
+
+    [Theory]
+    [InlineData(DeploymentEnvironment.Development)]
+    [InlineData(DeploymentEnvironment.Staging)]
+    [InlineData(DeploymentEnvironment.Production)]
+    public void IsAllowed_ShouldRefuseAnUndeclaredMode_InEveryEnvironmentIncludingProduction(
+        DeploymentEnvironment environment)
+    {
+        // Live is permitted in production; Undeclared is permitted nowhere. "We have not established whether
+        // capital is at stake" is not a state to trade from, and production is exactly where guessing costs
+        // the most.
+        TradingModePolicy.IsAllowed(TradingMode.Undeclared, environment).Should().BeFalse();
+    }
+
+    [Fact]
+    public void EnsureAllowed_ShouldThrowForUndeclared_EvenInProduction()
+    {
+        Action act = () => TradingModePolicy.EnsureAllowed(TradingMode.Undeclared, DeploymentEnvironment.Production);
+
+        act.Should().Throw<TradingModeNotAllowedException>()
+            .Which.Message.Should().Contain("Undeclared");
+    }
 }

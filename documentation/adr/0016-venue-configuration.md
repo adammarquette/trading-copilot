@@ -87,8 +87,11 @@ stake from the platform would give one account two answers (`gh#60`).
   stays open rather than closed.
 - **The ProjectX naming trap moves into a field label**, where the person entering it will read it, instead of
   an env comment they will not.
-- **`gh#60` is unblocked without waiting on a contract.** The adapter reports its mechanism; the operator
-  declares the meaning per firm; an undeclared stage falls back to *at risk*.
+- **`gh#60` is unblocked without waiting on a contract**, and its domain half has landed. The adapter reports
+  its mechanism; the operator declares the meaning per firm (`FirmConventions`); an undeclared stage resolves to
+  `TradingMode.Undeclared` and is refused in **every** environment — stricter than *at risk*, which production
+  still permits. What this ADR still owes `gh#60` is the configuration surface that carries the declaration:
+  until it exists, every account reads `Undeclared` and none are tradeable.
 - **Nothing forecloses `gh#64`.** Compiled adapters, firm records, and per-adapter forms are all things a
   descriptor would later *generate* rather than replace.
 

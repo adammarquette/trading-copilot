@@ -67,6 +67,8 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 **Practice vs. live**
 - As a trader, I want to run on a practice account with the system behaving identically to live, so my stats and habits transfer directly.
 - As a trader, I want an unmistakable, always-visible indicator of whether I'm in practice or live mode, and a deliberate, hard-to-fumble switch between them, so I'm never confused about whether real money is at risk.
+- As a trader at a prop firm, I want to declare for myself which of my firm's account stages actually put money at risk, because the platform's own "simulated" flag says where an order *executes*, not what a breach *costs* — my funded account is simulated on both counts and real on the one that matters (gh#60).
+- As a trader, I want an account the system can't classify to be **untradeable until I classify it**, rather than assumed safe, so a firm adding a new stage blocks instead of quietly becoming tradable.
 
 **Risk**
 - As a funded trader, I want position sizing computed from layered constraints — Topstep daily loss/drawdown rules, fixed %-risk per trade, and my own manual caps — with the binding constraint identified, so every order is executable without violating my account rules.

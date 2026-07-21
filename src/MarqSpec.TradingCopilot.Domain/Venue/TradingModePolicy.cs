@@ -18,7 +18,9 @@ public static class TradingModePolicy
             TradingMode.Practice => true,
             TradingMode.Live => environment == DeploymentEnvironment.Production,
 
-            // An unrecognized mode fails closed -- a new mode must opt in here deliberately.
+            // Undeclared is stricter than Live: Live is permitted in production, Undeclared nowhere. "We have
+            // not established whether capital is at stake" is not a state to trade from, and production is
+            // where guessing costs most. An unrecognized mode fails closed the same way.
             _ => false,
         };
     }

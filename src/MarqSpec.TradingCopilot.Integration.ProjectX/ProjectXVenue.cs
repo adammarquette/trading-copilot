@@ -126,7 +126,15 @@ public sealed class ProjectXVenue : ITradingVenue
         IEnumerable<ClientModels.TradingAccount> accounts =
             await _api.GetAccountsAsync(onlyActiveAccounts: false, cancellationToken);
 
-        return [.. accounts.Select(account => ProjectXMapping.ToVenueAccount(account, Id))];
+        // Nothing declares stages or firm conventions yet, so every account maps to Undeclared and is tradeable
+        // nowhere until the operator classifies it. That is the intended failure direction (gh#60): "classify
+        // this before trading it" beats "assumed practice, then traded a funded account". Wiring the operator's
+        // declaration through configuration is its own change.
+        return
+        [
+            .. accounts.Select(account =>
+                ProjectXMapping.ToVenueAccount(account, Id, FirmConventions.None, AccountStage.Unknown)),
+        ];
     }
 
     /// <inheritdoc />
