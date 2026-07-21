@@ -8,7 +8,7 @@ loop. Its one autonomous action is risk-reducing: **auto-flattening open positio
 
 **You run your own instance.** Fork it, deploy it, point it at your own broker credentials — broker API keys are
 tied to an individual login, so the system is built to be operated by the person whose account it trades. It is
-multi-user *capable* (authenticated, with per-user data isolation), but each deployment belongs to whoever runs it.
+authenticated because it is web-exposed, with data isolation enforced at the data layer — but it is **one operator per deployment**, not a service with a user base.
 
 > ### ⚠️ No warranty. Not financial advice.
 > This software places **real orders against a real broker account**. It is provided **as-is, without warranty of
@@ -18,7 +18,7 @@ multi-user *capable* (authenticated, with per-user data isolation), but each dep
 > like this can cost you an account.
 
 > **Status: `v0.1.0` (pre-release) — early / scaffolding.** The **`documentation/` folder is the current source of truth** — the product
-> requirements and engineering practices live there. The `src/` foundation is building out (solution + CI, data layer + multi-user tenancy, auth) and **runs locally via `docker compose up`** (see below). Built
+> requirements and engineering practices live there. The `src/` foundation is building out (solution + CI, data layer + tenancy, auth) and **runs locally via `docker compose up`** (see below). Built
 > with an AI-Engineering-first approach.
 
 ---
@@ -163,5 +163,5 @@ question largely academic. It would not be under a restrictive one.
 
 ---
 
-*Multi-user decision-support and execution tooling — for each user's own trading, not investment advice for
+*Self-hosted decision-support and execution tooling — for the operator’s own trading, not investment advice for
 third parties.*

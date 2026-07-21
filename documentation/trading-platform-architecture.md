@@ -173,7 +173,7 @@ views (footprint, volume profile).
   ingest → process flow (engineering §9; [ADR-0007](adr/0007-order-execution-model.md)).
 - **Authentication.** The REST API and real-time connections are the **Internet-exposed** surface and require a
   **JWT** on every request/connection (R-18). Authorization runs through a **claims / policy layer** that **scopes every request to the authenticated user** —
-  the app is **multi-user**, each user's data isolated at the data layer (R-20, [ADR-0011](adr/0011-multi-user-tenancy.md));
+  data is isolated at the data layer by default-deny scoping (R-20, [ADR-0011](adr/0011-multi-user-tenancy.md));
   richer roles remain an incremental add ([ADR-0003](adr/0003-authentication.md)). Execution, kill-switch,
   and account endpoints sit behind this same gate — no unauthenticated path to order actions.
 

@@ -34,8 +34,8 @@ Design-time UI artifacts for the trading co-pilot's **React SPA**. The **UI desi
   - **settings — configuration** — a two-pane config surface gathering the cross-feature settings (risk tolerance / target R:R front and center, **per-market auto-flatten times** (null = the market's default), entry defaults, news, watchlist, layout, account); and
   - **news relevance & feedback** — the mapping / topics config panel (ticker↔instrument, per-instrument + global topics, AI-suggested) and per-item sentiment thumbs (R-2);
   - **backtest** — config (range / instruments / strategies / model) → summary metrics + refinement suggestions (ADR-0009); and
-  - **AI usage & spend** — **operator-only**, reported in **Grafana** (not a user surface) in the multi-user model (§7 / ADR-0008 / ADR-0002); and
-  - **sign-in & accept-invite (multi-user)** — **invitation-only** onboarding + login; each user owns an isolated workspace (accounts, rules, journal private per user), enforced at the data layer (R-18 / R-20 / ADR-0011); and
+  - **AI usage & spend** — **operator-only**, reported in **Grafana** (not a trading surface) (§7 / ADR-0008 / ADR-0002); and
+  - **sign-in** — login for a web-exposed deployment; the operator's account is seeded at first start, and data access is scoped to it at the data layer (R-18 / R-20); and
   - **connection & account onboarding** — add a firm login (platform → firm → server-side creds), discover its accounts, first sync (R-17 / R-18); and
   - **strategy templates ("playbooks")** — a gallery of packaged methodologies (13/48, ICT, VWAP-reclaim…) + a template's five-layer decomposition (indicators → setups → suggestion shape → risk → rules); install &amp; personalize (R-21); and
   - **rulebook & triggers** — plain-language rules compiled to confirmed deterministic triggers (mechanical-alert vs. agent-review), with debounce / rate-limit (R-7 / ADR-0008); and
