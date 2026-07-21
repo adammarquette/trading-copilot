@@ -22,3 +22,4 @@ rewritten — a later ADR **supersedes** it. Referenced from the
 | [0013](0013-failure-recovery-model.md) | Failure & recovery model — client resume, state rehydration, suggestions expire, native-stop + orphan handling, the auto-flatten watchdog (open) | Accepted |
 | [0014](0014-news-importance-feedback.md) | News importance feedback & personalized weighting — per-user star raises salience of similar future news; soft weight, not a risk control | Accepted |
 | [0015](0015-distribution-licensing-governance.md) | Distribution, licensing & governance — self-hosted fork-first; Apache-2.0; maintainer-led; AI-first authorship disclosed | Accepted · refines [0011](0011-multi-user-tenancy.md) |
+| [0016](0016-venue-configuration.md) | Venue configuration — adapters compiled in; firms (name, endpoint, credentials, conventions) configured in settings; full plugin contract deferred to `gh#64` | **Proposed** · extends [0015](0015-distribution-licensing-governance.md) |
