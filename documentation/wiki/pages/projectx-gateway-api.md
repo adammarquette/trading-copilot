@@ -45,10 +45,16 @@ failure surfaces far away as "no contract matches ES". Practice credentials must
 therefore takes the tier as a **required** constructor argument (`ProjectXDataTier`) rather than defaulting it —
 a silent default here is indistinguishable from a missing instrument.
 
-**Known broken:** `Retrieve Bars` currently **400s for every parameter combination** — the gateway rejects the
-`unit` field (`"The JSON value could not be converted to …AggregateBarUnit"`), so the whole body fails to bind.
-Ruled out: unit, window, limit, partial-bar flag, and the tier. Tracked in **gh#56**; the fix belongs in
-`MarqSpec.Client.ProjectX`'s serialization, not in the adapter.
+**Enums go on the wire as integers, not strings** (fixed 2026-07-20, gh#56). `Retrieve Bars` used to 400 on every
+request: Refit's default serializer writes enums as camelCase strings, so the unit went out as `"unit":"minute"`
+where the schema types it as an integer (`2 = Minute`). The gateway answered
+`"$.unit": ["The JSON value could not be converted to …AggregateBarUnit"]`, plus a misleading
+`"request": ["The request field is required."]` — a knock-on, since a body that fails to convert fails to bind at
+all, which makes a serialization fault look like a missing parameter.
+
+Worth keeping in mind for any new client: **every enum in the gateway's swagger is integer-typed and none is a
+string**, so a serializer must write them numerically. Fixed in `MarqSpec.Client.ProjectX` (its PR #14), not in
+the adapter.
 
 ## Orders / execution (Q-1)
 - `POST /api/Order/place` — params: `accountId`, `contractId`, `size`, `limitPrice?`, `stopPrice?`,
