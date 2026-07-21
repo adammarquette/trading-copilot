@@ -1,10 +1,11 @@
 # AGENTS.md — Trading Co-Pilot (root)
 
 Instructions for AI coding agents working in this repository — a **self-hosted, single-operator** futures trading
-co-pilot. This root file holds the rules that apply everywhere; **two role-specific contracts take precedence in
-their subtree**:
+co-pilot. This root file holds the rules that apply everywhere; **three role-specific contracts take precedence
+for their role**:
 - **Coding Agent** — [`src/AGENTS.md`](src/AGENTS.md): production code + unit tests (test-first).
 - **QA Agent** — [`src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md`](src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md): integration + smoke tests, written *independently* of the coding work.
+- **Code Reviewer Agent** — [`.github/AGENTS.md`](.github/AGENTS.md): reviewing changes anywhere in the repo. Reports defects; does not fix them. **Role-scoped, not subtree-scoped** — the first two apply to the directory you are editing, this one applies to what you are doing.
 
 ## What this repo is
 A **self-hosted futures day-trading co-pilot** — a human-in-the-loop decision-support **and** execution

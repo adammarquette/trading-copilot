@@ -5,8 +5,12 @@ brokerage and prop-firm accounts, and its one autonomous action is a safety-crit
 CME close. A defect here can cost someone an account.
 
 Review accordingly: **a plausible-looking bug on a path that reaches a broker matters more than any number of
-style observations.** The full agent contract is in [`AGENTS.md`](../AGENTS.md) and
-[`src/AGENTS.md`](../src/AGENTS.md); this file is the review-relevant subset.
+style observations.**
+
+This file owns the **substance** of what to look for. The reviewer's **role** — independence, how to report,
+what not to do — is [`.github/AGENTS.md`](AGENTS.md). The rules the code is written against are
+[`AGENTS.md`](../AGENTS.md) and [`src/AGENTS.md`](../src/AGENTS.md). Change a rule in one place only; these
+files link rather than restate.
 
 ## What this codebase treats as a defect
 
