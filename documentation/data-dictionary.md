@@ -206,7 +206,7 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 |---|---|---|---|
 | **Conversation / ChatMessage** | role, content, tool invocations, grounding refs, ts — persists across sessions | REL + VEC | R-6 |
 | **AuditRecord** | actor, action (order / guardrail / kill / flatten / **connection-loss**), **placement (native / synthetic)** + **`synthetic_risk`** (a live position resting on an in-app synthetic stop / bracket — an **orphan risk** if the connection drops), before → after, ts — immutable | REL / TS | eng §9, ADR-0007 |
-| **AIUsage** | invocation: feature (suggestion / follow-up / backtest / triage / embed), model + tier, tokens in/out, **est. $ cost**, latency, trace id, ts, **user** — spend tracking + governor input. **Operator / platform-facing:** aggregated in **Grafana** (ADR-0002), **not a user surface** (R-20); the per-user tag supports operator attribution | REL / TS | ADR-0008, ADR-0002, Q-10 |
+| **AIUsage** | invocation: feature (suggestion / follow-up / backtest / triage / embed), model + tier, tokens in/out, **est. $ cost**, latency, trace id, ts, **user** — spend tracking + governor input. Surfaced **both ways**: aggregated in **Grafana** (ADR-0002) for the operational view, and **read back in the app** for the spend meter — cost per suggestion, cost per taken trade, cap remaining (gh#62). The spend is the operator's own, billed to their own keys (ADR-0015) | REL / TS | ADR-0008, ADR-0002, Q-10 |
 
 ## Cross-cutting
 - **Tenancy & isolation (R-20).** The **User** is the **tenant root**. **Reference & market data** — Instrument,
