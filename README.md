@@ -42,16 +42,17 @@ docker compose down                # stop the pulled container
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
-The API comes up on **http://localhost:8080**, applies the EF migrations, and seeds a first operator
-(`operator@local` / `changeme-local` — local-dev defaults; override in `.env`). The invitation-only flow works end
-to end:
+The API comes up on **http://localhost:8080**, applies the EF migrations, and **seeds the operator**
+(`operator@local` / `changeme-local` — local-dev defaults; override in `.env`). Onboarding is just sign-in —
+**one operator per deployment** (ADR-0017):
 
 ```
-POST /auth/login          {email, password}            -> JWT
-POST /auth/invitations    {email}   (Bearer)           -> an invite token (shown once)
-POST /auth/accept-invite  {token, password, displayName} -> a new account + JWT
-GET  /auth/me             (Bearer)                     -> your user
+POST /auth/login          {email, password}   -> JWT
+GET  /auth/me             (Bearer)            -> the operator
 ```
+
+The `/auth/invitations` and `/auth/accept-invite` endpoints also exist and work, but are **dormant** — not part
+of the onboarding story, retained as the plumbing a future read-only / mentee login would reuse (ADR-0017 §4).
 
 Config — the DB connection string, `Jwt:SigningKey`, and the bootstrap operator — comes from env / `.env` (see
 [`.env.example`](.env.example)); real secrets are never committed (ADR-0012, engineering §8). `docker compose down -v`
@@ -150,11 +151,6 @@ expect design discussion before implementation.
 
 Copyright © 2026 Adam Marquette. Licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE) and
 [`NOTICE`](NOTICE).
-
-Permissive on purpose: fork it, run it, build on it, commercially or otherwise. Apache-2.0 over MIT for the
-**express patent grant** and the **explicit trademark non-grant** — meaningful for software that executes
-financial transactions, and it keeps the project's name with the maintainer while a fork keeps everything else.
-Reasoning in [ADR-0015](documentation/adr/0015-distribution-licensing-governance.md).
 
 ### An AI-first engineering project
 

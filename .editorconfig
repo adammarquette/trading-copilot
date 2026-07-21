@@ -13,6 +13,12 @@ trim_trailing_whitespace = true
 indent_style = space
 indent_size = 4
 
+# Must match .gitattributes (`* text=auto eol=lf`). Without this, `dotnet format`
+# defaults to the host's line ending — CRLF on Windows — and reports whitespace
+# violations that CI (ubuntu-latest, LF) does not, so a local pre-PR check
+# disagrees with the gate it is meant to predict.
+end_of_line = lf
+
 # Markdown: trailing double-spaces are meaningful (hard line breaks).
 [*.{md,markdown}]
 trim_trailing_whitespace = false

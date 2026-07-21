@@ -86,6 +86,25 @@ configuration that lives only in a provider console is otherwise invisible to an
 3. Until step 2 is done, Railway still builds from source; the GHCR image is used by local dev only. The pipeline
    is deliberately left this way rather than half-wiring a deploy trigger against a not-yet-image-sourced service.
 
+### Automated code review — a ruleset, not a workflow
+**Copilot code review is not a GitHub Actions job** and cannot be invoked from `ci.yml`. It is a **branch
+ruleset** rule, so it lives in repository settings rather than in this repo — recorded here because
+configuration that exists only in the GitHub UI is otherwise invisible to anyone reading the pipeline.
+
+| Ruleset | Target | Rule | Settings |
+| --- | --- | --- | --- |
+| `copilot-review-develop` (**active**) | `refs/heads/develop` | `copilot_code_review` | `review_on_push: true` · `review_draft_pull_requests: false` |
+| `default-main` (**disabled**) | — | `pull_request`, `code_scanning`, … | Required approvals and the promotion guards — deliberately off; see `gh#45` |
+
+Every feature PR targets `develop`, so the first ruleset covers the whole review surface. `review_on_push` means
+each new commit on an open PR is reviewed, not just the PR's opening. Drafts are excluded so a branch can churn
+without triggering a review per commit.
+
+Review findings are advisory — they do not block a merge. The blocking gates remain `dotnet format`, the unit
+tests, and the `ladder` branch-policy check. Repo-specific review guidance lives in
+[`.github/copilot-instructions.md`](../.github/copilot-instructions.md); update it when a review repeatedly
+misses something this codebase cares about.
+
 ## Deploy procedure
 - **Non-prod (dev / staging):** automatic on merge — CI builds + deploys.
 - **Production:** **human-approved** (§9). Promote `staging → main`; CI deploys; smoke tests verify. A person must be
