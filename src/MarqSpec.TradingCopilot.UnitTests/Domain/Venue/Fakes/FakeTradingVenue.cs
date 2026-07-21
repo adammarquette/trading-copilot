@@ -26,9 +26,10 @@ internal sealed class FakeTradingVenue : ITradingVenue
 
     public IReadOnlyList<OrderRequest> PlacedOrders => _placedOrders;
 
-    public Task<VenueContractId> ResolveContractAsync(InstrumentId instrument, CancellationToken cancellationToken = default)
+    public Task<ResolvedContract> ResolveContractAsync(InstrumentId instrument, CancellationToken cancellationToken = default)
     {
-        return Task.FromResult(VenueContractId.Create(Id, $"{instrument.Symbol}M25"));
+        return Task.FromResult(
+            new ResolvedContract(VenueContractId.Create(Id, $"{instrument.Symbol}M25"), instrument));
     }
 
     public Task<IReadOnlyList<Bar>> GetBarsAsync(

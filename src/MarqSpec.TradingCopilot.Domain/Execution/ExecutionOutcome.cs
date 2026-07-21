@@ -17,4 +17,18 @@ public enum ExecutionOutcome
     /// "no trade". Nothing was sent.
     /// </summary>
     RefusedByRisk,
+
+    /// <summary>
+    /// Refused because the request contradicts itself: the risk snapshot describes a different account than the
+    /// one being traded, or the contract was resolved for a different instrument than the proposal is sized for.
+    /// Refused <b>before</b> the gate runs — evaluating an incoherent request would produce an authorization for
+    /// something other than what would be sent.
+    /// </summary>
+    RefusedByMismatch,
+
+    /// <summary>
+    /// Refused because the ticket cannot express this order type. Distinct from a venue lacking the capability:
+    /// the request itself is unrepresentable, so no venue could receive it correctly.
+    /// </summary>
+    RefusedByUnsupportedType,
 }

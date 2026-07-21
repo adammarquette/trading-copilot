@@ -20,13 +20,22 @@ public class OrderExecutionServiceTests
 
     public OrderExecutionServiceTests()
     {
-        _service = new OrderExecutionService(_gate, _venue);
+        _service = ServiceIn(DeploymentEnvironment.Development);
+    }
+
+    private static VenueAccountId AccountId => VenueAccountId.Create(Venue, "9001");
+
+    private OrderExecutionService ServiceIn(DeploymentEnvironment environment)
+    {
+        // Fixed at construction, never per send: a caller able to name its own environment could walk a live
+        // account through the R-14 guard from a development host.
+        return new OrderExecutionService(_gate, _venue, environment);
     }
 
     private static VenueAccount Account(TradingMode mode)
     {
         return new VenueAccount(
-            VenueAccountId.Create(Venue, "9001"),
+            AccountId,
             mode == TradingMode.Practice ? "PRAC-50K" : "LIVE-50K",
             Balance: 50_000m,
             CanTrade: true,
@@ -48,9 +57,10 @@ public class OrderExecutionServiceTests
             ReferencePrice: new Price(5_000m));
     }
 
-    private static RiskContext Context()
+    private static RiskContext Context(VenueAccountId? account = null)
     {
         return new RiskContext(
+            account ?? AccountId,
             new AccountRiskState(55_000m, 0m, 0m),
             TrailingDrawdown.Start(TrailingMode.EndOfDay, 5_000m, 55_000m),
             new AccountRiskRules(3_000m, null, FloorSource.FirmImposed),
@@ -59,13 +69,16 @@ public class OrderExecutionServiceTests
             new SanityCaps(10, 10_000_000m, 40));
     }
 
+    private static ResolvedContract EsContract =>
+        new(VenueContractId.Create(Venue, "CON.F.US.EP.U26"), InstrumentId.Parse("ES"));
+
     private static ExecutionRequest Request(VenueAccount account, int quantity = 4)
     {
         return new ExecutionRequest(
             Proposal(quantity),
-            VenueContractId.Create(Venue, "CON.F.US.EP.U26"),
+            EsContract,
             account,
-            Context());
+            Context(account.Id));
     }
 
     private void GateReturns(GateDecision decision)
@@ -89,7 +102,7 @@ public class OrderExecutionServiceTests
         VenueAccepts();
 
         ExecutionResult result = await _service.SendAsync(
-            Request(Account(TradingMode.Practice)), DeploymentEnvironment.Development, CancellationToken.None);
+            Request(Account(TradingMode.Practice)), CancellationToken.None);
 
         result.Outcome.Should().Be(ExecutionOutcome.Placed);
         result.Order.Should().NotBeNull();
@@ -109,7 +122,7 @@ public class OrderExecutionServiceTests
                 Task.FromResult(new PlacedOrder(r.Account, "555", DateTimeOffset.UnixEpoch)));
 
         ExecutionResult result = await _service.SendAsync(
-            Request(Account(TradingMode.Practice), quantity: 4), DeploymentEnvironment.Development, CancellationToken.None);
+            Request(Account(TradingMode.Practice), quantity: 4), CancellationToken.None);
 
         result.Outcome.Should().Be(ExecutionOutcome.Placed);
         sent.Should().NotBeNull();
@@ -124,7 +137,7 @@ public class OrderExecutionServiceTests
         GateReturns(GateDecision.Block(RiskLayer.DrawdownFloor, "floor breached"));
 
         ExecutionResult result = await _service.SendAsync(
-            Request(Account(TradingMode.Practice)), DeploymentEnvironment.Development, CancellationToken.None);
+            Request(Account(TradingMode.Practice)), CancellationToken.None);
 
         result.Outcome.Should().Be(ExecutionOutcome.RefusedByRisk);
         result.Order.Should().BeNull();
@@ -139,7 +152,7 @@ public class OrderExecutionServiceTests
         GateReturns(new GateDecision(GateOutcome.Resized, 0, RiskLayer.PerTradeRisk, "no viable size"));
 
         ExecutionResult result = await _service.SendAsync(
-            Request(Account(TradingMode.Practice)), DeploymentEnvironment.Development, CancellationToken.None);
+            Request(Account(TradingMode.Practice)), CancellationToken.None);
 
         result.Outcome.Should().Be(ExecutionOutcome.RefusedByRisk);
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
@@ -152,8 +165,8 @@ public class OrderExecutionServiceTests
     {
         GateReturns(GateDecision.Allow(4, "within every layer"));
 
-        ExecutionResult result = await _service.SendAsync(
-            Request(Account(TradingMode.Live)), DeploymentEnvironment.Staging, CancellationToken.None);
+        ExecutionResult result = await ServiceIn(DeploymentEnvironment.Staging).SendAsync(
+            Request(Account(TradingMode.Live)), CancellationToken.None);
 
         result.Outcome.Should().Be(ExecutionOutcome.RefusedByMode);
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
@@ -166,7 +179,7 @@ public class OrderExecutionServiceTests
         GateReturns(GateDecision.Allow(4, "within every layer"));
 
         await _service.SendAsync(
-            Request(Account(TradingMode.Live)), DeploymentEnvironment.Development, CancellationToken.None);
+            Request(Account(TradingMode.Live)), CancellationToken.None);
 
         A.CallTo(() => _gate.Evaluate(A<OrderProposal>._, A<RiskContext>._)).MustNotHaveHappened();
     }
@@ -177,8 +190,8 @@ public class OrderExecutionServiceTests
         GateReturns(GateDecision.Allow(4, "within every layer"));
         VenueAccepts();
 
-        ExecutionResult result = await _service.SendAsync(
-            Request(Account(TradingMode.Live)), DeploymentEnvironment.Production, CancellationToken.None);
+        ExecutionResult result = await ServiceIn(DeploymentEnvironment.Production).SendAsync(
+            Request(Account(TradingMode.Live)), CancellationToken.None);
 
         result.Outcome.Should().Be(ExecutionOutcome.Placed);
     }
@@ -196,7 +209,7 @@ public class OrderExecutionServiceTests
                 Task.FromResult(new PlacedOrder(r.Account, "555", DateTimeOffset.UnixEpoch)));
 
         VenueAccount account = Account(TradingMode.Practice);
-        await _service.SendAsync(Request(account), DeploymentEnvironment.Development, CancellationToken.None);
+        await _service.SendAsync(Request(account), CancellationToken.None);
 
         sent!.Account.Should().Be(account.Id);
         sent.Contract.Venue.Should().Be(Venue);
@@ -208,8 +221,100 @@ public class OrderExecutionServiceTests
         GateReturns(GateDecision.Block(RiskLayer.SanityCap, "fat finger"));
 
         ExecutionResult result = await _service.SendAsync(
-            Request(Account(TradingMode.Practice)), DeploymentEnvironment.Development, CancellationToken.None);
+            Request(Account(TradingMode.Practice)), CancellationToken.None);
 
         result.Reason.Should().NotBeNullOrWhiteSpace();
+    }
+
+    // --- The request must mean what it appears to mean ---
+
+    [Fact]
+    public async Task SendAsync_ShouldRefuse_WhenTheRiskSnapshotDescribesADifferentAccount()
+    {
+        // Equity, drawdown floor and daily limits are account-specific. Sizing against one account and sending
+        // to another authorizes a quantity the target account never justified.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+        VenueAccount account = Account(TradingMode.Practice);
+
+        ExecutionRequest crossed = Request(account) with
+        {
+            Risk = Context(VenueAccountId.Create(Venue, "9999")),
+        };
+
+        ExecutionResult result = await _service.SendAsync(crossed, CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByMismatch);
+        result.Decision.Should().BeNull();
+        A.CallTo(() => _gate.Evaluate(A<OrderProposal>._, A<RiskContext>._)).MustNotHaveHappened();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldRefuse_WhenTheContractWasResolvedForADifferentInstrument()
+    {
+        // The proposal's tick size and point value are ES's; the contract is NQ's. The gate would authorize
+        // exposure the transmitted contract does not have.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+
+        ExecutionRequest crossed = Request(Account(TradingMode.Practice)) with
+        {
+            Contract = new ResolvedContract(
+                VenueContractId.Create(Venue, "CON.F.US.ENQ.U26"), InstrumentId.Parse("NQ")),
+        };
+
+        ExecutionResult result = await _service.SendAsync(crossed, CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByMismatch);
+        result.Reason.Should().Contain("ES").And.Contain("NQ");
+        A.CallTo(() => _gate.Evaluate(A<OrderProposal>._, A<RiskContext>._)).MustNotHaveHappened();
+    }
+
+    // --- Order types ---
+
+    [Theory]
+    [InlineData(OrderType.Market, null, null)]
+    [InlineData(OrderType.Limit, 5_000, null)]
+    [InlineData(OrderType.Stop, null, 5_000)]
+    [InlineData(OrderType.StopLimit, 5_000, 5_000)]
+    public async Task SendAsync_ShouldTransmitTheTypeWithExactlyThePricesThatTypeNeeds(
+        OrderType type,
+        int? expectedLimit,
+        int? expectedStop)
+    {
+        // A price on the wrong type -- or a missing one on the right type -- is a malformed ticket the venue
+        // either rejects or, worse, fills somewhere unintended.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+        OrderRequest? sent = null;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes((OrderRequest r, CancellationToken _) => sent = r)
+            .ReturnsLazily((OrderRequest r, CancellationToken _) =>
+                Task.FromResult(new PlacedOrder(r.Account, "555", DateTimeOffset.UnixEpoch)));
+
+        ExecutionRequest request = Request(Account(TradingMode.Practice)) with { Type = type };
+
+        await _service.SendAsync(request, CancellationToken.None);
+
+        sent!.Type.Should().Be(type);
+        sent.LimitPrice.Should().Be(expectedLimit is null ? null : new Price(expectedLimit.Value));
+        sent.StopPrice.Should().Be(expectedStop is null ? null : new Price(expectedStop.Value));
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldRefuseATrailingStop_BecauseTheTicketCarriesNoTrailDistance()
+    {
+        // Not a venue-capability question: the neutral ticket has nowhere to put a trail distance, so no venue
+        // could receive it correctly. Refusing here makes the answer the same whichever adapter is wired in,
+        // rather than depending on ProjectX happening to check its capability flags.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+
+        ExecutionRequest trailing = Request(Account(TradingMode.Practice)) with
+        {
+            Type = OrderType.TrailingStop,
+        };
+
+        ExecutionResult result = await _service.SendAsync(trailing, CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByUnsupportedType);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 }

@@ -44,4 +44,20 @@ public sealed record ExecutionResult(
     {
         return new ExecutionResult(ExecutionOutcome.RefusedByRisk, Order: null, decision, decision.Reason);
     }
+
+    /// <summary>The request contradicted itself, so it was refused before the gate ran.</summary>
+    /// <param name="reason">Which part disagreed with which.</param>
+    /// <returns>A refused result carrying no gate decision — nothing was sized.</returns>
+    public static ExecutionResult RefusedByMismatch(string reason)
+    {
+        return new ExecutionResult(ExecutionOutcome.RefusedByMismatch, Order: null, Decision: null, reason);
+    }
+
+    /// <summary>The ticket cannot express this order type.</summary>
+    /// <param name="reason">Why the type is unrepresentable.</param>
+    /// <returns>A refused result carrying no gate decision — nothing was sized.</returns>
+    public static ExecutionResult RefusedByUnsupportedType(string reason)
+    {
+        return new ExecutionResult(ExecutionOutcome.RefusedByUnsupportedType, Order: null, Decision: null, reason);
+    }
 }

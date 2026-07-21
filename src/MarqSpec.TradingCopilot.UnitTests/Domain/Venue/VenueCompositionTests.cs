@@ -36,9 +36,10 @@ public class VenueCompositionTests
     {
         ITradingVenue venue = new FakeTradingVenue();
 
-        VenueContractId contract = await venue.ResolveContractAsync(InstrumentId.Parse("ES"), CancellationToken.None);
+        ResolvedContract contract = await venue.ResolveContractAsync(InstrumentId.Parse("ES"), CancellationToken.None);
 
-        contract.Venue.Should().Be(venue.Id);
+        contract.Contract.Venue.Should().Be(venue.Id);
+        contract.Instrument.Should().Be(InstrumentId.Parse("ES"));
     }
 
     [Fact]

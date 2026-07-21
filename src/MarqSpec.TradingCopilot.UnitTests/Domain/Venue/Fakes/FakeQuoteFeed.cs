@@ -14,9 +14,9 @@ internal sealed class FakeQuoteFeed : IMarketDataSource
 
     public VenueCapabilities Capabilities { get; } = VenueCapabilities.Of(VenueCapability.Quotes);
 
-    public Task<VenueContractId> ResolveContractAsync(InstrumentId instrument, CancellationToken cancellationToken = default)
+    public Task<ResolvedContract> ResolveContractAsync(InstrumentId instrument, CancellationToken cancellationToken = default)
     {
-        return Task.FromResult(VenueContractId.Create(Id, instrument.Symbol));
+        return Task.FromResult(new ResolvedContract(VenueContractId.Create(Id, instrument.Symbol), instrument));
     }
 
     public Task<IReadOnlyList<Bar>> GetBarsAsync(
