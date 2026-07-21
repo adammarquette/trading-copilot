@@ -209,7 +209,7 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 | **AIUsage** | invocation: feature (suggestion / follow-up / backtest / triage / embed), model + tier, tokens in/out, **est. $ cost**, latency, trace id, ts, **user** — spend tracking + governor input. **Operator / platform-facing:** aggregated in **Grafana** (ADR-0002), **not a user surface** (R-20); the per-user tag supports operator attribution | REL / TS | ADR-0008, ADR-0002, Q-10 |
 
 ## Cross-cutting
-- **Multi-user tenancy (R-20).** The **User** is the **tenant root**. **Reference & market data** — Instrument,
+- **Tenancy & isolation (R-20).** The **User** is the **tenant root**. **Reference & market data** — Instrument,
   TradingVenue, DataSource, Firm (§1), all market series (§2), and raw SoftSignal / news (§9) — is **shared / global**.
   **All operator-owned data** — Connection, Account, Position, AccountSnapshot, RiskProfile, GateDecision, Suggestion
   (+ disposition / snapshot), Order / Fill / StopPlan / ConditionalOrder / Bracket, Trade / TradeFeedback / Outcome,

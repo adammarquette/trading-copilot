@@ -1360,8 +1360,8 @@
 
   <section class="spend">
     <div class="cap"><h2>AI usage &amp; spend — operator-only, in Grafana</h2><span class="bp">§7 · ADR-0008 · ADR-0002</span>
-      <span class="muted">not a user surface in the multi-user model — see why</span></div>
-    <div class="warnbn"><span class="ic">📊</span><div>AI usage &amp; spend is an <b>operator</b> concern — one shared Anthropic / Cohere account funds every user — so it is reported in <b>Grafana</b> (observability, ADR-0002) and <b>not shown to end users</b>. The <b>AI-spend governor</b> is a <b>platform-level</b> cost control the operator configures; invited users never see or manage spend. <b>If</b> the operator later has invitees bring <b>their own LLM accounts</b>, per-user spend returns as a user surface. <span class="muted">(Was a user-facing meter; moved to operator observability when the app became multi-user — gh#4.)</span></div></div>
+      <span class="muted">not a trading surface — see why</span></div>
+    <div class="warnbn"><span class="ic">📊</span><div>AI usage &amp; spend lives in <b>Grafana</b> (observability, ADR-0002), not in the trading surface — it is a <b>running-cost</b> question, not a trading decision, and mixing it into the workspace competes for attention with the things that move money. The <b>AI-spend governor</b> is a cost control configured alongside the other platform settings. <span class="muted">(You run your own deployment and your own LLM keys, so the spend is simply yours — ADR-0015.)</span></div></div>
   </section>
 
   <section class="life">
@@ -1517,8 +1517,8 @@
   </section>
 
   <section class="auth">
-    <div class="cap"><h2>Sign in &amp; accept an invite — multi-user</h2><span class="bp">R-18 · R-20</span>
-      <span class="muted">onboarding is <b>invitation-only</b> — each user joins by invite and owns an isolated workspace; accounts, rules &amp; journal are private to them</span></div>
+    <div class="cap"><h2>Sign in</h2><span class="bp">R-18 · R-20</span>
+      <span class="muted">the deployment is yours and is reachable from the web, so it <b>authenticates</b> — anonymous access is refused. Your account is seeded at first start; there is no self-service sign-up. The invite-acceptance path stays in the codebase should a second login on one instance ever be wanted (ADR-0015)</span></div>
     <div class="auth-stage">
       <div class="authcard">
         <div class="auth-brand"><svg class="glyph" viewBox="0 0 64 64" aria-hidden="true"><use href="#tc-logo"/></svg>Trading Co-Pilot</div>
@@ -1773,7 +1773,7 @@
       <div><span class="tag">R-7 · ADR-0008</span> Rulebook &amp; triggers — plain-language rules compile to confirmed deterministic triggers (alert vs. agent-review)</div>
       <div><span class="tag">R-6 · ADR-0009</span> AI refinement loop — journal + backtest → follow-up questions → confirmed rule / strategy refinements</div>
       <div><span class="tag">R-13 · ADR-0007</span> Kill switch &amp; auto-flatten — countdown escalation, native-first flatten sequence, immutable audit; connection-loss → synthetic-orphan emergency</div>
-      <div><span class="tag">R-18 · R-20</span> Sign in &amp; accept-invite — multi-user; <b>invitation-only</b> onboarding + login; each user's workspace isolated per user (ADR-0011)</div>
+      <div><span class="tag">R-18 · R-20</span> Sign in — login for a web-exposed deployment; the operator's account is seeded at first start, data access scoped to it at the data layer</div>
       <div><span class="tag">R-2</span> News relevance — ticker↔instrument maps, per-instrument + global topics (AI-suggested); sentiment thumbs</div>
     </div>
   </section>

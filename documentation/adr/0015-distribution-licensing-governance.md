@@ -90,6 +90,33 @@ and with it the enforceability of any licence, is genuinely uncertain.
 - **Disclosing AI authorship invites scepticism** from some readers. Accepted as the honest position, and the
   test suites, ADR trail, and traceability are the counter-evidence.
 
+## Update (2026-07-20) — narrowed to one operator per deployment
+
+The decision above said *multi-user **capable**, single-operator by default*. That is now firmer: **one
+deployment, one operator.** Authentication exists because the deployment is **reachable from the web**, not
+because the app serves a user base.
+
+What follows:
+
+- **Authentication stays** (R-18), unchanged. A web-exposed trading system without it is indefensible.
+- **Tenancy stays** (R-20), reframed. The per-user scoping is a **default-deny safety property** rather than a
+  multi-tenant feature: a query that forgets its scope returns *nothing* instead of *everything*. It is built and
+  tested, costs nothing to keep, and would be painful to retrofit.
+- **Invitation-only onboarding is no longer the product's story.** The endpoints, entity, and migration **remain
+  in the codebase** — dormant, undocumented as a product feature — so a second login on one instance stays
+  possible without unwinding a migration. The documented path is: the operator's account is seeded at first
+  start, then they log in.
+- **AI spend is simply the operator's own.** The prior framing — one shared LLM account funding many users, spend
+  hidden from "end users" — no longer describes anything. Spend lives in Grafana because it is a running-cost
+  question rather than a trading decision, not because it is being withheld from someone.
+
+**The earlier ADRs are deliberately not rewritten.** [0003](0003-authentication.md),
+[0008](0008-ai-invocation-cost-model.md), [0011](0011-multi-user-tenancy.md),
+[0013](0013-failure-recovery-model.md), and [0014](0014-news-importance-feedback.md) carry multi-user framing and
+keep it: an accepted ADR is an immutable record, superseded by a later one rather than edited (see the
+[ADR index](README.md)). They remain accurate about *why* those decisions were taken; this ADR narrows the
+deployment model they assumed. `0011`'s tenancy mechanism in particular is still exactly what ships.
+
 ## Follow-ups
 
 - Reconcile the **PRD's pervasive "multi-user" framing** with "multi-user capable, single-operator deployment"

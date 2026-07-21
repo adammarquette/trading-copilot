@@ -1,13 +1,13 @@
 # AGENTS.md — Trading Co-Pilot (root)
 
-Instructions for AI coding agents working in this repository — a **multi-user** futures trading
+Instructions for AI coding agents working in this repository — a **self-hosted, single-operator** futures trading
 co-pilot. This root file holds the rules that apply everywhere; **two role-specific contracts take precedence in
 their subtree**:
 - **Coding Agent** — [`src/AGENTS.md`](src/AGENTS.md): production code + unit tests (test-first).
 - **QA Agent** — [`src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md`](src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md): integration + smoke tests, written *independently* of the coding work.
 
 ## What this repo is
-A **multi-user futures day-trading co-pilot** — a human-in-the-loop decision-support **and** execution
+A **self-hosted futures day-trading co-pilot** — a human-in-the-loop decision-support **and** execution
 system with a safety-critical **auto-flatten** before the CME close. C# / .NET, integrating with the broker via
 `MarqSpec.Client.ProjectX`. The `src/` solution (**`MarqSpec.TradingCopilot.slnx`**, base namespace `MarqSpec.TradingCopilot.*`) builds out per the roadmap — `Domain`, `Data` (EF Core), the `Api` (BFF), + test projects so far; read the docs before building.
 
