@@ -1,11 +1,19 @@
 # docker-compose — local development environment.
 # `docker compose up -d` from the repo root stands up the local stack.
-# See ADR-0012 (containerization & local development) and engineering §8.
+# See ADR-0012 (containerization) and ADR-0018 (build-once → GHCR), and engineering §8.
 #
-# App services run as the SAME containerized artifact as Railway (the multi-stage
-# Dockerfile). The DATABASE is config-driven: the app reads its connection string from
-# config (ConnectionStrings__* / appsettings), so it can use the `db` service below OR an
-# external / managed Postgres -- swapping is a config change, not a code change.
+# By default the `app` service PULLS the image CI built and pushed to GHCR -- the SAME artifact
+# Railway runs (ADR-0018), so nothing is rebuilt just to run locally. To run YOUR local changes
+# instead, layer the dev override, which builds from source:
+#
+#   docker compose up -d                                              # pull GHCR image (default)
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build   # build my changes
+#
+# IMAGE_TAG selects which published build to pull (default: develop, the dev-environment tag).
+#
+# The DATABASE is config-driven: the app reads its connection string from config
+# (ConnectionStrings__* / appsettings), so it can use the `db` service below OR an external /
+# managed Postgres -- swapping is a config change, not a code change.
 #
 # Scaffold: services are added as the src/ solution is built (only `db` is concrete today).
 services:
@@ -28,10 +36,10 @@ services:
       retries: 5
 
   app:
-    # The BFF -- the SAME multi-stage image as Railway (ADR-0012). Build context is the repo root.
-    build:
-      context: .
-      dockerfile: src/MarqSpec.TradingCopilot.Api/Dockerfile
+    # The BFF -- the CI-built image from GHCR, the SAME artifact Railway runs (ADR-0018). No `build`
+    # here on purpose: `docker compose up` PULLS rather than rebuilds. docker-compose.dev.yml adds the
+    # build for the "run my local changes" workflow.
+    image: "ghcr.io/adammarquette/trading-copilot:${IMAGE_TAG:-develop}"
     depends_on:
       db:
         condition: service_healthy

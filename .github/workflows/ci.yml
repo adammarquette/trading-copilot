@@ -39,3 +39,51 @@ jobs:
       # never in PR CI, so they are not invoked here.
       - name: Unit tests
         run: dotnet test src/MarqSpec.TradingCopilot.UnitTests/MarqSpec.TradingCopilot.UnitTests.csproj --configuration Release --no-build
+
+  # Build the deployment image ONCE and publish it to GHCR, so local dev and Railway consume the
+  # same artifact rather than each rebuilding from source (ADR-0018, extends ADR-0012).
+  publish-image:
+    name: publish image (GHCR)
+    needs: build-test
+    # Merges only. A PR must not publish an image: the code is not yet on a long-lived branch, and a
+    # fork PR cannot be granted packages:write anyway. Tags map to the branch's environment (§8).
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The Dockerfile COPYs external/ (the ProjectX submodule) into the build.
+          submodules: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Branch -> tag (:develop, :staging, :main) plus an immutable :sha-<short> for pinning a rollback
+      # to an exact build. github.repository is already lowercase, which GHCR requires.
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/MarqSpec.TradingCopilot.Api/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Reuse layers across builds on the same branch -- the SDK restore/publish is the slow part.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

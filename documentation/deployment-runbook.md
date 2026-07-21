@@ -10,13 +10,29 @@ throwaway placeholder); this documents the intended shape and the setup still to
 ## Platform
 - **Cloud:** [Railway](https://railway.com) — project **`soothing-illumination`**
   (`2601eb74-b5f9-411f-bb9a-0cd19e6fd540`).
+- **Image registry:** **GHCR** — `ghcr.io/adammarquette/trading-copilot`, **public** ([ADR-0018](adr/0018-image-registry-ghcr.md)).
+  CI builds once per merge and pushes; local and Railway both **pull** this artifact. Tags: `:develop` / `:staging` /
+  `:main` per environment, plus `:sha-<short>` for an exact rollback target.
 - **Data:** one Postgres with **TimescaleDB** + **pgvector** (Railway-managed plugin vs. self-hosted — *Decide*),
   three shapes in one database (engineering §2).
 
 ## Local development (docker-compose)
 `docker compose up -d` from the repo root stands up the local stack ([ADR-0012](adr/0012-containerization-local-dev.md),
-engineering §8). App services run as the **same containerized artifact** as Railway (the multi-stage `Dockerfile`),
-so **local ≡ cloud**.
+[ADR-0018](adr/0018-image-registry-ghcr.md), engineering §8). The `app` service **pulls the GHCR image** — the same
+artifact Railway runs — so **local ≡ cloud** literally, not just the same Dockerfile.
+
+**Two modes:**
+
+| Goal | Command |
+| --- | --- |
+| Run the published build (default) | `docker compose up -d` |
+| Run **my local changes** | `docker compose down` then `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build` |
+
+`docker compose up` **pulls, never builds** — fast, and works on a machine that cannot build the image.
+`IMAGE_TAG` selects the published build (default `develop`; e.g. `IMAGE_TAG=staging docker compose up -d`).
+The dev override (`docker-compose.dev.yml`) builds from your working tree and tags it `trading-copilot:local`, a
+distinct name so a later `docker compose pull` cannot clobber your build. Building needs a **recursive clone**
+(the Dockerfile copies the `external/` submodule).
 - **Database is config-driven** — `docker-compose.yml` includes a **TimescaleDB + pgvector** service for convenience,
   but the app takes its **connection string from config** (`ConnectionStrings__*` env / `appsettings`), so you can
   point at the compose DB, a local Postgres, or a managed instance instead.
@@ -49,13 +65,26 @@ The microservices ([architecture](trading-platform-architecture.md)) deploy as *
 independently: ingestion (websocket) · poller · processor(s) · trigger engine · BFF/API + agents · the React SPA
 (static). *(Fill in service names / start commands as they land.)*
 
-## CI/CD pipeline (GitHub Actions → Railway)
-`lint → build → test → deploy → verify` (engineering §10):
+## CI/CD pipeline (GitHub Actions → GHCR → Railway)
+`lint → build → test → publish image → deploy → verify` (engineering §10, [ADR-0018](adr/0018-image-registry-ghcr.md)):
 1. Push / merge to a long-lived branch triggers the pipeline.
 2. `dotnet format --verify-no-changes` + **unit tests** must pass.
-3. Build, then **deploy to the branch's Railway environment**.
-4. **Integration tests** run against **staging** after a merge to `staging`.
-5. On **production** deploy, a **smoke-test subset** runs; a failure **flags the release for rollback**.
+3. **Publish image to GHCR** — CI builds the `Dockerfile` **once** and pushes `ghcr.io/adammarquette/trading-copilot`
+   tagged `:<branch>` + `:sha-<short>`. Merge-only (`if: github.event_name == 'push'`); a PR never publishes.
+4. **Railway deploys that image** (the pushed tag) to the branch's environment — the tested artifact, not a rebuild.
+5. **Integration tests** run against **staging** after a merge to `staging`.
+6. On **production** deploy, a **smoke-test subset** runs; a failure **flags the release for rollback** — pin the
+   previous `:sha-<short>` tag to roll back to an exact prior build.
+
+### Operator setup — console actions CI cannot do (ADR-0018)
+The build/push half is code (`.github/workflows/ci.yml`). These are one-time console steps, recorded here because
+configuration that lives only in a provider console is otherwise invisible to anyone reading the pipeline:
+1. **After the first CI publish**, set the GHCR package `trading-copilot` visibility to **public** — GHCR creates
+   packages **private** by default, so the first pull (local or Railway) fails until this is flipped.
+2. **Reconfigure the Railway service** to deploy from the image `ghcr.io/adammarquette/trading-copilot:<branch>`
+   rather than building from the repo source. No pull credential is needed (public image).
+3. Until step 2 is done, Railway still builds from source; the GHCR image is used by local dev only. The pipeline
+   is deliberately left this way rather than half-wiring a deploy trigger against a not-yet-image-sourced service.
 
 ## Deploy procedure
 - **Non-prod (dev / staging):** automatic on merge — CI builds + deploys.
