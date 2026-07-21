@@ -18,7 +18,9 @@ public static class TradingModePolicy
             TradingMode.Practice => true,
             TradingMode.Live => environment == DeploymentEnvironment.Production,
 
-            // An unrecognized mode fails closed -- a new mode must opt in here deliberately.
+            // Undeclared is stricter than Live: Live is permitted in production, Undeclared nowhere. "We have
+            // not established whether capital is at stake" is not a state to trade from, and production is
+            // where guessing costs most. An unrecognized mode fails closed the same way.
             _ => false,
         };
     }
@@ -31,8 +33,7 @@ public static class TradingModePolicy
     {
         if (!IsAllowed(mode, environment))
         {
-            throw new TradingModeNotAllowedException(
-                $"A {mode} account may not be traded from {environment} — practice accounts only outside production (R-14).");
+            throw new TradingModeNotAllowedException(ReasonFor(mode, environment));
         }
     }
 
@@ -45,8 +46,23 @@ public static class TradingModePolicy
         if (!IsAllowed(account.Mode, environment))
         {
             throw new TradingModeNotAllowedException(
-                $"Account '{account.Name}' ({account.Id}) is {account.Mode} and may not be traded from " +
-                $"{environment} — practice accounts only outside production (R-14).");
+                $"Account '{account.Name}' ({account.Id}) may not be traded. "
+                + ReasonFor(account.Mode, environment));
         }
+    }
+
+    /// <summary>
+    /// Why a mode is refused. Undeclared and Live fail for different reasons and need different fixes, so one
+    /// message for both would send the operator after the wrong thing — "practice accounts only outside
+    /// production" reads as though production would have been fine.
+    /// </summary>
+    private static string ReasonFor(TradingMode mode, DeploymentEnvironment environment)
+    {
+        return mode == TradingMode.Live
+            ? $"A {mode} account may not be traded from {environment} — practice accounts only outside "
+                + "production (R-14)."
+            : $"Its trading mode is {mode}: no firm convention says whether capital is at risk here, so it is "
+                + $"refused in every environment including {environment}. Classify the account's stage before "
+                + "trading it (R-14).";
     }
 }

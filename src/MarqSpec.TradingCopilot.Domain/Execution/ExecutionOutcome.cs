@@ -8,7 +8,8 @@ public enum ExecutionOutcome
 
     /// <summary>
     /// Refused by R-14's <b>environment restriction</b>: this account's mode may not be traded from this
-    /// deployment environment. Nothing was sized and nothing was sent.
+    /// deployment environment — or, for <see cref="Venue.TradingMode.Undeclared"/>, from any environment at all,
+    /// because nothing has established whether capital is at risk. Nothing was sized and nothing was sent.
     /// </summary>
     /// <remarks>
     /// Not to be confused with R-14's <i>mode guard</i> (PRD R-14), which forbids <b>persisting</b> an

@@ -303,6 +303,33 @@ public class OrderExecutionServiceTests
         sent.StopPrice.Should().Be(expectedStop is null ? null : new Price(expectedStop.Value));
     }
 
+    [Theory]
+    [InlineData(DeploymentEnvironment.Development)]
+    [InlineData(DeploymentEnvironment.Staging)]
+    [InlineData(DeploymentEnvironment.Production)]
+    public async Task SendAsync_ShouldRefuseAnUndeclaredAccount_InEveryEnvironmentIncludingProduction(
+        DeploymentEnvironment environment)
+    {
+        // The seam between the send path and declared trading modes (gh#11 + gh#60): neither shipped with the
+        // other, so nothing exercised them together. An account whose stage the operator has not classified is
+        // exactly the one that must not reach a broker -- production included, since Live is permitted there and
+        // Undeclared must not inherit that permission.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+        VenueAccount unclassified = Account(TradingMode.Practice) with
+        {
+            Name = "EXPRESS-50K-9001",
+            Mode = TradingMode.Undeclared,
+        };
+
+        ExecutionResult result = await ServiceIn(environment).SendAsync(
+            Request(unclassified), CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByMode);
+        result.Decision.Should().BeNull();
+        A.CallTo(() => _gate.Evaluate(A<OrderProposal>._, A<RiskContext>._)).MustNotHaveHappened();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
     [Fact]
     public async Task SendAsync_ShouldRefuse_WhenTheVenueReportsTheAccountAsNotTradable()
     {

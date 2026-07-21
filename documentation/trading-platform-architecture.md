@@ -64,19 +64,36 @@ Finnhub, order types vary — so a gap fails loudly at the seam instead of surfa
 
 **What must not leak across it:** transport shape (ProjectX = one realtime host, two SignalR hubs; Tradovate =
 two separate sockets), auth scheme, and how the venue expresses its **execution mode** (ProjectX exposes a
-required **`simulated`** flag per account; Tradovate splits it by **host**). The adapter normalizes that raw
-signal; the core sees only `TradingMode`, and `TradingModePolicy` enforces **R-14** in code, below the model.
+required **`simulated`** flag per account; Tradovate splits it by **host**). The core sees only `TradingMode`,
+and `TradingModePolicy` enforces **R-14** in code, below the model.
 
-> **How `TradingMode` is derived is under revision — gh#60.** The venue's flag says **where an order executes**,
-> not **whether capital is at risk**. A Topstep *funded* account reports `simulated: true` — it is copy-traded on
-> a simulated matching engine — yet real payouts ride on it, and breaching it costs the operator money. Deriving
-> `TradingMode` from that flag alone therefore classifies a funded account as **practice**, and R-14 would permit
-> trading it outside production: the gate failing in the dangerous direction.
->
-> This is **live in the shipped adapter** (`ProjectXMapping.ToVenueAccount` maps `simulated → Practice`), and a
-> run against a real login classified **all 293 accounts as practice — `EXPRESS-…` funded stages included**. The
-> design under review keeps the adapter reporting only the venue's raw signal and adds a **per-firm, per-stage
-> operator declaration** of what counts as at-risk. This paragraph and the seam settle together when gh#60 does.
+#### `TradingMode` is declared, not derived (R-14, gh#60)
+
+A venue's mode flag says **where an order executes**, not **whether capital is at risk** — on a prop platform the
+two are close to orthogonal. A Topstep *funded* account reports `simulated: true` (it is copy-traded on a
+simulated matching engine) yet real payouts ride on it, and breaching it costs the operator money. The shipped
+adapter originally mapped `simulated → Practice`; a run against a real login classified **all 293 accounts as
+practice — `EXPRESS-…` funded stages included**, which R-14 would then have permitted trading outside
+production. The gate failed in the dangerous direction.
+
+So the derivation is gone. Three pieces replace it:
+
+| Piece | Owns | Where |
+| --- | --- | --- |
+| `AccountStage` | Where an account sits in a programme — `Practice` · `Evaluation` · `Funded` · `Unknown` | reported by the venue |
+| `FirmConventions` | What each stage **means economically** at one firm, declared by the operator | operator configuration |
+| `TradingMode` | Whether capital is at risk — `Practice` · `Live` · **`Undeclared`** | resolved from the two above |
+
+Conventions belong to the **firm**, not the platform: several firms share a platform, the operator holds one
+login per firm, and they classify their stages differently. An **undeclared** stage resolves to
+`TradingMode.Undeclared`, which `TradingModePolicy` refuses in **every** environment — production included, since
+that is where guessing costs most. Silence is not consent: the failure mode is "classify this before trading it",
+never "assumed practice, then traded a funded account". Both enums make the unsafe reading their zero value, so an
+uninitialised mode fails closed rather than defaulting to something tradeable.
+
+> **Open seam:** nothing wires the operator's declaration through configuration yet, so `ProjectXVenue` reports
+> every account as `Undeclared` and none are tradeable. That gap is deliberate and visible rather than papered
+> over with a plausible default — see ADR-0016 for where the declaration will live.
 
 ### Risk gate — the enforcing checkpoint (R-5, R-16)
 Every order funnels through one gate before transmission — manual ticket, taken suggestion, edited take, or a

@@ -187,9 +187,24 @@ public class ProjectXVenueTests
         IReadOnlyList<VenueAccount> accounts = await _venue.GetAccountsAsync(CancellationToken.None);
 
         accounts.Should().HaveCount(2);
-        accounts[0].Mode.Should().Be(TradingMode.Practice);
-        accounts[1].Mode.Should().Be(TradingMode.Live);
         accounts[1].IsSelectable.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task GetAccountsAsync_ShouldReportEveryAccountAsUndeclared_UntilTheOperatorClassifiesThem()
+    {
+        // Until firm conventions are wired through configuration, the adapter has no basis to say what is at
+        // stake -- and it must not guess from the simulated flag (gh#60). Undeclared is refused everywhere, so
+        // the gap blocks trading rather than hiding behind a plausible default.
+        A.CallTo(() => _api.GetAccountsAsync(A<bool>._, A<CancellationToken>._)).Returns<IEnumerable<ClientModels.TradingAccount>>(
+        [
+            new ClientModels.TradingAccount { Id = 9001, Name = "PRAC-50K", CanTrade = true, IsVisible = true, Simulated = true },
+            new ClientModels.TradingAccount { Id = 9002, Name = "50KTC-V2", CanTrade = true, IsVisible = true, Simulated = false },
+        ]);
+
+        IReadOnlyList<VenueAccount> accounts = await _venue.GetAccountsAsync(CancellationToken.None);
+
+        accounts.Should().OnlyContain(account => account.Mode == TradingMode.Undeclared);
     }
 
     // --- Contract resolution ---
