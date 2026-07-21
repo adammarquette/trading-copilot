@@ -91,9 +91,10 @@ public class ProjectXVenueTests
             .Returns<IEnumerable<ClientModels.Contract>>(
                 [new ClientModels.Contract { Id = ContractKey, ActiveContract = true }]);
 
-        VenueContractId resolved = await _venue.ResolveContractAsync(InstrumentId.Parse("ES"), CancellationToken.None);
+        ResolvedContract resolved = await _venue.ResolveContractAsync(InstrumentId.Parse("ES"), CancellationToken.None);
 
-        resolved.Key.Should().Be(ContractKey);
+        resolved.Contract.Key.Should().Be(ContractKey);
+        resolved.Instrument.Should().Be(InstrumentId.Parse("ES"));
         A.CallTo(() => _api.SearchContractsAsync("ES", true, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
@@ -217,10 +218,11 @@ public class ProjectXVenueTests
             new ClientModels.Contract { Id = ContractKey, ActiveContract = true, TickSize = 0.25m, TickValue = 12.5m },
         ]);
 
-        VenueContractId resolved = await _venue.ResolveContractAsync(InstrumentId.Parse("ES"), CancellationToken.None);
+        ResolvedContract resolved = await _venue.ResolveContractAsync(InstrumentId.Parse("ES"), CancellationToken.None);
 
-        resolved.Key.Should().Be(ContractKey);
-        resolved.Venue.Should().Be(_venue.Id);
+        resolved.Contract.Key.Should().Be(ContractKey);
+        resolved.Instrument.Should().Be(InstrumentId.Parse("ES"));
+        resolved.Contract.Venue.Should().Be(_venue.Id);
     }
 
     [Fact]

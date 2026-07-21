@@ -48,6 +48,8 @@ public class RiskGateTests
         TrailingMode trailingMode = TrailingMode.EndOfDay)
     {
         return new RiskContext(
+            VenueAccountId.Create(VenueId.Parse("projectx"), "9001"),
+
             // The realized balance already carries the day's result.
             new AccountRiskState(Balance: 55_000m + dayRealizedPnL, unrealizedPnL, dayRealizedPnL),
             TrailingDrawdown.Start(trailingMode, trailingAmount: 5_000m, startingBalance: 55_000m, locksAt: null),

@@ -67,7 +67,7 @@ public sealed class ProjectXVenue : ITradingVenue
         | VenueCapability.ClosePosition);
 
     /// <inheritdoc />
-    public async Task<VenueContractId> ResolveContractAsync(
+    public async Task<ResolvedContract> ResolveContractAsync(
         InstrumentId instrument,
         CancellationToken cancellationToken = default)
     {
@@ -77,9 +77,10 @@ public sealed class ProjectXVenue : ITradingVenue
         // Prefer the front month the gateway marks active; a search can also return expired or back months.
         ClientModels.Contract? contract = matches.Find(c => c.ActiveContract) ?? matches.FirstOrDefault();
 
+        // The instrument travels with the handle: this method is the only place that knows they belong together.
         return contract is null
             ? throw new ProjectXVenueException($"No ProjectX contract matches instrument '{instrument}'.")
-            : VenueContractId.Create(Id, contract.Id);
+            : new ResolvedContract(VenueContractId.Create(Id, contract.Id), instrument);
     }
 
     /// <inheritdoc />
