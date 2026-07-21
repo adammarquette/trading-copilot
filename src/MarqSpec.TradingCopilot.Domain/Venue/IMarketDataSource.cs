@@ -14,8 +14,12 @@ public interface IMarketDataSource : IVenue
     /// <summary>Resolves a venue-neutral instrument to this venue's own contract handle.</summary>
     /// <param name="instrument">The instrument to resolve (for example <c>ES</c>).</param>
     /// <param name="cancellationToken">Cancels the operation.</param>
-    /// <returns>The venue's contract handle for the instrument.</returns>
-    Task<VenueContractId> ResolveContractAsync(InstrumentId instrument, CancellationToken cancellationToken = default);
+    /// <returns>
+    /// The venue's contract handle <b>paired with the instrument it was resolved for</b>. The venue is the only
+    /// party that knows that pairing, and carrying it forward is what lets the execution path detect a proposal
+    /// sized for one instrument being sent as another's contract.
+    /// </returns>
+    Task<ResolvedContract> ResolveContractAsync(InstrumentId instrument, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Retrieves historical bars — the clean series that is the system of record for journaling and replay (R-1).
