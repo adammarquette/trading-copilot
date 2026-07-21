@@ -31,8 +31,9 @@ dictionary is kept **in lockstep with the `MarqSpec.TradingCopilot.Data` entitie
 - **Audit (engineering §9):** every order action and guardrail decision is written to an immutable record.
 
 ## Model at a glance (ERD)
-The relational **spine** — entities and how they relate. The **User (Operator)** is the **tenant root**: every
-operator-owned entity is scoped to it (R-20); reference & market data is shared. Attributes live in the section tables below; this diagram
+The relational **spine** — entities and how they relate. There is **one operator per deployment** (ADR-0017);
+every operator-owned entity still carries an owning identity and is scoped to it, so a query that forgets its
+scope returns nothing (R-20). Reference & market data is shared. Attributes live in the section tables below; this diagram
 is the **map, not a second copy** of the fields, so it stays cheap to maintain. Kept **in lockstep** with the tables
 + `MarqSpec.TradingCopilot.Data`: update it in the **same PR** as any entity/relationship change (universal same-PR doc rule;
 engineering §10, *Maintenance* below). Time-series detail (Quote / Tick / DepthLevel), the event backbone (Event /
@@ -46,7 +47,6 @@ erDiagram
   Operator      ||--o{ Suggestion             : owns
   Operator      ||--o{ Trade                  : owns
   Operator      ||--o{ Conversation           : owns
-  Operator      ||--o{ Invitation             : issues
   Operator      ||--o{ SoftSignalFeedback     : rates
   Firm          ||--o{ Connection            : provides
   TradingVenue  ||--o{ Connection            : "platform for"
@@ -101,10 +101,9 @@ erDiagram
 | **Instrument** | symbol, venue/source, asset class (future/equity/index/etf), exchange, tick size, point value, currency, session hours, **settlement / close time** (drives the per-instrument R-13 flatten default), contract/expiry | REL | R-1, R-13, R-17 |
 | **TradingVenue** | name (ProjectX / Tradovate), kind = execution, capabilities (order types, data streams), hosts/endpoints, mode support | REL | R-17, ADR-0007 |
 | **DataSource** | name (Finnhub / Tiingo), kind = data-only, capabilities (ws / rest, market / news), free-tier limits | REL | R-1, R-2, R-17 |
-| **Strategy / Setup** | name (VWAP-reclaim, opening-drive…), description, enabled, **template lineage** (source StrategyTemplate + version, if installed from one) — the **per-user, editable instance** | REL | R-4, R-9, R-21 |
-| **StrategyTemplate** (“playbook”) | name (e.g. 13/48 EMA-crossover, an ICT model), version, methodology tag, **source** (platform-curated / user-authored), **required features / indicators**, **setup definitions** (→ triggers), **suggestion shape** (entry / stop / target / size derivation), **risk defaults** (R-5), packaged **rules** (R-7); **install → instantiates** per-user Strategy + Rule + Trigger + defaults, tracked by lineage. Platform templates are global; user-authored are per-user (R-20) | REL + VEC | R-21, R-7, R-4, R-5 |
-| **User (Operator)** — *tenant root* | id, **email**, credential (hashed, server-side), display name, created ts, status, claims / roles (RBAC-capable); **owns an isolated workspace** — every operator-owned entity references its owning user (R-20) | REL | R-18, R-20, ADR-0003, ADR-0011 |
-| **Invitation** | id, **invited email**, token (hashed), **issued-by** user (operator / admin), status (pending / accepted / revoked / expired), created + **expires** ts, accepted-user (once used); **single-use**, **gates onboarding** (R-18) — no open sign-up | REL | R-18, R-20, ADR-0011 |
+| **Strategy / Setup** | name (VWAP-reclaim, opening-drive…), description, enabled, **template lineage** (source StrategyTemplate + version, if installed from one) — the operator’s **editable instance** | REL | R-4, R-9, R-21 |
+| **StrategyTemplate** (“playbook”) | name (e.g. 13/48 EMA-crossover, an ICT model), version, methodology tag, **source** (platform-curated / user-authored), **required features / indicators**, **setup definitions** (→ triggers), **suggestion shape** (entry / stop / target / size derivation), **risk defaults** (R-5), packaged **rules** (R-7); **install → instantiates** the operator’s own Strategy + Rule + Trigger + defaults, tracked by lineage. Curated templates ship global; operator-authored ones are operator-owned (R-20), and either can be **exported to a portable JSON artifact** for another deployment to import (gh#3, ADR-0017) | REL + VEC | R-21, R-7, R-4, R-5 |
+| **User (Operator)** | id, **email**, credential (hashed, server-side), display name, created ts, status, claims / roles (RBAC-capable); **one per deployment** — provisioned at deploy, no sign-up and no invitation (ADR-0017). Every operator-owned entity references its owning user, so a query that forgets its scope returns **nothing** rather than everything (R-20) | REL | R-18, R-20, ADR-0003, ADR-0017 |
 | **Firm / account provider** | a **prop firm** (Topstep, Apex, …) **or a brokerage**; the **platform(s) it offers** — **one-to-many**, e.g. Apex offers **Tradovate and Rithmic** while Topstep **owns ProjectX** and offers only that; its **stage conventions** (what Evaluation / Funded mean here — declared by the operator, applying across every platform the firm offers, gh#60); super-account concept (prop) | REL | R-17, R-14 |
 | **Connection** (a firm login) | operator, **firm** + **which of that firm's platforms** this login is for, credentials (server-side ref), status — **one per firm × platform** (Apex on Tradovate and Apex on Rithmic are two logins; several firms also share one platform → several logins on it); exposes many accounts | REL | R-17, R-18 |
 
@@ -186,7 +185,7 @@ News is the reference template; other non-market feeds reuse this shape (R-2).
 | **SoftSignal (NewsItem)** | source, type (news / social / …), published + crawl ts, title, content, url, tickers, **matched instruments / topics** (relevance), tags, **dedup key**, **provenance (source feeds[])**; sentiment **deferred** | REL + VEC | R-2 |
 | **NewsTopic** | name, tags / keywords / embedding, scope (instrument \| global) | REL + VEC | R-2 |
 | **RelevanceConfig / TopicMap** | ticker↔instrument maps (SPY→ES), per-instrument topics, global topics; **AI-suggested + user-curated** (config panel); **personalized importance weights** learned from `SoftSignalFeedback` stars (per-dimension salience multipliers, ADR-0014) | REL | R-2, R-6/R-7, ADR-0014 |
-| **SoftSignalFeedback** | per-user feedback on a soft-signal / news item: **kind** (**important / star** \| sentiment 👍/👎 \| **mute**), value / weight, ts, **user**; a **star** raises the personalized **salience** of similar future items (aggregated into `RelevanceConfig` weights) — a **soft signal, never a risk control**; transparent + adjustable (un-star / mute, salience floor) | REL | R-2, R-6, R-9, ADR-0014, ADR-0011 |
+| **SoftSignalFeedback** | per-user feedback on a soft-signal / news item: **kind** (**important / star** \| sentiment 👍/👎 \| **mute**), value / weight, ts, **user**; a **star** raises the personalized **salience** of similar future items (aggregated into `RelevanceConfig` weights) — a **soft signal, never a risk control**; transparent + adjustable (un-star / mute, salience floor) | REL | R-2, R-6, R-9, ADR-0014, ADR-0017 |
 
 ## 10. Vectors & retrieval
 | Entity | Key fields | Storage | Traces |
@@ -209,14 +208,16 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 | **AIUsage** | invocation: feature (suggestion / follow-up / backtest / triage / embed), model + tier, tokens in/out, **est. $ cost**, latency, trace id, ts, **user** — spend tracking + governor input. Surfaced **both ways**: aggregated in **Grafana** (ADR-0002) for the operational view, and **read back in the app** for the spend meter — cost per suggestion, cost per taken trade, cap remaining (gh#62). The spend is the operator's own, billed to their own keys (ADR-0015) | REL / TS | ADR-0008, ADR-0002, Q-10 |
 
 ## Cross-cutting
-- **Tenancy & isolation (R-20).** The **User** is the **tenant root**. **Reference & market data** — Instrument,
+- **Data isolation (R-20).** One operator per deployment (ADR-0017). **Reference & market data** — Instrument,
   TradingVenue, DataSource, Firm (§1), all market series (§2), and raw SoftSignal / news (§9) — is **shared / global**.
   **All operator-owned data** — Connection, Account, Position, AccountSnapshot, RiskProfile, GateDecision, Suggestion
   (+ disposition / snapshot), Order / Fill / StopPlan / ConditionalOrder / Bracket, Trade / TradeFeedback / Outcome,
   Rule / Trigger, RelevanceConfig, Embedding, Conversation / ChatMessage, AuditRecord, AIUsage, SoftSignalFeedback — carries an **owning
-  `user_id`** and is **filtered by the authenticated user at the data layer** (row-level scoping); **no cross-user
-  access**, enforced below the UI. *(Event-log tenancy — a mix of shared market + per-user decision events — is an
-  open item; see [ADR-0011](adr/0011-multi-user-tenancy.md).)*
+  `user_id`** and is **filtered by the authenticated user at the data layer** (row-level scoping, **default-deny**),
+  enforced below the UI. With **one operator per deployment** (ADR-0017) this is a **fail-closed safety property**,
+  not a tenancy feature: a query that forgets its scope returns *nothing* instead of *everything*, and a second
+  login stays possible later without reworking the data layer. *(Event-log scoping — a mix of shared market and
+  operator decision events — is an open item; see [ADR-0017](adr/0017-single-operator-data-isolation.md).)*
 - **Venue/source-tagging** end-to-end (R-17) — e.g. Finnhub `SPY` vs. ProjectX `ES` never conflate.
 - **Practice vs. live** is a **tag**, not a separate schema (R-14) — identical ingestion / journaling / learning —
   **but mode-guarded:** an `Order` / `Suggestion` `mode` **must equal its `Account.mode`**, enforced at the

@@ -4,7 +4,7 @@
 **Relates to:** PRD `R-2` (soft-signal ingestion + relevance), `R-6` (co-pilot / personalization), `R-9` (learning
 loop); data dictionary (`SoftSignalFeedback`, `RelevanceConfig`); [ADR-0008](0008-ai-invocation-cost-model.md)
 (retrieval / embeddings), [ADR-0007](0007-order-execution-model.md) (enforcement below the model),
-[ADR-0011](0011-multi-user-tenancy.md) (per-user).
+[ADR-0017](0017-single-operator-data-isolation.md) (operator-owned).
 
 ## Context
 News volume is high and **not every item matters equally to a given operator**. R-2 already defers *sentiment* (a

@@ -5,7 +5,7 @@
 re-validation), `R-13` (auto-flatten — safety-critical), `R-19` (PWA), `R-20` (tenancy); engineering §2 (SignalR
 resume), §9 (safety-critical); [ADR-0001](0001-event-backbone.md) (event log / clean-historical),
 [ADR-0007](0007-order-execution-model.md) (execution / orphan handling), [ADR-0010](0010-progressive-web-app.md),
-[ADR-0011](0011-multi-user-tenancy.md).
+[ADR-0017](0017-single-operator-data-isolation.md).
 
 ## Context
 Things fail: the user's client drops, the backend restarts, the venue connection breaks, or — worst — the cloud tier

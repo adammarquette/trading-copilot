@@ -1,6 +1,17 @@
 # ADR-0011: Multi-user tenancy & data isolation
 
-**Status:** Accepted · **Date:** 2026-07-19 · **Deciders:** Adam (operator)
+**Status:** **Superseded by [ADR-0017](0017-single-operator-data-isolation.md)** (2026-07-21) · **Date:** 2026-07-19 · **Deciders:** Adam (operator)
+
+> **Superseded.** The product returned to **one operator per deployment**
+> ([ADR-0015](0015-distribution-licensing-governance.md)), and multi-tenancy turned out to be an active
+> liability rather than a neutral capability: several users behind one deployment would share the same broker
+> credentials and venue sessions, which prop firms treat as a breach of terms. ADR-0017 keeps this ADR's
+> **data-layer mechanism** — owning identity plus default-deny query filters — reframed as a fail-closed safety
+> property, and drops the multi-user premise, the `Invitation` flow, and peer-to-peer template sharing.
+> Its restoration of ADR-0003's single-operator premise means the line below no longer holds.
+>
+> The text is preserved unedited; read it for the isolation analysis, not for the product shape.
+
 **Extends / partially supersedes:** [ADR-0003](0003-authentication.md) (auth — its "single-operator now" premise).
 **Relates to:** PRD `R-18` (multi-user auth), `R-20` (tenancy), `R-14` / `R-17` (accounts / venues), `R-15`
 (removal); engineering §1 (BFF), §2 (data layer), §9 (audit); [ADR-0001](0001-event-backbone.md) (event log),
