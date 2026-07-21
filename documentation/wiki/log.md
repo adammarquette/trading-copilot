@@ -2,6 +2,19 @@
 
 Chronological ingest / lint history. Prefix: `## [YYYY-MM-DD] <op> | <title>`.
 
+## [2026-07-21] ingest | Webull OpenAPI — cross-asset market-data source (futures / stocks / crypto)
+**Source:** `ingest/urls` — https://developer.webull.com/apis/docs/ (+ `market-data-api/overview`, `data-streaming-api`, `reference/futures-market-data`, `trade-api/futures`, `authentication/overview`, `sdk` — all WebFetch ✓ `200`; `sources/urls` updated).
+**Created:** `pages/webull-api.md`. **Updated:** `index.md` (row + Data-only-providers topic). **Method:** fetch/extract **delegated to a cheaper model (Sonnet)**, reviewed by the orchestrator; three guessed doc paths 404'd → re-grounded via web search to the correct sibling paths. Trust: authoritative (SHA1-vs-SHA256 + several points flagged **confirm**).
+**Why:** operator added the Webull URL and wants Webull **market data** to **augment the [ProjectX](pages/projectx-gateway-api.md)/[Topstep](pages/topstep-brokerage.md) futures feed** — options trading a *future* increment; **futures execution stays with the futures venue**.
+
+**Key takeaways:**
+- **Cross-asset MD provider (extends R-17), also a *future* execution venue.** Implements the market-data slice now (like [Finnhub](pages/finnhub-api.md)/[Tiingo](pages/tiingo-api.md)) — HTTP Data API (tick / snapshot / quotes / DOM / historical bars / **footprint**) + **MQTT v3.1.1** streaming (`data-api.webull.com`; topics `quote`/`snapshot`/`tick`/`event-*`/`notice`/`echo`, Protobuf). **No R-13 exposure** (data-only). Options execution = plausible future R-11 increment; **futures execution stays on ProjectX/Topstep**.
+- **Load-bearing caveat — futures MD is a paid subscription that may not be purchasable yet.** Crypto + event contracts are **free**; US stocks/ETFs need **Nasdaq Basic/TotalView** (`403` without it); options need **OPRA**; **futures need a separate paid OpenAPI MD subscription whose module was "not yet generally released" as of 2026-07-21.** ⇒ the core "augment the futures feed" use case **may not be actionable yet** regardless of App Key approval — re-check before integration. Near-term practical value skews to **stock/ETF context** (also gated).
+- **Auth:** per-request **HMAC** (App Key/Secret; `x-app-key`/`x-signature`/`x-timestamp`/`x-signature-nonce`/…) + a **mobile-app-approved `x-access-token`** for trading. **Not** OAuth (that's the separate **Connect API**). **Signature algorithm flagged confirm** — official docs say **HMAC-SHA1**, secondary sources say SHA256. **No .NET SDK** (Python/Java only) → hand-rolled signer + `HttpClient` + **MQTTnet** behind the market-data abstraction.
+- **Sandbox** (`api.sandbox.webull.com`, shared accounts, no application) for wire shapes — whether it returns real (delayed) data or only mock is unconfirmed.
+
+**Follow-ups (carried in the page's Open items):** confirm SHA1 vs SHA256; futures-MD subscription availability/cost; reconcile rate limits (300 vs 600/min); MQTT Protobuf schemas; whether an approved key with no subscription sees any data. **Relates to** the client scaffold [`MarqSpec.Client.Webull`](https://github.com/adammarquette/MarqSpec.Client.Webull) (gh#66).
+
 ## [2026-07-19] operator-input | Auto-flatten timing + end-of-day settlement resiliency
 **Source:** operator (Adam) — session / close mechanics; no external URL (exact times flagged **confirm** vs. CME rulebook / venue help).
 **Created:** `pages/market-sessions-and-settlement.md`. **Updated:** R-13 + several stale "3:00 PM CST" refs (PRD), ADR-0013 (auto-flatten guarantee + a settlement bullet), ADR-0007, data-dictionary RiskProfile (`auto-flatten deadline`) + time note, engineering §7, wireframe safety-control copy, index.
