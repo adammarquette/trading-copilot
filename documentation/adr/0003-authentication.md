@@ -1,6 +1,6 @@
 # ADR-0003: API authentication — JWT, RBAC-ready authorization
 
-**Status:** Accepted · **Date:** 2026-07-18 · **Deciders:** Adam (operator) · **Premise restored by [ADR-0017](0017-single-operator-data-isolation.md)** — [ADR-0011](0011-multi-user-tenancy.md) briefly superseded the *single-operator* premise below with multi-user tenancy; that reversal is itself superseded, so **single-operator stands as written**. The RBAC-ready claims/policy design is retained either way — now because it keeps a second login possible without reworking the data layer, not because multi-user is planned.
+**Status:** Accepted · **Date:** 2026-07-18 · **Deciders:** Adam (operator) · **Extended by [ADR-0011](0011-multi-user-tenancy.md)** (multi-user tenancy — supersedes the *single-operator* premise below; the RBAC-ready claims/policy design is exactly what enables it)
 **Relates to:** PRD `R-18`, [engineering](../trading-platform-engineering.md) §2, [architecture](../trading-platform-architecture.md), `R-11` / `R-16` (execution / kill switch).
 
 ## Context

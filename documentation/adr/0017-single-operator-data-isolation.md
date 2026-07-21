@@ -16,11 +16,28 @@ root, per-user broker connections. ADR-0015 then settled the opposite direction 
 and fork-first**, one deployment per person. The two positions have been live in the doc set simultaneously,
 with ADR-0003 marked as superseded by a premise the project had already reversed.
 
-**Multi-tenancy here is not merely unnecessary — it is a liability.** Several people behind one deployment would
-sit behind the *same broker and prop-firm credentials* and the *same REST and WebSocket sessions*. Prop firms
-treat account and credential sharing as a breach of their terms; this is an account-integrity and plausibly a
-legal exposure, not an architectural preference. It is worth stating plainly, because "we could support a few
-users" is otherwise an easy and reasonable-sounding thing to re-propose later.
+**Multi-tenancy here is not merely unnecessary — it is a liability**, and the reason has to be stated precisely,
+because the loose version ("multi-user means shared credentials") is wrong and invites rebuttal: ADR-0011 §Decision
+did design *per-user* credentials and **no shared broker session**. The liability is not that multi-user forces
+sharing. It is threefold, and it stands even with ADR-0011's isolation built:
+
+1. **Custody.** Hosting several operators means the deployment holds *other people's* broker credentials. Prop
+   firms treat that as an account-integrity and terms-of-service problem however well the host isolates them
+   internally — the exposure is the custody itself, not a leak between users.
+2. **The isolation is unbuilt work, not a config flag.** The venue client is **one credential per process** — the
+   websocket client is a singleton today (ADR-0015 §1). Real per-user sessions are a re-architecture; a deployment
+   that skips it *falls back* to a shared session, and that is the breach the loose version wrongly attributes to
+   multi-user in general.
+3. **Auto-flatten liability scales with users.** A host running R-13 on others' behalf owns the consequence when a
+   token refresh fails at 2:29 PM CT and someone's funded account breaches (ADR-0015 §2).
+
+The safe answer to all three is one deployment per person. Stating it this way matters because "we could support a
+few users" is otherwise an easy and reasonable-sounding thing to re-propose later.
+
+All three, note, are about additional *trading* operators — each needing broker credentials, a venue session, and
+auto-flatten run on their behalf. A **read-only** user carries none of them: no credentials, no session, nothing to
+flatten. That is a genuinely different shape, and the reason the owning-identity scoping (§3) and the dormant
+invitation mechanism (§4) are kept rather than deleted — see Follow-ups.
 
 What ADR-0011 got right is the **mechanism**. Row-level scoping with default-deny query filters is valuable on a
 single-operator deployment too, for a different reason than tenancy: a query that forgets its scope returns
@@ -46,37 +63,40 @@ owning identity, and every query is still scoped to the authenticated one via **
 (default-deny)**. The justification is fail-closed behaviour, not tenancy. Reference and market data
 (instruments, venues, providers, bars/ticks/quotes, raw news) stays **shared / global**.
 
-**4. `Invitation` is removed.** Single-use, email-bound, issue/accept/revoke — there is nobody to invite. The
-entity and its ERD edge come out of the data dictionary (`gh#4`).
+**4. `Invitation` stays, dormant.** Invitation-only onboarding is **not** the product's story — the single
+operator is seeded at first start, and there is nobody to invite. But the mechanism is **kept in the codebase**,
+undocumented as a product feature, exactly as [ADR-0015](0015-distribution-licensing-governance.md) decided.
 
-> **This departs from [ADR-0015](0015-distribution-licensing-governance.md)**, which kept invitation-only
-> onboarding *"dormant, undocumented as a product feature"* so that *"a second login on one instance stays
-> possible without unwinding a migration."* That reasoning assumed *"the endpoints, entity, and migration remain
-> **in the codebase**"* — but none of them exist. The data layer is unbuilt; the data dictionary is a design-time
-> model. There is no migration to unwind, so keeping `Invitation` buys nothing and instead leaves a specified
-> entity nobody intends to build.
+> **An earlier draft of this ADR removed `Invitation`, on the stated grounds that the entity, endpoints and
+> migration did not exist.** That was **wrong**: `Invitation` and `InvitationStatus`, the `/invitations` and
+> `/accept-invite` endpoints, and the `AddInvitations` migration are all built and on `develop`, and the local
+> flow runs end to end. ADR-0015's reasoning held — a second login stays possible *"without unwinding a
+> migration"* precisely because the migration is real. Dropping it would mean writing a **new** migration to
+> drop the table and deleting working code, which is more cost than keeping dormant plumbing, not less.
 >
-> The asymmetry argument ADR-0015 relied on — trivial to remove later, painful to retrofit — is real, and it
-> applies to the **owning-identity column and its query filters**, which §3 keeps for exactly that reason.
-> It does not apply to `Invitation`, which is onboarding UX and re-specifiable in an afternoon.
+> The asymmetry argument (trivial to keep, painful to retrofit) therefore applies to `Invitation` too, not only
+> to the owning-identity column in §3.
 
 **5. Sharing is an artifact, not a feature.** A strategy template — its rules, setups, triggers, defaults, and the
 notes attached to them — **exports to a portable JSON file** that another operator imports on their own
 deployment. Transport is a gist, an email, a repo; the platform is not in the middle. Two constraints define it
 (`gh#3`):
 
-- **The export excludes credentials, account identifiers, journal, positions, fills and P&L.** A file gets
-  forwarded and posted; the blast radius of a mistake here is larger than for anything held server-side.
+- **The export excludes credentials, account identifiers, journal, positions, fills, P&L and AI-usage** — the
+  full exclusion list is `gh#3`'s, and it is normative, not illustrative. A file gets forwarded and posted; the
+  blast radius of a mistake here is larger than for anything held server-side.
 - **An import arrives inert.** Its rules are enabled as a group by a deliberate action, never silently live —
   the source is now an anonymous file rather than a named peer, and a downloaded artifact must not be able to
   take positions.
 
 ## Alternatives considered
 
-- **Keep multi-tenancy (ADR-0011 as written).** Rejected on the credential argument above, which is the decisive
-  one: shared venue sessions across users is a terms-of-service problem with the broker, and no amount of
-  row-level isolation inside our database changes what the venue sees. Rejected also as unpaid complexity —
-  billing, roles, cross-user analytics, and an isolation test suite all exist to serve users we do not have.
+- **Keep multi-tenancy (ADR-0011 as written).** Rejected on the custody-and-liability argument above, which is
+  the decisive one: the host holds other people's broker credentials and, until per-user sessions are built,
+  runs them through one shared venue session — a terms-of-service problem with the broker that no amount of
+  row-level isolation inside our database changes, because it is not about what one user can read of another.
+  Rejected also as unpaid complexity — billing, roles, cross-user analytics, and an isolation test suite all
+  exist to serve users we do not have.
 - **Drop scoping entirely along with tenancy.** Tempting, and rejected: the `user_id` column and default-deny
   filters cost almost nothing and convert a forgotten `.Where(...)` from "returns every row" into "returns none".
   A single-operator system still benefits from failing closed, and dropping the column would make a second login
@@ -117,8 +137,15 @@ deployment. Transport is a gist, an email, a repo; the platform is not in the mi
   open, and now simpler — the question is partitioning by kind, not by owner.
 - Specify the **template export schema** (`gh#3`): version field, lineage representation with no server-side
   identity, re-import semantics, and the reject-vs-warn rules for validation.
-- Operator lifecycle: credential rotation and account deletion (R-15 tombstoning). Registration, email
-  verification and invitation acceptance are **dropped**, not deferred.
+- Operator lifecycle: credential rotation and account deletion (R-15 tombstoning). Self-service **registration**
+  is dropped (a seeded single operator does not register); **invitation acceptance is dormant, not dropped** (§4).
+- **Read-only / mentee users — a plausible future, and the concrete shape a second login would take.** A mentor
+  offering tips, or a trader showing a mentee their own profile, needs an *observer* who can read a scoped view
+  and place no orders. This carries none of the trading-operator liability above — no broker credentials, no
+  venue session, no auto-flatten — and it reuses exactly what this ADR keeps: the owning-identity scoping (§3)
+  for the read boundary, and the dormant invitation mechanism (§4) to admit the observer. Not in scope now;
+  recorded so the retained machinery has a named purpose rather than reading as dead weight. Would land as its
+  own ADR and issue.
 
 ### Follow-ups this ADR closes
 
