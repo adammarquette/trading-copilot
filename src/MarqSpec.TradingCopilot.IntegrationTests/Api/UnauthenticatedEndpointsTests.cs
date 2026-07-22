@@ -1,10 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
-using MarqSpec.TradingCopilot.Data;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
+using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 
@@ -12,11 +8,11 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// Integration tests verifying unauthenticated access security (PRD R-18, gh#8).
 /// Every non-anonymous endpoint must reject missing, malformed, or expired tokens with HTTP 401 Unauthorized.
 /// </summary>
-public class UnauthenticatedEndpointsTests : IClassFixture<UnauthenticatedEndpointsTests.TestWebApplicationFactory>
+public class UnauthenticatedEndpointsTests : IClassFixture<PostgresApiFactory>
 {
     private readonly HttpClient _client;
 
-    public UnauthenticatedEndpointsTests(TestWebApplicationFactory factory)
+    public UnauthenticatedEndpointsTests(PostgresApiFactory factory)
     {
         _client = factory.CreateClient();
     }
@@ -77,37 +73,4 @@ public class UnauthenticatedEndpointsTests : IClassFixture<UnauthenticatedEndpoi
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
-    public class TestWebApplicationFactory : WebApplicationFactory<Program>
-    {
-        private readonly string _dbName = Guid.NewGuid().ToString();
-
-        protected override void ConfigureWebHost(IWebHostBuilder builder)
-        {
-            builder.UseSetting("Jwt:SigningKey", "integration-test-signing-key-that-is-long-enough-32bytes");
-            builder.UseSetting("Jwt:Issuer", "trading-copilot-tests");
-            builder.UseSetting("Jwt:Audience", "trading-copilot-tests");
-            builder.UseSetting("Bootstrap:Email", "operator@example.com");
-            builder.UseSetting("Bootstrap:Password", "Password123!");
-
-            builder.ConfigureServices(services =>
-            {
-                List<ServiceDescriptor> descriptors = services
-                    .Where(d => d.ServiceType.Namespace?.StartsWith("Microsoft.EntityFrameworkCore") == true ||
-                                d.ServiceType.Namespace?.StartsWith("Npgsql") == true ||
-                                d.ImplementationType?.Namespace?.StartsWith("Microsoft.EntityFrameworkCore") == true ||
-                                d.ImplementationType?.Namespace?.StartsWith("Npgsql") == true)
-                    .ToList();
-
-                foreach (ServiceDescriptor d in descriptors)
-                {
-                    services.Remove(d);
-                }
-
-                services.AddDbContext<TradingCopilotDbContext>(options =>
-                {
-                    options.UseInMemoryDatabase(_dbName);
-                });
-            });
-        }
-    }
 }
