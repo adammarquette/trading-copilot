@@ -28,4 +28,67 @@ public sealed record RiskProfile(
     decimal DailyDrawdownGovernor,
     decimal? DailyProfitTarget,
     bool StopForDayAtProfitTarget,
-    SizingBasis SizingBasis);
+    SizingBasis SizingBasis)
+{
+    /// <summary>
+    /// Declares a profile with the invariants enforced (the <c>FirmConventions.For</c> pattern): boundaries
+    /// construct through here, so a profile that would size nothing — or everything — never reaches the gate.
+    /// </summary>
+    /// <param name="perTradeRiskFraction">Risk per trade as a fraction of headroom — in (0, 1].</param>
+    /// <param name="targetRewardRatio">The target reward-to-risk ratio — positive.</param>
+    /// <param name="maxDrawdownPerTrade">The per-trade hard loss cap — positive.</param>
+    /// <param name="dailyDrawdownGovernor">The personal daily governor — positive.</param>
+    /// <param name="dailyProfitTarget">The daily profit target — positive when set; null means none.</param>
+    /// <param name="stopForDayAtProfitTarget">Whether reaching the target stops the day.</param>
+    /// <param name="sizingBasis">Whether sizing uses the working stop or the safety stop.</param>
+    /// <returns>The validated profile.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">A value is outside its declared range.</exception>
+    public static RiskProfile Declare(
+        decimal perTradeRiskFraction,
+        decimal targetRewardRatio,
+        decimal maxDrawdownPerTrade,
+        decimal dailyDrawdownGovernor,
+        decimal? dailyProfitTarget,
+        bool stopForDayAtProfitTarget,
+        SizingBasis sizingBasis)
+    {
+        if (perTradeRiskFraction <= 0m || perTradeRiskFraction > 1m)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(perTradeRiskFraction), perTradeRiskFraction, "The per-trade risk fraction must be in (0, 1].");
+        }
+
+        if (targetRewardRatio <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(targetRewardRatio), targetRewardRatio, "The target reward ratio must be positive.");
+        }
+
+        if (maxDrawdownPerTrade <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxDrawdownPerTrade), maxDrawdownPerTrade, "The per-trade drawdown cap must be positive.");
+        }
+
+        if (dailyDrawdownGovernor <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(dailyDrawdownGovernor), dailyDrawdownGovernor, "The daily governor must be positive.");
+        }
+
+        if (dailyProfitTarget is <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(dailyProfitTarget), dailyProfitTarget, "A daily profit target must be positive when set — null means none.");
+        }
+
+        return new RiskProfile(
+            perTradeRiskFraction,
+            targetRewardRatio,
+            maxDrawdownPerTrade,
+            dailyDrawdownGovernor,
+            dailyProfitTarget,
+            stopForDayAtProfitTarget,
+            sizingBasis);
+    }
+}
