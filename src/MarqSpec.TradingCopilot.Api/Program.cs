@@ -76,3 +76,6 @@ app.MapAccountEndpoints();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 app.Run();
+
+/// <summary>The WebApplication entry point for testing integration.</summary>
+public partial class Program { }

@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- QA-owned integration + smoke tests (run against staging/production, not PR CI). Contract: AGENTS.md.
+  <!-- QA-owned integration + smoke tests. Contract: AGENTS.md.
        No mocking library by design — integration tests use real dependencies. -->
   <PropertyGroup>
     <IsPackable>false</IsPackable>
@@ -13,6 +13,14 @@
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="FluentAssertions" />
     <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Api\MarqSpec.TradingCopilot.Api.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Data\MarqSpec.TradingCopilot.Data.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Domain\MarqSpec.TradingCopilot.Domain.csproj" />
   </ItemGroup>
 
   <ItemGroup>
