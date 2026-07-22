@@ -10,6 +10,9 @@
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build   # build my changes
 #
 # IMAGE_TAG selects which published build to pull (default: develop, the dev-environment tag).
+# If the pull fails with `unauthorized`/`not found`, the GHCR package isn't public yet (it's created
+# private on first merge; see the deployment runbook) -- use the dev override above to build from
+# source, which needs no registry access.
 #
 # The DATABASE is config-driven: the app reads its connection string from config
 # (ConnectionStrings__* / appsettings), so it can use the `db` service below OR an external /

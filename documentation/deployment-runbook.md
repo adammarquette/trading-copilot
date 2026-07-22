@@ -33,6 +33,12 @@ artifact Railway runs — so **local ≡ cloud** literally, not just the same Do
 The dev override (`docker-compose.dev.yml`) builds from your working tree and tags it `trading-copilot:local`, a
 distinct name so a later `docker compose pull` cannot clobber your build. Building needs a **recursive clone**
 (the Dockerfile copies the `external/` submodule).
+
+> **Before the image is published-and-public, the default pull fails.** The GHCR package is created on the first
+> merge to `develop`, **private** until the operator flips it public (below). Until that flip, `docker compose up`
+> returns `unauthorized`/`not found` — so the **dev-override build is the working local path**, or authenticate
+> with `docker login ghcr.io` (`read:packages`). This is a startup-window caveat, not a steady state: once the
+> package is public, the plain pull is the default again.
 - **Database is config-driven** — `docker-compose.yml` includes a **TimescaleDB + pgvector** service for convenience,
   but the app takes its **connection string from config** (`ConnectionStrings__*` env / `appsettings`), so you can
   point at the compose DB, a local Postgres, or a managed instance instead.

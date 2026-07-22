@@ -33,8 +33,13 @@ git clone …                        # a recursive clone is only needed to BUILD
 docker compose up -d               # pulls ghcr.io/adammarquette/trading-copilot:develop, starts Postgres + the app
 ```
 
-**To run your own changes**, build from source with the dev override (needs a **recursive** clone — the ProjectX
-client is a submodule under `external/` the image builds against):
+> **If the pull fails with `unauthorized` or `not found`:** the GHCR package isn't published-and-public yet (it's
+> created on the first merge to `develop`, and is **private until made public** — see the runbook's operator
+> setup). Until then, either `docker login ghcr.io` with a token that has `read:packages`, or just **build from
+> source** with the dev override below — it needs no registry access at all.
+
+**To run your own changes** (or before the image is public), build from source with the dev override (needs a
+**recursive** clone — the ProjectX client is a submodule under `external/` the image builds against):
 
 ```bash
 git submodule update --init        # if you didn't clone --recursive
