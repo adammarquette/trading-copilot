@@ -37,10 +37,33 @@ jobs:
       - name: Build
         run: dotnet build src/MarqSpec.TradingCopilot.slnx --configuration Release --no-restore
 
-      # Unit tests only. Integration/smoke tests run against staging/production (engineering guide §5),
-      # never in PR CI, so they are not invoked here.
+      # Unit tests here; the pre-merge integration tier runs in its own job below. Staging/venue
+      # integration and the production smoke subset stay post-merge (engineering guide §5).
       - name: Unit tests
         run: dotnet test src/MarqSpec.TradingCopilot.UnitTests/MarqSpec.TradingCopilot.UnitTests.csproj --configuration Release --no-build
+
+  # Pre-merge integration tier (gh#121): the venue-independent QA suites run against a throwaway
+  # PostgreSQL container (Testcontainers, the same image the compose stack runs), so the real
+  # migrations and DB-level guards are exercised on every PR. Staging/venue integration and the
+  # production smoke subset remain post-merge tiers (engineering guide §5, §10).
+  integration-test:
+    name: integration tests (pre-merge)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore src/MarqSpec.TradingCopilot.slnx
+
+      - name: Integration tests (Testcontainers Postgres)
+        run: dotnet test src/MarqSpec.TradingCopilot.IntegrationTests/MarqSpec.TradingCopilot.IntegrationTests.csproj --configuration Release
 
   # Build the deployment image ONCE and publish it to GHCR, so local dev and Railway consume the
   # same artifact rather than each rebuilding from source (ADR-0018, extends ADR-0012).
