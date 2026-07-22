@@ -60,6 +60,7 @@ app.UseAuthorization();
 app.MapAuthEndpoints();
 app.MapFirmEndpoints();
 app.MapConnectionEndpoints();
+app.MapAccountEndpoints();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 app.Run();

@@ -175,6 +175,86 @@ public class ConnectionEndpointsTests
     }
 
     [Fact]
+    public async Task DiscoverAccounts_ShouldPreserveTheOperatorOverride_AcrossRediscovery()
+    {
+        (_, Guid connectionId) = await SeedFirmAndConnectionAsync();
+        VenueId venueId = VenueId.Parse("projectx");
+        A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
+        [
+            new VenueAccount(VenueAccountId.Create(venueId, "9001"), "50KTC-V2", 49_000m, true, true, TradingMode.Undeclared) { Stage = AccountStage.Unknown },
+        ]);
+
+        await using (TradingCopilotDbContext first = Context())
+        {
+            await ConnectionEndpoints.DiscoverAccountsAsync(
+                connectionId, new FixedUser(_operator), first, _factory, OptionsFor("topstep-main"), CancellationToken.None);
+        }
+
+        // The operator corrects the resolver: this one is actually Funded.
+        await using (TradingCopilotDbContext declare = Context())
+        {
+            Account account = await declare.Accounts.SingleAsync();
+            account.StageOverride = AccountStage.Funded;
+            await declare.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext second = Context();
+        IResult result = await ConnectionEndpoints.DiscoverAccountsAsync(
+            connectionId, new FixedUser(_operator), second, _factory, OptionsFor("topstep-main"), CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        List<AccountResponse> responses = (List<AccountResponse>)((IValueHttpResult)result).Value!;
+        responses.Single().StageOverride.Should().Be(AccountStage.Funded);
+        responses.Single().Mode.Should().Be(TradingMode.Live); // computed from the OVERRIDE, not the resolver's Unknown
+
+        await using TradingCopilotDbContext reload = Context();
+        Account stored = await reload.Accounts.SingleAsync(); // still one row
+        stored.StageOverride.Should().Be(AccountStage.Funded); // rediscovery refreshed the resolver's view...
+        stored.Stage.Should().Be(AccountStage.Unknown);        // ...and never touched the declaration
+    }
+
+    [Fact]
+    public async Task ListAccounts_ShouldReturnThePersistedRoster_WithoutCallingTheVenue()
+    {
+        (_, Guid connectionId) = await SeedFirmAndConnectionAsync();
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            seed.Accounts.Add(new Account
+            {
+                Id = Guid.NewGuid(),
+                UserId = _operator,
+                ConnectionId = connectionId,
+                VenueAccountKey = "9001",
+                Name = "50KTC-V2",
+                Stage = AccountStage.Unknown,
+                StageOverride = AccountStage.Funded,
+                CanTrade = true,
+                IsVisible = true,
+                Balance = 49_000m,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await ConnectionEndpoints.ListAccountsAsync(connectionId, context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        List<AccountResponse> responses = (List<AccountResponse>)((IValueHttpResult)result).Value!;
+        responses.Single().Mode.Should().Be(TradingMode.Live); // effective stage = override
+        A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ListAccounts_ShouldReturnNotFound_ForAnUnknownConnection()
+    {
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await ConnectionEndpoints.ListAccountsAsync(Guid.NewGuid(), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
     public async Task DiscoverAccounts_ShouldReturnNotFound_ForAnUnknownConnection()
     {
         await using TradingCopilotDbContext context = Context();
