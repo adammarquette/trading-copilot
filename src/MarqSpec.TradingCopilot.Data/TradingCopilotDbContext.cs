@@ -25,6 +25,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Onboarding invitations (R-18) — not user-owned; accepted anonymously by token hash.</summary>
     public DbSet<Invitation> Invitations => Set<Invitation>();
 
+    /// <summary>The operator's firms — prop firms and brokerages they trade with (gh#76). Operator-owned.</summary>
+    public DbSet<Firm> Firms => Set<Firm>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -42,6 +45,14 @@ public class TradingCopilotDbContext : TenantDbContext
             invitation.HasIndex(i => i.TokenHash).IsUnique();
             invitation.Property(i => i.Email).HasMaxLength(320);
             invitation.Property(i => i.TokenHash).HasMaxLength(128);
+        });
+
+        modelBuilder.Entity<Firm>(firm =>
+        {
+            firm.Property(f => f.Name).HasMaxLength(128);
+
+            // Unique within an operator's workspace, not globally: two operators may each trade "Topstep".
+            firm.HasIndex(f => new { f.UserId, f.Name }).IsUnique();
         });
     }
 }
