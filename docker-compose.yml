@@ -67,6 +67,10 @@ services:
       # Defaulted, not passed through empty: this map is an allowlist, and an empty value would BIND
       # over the client's own default and point the app at nowhere. Override in .env for other firms.
       ProjectX__BaseUrl: "${ProjectX__BaseUrl:-https://api.topstepx.com}"
+      # Which Connection.CredentialKey the credentials above belong to (one credential set per process,
+      # ADR-0015) and which market-data universe they are entitled to (Simulated is the fail-safe default).
+      ProjectX__CredentialKey: "${ProjectX__CredentialKey:-projectx}"
+      ProjectX__DataTier: "${ProjectX__DataTier:-Simulated}"
     ports:
       - "8080:8080"
 

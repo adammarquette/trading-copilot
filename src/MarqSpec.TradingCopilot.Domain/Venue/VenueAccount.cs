@@ -25,6 +25,13 @@ public sealed record VenueAccount(
     TradingMode Mode)
 {
     /// <summary>
+    /// Where the account sits in the firm's programme, as the adapter resolved it (conservatively — see the
+    /// adapter's stage resolver). <see cref="AccountStage.Unknown"/> by default: fail-closed, matching the
+    /// enum's zero value. Persisted at discovery so the operator's per-account override has a landing spot.
+    /// </summary>
+    public AccountStage Stage { get; init; } = AccountStage.Unknown;
+
+    /// <summary>
     /// Whether the account belongs in the account switcher — tradable and not hidden. The full roster (passed,
     /// failed, hidden) stays available in settings (R-17).
     /// </summary>
