@@ -102,15 +102,14 @@ public static class ConnectionEndpoints
             return Results.NotFound();
         }
 
-        // The PERSISTED roster -- no venue round-trip. Modes are computed fresh under the firm's current
-        // declarations, so a changed convention or override shows immediately (gh#60).
-        FirmConventions conventions = await database.ConventionsForConnectionAsync(id, cancellationToken);
+        // The PERSISTED roster -- no venue round-trip. Mode is served from the persisted column, which every
+        // mode-moving write point recomputes (gh#7) -- the same truth the DB-level R-14 guard enforces.
         List<Account> accounts = await database.Accounts
             .Where(account => account.ConnectionId == id)
             .OrderBy(account => account.VenueAccountKey)
             .ToListAsync(cancellationToken);
 
-        return Results.Ok(accounts.Select(account => AccountResponse.From(account, conventions)).ToList());
+        return Results.Ok(accounts.Select(AccountResponse.From).ToList());
     }
 
     internal static async Task<IResult> DiscoverAccountsAsync(
@@ -197,7 +196,10 @@ public static class ConnectionEndpoints
             account.IsVisible = venueAccount.IsVisible;
             account.Balance = venueAccount.Balance;
 
-            responses.Add(AccountResponse.From(account, conventions));
+            // Write point 1 of 3 for the persisted mode (gh#7): the resolver may have moved the stage.
+            account.RecomputeMode(conventions);
+
+            responses.Add(AccountResponse.From(account));
         }
 
         await database.SaveChangesAsync(cancellationToken);

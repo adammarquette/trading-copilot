@@ -139,6 +139,12 @@ public class ConnectionEndpointsTests
         stored[0].Stage.Should().Be(AccountStage.Practice);
         stored[0].UserId.Should().Be(_operator);
         stored[1].Stage.Should().Be(AccountStage.Unknown); // unrecognised name stays Unknown -> Undeclared, never guessed
+
+        // The PERSISTED mode (gh#7): written at discovery so the DB-level R-14 guard has a truth to compare
+        // orders against. Must equal what the conventions compute -- staleness here is what the recompute-at-
+        // every-write-point discipline prevents.
+        stored[0].Mode.Should().Be(TradingMode.Practice);
+        stored[1].Mode.Should().Be(TradingMode.Undeclared);
     }
 
     [Fact]
@@ -228,6 +234,7 @@ public class ConnectionEndpointsTests
                 Name = "50KTC-V2",
                 Stage = AccountStage.Unknown,
                 StageOverride = AccountStage.Funded,
+                Mode = TradingMode.Live, // what the override write point persisted (Funded x capital-at-risk)
                 CanTrade = true,
                 IsVisible = true,
                 Balance = 49_000m,
@@ -240,7 +247,7 @@ public class ConnectionEndpointsTests
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         List<AccountResponse> responses = (List<AccountResponse>)((IValueHttpResult)result).Value!;
-        responses.Single().Mode.Should().Be(TradingMode.Live); // effective stage = override
+        responses.Single().Mode.Should().Be(TradingMode.Live); // served from the persisted column, no venue call
         A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).MustNotHaveHappened();
     }
 

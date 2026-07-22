@@ -96,6 +96,7 @@ public class AccountEndpointsTests
         Account stored = await reload.Accounts.SingleAsync();
         stored.StageOverride.Should().Be(AccountStage.Funded);
         stored.Stage.Should().Be(AccountStage.Unknown);
+        stored.Mode.Should().Be(TradingMode.Live); // persisted mode recomputed at the write point (gh#7)
     }
 
     [Fact]
@@ -154,7 +155,9 @@ public class AccountEndpointsTests
         response.Mode.Should().Be(TradingMode.Practice); // computed from the resolver's Practice again
 
         await using TradingCopilotDbContext reload = Context();
-        (await reload.Accounts.SingleAsync()).StageOverride.Should().BeNull();
+        Account stored = await reload.Accounts.SingleAsync();
+        stored.StageOverride.Should().BeNull();
+        stored.Mode.Should().Be(TradingMode.Practice); // persisted mode falls back with the override (gh#7)
     }
 
     [Fact]

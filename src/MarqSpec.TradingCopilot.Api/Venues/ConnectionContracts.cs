@@ -37,9 +37,11 @@ public sealed record SetStageOverrideRequest(AccountStage Stage);
 /// <param name="Stage">The stage the resolver read from the name (conservatively; <c>Unknown</c> when unrecognised).</param>
 /// <param name="StageOverride">The operator's declared stage, when set — it wins over <paramref name="Stage"/>.</param>
 /// <param name="Mode">
-/// Computed from the <b>effective</b> stage (<paramref name="StageOverride"/> ?? <paramref name="Stage"/>) × the
-/// firm's declared conventions — never persisted, so it cannot go stale when a declaration changes (gh#60).
-/// <c>Undeclared</c> is tradeable nowhere.
+/// The <b>persisted</b> mode (gh#7) — <c>effective stage (StageOverride ?? Stage) × the firm's declared
+/// conventions</c>, recomputed at every write point that can move it (discovery, the override, a conventions
+/// re-declaration) so it cannot go stale. Served from the same column the DB-level R-14 guard compares order
+/// rows against — the operator sees exactly the truth the guard enforces. <c>Undeclared</c> is tradeable
+/// nowhere.
 /// </param>
 /// <param name="CanTrade">Whether the venue permits trading it.</param>
 /// <param name="IsVisible">Whether the operator has left it visible.</param>
@@ -55,21 +57,19 @@ public sealed record AccountResponse(
     bool IsVisible,
     decimal Balance)
 {
-    /// <summary>Projects a persisted account, computing the mode from its effective stage.</summary>
+    /// <summary>Projects a persisted account, serving its persisted (write-point-recomputed) mode.</summary>
     /// <param name="account">The account.</param>
-    /// <param name="conventions">The owning firm's declared conventions.</param>
     /// <returns>The response.</returns>
-    public static AccountResponse From(Account account, FirmConventions conventions)
+    public static AccountResponse From(Account account)
     {
         ArgumentNullException.ThrowIfNull(account);
-        ArgumentNullException.ThrowIfNull(conventions);
         return new AccountResponse(
             account.Id,
             account.VenueAccountKey,
             account.Name,
             account.Stage,
             account.StageOverride,
-            conventions.ModeFor(account.StageOverride ?? account.Stage),
+            account.Mode,
             account.CanTrade,
             account.IsVisible,
             account.Balance);

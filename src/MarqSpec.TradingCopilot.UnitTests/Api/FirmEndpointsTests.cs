@@ -124,6 +124,55 @@ public class FirmEndpointsTests
     }
 
     [Fact]
+    public async Task DeclareConventions_ShouldRecomputeThePersistedModeOfEveryAffectedAccount()
+    {
+        // The staleness killer (gh#7): Account.Mode is persisted so the DB-level R-14 guard can compare order
+        // rows against it -- which means every declaration change MUST sweep the firm's accounts, or the guard
+        // would enforce yesterday's declaration.
+        Guid firmId = await SeedFirmAsync();
+        Guid connectionId = Guid.NewGuid();
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            IResult declared = await FirmEndpoints.DeclareConventionsAsync(
+                firmId,
+                new DeclareConventionsRequest([new StageConventionDto(AccountStage.Practice, false)]),
+                new FixedUser(_operator), seed, CancellationToken.None);
+            StatusOf(declared).Should().Be(StatusCodes.Status200OK);
+
+            seed.Connections.Add(new Connection
+            {
+                Id = connectionId,
+                UserId = _operator,
+                FirmId = firmId,
+                Platform = "projectx",
+                CredentialKey = "topstep-main",
+            });
+            seed.Accounts.Add(new Account
+            {
+                Id = Guid.NewGuid(),
+                UserId = _operator,
+                ConnectionId = connectionId,
+                VenueAccountKey = "9001",
+                Name = "PRAC-50K-1234",
+                Stage = AccountStage.Practice,
+                Mode = TradingMode.Practice, // correct under the current declaration
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        // The operator re-declares: Practice at this firm is now capital-at-risk.
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await FirmEndpoints.DeclareConventionsAsync(
+            firmId,
+            new DeclareConventionsRequest([new StageConventionDto(AccountStage.Practice, true)]),
+            new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Accounts.SingleAsync()).Mode.Should().Be(TradingMode.Live);
+    }
+
+    [Fact]
     public async Task DeclareConventions_ShouldReplaceThePreviousSet()
     {
         Guid firmId = await SeedFirmAsync();

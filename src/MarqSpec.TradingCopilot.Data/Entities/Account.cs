@@ -55,6 +55,16 @@ public class Account : IUserOwned
     /// </summary>
     public AccountStage? StageOverride { get; set; }
 
+    /// <summary>
+    /// The <b>persisted</b> trading mode (R-14, gh#7) — <c>effective stage × the firm's declared conventions</c>,
+    /// materialised so the DB-level mode guard has a truth to compare <see cref="Order"/> /
+    /// <see cref="Suggestion"/> rows against. Never edited directly: recomputed via
+    /// <c>AccountModeMapping.RecomputeMode</c> at <b>every</b> write point that can move it — discovery,
+    /// the stage override, and a conventions re-declaration — so it cannot go stale (the gh#60 concern that
+    /// kept it computed until the guard needed it in the database).
+    /// </summary>
+    public TradingMode Mode { get; set; }
+
     /// <summary>Whether the venue permits trading this account.</summary>
     public bool CanTrade { get; set; }
 

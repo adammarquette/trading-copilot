@@ -37,6 +37,18 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Trading accounts as discovered through connections. Operator-owned.</summary>
     public DbSet<Account> Accounts => Set<Account>();
 
+    /// <summary>AI trade suggestions — the journal spine (gh#7). Operator-owned; mode-guarded (R-14).</summary>
+    public DbSet<Suggestion> Suggestions => Set<Suggestion>();
+
+    /// <summary>Journaled orders — the journal spine (gh#7). Operator-owned; mode-guarded (R-14).</summary>
+    public DbSet<Order> Orders => Set<Order>();
+
+    /// <summary>Native executions of orders. Operator-owned; mode inherited through the order.</summary>
+    public DbSet<Fill> Fills => Set<Fill>();
+
+    /// <summary>Journaled trades — round-trip outcomes. Operator-owned.</summary>
+    public DbSet<Trade> Trades => Set<Trade>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -112,6 +124,96 @@ public class TradingCopilotDbContext : TenantDbContext
             // it (gh#60) -- clearing the override (NULL) is how the operator says "I don't know".
             account.ToTable(table =>
                 table.HasCheckConstraint("CK_Accounts_StageOverride_NotUnknown", "\"StageOverride\" <> 0"));
+        });
+
+        modelBuilder.Entity<Suggestion>(suggestion =>
+        {
+            suggestion.Property(s => s.Instrument).HasMaxLength(64);
+
+            suggestion.HasOne<Account>()
+                .WithMany()
+                .HasForeignKey(s => s.AccountId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // The R-14 persistence guard, half one: Undeclared (0) and an unset state are refused outright --
+            // nothing is ever suggested on an undeclared account. Half two (mode must equal the account's
+            // persisted mode) is a cross-table rule a single-row CHECK cannot express; it lives in the
+            // enforce_mode_matches_account constraint trigger added by the AddExecutionJournal migration.
+            suggestion.ToTable(table =>
+            {
+                table.HasCheckConstraint("CK_Suggestions_Mode_NotUndeclared", "\"Mode\" <> 0");
+                table.HasCheckConstraint("CK_Suggestions_State_NotUnknown", "\"State\" <> 0");
+                table.HasCheckConstraint("CK_Suggestions_Size_Positive", "\"Size\" > 0");
+            });
+        });
+
+        modelBuilder.Entity<Order>(order =>
+        {
+            order.Property(o => o.Instrument).HasMaxLength(64);
+            order.Property(o => o.VenueOrderKey).HasMaxLength(64);
+
+            order.HasOne<Account>()
+                .WithMany()
+                .HasForeignKey(o => o.AccountId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // The journal outlives its provenance: deleting a suggestion nulls the link, never the order.
+            order.HasOne<Suggestion>()
+                .WithMany()
+                .HasForeignKey(o => o.SuggestionId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // One row per venue handle within an account (null venue keys -- synthetic/unplaced -- excepted).
+            order.HasIndex(o => new { o.AccountId, o.VenueOrderKey }).IsUnique();
+
+            // The R-14 persistence guard, half one (see the Suggestion comment): no Undeclared order, ever --
+            // gh#7 records that outright rejection beats merely matching the parent. The cross-table half is
+            // the enforce_mode_matches_account constraint trigger.
+            order.ToTable(table =>
+            {
+                table.HasCheckConstraint("CK_Orders_Mode_NotUndeclared", "\"Mode\" <> 0");
+                table.HasCheckConstraint("CK_Orders_Status_NotUnknown", "\"Status\" <> 0");
+                table.HasCheckConstraint("CK_Orders_Size_Positive", "\"Size\" > 0");
+            });
+        });
+
+        modelBuilder.Entity<Fill>(fill =>
+        {
+            fill.Property(f => f.VenueFillKey).HasMaxLength(64);
+
+            fill.HasOne<Order>()
+                .WithMany()
+                .HasForeignKey(f => f.OrderId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            fill.HasIndex(f => new { f.OrderId, f.VenueFillKey }).IsUnique();
+
+            fill.ToTable(table =>
+                table.HasCheckConstraint("CK_Fills_Size_Positive", "\"Size\" > 0"));
+        });
+
+        modelBuilder.Entity<Trade>(trade =>
+        {
+            trade.Property(t => t.Instrument).HasMaxLength(64);
+
+            trade.HasOne<Account>()
+                .WithMany()
+                .HasForeignKey(t => t.AccountId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            trade.HasOne<Suggestion>()
+                .WithMany()
+                .HasForeignKey(t => t.SuggestionId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // Mode is a journal fact (practice results never blend into live results) -- check-constrained,
+            // but NOT trigger-guarded: a trade closes after placement, when the declaration may legitimately
+            // have moved on. The placement-time guard lives on Orders and Suggestions.
+            trade.ToTable(table =>
+            {
+                table.HasCheckConstraint("CK_Trades_Mode_NotUndeclared", "\"Mode\" <> 0");
+                table.HasCheckConstraint("CK_Trades_Size_Positive", "\"Size\" > 0");
+            });
         });
     }
 }
