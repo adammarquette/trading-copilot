@@ -220,7 +220,10 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
   `user_id`** and is **filtered by the authenticated user at the data layer** (row-level scoping, **default-deny**),
   enforced below the UI. With **one operator per deployment** (ADR-0017) this is a **fail-closed safety property**,
   not a tenancy feature: a query that forgets its scope returns *nothing* instead of *everything*, and a second
-  login stays possible later without reworking the data layer. *(Event-log scoping — a mix of shared market and
+  login stays possible later without reworking the data layer. **In code (gh#7):** operator-owned entities
+  implement `IUserOwned` and `TenantDbContext` applies the default-deny filter automatically; a **guard test**
+  fails if an entity is added that is neither owned nor an *acknowledged global*, so the filter cannot be
+  forgotten on a new entity. `Firm` is the first operator-owned entity to land. *(Event-log scoping — a mix of shared market and
   operator decision events — is an open item; see [ADR-0017](adr/0017-single-operator-data-isolation.md).)*
 - **Venue/source-tagging** end-to-end (R-17) — e.g. Finnhub `SPY` vs. ProjectX `ES` never conflate.
 - **Practice vs. live** is a **tag**, not a separate schema (R-14) — identical ingestion / journaling / learning —
