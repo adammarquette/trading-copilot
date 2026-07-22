@@ -23,4 +23,11 @@ public class Firm : IUserOwned
 
     /// <summary>Whether this is a prop firm (staged) or a brokerage (live/paper only).</summary>
     public FirmType Type { get; set; }
+
+    /// <summary>
+    /// The operator's per-stage declarations of what each stage means here (gh#60). Compose the domain
+    /// <see cref="Domain.Venue.FirmConventions"/> via <see cref="FirmConventionsMapping.ToConventions"/>. Empty
+    /// until the operator declares — every stage then resolves to <see cref="Domain.Venue.TradingMode.Undeclared"/>.
+    /// </summary>
+    public ICollection<FirmStageConvention> StageConventions { get; set; } = [];
 }

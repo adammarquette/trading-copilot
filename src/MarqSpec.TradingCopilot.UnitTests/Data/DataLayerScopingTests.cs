@@ -1,6 +1,7 @@
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Data;
@@ -76,6 +77,40 @@ public class DataLayerScopingTests
         await using (TradingCopilotDbContext asA = ContextFor(operatorA, database))
         {
             (await asA.Firms.ToListAsync()).Should().ContainSingle(firm => firm.Name == "Topstep");
+        }
+    }
+
+    [Fact]
+    public async Task AFirm_RoundTripsWithItsStageConventions_AndBridgesToTheDomainConventions()
+    {
+        Guid owner = Guid.NewGuid();
+        string database = Guid.NewGuid().ToString();
+        Guid firmId = Guid.NewGuid();
+
+        await using (TradingCopilotDbContext asOwner = ContextFor(owner, database))
+        {
+            asOwner.Firms.Add(new Firm
+            {
+                Id = firmId,
+                UserId = owner,
+                Name = "Topstep",
+                Type = FirmType.PropFirm,
+                StageConventions =
+                [
+                    new FirmStageConvention { Id = Guid.NewGuid(), UserId = owner, FirmId = firmId, Stage = AccountStage.Practice, CapitalAtRisk = false },
+                    new FirmStageConvention { Id = Guid.NewGuid(), UserId = owner, FirmId = firmId, Stage = AccountStage.Funded, CapitalAtRisk = true },
+                ],
+            });
+            await asOwner.SaveChangesAsync();
+        }
+
+        await using (TradingCopilotDbContext asOwner = ContextFor(owner, database))
+        {
+            Firm loaded = await asOwner.Firms.Include(f => f.StageConventions).SingleAsync();
+
+            FirmConventions conventions = loaded.ToConventions();
+            conventions.ModeFor(AccountStage.Practice).Should().Be(TradingMode.Practice);
+            conventions.ModeFor(AccountStage.Funded).Should().Be(TradingMode.Live);
         }
     }
 
