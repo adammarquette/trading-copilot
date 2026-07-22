@@ -41,10 +41,19 @@ public class Account : IUserOwned
     public required string Name { get; set; }
 
     /// <summary>
-    /// Where the account sits in the firm's programme — resolved conservatively from the name at discovery
-    /// (<c>Unknown</c> when not confidently recognised), and the landing spot for a future operator override.
+    /// Where the account sits in the firm's programme <b>as the conservative name-resolver read it</b> at
+    /// discovery (<c>Unknown</c> when not confidently recognised). Refreshed on every rediscovery; never
+    /// carries the operator's correction — that lives in <see cref="StageOverride"/>.
     /// </summary>
     public AccountStage Stage { get; set; }
+
+    /// <summary>
+    /// The operator's declared stage for this account (gh#76), taking precedence over <see cref="Stage"/>
+    /// wherever a stage is consumed — <c>effective stage = StageOverride ?? Stage</c>. <c>null</c> means "no
+    /// correction"; <c>Unknown</c> is not declarable (a DB check refuses it — clearing the override is how the
+    /// operator says "I don't know"). Survives rediscovery untouched.
+    /// </summary>
+    public AccountStage? StageOverride { get; set; }
 
     /// <summary>Whether the venue permits trading this account.</summary>
     public bool CanTrade { get; set; }

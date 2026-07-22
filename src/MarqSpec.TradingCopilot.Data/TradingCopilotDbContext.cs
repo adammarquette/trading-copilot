@@ -107,6 +107,11 @@ public class TradingCopilotDbContext : TenantDbContext
 
             // One row per venue handle within a connection -- rediscovery updates, never duplicates.
             account.HasIndex(a => new { a.ConnectionId, a.VenueAccountKey }).IsUnique();
+
+            // An override IS a declaration, so Unknown (0) is refused the same way FirmStageConvention refuses
+            // it (gh#60) -- clearing the override (NULL) is how the operator says "I don't know".
+            account.ToTable(table =>
+                table.HasCheckConstraint("CK_Accounts_StageOverride_NotUnknown", "\"StageOverride\" <> 0"));
         });
     }
 }

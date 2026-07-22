@@ -62,6 +62,11 @@ GET  /connections             (Bearer)                   -> the operator's conne
 POST /connections/{id}/accounts/discover                 -> pull the venue's roster; each account's mode is
                                                             COMPUTED from its stage x the firm's declared
                                                             conventions, never taken from the venue (gh#60)
+GET  /connections/{id}/accounts                          -> the persisted roster (no venue round-trip)
+PUT  /accounts/{id}/stage     {stage}                    -> declare an account's stage, overriding the
+                                                            conservative resolver (it never guesses; you do
+                                                            the telling). Unknown is refused
+DEL  /accounts/{id}/stage                                -> clear the override, fall back to the resolved stage
 ```
 
 The `/auth/invitations` and `/auth/accept-invite` endpoints also exist and work, but are **dormant** — not part

@@ -29,6 +29,7 @@ public static class ConnectionEndpoints
         RouteGroupBuilder group = endpoints.MapGroup("/connections").RequireAuthorization();
         group.MapPost("/", CreateConnectionAsync);
         group.MapGet("/", ListConnectionsAsync);
+        group.MapGet("/{id:guid}/accounts", ListAccountsAsync);
         group.MapPost("/{id:guid}/accounts/discover", DiscoverAccountsAsync);
         return endpoints;
     }
@@ -88,6 +89,28 @@ public static class ConnectionEndpoints
         List<Connection> connections = await database.Connections.ToListAsync(cancellationToken);
 
         return Results.Ok(connections.Select(ConnectionResponse.From).ToList());
+    }
+
+    internal static async Task<IResult> ListAccountsAsync(
+        Guid id,
+        TradingCopilotDbContext database,
+        CancellationToken cancellationToken)
+    {
+        bool connectionExists = await database.Connections.AnyAsync(candidate => candidate.Id == id, cancellationToken);
+        if (!connectionExists)
+        {
+            return Results.NotFound();
+        }
+
+        // The PERSISTED roster -- no venue round-trip. Modes are computed fresh under the firm's current
+        // declarations, so a changed convention or override shows immediately (gh#60).
+        FirmConventions conventions = await database.ConventionsForConnectionAsync(id, cancellationToken);
+        List<Account> accounts = await database.Accounts
+            .Where(account => account.ConnectionId == id)
+            .OrderBy(account => account.VenueAccountKey)
+            .ToListAsync(cancellationToken);
+
+        return Results.Ok(accounts.Select(account => AccountResponse.From(account, conventions)).ToList());
     }
 
     internal static async Task<IResult> DiscoverAccountsAsync(
@@ -150,7 +173,7 @@ public static class ConnectionEndpoints
             .Where(account => account.ConnectionId == connection.Id)
             .ToDictionaryAsync(account => account.VenueAccountKey, cancellationToken);
 
-        List<DiscoveredAccountResponse> responses = [];
+        List<AccountResponse> responses = [];
         foreach (VenueAccount venueAccount in discovered)
         {
             if (!existing.TryGetValue(venueAccount.Id.Key, out Account? account))
@@ -166,21 +189,15 @@ public static class ConnectionEndpoints
                 database.Accounts.Add(account);
             }
 
+            // Refresh what the venue/resolver report; StageOverride is the OPERATOR's declaration and is
+            // deliberately absent here -- rediscovery never touches it (gh#76).
             account.Name = venueAccount.Name;
             account.Stage = venueAccount.Stage;
             account.CanTrade = venueAccount.CanTrade;
             account.IsVisible = venueAccount.IsVisible;
             account.Balance = venueAccount.Balance;
 
-            responses.Add(new DiscoveredAccountResponse(
-                account.Id,
-                account.VenueAccountKey,
-                account.Name,
-                account.Stage,
-                venueAccount.Mode,
-                account.CanTrade,
-                account.IsVisible,
-                account.Balance));
+            responses.Add(AccountResponse.From(account, conventions));
         }
 
         await database.SaveChangesAsync(cancellationToken);
