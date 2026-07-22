@@ -8,7 +8,9 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel only superseded PR runs. A push run publishes an image (and, once wired, deploys it), so it
+  # must finish -- a concurrent merge cancelling it mid-publish is how the #80 run was lost (gh#82).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-test:
@@ -57,6 +59,11 @@ jobs:
         with:
           # The Dockerfile COPYs external/ (the ProjectX submodule) into the build.
           submodules: true
+
+      # Required for `cache-to: type=gha` below: the default `docker` driver cannot export a build
+      # cache, so without the docker-container driver this step provides, the build fails (gh#82).
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
