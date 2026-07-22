@@ -21,6 +21,7 @@ public class UnauthenticatedEndpointsTests : IClassFixture<PostgresApiFactory>
         new List<object[]>
         {
             new object[] { HttpMethod.Get, "/auth/me" },
+            new object[] { HttpMethod.Post, "/auth/invitations" },
             new object[] { HttpMethod.Get, "/firms" },
             new object[] { HttpMethod.Post, "/firms" },
             new object[] { HttpMethod.Put, $"/firms/{Guid.NewGuid()}/conventions" },
@@ -72,5 +73,4 @@ public class UnauthenticatedEndpointsTests : IClassFixture<PostgresApiFactory>
 
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
-
 }

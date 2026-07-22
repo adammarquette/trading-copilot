@@ -21,6 +21,7 @@
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Api\MarqSpec.TradingCopilot.Api.csproj" />
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Data\MarqSpec.TradingCopilot.Data.csproj" />
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Domain\MarqSpec.TradingCopilot.Domain.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.ProjectX\MarqSpec.TradingCopilot.Integration.ProjectX.csproj" />
   </ItemGroup>
 
   <ItemGroup>
