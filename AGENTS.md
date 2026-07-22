@@ -62,14 +62,10 @@ it there instead — `AGENT-MEMORY.md` is overflow, not a substitute.
 
 ## Build / test
 - Solution: `src/MarqSpec.TradingCopilot.slnx` (base namespace `MarqSpec.TradingCopilot.*`) — `Domain`, `Data`, `Api` + test projects so far. Build: `dotnet build src/MarqSpec.TradingCopilot.slnx`.
-- Test tiers, as they're added: **unit** (mocked) · **integration** (real deps in **staging**) ·
-  **deterministic evals**. Before a PR: `dotnet format --verify-no-changes` + unit tests green.
+- Test tiers, as they're added: **unit** (mocked) · **integration** (ephemeral compose pre-merge + staging post-merge) · **deterministic evals**. Before a PR: `dotnet format --verify-no-changes` + unit tests green.
 - **Unit tests → `MarqSpec.TradingCopilot.UnitTests`:** xUnit + FakeItEasy + FluentAssertions, fully mocked (suite runs
   in seconds). Test **every public product method**; folders mirror the namespace; name tests
   `MethodUnderTest_Should{ExpectedBehavior}_When{condition}`. (Engineering guide §5.)
-- **Integration tests → `MarqSpec.TradingCopilot.IntegrationTests`** (mirrors UnitTests layout): nothing mocked, run
-  against **staging** (not local dev); a tagged **smoke** subset runs on production deploy. Env-specific config
-  (creds/endpoints) per category × environment, from CI secrets. Prod deploy & rollback are human-approved.
-  (Engineering guide §5, §10.)
+- **Integration tests → `MarqSpec.TradingCopilot.IntegrationTests`** (mirrors UnitTests layout): nothing mocked; venue-independent API/DB integration runs in CI/dev against an ephemeral `docker compose` stack pre-merge, and venue/cloud integration runs against **staging** post-merge; a tagged **smoke** subset (strictly read-only on production) runs on production deploy. Env-specific config (creds/endpoints) per category × environment, from CI secrets. Prod deploy & rollback are human-approved. (Engineering guide §5, §10.)
 
 *This file is a lightweight, evolving scaffold — it deepens as the plan and `src/` do.*

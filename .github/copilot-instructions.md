@@ -73,6 +73,7 @@ Worth flagging specifically:
 - A new guard or refusal path with no test asserting **the venue is never called**.
 - A new branch in price or quantity selection with no test asserting the **exact** values transmitted.
 - A fake that doesn't configure the identity a new guard now reads — it will pass or fail for the wrong reason.
+- **Telemetry completeness (once the §7 observability stack is wired):** A new feature, pipeline step, or guard pathway with no OpenTelemetry metrics counter/gauge or trace context propagation (`trace_id` span links across event log boundaries).
 
 ## Documentation is part of the change
 

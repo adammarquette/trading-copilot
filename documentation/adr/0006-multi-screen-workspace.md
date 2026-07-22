@@ -65,3 +65,4 @@ must **not require an install**, and must **never introduce a second execution p
 - Design **token/session sharing across same-origin windows** (R-18) and **per-window SignalR resume**.
 - **Spike** the Window Management API placement with a manual-drag fallback.
 - Extend the wireframes with a **detached / multi-screen arrangement**.
+- Author **Playwright E2E UI tests** covering pop-out window detachment, SignalR multi-window state resume, and `BroadcastChannel` local UI state sync once the SPA lands.
