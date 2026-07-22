@@ -31,6 +31,12 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Per-firm stage declarations (gh#60) — what each stage means. Operator-owned.</summary>
     public DbSet<FirmStageConvention> FirmStageConventions => Set<FirmStageConvention>();
 
+    /// <summary>Firm logins — one per firm × platform (ADR-0016). Operator-owned; no secrets stored.</summary>
+    public DbSet<Connection> Connections => Set<Connection>();
+
+    /// <summary>Trading accounts as discovered through connections. Operator-owned.</summary>
+    public DbSet<Account> Accounts => Set<Account>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -72,6 +78,35 @@ public class TradingCopilotDbContext : TenantDbContext
             // to persist it, defense-in-depth below the service (gh#60). Ties to the enum's fail-closed zero.
             convention.ToTable(table =>
                 table.HasCheckConstraint("CK_FirmStageConvention_Stage_NotUnknown", "\"Stage\" <> 0"));
+        });
+
+        modelBuilder.Entity<Connection>(connection =>
+        {
+            connection.Property(c => c.Platform).HasMaxLength(64);
+            connection.Property(c => c.CredentialKey).HasMaxLength(128);
+
+            // One login per firm x platform (ADR-0016): Apex-on-Tradovate and Apex-on-Rithmic are two rows;
+            // a second login for the same pair is a mistake, not a variant.
+            connection.HasIndex(c => new { c.UserId, c.FirmId, c.Platform }).IsUnique();
+
+            connection.HasOne<Firm>()
+                .WithMany()
+                .HasForeignKey(c => c.FirmId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            connection.HasMany(c => c.Accounts)
+                .WithOne()
+                .HasForeignKey(account => account.ConnectionId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<Account>(account =>
+        {
+            account.Property(a => a.VenueAccountKey).HasMaxLength(64);
+            account.Property(a => a.Name).HasMaxLength(128);
+
+            // One row per venue handle within a connection -- rediscovery updates, never duplicates.
+            account.HasIndex(a => new { a.ConnectionId, a.VenueAccountKey }).IsUnique();
         });
     }
 }
