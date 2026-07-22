@@ -22,7 +22,7 @@ public class ProjectXVenueTests
 
     public ProjectXVenueTests()
     {
-        _venue = new ProjectXVenue(_api, _webSocket, ProjectXDataTier.Simulated);
+        _venue = new ProjectXVenue(_api, _webSocket, ProjectXDataTier.Simulated, FirmConventions.None);
     }
 
     private VenueAccountId Account => VenueAccountId.Create(_venue.Id, "9001");
@@ -77,7 +77,7 @@ public class ProjectXVenueTests
     {
         // Falling through to simulated would silently recreate the empty-universe failure the
         // required parameter exists to prevent.
-        Action act = () => new ProjectXVenue(_api, _webSocket, (ProjectXDataTier)99);
+        Action act = () => new ProjectXVenue(_api, _webSocket, (ProjectXDataTier)99, FirmConventions.None);
 
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
@@ -101,7 +101,7 @@ public class ProjectXVenueTests
     [Fact]
     public async Task ResolveContractAsync_ShouldQueryTheLiveUniverse_WhenTheTierIsLive()
     {
-        ProjectXVenue live = new(_api, _webSocket, ProjectXDataTier.Live);
+        ProjectXVenue live = new(_api, _webSocket, ProjectXDataTier.Live, FirmConventions.None);
         A.CallTo(() => _api.SearchContractsAsync("ES", true, A<CancellationToken>._))
             .Returns<IEnumerable<ClientModels.Contract>>(
                 [new ClientModels.Contract { Id = ContractKey, ActiveContract = true }]);
@@ -191,11 +191,11 @@ public class ProjectXVenueTests
     }
 
     [Fact]
-    public async Task GetAccountsAsync_ShouldReportEveryAccountAsUndeclared_UntilTheOperatorClassifiesThem()
+    public async Task GetAccountsAsync_ShouldReportEveryAccountAsUndeclared_WhenTheFirmHasDeclaredNothing()
     {
-        // Until firm conventions are wired through configuration, the adapter has no basis to say what is at
-        // stake -- and it must not guess from the simulated flag (gh#60). Undeclared is refused everywhere, so
-        // the gap blocks trading rather than hiding behind a plausible default.
+        // With FirmConventions.None the adapter has no basis to say what is at stake -- and it must not guess
+        // from the simulated flag (gh#60). Undeclared is refused everywhere, so the gap blocks trading rather
+        // than hiding behind a plausible default. (_venue is built with None.)
         A.CallTo(() => _api.GetAccountsAsync(A<bool>._, A<CancellationToken>._)).Returns<IEnumerable<ClientModels.TradingAccount>>(
         [
             new ClientModels.TradingAccount { Id = 9001, Name = "PRAC-50K", CanTrade = true, IsVisible = true, Simulated = true },
@@ -205,6 +205,28 @@ public class ProjectXVenueTests
         IReadOnlyList<VenueAccount> accounts = await _venue.GetAccountsAsync(CancellationToken.None);
 
         accounts.Should().OnlyContain(account => account.Mode == TradingMode.Undeclared);
+    }
+
+    [Fact]
+    public async Task GetAccountsAsync_ShouldResolveModeFromNameAndConventions_WhenTheFirmHasDeclared()
+    {
+        // The seam this increment builds (gh#76): stage from the name (conservatively), meaning from the firm's
+        // conventions. A PRAC account resolves to Practice; a funded-named account the resolver will not classify
+        // stays Unknown -> Undeclared, never guessed into a tradeable mode.
+        FirmConventions topstep = FirmConventions.For(
+            "Topstep", (AccountStage.Practice, false), (AccountStage.Funded, true));
+        ProjectXVenue venue = new(_api, _webSocket, ProjectXDataTier.Simulated, topstep);
+
+        A.CallTo(() => _api.GetAccountsAsync(A<bool>._, A<CancellationToken>._)).Returns<IEnumerable<ClientModels.TradingAccount>>(
+        [
+            new ClientModels.TradingAccount { Id = 9001, Name = "PRAC-50K-1234", CanTrade = true, IsVisible = true, Simulated = true },
+            new ClientModels.TradingAccount { Id = 9002, Name = "50KTC-V2-DLL-0000", CanTrade = true, IsVisible = true, Simulated = true },
+        ]);
+
+        IReadOnlyList<VenueAccount> accounts = await venue.GetAccountsAsync(CancellationToken.None);
+
+        accounts[0].Mode.Should().Be(TradingMode.Practice);   // PRAC -> Practice stage -> declared not-at-risk
+        accounts[1].Mode.Should().Be(TradingMode.Undeclared);  // unrecognised name -> Unknown stage -> Undeclared
     }
 
     // --- Contract resolution ---

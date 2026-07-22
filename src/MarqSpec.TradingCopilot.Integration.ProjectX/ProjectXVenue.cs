@@ -26,6 +26,7 @@ public sealed class ProjectXVenue : ITradingVenue
 
     private readonly IProjectXApiClient _api;
     private readonly IProjectXWebSocketClient _webSocket;
+    private readonly FirmConventions _conventions;
     private readonly bool _live;
 
     /// <summary>Creates the adapter over a configured gateway client.</summary>
@@ -36,10 +37,21 @@ public sealed class ProjectXVenue : ITradingVenue
     /// tier returns an <b>empty</b> contract universe rather than an error, so a silent default would surface
     /// much later as an unresolvable instrument.
     /// </param>
-    public ProjectXVenue(IProjectXApiClient api, IProjectXWebSocketClient webSocket, ProjectXDataTier dataTier)
+    /// <param name="conventions">
+    /// What the firm behind this login has declared each stage to mean (R-14, gh#60). One login is one firm
+    /// (ADR-0016), so a single set of conventions scopes the adapter. <see cref="FirmConventions.None"/> is
+    /// explicit for "nothing declared yet" — every account then resolves to <see cref="TradingMode.Undeclared"/>
+    /// and is tradeable nowhere, which is the intended failure direction, not an accident.
+    /// </param>
+    public ProjectXVenue(
+        IProjectXApiClient api,
+        IProjectXWebSocketClient webSocket,
+        ProjectXDataTier dataTier,
+        FirmConventions conventions)
     {
         _api = api;
         _webSocket = webSocket;
+        _conventions = conventions;
         _live = dataTier switch
         {
             ProjectXDataTier.Simulated => false,
@@ -129,14 +141,14 @@ public sealed class ProjectXVenue : ITradingVenue
         IEnumerable<ClientModels.TradingAccount> accounts =
             await _api.GetAccountsAsync(onlyActiveAccounts: false, cancellationToken);
 
-        // Nothing declares stages or firm conventions yet, so every account maps to Undeclared and is tradeable
-        // nowhere until the operator classifies it. That is the intended failure direction (gh#60): "classify
-        // this before trading it" beats "assumed practice, then traded a funded account". Wiring the operator's
-        // declaration through configuration is its own change.
+        // Stage comes from the account name (conservatively -- ProjectXAccountStage refuses to guess), and what
+        // that stage *means* comes from the firm's declared conventions. An unrecognised name or an undeclared
+        // stage lands on Undeclared: "classify this before trading it" beats "assumed practice, then traded a
+        // funded account" (gh#60). The venue's own `simulated` flag is deliberately not consulted.
         return
         [
-            .. accounts.Select(account =>
-                ProjectXMapping.ToVenueAccount(account, Id, FirmConventions.None, AccountStage.Unknown)),
+            .. accounts.Select(account => ProjectXMapping.ToVenueAccount(
+                account, Id, _conventions, ProjectXAccountStage.Resolve(account.Name))),
         ];
     }
 
