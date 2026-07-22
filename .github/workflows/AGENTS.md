@@ -9,9 +9,10 @@ live:
 | --- | --- |
 | CI + branch-policy workflows | [`.github/workflows/`](.) |
 | Container image (the **same** artifact local and deployed) | [`src/MarqSpec.TradingCopilot.Api/Dockerfile`](../../src/MarqSpec.TradingCopilot.Api/Dockerfile), build context = repo root |
-| Local stack | [`docker-compose.yml`](../../docker-compose.yml) |
+| Image registry — built once in CI, pulled by local + Railway | `ghcr.io/adammarquette/trading-copilot` (public) |
+| Local stack — pull (default) / dev-build override | [`docker-compose.yml`](../../docker-compose.yml), [`docker-compose.dev.yml`](../../docker-compose.dev.yml) |
 | Deploy resources, procedures, rulesets | [`documentation/deployment-runbook.md`](../../documentation/deployment-runbook.md) |
-| Deployment decisions | [ADR-0012](../../documentation/adr/0012-containerization-local-dev.md) (containerization), [ADR-0015](../../documentation/adr/0015-distribution-licensing-governance.md) (self-hosted, fork-first) |
+| Deployment decisions | [ADR-0012](../../documentation/adr/0012-containerization-local-dev.md) (containerization), [ADR-0018](../../documentation/adr/0018-image-registry-ghcr.md) (build-once → GHCR), [ADR-0015](../../documentation/adr/0015-distribution-licensing-governance.md) (self-hosted, fork-first) |
 
 ## Role
 Keep the pipeline and the runtime boring, reproducible, and honest about what it is doing. **Configuration that

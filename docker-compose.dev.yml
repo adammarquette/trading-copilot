@@ -1,0 +1,18 @@
+# docker-compose.dev.yml — the "run my local changes" override.
+#
+# The base docker-compose.yml PULLS the app image from GHCR (the CI-built artifact). This override
+# BUILDS it from your working tree instead, so a container carries your uncommitted changes.
+#
+#   docker compose down                                              # stop the pulled container
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#
+# The build is tagged locally as trading-copilot:local -- a distinct name from the GHCR ref, so it is
+# never confused with a published build and a later `docker compose pull` cannot clobber it.
+#
+# Requires a recursive clone: the Dockerfile COPYs external/ (the ProjectX submodule).
+services:
+  app:
+    build:
+      context: .
+      dockerfile: src/MarqSpec.TradingCopilot.Api/Dockerfile
+    image: "trading-copilot:local"

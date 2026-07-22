@@ -25,12 +25,26 @@ authenticated because it is web-exposed, with data isolation enforced at the dat
 
 ## Run it locally
 
-Requires Docker, and a **recursive** clone — the ProjectX client is a submodule under `external/`, and both the
-solution and the image build against it:
+Requires Docker. `docker compose up` **pulls** the CI-built image from GHCR (the same artifact Railway runs —
+ADR-0018), so a plain clone is enough to *run* it:
 
 ```bash
-git clone --recursive …            # or, in an existing clone: git submodule update --init
-docker compose up -d --build       # builds the API image, starts Postgres + the app
+git clone …                        # a recursive clone is only needed to BUILD (see below)
+docker compose up -d               # pulls ghcr.io/adammarquette/trading-copilot:develop, starts Postgres + the app
+```
+
+> **If the pull fails with `unauthorized` or `not found`:** the GHCR package isn't published-and-public yet (it's
+> created on the first merge to `develop`, and is **private until made public** — see the runbook's operator
+> setup). Until then, either `docker login ghcr.io` with a token that has `read:packages`, or just **build from
+> source** with the dev override below — it needs no registry access at all.
+
+**To run your own changes** (or before the image is public), build from source with the dev override (needs a
+**recursive** clone — the ProjectX client is a submodule under `external/` the image builds against):
+
+```bash
+git submodule update --init        # if you didn't clone --recursive
+docker compose down                # stop the pulled container
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
 The API comes up on **http://localhost:8080**, applies the EF migrations, and **seeds the operator**
