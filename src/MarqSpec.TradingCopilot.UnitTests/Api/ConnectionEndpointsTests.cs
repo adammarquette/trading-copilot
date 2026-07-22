@@ -44,6 +44,9 @@ public class ConnectionEndpointsTests
     private static IOptions<ProjectXConnectionOptions> OptionsFor(string credentialKey) =>
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey });
 
+    /// <summary>The R-14 environment the handlers run in — Development (practice-only) unless a test says otherwise.</summary>
+    private static HostTradingEnvironment Development { get; } = new(DeploymentEnvironment.Development);
+
     private async Task<(Guid FirmId, Guid ConnectionId)> SeedFirmAndConnectionAsync(string credentialKey = "topstep-main")
     {
         Guid firmId = Guid.NewGuid();
@@ -108,7 +111,7 @@ public class ConnectionEndpointsTests
         await using TradingCopilotDbContext context = Context();
 
         IResult result = await ConnectionEndpoints.DiscoverAccountsAsync(
-            connectionId, new FixedUser(_operator), context, _factory, OptionsFor("topstep-main"), CancellationToken.None);
+            connectionId, new FixedUser(_operator), context, _factory, OptionsFor("topstep-main"), Development, CancellationToken.None);
 
         // One credential set per process (ADR-0015). Serving another key's connection would silently discover
         // the wrong login's accounts into this connection's rows.
@@ -129,7 +132,7 @@ public class ConnectionEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await ConnectionEndpoints.DiscoverAccountsAsync(
-            connectionId, new FixedUser(_operator), context, _factory, OptionsFor("topstep-main"), CancellationToken.None);
+            connectionId, new FixedUser(_operator), context, _factory, OptionsFor("topstep-main"), Development, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
 
@@ -145,6 +148,12 @@ public class ConnectionEndpointsTests
         // every-write-point discipline prevents.
         stored[0].Mode.Should().Be(TradingMode.Practice);
         stored[1].Mode.Should().Be(TradingMode.Undeclared);
+
+        // The R-14 environment gate at the account-selection boundary (gh#9): practice trades anywhere,
+        // undeclared trades NOWHERE -- not even here in Development.
+        List<AccountResponse> responses = (List<AccountResponse>)((IValueHttpResult)result).Value!;
+        responses.Single(r => r.Stage == AccountStage.Practice).TradeableHere.Should().BeTrue();
+        responses.Single(r => r.Stage == AccountStage.Unknown).TradeableHere.Should().BeFalse();
     }
 
     [Fact]
@@ -160,7 +169,7 @@ public class ConnectionEndpointsTests
         await using (TradingCopilotDbContext first = Context())
         {
             await ConnectionEndpoints.DiscoverAccountsAsync(
-                connectionId, new FixedUser(_operator), first, _factory, OptionsFor("topstep-main"), CancellationToken.None);
+                connectionId, new FixedUser(_operator), first, _factory, OptionsFor("topstep-main"), Development, CancellationToken.None);
         }
 
         // The venue now reports a changed balance for the same handle.
@@ -172,7 +181,7 @@ public class ConnectionEndpointsTests
         await using (TradingCopilotDbContext second = Context())
         {
             await ConnectionEndpoints.DiscoverAccountsAsync(
-                connectionId, new FixedUser(_operator), second, _factory, OptionsFor("topstep-main"), CancellationToken.None);
+                connectionId, new FixedUser(_operator), second, _factory, OptionsFor("topstep-main"), Development, CancellationToken.None);
         }
 
         await using TradingCopilotDbContext reload = Context();
@@ -193,7 +202,7 @@ public class ConnectionEndpointsTests
         await using (TradingCopilotDbContext first = Context())
         {
             await ConnectionEndpoints.DiscoverAccountsAsync(
-                connectionId, new FixedUser(_operator), first, _factory, OptionsFor("topstep-main"), CancellationToken.None);
+                connectionId, new FixedUser(_operator), first, _factory, OptionsFor("topstep-main"), Development, CancellationToken.None);
         }
 
         // The operator corrects the resolver: this one is actually Funded.
@@ -206,7 +215,7 @@ public class ConnectionEndpointsTests
 
         await using TradingCopilotDbContext second = Context();
         IResult result = await ConnectionEndpoints.DiscoverAccountsAsync(
-            connectionId, new FixedUser(_operator), second, _factory, OptionsFor("topstep-main"), CancellationToken.None);
+            connectionId, new FixedUser(_operator), second, _factory, OptionsFor("topstep-main"), Development, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         List<AccountResponse> responses = (List<AccountResponse>)((IValueHttpResult)result).Value!;
@@ -243,7 +252,7 @@ public class ConnectionEndpointsTests
         }
 
         await using TradingCopilotDbContext context = Context();
-        IResult result = await ConnectionEndpoints.ListAccountsAsync(connectionId, context, CancellationToken.None);
+        IResult result = await ConnectionEndpoints.ListAccountsAsync(connectionId, context, Development, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         List<AccountResponse> responses = (List<AccountResponse>)((IValueHttpResult)result).Value!;
@@ -256,7 +265,7 @@ public class ConnectionEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await ConnectionEndpoints.ListAccountsAsync(Guid.NewGuid(), context, CancellationToken.None);
+        IResult result = await ConnectionEndpoints.ListAccountsAsync(Guid.NewGuid(), context, Development, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
     }
@@ -267,7 +276,7 @@ public class ConnectionEndpointsTests
         await using TradingCopilotDbContext context = Context();
 
         IResult result = await ConnectionEndpoints.DiscoverAccountsAsync(
-            Guid.NewGuid(), new FixedUser(_operator), context, _factory, OptionsFor("topstep-main"), CancellationToken.None);
+            Guid.NewGuid(), new FixedUser(_operator), context, _factory, OptionsFor("topstep-main"), Development, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
     }

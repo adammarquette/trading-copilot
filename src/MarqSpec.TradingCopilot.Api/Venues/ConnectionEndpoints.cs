@@ -94,6 +94,7 @@ public static class ConnectionEndpoints
     internal static async Task<IResult> ListAccountsAsync(
         Guid id,
         TradingCopilotDbContext database,
+        HostTradingEnvironment environment,
         CancellationToken cancellationToken)
     {
         bool connectionExists = await database.Connections.AnyAsync(candidate => candidate.Id == id, cancellationToken);
@@ -104,12 +105,13 @@ public static class ConnectionEndpoints
 
         // The PERSISTED roster -- no venue round-trip. Mode is served from the persisted column, which every
         // mode-moving write point recomputes (gh#7) -- the same truth the DB-level R-14 guard enforces.
+        // TradeableHere is the R-14 environment verdict for THIS host (gh#9), computed per request.
         List<Account> accounts = await database.Accounts
             .Where(account => account.ConnectionId == id)
             .OrderBy(account => account.VenueAccountKey)
             .ToListAsync(cancellationToken);
 
-        return Results.Ok(accounts.Select(AccountResponse.From).ToList());
+        return Results.Ok(accounts.Select(account => AccountResponse.From(account, environment)).ToList());
     }
 
     internal static async Task<IResult> DiscoverAccountsAsync(
@@ -118,6 +120,7 @@ public static class ConnectionEndpoints
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
         IOptions<ProjectXConnectionOptions> projectXOptions,
+        HostTradingEnvironment environment,
         CancellationToken cancellationToken)
     {
         Connection? connection = await database.Connections
@@ -199,7 +202,7 @@ public static class ConnectionEndpoints
             // Write point 1 of 3 for the persisted mode (gh#7): the resolver may have moved the stage.
             account.RecomputeMode(conventions);
 
-            responses.Add(AccountResponse.From(account));
+            responses.Add(AccountResponse.From(account, environment));
         }
 
         await database.SaveChangesAsync(cancellationToken);

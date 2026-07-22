@@ -46,6 +46,12 @@ public sealed record SetStageOverrideRequest(AccountStage Stage);
 /// <param name="CanTrade">Whether the venue permits trading it.</param>
 /// <param name="IsVisible">Whether the operator has left it visible.</param>
 /// <param name="Balance">The balance as last reported by the venue.</param>
+/// <param name="TradeableHere">
+/// Whether R-14 permits trading this account <b>in this deployment environment</b> —
+/// <c>TradingModePolicy.IsAllowed(Mode, environment)</c>: practice anywhere, live only in production,
+/// undeclared nowhere. Computed per request, never persisted; distinct from the venue's own
+/// <paramref name="CanTrade"/>.
+/// </param>
 public sealed record AccountResponse(
     Guid Id,
     string VenueAccountKey,
@@ -55,14 +61,20 @@ public sealed record AccountResponse(
     TradingMode Mode,
     bool CanTrade,
     bool IsVisible,
-    decimal Balance)
+    decimal Balance,
+    bool TradeableHere)
 {
-    /// <summary>Projects a persisted account, serving its persisted (write-point-recomputed) mode.</summary>
+    /// <summary>
+    /// Projects a persisted account: the persisted (write-point-recomputed) mode, plus the R-14 environment
+    /// verdict for this host.
+    /// </summary>
     /// <param name="account">The account.</param>
+    /// <param name="environment">The environment this host runs in.</param>
     /// <returns>The response.</returns>
-    public static AccountResponse From(Account account)
+    public static AccountResponse From(Account account, HostTradingEnvironment environment)
     {
         ArgumentNullException.ThrowIfNull(account);
+        ArgumentNullException.ThrowIfNull(environment);
         return new AccountResponse(
             account.Id,
             account.VenueAccountKey,
@@ -72,6 +84,7 @@ public sealed record AccountResponse(
             account.Mode,
             account.CanTrade,
             account.IsVisible,
-            account.Balance);
+            account.Balance,
+            TradingModePolicy.IsAllowed(account.Mode, environment.Value));
     }
 }

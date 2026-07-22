@@ -39,6 +39,12 @@ builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
 // change, not a rewrite. Producers/consumers arrive with market-data ingestion (R-1).
 builder.Services.AddScoped<IEventLog, TimescaleEventLog>();
 
+// The R-14 environment, mapped ONCE at the composition root from the host (gh#9): practice anywhere, live only
+// in production, undeclared nowhere -- and an unrecognised environment name fails closed to Development
+// (practice-only). Wrapped so endpoints bind it from services, never from a request.
+builder.Services.AddSingleton(new HostTradingEnvironment(
+    DeploymentEnvironmentMapping.From(builder.Environment.EnvironmentName)));
+
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>

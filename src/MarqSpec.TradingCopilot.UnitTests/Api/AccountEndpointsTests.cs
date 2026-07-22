@@ -33,6 +33,9 @@ public class AccountEndpointsTests
 
     private static int StatusOf(IResult result) => ((IStatusCodeHttpResult)result).StatusCode ?? 0;
 
+    /// <summary>The R-14 environment the handlers run in — Development (practice-only) unless a test says otherwise.</summary>
+    private static HostTradingEnvironment Development { get; } = new(DeploymentEnvironment.Development);
+
     /// <summary>Seeds firm (Practice=paper, Funded=capital-at-risk) → connection → one account.</summary>
     private async Task<Guid> SeedAccountAsync(AccountStage resolvedStage, AccountStage? existingOverride = null)
     {
@@ -84,13 +87,14 @@ public class AccountEndpointsTests
         await using TradingCopilotDbContext context = Context();
 
         IResult result = await AccountEndpoints.SetStageOverrideAsync(
-            accountId, new SetStageOverrideRequest(AccountStage.Funded), context, CancellationToken.None);
+            accountId, new SetStageOverrideRequest(AccountStage.Funded), context, Development, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         AccountResponse response = ((IValueHttpResult)result).Value.Should().BeOfType<AccountResponse>().Subject;
         response.StageOverride.Should().Be(AccountStage.Funded);
         response.Stage.Should().Be(AccountStage.Unknown); // the resolver's own answer is never touched
         response.Mode.Should().Be(TradingMode.Live);      // Funded is declared capital-at-risk at this firm
+        response.TradeableHere.Should().BeFalse();        // R-14: a live account is unreachable from Development
 
         await using TradingCopilotDbContext reload = Context();
         Account stored = await reload.Accounts.SingleAsync();
@@ -106,7 +110,7 @@ public class AccountEndpointsTests
         await using TradingCopilotDbContext context = Context();
 
         IResult result = await AccountEndpoints.SetStageOverrideAsync(
-            accountId, new SetStageOverrideRequest(AccountStage.Unknown), context, CancellationToken.None);
+            accountId, new SetStageOverrideRequest(AccountStage.Unknown), context, Development, CancellationToken.None);
 
         // "I don't know" is not a declaration -- clearing the override is how you say that.
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
@@ -121,7 +125,7 @@ public class AccountEndpointsTests
         await using TradingCopilotDbContext context = Context();
 
         IResult result = await AccountEndpoints.SetStageOverrideAsync(
-            accountId, new SetStageOverrideRequest((AccountStage)99), context, CancellationToken.None);
+            accountId, new SetStageOverrideRequest((AccountStage)99), context, Development, CancellationToken.None);
 
         // Whitelist, not blacklist (the fail-open lesson): only defined, declarable stages pass.
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
@@ -136,9 +140,29 @@ public class AccountEndpointsTests
         await using TradingCopilotDbContext context = Context();
 
         IResult result = await AccountEndpoints.SetStageOverrideAsync(
-            Guid.NewGuid(), new SetStageOverrideRequest(AccountStage.Funded), context, CancellationToken.None);
+            Guid.NewGuid(), new SetStageOverrideRequest(AccountStage.Funded), context, Development, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
+    public async Task SetStageOverride_ShouldMarkALiveAccountTradeable_OnlyInProduction()
+    {
+        // The R-14 ladder at the account-selection boundary (gh#9): the same live-mode account is refused
+        // outside production and permitted in it -- TradingModePolicy consulted per request, never persisted.
+        Guid accountId = await SeedAccountAsync(resolvedStage: AccountStage.Unknown);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await AccountEndpoints.SetStageOverrideAsync(
+            accountId,
+            new SetStageOverrideRequest(AccountStage.Funded),
+            context,
+            new HostTradingEnvironment(DeploymentEnvironment.Production),
+            CancellationToken.None);
+
+        AccountResponse response = ((IValueHttpResult)result).Value.Should().BeOfType<AccountResponse>().Subject;
+        response.Mode.Should().Be(TradingMode.Live);
+        response.TradeableHere.Should().BeTrue(); // live in production -- the only place it may trade
     }
 
     [Fact]
@@ -147,12 +171,13 @@ public class AccountEndpointsTests
         Guid accountId = await SeedAccountAsync(resolvedStage: AccountStage.Practice, existingOverride: AccountStage.Funded);
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await AccountEndpoints.ClearStageOverrideAsync(accountId, context, CancellationToken.None);
+        IResult result = await AccountEndpoints.ClearStageOverrideAsync(accountId, context, Development, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         AccountResponse response = ((IValueHttpResult)result).Value.Should().BeOfType<AccountResponse>().Subject;
         response.StageOverride.Should().BeNull();
         response.Mode.Should().Be(TradingMode.Practice); // computed from the resolver's Practice again
+        response.TradeableHere.Should().BeTrue();        // R-14: practice trades in every environment
 
         await using TradingCopilotDbContext reload = Context();
         Account stored = await reload.Accounts.SingleAsync();
@@ -165,7 +190,7 @@ public class AccountEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await AccountEndpoints.ClearStageOverrideAsync(Guid.NewGuid(), context, CancellationToken.None);
+        IResult result = await AccountEndpoints.ClearStageOverrideAsync(Guid.NewGuid(), context, Development, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
     }

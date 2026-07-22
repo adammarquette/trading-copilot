@@ -24,6 +24,8 @@ internal sealed class FakeTradingVenue : ITradingVenue
 
     public VenueCapabilities Capabilities { get; }
 
+    public int AdapterLogicVersion => 1;
+
     public IReadOnlyList<OrderRequest> PlacedOrders => _placedOrders;
 
     public Task<ResolvedContract> ResolveContractAsync(InstrumentId instrument, CancellationToken cancellationToken = default)
