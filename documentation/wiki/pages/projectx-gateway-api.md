@@ -72,12 +72,29 @@ the adapter.
 (50K/100K/150K), evaluation vs. funded stage, status (active/passed/failed), and daily-loss limit** are **encoded
 in the account `name`** (`50KTC-V2-DLL-0000-…`, `PRAC-…`) or the firm portal.
 
-> **Stage resolution is deliberately conservative (gh#76).** `ProjectXAccountStage.Resolve` reads only what it is
-> sure of — the `PRAC` marker → `AccountStage.Practice` — and returns `Unknown` for everything else. Funded vs.
-> evaluation naming varies by firm and is **not** reliably documented, so the adapter refuses to guess it: a
-> misread funded account read as practice is exactly the failure gh#60 removed. `Unknown` resolves to
-> `TradingMode.Undeclared` (tradeable nowhere) until the operator classifies it. Firm-specific funded/eval
-> patterns and a per-account override are deferred to a later increment grounded in a real account roster.
+> **Stage resolution is conservative and roster-grounded (gh#76).** `ProjectXAccountStage.Resolve` recognises
+> only the name families below — **grounded 2026-07-22 against a real 294-account Topstep roster** (six
+> families, **zero unmatched**) — and returns `Unknown` for everything else: a misread funded account read as
+> practice is exactly the failure gh#60 removed. `Unknown` resolves to `TradingMode.Undeclared` (tradeable
+> nowhere) until the operator classifies it via the **per-account override** (`PUT /accounts/{id}/stage`), which
+> always outranks these patterns.
+
+### Account name families (Topstep roster, 2026-07-22; digits masked `#`)
+
+| Family | Shape (first segment / whole name) | → Stage | Seen | Evidence notes |
+|---|---|---|---|---|
+| Practice (modern) | `PRAC-…` (segment `PRAC`) | Practice | 7 | balances ~150K; the 1 active practice account |
+| Practice (legacy) | `PRACTICE<MON>#` (single segment) | Practice | 11 | balances ~146–155K; all inactive |
+| Trading Combine | `#KTC-…` (segment `<size>KTC`, e.g. `50KTC`) | Evaluation | 106 | 50/100/150K combines; the 5 active evals |
+| Step eval (legacy) | `S<step><MON>#` (single segment, e.g. `S1JUL#`) | Evaluation | 133 | every instance `CanTrade=false` (expired) |
+| Express Funded | `EXPRESS-…` (segment `EXPRESS`) | **Funded** | 17 | all closed, negative final balances |
+| Express Funded (legacy) | `EXPRESS<MON>#` (single segment) | **Funded** | 20 | all closed, negative final balances |
+
+> **Direction-of-error rationale:** misreading something *as* Funded is the over-cautious direction (funded ×
+> capital-at-risk conventions → Live → maximally guarded); the dangerous direction — funded misread as
+> practice/eval — is covered by the anchored patterns' near-miss fallback to `Unknown`. **Grounded against
+> Topstep only:** another ProjectX-family firm may reuse these spellings with other meanings — revisit this
+> table when onboarding one (the override is the correction path meanwhile).
 
 `simulated` is a **required boolean** on the account model, so what the gateway reports is read, never
 inferred (corrected 2026-07-20 — see the header note).
