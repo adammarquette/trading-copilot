@@ -1,16 +1,18 @@
 name: Branch policy
 
 # Enforces the promotion ladder documented in CONTRIBUTING.md: develop -> staging -> main,
-# with exactly one allowed source per step.
+# with exactly one allowed source per step -- and guards stacked PRs against an
+# already-merged base, where a green merge lands work nothing will ever pick up (gh#72).
 #
-# NOTE: this check is ADVISORY until branch protection is available on the repo (it is
+# NOTE: these checks are ADVISORY until branch protection is available on the repo (it is
 # plan-gated on private repos -- see gh#45). A red check here does not currently block a
-# merge. Once protection is enabled, mark "ladder" as a required check and this becomes a
-# hard gate with no changes to this file.
+# merge. Once protection is enabled, mark "ladder" and "stale-base" as required checks and
+# this becomes a hard gate with no changes to this file.
 
 on:
   pull_request:
-    branches: [staging, main]
+    # No `branches` filter: the ladder governs staging/main, and the stale-base guard
+    # must see every other base (gh#72), so the workflow runs on all PR bases.
     # `labeled` / `unlabeled` so adding the exception label re-runs the check.
     types: [opened, reopened, synchronize, edited, labeled, unlabeled]
 
@@ -72,3 +74,37 @@ jobs:
               echo "No ladder constraint for base '$BASE'."
               ;;
           esac
+
+  # gh#72: a PR based on a feature branch that has ALREADY merged into develop merges
+  # green, closes, and lands its work on a branch nothing will ever merge again. Squash
+  # merges rewrite history, so ancestry of the base's tip proves nothing -- the reliable
+  # signal is a merged PR whose head was this base branch.
+  stale-base:
+    name: stale-base
+    runs-on: ubuntu-latest
+    # Only stacked PRs need this; develop/staging/main are governed by the ladder.
+    if: ${{ !contains(fromJSON('["develop", "staging", "main"]'), github.base_ref) }}
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Fail if the base branch has already merged
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.base_ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "Stacked PR: base '$BASE' is not a long-lived branch."
+
+          MERGED=$(gh pr list --repo "$REPO" --state merged --head "$BASE" --json number --jq '[.[].number] | join(", #")')
+          if [ -n "$MERGED" ]; then
+            echo "::error::Base branch '$BASE' already merged (PR #$MERGED). Merging this PR would land its work on a finished branch nothing will merge again (gh#72). Retarget this PR's base to 'develop'."
+            exit 1
+          fi
+
+          # Legitimately stacked (base still unmerged). One known blind spot: GitHub fires
+          # no event on this PR when its base merges later, so the red only appears on the
+          # next push/edit/label. Deleting merged branches closes it -- GitHub then auto-
+          # retargets child PRs to the deleted branch's own base.
+          echo "::warning::Stacked PR (base '$BASE'). Fine while the base is unmerged -- but if the base merges first, retarget this PR to 'develop' before merging it (gh#72)."
+          echo "OK: no merged PR has head '$BASE'."
