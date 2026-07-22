@@ -49,3 +49,4 @@ strategy; offline scope must be **deliberately narrow** so nothing stale is ever
 - Define the **disconnected-shell** UX (the "data stale / reconnecting" surface) and the no-order-while-offline guard.
 - Validate **install + standalone** on Android and **Add to Home Screen** on iOS; record the capability matrix.
 - Wire **web-push** for flatten warnings (P1) once the notification channel is designed.
+- Author **Playwright E2E UI tests** covering SPA/PWA standalone launch, SignalR outbox sequence continuity on network drop, and multi-screen `BroadcastChannel` state parity once the SPA lands.

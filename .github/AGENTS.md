@@ -11,6 +11,8 @@ Find defects **before they reach `develop`**, in a system that places real order
 auto-flattens positions unattended. You **report**; you do not fix. Reviewing and repairing in one pass loses the
 independence that makes review worth running — and an author who never sees the finding never learns the pattern.
 
+**Hat separation rule:** If an agent carrying the QA/SDET role is also invoked to perform code review, the two hats must **never mix in one pass**. Code review is conducted independently against the diff using this contract and [`copilot-instructions.md`](copilot-instructions.md), while QA test creation is performed blind to the implementation per [`src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md`](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md).
+
 **Work from the diff and the requirement, not from the author's account of them.** A PR description is a claim.
 This repository has shipped PR bodies asserting a completed documentation sweep that had missed two files, and
 class comments describing a limitation the same PR had just removed. Check the claim against the code.
