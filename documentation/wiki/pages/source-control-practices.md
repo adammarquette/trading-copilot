@@ -20,8 +20,9 @@ Microsoft's engineering playbook on source control — the general best practice
 - **Branch naming: `<type>/<work-item-id>_<title>`** — `type ∈ {feature, bug, hotfix}`, `work-item-id` = the GitHub
   issue number, `title` = short kebab (e.g. `feature/42_risk-gate`). **Work-item-oriented, not alias-oriented** — a
   branch traces to the issue it delivers (issue-first).
-- **`develop → staging → main`** branching; **rebase / squash before merge**; Conventional Commits + an `Assisted-by`
-  trailer; the **same-PR doc rule** (engineering §10).
+- **`develop → staging → main`** branching; **rebase-merge with curated units-of-work commits** (squash retired,
+  gh#104; merge commits are promotions-only); Conventional Commits + an `Assisted-by` trailer; the **same-PR doc
+  rule** (engineering §10).
 
 ## Relevant-link index
 - Microsoft Code-With Engineering Playbook — Source Control — https://microsoft.github.io/code-with-engineering-playbook/source-control/

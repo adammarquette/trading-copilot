@@ -124,7 +124,7 @@ each new commit on an open PR is reviewed, not just the PR's opening. Drafts are
 without triggering a review per commit.
 
 Review findings are advisory — they do not block a merge. The blocking gates remain `dotnet format`, the unit
-tests, and the `ladder` + `stale-base` branch-policy checks (gh#72). Repo-specific review guidance lives in
+tests, and the `ladder` + `stale-base` + `commit-hygiene` branch-policy checks (gh#72, gh#104). Repo-specific review guidance lives in
 [`.github/copilot-instructions.md`](../.github/copilot-instructions.md); update it when a review repeatedly
 misses something this codebase cares about.
 
