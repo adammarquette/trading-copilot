@@ -2,6 +2,9 @@
 
 > **Trust tier:** authoritative
 > **Verified:** against vendor docs, 2026-07-18 · **Sources:** https://gateway.docs.projectx.com/docs/intro
+> **Access:** vendor docs fetched directly (no auth wall); later grounding from the gateway's own `swagger.json`
+> and first-party observation via the operator's authenticated login (gh#76 roster — aggregated, digits masked).
+> Nothing from the docs is reproduced.
 > **Informs:** R-1, R-3, R-11, R-13, R-17, Q-1, Q-2, Q-4
 > **Corrected 2026-07-20** (gh#9, building the adapter): the account model **does** carry a required `simulated`
 > flag — this page previously stated it did not. Verified against the gateway's own **`swagger.json`** (vendored in

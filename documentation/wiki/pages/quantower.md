@@ -2,6 +2,7 @@
 
 > **Trust tier:** authoritative
 > **Verified:** vendor site, 2026-07-19 · **Sources:** https://www.quantower.com/assets-and-brokers-features
+> **Access:** public vendor marketing site, fetched directly; summarised, nothing reproduced.
 > **Informs:** design thinking — R-3 (order flow), R-10 (charting/DOM), R-17 (multi-venue), ADR-0006 (panels)
 
 A **reference / example system** — a platform the operator has used — **not a venue we integrate and not a template

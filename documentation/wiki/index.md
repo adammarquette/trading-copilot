@@ -9,9 +9,10 @@ place. **Not read by the product.** Conventions + trust tiers: [`SCHEMA.md`](SCH
 > rules, session times — written in our own words from publicly documented sources, each cited by URL and, where
 > a claim is load-bearing, marked to confirm against the vendor. Facts and functional API details are summarised,
 > **not reproduced**: no page carries substantial verbatim text, and no vendor document is redistributed here
-> (the one that was has been removed). Short quotes are attributed inline. Trademarks belong to their owners and
-> are used only to identify what is being described. Per-source terms posture is recorded in each page's
-> `Access:` header — see [`SCHEMA.md`](SCHEMA.md) and gh#53.
+> (the one that was has been removed **and purged from history** — gh#52). Short quotes are attributed inline.
+> Trademarks belong to their owners and are used only to identify what is being described. Per-source terms
+> posture is recorded in each page's `Access:` header — see [`SCHEMA.md`](SCHEMA.md), gh#53, and the open
+> per-source decision gh#118.
 
 ## Pages
 | Page | Authoritative for | Trust | Informs |

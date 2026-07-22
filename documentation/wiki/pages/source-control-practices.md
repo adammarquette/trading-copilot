@@ -2,6 +2,8 @@
 
 > **Trust tier:** authoritative (Microsoft Code-With Engineering Playbook). **Verified:** WebFetch 2026-07-19.
 > **Source:** https://microsoft.github.io/code-with-engineering-playbook/source-control/
+> **Access:** public GitHub Pages site fetched directly; the playbook repo is **CC-BY-4.0** (LICENSE verified
+> 2026-07-22) — this page is an attributed summary with the canonical link, not a copy.
 > **Informs:** [`CONTRIBUTING.md`](../../../CONTRIBUTING.md), engineering §10 (Git workflow). This page is the
 > external reference; our **concrete conventions live in `CONTRIBUTING.md`**.
 

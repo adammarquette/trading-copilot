@@ -3,6 +3,8 @@
 > **Trust tier:** authoritative
 > **Verified:** against vendor docs + pricing/news-product pages, 2026-07-18 (docs are server-rendered — directly
 > read) · full news param list + auth header format from Tiingo API knowledge, **confirm in `/documentation/general/connecting`** · **Sources:** https://www.tiingo.com/documentation/news , https://www.tiingo.com/about/pricing
+> **Access:** server-rendered public docs read directly (no auth wall or paywall); facts summarised, no vendor
+> text reproduced.
 > **Informs:** R-2 (primary — news template), R-17 (data-only provider); R-1 (market-data-capable, but **not wired** — Finnhub owns prices)
 
 A **data-only provider** (market data + **news**, **no account, no execution**) — the market-data/non-market slice

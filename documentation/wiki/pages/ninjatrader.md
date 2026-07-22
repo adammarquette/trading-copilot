@@ -2,6 +2,7 @@
 
 > **Trust tier:** authoritative
 > **Verified:** vendor site, 2026-07-19 · **Sources:** https://ninjatrader.com/trading-platform
+> **Access:** public vendor marketing site, fetched directly; summarised, nothing reproduced.
 > **Informs:** design thinking — R-3 (DOM/order flow), R-9 (replay), R-11 (order/ATM), R-14 (sim), ADR-0007
 
 A **reference / example system** — a platform the operator has used — **not a venue we integrate and not a template
