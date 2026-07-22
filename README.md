@@ -137,10 +137,28 @@ See the engineering guide for the full, evolving picture.
 
 ## How we work — AI-Engineering first
 
-Software here is built with AI agents as first-class engineering participants. The documentation is a
-**cross-referenced knowledge base** (Andrej Karpathy's
-[LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern) that agents traverse — via
-`R-#` requirement IDs and doc-section pointers — to reconstruct context instead of re-deriving it each session.
+Software here is built with AI agents as first-class engineering participants.
+
+**The documentation is a layer of the software, not commentary on it.** Machine code abstracts the hardware;
+assembler abstracts machine code; C# abstracts both — and this repository treats its documentation — the
+`documentation/` markdown **and the GitHub issues and PRs** — as the next layer up: **the highest-level source
+code of the system**. Like any source layer, it is written to be *compiled downward*: from the PRD's
+requirements (`R-#`), the ADRs, the data dictionary, and the issue/PR trail, the C# below is
+**reconstructable** — by an agent or a human — the way a compiler reconstructs machine code from source. The
+repo's documentation rules are consequences of that principle, not housekeeping:
+
+- The docs form a **cross-referenced knowledge base** (Andrej Karpathy's
+  [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern), traversed via stable
+  IDs — `R-#`, ADR numbers, `gh#N` — which are the layer's **symbol table**. Agents follow them to reconstruct
+  context each session instead of re-deriving it.
+- **Docs move in the same PR** as the change they describe. A stale doc is a **build break in the top layer** —
+  the source no longer produces the system — not a housekeeping lapse.
+- **Issues and PRs are part of the source, not exhaust.** Issue-first; every PR cites its issue; decisions,
+  evidence, and findings are recorded on them where the next session — human or agent — recompiles from.
+- A session **starts by reading the top layer** (this README, then `documentation/`) and derives the rest —
+  which is exactly the compile direction.
+
+The engineering practice that follows from it:
 
 - **Test-first**, with heightened rigor and change control on the execution / auto-flatten layer.
 - **Enforcement below the model** — the risk/execution gate enforces limits; the LLM only proposes.
