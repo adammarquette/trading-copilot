@@ -1,6 +1,6 @@
 # ADR-0016: Venue configuration — adapters are compiled in, firms are configured in settings
 
-**Status:** Proposed · **Date:** 2026-07-20 · **Deciders:** Adam (operator/maintainer)
+**Status:** Accepted (2026-07-22 — implemented; see the *Status note* below · proposed 2026-07-20) · **Date:** 2026-07-20 · **Deciders:** Adam (operator/maintainer)
 **Relates to:** PRD `R-17` (venue abstraction), `R-14` (practice vs. live), `R-18` (auth), `Q-14` (capability
 matrix); [ADR-0015](0015-distribution-licensing-governance.md) (fork-first distribution),
 [ADR-0007](0007-order-execution-model.md) (execution). Issues: `gh#64` (the deferred plugin contract), `gh#60`
@@ -105,3 +105,14 @@ stake from the platform would give one account two answers (`gh#60`).
   own, since they have no accounts and no credentials in the same sense.
 - ADR-0015 asks that S3/S4 stay **composition-root-agnostic** — resolve the venue per account rather than a
   process-wide singleton. Firm records are per-user data, so this must not reintroduce one.
+
+## Status note — accepted as implemented (2026-07-22)
+
+The decision merged substantially as written (gh#76, PRs #86–#94): firm records with per-stage conventions and a
+`/firms` configuration surface; one login per firm × platform (`Connection`); discovery persisting each account's
+resolved stage with a per-account operator override; modes computed from the declared conventions and refused
+while `Undeclared`. One deliberate divergence, recorded in the data dictionary: **credentials landed as an
+env-entry reference** (`Connection.CredentialKey` — no secret stored) rather than §2's UI-entered server-side
+store, which stays a later increment (`gh#95` tracks the one-credential-set-per-process constraint that implies).
+The consequence above — "until it exists, every account reads `Undeclared`" — is therefore historical: the
+configuration surface exists.

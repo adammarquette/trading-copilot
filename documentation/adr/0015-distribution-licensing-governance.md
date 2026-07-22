@@ -1,8 +1,8 @@
 # ADR-0015: Distribution, licensing & governance — self-hosted, Apache-2.0, maintainer-led
 
-**Status:** Accepted · **Date:** 2026-07-20 · **Deciders:** Adam (operator/maintainer)
+**Status:** Accepted · refined by [ADR-0017](0017-single-operator-data-isolation.md) · **Date:** 2026-07-20 · **Deciders:** Adam (operator/maintainer)
 **Relates to:** PRD `R-14` (practice vs. live), `R-17` (venue abstraction), `R-18` (auth), `R-20` (tenancy);
-[ADR-0011](0011-multi-user-tenancy.md) (refined, not superseded), [ADR-0013](0013-failure-recovery-model.md)
+[ADR-0011](0011-multi-user-tenancy.md) (refined here; since **superseded by [ADR-0017](0017-single-operator-data-isolation.md)**), [ADR-0013](0013-failure-recovery-model.md)
 (auto-flatten), [ADR-0012](0012-containerization-local-dev.md) (deployment); `README.md`, `CONTRIBUTING.md`.
 
 ## Context

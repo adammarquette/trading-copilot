@@ -36,6 +36,7 @@ Design-time UI artifacts for the trading co-pilot's **React SPA**. The **UI desi
   - **backtest** — config (range / instruments / strategies / model) → summary metrics + refinement suggestions (ADR-0009); and
   - **AI usage & spend** — **your keys, your bill**: shown in the app (cost per suggestion, cost per taken trade, cap remaining) *and* reported to **Grafana** for the operational view (ADR-0015 / ADR-0008 / ADR-0002); and
   - **sign-in** — login for a web-exposed deployment; the operator's account is seeded at first start, and data access is scoped to it at the data layer (R-18 / R-20); and
+  - **firms — define a firm before you can connect to it** — the firm registry ([ADR-0016](../adr/0016-venue-configuration.md)): per-firm stage-conventions declaration (what Evaluation / Funded mean *here* — gh#60, with a per-account override, gh#76); an **undeclared stage cannot be traded** (R-14); and
   - **connection & account onboarding** — add a firm login (platform → firm → server-side creds), discover its accounts, first sync (R-17 / R-18); and
   - **strategy templates ("playbooks")** — a gallery of packaged methodologies (13/48, ICT, VWAP-reclaim…) + a template's five-layer decomposition (indicators → setups → suggestion shape → risk → rules); install &amp; personalize (R-21); and
   - **rulebook & triggers** — plain-language rules compiled to confirmed deterministic triggers (mechanical-alert vs. agent-review), with debounce / rate-limit (R-7 / ADR-0008); and

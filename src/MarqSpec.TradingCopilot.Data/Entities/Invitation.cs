@@ -1,7 +1,9 @@
 namespace MarqSpec.TradingCopilot.Data.Entities;
 
 /// <summary>
-/// An onboarding invitation (R-18). The operator issues it (email-bound, single-use, expiring); the invitee
+/// A dormant onboarding invitation (R-18, ADR-0017 §4) — built for the multi-user era and deliberately retained:
+/// not part of the product's onboarding story (the operator is seeded at deploy) but the plumbing a future
+/// read-only / mentee login would reuse. The operator issues it (email-bound, single-use, expiring); the invitee
 /// accepts it — with the invite token + a password — to create their <see cref="User"/> account. There is no open
 /// sign-up. Not user-owned: it is looked up anonymously by token hash during accept.
 /// </summary>

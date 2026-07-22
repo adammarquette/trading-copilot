@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore;
 namespace MarqSpec.TradingCopilot.Data.Tenancy;
 
 /// <summary>
-/// A <see cref="DbContext"/> that enforces multi-user isolation (R-20 / ADR-0011): every entity implementing
+/// A <see cref="DbContext"/> that enforces fail-closed operator scoping (R-20 / ADR-0017): every entity implementing
 /// <see cref="IUserOwned"/> automatically receives a <b>default-deny</b> per-user query filter. The current user's
 /// id is held in a context field and re-evaluated by EF per query, so one context can never read another user's
 /// rows, and with no user context (<see cref="System.Guid.Empty"/>) the filter matches nothing.
