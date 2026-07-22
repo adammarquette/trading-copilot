@@ -31,6 +31,7 @@ Working practices Adam has asked agents to follow that have no formal-doc home.
 - **[2026-07-18] Apply, then review.** Make non-trivial changes directly in the files and let Adam review the
   diff (version control makes it safe), rather than proposing every change for approval first. Trivial factual
   corrections always go straight in.
+- **[2026-07-22] Always use `git worktree` for isolated work.** When working on features, tests, or fixes, use isolated `git worktree` directories (or `Workspace: "share"` subagents) to prevent stepping on or dirtying other active agents' working trees.
 
 ## Notes & communications
 
