@@ -78,6 +78,14 @@ public sealed class ProjectXVenue : ITradingVenue
         | VenueCapability.Quotes
         | VenueCapability.ClosePosition);
 
+    /// <summary>
+    /// The ProjectX derivation-logic version (ADR-0009, gh#9). History: <b>1</b> — the conservative PRAC-only
+    /// stage resolver (gh#86); <b>2</b> — the roster-grounded name families (gh#94). Bump on any change to how
+    /// raw gateway facts become derived values (stage, mode); the pinning unit test makes the bump a
+    /// deliberate, reviewed act.
+    /// </summary>
+    public int AdapterLogicVersion => 2;
+
     /// <inheritdoc />
     public async Task<ResolvedContract> ResolveContractAsync(
         InstrumentId instrument,

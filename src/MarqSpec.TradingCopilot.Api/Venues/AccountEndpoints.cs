@@ -32,6 +32,7 @@ public static class AccountEndpoints
         Guid id,
         SetStageOverrideRequest request,
         TradingCopilotDbContext database,
+        HostTradingEnvironment environment,
         CancellationToken cancellationToken)
     {
         // Whitelist, not blacklist (the fail-open lesson): only defined, declarable stages pass. Unknown is not
@@ -52,12 +53,13 @@ public static class AccountEndpoints
         }
 
         account.StageOverride = request.Stage;
-        return await RecomputeModeAndRespondAsync(account, database, cancellationToken);
+        return await RecomputeModeAndRespondAsync(account, database, environment, cancellationToken);
     }
 
     internal static async Task<IResult> ClearStageOverrideAsync(
         Guid id,
         TradingCopilotDbContext database,
+        HostTradingEnvironment environment,
         CancellationToken cancellationToken)
     {
         Account? account = await database.Accounts
@@ -68,7 +70,7 @@ public static class AccountEndpoints
         }
 
         account.StageOverride = null;
-        return await RecomputeModeAndRespondAsync(account, database, cancellationToken);
+        return await RecomputeModeAndRespondAsync(account, database, environment, cancellationToken);
     }
 
     /// <summary>
@@ -78,12 +80,13 @@ public static class AccountEndpoints
     private static async Task<IResult> RecomputeModeAndRespondAsync(
         Account account,
         TradingCopilotDbContext database,
+        HostTradingEnvironment environment,
         CancellationToken cancellationToken)
     {
         FirmConventions conventions = await database.ConventionsForConnectionAsync(account.ConnectionId, cancellationToken);
         account.RecomputeMode(conventions);
         await database.SaveChangesAsync(cancellationToken);
 
-        return Results.Ok(AccountResponse.From(account));
+        return Results.Ok(AccountResponse.From(account, environment));
     }
 }

@@ -173,6 +173,18 @@ public class ProjectXVenueTests
             .MustNotHaveHappened();
     }
 
+    // --- Identity ---
+
+    [Fact]
+    public void AdapterLogicVersion_ShouldBePinned_SoSnapshotsStayInterpretable()
+    {
+        // ADR-0009 / gh#9: derived values (stage, mode) depend on adapter logic that CHANGES -- v1 was the
+        // PRAC-only resolver (#86), v2 the roster-grounded families (#94). Snapshots stamp this version so a
+        // past row stays interpretable after the logic moves on. Bump it when derivation behaviour changes;
+        // this pin makes that bump a deliberate, reviewed act.
+        _venue.AdapterLogicVersion.Should().Be(2);
+    }
+
     // --- Accounts ---
 
     [Fact]

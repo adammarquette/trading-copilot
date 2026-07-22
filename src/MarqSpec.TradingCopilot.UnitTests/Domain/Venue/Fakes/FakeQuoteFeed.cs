@@ -12,6 +12,8 @@ internal sealed class FakeQuoteFeed : IMarketDataSource
 {
     public VenueId Id { get; } = VenueId.Parse("fakefeed");
 
+    public int AdapterLogicVersion => 1;
+
     public VenueCapabilities Capabilities { get; } = VenueCapabilities.Of(VenueCapability.Quotes);
 
     public Task<ResolvedContract> ResolveContractAsync(InstrumentId instrument, CancellationToken cancellationToken = default)
