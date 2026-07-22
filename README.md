@@ -67,6 +67,11 @@ PUT  /accounts/{id}/stage     {stage}                    -> declare an account's
                                                             conservative resolver (it never guesses; you do
                                                             the telling). Unknown is refused
 DEL  /accounts/{id}/stage                                -> clear the override, fall back to the resolved stage
+PUT  /accounts/{id}/risk      {the whole declaration}    -> declare the account's risk rules (R-5); validated
+                                                            through the domain factories, refused whole on any
+                                                            violation (gh#10)
+GET  /accounts/{id}/risk                                 -> the declared rules; 404 until declared -- absence
+                                                            is the gate's fail-closed input, never a default
 ```
 
 The `/auth/invitations` and `/auth/accept-invite` endpoints also exist and work, but are **dormant** — not part

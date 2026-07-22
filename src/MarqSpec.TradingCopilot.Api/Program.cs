@@ -3,6 +3,7 @@ using MarqSpec.Client.ProjectX.DependencyInjection;
 using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
+using MarqSpec.TradingCopilot.Api.Risk;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Events;
@@ -73,6 +74,7 @@ app.MapAuthEndpoints();
 app.MapFirmEndpoints();
 app.MapConnectionEndpoints();
 app.MapAccountEndpoints();
+app.MapRiskEndpoints();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 app.Run();

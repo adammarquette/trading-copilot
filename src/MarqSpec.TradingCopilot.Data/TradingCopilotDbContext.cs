@@ -49,6 +49,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Journaled trades — round-trip outcomes. Operator-owned.</summary>
     public DbSet<Trade> Trades => Set<Trade>();
 
+    /// <summary>Declared per-account risk rules (R-5, gh#10). Operator-owned; one per account.</summary>
+    public DbSet<RiskProfileRecord> RiskProfiles => Set<RiskProfileRecord>();
+
     /// <summary>The append-only event log (ADR-0001). System plumbing — an acknowledged global, not operator-owned.</summary>
     public DbSet<Event> Events => Set<Event>();
 
@@ -220,6 +223,31 @@ public class TradingCopilotDbContext : TenantDbContext
                 table.HasCheckConstraint("CK_Trades_Mode_NotUndeclared", "\"Mode\" <> 0");
                 table.HasCheckConstraint("CK_Trades_Size_Positive", "\"Size\" > 0");
             });
+        });
+
+        modelBuilder.Entity<RiskProfileRecord>(profile =>
+        {
+            profile.ToTable("RiskProfiles", table =>
+            {
+                // The DB half of the declaration invariants (defense-in-depth below RiskProfile.Declare /
+                // TrailingDrawdown.Start / ManualCaps.Create): numbers that would size nothing -- or
+                // everything -- cannot be stored, even by a direct write. NULL passes the nullable checks.
+                table.HasCheckConstraint("CK_RiskProfiles_TrailingAmount_Positive", "\"TrailingAmount\" > 0");
+                table.HasCheckConstraint("CK_RiskProfiles_PerTradeRiskFraction_ZeroToOne", "\"PerTradeRiskFraction\" > 0 AND \"PerTradeRiskFraction\" <= 1");
+                table.HasCheckConstraint("CK_RiskProfiles_TargetRewardRatio_Positive", "\"TargetRewardRatio\" > 0");
+                table.HasCheckConstraint("CK_RiskProfiles_MaxDrawdownPerTrade_Positive", "\"MaxDrawdownPerTrade\" > 0");
+                table.HasCheckConstraint("CK_RiskProfiles_DailyDrawdownGovernor_Positive", "\"DailyDrawdownGovernor\" > 0");
+                table.HasCheckConstraint("CK_RiskProfiles_MaxContractsPerOrder_NotNegative", "\"MaxContractsPerOrder\" >= 0");
+                table.HasCheckConstraint("CK_RiskProfiles_MaxBestDayFraction_ZeroToOne", "\"MaxBestDayFraction\" > 0 AND \"MaxBestDayFraction\" <= 1");
+            });
+
+            // One declaration per account -- redeclaration replaces, never accumulates.
+            profile.HasIndex(p => p.AccountId).IsUnique();
+
+            profile.HasOne<Account>()
+                .WithOne()
+                .HasForeignKey<RiskProfileRecord>(p => p.AccountId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<Event>(evt =>
