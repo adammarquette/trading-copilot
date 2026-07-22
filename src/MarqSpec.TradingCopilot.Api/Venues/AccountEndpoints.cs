@@ -52,9 +52,7 @@ public static class AccountEndpoints
         }
 
         account.StageOverride = request.Stage;
-        await database.SaveChangesAsync(cancellationToken);
-
-        return await AccountWithComputedModeAsync(account, database, cancellationToken);
+        return await RecomputeModeAndRespondAsync(account, database, cancellationToken);
     }
 
     internal static async Task<IResult> ClearStageOverrideAsync(
@@ -70,18 +68,22 @@ public static class AccountEndpoints
         }
 
         account.StageOverride = null;
-        await database.SaveChangesAsync(cancellationToken);
-
-        return await AccountWithComputedModeAsync(account, database, cancellationToken);
+        return await RecomputeModeAndRespondAsync(account, database, cancellationToken);
     }
 
-    /// <summary>Projects the account with its mode recomputed under the owning firm's conventions.</summary>
-    private static async Task<IResult> AccountWithComputedModeAsync(
+    /// <summary>
+    /// Write point 2 of 3 for the persisted mode (gh#7): the override just moved the effective stage, so the
+    /// mode is recomputed under the owning firm's conventions before the save.
+    /// </summary>
+    private static async Task<IResult> RecomputeModeAndRespondAsync(
         Account account,
         TradingCopilotDbContext database,
         CancellationToken cancellationToken)
     {
         FirmConventions conventions = await database.ConventionsForConnectionAsync(account.ConnectionId, cancellationToken);
-        return Results.Ok(AccountResponse.From(account, conventions));
+        account.RecomputeMode(conventions);
+        await database.SaveChangesAsync(cancellationToken);
+
+        return Results.Ok(AccountResponse.From(account));
     }
 }

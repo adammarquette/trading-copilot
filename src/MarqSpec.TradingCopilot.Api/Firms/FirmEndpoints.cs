@@ -91,9 +91,10 @@ public static class FirmEndpoints
         // Validate through the domain rule that owns "what is a valid set of conventions" -- it rejects an
         // Unknown stage, an undefined stage, and a duplicate stage. Reusing it keeps one source of truth and
         // turns a bad request into a 400 rather than a DB constraint error later.
+        FirmConventions conventions;
         try
         {
-            _ = FirmConventions.For(
+            conventions = FirmConventions.For(
                 firm.Name,
                 [.. request.Conventions.Select(convention => (convention.Stage, convention.CapitalAtRisk))]);
         }
@@ -119,6 +120,21 @@ public static class FirmEndpoints
             }),
         ];
         database.FirmStageConventions.AddRange(declared);
+
+        // Write point 3 of 3 for the persisted mode (gh#7): a re-declaration changes what every stage MEANS,
+        // so every account under this firm is swept -- otherwise the DB-level R-14 guard would enforce
+        // yesterday's declaration.
+        List<Data.Entities.Account> affected = await database.Accounts
+            .Join(
+                database.Connections.Where(connection => connection.FirmId == firm.Id),
+                account => account.ConnectionId,
+                connection => connection.Id,
+                (account, _) => account)
+            .ToListAsync(cancellationToken);
+        foreach (Data.Entities.Account account in affected)
+        {
+            account.RecomputeMode(conventions);
+        }
 
         await database.SaveChangesAsync(cancellationToken);
 
