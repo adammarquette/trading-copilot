@@ -47,7 +47,10 @@ public static class ProjectXMapping
             account.Balance,
             account.CanTrade,
             account.IsVisible,
-            conventions.ModeFor(stage));
+            conventions.ModeFor(stage))
+        {
+            Stage = stage,
+        };
     }
 
     /// <summary>Maps a gateway contract onto the instrument spec the money math needs.</summary>

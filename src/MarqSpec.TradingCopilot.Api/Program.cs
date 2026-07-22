@@ -1,7 +1,9 @@
 using System.Text;
+using MarqSpec.Client.ProjectX.DependencyInjection;
 using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
+using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -22,6 +24,14 @@ builder.Services.AddScoped<ICurrentUser, HttpContextCurrentUser>();
 builder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
 builder.Services.AddSingleton<ITokenIssuer, JwtTokenIssuer>();
 builder.Services.AddTradingCopilotData(builder.Configuration.GetConnectionString("Default") ?? string.Empty);
+
+// The ProjectX client (credentials from the "ProjectX" section -- env, never source). One credential set per
+// process: the client's websocket is a singleton (ADR-0015); ProjectX:CredentialKey names whose it is, and the
+// discovery endpoint refuses a connection whose key this process does not hold.
+builder.Services.AddProjectXApiClient(builder.Configuration);
+builder.Services.Configure<ProjectXConnectionOptions>(
+    builder.Configuration.GetSection(ProjectXConnectionOptions.SectionName));
+builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -49,6 +59,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapAuthEndpoints();
 app.MapFirmEndpoints();
+app.MapConnectionEndpoints();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 app.Run();

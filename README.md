@@ -57,6 +57,11 @@ GET  /auth/me                 (Bearer)                   -> the operator
 POST /firms                   {name, type}   (Bearer)    -> register a firm (gh#76)
 GET  /firms                   (Bearer)                   -> the operator's firms + conventions
 PUT  /firms/{id}/conventions  [{stage, capitalAtRisk}]   -> declare what each stage means (gh#60)
+POST /connections             {firmId, platform, credentialKey} -> a firm login (one per firm x platform)
+GET  /connections             (Bearer)                   -> the operator's connections
+POST /connections/{id}/accounts/discover                 -> pull the venue's roster; each account's mode is
+                                                            COMPUTED from its stage x the firm's declared
+                                                            conventions, never taken from the venue (gh#60)
 ```
 
 The `/auth/invitations` and `/auth/accept-invite` endpoints also exist and work, but are **dormant** — not part
