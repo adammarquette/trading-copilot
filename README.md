@@ -52,8 +52,11 @@ The API comes up on **http://localhost:8080**, applies the EF migrations, and **
 **one operator per deployment** (ADR-0017):
 
 ```
-POST /auth/login          {email, password}   -> JWT
-GET  /auth/me             (Bearer)            -> the operator
+POST /auth/login              {email, password}          -> JWT
+GET  /auth/me                 (Bearer)                   -> the operator
+POST /firms                   {name, type}   (Bearer)    -> register a firm (gh#76)
+GET  /firms                   (Bearer)                   -> the operator's firms + conventions
+PUT  /firms/{id}/conventions  [{stage, capitalAtRisk}]   -> declare what each stage means (gh#60)
 ```
 
 The `/auth/invitations` and `/auth/accept-invite` endpoints also exist and work, but are **dormant** — not part
