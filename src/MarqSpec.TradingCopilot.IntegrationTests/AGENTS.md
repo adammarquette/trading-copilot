@@ -16,9 +16,11 @@ Write the **integration and smoke tests — independently of the development wor
 - **Secrets & Config:** Env-specific config (account id / password, endpoints) per category (integration vs. smoke) × environment (staging vs. production) — from CI secrets, never in source. (Engineering guide §5, §10.)
 
 ### 1. Integration tests
-- **Pre-Merge / PR Feedback (Fresh Test-Bootstrapped Compose Stack):**
+- **Pre-Merge / PR Feedback (Real Postgres via Testcontainers — gh#121):**
   - *Scope:* Venue-independent only — exercises API ↔ EF Core migrations ↔ TimescaleDB/pgvector ↔ domain logic end-to-end. Venue-touching tests (ProjectX/broker execution) are staging-only.
-  - *Isolation & Safety:* Runs in CI or local dev against a fresh test-bootstrapped `docker compose` stack (`docker-compose.yml` / `docker-compose.dev.yml` with isolated temp volume mounts and seed scripts). Must **never** target or mutate an operator's persistent `db-data` volume.
+  - *Mechanism:* Suites use the shared **`TestHost/PostgresApiFactory`** — a **throwaway PostgreSQL container per suite** (`Testcontainers.PostgreSql` on **`timescale/timescaledb-ha:pg17`**, the same image the compose stack runs) behind the real host pipeline: `MigrateAsync()` applies the actual migrations, so check constraints, unique indexes, and the DB-level guards (e.g. the gh#96 mode trigger) are live in every run. **EF InMemory — or any `EnsureCreated` path — is not an integration backend.**
+  - *Isolation & Safety:* By construction — a fresh container per suite, random port, destroyed on dispose; an operator's persistent `db-data` volume is unreachable. Runs in CI (the `integration tests (pre-merge)` job) and local dev (Docker required).
+  - *The one sanctioned test double:* the **venue seam** (`ITradingVenue` / its factory), because this tier is venue-independent by definition. A venue stub must be **adversarial where computed semantics are asserted** — it feeds inputs, never the production-computed answer; a stub that hands the system the right answer cannot catch the regression it exists to guard (PR #113 review).
 - **Post-Merge Staging Verification:** Run against **staging** post-merge to `staging` (engineering guide §10) to verify real cloud infrastructure and venue integration before promotion to `main`.
 - **Concurrency Safety:** Because staging tests run against shared practice accounts, test runs that place orders use dedicated practice accounts reserved for CI, with serialization as default to prevent execution collisions.
 
@@ -39,4 +41,4 @@ Write the **integration and smoke tests — independently of the development wor
 Tiers activate as the roadmap lands them; the first deliverable is the harness bootstrap (staging config from CI secrets + first ProjectX suite).
 
 ## Definition of done
-Traces directly to a GitHub tracking issue (`gh#N`) and, where applicable, PRD requirement (`R-#`) · every test guards a **named** failure mode (no happy-path-only) · nothing mocked · green in its target tier (compose pre-merge; staging post-merge) · smoke subset tagged + strictly read-only on production · provenance pinned (commit SHA, branch, environment) on every test run and defect report · no secrets in source.
+Traces directly to a GitHub tracking issue (`gh#N`) and, where applicable, PRD requirement (`R-#`) · every test guards a **named** failure mode (no happy-path-only) · nothing mocked (sole sanctioned exception: an **adversarial** venue stub in the pre-merge tier) · green in its target tier (container-backed Postgres pre-merge; staging post-merge) · smoke subset tagged + strictly read-only on production · provenance pinned (commit SHA, branch, environment) on every test run and defect report · no secrets in source.

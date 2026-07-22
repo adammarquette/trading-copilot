@@ -93,13 +93,14 @@ independently: ingestion (websocket) · poller · processor(s) · trigger engine
 ## CI/CD pipeline (GitHub Actions → GHCR → Railway)
 `lint → build → test → publish image → deploy → verify` (engineering §10, [ADR-0018](adr/0018-image-registry-ghcr.md)):
 1. Push / merge to a long-lived branch triggers the pipeline.
-2. `dotnet format --verify-no-changes` + **unit tests** must pass.
+2. `dotnet format --verify-no-changes` + **unit tests** + the **pre-merge integration suite** (venue-independent,
+   on a throwaway real-Postgres container — gh#121) must pass.
 3. **Publish image to GHCR** — CI builds the `Dockerfile` **once** and pushes `ghcr.io/adammarquette/trading-copilot`
    tagged `:<branch>` + `:sha-<short>`. Merge-only (`if: github.event_name == 'push'`); a PR never publishes.
 4. **Railway deploys that image** (the pushed tag) to the branch's environment — the tested artifact, not a rebuild
    *(not yet wired: console step 2 below is pending, so Railway does not deploy on merge today)*.
-5. **Integration tests** run against **staging** after a merge to `staging` *(not yet wired — the
-   `MarqSpec.TradingCopilot.IntegrationTests` project is an empty scaffold; this stage lands with the QA suites)*.
+5. **Integration tests** run against **staging** after a merge to `staging` *(not yet wired — this is the staging
+   tier; the venue-independent **pre-merge tier already runs in CI**, step 2 / gh#121)*.
 6. On **production** deploy, a **smoke-test subset** runs; a failure **flags the release for rollback** — pin the
    previous `:sha-<short>` tag to roll back to an exact prior build *(not yet wired, with step 5)*.
 
@@ -128,7 +129,8 @@ each new commit on an open PR is reviewed, not just the PR's opening. Drafts are
 without triggering a review per commit.
 
 Review findings are advisory — they do not block a merge. The blocking gates remain `dotnet format`, the unit
-tests, and the `ladder` + `stale-base` + `commit-hygiene` branch-policy checks (gh#72, gh#104). Repo-specific review guidance lives in
+tests, the pre-merge integration suite (gh#121), and the `ladder` + `stale-base` + `commit-hygiene` branch-policy
+checks (gh#72, gh#104). Repo-specific review guidance lives in
 [`.github/copilot-instructions.md`](../.github/copilot-instructions.md); update it when a review repeatedly
 misses something this codebase cares about.
 
