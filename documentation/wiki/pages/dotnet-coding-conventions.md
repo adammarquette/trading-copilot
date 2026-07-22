@@ -5,6 +5,9 @@
 > (the canonical C# conventions, adopted from the dotnet/runtime + Roslyn styles) ·
 > https://learn.microsoft.com/en-us/previous-versions/mixed-reality/world-locking-tools/documentation/howtos/codingconventions
 > (a project style guide — **Unity-oriented**; we take only its *universal* C# parts).
+> **Access:** Microsoft Learn pages fetched directly (no auth wall). The conventions doc's source repo
+> (`dotnet/docs`) is **CC-BY-4.0** (LICENSE verified 2026-07-22) — this page is an attributed summary with
+> canonical links, not a copy; the linked `dotnet/runtime` style guide is MIT.
 > **Informs:** engineering §4 (Coding Standards — the authoritative home), root + `src/` `AGENTS.md`. This page is
 > the fuller reference behind them.
 

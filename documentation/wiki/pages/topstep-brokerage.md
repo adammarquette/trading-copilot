@@ -3,6 +3,8 @@
 > **Trust tier:** authoritative (vendor help center) — but the landing help page is a **navigation hub**; specifics
 > (margins, account minimums, exact risk tools) are **light and need a deeper pass / in-portal confirmation**.
 > **Verified:** help.topstepbrokerage.com via WebFetch, 2026-07-19. **Source:** https://help.topstepbrokerage.com/en/
+> **Access:** help centre fetched directly (no auth wall) — the landing hub only, hence the light specifics;
+> short fragments quoted with attribution, nothing else reproduced.
 > **Informs:** R-5 (self-imposed floor on live accounts), R-14 (live vs. practice), R-17 (venue abstraction), the
 > account model (data dictionary — `type = live-brokerage`). See also [prop-firm-rules.md](prop-firm-rules.md).
 

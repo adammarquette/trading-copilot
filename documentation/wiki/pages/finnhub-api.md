@@ -2,6 +2,9 @@
 
 > **Trust tier:** authoritative
 > **Verified:** free-tier limits + candle restriction via web search & vendor issue [finnhubio/Finnhub-API#546](https://github.com/finnhubio/Finnhub-API/issues/546), 2026-07-18 · endpoint paths from Finnhub API knowledge (vendor docs are a JS SPA, not directly machine-fetchable) — **confirm exact wire formats in-console** when adapter work starts · **Sources:** https://finnhub.io/docs/api , https://finnhub.io/pricing
+> **Access:** the vendor docs (a JS SPA) were never machine-read — nothing was taken from them; facts are grounded
+> via web search and the vendor's own public GitHub issue tracker, endpoint paths from API knowledge (flagged
+> confirm). No vendor text reproduced.
 > **Informs:** R-1 (live path), R-2 (alt-data template), R-17 (data-only provider)
 
 The **first data-only provider** — real-time equities/indices + alternative data, **no account, no execution**.

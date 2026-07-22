@@ -2,6 +2,8 @@
 
 > **Trust tier:** authoritative
 > **Verified:** against vendor docs + web search, 2026-07-18 · **Sources:** https://partner.tradovate.com , https://api.tradovate.com/
+> **Access:** vendor docs fetched directly + web search; the vendor explicitly invites automated/agent consumption
+> (it publishes an LLM index at `partner.tradovate.com/llms.txt` and an MCP server). Nothing reproduced.
 > **Informs:** R-17, Q-14
 
 A **future** trading venue (the R-17 venue abstraction). Captured now mainly to compare against

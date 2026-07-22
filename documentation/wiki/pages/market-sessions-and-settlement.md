@@ -1,7 +1,9 @@
 # Market sessions, the close & settlement (reference)
 
 > **Trust tier:** operator-provided domain knowledge (Adam), 2026-07-19 — **exact times per product / venue are to
-> be confirmed** against the CME rulebook + venue help centers. **Informs:** R-13 (auto-flatten), R-5 (risk),
+> be confirmed** against the CME rulebook + venue help centers.
+> **Access:** operator-provided — no external source accessed; nothing imposed.
+> **Informs:** R-13 (auto-flatten), R-5 (risk),
 > ADR-0007 (execution), ADR-0013 (failure & recovery). See also [prop-firm-rules.md](prop-firm-rules.md),
 > [topstep-brokerage.md](topstep-brokerage.md).
 

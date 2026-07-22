@@ -2,6 +2,9 @@
 
 > **Trust tier:** authoritative (QuantConnect's official manual) · **Verified:** 2026-07-18
 > **Source:** `sources/Quantconnect-Cloud-Platform-Python.pdf` — QuantConnect **Local Platform** manual (~107 pp)
+> **Access:** the vendor's PDF manual, read locally. The document is deliberately **not tracked** — committed
+> once, then untracked (gh#50) and **purged from history** (gh#52); `sources/` is local-only, so only this
+> original summary is published. Redistributing the manual is not licensed — don't re-add it.
 > **Use:** **reference / example system — for insights only.** A comparable algo-trading platform catalogued to learn from; **not** a golden example, **not** a template to clone, and **nothing here is a requirement** for our system. Where it *differs* from ours is usually the most useful part.
 > **Informs:** design thinking around R-1 (data), R-3/R-4 (indicators/suggestions), R-9 (replay), R-11 (execution).
 

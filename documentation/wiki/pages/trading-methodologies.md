@@ -2,6 +2,9 @@
 
 > **Trust tier:** design-time reference. **Status:** structure + a to-ingest list — the **specifics of each
 > methodology are ingested from a source** (a course, a book, the operator's notes), **not invented here**.
+> **Access:** no external source ingested yet — the concept vocabulary below is common domain knowledge. When the
+> 13/48 course or an ICT model is ingested, record that source's terms here **first**: paid course material —
+> check its ToS before publishing derived rules in this public repo.
 > **Informs:** R-21 (strategy templates), R-4 / R-7 (suggestions, rulebook), R-5 (risk), R-9 (per-strategy analytics).
 
 How a named trading methodology becomes a **StrategyTemplate** (R-21). Every methodology decomposes into the same
