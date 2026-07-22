@@ -28,6 +28,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>The operator's firms — prop firms and brokerages they trade with (gh#76). Operator-owned.</summary>
     public DbSet<Firm> Firms => Set<Firm>();
 
+    /// <summary>Per-firm stage declarations (gh#60) — what each stage means. Operator-owned.</summary>
+    public DbSet<FirmStageConvention> FirmStageConventions => Set<FirmStageConvention>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -53,6 +56,22 @@ public class TradingCopilotDbContext : TenantDbContext
 
             // Unique within an operator's workspace, not globally: two operators may each trade "Topstep".
             firm.HasIndex(f => new { f.UserId, f.Name }).IsUnique();
+
+            firm.HasMany(f => f.StageConventions)
+                .WithOne()
+                .HasForeignKey(convention => convention.FirmId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<FirmStageConvention>(convention =>
+        {
+            // One declaration per (firm, stage) -- a stage cannot mean two things at one firm.
+            convention.HasIndex(c => new { c.FirmId, c.Stage }).IsUnique();
+
+            // AccountStage.Unknown (0) is not declarable -- FirmConventions.For rejects it -- so the DB refuses
+            // to persist it, defense-in-depth below the service (gh#60). Ties to the enum's fail-closed zero.
+            convention.ToTable(table =>
+                table.HasCheckConstraint("CK_FirmStageConvention_Stage_NotUnknown", "\"Stage\" <> 0"));
         });
     }
 }
