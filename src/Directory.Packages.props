@@ -28,6 +28,8 @@
     <!-- API host & Integration Testing -->
     <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.4" />
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.4" />
+    <!-- Real-Postgres pre-merge integration tier (gh#121): throwaway containers on the compose DB image. MIT. -->
+    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.13.0" />
   </ItemGroup>
 
 </Project>
