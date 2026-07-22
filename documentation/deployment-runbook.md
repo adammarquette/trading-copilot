@@ -14,7 +14,11 @@ throwaway placeholder); this documents the intended shape and the setup still to
   CI builds once per merge and pushes; local and Railway both **pull** this artifact. Tags: `:develop` / `:staging` /
   `:main` per environment, plus `:sha-<short>` for an exact rollback target.
 - **Data:** one Postgres with **TimescaleDB** + **pgvector** (Railway-managed plugin vs. self-hosted — *Decide*),
-  three shapes in one database (engineering §2).
+  three shapes in one database (engineering §2). Factor into the Decide: the `AddEventBackbone` migration
+  **degrades gracefully on non-Timescale Postgres** (the `Events` log stays a plain table, `RAISE WARNING`, no
+  hypertable/retention/continuous-aggregates) — the app runs, but the ADR-0001 backbone only gets its Timescale
+  behaviors on a Timescale-enabled instance (locally: the compose `timescaledb-ha` image, which bundles both
+  extensions).
 
 ## Local development (docker-compose)
 `docker compose up -d` from the repo root stands up the local stack ([ADR-0012](adr/0012-containerization-local-dev.md),

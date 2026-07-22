@@ -5,7 +5,9 @@ using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Data.Events;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Events;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 
@@ -32,6 +34,10 @@ builder.Services.AddProjectXApiClient(builder.Configuration);
 builder.Services.Configure<ProjectXConnectionOptions>(
     builder.Configuration.GetSection(ProjectXConnectionOptions.SectionName));
 builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
+
+// The event backbone (ADR-0001) behind its seam: today a Timescale hypertable; a future bus is an adapter
+// change, not a rewrite. Producers/consumers arrive with market-data ingestion (R-1).
+builder.Services.AddScoped<IEventLog, TimescaleEventLog>();
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)

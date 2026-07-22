@@ -49,6 +49,12 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Journaled trades — round-trip outcomes. Operator-owned.</summary>
     public DbSet<Trade> Trades => Set<Trade>();
 
+    /// <summary>The append-only event log (ADR-0001). System plumbing — an acknowledged global, not operator-owned.</summary>
+    public DbSet<Event> Events => Set<Event>();
+
+    /// <summary>Per-consumer-group replay cursors over the event log (ADR-0001). System plumbing.</summary>
+    public DbSet<EventCursor> EventCursors => Set<EventCursor>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -214,6 +220,26 @@ public class TradingCopilotDbContext : TenantDbContext
                 table.HasCheckConstraint("CK_Trades_Mode_NotUndeclared", "\"Mode\" <> 0");
                 table.HasCheckConstraint("CK_Trades_Size_Positive", "\"Size\" > 0");
             });
+        });
+
+        modelBuilder.Entity<Event>(evt =>
+        {
+            // Sequence is the LOGICAL key (identity, totally orders the log). Physically the AddEventBackbone
+            // migration drops the PK before hypertable conversion -- a hypertable's unique constraints must
+            // include the time dimension, and an append-only log EF never updates needs no DB-enforced key;
+            // the identity generator supplies uniqueness.
+            evt.HasKey(e => e.Sequence);
+            evt.Property(e => e.Sequence).UseIdentityByDefaultColumn();
+            evt.Property(e => e.Type).HasMaxLength(128);
+            evt.Property(e => e.Source).HasMaxLength(128);
+            evt.Property(e => e.Payload).HasColumnType("jsonb");
+            evt.Property(e => e.TraceParent).HasMaxLength(64); // W3C traceparent is 55 chars
+        });
+
+        modelBuilder.Entity<EventCursor>(cursor =>
+        {
+            cursor.HasKey(c => c.ConsumerGroup);
+            cursor.Property(c => c.ConsumerGroup).HasMaxLength(128);
         });
     }
 }
