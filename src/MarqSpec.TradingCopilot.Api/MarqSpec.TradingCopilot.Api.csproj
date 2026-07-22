@@ -11,4 +11,9 @@
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Data\MarqSpec.TradingCopilot.Data.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Endpoint handlers are internal; unit tests exercise them directly (integration tests hit the HTTP surface). -->
+    <InternalsVisibleTo Include="MarqSpec.TradingCopilot.UnitTests" />
+  </ItemGroup>
+
 </Project>

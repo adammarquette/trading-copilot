@@ -1,6 +1,7 @@
 using System.Text;
 using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Auth;
+using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -47,6 +48,7 @@ await StartupTasks.MigrateAndBootstrapAsync(app);
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapAuthEndpoints();
+app.MapFirmEndpoints();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 app.Run();
