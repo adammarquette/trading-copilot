@@ -13,6 +13,15 @@ RUN dotnet publish src/MarqSpec.TradingCopilot.Api/MarqSpec.TradingCopilot.Api.c
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
+
+# Npgsql probes for Kerberos/GSSAPI during the Postgres auth handshake; the base aspnet image does not
+# ship libgssapi_krb5, so without it every startup logs a spurious "cannot open shared object file"
+# error before falling back to password auth. Install it so startup logs stay clean, local and on
+# Railway (gh#82). Placed before the COPY so this layer caches independently of app code.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgssapi-krb5-2 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app ./
 # Railway sets $PORT; default to 8080 for local compose.
 ENV ASPNETCORE_URLS=http://+:8080
