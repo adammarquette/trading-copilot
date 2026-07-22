@@ -1,8 +1,9 @@
 namespace MarqSpec.TradingCopilot.Data.Entities;
 
 /// <summary>
-/// The tenant root — an operator with a private, isolated workspace (R-20 / ADR-0011). Every operator-owned entity
-/// references its owning <see cref="User"/>. A user is not itself user-owned; onboarding is invitation-only (R-18).
+/// The operator — the single owning identity of the deployment's workspace (R-20 / ADR-0017). Every operator-owned
+/// entity references its owning <see cref="User"/>. A user is not itself user-owned; the operator is seeded at
+/// deploy — there is no sign-up, and the invitation flow lies dormant (ADR-0017 §4).
 /// </summary>
 public class User
 {

@@ -5,9 +5,9 @@ using Microsoft.EntityFrameworkCore;
 namespace MarqSpec.TradingCopilot.Data;
 
 /// <summary>
-/// The application <see cref="DbContext"/>. Inherits the multi-user isolation model from
+/// The application <see cref="DbContext"/>. Inherits the fail-closed scoping model from
 /// <see cref="TenantDbContext"/> — every <see cref="IUserOwned"/> entity gets a default-deny per-user query
-/// filter (R-20 / ADR-0011).
+/// filter (R-20 / ADR-0017).
 /// </summary>
 public class TradingCopilotDbContext : TenantDbContext
 {

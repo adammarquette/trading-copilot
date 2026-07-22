@@ -4,8 +4,9 @@
 [§10](trading-platform-engineering.md) (Git workflow, CI/CD) — those hold the *practices*; this runbook holds the
 concrete **resources and procedures** for deploying and operating the platform.
 
-**Status:** scaffold — deepens as CI/CD and the real services are built. **Nothing is deployed yet** (`src/` is a
-throwaway placeholder); this documents the intended shape and the setup still to do.
+**Status:** living — the local stack and the CI → GHCR image pipeline are **real** (`src/` is the actual solution;
+pipeline steps 1–3 below run on every merge). The **Railway deploy hook is not wired yet** — steps 4–6 are the
+intended shape (see *Operator setup* and *Open items*), and the cloud environments still need creating.
 
 ## Platform
 - **Cloud:** [Railway](https://railway.com) — project **`soothing-illumination`**
@@ -91,10 +92,12 @@ independently: ingestion (websocket) · poller · processor(s) · trigger engine
 2. `dotnet format --verify-no-changes` + **unit tests** must pass.
 3. **Publish image to GHCR** — CI builds the `Dockerfile` **once** and pushes `ghcr.io/adammarquette/trading-copilot`
    tagged `:<branch>` + `:sha-<short>`. Merge-only (`if: github.event_name == 'push'`); a PR never publishes.
-4. **Railway deploys that image** (the pushed tag) to the branch's environment — the tested artifact, not a rebuild.
-5. **Integration tests** run against **staging** after a merge to `staging`.
+4. **Railway deploys that image** (the pushed tag) to the branch's environment — the tested artifact, not a rebuild
+   *(not yet wired: console step 2 below is pending, so Railway does not deploy on merge today)*.
+5. **Integration tests** run against **staging** after a merge to `staging` *(not yet wired — the
+   `MarqSpec.TradingCopilot.IntegrationTests` project is an empty scaffold; this stage lands with the QA suites)*.
 6. On **production** deploy, a **smoke-test subset** runs; a failure **flags the release for rollback** — pin the
-   previous `:sha-<short>` tag to roll back to an exact prior build.
+   previous `:sha-<short>` tag to roll back to an exact prior build *(not yet wired, with step 5)*.
 
 ### Operator setup — console actions CI cannot do (ADR-0018)
 The build/push half is code (`.github/workflows/ci.yml`). These are one-time console steps, recorded here because
@@ -145,7 +148,8 @@ Monthly Railway spend ceiling is **Q-10** (open) — watch always-on ingestion +
 
 ## Open items
 - Postgres / Timescale / pgvector on Railway: managed plugin vs. self-hosted service.
-- Concrete GitHub Actions workflow(s) + the Railway deploy integration (CLI / MCP / GitHub trigger).
+- The Railway deploy integration (CLI / MCP / GitHub trigger) — the GitHub Actions workflows themselves exist
+  (`ci.yml` + `branch-policy.yml`; §CI/CD above).
 - Create the `dev` + `staging` Railway environments and map branch → environment.
 - Non-prod **snapshot refresh** cadence + mechanism (§8).
 - Define the **smoke-test set** and the health / verify checks.

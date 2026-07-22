@@ -1,12 +1,12 @@
 # Data Dictionary — Trading Co-Pilot
 
-The authoritative catalog of the platform's **data entities, key fields, and storage**. This is a **design-time
-model** derived from the [PRD](trading-platform-prd.md) + [ADRs](adr/) — the schema itself is not built yet; the
-dictionary is kept **in lockstep with the `MarqSpec.TradingCopilot.Data` entities and `dotnet ef` migrations** as they land
-(see *Maintenance* below). Companion to [engineering §2](trading-platform-engineering.md) (storage) and the
+The authoritative catalog of the platform's **data entities, key fields, and storage**. Begun as a **design-time
+model** derived from the [PRD](trading-platform-prd.md) + [ADRs](adr/), it is now **partially implemented** — rows
+carry an **Implemented** marker (with the issue) as their entity lands — and the dictionary is kept **in lockstep
+with the `MarqSpec.TradingCopilot.Data` entities and `dotnet ef` migrations** (see *Maintenance* below). Companion to [engineering §2](trading-platform-engineering.md) (storage) and the
 [architecture](trading-platform-architecture.md).
 
-**Status:** scaffold · **Date:** 2026-07-18
+**Status:** living — implemented rows are marked per entity · **Date:** 2026-07-22
 
 ## How to read this
 - **Storage** column: `REL` relational · `TS` TimescaleDB hypertable (time-series) · `VEC` pgvector.
@@ -52,6 +52,7 @@ erDiagram
   Operator      ||--o{ Invitation             : "issues (dormant)"
   Operator      ||--o{ SoftSignalFeedback     : rates
   Firm          ||--o{ Connection            : provides
+  Firm          ||--o{ FirmStageConvention   : "stage meanings"
   TradingVenue  ||--o{ Connection            : "platform for"
   TradingVenue  ||--o{ Instrument            : lists
   Connection    ||--o{ Account               : exposes
@@ -107,7 +108,7 @@ erDiagram
 | **DataSource** | name (Finnhub / Tiingo), kind = data-only, capabilities (ws / rest, market / news), free-tier limits | REL | R-1, R-2, R-17 |
 | **Strategy / Setup** | name (VWAP-reclaim, opening-drive…), description, enabled, **template lineage** (source StrategyTemplate + version, if installed from one) — the operator’s **editable instance** | REL | R-4, R-9, R-21 |
 | **StrategyTemplate** (“playbook”) | name (e.g. 13/48 EMA-crossover, an ICT model), version, methodology tag, **source** (platform-curated / user-authored), **required features / indicators**, **setup definitions** (→ triggers), **suggestion shape** (entry / stop / target / size derivation), **risk defaults** (R-5), packaged **rules** (R-7); **install → instantiates** the operator’s own Strategy + Rule + Trigger + defaults, tracked by lineage. Curated templates ship global; operator-authored ones are operator-owned (R-20), and either can be **exported to a portable JSON artifact** for another deployment to import (gh#3, ADR-0017) | REL + VEC | R-21, R-7, R-4, R-5 |
-| **User (Operator)** | id, **email**, credential (hashed, server-side), display name, created ts, status, claims / roles (RBAC-capable); **one per deployment** — provisioned at deploy, **no sign-up** (ADR-0017). Every operator-owned entity references its owning user, so a query that forgets its scope returns **nothing** rather than everything (R-20) | REL | R-18, R-20, ADR-0003, ADR-0017 |
+| **User (Operator)** | id, **email**, credential (hashed, server-side), display name, created ts, status; **one per deployment** — provisioned at deploy, **no sign-up** (ADR-0017). Every operator-owned entity references its owning user, so a query that forgets its scope returns **nothing** rather than everything (R-20). **Implemented** (gh#7, `InitialCreate`) — deliberately with **no claims/roles columns**: authorization is policy-based (ADR-0003), so RBAC stays an incremental add, not a schema fact | REL | R-18, R-20, ADR-0003, ADR-0017 |
 | **Invitation** | id, **invited email**, token (hashed), **issued-by** user, status (pending / accepted / revoked / expired), created + **expires** ts, accepted-user (once used); **single-use**. **Built and dormant** (entity + endpoints + migration exist) — **not** part of the product's onboarding story, which seeds the single operator (ADR-0017). Retained rather than dropped because unwinding an applied migration costs more than keeping it, and it is the plumbing a future **read-only / mentee** login would reuse | REL | R-18, ADR-0017 |
 | **Firm / account provider** | a **prop firm** (Topstep, Apex, …) **or a brokerage** (`FirmType`); the **platform(s) it offers** — **one-to-many**, e.g. Apex offers **Tradovate and Rithmic** while Topstep **owns ProjectX** and offers only that; its **stage conventions** (what Evaluation / Funded mean here — declared by the operator, applying across every platform the firm offers, gh#60); super-account concept (prop). **Operator-owned** (`IUserOwned`); unique per (owner, name). **Implemented** (gh#7): core `Firm` + `FirmStageConvention` children; offered-platforms + credentials still to land | REL | R-17, R-14 |
 | **FirmStageConvention** | one operator declaration — `(firm, stage) → capital-at-risk` — composing a firm's domain `FirmConventions` (gh#60). **Operator-owned**; unique per (firm, stage); a **DB check constraint** refuses `Unknown` (0), the enum's fail-closed zero. Bridged to the domain value object by `Firm.ToConventions()` | REL | R-14, gh#7, gh#76 |
@@ -160,7 +161,7 @@ a **self-imposed** max-loss (R-5) that reuses the same trailing-floor machinery.
 ## 5. Risk
 | Entity | Key fields | Storage | Traces |
 |---|---|---|---|
-| **RiskProfile / Limits** (risk tolerance) | prop rules (daily loss, trailing DD), fixed **%-risk per trade**, **target R:R** (reward:risk, e.g. 1.5 : 1), manual (max contracts, per-instrument caps, **max-DD-per-trade**), **daily governor**, **daily profit target** + **consistency target** (max best-day % of total profit → **stand-down on reach**: suppress suggestions + optional stop-for-day), sizing basis (actual / safety), **kill-switch mode** (flatten-all | halt-only; default flatten-all), **auto-flatten — per instrument**: **enabled** (default **on** — best practice; disabling a market is a deliberate, warned override at own risk, R-13) + **deadline** (nullable override; null → the instrument's session-close default); GC / CL / ES / NQ close/settle at different times — equity-index ~2:30 PM CT pre-MOC, crude/gold earlier; R-13 / ADR-0013 — all configurable; **seeds sizing + the R:R KPI**. Persists the domain vocabulary in `Domain/Risk/` — `RiskProfile`, `ManualCaps`, `SanityCaps`; the consistency target, kill-switch mode, and auto-flatten config are specified here but not yet in code | REL | R-5, R-9, R-13, ADR-0007, ADR-0013 |
+| **RiskProfile / Limits** (risk tolerance) | prop rules (daily loss, trailing DD), fixed **%-risk per trade**, **target R:R** (reward:risk, e.g. 1.5 : 1), manual (max contracts, per-instrument caps, **max-DD-per-trade**), **daily governor**, **daily profit target** + **consistency target** (max best-day % of total profit → **stand-down on reach**: suppress suggestions + optional stop-for-day), sizing basis (actual / safety), **kill-switch mode** (flatten-all | halt-only; default flatten-all), **auto-flatten — per instrument**: **enabled** (default **on** — best practice; disabling a market is a deliberate, warned override at own risk, R-13) + **deadline** (nullable override; null → the instrument's session-close default); GC / CL / ES / NQ close/settle at different times — equity-index ~2:30 PM CT pre-MOC, crude/gold earlier; R-13 / ADR-0013 — all configurable; **seeds sizing + the R:R KPI**. Persists the domain vocabulary in `Domain/Risk/` — `RiskProfile`, `ManualCaps`, `SanityCaps` — and `Domain/Flatten/FlattenSchedule` (the per-instrument auto-flatten config: enabled + nullable deadline override, gh#12); the consistency target and kill-switch mode are specified here but not yet in code, and none of it is persisted yet | REL | R-5, R-9, R-13, ADR-0007, ADR-0013 |
 | **GateDecision** | suggestion / order, computed size, **binding layer**, outcome (allow / block / resize / acknowledge), ts — auditable. Persists `Domain/Risk/GateDecision` + `RiskLayer`; `acknowledge` arrives with the arm/edit flow (S3) | REL | R-5, R-16, ADR-0007 |
 
 ## 6. Suggestions
@@ -215,8 +216,8 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 
 ## Cross-cutting
 - **Data isolation (R-20).** One operator per deployment (ADR-0017). **Reference & market data** — Instrument,
-  TradingVenue, DataSource, Firm (§1), all market series (§2), and raw SoftSignal / news (§9) — is **shared / global**.
-  **All operator-owned data** — Connection, Account, Position, AccountSnapshot, RiskProfile, GateDecision, Suggestion
+  TradingVenue, DataSource (§1), all market series (§2), and raw SoftSignal / news (§9) — is **shared / global**.
+  **All operator-owned data** — Firm / FirmStageConvention, Connection, Account, Position, AccountSnapshot, RiskProfile, GateDecision, Suggestion
   (+ disposition / snapshot), Order / Fill / StopPlan / ConditionalOrder / Bracket, Trade / TradeFeedback / Outcome,
   Rule / Trigger, RelevanceConfig, Embedding, Conversation / ChatMessage, AuditRecord, AIUsage, SoftSignalFeedback — carries an **owning
   `user_id`** and is **filtered by the authenticated user at the data layer** (row-level scoping, **default-deny**),

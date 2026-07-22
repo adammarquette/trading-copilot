@@ -91,9 +91,11 @@ that is where guessing costs most. Silence is not consent: the failure mode is "
 never "assumed practice, then traded a funded account". Both enums make the unsafe reading their zero value, so an
 uninitialised mode fails closed rather than defaulting to something tradeable.
 
-> **Open seam:** nothing wires the operator's declaration through configuration yet, so `ProjectXVenue` reports
-> every account as `Undeclared` and none are tradeable. That gap is deliberate and visible rather than papered
-> over with a plausible default — see ADR-0016 for where the declaration will live.
+> **Seam closed (gh#76, PRs #86–#94):** the declaration now flows end-to-end — the operator declares stage
+> conventions per firm (`/firms`, ADR-0016), discovery persists each account's resolved stage (with a per-account
+> operator override), and `ProjectXVenueFactory` hands the venue real `FirmConventions`, so modes resolve from the
+> declaration instead of a hard-coded `None`. An undeclared stage still reads `Undeclared` and stays untradeable —
+> that part is the design, not a gap.
 
 ### Risk gate — the enforcing checkpoint (R-5, R-16)
 Every order funnels through one gate before transmission — manual ticket, taken suggestion, edited take, or a
