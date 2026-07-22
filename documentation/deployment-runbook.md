@@ -66,6 +66,20 @@ Server-side only, from the Railway environment — **never in source** (Options 
 - **Database:** connection string (Railway-managed).
 - **Ingestion:** poll intervals; news relevance config (or DB-stored).
 
+### Operator password recovery (R-18, ADR-0017 operator lifecycle)
+The operator controls the deployment, so the environment can recover the account — **host control = account
+control**. There is no email reset (no mail infrastructure, no need) and no second admin. Forgot the password:
+
+1. Set **`Bootstrap__Password`** to the **new** password and **`Bootstrap__ResetPassword=true`** in the
+   environment (`.env` locally; Railway variables in the cloud).
+2. **Restart the app once.** On startup it re-hashes the new password onto the **existing** operator — same user
+   row, same id, so every R-20-scoped row in the workspace (firms, conventions, orders, journal) stays yours.
+   *Never* recover by deleting the user row: the reseeded user gets a new id and the default-deny filter strands
+   the entire workspace as orphaned data.
+3. Sign in, then **remove `Bootstrap__ResetPassword`** (and rotate `Bootstrap__Password` out if you prefer).
+   The flag is a deliberate one-restart opt-in — without it, a stale env password can never silently overwrite
+   the stored credential.
+
 ## Services (as they are built)
 The microservices ([architecture](trading-platform-architecture.md)) deploy as **separate Railway services**, scaled
 independently: ingestion (websocket) · poller · processor(s) · trigger engine · BFF/API + agents · the React SPA
