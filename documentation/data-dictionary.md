@@ -39,7 +39,7 @@ scope returns nothing (R-20). Reference & market data is shared. Attributes live
 is the **map, not a second copy** of the fields, so it stays cheap to maintain. Kept **in lockstep** with the tables
 + `MarqSpec.TradingCopilot.Data`: update it in the **same PR** as any entity/relationship change (universal same-PR doc rule;
 engineering §10, *Maintenance* below). Time-series detail (Quote / Tick / DepthLevel), the event backbone (Event /
-ConsumerCursor), the polymorphic Embedding, and AuditRecord / AIUsage are cataloged in §2 / §10–§12 and omitted here
+EventCursor), the polymorphic Embedding, and AuditRecord / AIUsage are cataloged in §2 / §10–§12 and omitted here
 for legibility.
 
 ```mermaid
@@ -207,7 +207,7 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 | Entity | Key fields | Storage | Traces |
 |---|---|---|---|
 | **Event** | envelope: type, source, occurred-at, **monotonic seq**, trace context, payload — append-only | TS | ADR-0001, ADR-0002 |
-| **ConsumerCursor** | consumer group, last-processed seq / time | REL | ADR-0001 |
+| **EventCursor** | consumer group, last-processed seq / time | REL | ADR-0001 |
 
 ## 12. Chat & audit
 | Entity | Key fields | Storage | Traces |
