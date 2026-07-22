@@ -210,9 +210,10 @@ public class ProjectXVenueTests
     [Fact]
     public async Task GetAccountsAsync_ShouldResolveModeFromNameAndConventions_WhenTheFirmHasDeclared()
     {
-        // The seam this increment builds (gh#76): stage from the name (conservatively), meaning from the firm's
-        // conventions. A PRAC account resolves to Practice; a funded-named account the resolver will not classify
-        // stays Unknown -> Undeclared, never guessed into a tradeable mode.
+        // The seam this increment builds (gh#76): stage from the name, meaning from the firm's conventions. A
+        // PRAC account resolves to Practice; a Trading Combine name resolves to the EVALUATION stage -- but this
+        // firm has not declared what Evaluation means, so the mode is still Undeclared: a resolved stage without
+        // a declaration is never guessed into a tradeable mode.
         FirmConventions topstep = FirmConventions.For(
             "Topstep", (AccountStage.Practice, false), (AccountStage.Funded, true));
         ProjectXVenue venue = new(_api, _webSocket, ProjectXDataTier.Simulated, topstep);
@@ -226,7 +227,8 @@ public class ProjectXVenueTests
         IReadOnlyList<VenueAccount> accounts = await venue.GetAccountsAsync(CancellationToken.None);
 
         accounts[0].Mode.Should().Be(TradingMode.Practice);   // PRAC -> Practice stage -> declared not-at-risk
-        accounts[1].Mode.Should().Be(TradingMode.Undeclared);  // unrecognised name -> Unknown stage -> Undeclared
+        accounts[1].Stage.Should().Be(AccountStage.Evaluation); // 50KTC -> Trading Combine (gh#76 grounding)...
+        accounts[1].Mode.Should().Be(TradingMode.Undeclared);   // ...but Evaluation is undeclared at this firm
     }
 
     // --- Contract resolution ---
