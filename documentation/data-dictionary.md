@@ -124,6 +124,8 @@ Live stream and clean-historical are **distinct paths** (R-1); the historical se
 | **Quote** | instrument, bid, ask, bid/ask size, ts | TS | R-1 |
 | **DepthLevel (DOM)** | instrument, side, price, size, ts (order book) | TS | R-1, R-3 |
 | **IndicatorValue** | instrument, resolution, kind (RSI / MACD / VWAP / delta / volume-profile), value(s), ts — **pre-computed projection** | TS | R-3, ADR-0001 |
+| **Event (the event log)** | the ADR-0001 backbone row: monotonic **sequence** (identity — the logical key; consumers read/commit by it), **id** (the consumer dedupe key, producer-suppliable for idempotent retries), type, source, occurred-at, **recorded-at** (the hypertable time dimension), payload (jsonb), **traceparent** (W3C — carries the producer's trace across the async boundary, engineering §7). **Implemented** (gh#7) behind the **`IEventLog`** seam: **hypertable + 24h retention policy** where Timescale is available (**graceful plain-table degrade** elsewhere — see the runbook), `NOTIFY events_appended` on every append (the LISTEN side arrives with the first live consumer). **No DB primary key by design** (append-only; hypertable unique constraints must include time). Short-lived: the poller's clean historical is the long-lived record | TS | ADR-0001, R-1, R-3 |
+| **EventCursor** | per-**consumer-group** replay cursor over the log: group (key), last sequence, committed-at. A new consumer starts absent (reads from the start); **a rebuild is a deliberate backwards commit**. **Implemented** (gh#7) | REL | ADR-0001 |
 
 ## 3. Account & positions
 | Entity | Key fields | Storage | Traces |

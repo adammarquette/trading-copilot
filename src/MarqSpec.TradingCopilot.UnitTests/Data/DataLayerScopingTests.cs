@@ -21,6 +21,8 @@ public class DataLayerScopingTests
     {
         typeof(User),        // the tenant root: owns other rows, is not itself owned
         typeof(Invitation),  // anonymous onboarding by token hash (R-18), resolved before a user exists
+        typeof(Event),       // the append-only event backbone (ADR-0001): system plumbing, not workspace rows
+        typeof(EventCursor), // per-consumer-group replay cursors for the backbone (ADR-0001): system plumbing
     };
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
