@@ -71,8 +71,11 @@ task** plus an independent **QA task** (engineering §10).
 
 ## Pull requests
 - Open against **`develop`**; reference the tracking issue.
-- **Clean history:** a branch may carry several commits while in progress, but **rebase / squash before merge** so
-  each merged commit has a single clear purpose (ideally one coherent commit per branch).
+- **Clean history — rebase-merge with curated commits (no squash, gh#104):** a branch may carry several commits
+  while in progress; before merge, **interactive-rebase it into understandable units of work** — each commit a
+  coherent, Conventional-typed package whose message carries the why. PRs land by **rebase-merge** (squash-merge is
+  disabled in the repo settings); **true merge commits are reserved for the `develop → staging → main` promotions**.
+  The `commit-hygiene` check fails non-Conventional and leftover `fixup!` / `wip` commits.
 - Before a PR: `dotnet format --verify-no-changes` + **unit tests green**. **Test-first is the Definition of Done**
   (no new public method without a failing test first). Query code uses **fluent / method syntax, never LINQ
   query-comprehension** (engineering §4).

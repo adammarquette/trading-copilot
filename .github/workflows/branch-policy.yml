@@ -108,3 +108,43 @@ jobs:
           # retargets child PRs to the deleted branch's own base.
           echo "::warning::Stacked PR (base '$BASE'). Fine while the base is unmerged -- but if the base merges first, retarget this PR to 'develop' before merging it (gh#72)."
           echo "OK: no merged PR has head '$BASE'."
+
+  # gh#104: PRs land by rebase-merge, so every branch commit becomes permanent history.
+  # Enforce the floor of "curated units of work": Conventional subjects, no leftover
+  # fixup!/squash!/wip commits. Merge commits are skipped -- GitHub's rebase-merge drops
+  # them on landing. GitHub-generated 'Revert "..."' subjects pass.
+  commit-hygiene:
+    name: commit-hygiene
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Check every commit is a curated unit of work
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          TYPES='build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
+          FAIL=0
+          COUNT=0
+          while IFS=$'\t' read -r sha parents subject; do
+            COUNT=$((COUNT + 1))
+            if [ "$parents" -gt 1 ]; then
+              echo "SKIP  $sha (merge commit -- rebase-merge drops it): $subject"
+              continue
+            fi
+            if printf '%s' "$subject" | grep -qiE '^(fixup!|squash!|amend!)|^wip\b'; then
+              echo "::error::$sha is a leftover work-in-progress commit ('$subject'). Interactive-rebase the branch into units of work before merge (engineering S10, gh#104)."
+              FAIL=1
+            elif ! printf '%s' "$subject" | grep -qE "^Revert \"|^(${TYPES})(\([[:alnum:]._/-]+\))?!?: .+"; then
+              echo "::error::$sha subject is not a Conventional Commit ('$subject'). Every rebase-merged commit becomes permanent history -- give it a type and a purpose (engineering S10, gh#104)."
+              FAIL=1
+            else
+              echo "OK    $sha: $subject"
+            fi
+          done < <(gh api "repos/$REPO/pulls/$PR/commits" --paginate \
+            --jq '.[] | [.sha[0:7], (.parents | length | tostring), (.commit.message | split("\n")[0])] | @tsv')
+          echo "$COUNT commit(s) checked."
+          exit $FAIL

@@ -146,7 +146,7 @@ Software here is built with AI agents as first-class engineering participants. T
 - **Enforcement below the model** — the risk/execution gate enforces limits; the LLM only proposes.
 - **Conventional Commits**; add an `Assisted-by:` trailer for AI-authored changes.
 - **Work tracked in GitHub issues & PRs** — issue-first, no orphaned PRs.
-- **Contributing:** branch off `develop`, name branches **`<type>/<work-item-id>_<title>`**, rebase/squash before merge — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+- **Contributing:** branch off `develop`, name branches **`<type>/<work-item-id>_<title>`**, curate commits into units of work and land by **rebase-merge** (squash retired) — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Contributing & governance
 
