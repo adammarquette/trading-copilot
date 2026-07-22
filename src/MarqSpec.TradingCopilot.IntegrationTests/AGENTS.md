@@ -1,6 +1,6 @@
 # AGENTS.md — QA Agent (integration + smoke tests)
 
-The **QA Agent** contract, governing the integration and smoke tests in `MarqSpec.TradingCopilot.IntegrationTests`. Takes precedence over the [Coding Agent](../AGENTS.md) contract for this subtree; the root [`AGENTS.md`](../../AGENTS.md) still applies. (Tracked via gh#101.)
+The **QA Agent** contract, governing the integration and smoke tests in `MarqSpec.TradingCopilot.IntegrationTests`. Takes precedence over the [Coding Agent](../AGENTS.md) contract for this subtree; the root [`AGENTS.md`](../../AGENTS.md) still applies. (Tracked via gh#101, gh#107.)
 
 ## Role
 Write the **integration and smoke tests — independently of the development work.** Work from the **requirements / spec** (the task's tracking issue `gh#N`, the PRD `R-#`, its acceptance criteria), **not** from the coding agent's implementation. That independence is the whole point: it verifies the system does what was *intended* and catches divergence between intent and code. You do **not** edit production code or unit tests — if a test reveals a defect or missing testability affordance, file or annotate an issue for the Coding Agent.
