@@ -70,8 +70,16 @@ the adapter.
 `POST /api/Account/search` (`{ onlyActiveAccounts }`) lists the login's trading accounts. Each account is
 `{ id, name, balance, canTrade, isVisible, simulated }` — **nothing prop-firm-specific**. **Buying power
 (50K/100K/150K), evaluation vs. funded stage, status (active/passed/failed), and daily-loss limit** are **encoded
-in the account `name`** (`50KTC-V2-DLL-0000-…`, `PRAC-…`) or the firm portal — the **adapter derives those from the
-name**. `simulated` is a **required boolean** on the account model, so what the gateway reports is read, never
+in the account `name`** (`50KTC-V2-DLL-0000-…`, `PRAC-…`) or the firm portal.
+
+> **Stage resolution is deliberately conservative (gh#76).** `ProjectXAccountStage.Resolve` reads only what it is
+> sure of — the `PRAC` marker → `AccountStage.Practice` — and returns `Unknown` for everything else. Funded vs.
+> evaluation naming varies by firm and is **not** reliably documented, so the adapter refuses to guess it: a
+> misread funded account read as practice is exactly the failure gh#60 removed. `Unknown` resolves to
+> `TradingMode.Undeclared` (tradeable nowhere) until the operator classifies it. Firm-specific funded/eval
+> patterns and a per-account override are deferred to a later increment grounded in a real account roster.
+
+`simulated` is a **required boolean** on the account model, so what the gateway reports is read, never
 inferred (corrected 2026-07-20 — see the header note).
 
 > **What `simulated` does *not* answer (corrected 2026-07-21, gh#60).** This page previously called `simulated`
