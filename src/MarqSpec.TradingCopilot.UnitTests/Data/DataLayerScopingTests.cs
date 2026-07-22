@@ -115,6 +115,54 @@ public class DataLayerScopingTests
     }
 
     [Fact]
+    public async Task TheFirmLoginSpine_RoundTrips_AndStaysInvisibleToOtherOperators()
+    {
+        Guid owner = Guid.NewGuid();
+        Guid firmId = Guid.NewGuid();
+        Guid connectionId = Guid.NewGuid();
+        string database = Guid.NewGuid().ToString();
+
+        await using (TradingCopilotDbContext asOwner = ContextFor(owner, database))
+        {
+            asOwner.Firms.Add(new Firm { Id = firmId, UserId = owner, Name = "Topstep", Type = FirmType.PropFirm });
+            asOwner.Connections.Add(new Connection
+            {
+                Id = connectionId,
+                UserId = owner,
+                FirmId = firmId,
+                Platform = "projectx",
+                CredentialKey = "topstep-projectx", // a NAME, never a secret -- credentials live in env
+            });
+            asOwner.Accounts.Add(new Account
+            {
+                Id = Guid.NewGuid(),
+                UserId = owner,
+                ConnectionId = connectionId,
+                VenueAccountKey = "9001",
+                Name = "PRAC-50K-1234",
+                Stage = AccountStage.Practice,
+                CanTrade = true,
+                IsVisible = true,
+                Balance = 50_000m,
+            });
+            await asOwner.SaveChangesAsync();
+        }
+
+        await using (TradingCopilotDbContext asOwner = ContextFor(owner, database))
+        {
+            Connection loaded = await asOwner.Connections.Include(c => c.Accounts).SingleAsync();
+            loaded.Platform.Should().Be("projectx");
+            loaded.Accounts.Should().ContainSingle(account => account.VenueAccountKey == "9001"
+                && account.Stage == AccountStage.Practice);
+        }
+
+        // The login spine carries the operator's broker relationships -- exactly what R-20 exists to scope.
+        await using TradingCopilotDbContext asStranger = ContextFor(Guid.NewGuid(), database);
+        (await asStranger.Connections.AnyAsync()).Should().BeFalse();
+        (await asStranger.Accounts.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task WithNoUserContext_TheFilterMatchesNothing()
     {
         Guid owner = Guid.NewGuid();
