@@ -20,7 +20,14 @@ public static class StartupTasks
     {
         using IServiceScope scope = app.Services.CreateScope();
         TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
-        await database.Database.MigrateAsync();
+        if (database.Database.IsRelational())
+        {
+            await database.Database.MigrateAsync();
+        }
+        else
+        {
+            await database.Database.EnsureCreatedAsync();
+        }
 
         await BootstrapOperatorAsync(
             database,
