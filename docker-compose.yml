@@ -55,6 +55,10 @@ services:
       Jwt__SigningKey: "${Jwt__SigningKey:-local-dev-signing-key-change-me-at-least-32-bytes}"
       Bootstrap__Email: "${Bootstrap__Email:-operator@local}"
       Bootstrap__Password: "${Bootstrap__Password:-changeme-local}"
+      # The password-recovery opt-in (runbook "Operator password recovery"): set true for ONE restart to re-hash
+      # Bootstrap__Password onto the EXISTING operator, then remove. Off by default so a stale env password can
+      # never silently overwrite the stored credential.
+      Bootstrap__ResetPassword: "${Bootstrap__ResetPassword:-false}"
       # Broker credentials, passed through from .env. Deliberately NO local-dev default: a made-up
       # value would let the app start and fail obscurely at the first venue call. Empty is honest.
       # Practice accounts only outside production (R-14).
