@@ -121,6 +121,13 @@ public class FirmOnboardingEndpointsIntegrationTests : IClassFixture<FirmOnboard
         cleared.Stage.Should().Be(AccountStage.Evaluation);
         cleared.Mode.Should().Be(TradingMode.Practice);
         cleared.TradeableHere.Should().BeTrue();
+
+        // 8. Verify tripwire: Onboarding workflow must never transmit an order to the venue
+        using (IServiceScope scope = _factory.Services.CreateScope())
+        {
+            AdversarialTestProjectXVenueFactory venueFactory = (AdversarialTestProjectXVenueFactory)scope.ServiceProvider.GetRequiredService<IProjectXVenueFactory>();
+            venueFactory.LastVenueCreated.PlacedOrdersCount.Should().Be(0);
+        }
     }
 
     [Fact]
