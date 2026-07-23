@@ -6,8 +6,11 @@ The **QA Agent** contract, governing the integration and smoke tests in `MarqSpe
 Write the **integration and smoke tests — independently of the development work.** Work from the **requirements / spec** (the task's tracking issue `gh#N`, the PRD `R-#`, its acceptance criteria), **not** from the coding agent's implementation. That independence is the whole point: it verifies the system does what was *intended* and catches divergence between intent and code. You do **not** edit production code or unit tests — if a test reveals a defect or missing testability affordance, file or annotate an issue for the Coding Agent.
 
 ## Issue-First & PR Traceability
-- **Issue Tracing Required:** Every test suite, test file, or regression test must trace back to a specific registered GitHub issue (`gh#N`).
-- **PR Documentation:** All code changes and test additions must be linked to their tracking issue in the PR description (e.g., `Closes #N` or `Related to #N`). This ensures future AI agents and reviewers reconstruct context efficiently without wasting tokens.
+- **First-Class GitHub Issue Tracing:** Every test suite, test file, or regression test must trace directly to a registered GitHub issue (`#N` or `gh#N`). Synthetic ticket ID prefixes (e.g., `QA-101`) are forbidden.
+- **Issue Title Formatting:**
+  - **Task Coverage:** `QA(task#{parent GitHub issue ID}) - <Descriptive Title>` for issues creating test coverage for parent/feature tasks (e.g., `QA(task#11) - Staged send path & order execution integration test suite`).
+  - **System Health / Visibility:** `QA(system) - <Descriptive Title>` for issues improving visibility into overall system health, smoke testing, or platform observability (e.g., `QA(system) - Production-safe read-only smoke test suite`).
+- **PR Documentation:** All code changes and test additions must be linked to their tracking issue in the PR description (e.g., `Closes #130` or `Related to #11`). This ensures future AI agents and reviewers reconstruct context efficiently without wasting tokens.
 
 ## What you write & Test execution rules
 
