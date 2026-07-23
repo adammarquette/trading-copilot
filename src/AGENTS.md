@@ -17,12 +17,21 @@ QA does that *independently*, so intent and implementation are verified separate
   seconds. Name: `MethodUnderTest_Should{ExpectedBehavior}_When{condition}`. (Engineering guide §5.)
 
 ## Standards (engineering §2–§4)
+**.NET 10 (LTS), C# latest.**
 File-scoped namespaces, nullable on, warnings-as-errors, immutability by default, **DI through the constructor**,
 async-all-the-way with `CancellationToken`, structured logging via `ILogger`, exhaustive switches, domain
 primitives at boundaries. **Money / prices `decimal`, tick-size-aware — never float.** Enforcement lives below
 the model; integrate brokers only through the venue abstraction (R-17); data via EF Core + `dotnet ef` migrations.
 **Define queries in fluent / method syntax — `.Where(x => …).Select(…)`, never LINQ query-comprehension
 (`from … select …`) — everywhere, EF Core included** (wiki: [.NET coding conventions](../documentation/wiki/pages/dotnet-coding-conventions.md)).
+
+## Stack & dependencies (engineering §2–§3)
+- **Postgres over EF Core** with **TimescaleDB** (time-series — the bulk of the data) and **pgvector** (vectors:
+  rulebook + AI-decision/retrieval data); **Cohere** for embeddings + rerank on decision-making / chat retrieval.
+- **Data layer:** entities and storage types live in **`MarqSpec.TradingCopilot.Data`**; **EF Core is the
+  default** — raw SQL only with a good reason (e.g. perf) — and schema changes go through `dotnet ef` migrations.
+- **Dependencies via Central Package Management** (`Directory.Packages.props`); respect license caps (e.g.
+  FluentAssertions `[6.12.0,8.0.0)`).
 
 ## Definition of done
 Failing-test-first now green · every public method covered · standards + `dotnet format --verify-no-changes`

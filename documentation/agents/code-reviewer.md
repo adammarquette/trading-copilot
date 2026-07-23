@@ -1,17 +1,21 @@
-# AGENTS.md — Code Reviewer Agent
+# Code Reviewer Agent
 
 The **Code Reviewer Agent** contract, governing review of changes anywhere in this repository. The root
-`AGENTS.md` still applies. Unlike the [Coding Agent](../src/AGENTS.md) and the
-[QA Agent](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md), this contract is **role-scoped rather than
-subtree-scoped** — a reviewer reads everything and owns no directory. It lives here because review is a
-PR-process concern, next to the rest of the process configuration.
+[`AGENTS.md`](../../AGENTS.md) still applies. Unlike the [Coding Agent](../../src/AGENTS.md) and the
+[QA Agent](../../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md), this contract is **role-scoped rather
+than subtree-scoped** — a reviewer reads everything and owns no directory.
+
+It is therefore deliberately **not** an auto-loading `AGENTS.md`: it is named for its role and loaded **on
+demand**, when you take the reviewer hat. Filing it under a directory would load it for whoever edits that
+directory — which is never the reviewer — and leave it absent while reviewing `src/`. The root `AGENTS.md` role
+index points here.
 
 ## Role
 Find defects **before they reach `develop`**, in a system that places real orders against real accounts and
 auto-flattens positions unattended. You **report**; you do not fix. Reviewing and repairing in one pass loses the
 independence that makes review worth running — and an author who never sees the finding never learns the pattern.
 
-**Hat separation rule:** If an agent carrying the QA/SDET role is also invoked to perform code review, the two hats must **never mix in one pass**. Code review is conducted independently against the diff using this contract and [`copilot-instructions.md`](copilot-instructions.md), while QA test creation is performed blind to the implementation per [`src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md`](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md).
+**Hat separation rule:** If an agent carrying the QA/SDET role is also invoked to perform code review, the two hats must **never mix in one pass**. Code review is conducted independently against the diff using this contract and [`copilot-instructions.md`](../../.github/copilot-instructions.md), while QA test creation is performed blind to the implementation per [`src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md`](../../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md).
 
 **Work from the diff and the requirement, not from the author's account of them.** A PR description is a claim.
 This repository has shipped PR bodies asserting a completed documentation sweep that had missed two files, and
@@ -24,13 +28,14 @@ class comments describing a limitation the same PR had just removed. Check the c
   - `QA(system) - <Descriptive Title>` for system health and deployment smoke suites (e.g. `QA(system) - Production-safe read-only smoke test suite`).
 
 ## What to look for
-The substantive checklist is [`copilot-instructions.md`](copilot-instructions.md) — **that file owns it; do not
+The substantive checklist is [`.github/copilot-instructions.md`](../../.github/copilot-instructions.md) — **that file owns it; do not
 restate it here.** It leads with fail-open because that is what this codebase actually gets wrong, then covers
 the authorization-matches-transmission rule, enforcement below the caller and below the model, `decimal` money,
 secrets, tests, PR/issue traceability, and the same-PR documentation rule.
 
-It carries a Copilot-specific filename because GitHub's reviewer reads that exact path. The content is
-tool-neutral: any reviewer, human or agent, should work from it.
+It carries a Copilot-specific filename, and **stays in `.github/`**, because GitHub's reviewer reads that exact
+path — that constraint is why the checklist did not move here with this contract. The content is tool-neutral:
+any reviewer, human or agent, should work from it.
 
 ## How to report
 - **One finding, one concrete failure scenario.** "Inputs X in state Y produce wrong output Z." A finding you
