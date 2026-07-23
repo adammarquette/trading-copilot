@@ -7,6 +7,7 @@ Write the **integration and smoke tests — independently of the development wor
 
 ## Issue-First & PR Traceability
 - **First-Class GitHub Issue Tracing:** Every test suite, test file, or regression test must trace directly to a registered GitHub issue (`#N` or `gh#N`). Synthetic ticket ID prefixes (e.g., `QA-101`) are forbidden.
+- **The spec lives in the issue — never in `documentation/`.** A task's acceptance criteria, target test file, and test-case list belong in the **GitHub issue body**. Do not create a parallel spec file under `documentation/` (e.g. a `tasks/` folder): it duplicates the tracker, drifts from it the first time the issue is edited, and splits the definition of done across two places. If a spec is too long for an issue body, it is too long — decompose it into sub-issues.
 - **Issue Title Formatting:**
   - **Task Coverage:** `QA(task#{parent GitHub issue ID}) - <Descriptive Title>` for issues creating test coverage for parent/feature tasks (e.g., `QA(task#11) - Staged send path & order execution integration test suite`).
   - **System Health / Visibility:** `QA(system) - <Descriptive Title>` for issues improving visibility into overall system health, smoke testing, or platform observability (e.g., `QA(system) - Production-safe read-only smoke test suite`).
