@@ -14,7 +14,8 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// <summary>
 /// Dedicated production-safe, strictly read-only Smoke Test suite (<c>[Trait("Category", "Smoke")]</c>)
 /// verifying core system health, operator authentication, and resource reading against local test hosts
-/// or deployed environments (<c>SMOKE_TARGET_BASE_URL</c>) (Engineering Guide §5/§10, QA Agent Contract, gh#26, gh#131).
+/// or deployed environments (<c>SMOKE_TARGET_BASE_URL</c>, <c>SMOKE_TARGET_OPERATOR_EMAIL</c>, <c>SMOKE_TARGET_OPERATOR_PASSWORD</c>)
+/// (Engineering Guide §5/§10, QA Agent Contract, gh#26, gh#131).
 /// </summary>
 [Trait("Category", "Smoke")]
 public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFactory>
@@ -66,7 +67,9 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
         UserMeResponse? user = await response.Content.ReadFromJsonAsync<UserMeResponse>(_jsonOptions);
         ArgumentNullException.ThrowIfNull(user);
         user.Id.Should().NotBeEmpty();
-        user.Email.Should().Be(PostgresApiFactory.OperatorEmail);
+
+        string expectedEmail = Environment.GetEnvironmentVariable("SMOKE_TARGET_OPERATOR_EMAIL") ?? PostgresApiFactory.OperatorEmail;
+        user.Email.Should().Be(expectedEmail);
     }
 
     [Fact]
@@ -190,9 +193,35 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
             .WithMessage("Smoke tests are strictly read-only; PUT * is forbidden.");
     }
 
+    [Fact]
+    public void Smoke_CreateSmokeClient_ShouldThrow_WhenRequireRemoteTargetIsSet_ButBaseUrlIsMissing()
+    {
+        Environment.SetEnvironmentVariable("SMOKE_REQUIRE_REMOTE_TARGET", "true");
+        Environment.SetEnvironmentVariable("SMOKE_TARGET_BASE_URL", null);
+
+        try
+        {
+            Action act = () => CreateSmokeClient();
+            act.Should().Throw<InvalidOperationException>()
+                .WithMessage("SMOKE_REQUIRE_REMOTE_TARGET is set to true, but SMOKE_TARGET_BASE_URL environment variable is missing or empty.");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SMOKE_REQUIRE_REMOTE_TARGET", null);
+        }
+    }
+
     private HttpClient CreateSmokeClient()
     {
         string? targetBaseUrl = Environment.GetEnvironmentVariable("SMOKE_TARGET_BASE_URL");
+        bool requireRemoteTarget = bool.TryParse(Environment.GetEnvironmentVariable("SMOKE_REQUIRE_REMOTE_TARGET"), out bool req) && req;
+
+        if (requireRemoteTarget && string.IsNullOrWhiteSpace(targetBaseUrl))
+        {
+            throw new InvalidOperationException(
+                "SMOKE_REQUIRE_REMOTE_TARGET is set to true, but SMOKE_TARGET_BASE_URL environment variable is missing or empty.");
+        }
+
         HttpMessageHandler primaryHandler = string.IsNullOrWhiteSpace(targetBaseUrl)
             ? _factory.Server.CreateHandler()
             : new HttpClientHandler();
@@ -214,7 +243,12 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
 
     private async Task<string> AuthenticateAsync(HttpClient client)
     {
-        using HttpResponseMessage response = await client.PostAsJsonAsync("/auth/login", new LoginRequest(PostgresApiFactory.OperatorEmail, PostgresApiFactory.OperatorPassword));
+        string email = Environment.GetEnvironmentVariable("SMOKE_TARGET_OPERATOR_EMAIL")
+            ?? PostgresApiFactory.OperatorEmail;
+        string password = Environment.GetEnvironmentVariable("SMOKE_TARGET_OPERATOR_PASSWORD")
+            ?? PostgresApiFactory.OperatorPassword;
+
+        using HttpResponseMessage response = await client.PostAsJsonAsync("/auth/login", new LoginRequest(email, password));
         LoginTokenResponse? auth = await response.Content.ReadFromJsonAsync<LoginTokenResponse>(_jsonOptions);
         ArgumentNullException.ThrowIfNull(auth);
         return auth.Token;
