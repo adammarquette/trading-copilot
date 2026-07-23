@@ -71,7 +71,7 @@ The following GitHub issues are registered and tracked on `adammarquette/trading
 ### Ticket 1: `gh#130` — `QA(task#11) - Staged send path & order execution integration test suite`
 * **GitHub Link**: [https://github.com/adammarquette/trading-copilot/issues/130](https://github.com/adammarquette/trading-copilot/issues/130)
 * **Title Format**: `QA(task#11) - Staged send path & order execution integration test suite`
-* **Specification File**: [`documentation/tasks/qa-task-130-order-execution.md`](tasks/qa-task-130-order-execution.md)
+* **Specification**: [gh#130](https://github.com/adammarquette/trading-copilot/issues/130)
 * **Priority**: **P0 (Critical)**
 * **Category**: Integration Testing
 * **Parent Tasks**: `#11` (Staged Send Path), `#134` (Working Stop persistence)
@@ -82,7 +82,7 @@ The following GitHub issues are registered and tracked on `adammarquette/trading
 ### Ticket 2: `gh#132` — `QA(task#128) - Multi-tenant workspace & resource isolation integration suite`
 * **GitHub Link**: [https://github.com/adammarquette/trading-copilot/issues/132](https://github.com/adammarquette/trading-copilot/issues/132)
 * **Title Format**: `QA(task#128) - Multi-tenant workspace & resource isolation integration suite`
-* **Specification File**: [`documentation/tasks/qa-task-132-multi-tenant-isolation.md`](tasks/qa-task-132-multi-tenant-isolation.md)
+* **Specification**: [gh#132](https://github.com/adammarquette/trading-copilot/issues/132)
 * **Priority**: **P0 (Critical)**
 * **Category**: Security & Isolation Integration Testing
 * **Parent Tasks**: `#128` (Primary Operator Issuance Restriction), `ADR-0017`, `R-20`
@@ -93,7 +93,7 @@ The following GitHub issues are registered and tracked on `adammarquette/trading
 ### Ticket 3: `gh#131` — `QA(system) - Production-safe read-only smoke test suite`
 * **GitHub Link**: [https://github.com/adammarquette/trading-copilot/issues/131](https://github.com/adammarquette/trading-copilot/issues/131)
 * **Title Format**: `QA(system) - Production-safe read-only smoke test suite`
-* **Specification File**: [`documentation/tasks/qa-task-131-read-only-smoke.md`](tasks/qa-task-131-read-only-smoke.md)
+* **Specification**: [gh#131](https://github.com/adammarquette/trading-copilot/issues/131)
 * **Priority**: **P1 (High)**
 * **Category**: Deployment & Smoke Testing
 * **Parent Task**: System Health & Visibility
@@ -104,7 +104,7 @@ The following GitHub issues are registered and tracked on `adammarquette/trading
 ### Ticket 4: `gh#142` — `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite`
 * **GitHub Link**: [https://github.com/adammarquette/trading-copilot/issues/142](https://github.com/adammarquette/trading-copilot/issues/142)
 * **Title Format**: `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite`
-* **Specification File**: [`documentation/tasks/qa-task-connection-lifecycle.md`](tasks/qa-task-connection-lifecycle.md)
+* **Specification**: [gh#142](https://github.com/adammarquette/trading-copilot/issues/142)
 * **Priority**: **P2 (Medium)**
 * **Category**: Integration Testing
 * **Parent Task**: `#7` (Connection & Account Resolution)
@@ -115,7 +115,7 @@ The following GitHub issues are registered and tracked on `adammarquette/trading
 ### Ticket 5: `gh#143` — `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite`
 * **GitHub Link**: [https://github.com/adammarquette/trading-copilot/issues/143](https://github.com/adammarquette/trading-copilot/issues/143)
 * **Title Format**: `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite`
-* **Specification File**: [`documentation/tasks/qa-task-risk-floor-tracking.md`](tasks/qa-task-risk-floor-tracking.md)
+* **Specification**: [gh#143](https://github.com/adammarquette/trading-copilot/issues/143)
 * **Priority**: **P2 (Medium)**
 * **Category**: Integration Testing
 * **Parent Task**: `#10` (Risk Rules Persistence & Gate Composition)
@@ -127,8 +127,8 @@ The following GitHub issues are registered and tracked on `adammarquette/trading
 
 | GitHub Issue # | Parent Task | Issue Title Format | Specification File | Target Test File |
 | :--- | :--- | :--- | :--- | :--- |
-| **`#130`** | `#11`, `#134` | `QA(task#11) - Staged send path & order execution integration test suite` | [`qa-task-130-order-execution.md`](tasks/qa-task-130-order-execution.md) | `OrderExecutionEndpointsIntegrationTests.cs` |
-| **`#132`** | `#128` | `QA(task#128) - Multi-tenant workspace & resource isolation integration suite` | [`qa-task-132-multi-tenant-isolation.md`](tasks/qa-task-132-multi-tenant-isolation.md) | `MultiTenantIsolationIntegrationTests.cs` |
-| **`#131`** | System Health | `QA(system) - Production-safe read-only smoke test suite` | [`qa-task-131-read-only-smoke.md`](tasks/qa-task-131-read-only-smoke.md) | `ProductionSmokeTests.cs` |
-| **`#142`** | `#7` | `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite` | [`qa-task-connection-lifecycle.md`](tasks/qa-task-connection-lifecycle.md) | `ConnectionLifecycleIntegrationTests.cs` |
-| **`#143`** | `#10` | `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite` | [`qa-task-risk-floor-tracking.md`](tasks/qa-task-risk-floor-tracking.md) | `RiskProfileLifecycleIntegrationTests.cs` |
+| **`#130`** | `#11`, `#134` | `QA(task#11) - Staged send path & order execution integration test suite` | [gh#130](https://github.com/adammarquette/trading-copilot/issues/130) | `OrderExecutionEndpointsIntegrationTests.cs` |
+| **`#132`** | `#128` | `QA(task#128) - Multi-tenant workspace & resource isolation integration suite` | [gh#132](https://github.com/adammarquette/trading-copilot/issues/132) | `MultiTenantIsolationIntegrationTests.cs` |
+| **`#131`** | System Health | `QA(system) - Production-safe read-only smoke test suite` | [gh#131](https://github.com/adammarquette/trading-copilot/issues/131) | `ProductionSmokeTests.cs` |
+| **`#142`** | `#7` | `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite` | [gh#142](https://github.com/adammarquette/trading-copilot/issues/142) | `ConnectionLifecycleIntegrationTests.cs` |
+| **`#143`** | `#10` | `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite` | [gh#143](https://github.com/adammarquette/trading-copilot/issues/143) | `RiskProfileLifecycleIntegrationTests.cs` |

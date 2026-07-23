@@ -54,9 +54,11 @@ and cross-agent heads-ups with no formal home. **Check it before starting work**
   mechanics belong to the Coding and QA contracts.
 - **Commits:** Conventional Commits; add an `Assisted-by:` trailer for AI-authored changes.
 - **Issue-first — no orphaned PRs.** Every PR references a tracking issue opened *before* it (`Closes #N` /
-  `Related to #N`). Cite issues/PRs like doc sections (`gh#N`). Planning/progress lives on the GitHub **Project
-  board** (may span related repos); the [board workflow](documentation/project-board-workflow.md) governs its
-  columns and the `work:*` + `Work Estimate` tagging that routes pickup by role and model tier.
+  `Related to #N`). Cite issues/PRs like doc sections (`gh#N`). **Task specs and acceptance criteria belong in
+  the issue**, never as files under `documentation/` — a parallel spec in the repo duplicates the tracker and
+  drifts from it. Planning/progress lives on the GitHub **Project board** (may span related repos); the
+  [board workflow](documentation/project-board-workflow.md) governs its columns and the `work:*` +
+  `Work Estimate` tagging that routes pickup by role and model tier.
 - **Maximal metadata on every issue & PR/MR.** Populate every field it offers: **assign the current account**,
   **set the milestone** when the phase is known (the milestones *are* the phases), and apply the `work:*` +
   `Work Estimate` labels. **Issues are the board cards; a PR is not carded** — it links to its defining issue with
