@@ -37,6 +37,7 @@ public class RiskEndpointsTests
     private static DeclareRiskProfileRequest ValidRequest() => new(
         DailyLossLimit: 1_000m,
         AccountProfitTarget: 3_000m,
+        StartingBalance: 50_000m,
         FloorSource: FloorSource.FirmImposed,
         TrailingMode: TrailingMode.EndOfDay,
         TrailingAmount: 2_000m,

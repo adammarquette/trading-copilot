@@ -35,6 +35,13 @@ public class RiskProfileRecord : IUserOwned
     /// <summary>The account these rules govern — one profile per account.</summary>
     public Guid AccountId { get; set; }
 
+    /// <summary>
+    /// The account's declared starting balance — where the trailing floor starts from (gh#11). Positive,
+    /// DB-checked. The high-water mark the floor truly trails is runtime state (deferred); until it lands, the
+    /// floor starts from max(this, live balance), bounded by <see cref="LocksAt"/>.
+    /// </summary>
+    public required decimal StartingBalance { get; set; }
+
     /// <summary>The hard daily loss limit; null means the account has none (absent, not zero).</summary>
     public decimal? DailyLossLimit { get; set; }
 

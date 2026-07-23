@@ -88,6 +88,14 @@ Constraints:
 - **Fixed sizing / defaults.** Rejected — traders differ; sizing basis, proximity metric, and default entry action
   are configurable.
 
+## Update (2026-07-22) — per-trade risk basis confirmed; the send path composed
+The flagged **per-trade risk % basis** is confirmed by the operator (gh#10): `PerTradeRiskFraction` is a fraction
+of **headroom to the drawdown floor** — not account size — realistic values ~0.10–0.25. The gate sizes from it
+as implemented. The send path is now composed at the API (gh#11 increment 1): declared risk rules are the gate's
+fail-closed input, every sized attempt persists its `GateDecision`, and placed orders journal under the R-14 DB
+mode guard. Increment-1 sends require a **flat** account (venue P&L is not reported; flat makes unrealized = 0 a
+fact); the floor starts from the declared starting balance (high-water tracking deferred).
+
 ## Consequences
 **Positive**
 - **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move

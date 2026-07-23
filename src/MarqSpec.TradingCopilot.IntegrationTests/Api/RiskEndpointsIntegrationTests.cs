@@ -47,6 +47,7 @@ public class RiskEndpointsIntegrationTests : IClassFixture<StubbedVenuePostgresF
         DeclareRiskProfileRequest declareReq = new(
             DailyLossLimit: 1_000m,
             AccountProfitTarget: 3_000m,
+            StartingBalance: 50_000m,
             FloorSource: FloorSource.FirmImposed,
             TrailingMode: TrailingMode.Intraday,
             TrailingAmount: 2_000m,
@@ -84,6 +85,7 @@ public class RiskEndpointsIntegrationTests : IClassFixture<StubbedVenuePostgresF
         DeclareRiskProfileRequest replacementReq = new(
             DailyLossLimit: 1_500m,
             AccountProfitTarget: null,
+            StartingBalance: 50_000m,
             FloorSource: FloorSource.SelfImposed,
             TrailingMode: TrailingMode.EndOfDay,
             TrailingAmount: 2_500m,
@@ -239,6 +241,7 @@ public class RiskEndpointsIntegrationTests : IClassFixture<StubbedVenuePostgresF
         return new DeclareRiskProfileRequest(
             DailyLossLimit: dailyLossLimit,
             AccountProfitTarget: 3_000m,
+            StartingBalance: 50_000m,
             FloorSource: FloorSource.FirmImposed,
             TrailingMode: TrailingMode.Intraday,
             TrailingAmount: 2_000m,

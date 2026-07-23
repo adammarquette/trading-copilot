@@ -67,6 +67,13 @@ PUT  /accounts/{id}/stage     {stage}                    -> declare an account's
                                                             conservative resolver (it never guesses; you do
                                                             the telling). Unknown is refused
 DEL  /accounts/{id}/stage                                -> clear the override, fall back to the resolved stage
+POST /accounts/{id}/orders    {the proposal}             -> ONE order through the whole ladder (gh#11):
+                                                            declared risk rules (refused when absent), the
+                                                            R-14 mode x environment gate, the R-5/R-16 risk
+                                                            gate -- every sized attempt leaves an auditable
+                                                            GateDecision; a placed one journals the Order.
+                                                            Increment 1 requires a FLAT account (honest
+                                                            unrealized P&L = 0), and trailing stops are refused
 PUT  /accounts/{id}/risk      {the whole declaration}    -> declare the account's risk rules (R-5); validated
                                                             through the domain factories, refused whole on any
                                                             violation (gh#10)

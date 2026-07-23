@@ -18,6 +18,7 @@ public class RiskProfileMappingTests
         AccountId = Guid.NewGuid(),
         DailyLossLimit = 1_000m,
         AccountProfitTarget = 3_000m,
+        StartingBalance = 150_000m,
         FloorSource = FloorSource.FirmImposed,
         TrailingMode = TrailingMode.Intraday,
         TrailingAmount = 2_000m,
