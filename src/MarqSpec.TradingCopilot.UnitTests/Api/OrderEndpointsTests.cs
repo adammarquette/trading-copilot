@@ -38,6 +38,7 @@ public class OrderEndpointsTests
         // The executor's own venue identity -- the service's mismatch guard compares every handle against it,
         // and an unconfigured fake (default VenueId) reads as a foreign venue and refuses everything.
         A.CallTo(() => _venue.Id).Returns(VenueId.Parse("projectx"));
+        A.CallTo(() => _venue.Capabilities).Returns(VenueCapabilities.Of(VenueCapability.BracketOrders)); // can hold the safety stop (gh#11 inc 3)
 
         // A healthy, FLAT practice account at the venue unless a test says otherwise.
         A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(

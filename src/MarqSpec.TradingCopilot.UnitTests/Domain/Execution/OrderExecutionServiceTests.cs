@@ -24,6 +24,9 @@ public class OrderExecutionServiceTests
         // unconfigured fake would report the default id and fail every case for the wrong reason.
         A.CallTo(() => _venue.Id).Returns(Venue);
 
+        // A venue that can hold an exchange-native protective stop, unless a test says otherwise (gh#11 inc 3).
+        A.CallTo(() => _venue.Capabilities).Returns(VenueCapabilities.Of(VenueCapability.BracketOrders));
+
         _service = ServiceIn(DeploymentEnvironment.Development);
     }
 
@@ -95,6 +98,41 @@ public class OrderExecutionServiceTests
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
             .ReturnsLazily((OrderRequest r, CancellationToken _) =>
                 Task.FromResult(new PlacedOrder(r.Account, orderId, DateTimeOffset.UnixEpoch)));
+    }
+
+    // --- The always-native safety stop (gh#11 increment 3, ADR-0007) ---
+
+    [Fact]
+    public async Task SendAsync_ShouldAttachTheSafetyStopAsAnExchangeNativeProtectiveStop()
+    {
+        // "A live position is never without a real exchange-held stop" (ADR-0007): every transmitted entry
+        // carries its safety stop as a protective bracket, so the exchange attaches it on fill.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+        OrderRequest? sent = null;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes((OrderRequest r, CancellationToken _) => sent = r)
+            .ReturnsLazily((OrderRequest r, CancellationToken _) =>
+                Task.FromResult(new PlacedOrder(r.Account, "555", DateTimeOffset.UnixEpoch)));
+
+        ExecutionResult result = await _service.SendAsync(Request(Account(TradingMode.Practice)), CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.Placed);
+        sent!.ProtectiveStop.Should().Be(new Price(4_990m)); // the proposal's safety stop, rode with the entry
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldRefuse_WhenTheVenueCannotHoldANativeProtectiveStop()
+    {
+        // Fail-closed: if the venue can't hold a protective stop, the position would be unprotected -- so the
+        // entry is not sent at all. Better no trade than an unprotected one (ADR-0007).
+        A.CallTo(() => _venue.Capabilities).Returns(VenueCapabilities.Of(VenueCapability.Quotes)); // no brackets
+        GateReturns(GateDecision.Allow(4, "the gate would allow it"));
+
+        ExecutionResult result = await _service.SendAsync(Request(Account(TradingMode.Practice)), CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByUnprotectableStop);
+        result.Order.Should().BeNull();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
     // --- Evaluate: the ladder minus transmission (gh#11 increment 2) ---

@@ -17,7 +17,8 @@ internal sealed class FakeTradingVenue : ITradingVenue
         Capabilities = capabilities ?? VenueCapabilities.Of(
             VenueCapability.HistoricalBars
             | VenueCapability.Quotes
-            | VenueCapability.ClosePosition);
+            | VenueCapability.ClosePosition
+            | VenueCapability.BracketOrders);
     }
 
     public VenueId Id { get; } = VenueId.Parse("fake");

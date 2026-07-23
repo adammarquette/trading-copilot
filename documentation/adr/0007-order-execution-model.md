@@ -100,7 +100,15 @@ the same code as `SendAsync` but stops short of transmission, so an armed ticket
 one; the proposal persists whole on the order row so **take re-validates everything against fresh venue truth
 (R-12)** — a ticket that passed at arm and fails the fresh gate stays staged, having transmitted nothing.
 Every arm/edit/take leaves its own `GateDecision`. A live *successful* take is a real placement and stays
-deferred to the operator's explicit go (PRAC only).
+deferred to the operator's explicit go (PRAC only). **Increment 3** wires the **always-native safety stop**:
+every transmitted entry carries its safety stop as an **exchange-held stop-loss bracket** (`OrderRequest.ProtectiveStop`
+→ the ProjectX `stopLossBracket`), so the venue attaches a real protective stop **on fill** — a live position is
+never unprotected. It is **fail-closed**: if the venue cannot hold a native protective stop
+(`VenueCapability.BracketOrders`), the entry is **not sent** (`ExecutionOutcome.RefusedByUnprotectableStop`) —
+better no trade than an unprotected one. *Still deferred to later increments:* the **staged/synthetic actual
+stop** and its **proximity promotion**, take-profit brackets, OCO-cancel-on-exit, and the connection-liveness
+orphan handling — increment 3 lands the catastrophic-insurance floor, not yet the hidden-then-promoted working
+stop.
 
 ## Consequences
 **Positive**
