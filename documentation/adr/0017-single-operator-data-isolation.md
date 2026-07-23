@@ -128,6 +128,15 @@ deployment. Transport is a gist, an email, a repo; the platform is not in the mi
   and easy to forget; it needs tests, not just a note.
 - **Cross-operator benchmarks are gone** as a product capability. Whether that mattered was never established.
 
+## Update (2026-07-23) — invitation issuance restricted to the primary operator (gh#128)
+The gh#127 regression suite probed the dormant plumbing and found issuance unrestricted: any authenticated user
+— an accepted invitee included — could mint further invitations (chaining ⇒ uncontrolled account creation on a
+web-exposed deployment). Fixed per the operator's ruling: `User.IsPrimaryOperator` is **declared at bootstrap
+seeding** (never derived from creation order; backfilled on existing deployments by excluding invite-created
+users), and `POST /auth/invitations` refuses any non-primary caller with 403. Invite-created users are never
+primary — consistent with §4's mentee future, where mentees observe and never invite. The gh#127 chaining probe
+is the fix's regression guard.
+
 ## Follow-ups
 
 - Define the **EF Core global query filter** pattern (owning identity, default-deny) and a **guard** — test or

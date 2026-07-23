@@ -22,6 +22,14 @@ public class User
     /// <summary>The account lifecycle state.</summary>
     public UserStatus Status { get; set; } = UserStatus.Active;
 
+    /// <summary>
+    /// Whether this is the <b>primary operator</b> — the bootstrap-seeded account (ADR-0017). Declared at
+    /// seeding, never derived: privileged surfaces (today: issuing invitations, gh#128) require it, and users
+    /// created through <c>accept-invite</c> are never primary — which is what stops an accepted invitee from
+    /// chaining invitations into uncontrolled account creation.
+    /// </summary>
+    public bool IsPrimaryOperator { get; set; }
+
     /// <summary>When the account was created (UTC).</summary>
     public DateTimeOffset CreatedUtc { get; set; }
 }

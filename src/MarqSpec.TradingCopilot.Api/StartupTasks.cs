@@ -86,6 +86,9 @@ public static class StartupTasks
             DisplayName = "Operator",
             Status = UserStatus.Active,
             CreatedUtc = DateTimeOffset.UtcNow,
+            // The bootstrap account is THE primary operator (ADR-0017) -- the only account that may issue
+            // invitations (gh#128). Declared here, never derived from creation order.
+            IsPrimaryOperator = true,
         });
         await database.SaveChangesAsync();
     }
