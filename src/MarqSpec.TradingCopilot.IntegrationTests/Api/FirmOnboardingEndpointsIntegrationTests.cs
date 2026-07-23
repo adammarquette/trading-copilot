@@ -353,7 +353,7 @@ internal class AdversarialTestTradingVenue : ITradingVenue
         Task.FromResult<IReadOnlyList<PositionSnapshot>>([]);
 
     public Task<PlacedOrder> PlaceOrderAsync(OrderRequest request, CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException();
+        Task.FromResult(new PlacedOrder(request.Account, $"STUB-ORDER-{Guid.NewGuid():N}", DateTimeOffset.UtcNow));
 
     public Task CancelOrderAsync(VenueAccountId account, string venueOrderId, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
