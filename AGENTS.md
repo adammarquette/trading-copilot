@@ -17,6 +17,12 @@ system with a safety-critical **auto-flatten** before the CME close. C# / .NET, 
 `MarqSpec.Client.ProjectX`. The `src/` solution (**`MarqSpec.TradingCopilot.slnx`**, base namespace `MarqSpec.TradingCopilot.*`) builds out per the roadmap — `Domain`, `Data` (EF Core), the `Api` (BFF), + test projects so far; read the docs before building.
 
 ## Source of truth (read before coding)
+**The documentation layer — these markdown files and the GitHub issues/PRs — is the highest-level source code
+of the system** (README §*How we work — AI-Engineering first*): it abstracts the C# below the way C# abstracts
+assembler and machine code, and the system is **reconstructable from it**. Read it as source and keep it
+compiling — the same-PR rule below is this layer's build rule, and the stable identifiers (`R-#`, ADR numbers,
+`gh#N`) are its symbol table.
+
 **Start at `README.md`, then the `documentation/` folder** — it is authoritative; this file only summarizes and
 points to it.
 - [`documentation/trading-platform-prd.md`](documentation/trading-platform-prd.md) — product requirements

@@ -169,6 +169,8 @@ The execution + auto-flatten layer moves real money and is **net-new / from scra
 
 It can be stood up now, independent of the product build and its safety phasing — the earlier it exists, the more the design decisions are grounded as they're made. If a runtime knowledge base ever becomes a product feature, that is a separate decision — it would reuse this pattern but be specified as its own product requirement, with the trust-tier discipline below as a hard prerequisite.
 
+> **The same pattern governs the project's own documentation** (README §*How we work — AI-Engineering first*): the `documentation/` layer — these files **plus the GitHub issues and PRs** — is the **highest-level source code of the platform**, abstracting the C# as C# abstracts machine code, kept compiling by the same-PR rule (§10) and navigated by its stable identifiers (`R-#`, ADRs, `gh#N`). The wiki below applies that discipline to *domain* knowledge; the rest of `documentation/` applies it to the *system itself* — both are written to be **recompiled from**, by agents or humans.
+
 ### What it is
 
 A compounding knowledge base following Karpathy's LLM Wiki pattern: immutable **raw sources**, an **LLM-maintained wiki** of interlinked markdown (summaries, concept and entity pages, an evolving synthesis), and a **schema file** that makes the agent a disciplined maintainer rather than a generic chatbot. Three operations — **ingest, query, lint** — and two navigation files: a content-oriented `index.md` and a chronological, append-only `log.md`. Knowledge is compiled once and kept current, not re-derived on every question.
