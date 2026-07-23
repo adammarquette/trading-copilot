@@ -83,6 +83,7 @@ GET  /accounts/{id}/risk                                 -> the declared rules; 
 
 The `/auth/invitations` and `/auth/accept-invite` endpoints also exist and work, but are **dormant** — not part
 of the onboarding story, retained as the plumbing a future read-only / mentee login would reuse (ADR-0017 §4).
+Issuing is **primary-operator-only** (gh#128): an accepted invitee cannot chain further invitations.
 
 Config — the DB connection string, `Jwt:SigningKey`, and the bootstrap operator — comes from env / `.env` (see
 [`.env.example`](.env.example)); real secrets are never committed (ADR-0012, engineering §8). `docker compose down -v`

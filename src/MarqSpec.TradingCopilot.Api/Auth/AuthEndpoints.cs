@@ -56,12 +56,24 @@ public static class AuthEndpoints
             : Results.Ok(new { user.Id, user.Email, user.DisplayName });
     }
 
-    private static async Task<IResult> IssueInvitationAsync(
+    internal static async Task<IResult> IssueInvitationAsync(
         IssueInvitationRequest request,
         ICurrentUser currentUser,
         TradingCopilotDbContext database,
         CancellationToken cancellationToken)
     {
+        // Only the PRIMARY operator issues invitations (gh#128, ADR-0017). The gh#127 probe showed any valid
+        // token sufficed -- an accepted invitee could chain invitations into uncontrolled account creation.
+        // Fail-closed: an absent or non-primary caller is refused identically.
+        bool callerIsPrimary = await database.Users
+            .AnyAsync(user => user.Id == currentUser.UserId && user.IsPrimaryOperator, cancellationToken);
+        if (!callerIsPrimary)
+        {
+            return Results.Json(
+                new { error = "Only the primary operator may issue invitations (gh#128)." },
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+
         (string token, string tokenHash) = InvitationTokens.Generate();
         DateTimeOffset now = DateTimeOffset.UtcNow;
 
@@ -83,7 +95,7 @@ public static class AuthEndpoints
         return Results.Ok(new { invitation.Id, token, expiresUtc = invitation.ExpiresUtc });
     }
 
-    private static async Task<IResult> AcceptInviteAsync(
+    internal static async Task<IResult> AcceptInviteAsync(
         AcceptInviteRequest request,
         TradingCopilotDbContext database,
         IPasswordHasher passwordHasher,

@@ -39,6 +39,7 @@ public class StartupTasksTests
         User seeded = await context.Users.SingleAsync();
         seeded.Email.Should().Be("op@local");
         _hasher.Verify(seeded.PasswordHash, "first-password").Should().BeTrue();
+        seeded.IsPrimaryOperator.Should().BeTrue(); // the bootstrap account IS the primary -- the only inviter (gh#128)
     }
 
     [Fact]

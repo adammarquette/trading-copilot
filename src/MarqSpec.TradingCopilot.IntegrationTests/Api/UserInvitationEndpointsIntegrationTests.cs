@@ -147,8 +147,9 @@ public class UserInvitationEndpointsIntegrationTests : IClassFixture<PostgresApi
             "/auth/invitations",
             new IssueInvitationRequest($"chained-user-{Guid.NewGuid():N}@example.com"));
 
-        // Currently, any authenticated user can issue invitations (returns 200 OK) — probed and documented.
-        chainInviteResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        // gh#128 RESOLVED: only the primary operator may issue invitations. This probe found the defect
+        // (any valid token sufficed — an invitee could chain accounts); it is now the fix's regression guard.
+        chainInviteResponse.StatusCode.Should().Be(HttpStatusCode.Forbidden);
     }
 
     [Fact]
