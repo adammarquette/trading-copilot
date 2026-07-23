@@ -75,7 +75,12 @@ Worth flagging specifically:
 - A fake that doesn't configure the identity a new guard now reads — it will pass or fail for the wrong reason.
 - **Telemetry completeness (once the §7 observability stack is wired):** A new feature, pipeline step, or guard pathway with no OpenTelemetry metrics counter/gauge or trace context propagation (`trace_id` span links across event log boundaries).
 
-## Documentation is part of the change
+## Documentation & PR Traceability are part of the change
+
+- Every PR description must reference a tracking GitHub issue opened *before* it (`Closes #N` or `Related to #N`).
+- For QA/SDET PRs and tracking issues, verify strict title formatting:
+  - `QA(task#{parent GitHub issue ID}) - <Descriptive Title>` for task coverage (e.g. `QA(task#11) - Staged send path & order execution integration test suite`).
+  - `QA(system) - <Descriptive Title>` for system-wide health and deployment smoke suites (e.g. `QA(system) - Production-safe read-only smoke test suite`).
 
 Any change whose behaviour, data model, API or UX a document describes must update that document **in the same
 PR** — the PRD (`R-#`), `documentation/trading-platform-architecture.md`, the data dictionary **and its ERD**,

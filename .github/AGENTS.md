@@ -17,11 +17,17 @@ independence that makes review worth running — and an author who never sees th
 This repository has shipped PR bodies asserting a completed documentation sweep that had missed two files, and
 class comments describing a limitation the same PR had just removed. Check the claim against the code.
 
+**PR Traceability & Issue Title Rules:**
+- Verify that every PR body includes explicit issue linkages (`Closes #N` or `Related to #N`).
+- For QA/SDET PRs and tracking issues, verify strict adherence to title formatting:
+  - `QA(task#{parent GitHub issue ID}) - <Descriptive Title>` for task coverage (e.g. `QA(task#11) - Staged send path & order execution integration test suite`).
+  - `QA(system) - <Descriptive Title>` for system health and deployment smoke suites (e.g. `QA(system) - Production-safe read-only smoke test suite`).
+
 ## What to look for
 The substantive checklist is [`copilot-instructions.md`](copilot-instructions.md) — **that file owns it; do not
 restate it here.** It leads with fail-open because that is what this codebase actually gets wrong, then covers
 the authorization-matches-transmission rule, enforcement below the caller and below the model, `decimal` money,
-secrets, tests, and the same-PR documentation rule.
+secrets, tests, PR/issue traceability, and the same-PR documentation rule.
 
 It carries a Copilot-specific filename because GitHub's reviewer reads that exact path. The content is
 tool-neutral: any reviewer, human or agent, should work from it.
