@@ -358,7 +358,7 @@ public static class OrderEndpoints
 
         OrderExecutionService execution = new(new RiskGate(), venue, environment.Value);
 
-        return (new Composition(account, profile, venue, venueAccount, risk, execution), null);
+        return (new Composition(account, profile, venue, venueAccount with { Mode = account.Mode }, risk, execution), null);
     }
 
     /// <summary>Resolves the contract and builds the execution request; 400 on an invalid proposal.</summary>
