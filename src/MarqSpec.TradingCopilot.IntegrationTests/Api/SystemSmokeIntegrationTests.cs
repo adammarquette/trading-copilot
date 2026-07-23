@@ -1,26 +1,20 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Reflection;
 using System.Text.Json;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Risk;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data.Entities;
-using MarqSpec.TradingCopilot.Domain.Risk;
-using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
-using Xunit.Sdk;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 
 /// <summary>
 /// Dedicated production-safe, strictly read-only Smoke Test suite (<c>[Trait("Category", "Smoke")]</c>)
-/// verifying core system health, operator authentication, and resource reading on deployment
-/// (Engineering Guide §5/§10, QA Agent Contract, gh#26, gh#131).
+/// verifying core system health, operator authentication, and resource reading against local test hosts
+/// or deployed environments (<c>SMOKE_TARGET_BASE_URL</c>) (Engineering Guide §5/§10, QA Agent Contract, gh#26, gh#131).
 /// </summary>
 [Trait("Category", "Smoke")]
 public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFactory>
@@ -31,6 +25,28 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     private sealed record LoginTokenResponse(string Token);
     private sealed record UserMeResponse(Guid Id, string Email, string DisplayName);
 
+    /// <summary>
+    /// Transport-level safety guard ensuring smoke test clients are strictly read-only.
+    /// Only <c>GET</c> requests and <c>POST /auth/login</c> (for token acquisition) are permitted.
+    /// Any mutating method (<c>POST</c>, <c>PUT</c>, <c>DELETE</c>) throws <see cref="InvalidOperationException"/>.
+    /// </summary>
+    private sealed class ReadOnlyHandler : DelegatingHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            bool isAllowed = request.Method == HttpMethod.Get
+                || (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/auth/login");
+
+            if (!isAllowed)
+            {
+                throw new InvalidOperationException(
+                    $"Smoke tests are strictly read-only; {request.Method} {request.RequestUri?.AbsolutePath} is forbidden.");
+            }
+
+            return await base.SendAsync(request, cancellationToken);
+        }
+    }
+
     public SystemSmokeIntegrationTests(StubbedVenuePostgresFactory factory)
     {
         _factory = factory;
@@ -40,7 +56,7 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     [Trait("Category", "Smoke")]
     public async Task Smoke_GetAuthMe_ShouldReturnOperatorProfile_WhenAuthenticated()
     {
-        HttpClient client = _factory.CreateClient();
+        HttpClient client = CreateSmokeClient();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -57,132 +73,94 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     [Trait("Category", "Smoke")]
     public async Task Smoke_GetFirms_ShouldReturnFirmCatalog_WhenAuthenticated()
     {
-        HttpClient client = _factory.CreateClient();
+        HttpClient client = CreateSmokeClient();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-        // Seed a firm
-        using HttpResponseMessage createResp = await client.PostAsJsonAsync("/firms", new CreateFirmRequest("Topstep-SmokeTest", FirmType.PropFirm));
-        createResp.EnsureSuccessStatusCode();
 
         using HttpResponseMessage response = await client.GetAsync("/firms");
         response.StatusCode.Should().Be(HttpStatusCode.OK);
 
         List<FirmResponse>? firms = await response.Content.ReadFromJsonAsync<List<FirmResponse>>(_jsonOptions);
         ArgumentNullException.ThrowIfNull(firms);
-        firms.Should().NotBeEmpty();
-        firms.Should().Contain(f => f.Name == "Topstep-SmokeTest");
     }
 
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task Smoke_GetConnections_ShouldReturnConnections_WhenAuthenticated()
     {
-        HttpClient client = _factory.CreateClient();
+        HttpClient client = CreateSmokeClient();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-        using HttpResponseMessage createFirm = await client.PostAsJsonAsync("/firms", new CreateFirmRequest("Topstep-SmokeConn", FirmType.PropFirm));
-        FirmResponse? firm = await createFirm.Content.ReadFromJsonAsync<FirmResponse>(_jsonOptions);
-        ArgumentNullException.ThrowIfNull(firm);
-
-        using HttpResponseMessage createConn = await client.PostAsJsonAsync("/connections", new CreateConnectionRequest(firm.Id, "projectx", "topstep-main"));
-        createConn.EnsureSuccessStatusCode();
 
         using HttpResponseMessage response = await client.GetAsync("/connections");
         response.StatusCode.Should().Be(HttpStatusCode.OK);
 
         List<ConnectionResponse>? connections = await response.Content.ReadFromJsonAsync<List<ConnectionResponse>>(_jsonOptions);
         ArgumentNullException.ThrowIfNull(connections);
-        connections.Should().NotBeEmpty();
-        connections.Should().Contain(c => c.FirmId == firm.Id);
     }
 
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task Smoke_GetAccounts_ShouldReturnAccountRoster_WhenAuthenticated()
     {
-        HttpClient client = _factory.CreateClient();
+        HttpClient client = CreateSmokeClient();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        using HttpResponseMessage createFirm = await client.PostAsJsonAsync("/firms", new CreateFirmRequest("Topstep-SmokeAccount", FirmType.PropFirm));
-        FirmResponse? firm = await createFirm.Content.ReadFromJsonAsync<FirmResponse>(_jsonOptions);
-        ArgumentNullException.ThrowIfNull(firm);
+        using HttpResponseMessage connsResponse = await client.GetAsync("/connections");
+        connsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
 
-        using HttpResponseMessage createConn = await client.PostAsJsonAsync("/connections", new CreateConnectionRequest(firm.Id, "projectx", "topstep-main"));
-        ConnectionResponse? conn = await createConn.Content.ReadFromJsonAsync<ConnectionResponse>(_jsonOptions);
-        ArgumentNullException.ThrowIfNull(conn);
+        List<ConnectionResponse>? connections = await connsResponse.Content.ReadFromJsonAsync<List<ConnectionResponse>>(_jsonOptions);
+        ArgumentNullException.ThrowIfNull(connections);
 
-        using HttpResponseMessage discover = await client.PostAsync($"/connections/{conn.Id}/accounts/discover", null);
-        discover.EnsureSuccessStatusCode();
+        if (connections.Count > 0)
+        {
+            Guid connectionId = connections[0].Id;
+            using HttpResponseMessage accountsResponse = await client.GetAsync($"/connections/{connectionId}/accounts");
+            accountsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
 
-        using HttpResponseMessage response = await client.GetAsync($"/connections/{conn.Id}/accounts");
-        response.StatusCode.Should().Be(HttpStatusCode.OK);
-
-        List<AccountResponse>? accounts = await response.Content.ReadFromJsonAsync<List<AccountResponse>>(_jsonOptions);
-        ArgumentNullException.ThrowIfNull(accounts);
-        accounts.Should().NotBeEmpty();
+            List<AccountResponse>? accounts = await accountsResponse.Content.ReadFromJsonAsync<List<AccountResponse>>(_jsonOptions);
+            ArgumentNullException.ThrowIfNull(accounts);
+        }
     }
 
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task Smoke_GetRiskProfile_ShouldReturnDeclaredProfile_WhenAuthenticated()
     {
-        HttpClient client = _factory.CreateClient();
+        HttpClient client = CreateSmokeClient();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        using HttpResponseMessage createFirm = await client.PostAsJsonAsync("/firms", new CreateFirmRequest("Topstep-SmokeRisk", FirmType.PropFirm));
-        FirmResponse? firm = await createFirm.Content.ReadFromJsonAsync<FirmResponse>(_jsonOptions);
-        ArgumentNullException.ThrowIfNull(firm);
+        using HttpResponseMessage connsResponse = await client.GetAsync("/connections");
+        connsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
 
-        using HttpResponseMessage createConn = await client.PostAsJsonAsync("/connections", new CreateConnectionRequest(firm.Id, "projectx", "topstep-main"));
-        ConnectionResponse? conn = await createConn.Content.ReadFromJsonAsync<ConnectionResponse>(_jsonOptions);
-        ArgumentNullException.ThrowIfNull(conn);
+        List<ConnectionResponse>? connections = await connsResponse.Content.ReadFromJsonAsync<List<ConnectionResponse>>(_jsonOptions);
+        ArgumentNullException.ThrowIfNull(connections);
 
-        using HttpResponseMessage discover = await client.PostAsync($"/connections/{conn.Id}/accounts/discover", null);
-        discover.EnsureSuccessStatusCode();
-        List<AccountResponse>? accounts = await discover.Content.ReadFromJsonAsync<List<AccountResponse>>(_jsonOptions);
-        ArgumentNullException.ThrowIfNull(accounts);
-        Guid accountId = accounts.First().Id;
+        if (connections.Count > 0)
+        {
+            Guid connectionId = connections[0].Id;
+            using HttpResponseMessage accountsResponse = await client.GetAsync($"/connections/{connectionId}/accounts");
+            accountsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
 
-        // Declare risk profile
-        DeclareRiskProfileRequest declareReq = new(
-            DailyLossLimit: 1_000m,
-            AccountProfitTarget: 3_000m,
-            FloorSource: FloorSource.FirmImposed,
-            TrailingMode: TrailingMode.Intraday,
-            TrailingAmount: 2_000m,
-            LocksAt: 50_100m,
-            PerTradeRiskFraction: 0.15m,
-            TargetRewardRatio: 1.5m,
-            MaxDrawdownPerTrade: 300m,
-            DailyDrawdownGovernor: 600m,
-            DailyProfitTarget: 1_500m,
-            StopForDayAtProfitTarget: true,
-            SizingBasis: SizingBasis.SafetyStop,
-            MaxContractsPerOrder: 5,
-            MaxBestDayFraction: 0.4m,
-            StartingBalance: 50_000m);
+            List<AccountResponse>? accounts = await accountsResponse.Content.ReadFromJsonAsync<List<AccountResponse>>(_jsonOptions);
+            ArgumentNullException.ThrowIfNull(accounts);
 
-        using HttpResponseMessage declareResp = await client.PutAsJsonAsync($"/accounts/{accountId}/risk", declareReq);
-        declareResp.EnsureSuccessStatusCode();
-
-        using HttpResponseMessage response = await client.GetAsync($"/accounts/{accountId}/risk");
-        response.StatusCode.Should().Be(HttpStatusCode.OK);
-
-        RiskProfileResponse? profile = await response.Content.ReadFromJsonAsync<RiskProfileResponse>(_jsonOptions);
-        ArgumentNullException.ThrowIfNull(profile);
-        profile.AccountId.Should().Be(accountId);
-        profile.DailyLossLimit.Should().Be(1_000m);
+            if (accounts.Count > 0)
+            {
+                Guid accountId = accounts[0].Id;
+                using HttpResponseMessage riskResponse = await client.GetAsync($"/accounts/{accountId}/risk");
+                riskResponse.StatusCode.Should().Match(s => s == HttpStatusCode.OK || s == HttpStatusCode.NotFound);
+            }
+        }
     }
 
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task Smoke_Endpoints_ShouldReturn401Unauthorized_WhenUnauthenticated()
     {
-        HttpClient anonymousClient = _factory.CreateClient();
+        HttpClient anonymousClient = CreateSmokeClient();
 
         using HttpResponseMessage meResp = await anonymousClient.GetAsync("/auth/me");
         meResp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
@@ -195,25 +173,43 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     }
 
     [Fact]
-    public void SmokeTests_MustBeStrictlyReadOnly_AndNeverContainExecutionEndpoints()
+    public async Task SmokeTests_MustBeStrictlyReadOnly_AndEnforcedByTransport()
     {
-        // Reflection check: verify all methods carrying Category=Smoke trait are strictly read-only
-        MethodInfo[] smokeMethods = typeof(SystemSmokeIntegrationTests)
-            .GetMethods(BindingFlags.Public | BindingFlags.Instance)
-            .Where(m => m.GetCustomAttributesData().Any(a =>
-                a.AttributeType == typeof(TraitAttribute) &&
-                a.ConstructorArguments.Count >= 2 &&
-                Equals(a.ConstructorArguments[0].Value, "Category") &&
-                Equals(a.ConstructorArguments[1].Value, "Smoke")))
-            .ToArray();
+        HttpClient client = CreateSmokeClient();
+        string token = await AuthenticateAsync(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        smokeMethods.Should().NotBeEmpty("smoke suite must contain tagged read-only smoke tests");
+        // Attempting a mutating request (e.g. POST /firms) through the smoke client MUST be rejected at transport level
+        Func<Task> actPost = async () => await client.PostAsJsonAsync("/firms", new CreateFirmRequest("Forbidden", FirmType.PropFirm));
+        await actPost.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Smoke tests are strictly read-only; POST /firms is forbidden.");
 
-        foreach (MethodInfo method in smokeMethods)
+        // Attempting a PUT request through the smoke client MUST also be rejected at transport level
+        Func<Task> actPut = async () => await client.PutAsJsonAsync($"/accounts/{Guid.NewGuid()}/risk", new { });
+        await actPut.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Smoke tests are strictly read-only; PUT * is forbidden.");
+    }
+
+    private HttpClient CreateSmokeClient()
+    {
+        string? targetBaseUrl = Environment.GetEnvironmentVariable("SMOKE_TARGET_BASE_URL");
+        HttpMessageHandler primaryHandler = string.IsNullOrWhiteSpace(targetBaseUrl)
+            ? _factory.Server.CreateHandler()
+            : new HttpClientHandler();
+
+        ReadOnlyHandler readOnlyHandler = new() { InnerHandler = primaryHandler };
+        HttpClient client = new(readOnlyHandler);
+
+        if (!string.IsNullOrWhiteSpace(targetBaseUrl))
         {
-            method.Name.Should().StartWith("Smoke_", "production smoke tests must follow the 'Smoke_' naming convention");
-            method.Name.Should().NotContain("Order", "production smoke tests must NEVER touch order placement or execution endpoints");
+            client.BaseAddress = new Uri(targetBaseUrl);
         }
+        else
+        {
+            client.BaseAddress = _factory.ClientOptions.BaseAddress;
+        }
+
+        return client;
     }
 
     private async Task<string> AuthenticateAsync(HttpClient client)
