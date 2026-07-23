@@ -102,7 +102,7 @@ Work complete and a **PR is open**. Move here when the PR exists.
 - The rare issue with **no** code/doc change — a pure decision or a triage outcome — may enter Review (or go
   straight to Done) with the resolution recorded in a comment instead of a PR.
 - Review is the **Code Reviewer Agent's** arena: it leaves findings as review comments and submits a formal
-  verdict — **Approve** or **Request changes** (per its [contract](../.github/AGENTS.md)) — but does **not merge,
+  verdict — **Approve** or **Request changes** (per its [contract](agents/code-reviewer.md)) — but does **not merge,
   close, or move the card**. The author addresses findings and resolves threads; the maintainer merges.
 
 ### Done
@@ -136,7 +136,7 @@ dimensions, plus one override.
 |---|---|---|
 | `work:code` | [Coding Agent](../src/AGENTS.md) | production code + unit tests, test-first |
 | `work:qa` | [QA Agent](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) | integration / smoke tests, written independently |
-| `work:platform` | [Platform Agent](../.github/workflows/AGENTS.md) | CI/CD, container, deploy, infra |
+| `work:platform` | [Platform Agent](agents/platform.md) | CI/CD, container, deploy, infra |
 | `work:docs` | (any) | documentation-only change |
 
 Work that needs a product/UX/design decision before it can be built is not tagged for pickup — it **stays in
