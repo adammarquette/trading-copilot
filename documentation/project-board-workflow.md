@@ -83,8 +83,9 @@ Work complete and a **PR is open**. Move here when the PR exists.
   no unlinked issues (the existing issue-first rule, enforced at the board).
 - The rare issue with **no** code/doc change — a pure decision or a triage outcome — may enter Review (or go
   straight to Done) with the resolution recorded in a comment instead of a PR.
-- Review itself is the **Code Reviewer Agent's** arena; per its contract it reports findings and does **not**
-  approve, merge, or move the card. The author addresses findings and resolves threads; the maintainer merges.
+- Review is the **Code Reviewer Agent's** arena: it leaves findings as review comments and submits a formal
+  verdict — **Approve** or **Request changes** (per its [contract](../.github/AGENTS.md)) — but does **not merge,
+  close, or move the card**. The author addresses findings and resolves threads; the maintainer merges.
 
 ### Done
 Merged, and satisfying the **Definition of Done** (engineering §10: test-first, build green, docs updated in the
