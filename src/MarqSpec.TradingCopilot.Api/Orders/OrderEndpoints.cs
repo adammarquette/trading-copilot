@@ -222,9 +222,11 @@ public static class OrderEndpoints
 
         // The staged row IS the proposal (kept whole at arm/edit); its venue-neutral Symbol re-resolves the
         // contract fresh -- the front month may even have rolled since arming, and R-12 wants today's truth.
+        // WorkingStopPrice, not StopPrice: a Limit/Market order has no venue trigger, and rebuilding the stop
+        // from the safety stop would silently re-size against a wider stop than the operator armed (gh#134).
         (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
             composed, order.Symbol ?? order.Instrument, order.TickSize, order.PointValue, order.Side, order.Size,
-            order.EntryPrice, order.StopPrice ?? order.SafetyStopPrice, order.SafetyStopPrice,
+            order.EntryPrice, order.WorkingStopPrice, order.SafetyStopPrice,
             order.ReferencePrice, order.Type, cancellationToken);
         if (executionRequest is null)
         {
@@ -429,11 +431,13 @@ public static class OrderEndpoints
         order.Side = request.Side;
         order.Type = request.Type;
         order.EntryPrice = request.Entry;
+        order.WorkingStopPrice = request.Stop; // the protective stop, kept for every type -- the R-12 rebuild reads it
         order.SafetyStopPrice = request.SafetyStop;
         order.ReferencePrice = request.ReferencePrice;
         order.TickSize = request.TickSize;
         order.PointValue = request.PointValue;
         order.LimitPrice = request.Type == OrderType.Limit ? request.Entry : null;
+        // The venue TRIGGER -- only Stop/StopLimit orders carry one; distinct from the working stop above.
         order.StopPrice = request.Type is OrderType.Stop or OrderType.StopLimit ? request.Stop : null;
         if (order.Status == OrderStatus.Staged)
         {

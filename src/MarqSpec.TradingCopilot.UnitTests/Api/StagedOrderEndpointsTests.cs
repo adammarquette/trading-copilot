@@ -286,6 +286,47 @@ public class StagedOrderEndpointsTests
     }
 
     [Fact]
+    public async Task Take_ShouldRebuildTheWorkingStop_NotTheSafetyStop_ForANonStopOrder()
+    {
+        // The gh#134 defect: a Limit/Market order carries no venue trigger, so the working stop was not
+        // persisted -- take rebuilt it as the SAFETY stop, silently re-sizing against a different stop than
+        // the operator armed. Proven behaviourally through the real gate under ActualStop sizing, where the
+        // working stop is the only thing that moves the size: with the tight working stop the order passes and
+        // transmits; with the wide safety stop substituted, PerTradeRisk leaves room for zero and take blocks.
+        Guid accountId = await SeedAccountAsync();
+        await using (TradingCopilotDbContext tune = Context())
+        {
+            RiskProfileRecord profile = await tune.RiskProfiles.SingleAsync();
+            profile.SizingBasis = SizingBasis.ActualStop;   // size against the WORKING stop
+            profile.PerTradeRiskFraction = 0.02m;           // tight budget so the stop distance decides the size
+            profile.MaxContractsPerOrder = 100;             // don't let the manual cap mask the difference
+            await tune.SaveChangesAsync();
+        }
+
+        // Working stop 1pt ($5/contract) vs safety stop 20pt ($100/contract): under ActualStop the working
+        // stop admits size; the safety stop (the bug) admits none at this budget.
+        SendOrderRequest limit = new("MES", 0.25m, 5m, OrderSide.Buy, 1, 5300m, 5299m, 5280m, 5300m, OrderType.Limit);
+        await ArmAsync(accountId, limit);
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context())
+        {
+            Order staged = await read.Orders.SingleAsync();
+            orderId = staged.Id;
+            staged.StopPrice.Should().BeNull();             // a Limit order has no venue trigger...
+            staged.WorkingStopPrice.Should().Be(5299m);     // ...but the working stop is preserved regardless
+        }
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, CancellationToken.None);
+
+        // Fixed: take rebuilds the working stop, sizes as arm did, and transmits. (Under the defect this is a
+        // 422 -- PerTradeRisk sizes against the safety stop and leaves room for zero.)
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
     public async Task Take_ShouldConflict_WhenTheOrderIsNotStaged()
     {
         Guid accountId = await SeedAccountAsync();
