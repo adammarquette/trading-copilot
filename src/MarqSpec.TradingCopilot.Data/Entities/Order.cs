@@ -56,6 +56,14 @@ public class Order : IUserOwned
     /// <summary>The proposal's intended entry price — kept whole so a staged ticket can re-validate (R-12).</summary>
     public decimal EntryPrice { get; set; }
 
+    /// <summary>
+    /// The proposal's <b>working</b> (protective) stop — persisted for <i>every</i> order type, distinct from
+    /// <see cref="StopPrice"/> (the venue trigger, which only Stop/StopLimit orders carry). Kept whole so a
+    /// staged Market/Limit ticket re-validates against the stop the operator armed, not the safety stop
+    /// (gh#134). For a Stop order it equals <see cref="StopPrice"/>.
+    /// </summary>
+    public decimal WorkingStopPrice { get; set; }
+
     /// <summary>The proposal's safety-stop price — the deterministic worst case (R-5).</summary>
     public decimal SafetyStopPrice { get; set; }
 
