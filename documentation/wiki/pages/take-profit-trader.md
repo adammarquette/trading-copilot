@@ -3,9 +3,12 @@
 > **Trust tier:** authoritative-ish — **direct help-center fetch 403s** (Zendesk); facts **web-search-grounded**
 > (2026-07-19) and flagged **confirm in-portal**. **Source:** https://takeprofittraderhelp.zendesk.com/hc/en-us
 > **Access:** the help centre **refused a direct fetch (403)**; nothing here was taken from it. The facts below are
-> public rules restated from web-search results, and no help-centre text is reproduced. **Terms not yet reviewed —
-> the decision to ground the page this way was implicit; deciding it explicitly is open in gh#118** (successor to
-> gh#53, which closed with this undecided).
+> public rules restated from web-search results, and no help-centre text is reproduced. **Terms of Service reviewed
+> 2026-07-22 (gh#118 — decided: keep as-is).** The ToS **prohibits automated access** to TPT Resources and
+> reproduction of site content ⇒ **never machine-fetch TPT properties**; this page's grounding (web search, nothing
+> taken from the site) complies, and figures are confirmed **in-portal by the operator** — authenticated human
+> access under the user agreement. Nothing restricts restating program rules. (The ToS page itself was read via one
+> direct fetch of the main site, which served it `200` — the minimal read needed to learn the restriction.)
 > **Informs:** R-5 (drawdown mode + consistency), R-14 (stage/mode), R-17 / Q-14 (a firm on Tradovate), the account
 > model (data dictionary). Companion to [prop-firm-rules.md](prop-firm-rules.md).
 
