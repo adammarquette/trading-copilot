@@ -11,8 +11,8 @@ place. **Not read by the product.** Conventions + trust tiers: [`SCHEMA.md`](SCH
 > **not reproduced**: no page carries substantial verbatim text, and no vendor document is redistributed here
 > (the one that was has been removed **and purged from history** — gh#52). Short quotes are attributed inline.
 > Trademarks belong to their owners and are used only to identify what is being described. Per-source terms
-> posture is recorded in each page's `Access:` header — see [`SCHEMA.md`](SCHEMA.md), gh#53, and the open
-> per-source decision gh#118.
+> posture is recorded in each page's `Access:` header — see [`SCHEMA.md`](SCHEMA.md) and gh#53 → gh#118
+> (the 403-source terms decision, resolved 2026-07-22: pages kept as-is, postures recorded).
 
 ## Pages
 | Page | Authoritative for | Trust | Informs |

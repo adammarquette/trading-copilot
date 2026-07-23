@@ -8,9 +8,13 @@
 > https://apextraderfunding.com/help-center/eod-trailing-drawdown-accounts/eod-evaluations ,
 > https://apextraderfunding.com/help-center/eod-trailing-drawdown-accounts/eod-drawdown-explained/
 > **Access:** Topstep's help centre read directly; **Apex refused a direct fetch (403)** and its figures are
-> restated from web-search results, not taken from the site. No help-centre text is reproduced. **Apex's terms not
-> yet reviewed — grounding the page this way was an implicit decision; deciding it explicitly is open in gh#118**
-> (successor to gh#53, which closed with this undecided).
+> restated from web-search results, not taken from the site. No help-centre text is reproduced. **Apex's Terms of
+> Use reviewed 2026-07-22 (gh#118 — decided: keep as-is).** The ToU (eff. 2025-10-22, read via an interactive
+> browser session, which renders normally — the 403 blocks only non-browser fetches) has **no anti-automation
+> clause**: public pages are licensed for personal informational browsing. Reproducing site content needs written
+> permission — none is reproduced here. A clause purports to require permission even to *link* to the site; the
+> citation URLs below are kept deliberately (URLs are facts, citation is attribution). Nothing restricts restating
+> program rules.
 > **Informs:** R-5 (the enforcing risk model must **implement** these), R-14 (mode/account), R-17 / Q-14 (firm
 > differences), the account model (data dictionary), [topstep-brokerage.md](topstep-brokerage.md) (self-imposed floors).
 
