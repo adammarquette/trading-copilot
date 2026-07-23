@@ -9,6 +9,51 @@ Write the **integration and smoke tests — independently of the development wor
 - **Issue Tracing Required:** Every test suite, test file, or regression test must trace back to a specific registered GitHub issue (`gh#N`).
 - **PR Documentation:** All code changes and test additions must be linked to their tracking issue in the PR description (e.g., `Closes #N` or `Related to #N`). This ensures future AI agents and reviewers reconstruct context efficiently without wasting tokens.
 
+## The guard discipline — a test must be able to fail on the thing it guards
+
+The single rule this tier exists to serve. A test that cannot fail when its subject breaks is **worse than no
+test**: it reports safety that isn't there, and it is cited as evidence in review. Three obligations follow.
+
+### 1. Prove the red, not just the green
+A guard is only a guard once you have **seen it fail on the defect**. Before claiming a test covers a failure
+mode, break the subject deliberately — revert the fix, flip the constraint, disable the check — and confirm the
+test goes red for **that** reason. A test that passes both with and against the defect is documentation, not
+verification. *(The `Category=Smoke` read-only guard in PR #140 asserted method **names** never contain
+"Order"; every writing test in the suite satisfied it. A name cannot witness a verb.)*
+
+**Prefer guards that hold by construction** over guards that inspect. Where an invariant can be enforced at a
+seam — a `DelegatingHandler` that refuses any non-`GET`, a stub that cannot return the production-computed
+answer — do that instead of a reflective or naming check, and no future test can violate it however it is
+written.
+
+### 2. Pin an observed defect; never bless it
+When a probe finds the system doing the wrong thing, **assert the observed behaviour and mark it as a defect**,
+citing the issue — so the suite documents reality without enshrining it, and the assertion flips into that
+issue's regression guard when the fix lands:
+
+```csharp
+// DEFECT gh#128: issuance is unrestricted — any authenticated user may invite. Pins OBSERVED behavior
+// until #128 lands; the fix flips this to Forbidden and this test becomes its regression guard.
+response.StatusCode.Should().Be(HttpStatusCode.OK);
+```
+
+An unannotated assertion of broken behaviour reads as intent, and the fixer meets it as a *failing expectation*
+rather than a flipped guard. *(PR #127.)*
+
+### 3. A suite that cannot go green without a production change has **found a defect** — report it, don't fix it
+This tier's value is its independence; editing production to make your own suite pass destroys it. The correct
+outcome is **a red suite plus a filed issue** for the Coding Agent — that red *is* the deliverable. Concretely:
+
+- **File the issue** (`work:code`, the failure scenario, the suspected seam) and reference it from the PR.
+- **Mark the blocked test** `Skip = "blocked by gh#N"`, or pin the observed behaviour per rule 2 — never both
+  silently green.
+- **Do not** touch `src/**` outside `MarqSpec.TradingCopilot.IntegrationTests`. A production fix in a QA PR
+  ships without production review, without a unit regression ("bug fixes are regression-first" — the Coding
+  contract), and without a doc note.
+
+*(PR #135 carried a production fix twice because the suite could not otherwise pass. The fix was correct and the
+defect real — which is exactly why it deserved its own issue, unit regression, and review: gh#148.)*
+
 ## What you write & Test execution rules
 
 ### Structure & Config
@@ -26,7 +71,10 @@ Write the **integration and smoke tests — independently of the development wor
 
 ### 2. Smoke tests
 - **Deploy Trigger:** A tagged subset of the integration suite, run against **production on deploy**.
+- **A smoke test probes a *deployed* environment.** Its target is a **base URL + operator credentials from CI secrets** — never a self-hosted stack. A suite that spins up its own `PostgresApiFactory` container (or any stubbed venue) is an *integration* test wearing a smoke tag: it starts from an empty database, proves nothing about the deployment, and cannot verify what the deploy actually shipped. *(PR #140.)*
 - **Production Safety (Strictly Read-Only):** Production smoke tests are **strictly read-only** (e.g., fetching account info, contract specs, system health) with zero live execution impact; execution-path checks belong to the staging integration suite; nothing execution-shaped receives the smoke tag.
+- **Read-only means every verb, not just `/orders`.** `GET` only — the sole exception being the `POST /auth/login` needed to obtain a token. **No `POST` / `PUT` / `PATCH` / `DELETE`, no fixture creation, no discovery.** Enforce it **by construction** (rule 1): route every smoke client through a handler that throws on a non-`GET` request. Writing to production is not hypothetical harm — a smoke suite that declared an account's risk profile would silently replace the operator's real R-5 limits on a possibly **live, real-money** account.
+- **Probe what exists; never create what you want to read.** If the deployment holds no firm or account yet, the correct assertion is `200` with a possibly-empty collection. Where a probe needs an id, obtain it from a prior **`GET`** and **skip gracefully** when the environment has none.
 - **Rollback Flag:** A smoke failure flags the release for **human-approved rollback** (production deploy and rollback are human-approved, never automatic; engineering guide §9).
 
 ### 3. UI / Real-Time E2E tests (forward-looking)
@@ -41,4 +89,4 @@ Write the **integration and smoke tests — independently of the development wor
 Tiers activate as the roadmap lands them; the first deliverable is the harness bootstrap (staging config from CI secrets + first ProjectX suite).
 
 ## Definition of done
-Traces directly to a GitHub tracking issue (`gh#N`) and, where applicable, PRD requirement (`R-#`) · every test guards a **named** failure mode (no happy-path-only) · nothing mocked (sole sanctioned exception: an **adversarial** venue stub in the pre-merge tier) · green in its target tier (container-backed Postgres pre-merge; staging post-merge) · smoke subset tagged + strictly read-only on production · provenance pinned (commit SHA, branch, environment) on every test run and defect report · no secrets in source.
+Traces directly to a GitHub tracking issue (`gh#N`) and, where applicable, PRD requirement (`R-#`) · every test guards a **named** failure mode (no happy-path-only) · **every guard proven able to fail on the defect it guards** (§*The guard discipline*) · **no production code touched — a suite that can't pass without it has found a defect to file, not to fix** · nothing mocked (sole sanctioned exception: an **adversarial** venue stub in the pre-merge tier) · green in its target tier (container-backed Postgres pre-merge; staging post-merge) · smoke subset tagged, pointed at a **deployed** target, and **`GET`-only by construction** · provenance pinned (commit SHA, branch, environment) on every test run and defect report · no secrets in source.
