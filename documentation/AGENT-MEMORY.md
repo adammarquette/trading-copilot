@@ -35,9 +35,15 @@ Working practices Adam has asked agents to follow that have no formal-doc home.
 
 ## Notes & communications
 
-Cross-agent heads-ups and in-session decisions that don't have a formal home yet. *(none yet)*
+Cross-agent heads-ups and in-session decisions that don't have a formal home yet.
+
+- **[2026-07-23] QA Integration & Smoke Test Backlog (Issues #130, #131, #132):**
+  - **Issue #130 (`test(qa): order execution & gated send path integration suite`):** Integration suite for `POST /accounts/{id}/orders` (safety-critical send path) testing fail-closed risk checks, credential key process guard (ADR-0015), flat-account honesty, risk gate refusals, dual `Order` + `GateDecisionRecord` persistence, and R-14 mode x environment refusals against Testcontainers Postgres.
+  - **Issue #131 (`test(qa): production-safe read-only smoke test suite`):** Production deploy smoke suite tagged `Category=Smoke` covering read-only endpoints (`GET /auth/me`, `/firms`, `/connections`, `/connections/{id}/accounts`, `/accounts/{id}/risk`).
+  - **Issue #132 (`test(qa): multi-tenant workspace isolation integration suite`):** R-20 default-deny workspace isolation test suite verifying user A's resources are completely invisible (`404` / empty `[]`) to user B.
 
 ---
 
 *Part of the repo's living memory for agents. If you're an agent reading this: check the sections above, keep
 entries current, and leave things better than you found them.*
+
