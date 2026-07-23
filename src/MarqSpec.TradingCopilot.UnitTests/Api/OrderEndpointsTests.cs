@@ -253,6 +253,35 @@ public class OrderEndpointsTests
     }
 
     [Fact]
+    public async Task SendOrder_ShouldAuthorizeAgainstTheDeclaredMode_WhenTheVenueClaimsADifferentOne()
+    {
+        // The R-14 mode-source guard (gh#148, found by the gh#135 suite). ComposeAsync must hand the execution
+        // service the operator's DECLARED mode, not the one the venue reports: gh#60 removed the venue flag as
+        // the stake signal after it misclassified all 293 accounts on a real login.
+        //
+        // Declared Practice + venue claims Live, in Development: Practice trades anywhere, Live nowhere outside
+        // production -- so the send succeeds only if the DECLARED mode is what reaches TradingModePolicy.
+        // Reverting the override makes this fail 409 RefusedByMode.
+        Guid accountId = await SeedAsync(mode: TradingMode.Practice);
+        A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
+        [
+            new VenueAccount(_venueAccount, "PRAC-50K", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Live)
+            {
+                Stage = AccountStage.Practice,
+            },
+        ]);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+
+        // The journaled row carries the declared mode too -- the DB mode guard compares against that (gh#7).
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.SingleAsync()).Mode.Should().Be(TradingMode.Practice);
+    }
+
+    [Fact]
     public async Task SendOrder_ShouldRefusePreGate_WhenTheAccountModeIsUndeclared()
     {
         Guid accountId = await SeedAsync(mode: TradingMode.Undeclared);
