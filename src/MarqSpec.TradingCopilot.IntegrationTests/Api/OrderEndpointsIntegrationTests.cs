@@ -165,7 +165,7 @@ public class OrderEndpointsIntegrationTests : IClassFixture<StubbedVenuePostgres
         sendResponse.OrderId.Should().NotBeNull();
         sendResponse.VenueOrderKey.Should().NotBeNullOrWhiteSpace();
 
-        // Audit Trail Assertions: 1 Order persisted and 1 GateDecisionRecord linked to the Order
+        // Audit Trail Assertions: 1 Order persisted with Mode = account.Mode and 1 GateDecisionRecord linked to the Order
         await ExecuteDbContextAsync(async db =>
         {
             Order? dbOrder = await db.Orders.IgnoreQueryFilters().FirstOrDefaultAsync(o => o.Id == sendResponse.OrderId);
@@ -174,6 +174,7 @@ public class OrderEndpointsIntegrationTests : IClassFixture<StubbedVenuePostgres
             dbOrder.Instrument.Should().Be("MESM25");
             dbOrder.Side.Should().Be(OrderSide.Buy);
             dbOrder.Size.Should().Be(1);
+            dbOrder.Mode.Should().Be(TradingMode.Practice, "journaled order mode must mirror the account mode");
             dbOrder.Status.Should().Be(OrderStatus.Working);
             dbOrder.VenueOrderKey.Should().Be(sendResponse.VenueOrderKey);
 
@@ -183,6 +184,33 @@ public class OrderEndpointsIntegrationTests : IClassFixture<StubbedVenuePostgres
             decision.Outcome.Should().Be(GateOutcome.Allowed);
             decision.ApprovedQuantity.Should().Be(1);
         });
+    }
+
+    [Fact]
+    public async Task SendOrder_ShouldRespectAccountMode_WhenVenueAccountModeDiverges()
+    {
+        // Direct test for finding #2: Adversarial stub reports venueAccount.Mode = Live for ALL accounts.
+        // We set account.Mode = Practice via StageOverride on an evaluation account.
+        // In Development host (where Live is refused but Practice is allowed), the order MUST succeed (200 OK)
+        // because R-14 authorizes against account.Mode (Practice), ignoring the raw venue flag (Live).
+        HttpClient client = _factory.CreateClient();
+        string token = await AuthenticateAsync(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        Guid accountId = await SetupAccountAsync(client, "Topstep-DivergentMode");
+
+        // Set StageOverride to Evaluation -> account.Mode is Practice (diverges from stub's reported venueAccount.Mode = Live)
+        using HttpResponseMessage overrideResp = await client.PutAsJsonAsync(
+            $"/accounts/{accountId}/stage",
+            new SetStageOverrideRequest(AccountStage.Evaluation));
+        overrideResp.EnsureSuccessStatusCode();
+
+        await DeclareRiskProfileAsync(client, accountId);
+
+        SendOrderRequest request = ValidOrderRequest(quantity: 1);
+        using HttpResponseMessage response = await client.PostAsJsonAsync($"/accounts/{accountId}/orders", request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK, "order must be allowed because account.Mode is Practice, ignoring the venue's adversarial Live flag");
     }
 
     [Fact]
