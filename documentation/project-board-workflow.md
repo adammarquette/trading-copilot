@@ -1,0 +1,192 @@
+# Project board & workflow — how work moves, and who moves it
+
+> **Adopted:** 2026-07-23 (gh#136). **Board:**
+> [Trading Copilot, project #2](https://github.com/users/adammarquette/projects/2) (public).
+> **Relates to:** [`CONTRIBUTING.md`](../CONTRIBUTING.md) (branching + Definition of Done), root
+> [`AGENTS.md`](../AGENTS.md) (the four agent role contracts), engineering guide
+> [§10](trading-platform-engineering.md) (Git workflow / CI/CD), and the
+> [Work Estimate rubric](work-estimate-rubric.md).
+
+The GitHub Project board is the **schedule**; the git promotion ladder (`develop → staging → main`) is the
+**delivery mechanism**. This document governs the board: what each column means, what has to be true for an item
+to move, who is allowed to move it, and how items are tagged so that humans *and* model-routed agents can pick up
+the right work. It complements — never overrides — the issue-first / no-orphaned-PR rule and the Definition of
+Done that already live in `CONTRIBUTING.md` and the engineering guide.
+
+## The board at a glance
+
+Work flows through a **six-column funnel** — a wide intake reservoir narrowing to ready, actionable work:
+
+| Column | One-line meaning | Who moves an item **out** |
+|---|---|---|
+| **Backlog** | Valid direction, not yet being prepared — the intake reservoir | Maintainer / product owner |
+| **Planning** | Being prepared — needs review, sub-task breakdown, or a design decision | Maintainer / product owner |
+| **Current ToDo** | Ready and tagged — anyone (agent or teammate) may pick it up | Whoever picks it up |
+| **In Progress** | Actively being worked | The worker |
+| **Review** | Work complete, PR open and linked | Maintainer (on merge) |
+| **Done** | Merged and satisfies the Definition of Done | — (terminal) |
+
+Flow is left-to-right, with **one sanctioned backward move**: an item kicks back to **Planning** (from Current
+ToDo or In Progress) when it turns out to be underspecified — see *Kickback*.
+
+`Backlog → Planning → Current ToDo` is the funnel: the reservoir feeds active preparation, which feeds the ready
+queue. The gate between each is the **maintainer's / product owner's** judgment.
+
+## The columns
+
+### Backlog
+The **intake reservoir**: valid directions that are not yet being actively prepared. New issues land here by
+default, as does anything deferred — work carrying the `backlog` label ("valid direction, not scheduled; revisit
+when its trigger fires") lives here, and so do future-phase epics whose first increment is not yet being scoped.
+Nothing here is pick-up-able; an item leaves Backlog only when the maintainer pulls it into **Planning** to
+prepare it (its trigger has fired, or it is next up).
+
+### Planning
+Work that **can begin** but is not yet ready to hand to a worker — it needs a review, a break-down into
+sub-tasks, acceptance criteria, or a product/design decision (an ADR, a wireframe) first. This is the **active
+on-deck area**, deliberately smaller than Backlog: things here are being shaped for the next stretch of work, not
+parked.
+
+An item **leaves Planning only when it is actionable**: scoped clearly enough that a competent worker could
+implement it without a blocking question, **and tagged** (see *Tagging*). Promotion to Current ToDo is the
+"ready" gate and is the **maintainer's / product owner's call** — the moment work is declared ready to consume.
+
+### Current ToDo
+Ready, tagged, not started — a **prioritized rolling queue**; top of the column is highest priority. There is no
+sprint boundary: this column *is* the sprint, refilled continuously from Planning. Any agent or teammate may take
+the highest item that matches their role and model tier (see *Tagging & model routing*) and move it to In
+Progress.
+
+Two rules specific to this column:
+- **QA/SDET may add directly here.** Integration and smoke-test issues are specified *independently* of the
+  implementation (the QA Agent works blind to the code, per its contract), so their acceptance criteria come from
+  the requirement, not from a design that needs product review. They therefore **skip Backlog and Planning** and
+  land in Current ToDo — the one sanctioned bypass. (The `test(qa)` suites #130/#131/#132 arrived this way.)
+- **If picking it up reveals it is underspecified**, don't force it — **kick it back to Planning** (see
+  *Kickback*).
+
+### In Progress
+Being worked right now. **Self-assign** when you start (the board's Assignees field), so two workers never pick
+the same item. This column holds **both** coding-agent and QA/SDET-agent work, and a single feature can have both
+in flight at once — the coding task and its independent test suite advance in parallel.
+
+**Kickback.** If, once you are in, the item has *too many unresolved questions to finish correctly*, move it
+**back to Planning** with a comment enumerating the blocking questions. A stalled item must not sit in In Progress
+looking like active work. This is the pressure-relief valve the whole process depends on: better to re-plan than
+to guess on a system that places real orders.
+
+### Review
+Work complete and a **PR is open**. Move here when the PR exists.
+
+- **A PR must be linked to the issue** whenever the change touches **code or documentation** — via `Closes #N` /
+  `Related to #N` in the PR body, which auto-populates the board's *Linked pull requests* field. No orphaned PRs,
+  no unlinked issues (the existing issue-first rule, enforced at the board).
+- The rare issue with **no** code/doc change — a pure decision or a triage outcome — may enter Review (or go
+  straight to Done) with the resolution recorded in a comment instead of a PR.
+- Review itself is the **Code Reviewer Agent's** arena; per its contract it reports findings and does **not**
+  approve, merge, or move the card. The author addresses findings and resolves threads; the maintainer merges.
+
+### Done
+Merged, and satisfying the **Definition of Done** (engineering §10: test-first, build green, docs updated in the
+**same PR**). *Done is Done* — it implies no follow-up. Residual scope discovered along the way is **spun off as
+its own issue** (landing in Backlog, or Planning if it is next up), never left implied in a "done" item.
+
+## Transitions & ownership
+
+| From → To | Trigger | Who |
+|---|---|---|
+| *(new issue)* → **Backlog** | issue opened | author / auto-add |
+| **Backlog → Planning** | pulled in to be prepared (trigger fired / next up) | **maintainer / product owner** |
+| **Planning → Current ToDo** | scoped + tagged + product-ready | **maintainer / product owner** |
+| *(QA)* → **Current ToDo** | integration/smoke suite specified from the requirement | QA/SDET agent |
+| **Current ToDo → In Progress** | picked up | the worker (self-assign) |
+| **In Progress → Review** | PR open + linked | the worker |
+| **Review → Done** | PR merged | maintainer (merge) |
+| **Current ToDo / In Progress → Planning** | too many open questions (*kickback*) | the worker |
+| *(any)* → **Done** (closed *not planned*) | won't-do / superseded | maintainer |
+
+## Tagging & model routing
+
+The goal: by the time an item reaches **Current ToDo**, its labels alone tell a dispatcher *which kind of worker*
+and *which model tier* should take it. Tags are applied during **Planning**, before the ready gate. Two required
+dimensions, plus one override.
+
+**1. Work type** — which role/agent owns it (maps to the `AGENTS.md` role contracts):
+
+| Label | Role contract | Typical work |
+|---|---|---|
+| `work:code` | [Coding Agent](../src/AGENTS.md) | production code + unit tests, test-first |
+| `work:qa` | [QA Agent](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) | integration / smoke tests, written independently |
+| `work:platform` | [Platform Agent](../.github/workflows/AGENTS.md) | CI/CD, container, deploy, infra |
+| `work:docs` | (any) | documentation-only change |
+
+Work that needs a product/UX/design decision before it can be built is not tagged for pickup — it **stays in
+Planning** until the decision is made.
+
+**2. Work Estimate** — a 1–5 estimate of the *capability a task demands* (reasoning difficulty × blast radius —
+not raw effort: a large but mechanical change can be a 2). Drives which model tier is dispatched — a **guideline
+that evolves as we learn what each tier handles well**, not a hard contract. The scoring rubric, factors, and
+calibration anchors live in [work-estimate-rubric](work-estimate-rubric.md); the summary:
+
+| Label | Meaning | Model tier *(guideline)* |
+|---|---|---|
+| `Work Estimate: 1` | Trivial / mechanical — typo, doc tweak, config bump, rename | cheapest (e.g. Haiku) |
+| `Work Estimate: 2` | Simple — small, well-scoped, obvious approach, low blast radius | cheap (Haiku / Sonnet) |
+| `Work Estimate: 3` | Moderate — ordinary feature, some design latitude | mid (Sonnet) |
+| `Work Estimate: 4` | Complex — ambiguous, cross-cutting, or multi-component | top (Opus) |
+| `Work Estimate: 5` | Critical / deep — subtle correctness, high blast radius | top (Opus), max effort |
+
+We use a **fixed rubric** rather than relative story points because a single-maintainer-plus-agents operation has
+no estimation disagreement to mediate — the rubric yields a *deterministic* score a dispatcher can act on (see the
+rubric's *Why a fixed rubric*).
+
+**3. Safety override.** The existing `safety-critical` label **pins the item to ≥ `Work Estimate: 4` (top tier)**
+regardless of its nominal score — the risk gate, execution, auto-flatten, and kill-switch paths are never routed
+to a cheap model, however small the diff looks. Safety can only **raise** the tier, never lower it.
+
+The Work Estimate is assigned by whoever prepares the item in Planning (maintainer or a planning agent). Model
+tiers name current examples (Opus 4.8 / Sonnet / Haiku) but are written as *tiers* so the mapping survives model
+changes. Both axes are **repo labels** (not board-only fields), so an agent reading the raw issue via `gh` sees
+them.
+
+## Epics vs. tasks — they flow differently
+
+An **epic** (`epic` label) is a **container**, not a unit of work, so it does not move like a task:
+- It sits in **Backlog** (future phase) or **Planning** (its first increment being scoped), then moves to **In
+  Progress** and *stays there* while its child tasks flow through the columns individually.
+- It reaches **Done** only when every child task is Done (GitHub's *Sub-issues progress* field tracks this).
+- The things that actually traverse Current ToDo → In Progress → Review → Done are the **child tasks**, each a
+  `feature/<id>_…` branch with (per the QA contract) an independent test task.
+- **Epics are not `Work Estimate`-tagged** — the estimate is a per-task routing signal; a container has no single
+  tier. Its child tasks each carry their own.
+
+## Time-boxing
+
+**None, to start.** The board has no iteration/sprint field, and Current ToDo *is* the sprint — a rolling,
+prioritized ready-queue refilled from Planning. If velocity/burndown becomes useful later, add an *Iteration*
+field (and optionally group by phase with Milestones) without changing any column meaning.
+
+## Adoption (2026-07-23, gh#136)
+
+The board predated this process; adopting it was one clean-up pass:
+- **Added the `Backlog` column** (first Status option); **redefined Planning** from "not ready" to "being
+  prepared."
+- **Moved to Backlog:** the future-phase epics (#13–26) and the `backlog`-labeled items (#3, #27, #41, #64, #66,
+  #84, #95, #100, #103, #109). **Current ToDo** kept the genuinely-ready work (#45, #131, #132); #130 was already
+  In Progress.
+- **Seeded the labels** (`work:*`, `Work Estimate: 1–5`) and applied a first tagging pass to the actionable
+  items.
+
+## Automation
+
+GitHub Projects can run the mechanical moves. **Configuring the built-in workflows requires the Project's web UI**
+— the GitHub API does not expose them — so these are a maintainer setting, recorded here so the intended state is
+visible:
+- **Auto-add** new repo issues/PRs → **Backlog**, so nothing is orphaned off-board.
+- **Item closed → Done**, **PR merged → Done** (`closed → Done` already appears active — every closed issue sits
+  in Done).
+- Every **forward** gate (`Backlog → Planning → Current ToDo → In Progress`) stays **manual** — those are human /
+  agent judgment.
+
+> **Board hygiene note:** a Projects item's title can stop tracking its issue after a retitle (a known GitHub
+> quirk); the fix is to remove + re-add the item (which restores its Status), not another retitle.

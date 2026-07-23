@@ -58,8 +58,10 @@ Every branch traces back to the work item it delivers.
 
 ## Issue-first — no orphaned PRs
 Every change starts from a **tracking issue** opened *before* the branch/PR; the PR references it (`Closes #N` /
-`Related to #N`). Work is planned as epics → tasks on the GitHub **Project board**, and each feature gets a **dev
-task** plus an independent **QA task** (engineering §10).
+`Related to #N`). Work is planned as epics → tasks on the GitHub **Project board**; the
+[board workflow](documentation/project-board-workflow.md) governs how items flow across it (Backlog → Planning →
+Current ToDo → In Progress → Review → Done) and how they're tagged for pickup and model routing. Each feature gets
+a **dev task** plus an independent **QA task** (engineering §10).
 
 ## Commits
 - **[Conventional Commits](https://www.conventionalcommits.org/)** (`feat:`, `fix:`, `docs:`, `chore:`, `build:`, …);
