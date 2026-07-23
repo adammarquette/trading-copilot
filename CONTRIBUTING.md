@@ -74,9 +74,9 @@ a **dev task** plus an independent **QA task** (engineering §10).
 ## Pull requests
 - Open against **`develop`**; reference the tracking issue.
 - **Populate every field — maximal metadata.** Assign the current account, set the **milestone** (the work's
-  phase) and the **Project** board fields, apply the `work:*` + `Work Estimate` labels, and link the issue
-  (`Closes #N`). The next reader — often an agent — rebuilds context from these fields ([board
-  workflow](documentation/project-board-workflow.md)).
+  phase), apply the `work:*` + `Work Estimate` labels, and **link the PR to its defining issue** with `Closes #N`.
+  Issues are the board cards; a PR rides its issue's *Linked pull requests* rather than taking a card of its own
+  ([board workflow](documentation/project-board-workflow.md)).
 - **Reviews submit a verdict.** A reviewer leaves its findings as comments and **Approves** or **Requests
   changes** — never a bare comment that leaves the state ambiguous. **Merging stays the maintainer's**; an
   approval is a signal, not authority to ship.

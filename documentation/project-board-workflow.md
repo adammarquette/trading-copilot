@@ -32,6 +32,23 @@ ToDo or In Progress) when it turns out to be underspecified — see *Kickback*.
 `Backlog → Planning → Current ToDo` is the funnel: the reservoir feeds active preparation, which feeds the ready
 queue. The gate between each is the **maintainer's / product owner's** judgment.
 
+## Issues, PRs & sub-issues — cards vs. links
+
+The board tracks **issues**, and only issues are **cards** (they carry Status). Two relationships hang off them,
+and they use different GitHub mechanisms:
+
+- **A PR is an issue's implementation, not a card.** It **links to its defining issue with a closing keyword**
+  — `Closes #N` — which, because PRs target the default branch **`develop`**,
+  [auto-closes the issue on merge](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue)
+  and shows the PR in the issue's *Development* section and the board's *Linked pull requests* field. So an issue
+  in **Review** visibly carries its PR without the PR taking a card of its own. (`Related to #N` links *without*
+  closing — for a PR that touches, but does not complete, an issue.)
+- **A sub-issue is issue→issue decomposition.** An epic's tasks are its
+  [**sub-issues**](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/adding-sub-issues)
+  (the *Parent issue* / *Sub-issues progress* fields); a large task can hold its own. **A PR cannot be a
+  sub-issue** — GitHub restricts sub-issues to issues — so PR→issue always uses linking, never the sub-issue
+  hierarchy.
+
 ## The columns
 
 ### Backlog
@@ -78,9 +95,10 @@ to guess on a system that places real orders.
 ### Review
 Work complete and a **PR is open**. Move here when the PR exists.
 
-- **A PR must be linked to the issue** whenever the change touches **code or documentation** — via `Closes #N` /
-  `Related to #N` in the PR body, which auto-populates the board's *Linked pull requests* field. No orphaned PRs,
-  no unlinked issues (the existing issue-first rule, enforced at the board).
+- **A PR must be linked to its issue** whenever the change touches **code or documentation** — normally
+  `Closes #N` (auto-closes on merge into `develop`; use `Related to #N` when the PR does not complete the issue),
+  which populates the issue's *Linked pull requests* field so its card carries the PR (see *Issues, PRs &
+  sub-issues*). No orphaned PRs, no unlinked issues (the issue-first rule, enforced at the board).
 - The rare issue with **no** code/doc change — a pure decision or a triage outcome — may enter Review (or go
   straight to Done) with the resolution recorded in a comment instead of a PR.
 - Review is the **Code Reviewer Agent's** arena: it leaves findings as review comments and submits a formal
