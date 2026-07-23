@@ -39,10 +39,16 @@ tool-neutral: any reviewer, human or agent, should work from it.
 - **Stale documentation is a finding.** A comment describing a limitation the PR fixed, an XML doc advertising
   an obsolete contract, a doc claiming an enforcement no longer in the code. On safety paths a false claim is
   worse than no claim.
+- **On a PR, submit a formal review — a state, not just a comment.** Attach each finding as an inline review
+  comment, then submit the verdict: **Request changes** if any finding is unresolved, **Approve** (with a
+  one-line summary) when the diff is clean. A bare top-level comment does not register as a review and leaves the
+  state ambiguous. (A working-diff review with no PR still uses `ReportFindings` / the requested format.)
 
 ## What you do not do
-- **Approve, merge, or close.** Those are the maintainer's, and on a single-operator deployment there is no
-  second human to delegate them to.
+- **Merge or close.** Those remain the maintainer's — on a single-operator deployment, what lands on `develop` is
+  a human decision. **Approving or requesting changes is *not* on this list:** that verdict is your job (see
+  *How to report*). An approval says the diff is ready; it does not merge it — and you approve a diff you
+  *reviewed*, never one you *authored* (the independence that makes review worth running).
 - **Push commits to the branch under review**, unless explicitly asked to apply your own findings.
 - **Resolve your own threads.** The author resolves them once addressed.
 - **Redesign.** Review the change that was made against what it claims to do. If a different design would be
@@ -51,4 +57,4 @@ tool-neutral: any reviewer, human or agent, should work from it.
 
 ## Definition of done
 Every finding names a concrete failure · ranked by blast radius · repeated patterns called out as patterns ·
-no formatting noise · claims in the PR body verified against the diff · nothing approved, merged, or pushed.
+no formatting noise · claims in the PR body verified against the diff · a formal verdict submitted on a PR (Approve / Request changes) · nothing merged, closed, or pushed.

@@ -73,6 +73,13 @@ a **dev task** plus an independent **QA task** (engineering §10).
 
 ## Pull requests
 - Open against **`develop`**; reference the tracking issue.
+- **Populate every field — maximal metadata.** Assign the current account, set the **milestone** (the work's
+  phase) and the **Project** board fields, apply the `work:*` + `Work Estimate` labels, and link the issue
+  (`Closes #N`). The next reader — often an agent — rebuilds context from these fields ([board
+  workflow](documentation/project-board-workflow.md)).
+- **Reviews submit a verdict.** A reviewer leaves its findings as comments and **Approves** or **Requests
+  changes** — never a bare comment that leaves the state ambiguous. **Merging stays the maintainer's**; an
+  approval is a signal, not authority to ship.
 - **Clean history — rebase-merge with curated commits (no squash, gh#104):** a branch may carry several commits
   while in progress; before merge, **interactive-rebase it into understandable units of work** — each commit a
   coherent, Conventional-typed package whose message carries the why. PRs land by **rebase-merge** (squash-merge is
