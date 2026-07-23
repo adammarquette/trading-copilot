@@ -282,6 +282,31 @@ public class OrderEndpointsTests
     }
 
     [Fact]
+    public async Task SendOrder_ShouldRefuseADeclaredLiveAccount_EvenWhenTheVenueClaimsItIsPractice()
+    {
+        // The DANGEROUS direction of the same seam (gh#148): the venue calls a live account "practice" -- the
+        // gh#60 failure exactly, where the venue's flag classified real funded accounts as practice. If the
+        // guard read the venue's claim it would authorize a real-money trade from a Development host.
+        Guid accountId = await SeedAsync(mode: TradingMode.Live);
+        A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
+        [
+            new VenueAccount(_venueAccount, "EXPRESS-50K", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Practice)
+            {
+                Stage = AccountStage.Funded,
+            },
+        ]);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        // Refused before sizing: Live may not be traded outside production, whatever the venue calls it.
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.AnyAsync()).Should().BeFalse();
+        (await reload.GateDecisions.AnyAsync()).Should().BeFalse(); // never sized, so no decision exists
+    }
+
+    [Fact]
     public async Task SendOrder_ShouldRefusePreGate_WhenTheAccountModeIsUndeclared()
     {
         Guid accountId = await SeedAsync(mode: TradingMode.Undeclared);
