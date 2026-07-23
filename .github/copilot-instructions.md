@@ -8,7 +8,7 @@ Review accordingly: **a plausible-looking bug on a path that reaches a broker ma
 style observations.**
 
 This file owns the **substance** of what to look for. The reviewer's **role** — independence, how to report,
-what not to do — is [`.github/AGENTS.md`](AGENTS.md). The rules the code is written against are
+what not to do — is [`documentation/agents/code-reviewer.md`](../documentation/agents/code-reviewer.md). The rules the code is written against are
 [`AGENTS.md`](../AGENTS.md) and [`src/AGENTS.md`](../src/AGENTS.md). Change a rule in one place only; these
 files link rather than restate.
 
