@@ -26,4 +26,10 @@ public enum OrderStatus
 
     /// <summary>Rejected by the venue or the risk gate.</summary>
     Rejected = 5,
+
+    /// <summary>
+    /// Armed and staged server-side (gh#11, ADR-0007) — gate-evaluated, editable, <b>not at the venue</b>.
+    /// Taking it re-validates everything against fresh truth (R-12) before it becomes <see cref="Working"/>.
+    /// </summary>
+    Staged = 6,
 }

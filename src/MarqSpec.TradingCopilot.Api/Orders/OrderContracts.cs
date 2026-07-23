@@ -44,3 +44,36 @@ public sealed record SendOrderResponse(
     int ApprovedQuantity,
     RiskLayer? BindingLayer,
     string Reason);
+
+/// <summary>A staged (armed) order with its latest gate decision (gh#11 increment 2, ADR-0007).</summary>
+/// <param name="OrderId">The staged order's id.</param>
+/// <param name="Status">The order status (<c>Staged</c> until taken or cancelled).</param>
+/// <param name="Outcome">The latest gate outcome — allowing, resizing, or blocking; staging keeps all three.</param>
+/// <param name="ApprovedQuantity">The contracts the gate would authorize right now.</param>
+/// <param name="BindingLayer">The risk layer that bound the decision, when one did.</param>
+/// <param name="Reason">The gate's human-readable why — always populated (R-5).</param>
+public sealed record StagedOrderResponse(
+    Guid OrderId,
+    string Status,
+    string Outcome,
+    int ApprovedQuantity,
+    RiskLayer? BindingLayer,
+    string Reason)
+{
+    /// <summary>Projects a staged row and its decision.</summary>
+    /// <param name="order">The staged order.</param>
+    /// <param name="decision">The evaluation that accompanied this staging or edit.</param>
+    /// <returns>The response.</returns>
+    public static StagedOrderResponse From(Data.Entities.Order order, GateDecision decision)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+        ArgumentNullException.ThrowIfNull(decision);
+        return new StagedOrderResponse(
+            order.Id,
+            order.Status.ToString(),
+            decision.Outcome.ToString(),
+            decision.ApprovedQuantity,
+            decision.BindingLayer,
+            decision.Reason);
+    }
+}

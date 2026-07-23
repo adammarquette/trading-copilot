@@ -97,6 +97,35 @@ public class OrderExecutionServiceTests
                 Task.FromResult(new PlacedOrder(r.Account, orderId, DateTimeOffset.UnixEpoch)));
     }
 
+    // --- Evaluate: the ladder minus transmission (gh#11 increment 2) ---
+
+    [Fact]
+    public void Evaluate_ShouldRunTheGateAndReturnItsDecision_WithoutTransmitting()
+    {
+        // Arming judges a ticket exactly as sending would -- same ladder, same code -- but the venue must
+        // never see it: transmission is a separate, explicit act (ADR-0007).
+        GateReturns(GateDecision.Block(RiskLayer.ManualCap, "over the manual cap"));
+
+        ExecutionResult result = _service.Evaluate(Request(Account(TradingMode.Practice)));
+
+        result.Outcome.Should().Be(ExecutionOutcome.Evaluated);
+        result.Decision!.Outcome.Should().Be(GateOutcome.Blocked); // a blocking decision still stages -- it is
+        result.Order.Should().BeNull();                            // information, not authorization
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public void Evaluate_ShouldRefusePreGate_ExactlyAsSendWould()
+    {
+        GateReturns(GateDecision.Allow(4, "irrelevant -- never reached"));
+
+        ExecutionResult result = _service.Evaluate(Request(Account(TradingMode.Undeclared)));
+
+        // Undeclared trades nowhere (gh#60): the pre-gate ladder fires before sizing, for arm and send alike.
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByMode);
+        result.Decision.Should().BeNull();
+    }
+
     // --- The happy path ---
 
     [Fact]
