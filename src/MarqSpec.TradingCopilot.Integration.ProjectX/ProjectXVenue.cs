@@ -76,7 +76,10 @@ public sealed class ProjectXVenue : ITradingVenue
     public VenueCapabilities Capabilities { get; } = VenueCapabilities.Of(
         VenueCapability.HistoricalBars
         | VenueCapability.Quotes
-        | VenueCapability.ClosePosition);
+        | VenueCapability.ClosePosition
+        // The always-native safety stop rides the entry as a stop-loss bracket (gh#11 inc 3): the gateway holds
+        // it and attaches it on fill, so the neutral contract genuinely reaches this capability now.
+        | VenueCapability.BracketOrders);
 
     /// <summary>
     /// The ProjectX derivation-logic version (ADR-0009, gh#9). History: <b>1</b> — the conservative PRAC-only
@@ -190,6 +193,15 @@ public sealed class ProjectXVenue : ITradingVenue
             Size = request.Quantity,
             LimitPrice = request.LimitPrice?.Value,
             StopPrice = request.StopPrice?.Value,
+            // The always-native safety stop (ADR-0007, gh#11 inc 3): a stop-loss bracket the gateway holds and
+            // attaches on fill, so the position is never unprotected. A stop-type bracket at the safety price.
+            StopLossBracket = request.ProtectiveStop is { } protectiveStop
+                ? new ClientModels.OrderBracket
+                {
+                    Type = ProjectXMapping.ToClientType(OrderType.Stop),
+                    StopPrice = protectiveStop.Value,
+                }
+                : null,
         };
 
         ClientModels.PlaceOrderResponse response = await _api.PlaceOrderAsync(payload, cancellationToken);

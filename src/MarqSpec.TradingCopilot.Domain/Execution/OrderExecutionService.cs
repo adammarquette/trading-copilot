@@ -116,6 +116,16 @@ public sealed class OrderExecutionService : IOrderExecutionService
             return ExecutionResult.RefusedByRisk(decision);
         }
 
+        // The always-native safety stop (ADR-0007): every entry carries its safety stop as an exchange-held
+        // protective bracket, so a live position is never without a real stop. If the venue can't hold one,
+        // transmitting would open an UNPROTECTED position -- fail-closed and refuse, better no trade than that.
+        if (!_venue.Capabilities.Supports(VenueCapability.BracketOrders))
+        {
+            return ExecutionResult.RefusedByUnprotectableStop(
+                $"Venue '{_venue.Id}' cannot hold an exchange-native protective stop, so the position would be "
+                + "unprotected. The entry was not sent.");
+        }
+
         OrderRequest order = new(
             request.Account.Id,
             request.Contract.Contract,
@@ -123,7 +133,10 @@ public sealed class OrderExecutionService : IOrderExecutionService
             request.Type,
             decision.ApprovedQuantity,
             LimitPriceFor(request),
-            StopPriceFor(request));
+            StopPriceFor(request))
+        {
+            ProtectiveStop = request.Proposal.SafetyStop,
+        };
 
         PlacedOrder placed = await _venue.PlaceOrderAsync(order, cancellationToken);
 

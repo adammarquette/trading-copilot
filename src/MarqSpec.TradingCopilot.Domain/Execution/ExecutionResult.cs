@@ -77,4 +77,12 @@ public sealed record ExecutionResult(
     {
         return new ExecutionResult(ExecutionOutcome.RefusedByUnsupportedType, Order: null, Decision: null, reason);
     }
+
+    /// <summary>The venue cannot hold an exchange-native protective stop; the entry was not sent (ADR-0007, gh#11).</summary>
+    /// <param name="reason">Why the position could not be protected.</param>
+    /// <returns>A refused result carrying no gate decision.</returns>
+    public static ExecutionResult RefusedByUnprotectableStop(string reason)
+    {
+        return new ExecutionResult(ExecutionOutcome.RefusedByUnprotectableStop, Order: null, Decision: null, reason);
+    }
 }

@@ -55,10 +55,10 @@ public class ProjectXVenueTests
         _venue.Capabilities.Supports(VenueCapability.HistoricalBars).Should().BeTrue();
         _venue.Capabilities.Supports(VenueCapability.Quotes).Should().BeTrue();
         _venue.Capabilities.Supports(VenueCapability.ClosePosition).Should().BeTrue();
+        _venue.Capabilities.Supports(VenueCapability.BracketOrders).Should().BeTrue(); // the always-native safety stop (gh#11 inc 3)
     }
 
     [Theory]
-    [InlineData(VenueCapability.BracketOrders)]
     [InlineData(VenueCapability.TrailingStops)]
     [InlineData(VenueCapability.ModifyOrder)]
     [InlineData(VenueCapability.MarketDepth)]
@@ -159,6 +159,35 @@ public class ProjectXVenueTests
 
         await act.Should().ThrowAsync<ArgumentException>();
         A.CallTo(() => _api.ClosePositionAsync(A<int>._, A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task PlaceOrderAsync_ShouldAttachAStopLossBracket_FromTheProtectiveStop()
+    {
+        // The always-native safety stop (gh#11 inc 3): the protective stop rides the entry as a stop-loss
+        // bracket, so the exchange holds it and attaches it on fill -- the position is never unprotected.
+        ClientModels.PlaceOrderRequest? sent = null;
+        A.CallTo(() => _api.PlaceOrderAsync(A<ClientModels.PlaceOrderRequest>._, A<CancellationToken>._))
+            .Invokes((ClientModels.PlaceOrderRequest p, CancellationToken _) => sent = p)
+            .Returns(new ClientModels.PlaceOrderResponse { Success = true, OrderId = 555 });
+
+        await _venue.PlaceOrderAsync(MarketBuy() with { ProtectiveStop = new Price(4_990m) }, CancellationToken.None);
+
+        sent!.StopLossBracket.Should().NotBeNull();
+        sent.StopLossBracket!.StopPrice.Should().Be(4_990m);
+    }
+
+    [Fact]
+    public async Task PlaceOrderAsync_ShouldSendNoBracket_WhenThereIsNoProtectiveStop()
+    {
+        ClientModels.PlaceOrderRequest? sent = null;
+        A.CallTo(() => _api.PlaceOrderAsync(A<ClientModels.PlaceOrderRequest>._, A<CancellationToken>._))
+            .Invokes((ClientModels.PlaceOrderRequest p, CancellationToken _) => sent = p)
+            .Returns(new ClientModels.PlaceOrderResponse { Success = true, OrderId = 555 });
+
+        await _venue.PlaceOrderAsync(MarketBuy(), CancellationToken.None); // no protective stop on this ticket
+
+        sent!.StopLossBracket.Should().BeNull();
     }
 
     [Fact]

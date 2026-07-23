@@ -35,6 +35,7 @@ public class StagedOrderEndpointsTests
     {
         A.CallTo(() => _factory.Create(A<FirmConventions>._)).Returns(_venue);
         A.CallTo(() => _venue.Id).Returns(VenueId.Parse("projectx"));
+        A.CallTo(() => _venue.Capabilities).Returns(VenueCapabilities.Of(VenueCapability.BracketOrders)); // can hold the safety stop (gh#11 inc 3)
         A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
         [
             new VenueAccount(_venueAccount, "PRAC-50K", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Practice) { Stage = AccountStage.Practice },

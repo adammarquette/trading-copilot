@@ -19,4 +19,14 @@ public sealed record OrderRequest(
     OrderType Type,
     int Quantity,
     Price? LimitPrice,
-    Price? StopPrice);
+    Price? StopPrice)
+{
+    /// <summary>
+    /// The <b>always-native safety stop</b> to attach to this entry (ADR-0007, gh#11): an exchange-held
+    /// protective stop the venue places <i>on fill</i>, so a live position is never without a real stop —
+    /// covering gaps, fast moves, and outages. Requires <see cref="VenueCapability.BracketOrders"/>; the
+    /// execution service refuses to transmit an entry a venue cannot protect. <c>null</c> only where no entry
+    /// is being opened (a flatten or a stand-alone exit).
+    /// </summary>
+    public Price? ProtectiveStop { get; init; }
+}

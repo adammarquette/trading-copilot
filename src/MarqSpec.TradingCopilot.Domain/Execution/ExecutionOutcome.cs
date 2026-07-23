@@ -48,6 +48,12 @@ public enum ExecutionOutcome
     RefusedByUnsupportedType,
 
     /// <summary>
+    /// The gate authorized the order, but the venue cannot hold an exchange-native protective stop — so
+    /// transmitting the entry would open an unprotected position. Fail-closed: nothing was sent (ADR-0007, gh#11).
+    /// </summary>
+    RefusedByUnprotectableStop,
+
+    /// <summary>
     /// The full ladder ran and the gate decided — but nothing was transmitted (the arm/edit path, gh#11).
     /// The decision may be allowing, resizing, or blocking; transmission is a separate, explicit act.
     /// </summary>
