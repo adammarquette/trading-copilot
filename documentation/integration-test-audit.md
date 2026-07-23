@@ -26,7 +26,7 @@ The objective of this audit is to identify high-value integration testing gaps, 
 
 ## 2. Current Integration Test Inventory
 
-Below is the baseline inventory of current integration tests located under [src/MarqSpec.TradingCopilot.IntegrationTests/Api](file:///C:/Users/adamm/source/repos/trading-copilot/src/MarqSpec.TradingCopilot.IntegrationTests/Api):
+Below is the baseline inventory of current integration tests located under [`src/MarqSpec.TradingCopilot.IntegrationTests/Api`](../src/MarqSpec.TradingCopilot.IntegrationTests/Api):
 
 | Integration Test Suite | Covered Endpoints & Features | Current Status |
 | :--- | :--- | :--- |
