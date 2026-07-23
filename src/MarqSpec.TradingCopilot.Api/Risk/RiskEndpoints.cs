@@ -58,7 +58,12 @@ public static class RiskEndpoints
                 request.DailyProfitTarget,
                 request.StopForDayAtProfitTarget,
                 request.SizingBasis);
-            _ = TrailingDrawdown.Start(request.TrailingMode, request.TrailingAmount, account.Balance, request.LocksAt);
+            if (request.StartingBalance <= 0m)
+            {
+                throw new ArgumentOutOfRangeException(nameof(request.StartingBalance), request.StartingBalance, "The starting balance must be positive.");
+            }
+
+            _ = TrailingDrawdown.Start(request.TrailingMode, request.TrailingAmount, request.StartingBalance, request.LocksAt);
             _ = ManualCaps.Create(request.MaxContractsPerOrder);
         }
         catch (ArgumentOutOfRangeException error)
@@ -82,6 +87,7 @@ public static class RiskEndpoints
                 Id = Guid.NewGuid(),
                 UserId = currentUser.UserId,
                 AccountId = id,
+                StartingBalance = request.StartingBalance,
                 FloorSource = request.FloorSource,
                 TrailingMode = request.TrailingMode,
                 TrailingAmount = request.TrailingAmount,
@@ -99,6 +105,7 @@ public static class RiskEndpoints
         // declaration), it never merges.
         existing.DailyLossLimit = request.DailyLossLimit;
         existing.AccountProfitTarget = request.AccountProfitTarget;
+        existing.StartingBalance = request.StartingBalance;
         existing.FloorSource = request.FloorSource;
         existing.TrailingMode = request.TrailingMode;
         existing.TrailingAmount = request.TrailingAmount;

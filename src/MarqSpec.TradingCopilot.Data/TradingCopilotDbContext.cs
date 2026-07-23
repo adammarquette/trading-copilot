@@ -52,6 +52,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Declared per-account risk rules (R-5, gh#10). Operator-owned; one per account.</summary>
     public DbSet<RiskProfileRecord> RiskProfiles => Set<RiskProfileRecord>();
 
+    /// <summary>Persisted gate decisions — every sized send attempt, auditable (R-5/R-16, gh#11). Operator-owned.</summary>
+    public DbSet<GateDecisionRecord> GateDecisions => Set<GateDecisionRecord>();
+
     /// <summary>The append-only event log (ADR-0001). System plumbing — an acknowledged global, not operator-owned.</summary>
     public DbSet<Event> Events => Set<Event>();
 
@@ -233,6 +236,7 @@ public class TradingCopilotDbContext : TenantDbContext
                 // TrailingDrawdown.Start / ManualCaps.Create): numbers that would size nothing -- or
                 // everything -- cannot be stored, even by a direct write. NULL passes the nullable checks.
                 table.HasCheckConstraint("CK_RiskProfiles_TrailingAmount_Positive", "\"TrailingAmount\" > 0");
+                table.HasCheckConstraint("CK_RiskProfiles_StartingBalance_Positive", "\"StartingBalance\" > 0");
                 table.HasCheckConstraint("CK_RiskProfiles_PerTradeRiskFraction_ZeroToOne", "\"PerTradeRiskFraction\" > 0 AND \"PerTradeRiskFraction\" <= 1");
                 table.HasCheckConstraint("CK_RiskProfiles_TargetRewardRatio_Positive", "\"TargetRewardRatio\" > 0");
                 table.HasCheckConstraint("CK_RiskProfiles_MaxDrawdownPerTrade_Positive", "\"MaxDrawdownPerTrade\" > 0");
@@ -248,6 +252,26 @@ public class TradingCopilotDbContext : TenantDbContext
                 .WithOne()
                 .HasForeignKey<RiskProfileRecord>(p => p.AccountId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<GateDecisionRecord>(decision =>
+        {
+            decision.ToTable("GateDecisions");
+            decision.Property(d => d.Reason).HasMaxLength(512);
+
+            decision.HasOne<Account>()
+                .WithMany()
+                .HasForeignKey(d => d.AccountId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // The audit outlives the order row's fate; deleting an order never deletes its decision.
+            decision.HasOne<Order>()
+                .WithMany()
+                .HasForeignKey(d => d.OrderId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // The audit reads chronologically per account.
+            decision.HasIndex(d => new { d.AccountId, d.DecidedAt });
         });
 
         modelBuilder.Entity<Event>(evt =>

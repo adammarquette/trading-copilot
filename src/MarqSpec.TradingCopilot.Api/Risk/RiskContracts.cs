@@ -9,6 +9,7 @@ namespace MarqSpec.TradingCopilot.Api.Risk;
 /// </summary>
 /// <param name="DailyLossLimit">The hard daily loss limit; null when the account has none.</param>
 /// <param name="AccountProfitTarget">The account's profit target (evaluation accounts); null otherwise.</param>
+/// <param name="StartingBalance">The account's declared starting balance — where the floor starts from. Positive.</param>
 /// <param name="FloorSource">Whether the loss floor is firm-imposed or self-imposed.</param>
 /// <param name="TrailingMode">How the drawdown floor trails — end-of-day or intraday.</param>
 /// <param name="TrailingAmount">The trailing distance below the equity high-water mark. Positive.</param>
@@ -25,6 +26,7 @@ namespace MarqSpec.TradingCopilot.Api.Risk;
 public sealed record DeclareRiskProfileRequest(
     decimal? DailyLossLimit,
     decimal? AccountProfitTarget,
+    decimal StartingBalance,
     FloorSource FloorSource,
     TrailingMode TrailingMode,
     decimal TrailingAmount,
@@ -43,6 +45,7 @@ public sealed record DeclareRiskProfileRequest(
 /// <param name="AccountId">The account the rules govern.</param>
 /// <param name="DailyLossLimit">The hard daily loss limit; null when none.</param>
 /// <param name="AccountProfitTarget">The account's profit target; null when none.</param>
+/// <param name="StartingBalance">The declared starting balance the floor starts from.</param>
 /// <param name="FloorSource">Whether the loss floor is firm-imposed or self-imposed.</param>
 /// <param name="TrailingMode">How the drawdown floor trails.</param>
 /// <param name="TrailingAmount">The trailing distance.</param>
@@ -60,6 +63,7 @@ public sealed record RiskProfileResponse(
     Guid AccountId,
     decimal? DailyLossLimit,
     decimal? AccountProfitTarget,
+    decimal StartingBalance,
     FloorSource FloorSource,
     TrailingMode TrailingMode,
     decimal TrailingAmount,
@@ -84,6 +88,7 @@ public sealed record RiskProfileResponse(
             record.AccountId,
             record.DailyLossLimit,
             record.AccountProfitTarget,
+            record.StartingBalance,
             record.FloorSource,
             record.TrailingMode,
             record.TrailingAmount,
