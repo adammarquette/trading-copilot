@@ -31,7 +31,7 @@ internal class AdversarialTestTradingVenue : ITradingVenue
 
     public int AdapterLogicVersion => 2;
 
-    public VenueCapabilities Capabilities => VenueCapabilities.Of(VenueCapability.HistoricalBars | VenueCapability.Quotes);
+    public VenueCapabilities Capabilities => VenueCapabilities.Of(VenueCapability.HistoricalBars | VenueCapability.Quotes | VenueCapability.BracketOrders);
 
     public int PlacedOrdersCount => _placedOrders.Count;
     public IReadOnlyList<OrderRequest> PlacedOrderRequests => _placedOrders.AsReadOnly();

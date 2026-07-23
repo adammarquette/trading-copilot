@@ -37,6 +37,7 @@ public class StubbedVenuePostgresFactory : PostgresApiFactory
             services.Remove(factoryDescriptor);
         }
 
-        services.AddScoped<IProjectXVenueFactory, AdversarialTestProjectXVenueFactory>();
+        services.AddSingleton<AdversarialTestProjectXVenueFactory>();
+        services.AddSingleton<IProjectXVenueFactory>(sp => sp.GetRequiredService<AdversarialTestProjectXVenueFactory>());
     }
 }
