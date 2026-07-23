@@ -94,7 +94,13 @@ of **headroom to the drawdown floor** — not account size — realistic values 
 as implemented. The send path is now composed at the API (gh#11 increment 1): declared risk rules are the gate's
 fail-closed input, every sized attempt persists its `GateDecision`, and placed orders journal under the R-14 DB
 mode guard. Increment-1 sends require a **flat** account (venue P&L is not reported; flat makes unrealized = 0 a
-fact); the floor starts from the declared starting balance (high-water tracking deferred).
+fact); the floor starts from the declared starting balance (high-water tracking deferred). **Increment 2**
+adds **arm → edit → take** (`OrderStatus.Staged`): `OrderExecutionService.Evaluate` runs the entire ladder from
+the same code as `SendAsync` but stops short of transmission, so an armed ticket is judged exactly as a sent
+one; the proposal persists whole on the order row so **take re-validates everything against fresh venue truth
+(R-12)** — a ticket that passed at arm and fails the fresh gate stays staged, having transmitted nothing.
+Every arm/edit/take leaves its own `GateDecision`. A live *successful* take is a real placement and stays
+deferred to the operator's explicit go (PRAC only).
 
 ## Consequences
 **Positive**

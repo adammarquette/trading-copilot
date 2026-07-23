@@ -30,6 +30,14 @@ public sealed record ExecutionResult(
         return new ExecutionResult(ExecutionOutcome.Placed, order, decision, decision.Reason);
     }
 
+    /// <summary>The ladder ran and the gate decided; nothing was transmitted (arm/edit, gh#11).</summary>
+    /// <param name="decision">The gate's decision — allowing, resizing, or blocking.</param>
+    /// <returns>An evaluated, untransmitted result.</returns>
+    public static ExecutionResult Evaluated(GateDecision decision)
+    {
+        return new ExecutionResult(ExecutionOutcome.Evaluated, Order: null, decision, decision.Reason);
+    }
+
     /// <summary>The R-14 mode guard refused before anything was sized.</summary>
     /// <param name="reason">Why the account may not be traded here.</param>
     /// <returns>A refused result carrying no gate decision.</returns>

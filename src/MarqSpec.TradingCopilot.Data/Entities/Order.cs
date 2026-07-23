@@ -47,6 +47,27 @@ public class Order : IUserOwned
     /// <summary>The order type. <c>required</c>: the zero value is a real type, never a default.</summary>
     public required OrderType Type { get; set; }
 
+    /// <summary>
+    /// The venue-neutral symbol the proposal was sized for (e.g. <c>MES</c>) — the R-12 rebuild re-resolves
+    /// the contract from it; <see cref="Instrument"/> keeps the resolved contract key.
+    /// </summary>
+    public string? Symbol { get; set; }
+
+    /// <summary>The proposal's intended entry price — kept whole so a staged ticket can re-validate (R-12).</summary>
+    public decimal EntryPrice { get; set; }
+
+    /// <summary>The proposal's safety-stop price — the deterministic worst case (R-5).</summary>
+    public decimal SafetyStopPrice { get; set; }
+
+    /// <summary>The reference price the fat-finger band measured from at the last evaluation.</summary>
+    public decimal ReferencePrice { get; set; }
+
+    /// <summary>The instrument's tick size at evaluation. Moves to the Instrument entity when it lands.</summary>
+    public decimal TickSize { get; set; }
+
+    /// <summary>The instrument's point value at evaluation. Moves to the Instrument entity when it lands.</summary>
+    public decimal PointValue { get; set; }
+
     /// <summary>The limit price, for types that carry one.</summary>
     public decimal? LimitPrice { get; set; }
 

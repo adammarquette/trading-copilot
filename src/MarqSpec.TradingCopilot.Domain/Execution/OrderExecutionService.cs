@@ -45,8 +45,17 @@ public sealed class OrderExecutionService : IOrderExecutionService
         _environment = environment;
     }
 
-    /// <inheritdoc />
-    public async Task<ExecutionResult> SendAsync(ExecutionRequest request, CancellationToken cancellationToken)
+    /// <summary>
+    /// Runs the <b>entire</b> ladder — R-14 mode × environment, account state, mismatch, type, then the gate —
+    /// and stops short of transmission (the arm/edit path, gh#11). The same checks as
+    /// <see cref="SendAsync"/> in the same order, from the same code, so an armed ticket was judged exactly as
+    /// a sent one would be.
+    /// </summary>
+    /// <param name="request">The assembled execution request.</param>
+    /// <returns>
+    /// <see cref="ExecutionOutcome.Evaluated"/> carrying the gate's decision, or the pre-gate refusal.
+    /// </returns>
+    public ExecutionResult Evaluate(ExecutionRequest request)
     {
         // R-14's *environment* restriction -- practice accounts only outside production -- first, before the
         // order is even priced: an account this environment may not trade should be refused outright rather
@@ -81,7 +90,20 @@ public sealed class OrderExecutionService : IOrderExecutionService
             return ExecutionResult.RefusedByUnsupportedType(unrepresentable);
         }
 
-        GateDecision decision = _gate.Evaluate(request.Proposal, request.Risk);
+        return ExecutionResult.Evaluated(_gate.Evaluate(request.Proposal, request.Risk));
+    }
+
+    /// <inheritdoc />
+    public async Task<ExecutionResult> SendAsync(ExecutionRequest request, CancellationToken cancellationToken)
+    {
+
+        ExecutionResult evaluated = Evaluate(request);
+        if (evaluated.Outcome != ExecutionOutcome.Evaluated || evaluated.Decision is null)
+        {
+            return evaluated; // a pre-gate refusal -- mode, state, mismatch, or type
+        }
+
+        GateDecision decision = evaluated.Decision;
 
         // Whitelist, not "anything but Blocked". GateDecision has a public constructor and IRiskGate is
         // replaceable, so an unrecognized or later-added outcome must not become authorization by default --

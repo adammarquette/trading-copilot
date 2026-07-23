@@ -46,4 +46,10 @@ public enum ExecutionOutcome
     /// the request itself is unrepresentable, so no venue could receive it correctly.
     /// </summary>
     RefusedByUnsupportedType,
+
+    /// <summary>
+    /// The full ladder ran and the gate decided — but nothing was transmitted (the arm/edit path, gh#11).
+    /// The decision may be allowing, resizing, or blocking; transmission is a separate, explicit act.
+    /// </summary>
+    Evaluated,
 }
