@@ -17,8 +17,9 @@ namespace MarqSpec.TradingCopilot.Api.MarketData;
 /// <remarks>
 /// A consumer group tracks its own cursor (ADR-0001), so this is independent of every other reader and replays
 /// from where it left off after a restart. It only acts when staged stops exist, so it is harmless to run with
-/// none — no configuration gate needed. The venue is built once for the run (market data + execution are not
-/// operator-scoped here); the promotion service reads across the R-20 boundary deliberately (see its note).
+/// none — no configuration gate needed. A fresh DI scope is opened per pass (the log and DbContext are scoped),
+/// which also keeps host shutdown clean; the promotion service reads across the R-20 boundary deliberately (see
+/// its note).
 /// </remarks>
 public sealed class StopPromotionHost : BackgroundService
 {
@@ -45,42 +46,78 @@ public sealed class StopPromotionHost : BackgroundService
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await using AsyncServiceScope scope = _services.CreateAsyncScope();
-        IEventLog log = scope.ServiceProvider.GetRequiredService<IEventLog>();
-        StopPromotionService promotion = scope.ServiceProvider.GetRequiredService<StopPromotionService>();
-        IProjectXVenueFactory venueFactory = scope.ServiceProvider.GetRequiredService<IProjectXVenueFactory>();
-
-        // One venue for the run: the same executor promotes every due stop.
-        ITradingVenue venue = venueFactory.Create(FirmConventions.None);
-
-        long cursor = await log.GetCursorAsync(ConsumerGroup, stoppingToken) ?? 0;
-        _logger.LogInformation("Stop-promotion watcher started at sequence {Cursor}.", cursor);
+        long? cursor = null; // read from the log on the first pass, then carried in memory
+        bool announced = false;
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            IReadOnlyList<EventEnvelope> batch = await log.ReadAfterAsync(cursor, BatchSize, stoppingToken);
-            if (batch.Count == 0)
+            try
             {
-                // Caught up: wait for new events rather than hot-looping the log. LISTEN/NOTIFY replaces this
-                // poll when the push wake-up lands (ADR-0001).
-                await Task.Delay(IdlePoll, stoppingToken);
-                continue;
-            }
-
-            foreach (EventEnvelope evt in batch)
-            {
-                if (StopPromotionService.TryDecodeQuote(evt, out StopPromotionService.DecodedQuote quote))
+                // A FRESH scope per pass: the event log and DbContext are scoped, so holding one for the app's
+                // lifetime would leak tracked entities and -- when the host is torn down (integration tests) --
+                // leave this loop polling disposed services. Per-pass scoping keeps shutdown clean.
+                bool caughtUp;
+                await using (AsyncServiceScope scope = _services.CreateAsyncScope())
                 {
-                    await promotion.PromoteForQuoteAsync(
-                        quote.Venue, quote.ContractKey, quote.Bid, quote.Ask, venue, stoppingToken);
+                    IEventLog log = scope.ServiceProvider.GetRequiredService<IEventLog>();
+                    StopPromotionService promotion = scope.ServiceProvider.GetRequiredService<StopPromotionService>();
+                    IProjectXVenueFactory venueFactory = scope.ServiceProvider.GetRequiredService<IProjectXVenueFactory>();
+
+                    cursor ??= await log.GetCursorAsync(ConsumerGroup, stoppingToken) ?? 0;
+                    if (!announced)
+                    {
+                        _logger.LogInformation("Stop-promotion watcher started at sequence {Cursor}.", cursor.Value);
+                        announced = true;
+                    }
+
+                    IReadOnlyList<EventEnvelope> batch = await log.ReadAfterAsync(cursor.Value, BatchSize, stoppingToken);
+                    caughtUp = batch.Count == 0;
+
+                    if (!caughtUp)
+                    {
+                        ITradingVenue venue = venueFactory.Create(FirmConventions.None);
+                        foreach (EventEnvelope evt in batch)
+                        {
+                            if (StopPromotionService.TryDecodeQuote(evt, out StopPromotionService.DecodedQuote quote))
+                            {
+                                await promotion.PromoteForQuoteAsync(
+                                    quote.Venue, quote.ContractKey, quote.Bid, quote.Ask, venue, stoppingToken);
+                            }
+
+                            cursor = evt.Sequence;
+                        }
+
+                        // Commit once per batch: at-least-once redelivery on restart is safe because promotion
+                        // is idempotent (an already-Native stop is skipped, ADR-0001).
+                        await log.CommitCursorAsync(ConsumerGroup, cursor.Value, stoppingToken);
+                    }
                 }
 
-                cursor = evt.Sequence;
+                if (caughtUp)
+                {
+                    // Caught up: wait for new events rather than hot-looping the log. LISTEN/NOTIFY replaces
+                    // this poll when the push wake-up lands (ADR-0001).
+                    await Task.Delay(IdlePoll, stoppingToken);
+                }
             }
-
-            // Commit once per batch: at-least-once redelivery on restart is safe because promotion is
-            // idempotent (an already-Native stop is skipped, ADR-0001).
-            await log.CommitCursorAsync(ConsumerGroup, cursor, stoppingToken);
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break; // a clean stop -- the host is shutting down
+            }
+            catch (ObjectDisposedException)
+            {
+                // The root provider is being torn down (host shutdown may not signal the token first, e.g. a
+                // WebApplicationFactory disposing between test classes). Nothing to recover to -- exit cleanly
+                // rather than crash the host and cascade into every other test.
+                break;
+            }
+            catch (Exception error)
+            {
+                // A transient log/DB/venue fault must not kill the watcher: log, back off, and try again. The
+                // cursor is unchanged, so nothing is skipped.
+                _logger.LogWarning(error, "Stop-promotion pass failed; retrying after {Delay}.", IdlePoll);
+                await Task.Delay(IdlePoll, stoppingToken);
+            }
         }
     }
 }
