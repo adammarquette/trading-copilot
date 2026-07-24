@@ -56,8 +56,10 @@ any reviewer, human or agent, should work from it.
   state ambiguous. (A working-diff review with no PR still uses `ReportFindings` / the requested format.)
 - **Submit the state as the reviewer identity, never as the author.** GitHub blocks approving or requesting
   changes on your own PR, and agents here authenticate as the maintainer who authored it — so the verdict is
-  rendered by the **reviewer GitHub App** (`…[bot]`, a distinct actor), set up in the
-  [deployment runbook](../deployment-runbook.md) (gh#141). **Until that App is provisioned**, fall back to a
+  rendered by the **reviewer GitHub App** (`…[bot]`, a distinct actor) via
+  [`.github/scripts/reviewer-review.sh`](../../.github/scripts/reviewer-review.sh) (`review <pr> REQUEST_CHANGES
+  <body-file>`), set up in the [deployment runbook](../deployment-runbook.md) (gh#141). **Until that App is
+  provisioned**, fall back to a
   comment whose **first line is the verdict** — `**Verdict: Request changes**` / `**Verdict: Approve**` — so the
   signal is unambiguous even though it is not yet a formal state.
 
