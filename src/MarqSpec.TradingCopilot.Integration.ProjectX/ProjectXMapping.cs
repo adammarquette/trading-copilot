@@ -173,6 +173,27 @@ public static class ProjectXMapping
         return contract.Key;
     }
 
+    /// <summary>
+    /// The <b>product root</b> the gateway tags <c>GatewayQuote</c> updates with, derived from a full contract
+    /// id (gh#163). Subscription uses the full id (<c>CON.F.US.EP.M25</c>) but the realtime feed reports quotes
+    /// by root (<c>F.US.EP</c>) — so a stream filtered on the full id drops every tick. Strips the <c>CON.</c>
+    /// prefix and the trailing expiry segment.
+    /// </summary>
+    /// <param name="contractKey">The full contract id (e.g. <c>CON.F.US.EP.M25</c>).</param>
+    /// <returns>The product root (e.g. <c>F.US.EP</c>).</returns>
+    public static string ToQuoteSymbol(string contractKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(contractKey);
+
+        string[] segments = contractKey.Split('.');
+
+        // Drop a leading "CON" wrapper and the trailing expiry segment; the product root is what remains.
+        int start = segments.Length > 0 && segments[0] == "CON" ? 1 : 0;
+        int end = segments.Length - 1; // exclusive: the last segment is the expiry (e.g. M25)
+
+        return end > start ? string.Join('.', segments[start..end]) : contractKey;
+    }
+
     private static void EnsureBelongsTo(VenueId actual, VenueId expected, string qualified)
     {
         if (actual != expected)

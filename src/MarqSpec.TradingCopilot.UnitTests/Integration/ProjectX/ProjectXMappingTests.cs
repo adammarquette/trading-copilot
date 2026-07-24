@@ -13,6 +13,27 @@ public class ProjectXMappingTests
 {
     private static VenueId Venue => VenueId.Parse("projectx");
 
+    // --- The quote-symbol root: the gh#163 defect ---
+
+    [Theory]
+    [InlineData("CON.F.US.EP.M25", "F.US.EP")]   // ES June 2025
+    [InlineData("CON.F.US.MES.U26", "F.US.MES")] // MES September 2026 -- the roster case that lost 533 ticks
+    [InlineData("CON.F.US.ENQ.H27", "F.US.ENQ")] // NQ
+    public void ToQuoteSymbol_ShouldDeriveTheProductRoot_FromAFullContractId(string contractKey, string expected)
+    {
+        // The realtime feed tags quotes by product root; subscription uses the full id. Matching the two is
+        // what makes a live quote reach the stream (gh#163).
+        ProjectXMapping.ToQuoteSymbol(contractKey).Should().Be(expected);
+    }
+
+    [Fact]
+    public void ToQuoteSymbol_ShouldReturnTheInputUnchanged_WhenItIsTooShortToHaveARootAndExpiry()
+    {
+        // Guard against mangling a malformed key: nothing left after stripping the wrapper and expiry means the
+        // input round-trips rather than collapsing to empty. (Real ids are always CON.<root>.<expiry>.)
+        ProjectXMapping.ToQuoteSymbol("CON.X").Should().Be("CON.X");
+    }
+
     // --- Practice vs. live: the R-14 input (gh#60) ---
 
     private static FirmConventions Topstep => FirmConventions.For(

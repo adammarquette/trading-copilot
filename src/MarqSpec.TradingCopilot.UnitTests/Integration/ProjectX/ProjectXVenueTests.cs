@@ -511,9 +511,13 @@ public class ProjectXVenueTests
 
         // The handler is attached before the subscribe call, so once that has run a published tick is captured.
         await subscribed.Task;
+
+        // The gateway tags quotes with the PRODUCT ROOT (F.US.EP), not the full contract id we subscribed with
+        // (CON.F.US.EP.M25) -- the gh#163 defect: a filter on the full id dropped all 533 live ticks. Feed what
+        // the venue actually sends, not what makes the filter pass.
         _webSocket.PriceUpdateReceived += Raise.With(new ClientModels.PriceUpdate
         {
-            Symbol = ContractKey,
+            Symbol = "F.US.EP",
             BestBid = 5_000m,
             BestAsk = 5_000.25m,
             Timestamp = new DateTime(2026, 7, 20, 14, 30, 0, DateTimeKind.Utc),
@@ -543,11 +547,12 @@ public class ProjectXVenueTests
         ValueTask<bool> next = quotes.MoveNextAsync();
         await subscribed.Task;
 
-        // One hub carries every subscribed contract, so the wrong instrument must not leak into this stream.
+        // One hub carries every subscribed contract, so another product's root must not leak into this stream;
+        // both are matched on the product root (gh#163), never the full contract id.
         _webSocket.PriceUpdateReceived += Raise.With(
-            new ClientModels.PriceUpdate { Symbol = "CON.F.US.ENQ.M25", BestBid = 1m, BestAsk = 2m });
+            new ClientModels.PriceUpdate { Symbol = "F.US.ENQ", BestBid = 1m, BestAsk = 2m });
         _webSocket.PriceUpdateReceived += Raise.With(
-            new ClientModels.PriceUpdate { Symbol = ContractKey, BestBid = 5_000m, BestAsk = 5_000.25m });
+            new ClientModels.PriceUpdate { Symbol = "F.US.EP", BestBid = 5_000m, BestAsk = 5_000.25m });
 
         (await next).Should().BeTrue();
         quotes.Current.Bid.Should().Be(new Price(5_000m));
