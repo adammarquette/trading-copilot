@@ -10,6 +10,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Events;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Events;
+using MarqSpec.TradingCopilot.Domain.MarketData;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 
@@ -40,6 +41,10 @@ builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
 // The event backbone (ADR-0001) behind its seam: today a Timescale hypertable; a future bus is an adapter
 // change, not a rewrite. Producers/consumers arrive with market-data ingestion (R-1).
 builder.Services.AddScoped<IEventLog, TimescaleEventLog>();
+
+// The backbone's first producer (R-1, gh#13): normalises a venue quote stream into the append-only log.
+// The hosted subscription that drives it lands with the ingestion service topology.
+builder.Services.AddScoped<QuoteIngestionService>();
 
 // The R-14 environment, mapped ONCE at the composition root from the host (gh#9): practice anywhere, live only
 // in production, undeclared nowhere -- and an unrecognised environment name fails closed to Development
