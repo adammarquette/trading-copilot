@@ -3,6 +3,7 @@ using MarqSpec.Client.ProjectX.DependencyInjection;
 using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
+using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Risk;
 using MarqSpec.TradingCopilot.Api.Venues;
@@ -42,9 +43,12 @@ builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
 // change, not a rewrite. Producers/consumers arrive with market-data ingestion (R-1).
 builder.Services.AddScoped<IEventLog, TimescaleEventLog>();
 
-// The backbone's first producer (R-1, gh#13): normalises a venue quote stream into the append-only log.
-// The hosted subscription that drives it lands with the ingestion service topology.
+// The backbone's first producer (R-1, gh#13): normalises a venue quote stream into the append-only log, and
+// the hosted service that drives it -- a supervised subscription per configured contract. Opt-in: with no
+// Ingestion:Symbols configured, the host does nothing, so a run that wants no live feed simply omits them.
 builder.Services.AddScoped<QuoteIngestionService>();
+builder.Services.Configure<IngestionOptions>(builder.Configuration.GetSection(IngestionOptions.SectionName));
+builder.Services.AddHostedService<MarketDataIngestionHost>();
 
 // The R-14 environment, mapped ONCE at the composition root from the host (gh#9): practice anywhere, live only
 // in production, undeclared nowhere -- and an unrecognised environment name fails closed to Development

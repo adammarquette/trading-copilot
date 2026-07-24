@@ -71,6 +71,11 @@ services:
       # ADR-0015) and which market-data universe they are entitled to (Simulated is the fail-safe default).
       ProjectX__CredentialKey: "${ProjectX__CredentialKey:-projectx}"
       ProjectX__DataTier: "${ProjectX__DataTier:-Simulated}"
+      # Market-data ingestion (R-1, gh#13) -- OPT-IN. Empty (the default) disables the ingestion host; set a
+      # symbol to subscribe. Compose only forwards keys named here, so this mapping is what makes the .env value
+      # reach the app (an unset var arrives as "" and normalises back to disabled).
+      Ingestion__Symbols__0: "${Ingestion__Symbols__0:-}"
+      Ingestion__ReconnectDelaySeconds: "${Ingestion__ReconnectDelaySeconds:-5}"
     ports:
       - "8080:8080"
 
