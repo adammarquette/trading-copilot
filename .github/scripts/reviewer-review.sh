@@ -11,7 +11,10 @@
 # Requires in the environment (NEVER in source — see the runbook):
 #   REVIEWER_APP_ID                 the App ID (a number)
 #   REVIEWER_APP_INSTALLATION_ID    the installation ID (a number)
-#   REVIEWER_APP_PRIVATE_KEY        the .pem contents (multi-line or \n-escaped)
+#   and ONE of:
+#   REVIEWER_APP_PRIVATE_KEY_FILE   path to the unmodified .pem  (RECOMMENDED —
+#                                   no escaping/quoting to get wrong in .env)
+#   REVIEWER_APP_PRIVATE_KEY        the .pem contents inline (multi-line or \n-escaped)
 # Optional:
 #   REVIEWER_REPO                   default: adammarquette/trading-copilot
 #
@@ -23,11 +26,11 @@
 #       Submit the verdict as the bot. Prints the review id, the bot login it
 #       posted as, and the state — the proof that self-review was bypassed.
 #
-# The private key is written only to a private (0600) temp file for the openssl
-# call and removed immediately — process substitution is NOT portable to
-# native-Windows openssl, which cannot read a Git Bash /proc/*/fd path. The key
-# is never printed, and the minted token is only ever passed to gh via GH_TOKEN,
-# never echoed.
+# With REVIEWER_APP_PRIVATE_KEY_FILE, openssl reads the .pem directly. With the
+# inline REVIEWER_APP_PRIVATE_KEY, the key is written to a private (0600) temp
+# file for the openssl call and removed immediately (process substitution is NOT
+# portable to native-Windows openssl). The key is never printed, and the minted
+# token is only ever passed to gh via GH_TOKEN, never echoed.
 
 set -euo pipefail
 
@@ -43,7 +46,9 @@ ghapi() { MSYS_NO_PATHCONV=1 gh api "$@"; }
 
 : "${REVIEWER_APP_ID:?REVIEWER_APP_ID is not set (see the deployment runbook)}"
 : "${REVIEWER_APP_INSTALLATION_ID:?REVIEWER_APP_INSTALLATION_ID is not set}"
-: "${REVIEWER_APP_PRIVATE_KEY:?REVIEWER_APP_PRIVATE_KEY is not set}"
+if [ -z "${REVIEWER_APP_PRIVATE_KEY_FILE:-}" ] && [ -z "${REVIEWER_APP_PRIVATE_KEY:-}" ]; then
+  die "set REVIEWER_APP_PRIVATE_KEY_FILE (path to the unmodified .pem — recommended) or REVIEWER_APP_PRIVATE_KEY (inline PEM)"
+fi
 
 command -v openssl >/dev/null || die "openssl not found"
 command -v gh       >/dev/null || die "gh not found"
@@ -51,24 +56,30 @@ command -v gh       >/dev/null || die "gh not found"
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
 mint_token() {
-  # Accept both storage styles: a real multi-line PEM, or one line with \n escapes.
-  local key="${REVIEWER_APP_PRIVATE_KEY//\\n/$'\n'}"
-  local keyfile now header payload unsigned sig jwt
-  # openssl needs the key as a file. Process substitution is not portable to
-  # native-Windows openssl, so use a 0600 temp file removed when this (sub)shell
-  # exits — including on error via die.
-  keyfile=$(mktemp) || die "mktemp failed"
-  chmod 600 "$keyfile" 2>/dev/null || true
-  trap 'rm -f "$keyfile"' EXIT
-  printf '%s\n' "$key" > "$keyfile"
+  local keyfile tmpkey="" now header payload unsigned sig jwt
+  if [ -n "${REVIEWER_APP_PRIVATE_KEY_FILE:-}" ]; then
+    # Preferred: point at the unmodified .pem GitHub downloaded — no \n-escaping,
+    # quoting, or single-lining to get wrong. openssl reads it directly.
+    [ -r "$REVIEWER_APP_PRIVATE_KEY_FILE" ] || die "REVIEWER_APP_PRIVATE_KEY_FILE is not readable: $REVIEWER_APP_PRIVATE_KEY_FILE"
+    keyfile="$REVIEWER_APP_PRIVATE_KEY_FILE"
+  else
+    # Inline PEM: normalise \n escapes and write a 0600 temp file (openssl needs a
+    # file; process substitution is not portable to native-Windows openssl).
+    local key="${REVIEWER_APP_PRIVATE_KEY//\\n/$'\n'}"
+    tmpkey=$(mktemp) || die "mktemp failed"
+    chmod 600 "$tmpkey" 2>/dev/null || true
+    trap 'rm -f "$tmpkey"' EXIT
+    printf '%s\n' "$key" > "$tmpkey"
+    keyfile="$tmpkey"
+  fi
   now=$(date +%s)
   header=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)
   # iat backdated 60s for clock skew; exp 9 min out (GitHub caps JWT life at 10).
   payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now - 60))" "$((now + 540))" "$REVIEWER_APP_ID" | b64url)
   unsigned="${header}.${payload}"
   sig=$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$keyfile" -binary | b64url) \
-    || die "JWT signing failed — is REVIEWER_APP_PRIVATE_KEY a valid PEM?"
-  rm -f "$keyfile"; trap - EXIT
+    || die "JWT signing failed — is the private key a valid PEM?"
+  [ -n "$tmpkey" ] && { rm -f "$tmpkey"; trap - EXIT; }
   jwt="${unsigned}.${sig}"
   ghapi -H "Authorization: Bearer ${jwt}" -X POST \
     "/app/installations/${REVIEWER_APP_INSTALLATION_ID}/access_tokens" --jq '.token' \
