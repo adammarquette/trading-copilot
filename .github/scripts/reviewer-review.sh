@@ -35,6 +35,12 @@ REPO="${REVIEWER_REPO:-adammarquette/trading-copilot}"
 
 die() { printf 'reviewer-review: %s\n' "$*" >&2; exit 1; }
 
+# gh api with MSYS path conversion disabled, so Git Bash does not rewrite a
+# /app/... endpoint into a Windows path before gh sees it. Scoped to gh only
+# (NOT exported): openssl below needs conversion left ON so its temp-file path
+# stays Windows-resolvable. No-op off Windows.
+ghapi() { MSYS_NO_PATHCONV=1 gh api "$@"; }
+
 : "${REVIEWER_APP_ID:?REVIEWER_APP_ID is not set (see the deployment runbook)}"
 : "${REVIEWER_APP_INSTALLATION_ID:?REVIEWER_APP_INSTALLATION_ID is not set}"
 : "${REVIEWER_APP_PRIVATE_KEY:?REVIEWER_APP_PRIVATE_KEY is not set}"
@@ -64,7 +70,7 @@ mint_token() {
     || die "JWT signing failed — is REVIEWER_APP_PRIVATE_KEY a valid PEM?"
   rm -f "$keyfile"; trap - EXIT
   jwt="${unsigned}.${sig}"
-  gh api -H "Authorization: Bearer ${jwt}" -X POST \
+  ghapi -H "Authorization: Bearer ${jwt}" -X POST \
     "/app/installations/${REVIEWER_APP_INSTALLATION_ID}/access_tokens" --jq '.token' \
     || die "installation-token exchange failed — check REVIEWER_APP_ID / REVIEWER_APP_INSTALLATION_ID and that the App is installed on ${REPO}"
 }
@@ -73,7 +79,7 @@ cmd="${1:-}"
 case "$cmd" in
   verify)
     token=$(mint_token)
-    GH_TOKEN="$token" gh api /installation/repositories --jq \
+    GH_TOKEN="$token" ghapi /installation/repositories --jq \
       '"OK — token minted; installation can reach " + (.total_count|tostring) + " repo(s): " + ([.repositories[].full_name] | join(", "))'
     ;;
   review)
@@ -84,7 +90,7 @@ case "$cmd" in
     [ -f "$body_file" ] || die "body file not found: $body_file"
     body=$(cat "$body_file")
     token=$(mint_token)
-    GH_TOKEN="$token" gh api "/repos/${REPO}/pulls/${pr}/reviews" -X POST \
+    GH_TOKEN="$token" ghapi "/repos/${REPO}/pulls/${pr}/reviews" -X POST \
       -f event="$event" -f body="$body" --jq \
       '"review " + (.id|tostring) + " submitted as " + .user.login + " — state " + .state'
     ;;
