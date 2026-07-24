@@ -152,9 +152,13 @@ console-only, recorded here because they are otherwise invisible to anyone readi
    Read-only** (auto). Nothing else.
 3. **Create**, then **Generate a private key** (a `.pem` downloads) and note the **App ID**.
 4. **Install App → this account → Only select repositories → `trading-copilot`**; note the **Installation ID**.
-5. Store three values as **secrets** the reviewer agent reads (never in source): `REVIEWER_APP_ID`,
-   `REVIEWER_APP_INSTALLATION_ID`, `REVIEWER_APP_PRIVATE_KEY` (the `.pem` contents) — the operator's env / a
-   git-ignored `.env` locally, repository secrets in CI.
+5. Provide these to the reviewer agent as environment values (never in source): `REVIEWER_APP_ID`,
+   `REVIEWER_APP_INSTALLATION_ID`, and the private key. **For the key, prefer a file:** save the downloaded
+   `.pem` **unmodified** somewhere git-ignored (outside the repo is simplest — no `.gitignore` to trust) and set
+   `REVIEWER_APP_PRIVATE_KEY_FILE` to its path. A path has no newline/quote pitfalls; **cramming a multi-line PEM
+   into a line-based `.env` corrupts it** (the BEGIN header fuses to the base64). Inline `REVIEWER_APP_PRIVATE_KEY`
+   is also accepted (multi-line or `\n`-escaped, double-quoted) if you must. Locally: the operator's env / a
+   git-ignored `.env`; in CI: repository secrets.
 
 **How the reviewer agent uses it** — the committed helper
 [`.github/scripts/reviewer-review.sh`](../.github/scripts/reviewer-review.sh) does the token dance (JWT signed
