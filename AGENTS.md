@@ -43,6 +43,16 @@ and cross-agent heads-ups with no formal home. **Check it before starting work**
 (dated) — but if something fits a formal doc, put it there instead; it is overflow, not a substitute.
 
 ## Universal rules
+- **Wear a hat, open its contract — before you start.** The table above is an obligation, not a signpost: the
+  role contract holds the rules this file deliberately does not repeat, and the two role-scoped ones
+  (**Code Reviewer**, **Platform**) never auto-load. Two that catch agents out because they bind *whatever* you
+  came here to do:
+  - **Reviewing?** Findings are review comments **plus a submitted state** — **Approve** (with a summary) or
+    **Request changes** — never a bare comment. **Merging stays the maintainer's**; an approval is a signal, not
+    authority to ship, and an agent approves a diff it *reviewed*, **never one it authored**. Substance:
+    [Code Reviewer](documentation/agents/code-reviewer.md).
+  - **Touching CI/CD, the image, compose, or deploy?** That is the
+    [Platform](documentation/agents/platform.md) contract, wherever the file sits.
 - **No secrets in source** — Options pattern + environment; broker credentials server-side only.
 - **Enforcement lives below the model** — the risk / execution gate enforces limits; the LLM only *proposes*.
   Never rely on prompt text to hold a risk limit.
