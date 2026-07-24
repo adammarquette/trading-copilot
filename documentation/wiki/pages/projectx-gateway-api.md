@@ -29,6 +29,15 @@ v1 trading venue behind `MarqSpec.Client.ProjectX` (see [engineering §3](../../
   search (`search-contracts`, `search-contracts-by-id`, `available-contracts`). → the **clean historical** path in R-1.
 - **Real-time (SignalR Market Hub `…/hubs/market`):** events `GatewayQuote`, `GatewayTrade`, `GatewayDepth`
   (DOM); subscribe `SubscribeContractQuotes|Trades|MarketDepth(contractId)`. → the **live** path in R-1.
+  > **You subscribe by full contract id but quotes come back tagged by product root** (verified live, gh#163):
+  > `SubscribeContractQuotes("CON.F.US.MES.U26")` succeeds, then every `GatewayQuote` reports
+  > `symbol = "F.US.MES"` — the **product root**, not the subscribed id. A stream filtered on the full id drops
+  > **100%** of ticks silently (a confirmed subscription, zero data). The adapter derives the root
+  > (`ProjectXMapping.ToQuoteSymbol`: strip the `CON.` prefix + the trailing expiry segment) and filters on
+  > that. Confirmed against the **practice/Simulated tier**, which *does* stream live quotes — subscription
+  > success alone proves nothing about data flow. *(The message is `GatewayQuote(contractId, update)`; the
+  > `contractId` arg carries the exact id but the v1 client discards it — forwarding it would let the adapter
+  > match the exact id instead of the root, a cleaner client-repo change.)*
 - **Order flow (Q-2):** `GatewayTrade` carries a `type` (TradeLogType **Buy = 0 / Sell = 1**) and `GatewayDepth`
   gives DOM. So **footprint / delta is reconstructable** from trade direction + depth — there is no separate
   explicit aggressor field, but the buy/sell classification + DOM suffice. Feeds R-3. The stream also carries **trade volume**, so it supplies the data for **Bookmap-style** DOM / order-flow displays (a later feature).

@@ -288,10 +288,14 @@ public sealed class ProjectXVenue : ITradingVenue
             SingleReader = true,
         });
 
+        // The realtime feed tags quotes by PRODUCT ROOT (F.US.EP), not the full contract id we subscribed with
+        // (CON.F.US.EP.M25) -- so filter on the root, or every tick is dropped (gh#163).
+        string quoteSymbol = ProjectXMapping.ToQuoteSymbol(contractKey);
+
         void OnPriceUpdate(object? sender, ClientModels.PriceUpdate update)
         {
             // One hub carries every subscribed contract, so updates are filtered back down to this one.
-            if (string.Equals(update.Symbol, contractKey, StringComparison.Ordinal))
+            if (string.Equals(update.Symbol, quoteSymbol, StringComparison.Ordinal))
             {
                 quotes.Writer.TryWrite(ProjectXMapping.ToQuote(update));
             }
