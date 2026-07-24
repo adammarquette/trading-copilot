@@ -308,6 +308,40 @@ public class OrderEndpointsTests
     }
 
     [Fact]
+    public async Task SendOrder_ShouldRecordAHiddenStopPlan_WhenTheSafetyStopSitsBeyondTheWorkingStop()
+    {
+        // ADR-0007 staging (gh#11): the working stop starts HIDDEN -- keeping the entry off the book -- while
+        // the safety stop already rests natively as the entry's protective bracket (inc 3).
+        Guid accountId = await SeedAsync();
+
+        await SendAsync(accountId, SmallBuy()); // entry 5300, working 5295, safety 5290
+
+        await using TradingCopilotDbContext reload = Context();
+        StopPlanRecord plan = await reload.StopPlans.SingleAsync();
+        Order order = await reload.Orders.SingleAsync();
+        plan.OrderId.Should().Be(order.Id);
+        plan.Staging.Should().Be(StopStaging.Hidden);
+        plan.ActualStopPrice.Should().Be(5_295m);
+        plan.SafetyStopPrice.Should().Be(5_290m);   // beyond the working stop -- the catastrophic floor
+        plan.ProximityMetric.Should().Be(StopProximityMetric.Ticks);
+        plan.UserId.Should().Be(_operator);
+    }
+
+    [Fact]
+    public async Task SendOrder_ShouldRecordNoStopPlan_WhenTheWorkingAndSafetyStopsCoincide()
+    {
+        // Nothing to stage: the operator's working stop IS the safety stop, and it already rests natively.
+        // Inventing a plan here would assert a promotion that can never be meaningful.
+        Guid accountId = await SeedAsync();
+
+        await SendAsync(accountId, SmallBuy() with { Stop = 5_290m, SafetyStop = 5_290m });
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.AnyAsync()).Should().BeTrue();      // the order still placed...
+        (await reload.StopPlans.AnyAsync()).Should().BeFalse();  // ...with no staging plan
+    }
+
+    [Fact]
     public async Task SendOrder_ShouldRefusePreGate_WhenTheAccountModeIsUndeclared()
     {
         Guid accountId = await SeedAsync(mode: TradingMode.Undeclared);

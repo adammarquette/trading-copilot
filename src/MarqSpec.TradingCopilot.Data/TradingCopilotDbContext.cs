@@ -52,6 +52,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Declared per-account risk rules (R-5, gh#10). Operator-owned; one per account.</summary>
     public DbSet<RiskProfileRecord> RiskProfiles => Set<RiskProfileRecord>();
 
+    /// <summary>Staged-stop plans — one per order (ADR-0007, gh#11). Operator-owned.</summary>
+    public DbSet<StopPlanRecord> StopPlans => Set<StopPlanRecord>();
+
     /// <summary>Persisted gate decisions — every sized send attempt, auditable (R-5/R-16, gh#11). Operator-owned.</summary>
     public DbSet<GateDecisionRecord> GateDecisions => Set<GateDecisionRecord>();
 
@@ -272,6 +275,32 @@ public class TradingCopilotDbContext : TenantDbContext
 
             // The audit reads chronologically per account.
             decision.HasIndex(d => new { d.AccountId, d.DecidedAt });
+        });
+
+        modelBuilder.Entity<StopPlanRecord>(plan =>
+        {
+            plan.ToTable("StopPlans", table =>
+            {
+                // The safety-beyond-actual invariant, below the domain (ADR-0007): the catastrophic floor must
+                // rest FURTHER from entry than the working stop, or it triggers first and the declared
+                // worst case is neither deterministic nor the one declared. Side-dependent, so a cross-column
+                // CHECK expresses it -- OrderSide.Buy = 0, Sell = 1.
+                table.HasCheckConstraint(
+                    "CK_StopPlans_SafetyBeyondActual",
+                    "(\"Side\" = 0 AND \"SafetyStopPrice\" < \"ActualStopPrice\" AND \"ActualStopPrice\" < \"EntryPrice\") "
+                    + "OR (\"Side\" = 1 AND \"SafetyStopPrice\" > \"ActualStopPrice\" AND \"ActualStopPrice\" > \"EntryPrice\")");
+                table.HasCheckConstraint("CK_StopPlans_Staging_NotUnknown", "\"Staging\" <> 0");
+                table.HasCheckConstraint("CK_StopPlans_ProximityMetric_NotUnknown", "\"ProximityMetric\" <> 0");
+                table.HasCheckConstraint("CK_StopPlans_ProximityValue_Positive", "\"ProximityValue\" > 0");
+            });
+
+            // One plan per order.
+            plan.HasIndex(p => p.OrderId).IsUnique();
+
+            plan.HasOne<Order>()
+                .WithOne()
+                .HasForeignKey<StopPlanRecord>(p => p.OrderId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<Event>(evt =>

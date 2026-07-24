@@ -86,6 +86,7 @@ public static class OrderEndpoints
             journaled.VenueOrderKey = result.Order.VenueOrderId;
             journaled.PlacedAt = result.Order.AcceptedAt;
             database.Orders.Add(journaled);
+            AddStopPlan(database, currentUser, journaled, executionOptions.Value.StopPromotionTicks);
         }
 
         PersistDecision(database, currentUser, composed.Account.Id, journaled?.Id, result.Decision);
@@ -241,6 +242,7 @@ public static class OrderEndpoints
             order.VenueOrderKey = result.Order.VenueOrderId;
             order.PlacedAt = result.Order.AcceptedAt;
             order.Size = result.Decision?.ApprovedQuantity ?? order.Size;
+            AddStopPlan(database, currentUser, order, executionOptions.Value.StopPromotionTicks);
         }
 
         PersistDecision(database, currentUser, composed.Account.Id, order.Id, result.Decision);
@@ -461,6 +463,48 @@ public static class OrderEndpoints
             ExecutionOutcome.RefusedByRisk => Results.UnprocessableEntity(response),
             _ => Results.Conflict(response), // pre-gate refusals: mode, account state, mismatch, type
         };
+    }
+
+    /// <summary>
+    /// Records the staged-stop plan for a transmitted entry (ADR-0007, gh#11): the working stop starts
+    /// <b>hidden</b>, the safety stop is already native (it rode the entry as the protective bracket).
+    /// </summary>
+    /// <remarks>
+    /// Skipped when the two stops coincide — there is nothing to stage, because the operator's working stop
+    /// <i>is</i> the safety stop and it already rests natively. Staging requires the safety stop strictly
+    /// beyond the working one, which is exactly what <see cref="StopPlan.Create"/> (and the DB check) enforce.
+    /// </remarks>
+    private static void AddStopPlan(
+        TradingCopilotDbContext database,
+        ICurrentUser currentUser,
+        Order order,
+        int promotionTicks)
+    {
+        bool stageable = order.Side switch
+        {
+            OrderSide.Buy => order.SafetyStopPrice < order.WorkingStopPrice && order.WorkingStopPrice < order.EntryPrice,
+            OrderSide.Sell => order.SafetyStopPrice > order.WorkingStopPrice && order.WorkingStopPrice > order.EntryPrice,
+            _ => false,
+        };
+
+        if (!stageable)
+        {
+            return;
+        }
+
+        database.StopPlans.Add(new StopPlanRecord
+        {
+            Id = Guid.NewGuid(),
+            UserId = currentUser.UserId,
+            OrderId = order.Id,
+            Side = order.Side,
+            EntryPrice = order.EntryPrice,
+            ActualStopPrice = order.WorkingStopPrice,
+            SafetyStopPrice = order.SafetyStopPrice,
+            ProximityMetric = StopProximityMetric.Ticks,
+            ProximityValue = promotionTicks,
+            Staging = StopStaging.Hidden,
+        });
     }
 
     private static void PersistDecision(

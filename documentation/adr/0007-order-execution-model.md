@@ -110,6 +110,23 @@ stop** and its **proximity promotion**, take-profit brackets, OCO-cancel-on-exit
 orphan handling — increment 3 lands the catastrophic-insurance floor, not yet the hidden-then-promoted working
 stop.
 
+## Update (2026-07-24) — the staged-stop plan (increment 4)
+The **hidden actual stop** now has its model and its persistence: `Domain/Execution/StopPlan` holds entry, the
+working stop, the safety stop beyond it, and the promotion band, starting at `StopStaging.Hidden`;
+`ShouldPromote(price)` is the deterministic decision a watcher will consult, and `Promote()` is one-way and
+idempotent so a retrying watcher cannot re-transmit. The band is **ticks** or a **fraction of the entry→stop
+distance** — the ADR's "not % of raw price" made structural — and **ATR is refused outright** (`NotSupportedException`)
+until the indicator pipeline (R-3) can measure it, rather than silently mis-measuring.
+
+The invariant the type exists to hold is **safety-beyond-actual**: the catastrophic floor must rest *further*
+from entry than the working stop, or it fires first and the deterministic worst case is neither. It is enforced
+in `StopPlan.Create` **and** by a side-dependent cross-column DB CHECK (`CK_StopPlans_SafetyBeyondActual`) —
+proven rejecting against live Postgres. A plan is recorded per transmitted entry, and skipped when the two stops
+coincide (nothing to stage — the single stop already rests natively).
+
+*Still deferred:* the **live promotion watcher** (it needs streaming quotes — R-1), OCO-cancel-on-exit,
+take-profit brackets, and connection-liveness orphan handling.
+
 ## Consequences
 **Positive**
 - **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move

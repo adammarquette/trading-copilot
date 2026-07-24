@@ -21,6 +21,12 @@ public sealed class ExecutionOptions
     /// <summary>How far from the reference price an order may rest, in ticks.</summary>
     public int FatFingerBandTicks { get; init; } = 200;
 
+    /// <summary>
+    /// How close price must come to the working stop before it is promoted from hidden to a native working
+    /// order (ADR-0007, gh#11), in ticks. The band is deliberately tick-based, never a percentage of raw price.
+    /// </summary>
+    public int StopPromotionTicks { get; init; } = 8;
+
     /// <summary>The domain caps these options configure.</summary>
     /// <returns>The sanity caps.</returns>
     public SanityCaps ToSanityCaps() => new(MaxContractsPerOrder, MaxNotional, FatFingerBandTicks);
