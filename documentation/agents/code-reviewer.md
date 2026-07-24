@@ -54,6 +54,12 @@ any reviewer, human or agent, should work from it.
   comment, then submit the verdict: **Request changes** if any finding is unresolved, **Approve** (with a
   one-line summary) when the diff is clean. A bare top-level comment does not register as a review and leaves the
   state ambiguous. (A working-diff review with no PR still uses `ReportFindings` / the requested format.)
+- **Submit the state as the reviewer identity, never as the author.** GitHub blocks approving or requesting
+  changes on your own PR, and agents here authenticate as the maintainer who authored it — so the verdict is
+  rendered by the **reviewer GitHub App** (`…[bot]`, a distinct actor), set up in the
+  [deployment runbook](../deployment-runbook.md) (gh#141). **Until that App is provisioned**, fall back to a
+  comment whose **first line is the verdict** — `**Verdict: Request changes**` / `**Verdict: Approve**` — so the
+  signal is unambiguous even though it is not yet a formal state.
 
 ## What you do not do
 - **Merge or close.** Those remain the maintainer's — on a single-operator deployment, what lands on `develop` is

@@ -48,9 +48,11 @@ and cross-agent heads-ups with no formal home. **Check it before starting work**
   (**Code Reviewer**, **Platform**) never auto-load. Two that catch agents out because they bind *whatever* you
   came here to do:
   - **Reviewing?** Findings are review comments **plus a submitted state** — **Approve** (with a summary) or
-    **Request changes** — never a bare comment. **Merging stays the maintainer's**; an approval is a signal, not
-    authority to ship, and an agent approves a diff it *reviewed*, **never one it authored**. Substance:
-    [Code Reviewer](documentation/agents/code-reviewer.md).
+    **Request changes** — never a bare comment. The state is submitted as the **reviewer identity** (a `…[bot]`
+    GitHub App), never the author — GitHub blocks self-review (gh#141; setup in the deployment runbook), with a
+    verdict-prefixed comment as the interim until it is live. **Merging stays the maintainer's**; an approval is a
+    signal, not authority to ship, and an agent approves a diff it *reviewed*, **never one it authored**.
+    Substance: [Code Reviewer](documentation/agents/code-reviewer.md).
   - **Touching CI/CD, the image, compose, or deploy?** That is the
     [Platform](documentation/agents/platform.md) contract, wherever the file sits.
 - **No secrets in source** — Options pattern + environment; broker credentials server-side only.
