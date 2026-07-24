@@ -8,11 +8,25 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 
 internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
 {
+    private readonly List<AdversarialTestTradingVenue> _created = [];
+
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
+
+    /// <summary>
+    /// Every order this factory's venues have transmitted, across all compositions (gh#157). The ladder builds a
+    /// fresh venue per evaluation (<c>ComposeAsync</c> calls <see cref="Create"/> each time), so
+    /// <see cref="LastVenueCreated"/> alone cannot answer "did arming transmit?" — the arm's venue is discarded
+    /// before the assertion runs. Snapshot this before an action and compare after.
+    /// </summary>
+    public IReadOnlyList<OrderRequest> AllPlacedOrderRequests => [.. _created.SelectMany(venue => venue.PlacedOrderRequests)];
+
+    /// <summary>The cumulative count behind <see cref="AllPlacedOrderRequests"/>.</summary>
+    public int TotalPlacedOrderCount => _created.Sum(venue => venue.PlacedOrdersCount);
 
     public ITradingVenue Create(FirmConventions conventions)
     {
         LastVenueCreated = new AdversarialTestTradingVenue(conventions);
+        _created.Add(LastVenueCreated);
         return LastVenueCreated;
     }
 }
