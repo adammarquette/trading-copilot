@@ -50,6 +50,11 @@ builder.Services.AddScoped<QuoteIngestionService>();
 builder.Services.Configure<IngestionOptions>(builder.Configuration.GetSection(IngestionOptions.SectionName));
 builder.Services.AddHostedService<MarketDataIngestionHost>();
 
+// The event log's first consumer (ADR-0007, gh#153): the stop-promotion watcher reads market.quote events and
+// promotes hidden actual stops as price comes within their band. Harmless with no staged stops, so it always runs.
+builder.Services.AddScoped<StopPromotionService>();
+builder.Services.AddHostedService<StopPromotionHost>();
+
 // The R-14 environment, mapped ONCE at the composition root from the host (gh#9): practice anywhere, live only
 // in production, undeclared nowhere -- and an unrecognised environment name fails closed to Development
 // (practice-only). Wrapped so endpoints bind it from services, never from a request.

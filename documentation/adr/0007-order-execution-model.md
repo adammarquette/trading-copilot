@@ -124,8 +124,16 @@ in `StopPlan.Create` **and** by a side-dependent cross-column DB CHECK (`CK_Stop
 proven rejecting against live Postgres. A plan is recorded per transmitted entry, and skipped when the two stops
 coincide (nothing to stage — the single stop already rests natively).
 
-*Still deferred:* the **live promotion watcher** (it needs streaming quotes — R-1), OCO-cancel-on-exit,
-take-profit brackets, and connection-liveness orphan handling.
+## Update (2026-07-24) — the promotion watcher landed (gh#153)
+With R-1 quotes flowing, `StopPromotionHost` is the event log's **first consumer**: it reads `market.quote`
+events from its own cursor (an ADR-0001 consumer group) and, per hidden stop whose side-appropriate price (bid
+for a long, ask for a short) is within its band, transmits the actual stop as a native working order and records
+it `Native`. **Transmit-then-record**: a venue rejection propagates and the plan stays `Hidden`, never claiming
+an exchange-held stop that does not exist. Because promotion is idempotent (an already-`Native` stop is skipped),
+the consumer commits its cursor per batch and at-least-once redelivery on restart is safe. The watcher reads
+across the R-20 boundary deliberately — it is background plumbing acting for the deployment, not a request-user.
+
+*Still deferred:* OCO-cancel-on-exit, take-profit brackets, and connection-liveness orphan handling.
 
 ## Consequences
 **Positive**
