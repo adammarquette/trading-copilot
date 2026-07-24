@@ -134,6 +134,39 @@ checks (gh#72, gh#104). Repo-specific review guidance lives in
 [`.github/copilot-instructions.md`](../.github/copilot-instructions.md); update it when a review repeatedly
 misses something this codebase cares about.
 
+### Reviewer identity — a GitHub App for agent verdicts (gh#141)
+The [Code Reviewer contract](agents/code-reviewer.md) requires an agent to render a **formal verdict** — Approve
+or Request changes — not a bare comment. But **GitHub forbids approving or requesting changes on your own PR**,
+and every agent here authenticates as the maintainer (`adammarquette`), who authors the PRs. So the verdict needs
+a **distinct identity that is not the author.**
+
+**Decision (gh#141): a GitHub App**, not a second machine-user account — it needs no extra login or email, its
+token is scoped and revocable, its reviews post as `…[bot]` (a separate actor, so not self-review), and a fork
+recreates it without a second person (ADR-0015).
+
+**One-time operator setup — GitHub UI, cannot be scripted** (the App-manifest flow and the private key are
+console-only, recorded here because they are otherwise invisible to anyone reading the pipeline):
+1. **Settings → Developer settings → GitHub Apps → New GitHub App.** Name e.g. `trading-copilot-reviewer`; any
+   valid Homepage URL; **uncheck Webhook → Active**.
+2. **Permissions → Repository:** **Pull requests → Read & write**; **Contents → Read-only**; **Metadata →
+   Read-only** (auto). Nothing else.
+3. **Create**, then **Generate a private key** (a `.pem` downloads) and note the **App ID**.
+4. **Install App → this account → Only select repositories → `trading-copilot`**; note the **Installation ID**.
+5. Store three values as **secrets** the reviewer agent reads (never in source): `REVIEWER_APP_ID`,
+   `REVIEWER_APP_INSTALLATION_ID`, `REVIEWER_APP_PRIVATE_KEY` (the `.pem` contents) — the operator's env / a
+   git-ignored `.env` locally, repository secrets in CI.
+
+**How the reviewer agent uses it** — mint a short-lived installation token, then review as the App:
+- JWT signed with the private key (`iss` = App ID, ≤10-min expiry) → `POST /app/installations/{id}/access_tokens`
+  → an installation token (~1 h).
+- `GH_TOKEN=<installation-token> gh pr review <N> --repo … --request-changes|--approve --body-file …` → the
+  review posts as `trading-copilot-reviewer[bot]`, a different actor from the author, so GitHub accepts it.
+
+**Until the App exists**, an agent review falls back to a comment whose **first line is the verdict**
+(`**Verdict: Request changes**` / `**Verdict: Approve**`) so the signal is unambiguous even without a formal
+state. Once the App is live, this fallback is retired and (with `gh#45`) its approval can become a required
+check.
+
 ## Deploy procedure
 - **Non-prod (dev / staging):** automatic on merge — CI builds + deploys.
 - **Production:** **human-approved** (§9). Promote `staging → main`; CI deploys; smoke tests verify. A person must be
