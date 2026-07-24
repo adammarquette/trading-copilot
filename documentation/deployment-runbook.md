@@ -156,11 +156,17 @@ console-only, recorded here because they are otherwise invisible to anyone readi
    `REVIEWER_APP_INSTALLATION_ID`, `REVIEWER_APP_PRIVATE_KEY` (the `.pem` contents) — the operator's env / a
    git-ignored `.env` locally, repository secrets in CI.
 
-**How the reviewer agent uses it** — mint a short-lived installation token, then review as the App:
-- JWT signed with the private key (`iss` = App ID, ≤10-min expiry) → `POST /app/installations/{id}/access_tokens`
-  → an installation token (~1 h).
-- `GH_TOKEN=<installation-token> gh pr review <N> --repo … --request-changes|--approve --body-file …` → the
-  review posts as `trading-copilot-reviewer[bot]`, a different actor from the author, so GitHub accepts it.
+**How the reviewer agent uses it** — the committed helper
+[`.github/scripts/reviewer-review.sh`](../.github/scripts/reviewer-review.sh) does the token dance (JWT signed
+with the private key → `POST /app/installations/{id}/access_tokens` → a ~1 h installation token → the review),
+reading the three secrets from the environment. The key is written only to a private (0600) temp file for the
+openssl call and removed immediately (native-Windows openssl cannot read a process-substitution FD); neither key
+nor token is ever printed.
+- `reviewer-review.sh verify` — mints a token and reports what the installation can reach; **posts nothing**. Run
+  this first.
+- `reviewer-review.sh review <pr> REQUEST_CHANGES <body-file>` (or `APPROVE` / `COMMENT`) — submits the verdict;
+  it posts as `trading-copilot-reviewer[bot]`, a different actor from the author, so GitHub accepts it. The script
+  prints the bot login it posted as — the proof self-review was bypassed.
 
 **Until the App exists**, an agent review falls back to a comment whose **first line is the verdict**
 (`**Verdict: Request changes**` / `**Verdict: Approve**`) so the signal is unambiguous even without a formal
