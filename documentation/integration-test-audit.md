@@ -31,15 +31,17 @@ Below is the baseline inventory of current integration tests located under [`src
 | Integration Test Suite | Covered Endpoints & Features | Current Status |
 | :--- | :--- | :--- |
 | **`FirmOnboardingEndpointsIntegrationTests.cs`** | `GET /firms`, `GET /firms/{key}`, `POST /firms/{key}/stage-conventions`, connection creation & account resolution | **Active** (Passing) |
-| **`RiskEndpointsIntegrationTests.cs`** | `POST /accounts/{id}/risk`, `GET /accounts/{id}/risk` | **Active** (Passing) |
+| **`RiskEndpointsIntegrationTests.cs`** | `PUT /accounts/{id}/risk`, `GET /accounts/{id}/risk` | **Active** (Passing) |
 | **`UserInvitationEndpointsIntegrationTests.cs`** | `POST /auth/invitations`, `POST /auth/invitations/accept`, Primary Operator flag enforcement | **Active** (Passing) |
 | **`UnauthenticatedEndpointsTests.cs`** | Global HTTP 401 unauthenticated challenge verification | **Active** (Passing) |
+| **`OrderEndpointsIntegrationTests.cs`** | `POST /accounts/{id}/orders` — the **direct** send path: fail-closed risk absence, credential-key guard, gate refusal + audit trail, R-14 mode × environment (gh#130) | **Active** (Passing) |
+| **`StagedOrderLadderIntegrationTests.cs`** | The **staged ladder** — `POST …/orders/arm`, `PUT /orders/{id}`, `POST /orders/{id}/take`, `DELETE /orders/{id}` — plus the gh#134 working-stop regression and the gh#96 DB mode guard (gh#157) | **Active** (Passing) |
 | **`StopPlanPersistenceIntegrationTests.cs`** | Staged-stop plan persistence (`POST /accounts/{id}/orders` → `StopPlanRecord`); the four `CK_StopPlans_*` DB CHECK constraints proven by name on **both** safety-beyond-actual sides with a positive control; FK `ON DELETE CASCADE`; ATR not-yet-supported pin (gh#158) | **Active** (Passing) |
+| **`SystemSmokeIntegrationTests.cs`** | `Category=Smoke` read-only probes against a deployed target (gh#131); see gh#152 / gh#159 for its open tier issues | **Active** (Passing) |
 
-> **Inventory drift (tracked by [gh#160](https://github.com/adammarquette/trading-copilot/issues/160)):** this table
-> still omits the already-shipped `OrderEndpointsIntegrationTests.cs` and `SystemSmokeIntegrationTests.cs`, and
-> §4/§5 below carry stale file names and closed-issue statuses. The full realignment is **gh#160's** deliverable,
-> not this PR's — gh#158 adds only its own suite here per the same-PR rule.
+> **Inventory drift (tracked by [gh#160](https://github.com/adammarquette/trading-copilot/issues/160)):** §4/§5
+> below still carry stale target file names and closed-issue statuses, and duplicate the issue bodies wholesale
+> rather than linking them. The full realignment is **gh#160's** deliverable, not this PR's.
 
 ---
 
