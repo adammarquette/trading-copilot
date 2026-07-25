@@ -5,9 +5,10 @@ namespace MarqSpec.TradingCopilot.Domain.Audit;
 /// </summary>
 /// <remarks>
 /// <see cref="Unknown"/> is the refusable zero (the fail-closed-zero convention, gh#60): an uninitialised action
-/// must never masquerade as a real audited event. This records the <see cref="ConnectionLoss"/> event (gh#220) and
-/// the <see cref="PositionExit"/> retirement (gh#183); the remaining order / guardrail / kill / flatten actions the
-/// audit will carry are named in the data dictionary and land as those write sites are wired.
+/// must never masquerade as a real audited event. This records the <see cref="ConnectionLoss"/> event (gh#220), the
+/// <see cref="PositionExit"/> retirement (gh#183), and an operator <see cref="OrderCancelled"/> (gh#250); the
+/// remaining guardrail / kill / flatten actions the audit will carry are named in the data dictionary and land as
+/// those write sites are wired.
 /// </remarks>
 public enum AuditAction
 {
@@ -27,4 +28,13 @@ public enum AuditAction
     /// a plan to <c>Retired</c>; a flat-position cleanup, so its record does <b>not</b> carry <c>synthetic_risk</c>.
     /// </summary>
     PositionExit = 2,
+
+    /// <summary>
+    /// A working order left the book without ever holding a position (ADR-0007, gh#250): an <b>operator</b> cancel
+    /// via the order API, or a <b>venue-detected</b> cancel / rejection reconciled by the account-event stream
+    /// (gh#219). Its now-orphaned stop plan is retired with it (else the promotion watcher could promote a native
+    /// stop for an order that never filled). Recorded so a reader can tell the order left deliberately, not lost; a
+    /// never-filled entry, so its record does <b>not</b> carry <c>synthetic_risk</c> (no live position rested on it).
+    /// </summary>
+    OrderCancelled = 3,
 }

@@ -1,8 +1,10 @@
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
@@ -10,6 +12,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.Api.Orders;
@@ -38,7 +41,7 @@ public static class OrderEndpoints
         RouteGroupBuilder orderGroup = endpoints.MapGroup("/orders/{id:guid}").RequireAuthorization();
         orderGroup.MapPut("/", EditStagedOrderAsync);
         orderGroup.MapPost("/take", TakeStagedOrderAsync);
-        orderGroup.MapDelete("/", CancelStagedOrderAsync);
+        orderGroup.MapDelete("/", CancelOrderAsync);
 
         return endpoints;
     }
@@ -395,28 +398,174 @@ public static class OrderEndpoints
         return MapSendResult(result, order.Id);
     }
 
-    internal static async Task<IResult> CancelStagedOrderAsync(
+    internal static async Task<IResult> CancelOrderAsync(
         Guid id,
         TradingCopilotDbContext database,
+        IProjectXVenueFactory venueFactory,
+        IOptions<ProjectXConnectionOptions> projectXOptions,
+        IAuditLog auditLog,
+        ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
     {
         Order? order = await database.Orders.FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
         if (order is null)
         {
-            return Results.NotFound();
+            return Results.NotFound(); // not ours (R-20) or gone
         }
 
-        if (order.Status != OrderStatus.Staged)
+        // A cancel is risk-reducing, so it passes through neither the kill switch (which refuses NEW orders only)
+        // nor the send ladder (no risk profile, no flat check): pulling an order off the book is always allowed.
+        // What it does depends on where the order rests.
+        switch (order.Status)
         {
-            // Cancelling a WORKING order is venue work (a later increment); cancelling a cancelled one is a
-            // mistake worth surfacing, not a silent no-op.
-            return Results.Conflict(new { error = "Only a staged order can be cancelled here — this one has left staging." });
+            case OrderStatus.Staged:
+                // A staged ticket is server-side only -- nothing at the venue, so discarding it is a plain delete.
+                order.Status = OrderStatus.Cancelled;
+                await database.SaveChangesAsync(cancellationToken);
+                return Results.Ok(new { order.Id, status = order.Status.ToString() });
+
+            case OrderStatus.Working:
+                return await CancelWorkingOrderAsync(
+                    order, database, venueFactory, projectXOptions, auditLog, loggerFactory, cancellationToken);
+
+            default:
+                // Filled / cancelled / rejected -- already done. A no-op would hide a mistaken request.
+                return Results.Conflict(new { error = $"A {order.Status} order cannot be cancelled." });
+        }
+    }
+
+    private static async Task<IResult> CancelWorkingOrderAsync(
+        Order order,
+        TradingCopilotDbContext database,
+        IProjectXVenueFactory venueFactory,
+        IOptions<ProjectXConnectionOptions> projectXOptions,
+        IAuditLog auditLog,
+        ILoggerFactory loggerFactory,
+        CancellationToken cancellationToken)
+    {
+        if (order.VenueOrderKey is null)
+        {
+            return Results.Conflict(new { error = "This working order has no venue handle to cancel." });
+        }
+
+        // A LIGHT resolution of the order's venue -- no risk profile, no flat check, no gate (a cancel needs none of
+        // the send ladder), plus the one-credential-set process guard (ADR-0015). Account/connection are R-20-scoped.
+        Account? account = await database.Accounts
+            .FirstOrDefaultAsync(candidate => candidate.Id == order.AccountId, cancellationToken);
+        if (account is null)
+        {
+            return Results.NotFound(new { error = "The order's account no longer exists." });
+        }
+
+        Connection? connection = await database.Connections
+            .FirstOrDefaultAsync(candidate => candidate.Id == account.ConnectionId, cancellationToken);
+        if (connection is null)
+        {
+            return Results.NotFound(new { error = "The account's connection no longer exists." });
+        }
+
+        string configuredKey = projectXOptions.Value.CredentialKey;
+        if (!string.Equals(connection.CredentialKey, configuredKey, StringComparison.Ordinal))
+        {
+            return Results.Conflict(new
+            {
+                error = $"This process holds credentials for key '{configuredKey}', not '{connection.CredentialKey}' "
+                    + "(ADR-0015). Run a process for that key to cancel its orders.",
+            });
+        }
+
+        FirmConventions conventions = await database.ConventionsForConnectionAsync(connection.Id, cancellationToken);
+        ITradingVenue venue = venueFactory.Create(conventions);
+        VenueAccountId venueAccount = VenueAccountId.Create(venue.Id, account.VenueAccountKey);
+
+        try
+        {
+            await venue.CancelOrderAsync(venueAccount, order.VenueOrderKey, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // The venue refused -- typically the order already left the book (filled, or already cancelled). Do NOT
+            // force a terminal status: it may have FILLED, not cancelled, and guessing would mislabel it. The
+            // account-event stream (gh#219) is the authoritative venue-truth reconciler and advances the real
+            // status; the journal is left untouched for it, and the operator is told why.
+            return Results.Conflict(new
+            {
+                order.Id,
+                error = $"The venue refused to cancel order {order.VenueOrderKey}: {error.Message}. "
+                    + "Its true status reconciles from venue truth (the account-event stream).",
+            });
         }
 
         order.Status = OrderStatus.Cancelled;
+
+        // The entry is gone, so its stop plan protects nothing -- retire it terminally, else the promotion watcher
+        // could promote a native stop for a cancelled entry (gh#183 Finding 4). Committed WITH the status; audited
+        // as a secondary write after (the audit must never undo the cancel/retire).
+        StopPlanRecord? plan = await database.StopPlans
+            .FirstOrDefaultAsync(candidate => candidate.OrderId == order.Id
+                && (candidate.Staging == StopStaging.Hidden
+                    || candidate.Staging == StopStaging.Native
+                    || candidate.Staging == StopStaging.Orphaned), cancellationToken);
+        StopStaging? retiredFrom = plan?.Staging;
+        if (plan is not null)
+        {
+            plan.Staging = StopStaging.Retired;
+        }
+
         await database.SaveChangesAsync(cancellationToken);
+        await AuditCancelSafelyAsync(auditLog, loggerFactory, order, plan, retiredFrom, cancellationToken);
 
         return Results.Ok(new { order.Id, status = order.Status.ToString() });
+    }
+
+    // The immutable audit entry for an operator cancel (gh#250, gh#220): owned by the order's operator (R-20), a
+    // resting-entry cancel so NOT synthetic_risk (nothing had filled). Native placement -- the order was a native
+    // working order; when a stop plan was retired with it, the record carries the plan's id and staging transition.
+    private static async Task AuditCancelSafelyAsync(
+        IAuditLog auditLog,
+        ILoggerFactory loggerFactory,
+        Order order,
+        StopPlanRecord? plan,
+        StopStaging? retiredFrom,
+        CancellationToken cancellationToken)
+    {
+        if (plan is null)
+        {
+            // No stop plan to retire (e.g. working stop == safety stop, so none was staged). The cancel itself is
+            // journaled via the order status; the audit records the safety-relevant retirement, so there is none.
+            return;
+        }
+
+        AuditRecord record = new()
+        {
+            UserId = order.UserId,
+            Action = AuditAction.OrderCancelled,
+            Placement = AuditPlacement.Native,
+            SyntheticRisk = false,
+            StopPlanId = plan.Id,
+            Before = retiredFrom?.ToString(),
+            After = StopStaging.Retired.ToString(),
+            Detail = $"Working order {order.VenueOrderKey} cancelled by the operator; its stop plan was retired.",
+            RecordedAt = DateTimeOffset.UtcNow,
+        };
+
+        try
+        {
+            await auditLog.WriteAsync([record], cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
+                error, "Audit write failed for the cancel of order {Order}; the cancel still completed.", order.Id);
+        }
     }
 
     /// <summary>The shared precondition ladder — identical for send, arm, edit, and take (gh#11).</summary>
