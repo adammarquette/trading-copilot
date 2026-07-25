@@ -146,7 +146,7 @@ for free — target and stop cancel one another on fill.
 
 *Still deferred:* the **app-level OCO-cancel-on-exit** — cancelling a *synthetic/hidden* leg, or the safety
 stop, when a position exits by manual flatten or by the promoted actual stop (it needs account-streaming / fill
-events, `VenueCapability.AccountStreaming`); and connection-liveness orphan handling.
+events, `VenueCapability.AccountStreaming`). *(Connection-liveness orphan handling — listed deferred here — has since landed: gh#209, gh#191.)*
 
 ## Update (2026-07-25) — the take-profit wiring (gh#173)
 The operator can now set one: `SendOrderRequest.Target` flows through `BuildRequestAsync` into
@@ -207,11 +207,19 @@ synthetic protection, loudly. A **pending conditional is no-risk** and needs no 
 fire without quotes, and its cancel-if/expiry stands (ADR-0013). The guard runs as background plumbing
 (`IgnoreQueryFilters`, ownership preserved).
 
-*Deferred within orphan handling:* the **formal `AuditRecord` + `synthetic_risk` flag** and a **real-time
-operator alert** — the orphan is a **high-severity log** carrying `synthetic_risk` until the Phase-4 SPA/SignalR
-channel and the audit entity land; and **full per-position re-validation on re-arm** (re-arm restores `Hidden`
-so promotion resumes; a promotion for a since-closed position self-rejects at the venue, the safety stop being
-the floor throughout).
+*Deferred within orphan handling:* the **formal `AuditRecord` + `synthetic_risk` flag** (gh#220) and a
+**real-time operator alert** (gh#222) — the orphan is a **high-severity log** carrying `synthetic_risk` until the
+Phase-4 SPA/SignalR channel and the audit entity land.
+
+## Update (2026-07-25) — per-position re-validation on re-arm landed (gh#191)
+Re-arm is no longer unconditional. On reconnect the `OrphanGuardService` re-validates **each** orphaned stop
+against **venue truth** before re-arming: a plan whose position is still open re-arms to `Hidden`; one whose
+position **closed or reversed** during the outage is **`StopStaging.Retired`** (terminal — never promoted, never
+re-armed), because a stop for a position that no longer exists must not act (ADR-0013's "never auto-act on
+rehydrated state — re-validate first"); a **partial close** reconciles the protected quantity (`Order.Size`)
+first; and a plan that **cannot be re-validated** — the venue is unreachable, or it belongs to another process's
+credential set — stays orphaned and is **retried on a later pass** (the monitor keeps retrying while connected).
+Uncertainty resolves to the safe state: nothing re-arms on an unverified assumption (§9).
 
 ## Update (2026-07-25) — the kill switch landed (gh#189)
 The **kill switch** is now the operator's process-wide override, enforced at a **single choke point**: the
