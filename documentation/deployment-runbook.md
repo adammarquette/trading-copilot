@@ -135,11 +135,19 @@ without triggering a review per commit.
 
 **This rule gates the merge — it is not advisory.** Copilot's *findings* are advisory (no finding blocks
 anything), but the **rule itself is a ruleset requirement**: a PR into `develop` cannot merge until Copilot has
-actually reviewed it. The failure mode to know, because it is silent: **when Copilot cannot review — quota
-exhausted, service degraded — the PR simply stays unmergeable**, with green CI and 0 required approvals and no
-red check to point at. Nothing in the checks tab explains it. Only the maintainer can unblock it, by
-re-requesting the review once quota returns or by editing the ruleset in repo settings. Budget Copilot quota
-accordingly when several PRs are in flight.
+**responded**. What makes it confusing is that a ruleset rule is **not a status check** — it never appears in the
+checks tab, so while it is outstanding the PR reads `mergeStateStatus: BLOCKED` with every check green, 0
+required approvals, and **nothing to point at**. A merge click silently does not take.
+
+**Quota exhaustion delays it; it does not deadlock it.** When Copilot cannot review, it still replies — a
+`COMMENTED` review reading *"unable to review this pull request because the user who requested the review has
+reached their quota limit"* — and **that reply satisfies the rule**; the PR goes `CLEAN` and merges. Observed on
+both PR #195 and PR #237. So a PR that looks permanently stuck is usually just waiting on the bot to answer:
+re-check before escalating.
+
+Diagnose with `gh pr view <n> --json mergeStateStatus,reviewDecision,latestReviews` — the reviews array shows
+whether Copilot has responded at all. The ruleset carries **no bypass actors**, so if it ever genuinely does
+deadlock, only editing the ruleset in repo settings clears it.
 
 The other **blocking** gates are the required status checks enforced by the branch-protection rulesets below
 (gh#45): `build & unit tests`, `commit-hygiene`, the pre-merge integration suite (gh#121), and `ladder` on the
