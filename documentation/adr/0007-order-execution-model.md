@@ -208,9 +208,9 @@ synthetic protection, loudly. A **pending conditional is no-risk** and needs no 
 fire without quotes, and its cancel-if/expiry stands (ADR-0013). The guard runs as background plumbing
 (`IgnoreQueryFilters`, ownership preserved).
 
-*Deferred within orphan handling:* the **formal `AuditRecord` + `synthetic_risk` flag** (gh#220) and a
-**real-time operator alert** (gh#222) — the orphan is a **high-severity log** carrying `synthetic_risk` until the
-Phase-4 SPA/SignalR channel and the audit entity land.
+*Deferred within orphan handling:* the **real-time operator alert** (gh#222) — the orphan is a **high-severity
+log** carrying `synthetic_risk` until the Phase-4 SPA/SignalR channel lands. *(The formal `AuditRecord` +
+`synthetic_risk` flag landed in gh#220 — see the update below.)*
 
 ## Update (2026-07-25) — per-position re-validation on re-arm landed (gh#191)
 Re-arm is no longer unconditional. On reconnect the `OrphanGuardService` re-validates **each** orphaned stop
@@ -268,6 +268,23 @@ nothing — no `Fill` row was ever written and an order stopped at `Working`, ne
 *Still deferred:* **OCO-cancel-on-exit** (gh#183, the seam's first real consumer); backfilling fills missed while
 disconnected (venue-truth reconcile, gh#193); cancelling a *working* order through the order API (today only the kill
 switch does). `MarketDepth` / `ModifyOrder` / `TrailingStops` stay declared-but-unreached.
+
+## Update (2026-07-25) — the AuditRecord landed (gh#220)
+The `synthetic_risk` audit deferred by gh#209 is now a real entity. `AuditRecord` (table `AuditRecords`) is an
+**operator-owned** (`IUserOwned`, R-20), **append-only** row carrying `action` (`connection-loss` this increment),
+`placement` (`native` / `synthetic`), the **`synthetic_risk`** flag, `before → after`, a **soft** `stopPlanId`
+reference (no FK, so the immutable trail outlives the stop), and a timestamp — both enums fail-closed-zero, DB-checked
+`≠ unknown`. The `OrphanGuardService` writes one row per transition it already performs: `Hidden → Orphaned` on a
+drop, and `Orphaned → Hidden` (re-arm) or `Orphaned → Retired` on reconnect — each `synthetic_risk = true` and owned
+by the affected stop's operator, so the exposure window is reconstructable from the table alone. A stop **left
+orphaned** (unverifiable) transitions to nothing and records nothing.
+
+The audit is a **secondary write, subordinate to the safety action**: the guard commits the staging change *first*,
+then writes the audit in its own unit of work through an `IAuditLog` seam; a failure there is **logged and
+swallowed, never propagated** — a covering test makes the audit write throw and asserts the orphan / re-arm still
+completes. This is the general rule for the coming order / guardrail / kill / flatten write sites too: the record of
+a safety action must never be able to *prevent* it. *Still deferred within the audit:* those broader write sites, and
+the **real-time operator alert** (gh#222) — the high-severity log remains the interim alert.
 
 ## Consequences
 **Positive**
