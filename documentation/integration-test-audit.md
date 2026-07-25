@@ -1,9 +1,9 @@
 # Integration Test Suite Audit & Ticket Backlog Report
 
 **Author**: Primary QA / SDET  
-**Date**: July 23, 2026  
+**Date**: July 23, 2026 · **Realigned to the route map**: 2026-07-24 (gh#160)  
 **Target Repository**: `trading-copilot` (`src/MarqSpec.TradingCopilot.IntegrationTests`)  
-**Status**: Registered on GitHub & Ready for Development  
+**Status**: Living inventory — suites land incrementally; see §4 for current per-issue status  
 
 ---
 
@@ -13,14 +13,15 @@ As the primary QA/SDET for **Trading Copilot**, a comprehensive audit was conduc
 
 The objective of this audit is to identify high-value integration testing gaps, quantify risk coverage, and define actionable tickets to raise the quality ceiling of the platform.
 
-### Key Audit Findings
-1. **Existing Integration Coverage**: Solid coverage exists for **Firm Onboarding**, **Risk Profile Declaration**, and **User Invitation / Primary Operator Auth Guard**.
-2. **Critical Gaps Identified**:
-   - **Staged Send Path & Order Execution (`arm` $\rightarrow$ `edit` $\rightarrow$ `take` $\rightarrow$ `cancel`)**: Covered extensively in unit tests, but lacks an integration test suite running against real DB transactions and EF Core change trackers.
-   - **R-14 Database Mode & Environment Enforcement**: Database constraint triggers (`Order.mode == Account.mode`) and R-14 mode x environment mismatch guards need end-to-end integration verification against Testcontainers Postgres.
-   - **Multi-Tenant / Multi-Operator Data Isolation (R-20 / ADR-0017)**: Needs a dedicated integration suite proving that default-deny isolation enforces total invisibility (`404` / empty result sets) across separate user context tokens for all entities (`Order`, `Connection`, `Account`, `RiskProfile`, `GateDecision`).
-   - **Connection Lifecycle & Credential Mutation**: Connection creation, credential key rotation, deactivation cascading, and account stage updates lack dedicated integration test scenarios.
-   - **Production Read-Only Smoke Test Suite**: No tagged, production-safe smoke test suite exists for quick post-deployment health verification.
+### Key Audit Findings (status current as of the gh#160 realignment)
+1. **Existing Integration Coverage**: Firm Onboarding, Risk Profile Declaration, User Invitation / Primary-Operator Auth Guard, the unauthenticated challenge, order execution (direct + staged ladder), the staged-stop plan, the event backbone, and the production smoke suite — see §2 for the full inventory.
+2. **Gaps — delivered (✅) and remaining (⬜):**
+   - ✅ **Staged Send Path & Order Execution (`arm` → `edit` → `take` → `cancel`)** — direct send (gh#130), the staged ladder (gh#157), and the stop-plan DB guards (gh#158) all landed against Testcontainers Postgres.
+   - ✅ **R-14 Database Mode & Environment Enforcement** — the `Order.mode == Account.mode` trigger and mode × environment refusals are exercised in the order suites (gh#130, gh#157).
+   - ⬜ **Multi-Tenant / Multi-Operator Data Isolation (R-20 / ADR-0017)** — **gh#132**, now realigned to the route map (§5); most of the property is reachable today.
+   - ⬜ **Connection Lifecycle & Account Stage** — creation, discovery, and stage resolution are testable now (**gh#142**, realigned). Credential *rotation* and connection *soft-delete* are **missing features**, not missing tests → filed as **gh#210** for the Coding Agent.
+   - ✅ **Production Read-Only Smoke Test Suite** — gh#131; the lazy-fixture fix so a deployed-target run starts no container is gh#152.
+   - ✅ **Event Backbone Storage** — the append-only Timescale log at the storage tier (gh#161).
 
 ---
 
@@ -30,7 +31,7 @@ Below is the baseline inventory of current integration tests under [`src/MarqSpe
 
 | Integration Test Suite | Covered Endpoints & Features | Current Status |
 | :--- | :--- | :--- |
-| **`FirmOnboardingEndpointsIntegrationTests.cs`** | `GET /firms`, `GET /firms/{key}`, `POST /firms/{key}/stage-conventions`, connection creation & account resolution | **Active** (Passing) |
+| **`FirmOnboardingEndpointsIntegrationTests.cs`** | `POST /firms`, `GET /firms`, `PUT /firms/{id}/conventions`, connection creation & account discovery | **Active** (Passing) |
 | **`RiskEndpointsIntegrationTests.cs`** | `PUT /accounts/{id}/risk`, `GET /accounts/{id}/risk` | **Active** (Passing) |
 | **`UserInvitationEndpointsIntegrationTests.cs`** | `POST /auth/invitations`, `POST /auth/invitations/accept`, Primary Operator flag enforcement | **Active** (Passing) |
 | **`UnauthenticatedEndpointsTests.cs`** | Global HTTP 401 unauthenticated challenge verification | **Active** (Passing) |
@@ -39,10 +40,6 @@ Below is the baseline inventory of current integration tests under [`src/MarqSpe
 | **`StopPlanPersistenceIntegrationTests.cs`** | Staged-stop plan persistence (`POST /accounts/{id}/orders` → `StopPlanRecord`); the four `CK_StopPlans_*` DB CHECK constraints proven by name on **both** safety-beyond-actual sides with a positive control; FK `ON DELETE CASCADE`; ATR not-yet-supported pin (gh#158) | **Active** (Passing) |
 | **`SystemSmokeIntegrationTests.cs`** | `Category=Smoke` read-only probes against a deployed target (gh#131); the in-process host + its container are now **lazy**, so a deployed-target run starts no PostgreSQL container / needs no Docker (gh#152) | **Active** (Passing) |
 | **`Data/EventBackboneIntegrationTests.cs`** | The append-only event log (ADR-0001) at the **storage tier** via `IEventLog` against the applied `AddEventBackbone` hypertable migration — envelope round-trip (`jsonb` payload, UTC instant), monotonic sequences under concurrent appends, the #156 replay two-rows-one-`Id` contract, id generation, `ReadAfter` ordering + paging, cursor upsert, blank type/source rejection; pins the retention-gap silent-skip (gh#162) and a non-UTC `OccurredAt` rejection (gh#201) (gh#161) | **Active** (Passing) |
-
-> **Inventory drift (tracked by [gh#160](https://github.com/adammarquette/trading-copilot/issues/160)):** §4/§5
-> below still carry stale target file names and closed-issue statuses, and duplicate the issue bodies wholesale
-> rather than linking them. The full realignment is **gh#160's** deliverable, not this PR's.
 
 ---
 
@@ -73,73 +70,41 @@ flowchart TD
 
 ---
 
-## 4. Registered GitHub Issue Backlog & Specifications
+## 4. Registered GitHub issues — status link table
 
-The following GitHub issues are registered and tracked on `adammarquette/trading-copilot`:
+Specs live in their GitHub issues (the tracker is the source of truth, gh#144); this section is a **link table
+with status**, not a copy of the bodies. Statuses current as of the gh#160 realignment (2026-07-24).
 
-### Ticket 1: `gh#130` — `QA(task#11) - Staged send path & order execution integration test suite`
-* **GitHub Link**: [https://github.com/adammarquette/trading-copilot/issues/130](https://github.com/adammarquette/trading-copilot/issues/130)
-* **Title Format**: `QA(task#11) - Staged send path & order execution integration test suite`
-* **Specification**: [gh#130](https://github.com/adammarquette/trading-copilot/issues/130)
-* **Priority**: **P0 (Critical)**
-* **Category**: Integration Testing
-* **Parent Tasks**: `#11` (Staged Send Path), `#134` (Working Stop persistence)
-* **Target File**: `src/MarqSpec.TradingCopilot.IntegrationTests/Api/OrderExecutionEndpointsIntegrationTests.cs`
-
----
-
-### Ticket 2: `gh#132` — `QA(task#128) - Multi-tenant workspace & resource isolation integration suite`
-* **GitHub Link**: [https://github.com/adammarquette/trading-copilot/issues/132](https://github.com/adammarquette/trading-copilot/issues/132)
-* **Title Format**: `QA(task#128) - Multi-tenant workspace & resource isolation integration suite`
-* **Specification**: [gh#132](https://github.com/adammarquette/trading-copilot/issues/132)
-* **Priority**: **P0 (Critical)**
-* **Category**: Security & Isolation Integration Testing
-* **Parent Tasks**: `#128` (Primary Operator Issuance Restriction), `ADR-0017`, `R-20`
-* **Target File**: `src/MarqSpec.TradingCopilot.IntegrationTests/Api/MultiTenantIsolationIntegrationTests.cs`
+| Issue | Suite / concern | Target file | Status |
+| :--- | :--- | :--- | :--- |
+| [#130](https://github.com/adammarquette/trading-copilot/issues/130) | Direct send path & order execution | `OrderEndpointsIntegrationTests.cs` | ✅ Delivered · closed |
+| [#157](https://github.com/adammarquette/trading-copilot/issues/157) | Staged ladder (arm → edit → take → cancel) | `StagedOrderLadderIntegrationTests.cs` | ✅ Delivered (gh#197) · closed |
+| [#158](https://github.com/adammarquette/trading-copilot/issues/158) | StopPlan persistence & safety-beyond-actual DB guard | `StopPlanPersistenceIntegrationTests.cs` | ✅ Delivered (gh#196) · closed |
+| [#161](https://github.com/adammarquette/trading-copilot/issues/161) | Event backbone storage & replay-dedupe | `Data/EventBackboneIntegrationTests.cs` | ✅ Delivered (gh#204) · closed |
+| [#131](https://github.com/adammarquette/trading-copilot/issues/131) | Production-safe read-only smoke suite | `SystemSmokeIntegrationTests.cs` | ✅ Delivered · closed |
+| [#152](https://github.com/adammarquette/trading-copilot/issues/152) | Smoke suite starts no container on a deployed target | `SystemSmokeIntegrationTests.cs` (+ `TestHost/LazySmokeHostFixture.cs`) | ✅ Delivered (gh#205) · closed |
+| [#132](https://github.com/adammarquette/trading-copilot/issues/132) | Multi-tenant workspace & resource isolation | `MultiTenantIsolationIntegrationTests.cs` | 📝 Open · realigned to the route map (gh#160) |
+| [#142](https://github.com/adammarquette/trading-copilot/issues/142) | Connection & account-stage suite | `ConnectionLifecycleIntegrationTests.cs` | 📝 Open · realigned (gh#160); missing endpoints → [#210](https://github.com/adammarquette/trading-copilot/issues/210) |
+| [#143](https://github.com/adammarquette/trading-copilot/issues/143) | Risk profile trailing drawdown & floor tracking | `RiskProfileLifecycleIntegrationTests.cs` | 📝 Open · realigned — verb fixed, Test 2 reuses the gh#157 harness (gh#160) |
+| [#210](https://github.com/adammarquette/trading-copilot/issues/210) | *(work:code)* connection credential rotation + soft-delete | Coding Agent — `ConnectionEndpoints.cs` | 📝 Open · filed by gh#160 |
 
 ---
 
-### Ticket 3: `gh#131` — `QA(system) - Production-safe read-only smoke test suite`
-* **GitHub Link**: [https://github.com/adammarquette/trading-copilot/issues/131](https://github.com/adammarquette/trading-copilot/issues/131)
-* **Title Format**: `QA(system) - Production-safe read-only smoke test suite`
-* **Specification**: [gh#131](https://github.com/adammarquette/trading-copilot/issues/131)
-* **Priority**: **P1 (High)**
-* **Category**: Deployment & Smoke Testing
-* **Parent Task**: System Health & Visibility
-* **Target File**: `src/MarqSpec.TradingCopilot.IntegrationTests/Api/ProductionSmokeTests.cs`
+## 5. Route-map realignment log (gh#160)
 
----
+The open QA specs were drafted from the audit's *intended* surface, not the *built* one; gh#160 corrected each
+against the live route map on `develop` so every remaining test names an endpoint that exists:
 
-### Ticket 4: `gh#142` — `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite`
-* **GitHub Link**: [https://github.com/adammarquette/trading-copilot/issues/142](https://github.com/adammarquette/trading-copilot/issues/142)
-* **Title Format**: `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite`
-* **Specification**: [gh#142](https://github.com/adammarquette/trading-copilot/issues/142)
-* **Priority**: **P2 (Medium)**
-* **Category**: Integration Testing
-* **Parent Task**: `#7` (Connection & Account Resolution)
-* **Target File**: `src/MarqSpec.TradingCopilot.IntegrationTests/Api/ConnectionLifecycleIntegrationTests.cs`
+- **#142** — `PUT /connections/{id}/credentials` and `DELETE /connections/{id}` do **not** exist; they are missing
+  *features*, moved to [#210](https://github.com/adammarquette/trading-copilot/issues/210). The suite now covers
+  connection creation, account discovery, and stage resolution/override — all routes that exist. Re-estimated 3 → 2.
+- **#132** — `GET /connections/{id}` (by-id) and a gate-decision audit endpoint do **not** exist. Test 1 becomes
+  collection-scoping (`GET /connections` must exclude the other operator's connection); Test 4 is parked at the
+  `TradingCopilotDbContext` level until a gate-decision read surface exists. Stays **P0**.
+- **#143** — declaration is `PUT /accounts/{id}/risk`, not `POST`; its `take` test now **reuses the gh#157
+  staged-ladder harness** rather than standing up a second arm/take fixture.
 
----
-
-### Ticket 5: `gh#143` — `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite`
-* **GitHub Link**: [https://github.com/adammarquette/trading-copilot/issues/143](https://github.com/adammarquette/trading-copilot/issues/143)
-* **Title Format**: `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite`
-* **Specification**: [gh#143](https://github.com/adammarquette/trading-copilot/issues/143)
-* **Priority**: **P2 (Medium)**
-* **Category**: Integration Testing
-* **Parent Task**: `#10` (Risk Rules Persistence & Gate Composition)
-* **Target File**: `src/MarqSpec.TradingCopilot.IntegrationTests/Api/RiskProfileLifecycleIntegrationTests.cs`
-
----
-
-## 5. Summary Matrix & GitHub Issue Tracking
-
-| GitHub Issue # | Parent Task | Issue Title Format | Specification File | Target Test File |
-| :--- | :--- | :--- | :--- | :--- |
-| **`#130`** | `#11`, `#134` | `QA(task#11) - Staged send path & order execution integration test suite` | [gh#130](https://github.com/adammarquette/trading-copilot/issues/130) | `OrderExecutionEndpointsIntegrationTests.cs` |
-| **`#132`** | `#128` | `QA(task#128) - Multi-tenant workspace & resource isolation integration suite` | [gh#132](https://github.com/adammarquette/trading-copilot/issues/132) | `MultiTenantIsolationIntegrationTests.cs` |
-| **`#131`** | System Health | `QA(system) - Production-safe read-only smoke test suite` | [gh#131](https://github.com/adammarquette/trading-copilot/issues/131) | `ProductionSmokeTests.cs` |
-| **`#142`** | `#7` | `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite` | [gh#142](https://github.com/adammarquette/trading-copilot/issues/142) | `ConnectionLifecycleIntegrationTests.cs` |
-| **`#143`** | `#10` | `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite` | [gh#143](https://github.com/adammarquette/trading-copilot/issues/143) | `RiskProfileLifecycleIntegrationTests.cs` |
-| **`#158`** | `#153`, `#11` | `QA(task#153) - StopPlan persistence & the safety-beyond-actual DB guard integration suite` | [gh#158](https://github.com/adammarquette/trading-copilot/issues/158) | `StopPlanPersistenceIntegrationTests.cs` ✅ **delivered** |
-| **`#161`** | `#13`, `#156` | `QA(task#13) - Event backbone storage & replay-dedupe integration suite` | [gh#161](https://github.com/adammarquette/trading-copilot/issues/161) | `Data/EventBackboneIntegrationTests.cs` ✅ **delivered** |
+Earlier drift this refresh also cleared: the never-created `OrderExecutionEndpointsIntegrationTests.cs` /
+`ProductionSmokeTests.cs` target names (the shipped files are `OrderEndpointsIntegrationTests.cs` /
+`SystemSmokeIntegrationTests.cs`); `#134` mislisted as a parent *task* (it is a **PR**); and a stale
+"Ready for Development" header while several suites had already shipped and closed.
