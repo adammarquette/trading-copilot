@@ -193,9 +193,25 @@ To reuse the compose/gate/journal without duplicating a safety guard (the gh#148
 which has no request user — **discovers** pending orders with `IgnoreQueryFilters`, then does each owner's work
 in a DbContext **scoped to that owner**, so `ComposeAsync` stays R-20-correct unchanged.
 
-*Still deferred:* **connection-loss orphan handling** — a pending synthetic order needs the platform live to
-fire, so on a connection drop it must go **orphaned → emergency** (overlaps S4); until then a pending conditional
-carries that `synthetic_risk`. And **named-signal triggers** (R-3).
+*Still deferred:* **named-signal triggers** (they need the R-3 signal pipeline — price-cross only for now).
+
+## Update (2026-07-25) — connection-loss orphan handling landed (gh#209)
+The at-risk safety net (ADR-0013). A new R-17 seam `IVenueConnection` (a **process-wide singleton**, one
+credential set per process, ADR-0015) surfaces venue liveness — the ProjectX adapter reads its **market-hub**
+state (the hub whose drop stops quotes flowing, so a hidden stop can no longer promote). `VenueConnectionMonitorHost`
+polls it, and on a **drop** the `OrphanGuardService` marks every `Hidden` working stop **`StopStaging.Orphaned`**
+(a new staging; no migration — the `Staging` column is `int` and the `staging <> 0` CHECK already accepts it, and
+the promotion watcher already acts only on `Hidden`); on **reconnect** it **re-arms** them to `Hidden`. The
+**native safety stop stays the physical floor** throughout — this degrades only the operator's *tighter*
+synthetic protection, loudly. A **pending conditional is no-risk** and needs no orphaning: it simply does not
+fire without quotes, and its cancel-if/expiry stands (ADR-0013). The guard runs as background plumbing
+(`IgnoreQueryFilters`, ownership preserved).
+
+*Deferred within orphan handling:* the **formal `AuditRecord` + `synthetic_risk` flag** and a **real-time
+operator alert** — the orphan is a **high-severity log** carrying `synthetic_risk` until the Phase-4 SPA/SignalR
+channel and the audit entity land; and **full per-position re-validation on re-arm** (re-arm restores `Hidden`
+so promotion resumes; a promotion for a since-closed position self-rejects at the venue, the safety stop being
+the floor throughout).
 
 ## Consequences
 **Positive**

@@ -20,4 +20,14 @@ public enum StopStaging
 
     /// <summary>Promoted to a <b>native working order</b> at the venue — exchange-held, survives an outage.</summary>
     Native = 2,
+
+    /// <summary>
+    /// <b>Orphaned</b> by a venue-connection loss (ADR-0007, ADR-0013, gh#209): a hidden working stop the
+    /// platform can no longer promote, because the market connection that feeds its proximity is down. The
+    /// position is not unprotected — the <b>native safety stop</b> beyond it remains the physical floor — but the
+    /// operator's <i>tighter</i> protection is degraded until reconnect, when the guard <b>re-arms</b> it to
+    /// <see cref="Hidden"/>. The promotion watcher acts only on <see cref="Hidden"/>, so an orphaned stop never
+    /// promotes.
+    /// </summary>
+    Orphaned = 3,
 }

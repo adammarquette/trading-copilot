@@ -6,6 +6,7 @@ using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Orders;
+using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Risk;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
@@ -13,6 +14,8 @@ using MarqSpec.TradingCopilot.Data.Events;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.MarketData;
+using MarqSpec.TradingCopilot.Domain.Venue;
+using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 
@@ -40,6 +43,10 @@ builder.Services.Configure<ProjectXConnectionOptions>(
     builder.Configuration.GetSection(ProjectXConnectionOptions.SectionName));
 builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
 
+// Venue connection liveness (R-17, gh#209): a process-wide singleton over the venue's websocket client, so the
+// orphan guard can watch for a drop. One credential set per process (ADR-0015) -> one connection.
+builder.Services.AddSingleton<IVenueConnection, ProjectXConnection>();
+
 // The event backbone (ADR-0001) behind its seam: today a Timescale hypertable; a future bus is an adapter
 // change, not a rewrite. Producers/consumers arrive with market-data ingestion (R-1).
 builder.Services.AddScoped<IEventLog, TimescaleEventLog>();
@@ -60,6 +67,12 @@ builder.Services.AddHostedService<StopPromotionHost>();
 // events and fires / cancels / expires pending conditional entries on their trigger. Harmless with none.
 builder.Services.AddScoped<ConditionalFiringService>();
 builder.Services.AddHostedService<ConditionalOrderHost>();
+
+// Connection-loss orphan handling (ADR-0007, ADR-0013, gh#209): the monitor watches the venue connection and,
+// on a drop, orphans the hidden synthetic stops (the native safety stop stays the floor); on reconnect it
+// re-arms them. Harmless with no hidden stops, so it always runs.
+builder.Services.AddScoped<OrphanGuardService>();
+builder.Services.AddHostedService<VenueConnectionMonitorHost>();
 
 // Auto-flatten (R-13, gh#185, ADR-0013): the PRIMARY scheduler that closes open positions at each instrument's
 // per-market deadline on the DST-aware market clock. On by default and cannot be silently disabled -- so it
