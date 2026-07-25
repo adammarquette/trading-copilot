@@ -212,12 +212,13 @@ field** — the field that keeps finished or freshly-filed work from stranding i
 - Every **forward** gate (`Backlog → Planning → Current ToDo → In Progress`) stays **manual** — those are human /
   agent judgment.
 
-> **Enable-state (2026-07-24): both `Status`-setting workflows were found *off*.** A triage pass found **9 closed
-> issues stranded outside Done** (in *In Progress* / *Current ToDo* / *Backlog*) and **5 cards with no `Status` at
-> all** — exactly the two gaps above. The cards were corrected by hand, but until the two workflows are enabled in
-> the web UI, **closing an issue and filing a new one each need a manual `Status` set** (`gh#200`).
+> **Enable-state (2026-07-24 — both now enabled).** *Item added → `Status: Backlog`* was already **on**; only
+> *Item closed → `Status: Done`* was **off and unconfigured** ("a value is required"). That single gap is why a
+> triage pass found **9 closed issues stranded outside Done** (the `closed → Done` gap), while just **5 legacy
+> cards** predating the Backlog default carried no `Status`. Both `Status`-setting workflows are now enabled in the
+> web UI, and the stranded cards were corrected by hand (`gh#200`).
 
 > **Board hygiene note.** Two known GitHub quirks to watch: **(1)** a Projects item's title can stop tracking its
 > issue after a retitle; the fix is to remove + re-add the item (which restores its Status), not another retitle.
-> **(2)** the *Auto-add* action leaves `Status` empty (see *Automation*) — until the Backlog-setting workflow is
-> enabled, set the column by hand on any auto-added card.
+> **(2)** if a card ever appears with an empty `Status` (some add paths can bypass the *Item added → Backlog*
+> workflow), set the column by hand — an empty-`Status` card reads as unresolved forever.
