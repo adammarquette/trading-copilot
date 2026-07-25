@@ -54,8 +54,11 @@ owned by its requirement / ADR).
   ~3:10 PM CT), and a **live brokerage has none**, so we **cannot lean on the venue** as the net. It is
   **safety-critical and must fire even if the primary tier is degraded** → a **redundant / independent trigger** (a
   watchdog separate from the main scheduler), a defined behaviour if a flatten order is *rejected* near the deadline,
-  and possibly a **local fallback flatten path**. Still the **one piece to design in full**; until proven on practice
-  it is the **gating risk** for live trading. See [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md).
+  and possibly a **local fallback flatten path**. **Both tiers are implemented** — the primary scheduler
+  (**gh#185**) and the independent watchdog on its own separate loop (**gh#187**); see *Follow-ups* for what each
+  does and what remains (an opposing-market-order alternative close, and a client-side fallback). It is **still the
+  gating risk for live trading**: implemented is not proven, and the exit criterion is that it fires reliably on a
+  **practice** account every session (PRD §9). See [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md).
 - **The end-of-day / settlement boundary (R-13 companion).** The CME's **daily maintenance / settlement**
   (~4:00–5:00 PM CT) **re-marks** any position carried through it at the **settlement price** — the mark on return
   isn't the last trade seen. So end-of-day handling **leans on resiliency + fail-over, not on a live price**: on any

@@ -2,7 +2,8 @@
 
 **Companion to:** [`trading-platform-prd.md`](trading-platform-prd.md) (product requirements — *what*) and
 [`trading-platform-engineering.md`](trading-platform-engineering.md) (engineering practices — *how we build*).
-**Status:** Draft / scaffold · **Date:** 2026-07-18
+**Status:** Living — the ingest/process tier is still a design sketch; the **execution & safety runtime is built**
+(see *The safety-critical runtime*) · **Date:** 2026-07-18, revised 2026-07-25 (gh#233)
 
 The **runtime view** — the services and how data flows between them. Early and deliberately lightweight: it
 captures the intended shape and the open decisions, and deepens as design proceeds. Requirement IDs (`R-#`) link
@@ -154,9 +155,16 @@ path, cannot fall through into a transmitted order. A new order type or gate out
 **R-14 has two obligations, and this path discharges one.** The *environment restriction* — practice accounts
 only outside production — is enforced here, in code, below the model. The *mode guard* is a different rule: an
 `Order` or `Suggestion` may not be **persisted** with a mode conflicting with its parent `Account.mode`. That is
-journal integrity rather than transmission safety, it is enforced at the **repository layer and by a DB check
-constraint** (PRD R-14), and it belongs to the data layer — the venue ticket carries no mode, and nothing on this
-path is persisted yet.
+journal integrity rather than transmission safety, and it belongs to the data layer — the venue ticket carries no
+mode. **Both halves are now live** (gh#7, gh#11): every *sized* attempt persists a `GateDecision` (a pre-gate
+refusal persists nothing — it was never sized), a placed order journals its `Order` linked to that decision, and
+the mode guard is enforced at the repository **and** by a DB constraint trigger (`enforce_mode_matches_account`)
+plus a mode ≠ `undeclared` CHECK. The data dictionary §4 catalogues the columns.
+
+**The kill switch sits above every guard.** `OrderExecutionService` reads an `IKillSwitch` and, while engaged,
+refuses every transmission as `RefusedByKillSwitch` **before the order is sized** (gh#189). Reducing actions —
+auto-flatten's close, stop promotion — do not route through this path, so the lock stops new risk without
+stranding open positions.
 
 **Two pairings are enforced rather than assumed**, because nothing structural forces them and both fail in the
 same direction — the gate authorizes one thing, the venue receives another:
@@ -178,6 +186,46 @@ development host.
 `TrailingStop` is **refused outright**: the neutral ticket carries no trail distance, so no venue could receive it
 correctly. That is a property of the request, not of any venue's capabilities — refusing it here makes the answer
 the same whichever adapter is wired in. Trail distance arrives with staged stops.
+
+### The safety-critical runtime — the hosted services that act unattended (R-11, R-13, ADR-0007, ADR-0013)
+
+Everything above is *request*-driven: an operator asks, the gate answers. The services below are **not** — they
+run on a timer or on the event log, unattended, and several of them place orders. That is why they are the
+highest-rigor part of the system (engineering §9) and why they are listed here rather than folded into the
+ingest → process flow, which they deliberately sit outside of.
+
+| Host (`Api/`) | Cadence | What it does | Why it exists |
+|---|---|---|---|
+| `MarketDataIngestionHost` | supervised subscription | normalises the venue quote stream into the event log as `market.quote` (gh#13) | the backbone's only producer today |
+| `StopPromotionHost` | event log · `stop-promotion` cursor | promotes a **hidden** working stop to a native order once price enters its band (gh#153) | a hidden stop is only safe if something is watching for it to matter |
+| `ConditionalOrderHost` | event log · `conditional-order` cursor | fires / cancels / expires pending conditional entries, each through the **authoritative fire-time re-gate** (gh#198) | "send when conditions met" must be re-judged at fire, not at arm (R-12) |
+| `VenueConnectionMonitorHost` | poll over `IVenueConnection` | orphans every hidden stop on a venue **drop**, re-arms on reconnect (gh#209) | a synthetic stop cannot promote without quotes; the native safety stop stays the floor |
+| `AutoFlattenHost` | timer · DST-aware `MarketClock` | the **primary** R-13 trigger — closes positions at each instrument's per-market deadline, verifies flat, journals `flatten.*` (gh#185) | the one autonomous action, and it only reduces exposure |
+| `AutoFlattenWatchdogHost` | **separate** timer, own loop | the **redundant second tier** — backstops the primary past a grace window, persists on a rejected close, escalates to critical rather than firing blind (gh#187) | ADR-0013's independence requirement: a bug in the primary must not disable the flatten |
+
+Two more run once, at startup, in the same scope as migrate + bootstrap:
+
+- **`KillSwitch` rehydration** (gh#189) — the persisted `KillSwitchState` row is read back into the process-wide
+  flag, so the operator's lock **survives a restart**; nothing silently re-enables trading.
+- **`DecisionStateRehydrator`** (gh#221) — reads the whole decision surface back **inertly** (staged orders,
+  pending conditionals, hidden stops, active suggestions) and resumes *none* of it; on an **impossible
+  cross-entity combination** a crash left, it engages the kill switch (`HaltOnly`) and alerts, **never repairing**.
+  It reads across owners as background plumbing yet carries ownership on every row (R-20).
+
+`PositionReconciliationService` backs `GET /accounts/{id}/positions` (gh#193): positions come from **venue truth**
+tagged `Live` / `Settlement` (a re-mark inside the maintenance window, derived per-instrument from `MarketSession`)
+/ `Unknown` when the venue cannot be reached — declared-unknown, never a stale live view. The whole model is
+consolidated in [ADR-0013](adr/0013-failure-recovery-model.md).
+
+**The pattern these share.** Every *polling* host opens a **fresh DI scope per pass** and exits cleanly on
+teardown — a scope held across passes cascades `ObjectDisposedException` through the parallel suites, and a host
+that ignores its stop token outlives the app. (`MarketDataIngestionHost` is the exception that proves it: its
+scope spans the *subscription*, because a websocket subscription is the unit of work, not a poll.) Each reads
+across the R-20 filter with `IgnoreQueryFilters` to **discover** work — background plumbing has no request user —
+but does each owner's work in a context **scoped to that owner**, so the request-path guards stay correct
+unchanged rather than being re-implemented (the gh#148 duplication lesson). And every state transition is
+**one-way and idempotent**, which is what makes at-least-once redelivery safe on restart: a resolved conditional
+never re-fires, an already-`Native` stop is skipped, and a cursor commits per batch.
 
 ### Ingestion service — live market data (R-1)
 Connects via **websocket** and processes every event on the wire, then **publishes onto the event pipeline** for
