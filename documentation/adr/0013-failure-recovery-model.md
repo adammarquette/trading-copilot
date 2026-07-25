@@ -31,7 +31,10 @@ owned by its requirement / ADR).
 - **At-risk state is protected independently of client and app.** A live position always has a **native, exchange-held
   safety stop** (ADR-0007) — it survives *any* app / backend / connection failure. On **venue-connection loss**, in-app
   **synthetic** orders (hidden entries, un-promoted stops) go **orphaned → emergency** with an operator alert; on
-  reconnect the system **re-validates and re-arms** — nothing silently resumes (ADR-0007).
+  reconnect the system **re-validates and re-arms** — nothing silently resumes (ADR-0007; **implemented gh#209** —
+  a connection-liveness monitor over the `IVenueConnection` seam orphans hidden working stops on a drop and re-arms
+  them on reconnect; the operator alert is a high-severity log carrying `synthetic_risk` until the Phase-4 SPA
+  channel and the formal `AuditRecord` land).
 - **The hard case — the auto-flatten guarantee (R-13).** The auto-flatten is **our system feature**, fired at a
   **configurable, per-instrument deadline** (equity-index default ~2:30 PM CT ahead of MOC; **crude / gold settle earlier**) — **earlier than any venue-forced flatten** (Topstep
   ~3:10 PM CT), and a **live brokerage has none**, so we **cannot lean on the venue** as the net. It is
