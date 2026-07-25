@@ -31,6 +31,7 @@ public static class OrderEndpoints
         RouteGroupBuilder accountGroup = endpoints.MapGroup("/accounts/{id:guid}/orders").RequireAuthorization();
         accountGroup.MapPost("/", SendOrderAsync);
         accountGroup.MapPost("/arm", ArmOrderAsync);
+        accountGroup.MapPost("/conditional", CreateConditionalOrderAsync);
 
         RouteGroupBuilder orderGroup = endpoints.MapGroup("/orders/{id:guid}").RequireAuthorization();
         orderGroup.MapPut("/", EditStagedOrderAsync);
@@ -138,6 +139,89 @@ public static class OrderEndpoints
         await database.SaveChangesAsync(cancellationToken);
 
         return Results.Ok(StagedOrderResponse.From(staged, result.Decision));
+    }
+
+    internal static async Task<IResult> CreateConditionalOrderAsync(
+        Guid id,
+        CreateConditionalOrderRequest request,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        IProjectXVenueFactory venueFactory,
+        IOptions<ProjectXConnectionOptions> projectXOptions,
+        IOptions<ExecutionOptions> executionOptions,
+        HostTradingEnvironment environment,
+        CancellationToken cancellationToken)
+    {
+        // "Send when conditions met" (ADR-0007, gh#176): held local, fired by a watcher on the trigger. Creation
+        // runs the same compose ladder + Evaluate as arm -- for immediate feedback -- but transmits nothing; the
+        // authoritative gate re-runs at fire time (R-12).
+        (Composition? composed, IResult? refusal) = await ComposeAsync(
+            id, database, venueFactory, projectXOptions, executionOptions, environment, cancellationToken);
+        if (composed is null)
+        {
+            return refusal!;
+        }
+
+        SendOrderRequest order = request.Order;
+        (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
+            composed, order.Symbol, order.TickSize, order.PointValue, order.Side, order.Quantity,
+            order.Entry, order.Stop, order.SafetyStop, order.ReferencePrice, order.Target, order.Type, cancellationToken);
+        if (executionRequest is null)
+        {
+            return proposalRefusal!;
+        }
+
+        // A pre-gate refusal (mode, mismatch, wrong-side target) means there is nothing coherent to hold --
+        // refuse now. A gate BLOCK still rests: the setup may be viable by the time it triggers (R-12 re-decides).
+        ExecutionResult evaluation = composed.Execution.Evaluate(executionRequest);
+        if (evaluation.Outcome != ExecutionOutcome.Evaluated || evaluation.Decision is null)
+        {
+            return Results.Conflict(new { error = evaluation.Reason });
+        }
+
+        // The trigger + cancel band are validated by the domain aggregate before anything is stored.
+        try
+        {
+            _ = ConditionalOrder.Create(
+                executionRequest.Proposal,
+                new ConditionalTrigger(new Price(request.TriggerPrice), request.TriggerDirection),
+                request.CancelDrift is { } drift ? new Price(drift) : null,
+                request.ExpiresAt);
+        }
+        catch (ArgumentException error)
+        {
+            return Results.BadRequest(new { error = error.Message });
+        }
+
+        ConditionalOrderRecord record = new()
+        {
+            Id = Guid.NewGuid(),
+            UserId = currentUser.UserId,
+            AccountId = composed.Account.Id,
+            Instrument = executionRequest.Contract.Contract.Key,
+            Symbol = order.Symbol,
+            Side = order.Side,
+            Size = order.Quantity,
+            Type = order.Type,
+            EntryPrice = order.Entry,
+            WorkingStopPrice = order.Stop,
+            SafetyStopPrice = order.SafetyStop,
+            ReferencePrice = order.ReferencePrice,
+            TickSize = order.TickSize,
+            PointValue = order.PointValue,
+            TakeProfitPrice = order.Target,
+            TriggerPrice = request.TriggerPrice,
+            TriggerDirection = request.TriggerDirection,
+            CancelDriftPrice = request.CancelDrift,
+            ExpiresAt = request.ExpiresAt,
+            Status = ConditionalStatus.Pending,
+            Mode = composed.Account.Mode,
+            CreatedAt = DateTimeOffset.UtcNow,
+        };
+        database.ConditionalOrders.Add(record);
+        await database.SaveChangesAsync(cancellationToken);
+
+        return Results.Ok(ConditionalOrderResponse.From(record, evaluation.Decision));
     }
 
     internal static async Task<IResult> EditStagedOrderAsync(

@@ -55,6 +55,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Staged-stop plans — one per order (ADR-0007, gh#11). Operator-owned.</summary>
     public DbSet<StopPlanRecord> StopPlans => Set<StopPlanRecord>();
 
+    /// <summary>Synthetic conditional entry orders — "send when conditions met" (ADR-0007, gh#176). Operator-owned.</summary>
+    public DbSet<ConditionalOrderRecord> ConditionalOrders => Set<ConditionalOrderRecord>();
+
     /// <summary>Persisted gate decisions — every sized send attempt, auditable (R-5/R-16, gh#11). Operator-owned.</summary>
     public DbSet<GateDecisionRecord> GateDecisions => Set<GateDecisionRecord>();
 
@@ -311,6 +314,49 @@ public class TradingCopilotDbContext : TenantDbContext
                 .WithOne()
                 .HasForeignKey<StopPlanRecord>(p => p.OrderId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ConditionalOrderRecord>(conditional =>
+        {
+            conditional.Property(c => c.Instrument).HasMaxLength(64);
+            conditional.Property(c => c.Symbol).HasMaxLength(32);
+
+            conditional.HasOne<Account>()
+                .WithMany()
+                .HasForeignKey(c => c.AccountId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // The journal outlives its provenance: deleting a suggestion nulls the link, never the conditional.
+            conditional.HasOne<Suggestion>()
+                .WithMany()
+                .HasForeignKey(c => c.SuggestionId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // The fired order outlives — or is deleted independently of — its trigger; null the link if it goes.
+            conditional.HasOne<Order>()
+                .WithMany()
+                .HasForeignKey(c => c.FiredOrderId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // The firing watcher scans pending orders (a later increment); status leads the read.
+            conditional.HasIndex(c => c.Status);
+
+            conditional.ToTable("ConditionalOrders", table =>
+            {
+                table.HasCheckConstraint("CK_ConditionalOrders_Mode_NotUndeclared", "\"Mode\" <> 0");
+                table.HasCheckConstraint("CK_ConditionalOrders_Status_NotUnknown", "\"Status\" <> 0");
+                table.HasCheckConstraint("CK_ConditionalOrders_Size_Positive", "\"Size\" > 0");
+                table.HasCheckConstraint("CK_ConditionalOrders_Direction_NotUnknown", "\"TriggerDirection\" <> 0");
+
+                // The cancel band sits on the STALE side of the trigger, below the domain (ADR-0007, gh#176):
+                // below it for a RisesTo (1) order, above it for a FallsTo (2) -- a near-side band would cancel
+                // the instant price approached the trigger. NULL (no drift cancel) passes.
+                table.HasCheckConstraint(
+                    "CK_ConditionalOrders_CancelDrift_StaleSide",
+                    "\"CancelDriftPrice\" IS NULL "
+                    + "OR (\"TriggerDirection\" = 1 AND \"CancelDriftPrice\" < \"TriggerPrice\") "
+                    + "OR (\"TriggerDirection\" = 2 AND \"CancelDriftPrice\" > \"TriggerPrice\")");
+            });
         });
 
         modelBuilder.Entity<Event>(evt =>

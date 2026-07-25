@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 
@@ -84,5 +85,61 @@ public sealed record StagedOrderResponse(
             decision.BindingLayer,
             decision.Reason,
             order.TakeProfitPrice);
+    }
+}
+
+/// <summary>
+/// The request to create a <b>synthetic conditional</b> entry order (gh#176, ADR-0007) — the "send when
+/// conditions met" mode. The proposal rides an ordinary <see cref="SendOrderRequest"/>; the conditional part is
+/// the trigger and its cancel-if / expiry.
+/// </summary>
+/// <param name="Order">The entry proposal to hold and fire when the trigger crosses.</param>
+/// <param name="TriggerPrice">The price at which the order fires.</param>
+/// <param name="TriggerDirection">Which way price must cross the trigger to fire (RisesTo / FallsTo).</param>
+/// <param name="CancelDrift">The optional cancel band — the stale-side price past which the setup is abandoned.</param>
+/// <param name="ExpiresAt">The optional validity deadline; past it, a still-pending order cancels.</param>
+public sealed record CreateConditionalOrderRequest(
+    SendOrderRequest Order,
+    decimal TriggerPrice,
+    ConditionalCrossDirection TriggerDirection,
+    decimal? CancelDrift = null,
+    DateTimeOffset? ExpiresAt = null);
+
+/// <summary>A pending conditional order with its creation-time evaluation (gh#176).</summary>
+/// <param name="ConditionalOrderId">The conditional order's id.</param>
+/// <param name="Status">The lifecycle status (<c>Pending</c> until it fires, cancels, or expires).</param>
+/// <param name="TriggerPrice">The price at which it fires.</param>
+/// <param name="TriggerDirection">The cross direction.</param>
+/// <param name="Outcome">The creation-time gate outcome — feedback only; the authoritative gate runs at fire time (R-12).</param>
+/// <param name="ApprovedQuantity">The contracts the gate would authorize right now.</param>
+/// <param name="BindingLayer">The risk layer that bound the evaluation, when one did.</param>
+/// <param name="Reason">The gate's human-readable why — always populated (R-5).</param>
+public sealed record ConditionalOrderResponse(
+    Guid ConditionalOrderId,
+    string Status,
+    decimal TriggerPrice,
+    string TriggerDirection,
+    string Outcome,
+    int ApprovedQuantity,
+    RiskLayer? BindingLayer,
+    string Reason)
+{
+    /// <summary>Projects a pending conditional record and its creation-time decision.</summary>
+    /// <param name="record">The persisted conditional order.</param>
+    /// <param name="decision">The evaluation that accompanied its creation.</param>
+    /// <returns>The response.</returns>
+    public static ConditionalOrderResponse From(Data.Entities.ConditionalOrderRecord record, GateDecision decision)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        ArgumentNullException.ThrowIfNull(decision);
+        return new ConditionalOrderResponse(
+            record.Id,
+            record.Status.ToString(),
+            record.TriggerPrice,
+            record.TriggerDirection.ToString(),
+            decision.Outcome.ToString(),
+            decision.ApprovedQuantity,
+            decision.BindingLayer,
+            decision.Reason);
     }
 }
