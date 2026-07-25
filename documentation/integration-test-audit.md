@@ -26,7 +26,7 @@ The objective of this audit is to identify high-value integration testing gaps, 
 
 ## 2. Current Integration Test Inventory
 
-Below is the baseline inventory of current integration tests located under [`src/MarqSpec.TradingCopilot.IntegrationTests/Api`](../src/MarqSpec.TradingCopilot.IntegrationTests/Api):
+Below is the baseline inventory of current integration tests under [`src/MarqSpec.TradingCopilot.IntegrationTests`](../src/MarqSpec.TradingCopilot.IntegrationTests) (`Api/` for HTTP-driven suites, `Data/` for storage-tier ones):
 
 | Integration Test Suite | Covered Endpoints & Features | Current Status |
 | :--- | :--- | :--- |
@@ -38,6 +38,7 @@ Below is the baseline inventory of current integration tests located under [`src
 | **`StagedOrderLadderIntegrationTests.cs`** | The **staged ladder** — `POST …/orders/arm`, `PUT /orders/{id}`, `POST /orders/{id}/take`, `DELETE /orders/{id}` — plus the gh#134 working-stop regression and the gh#96 DB mode guard (gh#157) | **Active** (Passing) |
 | **`StopPlanPersistenceIntegrationTests.cs`** | Staged-stop plan persistence (`POST /accounts/{id}/orders` → `StopPlanRecord`); the four `CK_StopPlans_*` DB CHECK constraints proven by name on **both** safety-beyond-actual sides with a positive control; FK `ON DELETE CASCADE`; ATR not-yet-supported pin (gh#158) | **Active** (Passing) |
 | **`SystemSmokeIntegrationTests.cs`** | `Category=Smoke` read-only probes against a deployed target (gh#131); see gh#152 / gh#159 for its open tier issues | **Active** (Passing) |
+| **`Data/EventBackboneIntegrationTests.cs`** | The append-only event log (ADR-0001) at the **storage tier** via `IEventLog` against the applied `AddEventBackbone` hypertable migration — envelope round-trip (`jsonb` payload, UTC instant), monotonic sequences under concurrent appends, the #156 replay two-rows-one-`Id` contract, id generation, `ReadAfter` ordering + paging, cursor upsert, blank type/source rejection; pins the retention-gap silent-skip (gh#162) and a non-UTC `OccurredAt` rejection (gh#201) (gh#161) | **Active** (Passing) |
 
 > **Inventory drift (tracked by [gh#160](https://github.com/adammarquette/trading-copilot/issues/160)):** §4/§5
 > below still carry stale target file names and closed-issue statuses, and duplicate the issue bodies wholesale
@@ -141,3 +142,4 @@ The following GitHub issues are registered and tracked on `adammarquette/trading
 | **`#142`** | `#7` | `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite` | [gh#142](https://github.com/adammarquette/trading-copilot/issues/142) | `ConnectionLifecycleIntegrationTests.cs` |
 | **`#143`** | `#10` | `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite` | [gh#143](https://github.com/adammarquette/trading-copilot/issues/143) | `RiskProfileLifecycleIntegrationTests.cs` |
 | **`#158`** | `#153`, `#11` | `QA(task#153) - StopPlan persistence & the safety-beyond-actual DB guard integration suite` | [gh#158](https://github.com/adammarquette/trading-copilot/issues/158) | `StopPlanPersistenceIntegrationTests.cs` ✅ **delivered** |
+| **`#161`** | `#13`, `#156` | `QA(task#13) - Event backbone storage & replay-dedupe integration suite` | [gh#161](https://github.com/adammarquette/trading-copilot/issues/161) | `Data/EventBackboneIntegrationTests.cs` ✅ **delivered** |
