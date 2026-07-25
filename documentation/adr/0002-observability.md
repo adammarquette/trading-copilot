@@ -39,4 +39,9 @@ Instrument everything with **OpenTelemetry** and export the three pillars to the
 ## Follow-ups
 - Fix the **event-envelope trace-context fields** (with ADR-0001's envelope schema).
 - **Span conventions** for the agent path: a span per strategy agent and per executor step, so a suggestion's trace shows the full fan-in.
-- Alert channel + thresholds for the on-call-of-one (auto-flatten reliability must page); a trace **sampling** policy if needed.
+- ~~Alert channel + thresholds for the on-call-of-one (auto-flatten reliability must page)~~ — **decided in
+  [ADR-0019](0019-alerting-channel-and-thresholds.md)** (2026-07-25, `gh#242`): Pushover behind an
+  `INotificationChannel` seam, three layers including an out-of-process dead-man's switch, and the P1/P2/P3
+  taxonomy with its noise budget. This ADR's collection decisions are unchanged; ADR-0019 extends them with what
+  happens once a signal is worth waking someone for.
+- A trace **sampling** policy if needed.

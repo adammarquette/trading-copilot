@@ -273,7 +273,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 ### Nice-to-Have (P1)
 
 - **Morning briefing:** pre-market per-instrument summary — overnight action, volume-profile context, scheduled economic events, news/social digest.
-- **Alert & flatten notifications beyond the UI:** push/mobile channel for proactive alerts and — critically — flatten warnings and confirmations when away from the desk.
+- **Alert & flatten notifications beyond the UI:** push/mobile channel for proactive alerts and — critically — flatten warnings and confirmations when away from the desk. *(Channel and thresholds decided: [ADR-0019](adr/0019-alerting-channel-and-thresholds.md) — Pushover, with the flatten **warning** as a P2 notify and the **confirmation** as a silent P3 push, so both reach the desk-less operator without training them to ignore the pager.)*
 - **Economic calendar integration:** scheduled events (FOMC, CPI, NFP) as first-class signals and rulebook conditions.
 - **Source credibility scoring:** track predictive value of individual soft-signal sources from journal outcomes; weight or flag accordingly.
 - **Rulebook change analysis:** replay a proposed rule against journal history before persisting.
@@ -328,7 +328,14 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 9. *(Engineering)* Local UI packaging (hosted web app vs. desktop shell) — driven by charting choice and notification/kill-switch needs.
 10. *(Engineering)* Cloud host and monthly cost ceiling for the always-on tier (Railway is a natural candidate).
 11. *(Product)* Rulebook representation: structured DSL vs. natural-language rules interpreted at suggestion time.
-12. *(Product)* Alert taxonomy and noise budget (max alerts/hour; measuring alert fatigue).
+12. ~~*(Product)* Alert taxonomy and noise budget (max alerts/hour; measuring alert fatigue).~~ **Answered
+    2026-07-25 — [ADR-0019](adr/0019-alerting-channel-and-thresholds.md) (`gh#242`).** Taxonomy: **P1 page**
+    (Pushover Emergency — repeats until acknowledged, bypasses Do Not Disturb, never quiet-hour suppressed),
+    **P2 notify** (single push, suppressed outside 06:00–17:00 CT), **P3 quiet push** (delivered, no sound — the
+    flatten *confirmation* P1 asks for), and dashboard-only for everything else. Budget: **≤ 3 pushes/hour under
+    any single sustained fault, and 0 on a clean session.** Fatigue is *measured* — pushes per session by
+    severity, on the dashboard — because a rule that pages on a healthy day is a defect in the rule, not noise to
+    tolerate.
 13. *(Legal/personal)* **Ingestion posture per source — ToS review before adding.** Originally scoped to news sites (R-2), but it applies to **every** ingested source, vendor documentation included: copyright is not the only constraint, and a site's Terms can restrict automated access or redistribution regardless of what fair use allows. Two sources already returned **403** to a direct fetch and were grounded by web search instead (Apex; Take Profit Trader's Zendesk) — a decision taken implicitly that should be taken deliberately. Posture is now recorded per page in the wiki's `Access:` header (gh#53); the one wholesale third-party document has been removed (gh#52).
 14. *(Engineering)* Venue capability matrix (R-17): which trading APIs beyond ProjectX (Tradovate named), and how they differ in order types, order-flow granularity, and account model — defining what the venue-neutral interface must abstract. **Partly settled (S1, gh#9):** the interface and the capability model now exist in code — three slices (market-data / account / execution), venue-tagged identifiers, and explicit `VenueCapability` flags each adapter declares, with an unsupported capability failing loudly at the seam. What remains is populating the per-venue rows as each adapter lands.
 
