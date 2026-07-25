@@ -54,6 +54,25 @@ public sealed class FlattenOptions
     /// </summary>
     public int MaxFlattenAttempts { get; init; } = 3;
 
+    /// <summary>
+    /// The redundant watchdog's grace window (gh#187): how long past an instrument's deadline the watchdog waits
+    /// before stepping in — giving the primary scheduler (gh#185) its chance first, so the two tiers do not fight.
+    /// The watchdog acts only on the primary's <i>failure</i>: a position still open past deadline + this grace.
+    /// </summary>
+    public int WatchdogGraceMinutes { get; init; } = 2;
+
+    /// <summary>The watchdog grace window as a <see cref="TimeSpan"/>.</summary>
+    public TimeSpan WatchdogGrace => TimeSpan.FromMinutes(WatchdogGraceMinutes);
+
+    /// <summary>
+    /// How often the redundant watchdog (gh#187) evaluates — its <b>own</b> cadence, independent of the primary's
+    /// <see cref="PollIntervalSeconds"/>, so the two tiers never share a timer.
+    /// </summary>
+    public int WatchdogPollIntervalSeconds { get; init; } = 20;
+
+    /// <summary>The watchdog poll cadence as a <see cref="TimeSpan"/>.</summary>
+    public TimeSpan WatchdogPollInterval => TimeSpan.FromSeconds(WatchdogPollIntervalSeconds);
+
     /// <summary>Per-instrument overrides of the built-in defaults; may also add an instrument not in the defaults.</summary>
     public FlattenScheduleOption[] Instruments { get; init; } = [];
 

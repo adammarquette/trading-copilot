@@ -71,6 +71,13 @@ _ = (builder.Configuration.GetSection(FlattenOptions.SectionName).Get<FlattenOpt
 builder.Services.AddScoped<AutoFlattenService>();
 builder.Services.AddHostedService<AutoFlattenHost>();
 
+// The redundant watchdog (R-13, gh#187, ADR-0013): the INDEPENDENT second tier above the primary scheduler -- a
+// SEPARATE host on its own cadence, so the flatten still fires when the primary is degraded (hung host, per-pass
+// give-up, transient fault). It shares FlattenOptions (schedule + grace) but has its own loop and its own
+// trigger/close logic, so a bug in the primary cannot disable it. Always on, like the primary (R-13).
+builder.Services.AddScoped<AutoFlattenWatchdogService>();
+builder.Services.AddHostedService<AutoFlattenWatchdogHost>();
+
 // The R-14 environment, mapped ONCE at the composition root from the host (gh#9): practice anywhere, live only
 // in production, undeclared nowhere -- and an unrecognised environment name fails closed to Development
 // (practice-only). Wrapped so endpoints bind it from services, never from a request.
