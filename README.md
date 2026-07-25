@@ -17,9 +17,16 @@ authenticated because it is web-exposed, with data isolation enforced at the dat
 > investment advice or a recommendation to trade. **Prove it on a practice account first** — a defect in a system
 > like this can cost you an account.
 
-> **Status: `v0.1.0` (pre-release) — early / scaffolding.** The **`documentation/` folder is the current source of truth** — the product
-> requirements and engineering practices live there. The `src/` foundation is building out (solution + CI, data layer + tenancy, auth) and **runs locally via `docker compose up`** (see below). Built
-> with an AI-Engineering-first approach.
+> **Status: `v0.1.0` (pre-release) — the safety-critical spine is building out.** The **`documentation/` folder
+> remains the source of truth** — requirements, architecture, and engineering practices live there, and the code
+> is written against them. Landed in `src/` so far: the solution + CI/CD, the data layer + R-20 scoping, auth,
+> the **venue seam** (ProjectX adapter), the **enforcing risk gate**, the **gated send path** with the
+> arm → edit → take ladder, **staged stops** + their promotion watcher, **conditional entries** + their firing
+> watcher, the **append-only event backbone** and its two consumers, **auto-flatten** (primary scheduler +
+> redundant watchdog), the **kill switch**, and the recovery layer (orphan handling, settlement reconcile,
+> decision-state rehydration). **Not yet built:** the suggestion engine, the LLM/agent layer, soft signals, the
+> journal & analytics, and the React SPA / PWA — the whole client. **Nothing has traded live.** Runs locally via
+> `docker compose up` (see below). Built with an AI-Engineering-first approach.
 
 ---
 
@@ -80,11 +87,27 @@ POST /orders/{id}/take                                    -> TAKE: re-validate E
                                                             transmit. Fails-and-stays-staged if the fresh gate
                                                             now blocks -- what passed at arm is not authority
 DEL  /orders/{id}                                         -> cancel a staged ticket (before it is taken)
+POST /accounts/{id}/orders/conditional {proposal+trigger} -> the SECOND send mode, "send when conditions met"
+                                                            (gh#176): held local, transmits NOTHING. A watcher
+                                                            (gh#198) fires it on its price trigger through the
+                                                            authoritative fire-time re-gate; drift past the
+                                                            cancel band or the expiry resolves it as a scratch
 PUT  /accounts/{id}/risk      {the whole declaration}    -> declare the account's risk rules (R-5); validated
                                                             through the domain factories, refused whole on any
                                                             violation (gh#10)
 GET  /accounts/{id}/risk                                 -> the declared rules; 404 until declared -- absence
                                                             is the gate's fail-closed input, never a default
+GET  /accounts/{id}/positions                            -> positions from VENUE TRUTH, each tagged with its
+                                                            mark basis -- live / settlement re-mark / declared-
+                                                            unknown when the venue can't be reached. Never a
+                                                            stale live view (gh#193, R-13)
+POST /kill-switch             {mode, reason}             -> ENGAGE (hold-to-confirm): disables every outbound
+                                                            order at the send choke point, cancels working
+                                                            orders, then flattens-all or halts-only. Survives a
+                                                            restart -- nothing silently re-enables trading
+                                                            (gh#189, R-11)
+POST /kill-switch/disengage                              -> release the lock (deliberate, journaled)
+GET  /kill-switch                                        -> the current state: engaged, mode, when, why
 ```
 
 The `/auth/invitations` and `/auth/accept-invite` endpoints also exist and work, but are **dormant** — not part
@@ -115,7 +138,7 @@ The PRD is *what* the product does; the engineering guide is *how* we build it; 
 
 | Path | What's there |
 |---|---|
-| [`documentation/`](documentation/) | All specs & design docs — the substance today (PRD + engineering guide; a `wiki/` companion knowledge base to come) |
+| [`documentation/`](documentation/) | All specs & design docs — PRD, engineering guide, architecture, [data dictionary](documentation/data-dictionary.md), [ADRs](documentation/adr/), the [deployment runbook](documentation/deployment-runbook.md), [agent contracts](documentation/agents/), [wireframes](documentation/design/), and the [`wiki/`](documentation/wiki/) companion knowledge base (design-time domain knowledge — venue APIs, prop-firm rules, market sessions; not read by the product) |
 | `src/` | .NET solution (`MarqSpec.TradingCopilot.slnx`, base namespace `MarqSpec.TradingCopilot.*`) — projects build out under `src/` per the roadmap (`Domain`, `Data`, the `Api` BFF, the `Integration.ProjectX` venue adapter, + test projects so far); naming per engineering guide §3 |
 | `external/` | Vendored submodules, pinned per venue client: [`MarqSpec.Client.ProjectX`](https://github.com/adammarquette/MarqSpec.Client.ProjectX) (the v1 adapter builds against it) and [`MarqSpec.Client.Tradovate`](https://github.com/adammarquette/MarqSpec.Client.Tradovate) (requirements only so far — carried for reference, nothing builds against it yet). Outside `src/` so this solution's build settings aren't imposed on them |
 | `AGENTS.md` · `CLAUDE.md` | Orientation for AI coding agents (root); `CLAUDE.md` is a shim that imports `AGENTS.md` |
@@ -132,7 +155,8 @@ implement yourself. Fork it, write an adapter, and the rest of the system doesn'
 | **Data-only provider** | `IMarketDataSource` alone — no accounts, no execution | **built**; the slice a quotes/news source implements |
 | **Risk enforcement** (R-5) | `IRiskGate` → `GateDecision` | **built**; layered limits, most-restrictive wins |
 | **LLM provider** | `ILlmProvider` | planned — one provider behind a seam, never prompt-enforced limits |
-| **Event log** (ADR-0001) | `IEventLog` | planned — Timescale today, swappable later |
+| **Event log** (ADR-0001) | `IEventLog` | **built**; append-only Timescale hypertable behind the seam, two cursor-tracked consumers on it (stop promotion gh#153, conditional firing gh#198) — a future bus is an adapter change |
+| **Venue connection liveness** (R-17) | `IVenueConnection` | **built**; what the orphan guard watches to know the venue dropped (gh#209) |
 
 Two properties fall out of the decomposition. A **data-only source implements just the market-data slice**, so
 adding equities context alongside futures is an adapter rather than a second pipeline. And **venue capabilities
