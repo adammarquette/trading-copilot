@@ -1,7 +1,9 @@
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -42,6 +44,7 @@ public sealed class OcoExitService
     private readonly TradingCopilotDbContext _discovery;
     private readonly DbContextOptions<TradingCopilotDbContext> _options;
     private readonly IProjectXVenueFactory _venueFactory;
+    private readonly IAuditLog _auditLog;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly ILogger<OcoExitService> _logger;
 
@@ -49,12 +52,14 @@ public sealed class OcoExitService
     /// <param name="discovery">The scoped context, used only to resolve the owning account (across owners).</param>
     /// <param name="options">The context options, used to build a per-owner (R-20-scoped) context for the work.</param>
     /// <param name="venueFactory">Builds the owner's venue from its connection's conventions.</param>
+    /// <param name="auditLog">The immutable audit trail — each retired plan is recorded (gh#220), a secondary write.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
-    /// <param name="logger">The logger — the audited channel for a deliberately retired leg.</param>
+    /// <param name="logger">The logger.</param>
     public OcoExitService(
         TradingCopilotDbContext discovery,
         DbContextOptions<TradingCopilotDbContext> options,
         IProjectXVenueFactory venueFactory,
+        IAuditLog auditLog,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         ILogger<OcoExitService> logger)
     {
@@ -63,6 +68,7 @@ public sealed class OcoExitService
         _discovery = discovery;
         _options = options;
         _venueFactory = venueFactory;
+        _auditLog = auditLog;
         _projectX = projectXOptions.Value;
         _logger = logger;
     }
@@ -173,15 +179,61 @@ public sealed class OcoExitService
             return;
         }
 
+        List<AuditRecord> auditRows = [];
         foreach (StopPlanRecord plan in plans)
         {
+            StopStaging before = plan.Staging;
             plan.Staging = StopStaging.Retired;
+            auditRows.Add(AuditForExit(plan, before, exit));
         }
 
-        await database.SaveChangesAsync(cancellationToken);
+        await database.SaveChangesAsync(cancellationToken); // the retire -- the safety action, committed first
         _logger.LogInformation(
             "OCO-exit: {Count} stop plan(s) retired on {Contract} for account {Account} after it went flat.",
             plans.Count, exit.Contract, exit.Account);
+
+        // Record the retirement to the immutable audit trail (gh#220) -- a SECONDARY write after the retire
+        // committed, tolerating any failure so the audit can never be the reason the safety action did not complete.
+        await AuditSafelyAsync(auditRows, cancellationToken);
+    }
+
+    // A retired-on-exit audit entry, owned by the affected stop's operator (R-20) -- stamped explicitly because
+    // this runs as background plumbing with no ambient user. Not a synthetic_risk event: the position is flat, so
+    // no live exposure was resting on platform-held protection when the plan was retired (unlike the orphan guard).
+    private static AuditRecord AuditForExit(StopPlanRecord plan, StopStaging before, PositionEvent exit) => new()
+    {
+        UserId = plan.UserId,
+        Action = AuditAction.PositionExit,
+        Placement = before == StopStaging.Native ? AuditPlacement.Native : AuditPlacement.Synthetic,
+        SyntheticRisk = false,
+        StopPlanId = plan.Id,
+        Before = before.ToString(),
+        After = StopStaging.Retired.ToString(),
+        Detail = $"Stop plan retired on position exit ({exit.Contract} flat).",
+        RecordedAt = DateTimeOffset.UtcNow, // a record-keeping timestamp, not a decision input
+    };
+
+    private async Task AuditSafelyAsync(IReadOnlyCollection<AuditRecord> records, CancellationToken cancellationToken)
+    {
+        if (records.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await _auditLog.WriteAsync(records, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error, "OCO-exit: audit write failed for {Count} retirement(s); the retire still completed.",
+                records.Count);
+        }
     }
 
     private async Task CancelNativeLegsAsync(

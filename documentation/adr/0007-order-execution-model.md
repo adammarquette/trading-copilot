@@ -293,8 +293,9 @@ never asked for.
 - **Idempotent, benign under races, R-20-scoped.** A replayed exit finds the plans already `Retired` and the legs
   already gone; a cancel the venue rejects (already filled, or the venue's own OCO won the race) is logged and
   never retried (no storm); the account is resolved to its owner and every read/write/cancel runs in that owner's
-  context, so an exit never crosses the R-20 boundary. Each deliberately-retired leg is **audited** (a log line;
-  the formal `AuditRecord` is gh#220).
+  context, so an exit never crosses the R-20 boundary. Each retired plan is **audited** — an immutable `AuditRecord`
+  (gh#220, `AuditAction.PositionExit`), a secondary write that never fails the retire; not `synthetic_risk` (the
+  position is flat, so no live exposure rested on platform-held protection, unlike the orphan guard's records).
 
 *Still deferred:* venue-native OCO linkage (letting the broker pair the legs) — not applicable, since a synthetic
 leg is never on the book for the venue to pair, which is exactly why the cancel is app-level.
