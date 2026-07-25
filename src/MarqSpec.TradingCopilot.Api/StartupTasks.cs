@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Api.Auth;
+using MarqSpec.TradingCopilot.Api.Kill;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -27,6 +28,16 @@ public static class StartupTasks
         else
         {
             await database.Database.EnsureCreatedAsync();
+        }
+
+        // Rehydrate the kill switch (gh#189): if it was engaged when the process last stopped, come up engaged --
+        // the operator's lock persists across a restart, so a crash or redeploy never silently re-enables trading
+        // (ADR-0013, "nothing silently resumes").
+        KillSwitchState? killState = await database.KillSwitchStates.FirstOrDefaultAsync();
+        if (killState is { Engaged: true })
+        {
+            app.Services.GetRequiredService<KillSwitch>()
+                .Engage(killState.Mode, killState.EngagedAt ?? DateTimeOffset.UtcNow, killState.Reason);
         }
 
         await BootstrapOperatorAsync(

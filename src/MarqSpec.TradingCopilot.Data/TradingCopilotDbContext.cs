@@ -67,6 +67,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Per-consumer-group replay cursors over the event log (ADR-0001). System plumbing.</summary>
     public DbSet<EventCursor> EventCursors => Set<EventCursor>();
 
+    /// <summary>The durable kill-switch state (gh#189) — one row, rehydrated at startup so the lock survives a restart.</summary>
+    public DbSet<KillSwitchState> KillSwitchStates => Set<KillSwitchState>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -377,6 +380,12 @@ public class TradingCopilotDbContext : TenantDbContext
         {
             cursor.HasKey(c => c.ConsumerGroup);
             cursor.Property(c => c.ConsumerGroup).HasMaxLength(128);
+        });
+
+        modelBuilder.Entity<KillSwitchState>(kill =>
+        {
+            kill.HasKey(k => k.Id);
+            kill.Property(k => k.Reason).HasMaxLength(512);
         });
     }
 }

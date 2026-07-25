@@ -59,10 +59,11 @@ public static class OrderEndpoints
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<ExecutionOptions> executionOptions,
         HostTradingEnvironment environment,
+        IKillSwitch killSwitch,
         CancellationToken cancellationToken)
     {
         (Composition? composed, IResult? refusal) = await ComposeAsync(
-            id, database, venueFactory, projectXOptions, executionOptions, environment, cancellationToken);
+            id, database, venueFactory, projectXOptions, executionOptions, environment, killSwitch, cancellationToken);
         if (composed is null)
         {
             return refusal!;
@@ -105,11 +106,12 @@ public static class OrderEndpoints
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<ExecutionOptions> executionOptions,
         HostTradingEnvironment environment,
+        IKillSwitch killSwitch,
         CancellationToken cancellationToken)
     {
         // Arm is send-minus-transmission: the same fail-closed preconditions, the same ladder, no venue order.
         (Composition? composed, IResult? refusal) = await ComposeAsync(
-            id, database, venueFactory, projectXOptions, executionOptions, environment, cancellationToken);
+            id, database, venueFactory, projectXOptions, executionOptions, environment, killSwitch, cancellationToken);
         if (composed is null)
         {
             return refusal!;
@@ -150,13 +152,14 @@ public static class OrderEndpoints
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<ExecutionOptions> executionOptions,
         HostTradingEnvironment environment,
+        IKillSwitch killSwitch,
         CancellationToken cancellationToken)
     {
         // "Send when conditions met" (ADR-0007, gh#176): held local, fired by a watcher on the trigger. Creation
         // runs the same compose ladder + Evaluate as arm -- for immediate feedback -- but transmits nothing; the
         // authoritative gate re-runs at fire time (R-12).
         (Composition? composed, IResult? refusal) = await ComposeAsync(
-            id, database, venueFactory, projectXOptions, executionOptions, environment, cancellationToken);
+            id, database, venueFactory, projectXOptions, executionOptions, environment, killSwitch, cancellationToken);
         if (composed is null)
         {
             return refusal!;
@@ -233,6 +236,7 @@ public static class OrderEndpoints
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<ExecutionOptions> executionOptions,
         HostTradingEnvironment environment,
+        IKillSwitch killSwitch,
         CancellationToken cancellationToken)
     {
         Order? order = await database.Orders.FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
@@ -247,7 +251,7 @@ public static class OrderEndpoints
         }
 
         (Composition? composed, IResult? refusal) = await ComposeAsync(
-            order.AccountId, database, venueFactory, projectXOptions, executionOptions, environment, cancellationToken);
+            order.AccountId, database, venueFactory, projectXOptions, executionOptions, environment, killSwitch, cancellationToken);
         if (composed is null)
         {
             return refusal!;
@@ -283,6 +287,7 @@ public static class OrderEndpoints
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<ExecutionOptions> executionOptions,
         HostTradingEnvironment environment,
+        IKillSwitch killSwitch,
         CancellationToken cancellationToken)
     {
         Order? order = await database.Orders.FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
@@ -299,7 +304,7 @@ public static class OrderEndpoints
         // R-12: EVERYTHING re-validates against fresh truth -- fresh roster, fresh flat check, fresh gate. The
         // arm-time decision is history, not authorization.
         (Composition? composed, IResult? refusal) = await ComposeAsync(
-            order.AccountId, database, venueFactory, projectXOptions, executionOptions, environment, cancellationToken);
+            order.AccountId, database, venueFactory, projectXOptions, executionOptions, environment, killSwitch, cancellationToken);
         if (composed is null)
         {
             return refusal!;
@@ -367,6 +372,7 @@ public static class OrderEndpoints
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<ExecutionOptions> executionOptions,
         HostTradingEnvironment environment,
+        IKillSwitch killSwitch,
         CancellationToken cancellationToken)
     {
         Account? account = await database.Accounts
@@ -442,7 +448,7 @@ public static class OrderEndpoints
             profile.ToManualCaps(),
             executionOptions.Value.ToSanityCaps());
 
-        OrderExecutionService execution = new(new RiskGate(), venue, environment.Value);
+        OrderExecutionService execution = new(new RiskGate(), venue, environment.Value, killSwitch);
 
         return (new Composition(account, profile, venue, venueAccount with { Mode = account.Mode }, risk, execution), null);
     }

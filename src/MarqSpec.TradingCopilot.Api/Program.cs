@@ -4,6 +4,7 @@ using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Flatten;
+using MarqSpec.TradingCopilot.Api.Kill;
 using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Recovery;
@@ -13,6 +14,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Events;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Events;
+using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
@@ -100,6 +102,14 @@ builder.Services.Configure<ExecutionOptions>(builder.Configuration.GetSection(Ex
 builder.Services.AddSingleton(new HostTradingEnvironment(
     DeploymentEnvironmentMapping.From(builder.Environment.EnvironmentName)));
 
+// The kill switch (R-11, ADR-0007, gh#189): a process-wide flag the enforcing send path reads to refuse every
+// outbound order while engaged. A singleton (the mutable runtime state) exposed through its domain reader
+// interface, so OrderExecutionService stays pure. The persisted KillSwitchState row rehydrates it at startup, so
+// the operator's lock survives a restart -- nothing silently re-enables trading (ADR-0013).
+builder.Services.AddSingleton<KillSwitch>();
+builder.Services.AddSingleton<IKillSwitch>(services => services.GetRequiredService<KillSwitch>());
+builder.Services.AddScoped<KillSwitchService>();
+
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -130,6 +140,7 @@ app.MapConnectionEndpoints();
 app.MapAccountEndpoints();
 app.MapRiskEndpoints();
 app.MapOrderEndpoints();
+app.MapKillSwitchEndpoints();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 app.Run();

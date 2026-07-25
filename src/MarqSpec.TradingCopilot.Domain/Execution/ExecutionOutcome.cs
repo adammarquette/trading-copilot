@@ -61,6 +61,13 @@ public enum ExecutionOutcome
     RefusedByInvalidTarget,
 
     /// <summary>
+    /// Refused because the <b>kill switch is engaged</b> (ADR-0007, gh#189): outbound orders are disabled, so the
+    /// send is refused above the normal flow — before the order is sized. Nothing was sent. Reducing / protective
+    /// actions (auto-flatten's close, stop promotion) do not pass through this path and are unaffected.
+    /// </summary>
+    RefusedByKillSwitch,
+
+    /// <summary>
     /// The full ladder ran and the gate decided — but nothing was transmitted (the arm/edit path, gh#11).
     /// The decision may be allowing, resizing, or blocking; transmission is a separate, explicit act.
     /// </summary>
