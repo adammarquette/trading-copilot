@@ -338,6 +338,21 @@ public static class ProjectXMapping
             new Price(position.AveragePrice));
     }
 
+    /// <summary>Maps a gateway open order onto the venue-neutral <see cref="WorkingOrder"/> (gh#183).</summary>
+    /// <param name="order">The gateway's order (from an open-orders query).</param>
+    /// <param name="venue">The venue to tag it with.</param>
+    /// <returns>The neutral working-order view — the handle, contract, and resting price.</returns>
+    public static WorkingOrder ToWorkingOrder(ClientModels.Order order, VenueId venue)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+
+        return new WorkingOrder(
+            order.Id.ToString(CultureInfo.InvariantCulture),
+            VenueContractId.Create(venue, order.ContractId),
+            order.StopPrice is { } stopPrice ? new Price(stopPrice) : null,
+            order.LimitPrice is { } limitPrice ? new Price(limitPrice) : null);
+    }
+
     /// <summary>Expresses a bar duration as the gateway's unit plus a count.</summary>
     /// <param name="barSize">The bar duration.</param>
     /// <returns>The gateway's unit and unit count.</returns>

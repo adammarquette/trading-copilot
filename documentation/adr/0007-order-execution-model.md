@@ -144,10 +144,10 @@ something the operator did not ask for. A `null` target stays valid: the entry r
 alone (the two-leg bracket unchanged). Because the bracket is native, the venue gives **exchange-managed OCO**
 for free — target and stop cancel one another on fill.
 
-*Still deferred:* the **app-level OCO-cancel-on-exit** — cancelling a *synthetic/hidden* leg, or the safety
-stop, when a position exits by manual flatten or by the promoted actual stop (its account-streaming / fill-event
-prerequisite, `VenueCapability.AccountStreaming`, **landed gh#219** — see the Update below; the cancel-on-exit
-consumer itself is **gh#183**). *(Connection-liveness orphan handling — listed deferred here — has since landed: gh#209, gh#191.)*
+*Then deferred, since landed:* the **app-level OCO-cancel-on-exit** — cancelling a *synthetic/hidden* leg, or the
+safety stop, when a position exits by manual flatten or by the promoted actual stop — needed the account-streaming
+/ fill-event prerequisite `VenueCapability.AccountStreaming` (**gh#219**) and **landed gh#183** (see the Updates
+below). *(Connection-liveness orphan handling, once listed deferred here, has also landed: gh#209, gh#191.)*
 
 ## Update (2026-07-25) — the take-profit wiring (gh#173)
 The operator can now set one: `SendOrderRequest.Target` flows through `BuildRequestAsync` into
@@ -265,9 +265,39 @@ nothing — no `Fill` row was ever written and an order stopped at `Working`, ne
   lacks, the gh#212 lesson), and the capability is `Require`d **at the call** (R-17) — a venue that cannot stream is
   refused, not discovered mid-stream.
 
-*Still deferred:* **OCO-cancel-on-exit** (gh#183, the seam's first real consumer); backfilling fills missed while
-disconnected (venue-truth reconcile, gh#193); cancelling a *working* order through the order API (today only the kill
-switch does). `MarketDepth` / `ModifyOrder` / `TrailingStops` stay declared-but-unreached.
+*Still deferred:* backfilling fills missed while disconnected (venue-truth reconcile, gh#193); cancelling a
+*working* order through the order API (today only the kill switch does). `MarketDepth` / `ModifyOrder` /
+`TrailingStops` stay declared-but-unreached. **(OCO-cancel-on-exit — the seam's first real consumer — landed
+gh#183; see the Update below.)**
+
+## Update (2026-07-25) — app-level OCO-cancel-on-exit (gh#183)
+The **last deferred piece of the execution model** is done. When a position exits, whatever protection was
+standing for it now comes down; before this, a synthetic/hidden actual-stop and the always-native **safety stop**
+both survived the position they protected — and a dangling safety stop is not merely untidy, it is a **live
+resting order at the exchange with no position behind it**, which on the next fill opens a position the operator
+never asked for.
+
+- **The trigger is the account-event seam** (gh#219): a `PositionEvent` reporting the contract **flat**
+  (`NetQuantity == 0`). So **every** exit route reaches it the same way — a manual flatten, the promoted actual
+  stop firing (the safety stop is the leg left behind), auto-flatten, and the kill switch's flatten-all — because
+  each ends in a venue position update. The **catastrophic** case (cancelling protection while the position is
+  still open) is structurally impossible: a **partial** fill leaves the net non-zero and is a no-op, and a flat
+  contract has by definition no open position to leave unprotected (R-11).
+- **`Api/Accounts/OcoExitService`** retires the **synthetic** stop plans (a `Hidden` / `Native` / `Orphaned`
+  record → `Retired`, terminal, so the promotion watcher never re-arms it) and cancels the **native** legs resting
+  at the venue — the safety bracket, a promoted actual stop, a dangling take-profit. The legs are found by the
+  pure `Domain/Execution/OcoExitSelection`: a venue-resting order on the flat contract that is **not** one of the
+  operator's journaled entries. That distinction is **by construction, not a heuristic** — every protective leg
+  the venue spawns is unjournaled, while every operator entry is journaled — so a resting entry is never mistaken
+  for dangling protection. The venue's working orders are read through a new fail-closed `IOrderExecutor.GetWorkingOrdersAsync` (R-17).
+- **Idempotent, benign under races, R-20-scoped.** A replayed exit finds the plans already `Retired` and the legs
+  already gone; a cancel the venue rejects (already filled, or the venue's own OCO won the race) is logged and
+  never retried (no storm); the account is resolved to its owner and every read/write/cancel runs in that owner's
+  context, so an exit never crosses the R-20 boundary. Each deliberately-retired leg is **audited** (a log line;
+  the formal `AuditRecord` is gh#220).
+
+*Still deferred:* venue-native OCO linkage (letting the broker pair the legs) — not applicable, since a synthetic
+leg is never on the book for the venue to pair, which is exactly why the cancel is app-level.
 
 ## Update (2026-07-25) — the AuditRecord landed (gh#220)
 The `synthetic_risk` audit deferred by gh#209 is now a real entity. `AuditRecord` (table `AuditRecords`) is an
