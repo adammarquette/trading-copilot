@@ -93,4 +93,25 @@ public class FlattenOptionsTests
 
         act.Should().Throw<FormatException>();
     }
+
+    [Fact]
+    public void WatchdogDefaults_ShouldGivePrimaryItsWindow_AndRunOnItsOwnCadence()
+    {
+        FlattenOptions options = new();
+
+        // The redundant watchdog (gh#187) waits a short grace past the deadline before stepping in, and polls on
+        // its own interval -- independent of the primary's cadence, so the two tiers never share a timer.
+        options.WatchdogGrace.Should().Be(TimeSpan.FromMinutes(2));
+        options.WatchdogPollInterval.Should().Be(TimeSpan.FromSeconds(20));
+        options.WatchdogPollInterval.Should().NotBe(options.PollInterval);
+    }
+
+    [Fact]
+    public void WatchdogGraceAndInterval_ShouldProjectTheConfiguredValues()
+    {
+        FlattenOptions options = new() { WatchdogGraceMinutes = 5, WatchdogPollIntervalSeconds = 45 };
+
+        options.WatchdogGrace.Should().Be(TimeSpan.FromMinutes(5));
+        options.WatchdogPollInterval.Should().Be(TimeSpan.FromSeconds(45));
+    }
 }
