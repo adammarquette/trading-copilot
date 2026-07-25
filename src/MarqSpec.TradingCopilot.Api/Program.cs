@@ -76,6 +76,11 @@ builder.Services.AddHostedService<ConditionalOrderHost>();
 builder.Services.AddScoped<OrphanGuardService>();
 builder.Services.AddHostedService<VenueConnectionMonitorHost>();
 
+// Settlement-boundary position reconcile (R-13, ADR-0013, gh#193): reports positions from venue truth tagged
+// with their mark basis (live / settlement re-mark / declared-unknown), so a settlement re-mark is never read
+// as live and an unreachable venue is not shown as a stale live view.
+builder.Services.AddScoped<PositionReconciliationService>();
+
 // Auto-flatten (R-13, gh#185, ADR-0013): the PRIMARY scheduler that closes open positions at each instrument's
 // per-market deadline on the DST-aware market clock. On by default and cannot be silently disabled -- so it
 // ALWAYS runs; a market is turned off per-instrument in the Flatten config, not by omitting the host. The
@@ -141,6 +146,7 @@ app.MapAccountEndpoints();
 app.MapRiskEndpoints();
 app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
+app.MapPositionEndpoints();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 app.Run();
