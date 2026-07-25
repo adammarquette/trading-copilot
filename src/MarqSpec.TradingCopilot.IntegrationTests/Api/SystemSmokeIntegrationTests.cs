@@ -18,9 +18,9 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// (Engineering Guide §5/§10, QA Agent Contract, gh#26, gh#131).
 /// </summary>
 [Trait("Category", "Smoke")]
-public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFactory>
+public class SystemSmokeIntegrationTests : IClassFixture<LazySmokeHostFixture>
 {
-    private readonly StubbedVenuePostgresFactory _factory;
+    private readonly LazySmokeHostFixture _hostFixture;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
     private sealed record LoginTokenResponse(string Token);
@@ -48,16 +48,16 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
         }
     }
 
-    public SystemSmokeIntegrationTests(StubbedVenuePostgresFactory factory)
+    public SystemSmokeIntegrationTests(LazySmokeHostFixture hostFixture)
     {
-        _factory = factory;
+        _hostFixture = hostFixture;
     }
 
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task Smoke_GetAuthMe_ShouldReturnOperatorProfile_WhenAuthenticated()
     {
-        HttpClient client = CreateSmokeClient();
+        HttpClient client = await CreateSmokeClientAsync();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -76,7 +76,7 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     [Trait("Category", "Smoke")]
     public async Task Smoke_GetFirms_ShouldReturnFirmCatalog_WhenAuthenticated()
     {
-        HttpClient client = CreateSmokeClient();
+        HttpClient client = await CreateSmokeClientAsync();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -91,7 +91,7 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     [Trait("Category", "Smoke")]
     public async Task Smoke_GetConnections_ShouldReturnConnections_WhenAuthenticated()
     {
-        HttpClient client = CreateSmokeClient();
+        HttpClient client = await CreateSmokeClientAsync();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -106,7 +106,7 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     [Trait("Category", "Smoke")]
     public async Task Smoke_GetAccounts_ShouldReturnAccountRoster_WhenAuthenticated()
     {
-        HttpClient client = CreateSmokeClient();
+        HttpClient client = await CreateSmokeClientAsync();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -131,7 +131,7 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     [Trait("Category", "Smoke")]
     public async Task Smoke_GetRiskProfile_ShouldReturnDeclaredProfile_WhenAuthenticated()
     {
-        HttpClient client = CreateSmokeClient();
+        HttpClient client = await CreateSmokeClientAsync();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -163,7 +163,7 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     [Trait("Category", "Smoke")]
     public async Task Smoke_Endpoints_ShouldReturn401Unauthorized_WhenUnauthenticated()
     {
-        HttpClient anonymousClient = CreateSmokeClient();
+        HttpClient anonymousClient = await CreateSmokeClientAsync();
 
         using HttpResponseMessage meResp = await anonymousClient.GetAsync("/auth/me");
         meResp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
@@ -178,7 +178,7 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     [Fact]
     public async Task SmokeTests_MustBeStrictlyReadOnly_AndEnforcedByTransport()
     {
-        HttpClient client = CreateSmokeClient();
+        HttpClient client = await CreateSmokeClientAsync();
         string token = await AuthenticateAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -194,24 +194,29 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
     }
 
     [Fact]
-    public void Smoke_CreateSmokeClient_ShouldThrow_WhenRequireRemoteTargetIsSet_ButBaseUrlIsMissing()
+    public async Task Smoke_CreateSmokeClient_ShouldThrow_WhenRequireRemoteTargetIsSet_ButBaseUrlIsMissing()
     {
+        string? originalRequire = Environment.GetEnvironmentVariable("SMOKE_REQUIRE_REMOTE_TARGET");
+        string? originalBaseUrl = Environment.GetEnvironmentVariable("SMOKE_TARGET_BASE_URL");
         Environment.SetEnvironmentVariable("SMOKE_REQUIRE_REMOTE_TARGET", "true");
         Environment.SetEnvironmentVariable("SMOKE_TARGET_BASE_URL", null);
 
         try
         {
-            Action act = () => CreateSmokeClient();
-            act.Should().Throw<InvalidOperationException>()
+            Func<Task> act = () => CreateSmokeClientAsync();
+            await act.Should().ThrowAsync<InvalidOperationException>()
                 .WithMessage("SMOKE_REQUIRE_REMOTE_TARGET is set to true, but SMOKE_TARGET_BASE_URL environment variable is missing or empty.");
         }
         finally
         {
-            Environment.SetEnvironmentVariable("SMOKE_REQUIRE_REMOTE_TARGET", null);
+            // Restore BOTH vars: clearing SMOKE_TARGET_BASE_URL and leaving it cleared would push the rest of a
+            // deployed-target run into local mode — and back into starting a container, the very thing gh#152 removes.
+            Environment.SetEnvironmentVariable("SMOKE_REQUIRE_REMOTE_TARGET", originalRequire);
+            Environment.SetEnvironmentVariable("SMOKE_TARGET_BASE_URL", originalBaseUrl);
         }
     }
 
-    private HttpClient CreateSmokeClient()
+    private async Task<HttpClient> CreateSmokeClientAsync()
     {
         string? targetBaseUrl = Environment.GetEnvironmentVariable("SMOKE_TARGET_BASE_URL");
         bool requireRemoteTarget = bool.TryParse(Environment.GetEnvironmentVariable("SMOKE_REQUIRE_REMOTE_TARGET"), out bool req) && req;
@@ -222,23 +227,19 @@ public class SystemSmokeIntegrationTests : IClassFixture<StubbedVenuePostgresFac
                 "SMOKE_REQUIRE_REMOTE_TARGET is set to true, but SMOKE_TARGET_BASE_URL environment variable is missing or empty.");
         }
 
-        HttpMessageHandler primaryHandler = string.IsNullOrWhiteSpace(targetBaseUrl)
-            ? _factory.Server.CreateHandler()
-            : new HttpClientHandler();
-
-        ReadOnlyHandler readOnlyHandler = new() { InnerHandler = primaryHandler };
-        HttpClient client = new(readOnlyHandler);
-
+        // Remote: probe the DEPLOYED target directly. No in-process host is built and — crucially (gh#152) — the
+        // lazy fixture is never asked for one, so no PostgreSQL container (and no Docker) is touched. A deploy
+        // smoke run needs nothing but network + credentials.
         if (!string.IsNullOrWhiteSpace(targetBaseUrl))
         {
-            client.BaseAddress = new Uri(targetBaseUrl);
-        }
-        else
-        {
-            client.BaseAddress = _factory.ClientOptions.BaseAddress;
+            ReadOnlyHandler remoteHandler = new() { InnerHandler = new HttpClientHandler() };
+            return new HttpClient(remoteHandler) { BaseAddress = new Uri(targetBaseUrl) };
         }
 
-        return client;
+        // Local: boot the in-process host (and its throwaway container) lazily — once for the class.
+        StubbedVenuePostgresFactory factory = await _hostFixture.GetFactoryAsync();
+        ReadOnlyHandler localHandler = new() { InnerHandler = factory.Server.CreateHandler() };
+        return new HttpClient(localHandler) { BaseAddress = factory.ClientOptions.BaseAddress };
     }
 
     private async Task<string> AuthenticateAsync(HttpClient client)
