@@ -1,9 +1,12 @@
+using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Accounts;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -23,6 +26,7 @@ public class AccountEventIngestionServiceTests
     private static VenueId Projectx { get; } = VenueId.Parse("projectx");
     private readonly string _database = Guid.NewGuid().ToString();
     private readonly DateTimeOffset _now = new(2026, 1, 15, 14, 30, 0, TimeSpan.Zero);
+    private readonly IAuditLog _auditLog = A.Fake<IAuditLog>();
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
@@ -33,6 +37,7 @@ public class AccountEventIngestionServiceTests
     private AccountEventIngestionService Service() => new(
         Context(),
         new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
+        _auditLog,
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = OurCredentialKey }),
         NullLogger<AccountEventIngestionService>.Instance);
 
@@ -106,6 +111,28 @@ public class AccountEventIngestionServiceTests
 
     private async Task<Order> OrderAsync(Guid orderId) =>
         await Context().Orders.IgnoreQueryFilters().SingleAsync(order => order.Id == orderId);
+
+    private async Task SeedStopPlanAsync(Guid owner, Guid orderId, StopStaging staging)
+    {
+        await using TradingCopilotDbContext context = Context();
+        context.StopPlans.Add(new StopPlanRecord
+        {
+            Id = Guid.NewGuid(),
+            UserId = owner,
+            OrderId = orderId,
+            Side = OrderSide.Buy,
+            EntryPrice = 5_300m,
+            ActualStopPrice = 5_290m,
+            SafetyStopPrice = 5_280m,
+            ProximityMetric = StopProximityMetric.Ticks,
+            ProximityValue = 4m,
+            Staging = staging,
+        });
+        await context.SaveChangesAsync();
+    }
+
+    private async Task<StopStaging?> StagingAsync(Guid orderId) =>
+        (await Context().StopPlans.IgnoreQueryFilters().FirstOrDefaultAsync(plan => plan.OrderId == orderId))?.Staging;
 
     [Fact]
     public async Task ProcessAsync_ShouldPersistFill_AndAdvanceToPartiallyFilled_WhenPartlyFilled()
@@ -258,5 +285,42 @@ public class AccountEventIngestionServiceTests
         IReadOnlyList<VenueAccountId> accounts = await Service().DiscoverAccountsAsync(CancellationToken.None);
 
         accounts.Should().ContainSingle().Which.Should().Be(VenueAccountId.Create(Projectx, "9001"));
+    }
+
+    [Theory]
+    [InlineData(VenueOrderState.Cancelled)]
+    [InlineData(VenueOrderState.Rejected)]
+    public async Task ProcessAsync_ShouldRetireTheStopPlan_WhenAWorkingOrderTerminatesWithoutAPosition(VenueOrderState state)
+    {
+        // A never-filled working entry that is cancelled / rejected leaves no position, so its stop plan must be
+        // retired -- else the promotion watcher would promote a native stop for a cancelled entry (gh#183 / gh#250).
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        Guid orderId = await SeedOrderAsync(owner, accountId, "55001", OrderStatus.Working, size: 1);
+        await SeedStopPlanAsync(owner, orderId, StopStaging.Hidden);
+
+        await Service().ProcessAsync(OrderState("9001", "55001", state), CancellationToken.None);
+
+        (await StagingAsync(orderId)).Should().Be(StopStaging.Retired);
+        A.CallTo(() => _auditLog.WriteAsync(
+            A<IReadOnlyCollection<AuditRecord>>.That.Matches(rows => rows.Any(record =>
+                record.Action == AuditAction.OrderCancelled && !record.SyntheticRisk && record.UserId == owner)),
+            A<CancellationToken>._)).MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_ShouldKeepTheStopPlan_WhenAPartiallyFilledOrderIsCancelled()
+    {
+        // A partially-filled order that is cancelled still holds a LIVE position from the fills -- its stop plan
+        // protects that position and must NOT be retired here (OCO-exit retires it when the position later closes).
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        Guid orderId = await SeedOrderAsync(owner, accountId, "55001", OrderStatus.PartiallyFilled, size: 3);
+        await SeedStopPlanAsync(owner, orderId, StopStaging.Hidden);
+
+        await Service().ProcessAsync(OrderState("9001", "55001", VenueOrderState.Cancelled), CancellationToken.None);
+
+        (await OrderAsync(orderId)).Status.Should().Be(OrderStatus.Cancelled); // the remainder is cancelled
+        (await StagingAsync(orderId)).Should().Be(StopStaging.Hidden);         // but the plan stands -- a position is live
     }
 }

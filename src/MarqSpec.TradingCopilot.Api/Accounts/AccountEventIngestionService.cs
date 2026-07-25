@@ -1,7 +1,9 @@
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -37,17 +39,20 @@ public sealed class AccountEventIngestionService
 {
     private readonly TradingCopilotDbContext _discovery;
     private readonly DbContextOptions<TradingCopilotDbContext> _options;
+    private readonly IAuditLog _auditLog;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly ILogger<AccountEventIngestionService> _logger;
 
     /// <summary>Creates the service.</summary>
     /// <param name="discovery">The scoped context, used only to discover the owning account (across owners).</param>
     /// <param name="options">The context options, used to build a per-owner (R-20-scoped) context for the writes.</param>
+    /// <param name="auditLog">The immutable audit trail — a retired stop plan is recorded (gh#220), a secondary write.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
     /// <param name="logger">The logger.</param>
     public AccountEventIngestionService(
         TradingCopilotDbContext discovery,
         DbContextOptions<TradingCopilotDbContext> options,
+        IAuditLog auditLog,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         ILogger<AccountEventIngestionService> logger)
     {
@@ -55,6 +60,7 @@ public sealed class AccountEventIngestionService
 
         _discovery = discovery;
         _options = options;
+        _auditLog = auditLog;
         _projectX = projectXOptions.Value;
         _logger = logger;
     }
@@ -192,6 +198,8 @@ public sealed class AccountEventIngestionService
             return false;
         }
 
+        bool wasWorking = order.Status == OrderStatus.Working;
+
         OrderStatus? next = state.State switch
         {
             // A rejection of a still-working order is a reject; of a partially-filled one it is a cancel of the
@@ -207,9 +215,70 @@ public sealed class AccountEventIngestionService
         }
 
         order.Status = status;
+
+        // A working entry that NEVER filled (wasWorking) leaves no position, so its stop plan protects nothing --
+        // retire it here too, else the promotion watcher could promote a native stop for a cancelled / rejected
+        // entry (the gh#183 Finding-4 hazard, reachable via this venue-truth reconcile path -- which the operator
+        // cancel deliberately delegates to, gh#250). A PARTIALLY-filled order KEEPS its plan: the filled contracts
+        // are a live position the plan still protects, retired later when THAT position closes (OCO-exit, gh#183).
+        AuditRecord? planAudit = wasWorking
+            ? await RetireStopPlanForTerminalOrderAsync(database, order, cancellationToken)
+            : null;
+
         await database.SaveChangesAsync(cancellationToken);
         _logger.LogInformation("Order {Order} moved to {Status} from venue truth.", order.Id, status);
+        await AuditSafelyAsync(planAudit, cancellationToken);
         return true;
+    }
+
+    private static async Task<AuditRecord?> RetireStopPlanForTerminalOrderAsync(
+        TradingCopilotDbContext database, Order order, CancellationToken cancellationToken)
+    {
+        StopPlanRecord? plan = await database.StopPlans
+            .FirstOrDefaultAsync(candidate => candidate.OrderId == order.Id
+                && (candidate.Staging == StopStaging.Hidden
+                    || candidate.Staging == StopStaging.Native
+                    || candidate.Staging == StopStaging.Orphaned), cancellationToken);
+        if (plan is null)
+        {
+            return null;
+        }
+
+        StopStaging before = plan.Staging;
+        plan.Staging = StopStaging.Retired;
+        return new AuditRecord
+        {
+            UserId = order.UserId,
+            Action = AuditAction.OrderCancelled,
+            Placement = before == StopStaging.Native ? AuditPlacement.Native : AuditPlacement.Synthetic,
+            SyntheticRisk = false, // the entry never filled -- no live position rested on the protection
+            StopPlanId = plan.Id,
+            Before = before.ToString(),
+            After = StopStaging.Retired.ToString(),
+            Detail = $"Stop plan retired: order {order.VenueOrderKey} left the book ({order.Status}) without a position.",
+            RecordedAt = DateTimeOffset.UtcNow,
+        };
+    }
+
+    private async Task AuditSafelyAsync(AuditRecord? record, CancellationToken cancellationToken)
+    {
+        if (record is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _auditLog.WriteAsync([record], cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(error, "Audit write failed for a retired stop plan on a terminal order; the retire still completed.");
+        }
     }
 
     private static Task<Order?> FindOrderAsync(

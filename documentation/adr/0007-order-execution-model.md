@@ -336,6 +336,27 @@ one-action send is `SendAsIs`, a fired conditional is `Conditional`. *Out of sco
 **default entry-action preference** and its practice-only / confirm-to-enable guard (gh#218), and the split-button
 UI (gh#25).
 
+## Update (2026-07-25) — cancel a working order via the order API (gh#250)
+The venue seam has always cancelled orders (`IOrderExecutor.CancelOrderAsync`, used by the kill switch), but an
+operator had no way to pull a **single** resting order without engaging the whole kill switch. The `DELETE
+/orders/{id}` handler — previously a staged-ticket discard — is now **polymorphic**:
+
+- A **`Staged`** ticket is server-side only, so it is discarded in place (unchanged). A **`Working`** order is
+  cancelled at the **venue** and reconciled to `Cancelled`; a terminal order is refused.
+- A cancel is **risk-reducing**, so it deliberately bypasses the send ladder — **no risk profile, no flat-account
+  check, no kill-switch gate** (the kill switch refuses *new* orders, not cancels). It keeps only the R-20 scope
+  and the one-credential-set process guard (ADR-0015); the venue is resolved **lightly**, not through `ComposeAsync`.
+- The order's now-orphaned **stop plan is retired** with it (`Hidden`/`Native`/`Orphaned` → `Retired`), so the
+  promotion watcher cannot later promote a native stop for a **cancelled** entry (the gh#183 Finding-4 hazard in a
+  new guise). The cancel is **audited** (`AuditAction.OrderCancelled`, gh#220) as a secondary, failure-tolerant
+  write; not `synthetic_risk` — a resting entry never filled, so no live position rested on the protection.
+- A venue **rejection** (the order already filled or gone) **never forces a terminal status**: guessing `Cancelled`
+  would mislabel a *filled* order. The journal is left for the account-event stream (gh#219) — the authoritative
+  venue-truth reconciler — to advance, and the operator is told why (proven by a red-provable test).
+
+*Still deferred:* discarding a `Staged` order is already covered here; **modifying** a working order
+(`VenueCapability.ModifyOrder`) is the other #219 follow-up, not this one.
+
 ## Consequences
 **Positive**
 - **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move

@@ -1,4 +1,5 @@
 using FakeItEasy;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
@@ -10,6 +11,7 @@ using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api;
@@ -432,7 +434,8 @@ public class StagedOrderEndpointsTests
 
         await using (TradingCopilotDbContext context = Context())
         {
-            IResult cancelled = await OrderEndpoints.CancelStagedOrderAsync(orderId, context, CancellationToken.None);
+            IResult cancelled = await OrderEndpoints.CancelOrderAsync(
+                orderId, context, _factory, PxOptions(), A.Fake<IAuditLog>(), NullLoggerFactory.Instance, CancellationToken.None);
             StatusOf(cancelled).Should().Be(StatusCodes.Status200OK);
         }
 
@@ -440,8 +443,9 @@ public class StagedOrderEndpointsTests
         (await reload.Orders.SingleAsync()).Status.Should().Be(OrderStatus.Cancelled);
 
         await using TradingCopilotDbContext again = Context();
-        IResult second = await OrderEndpoints.CancelStagedOrderAsync(orderId, again, CancellationToken.None);
-        StatusOf(second).Should().Be(StatusCodes.Status409Conflict); // cancelled is not staged -- no silent no-op
+        IResult second = await OrderEndpoints.CancelOrderAsync(
+            orderId, again, _factory, PxOptions(), A.Fake<IAuditLog>(), NullLoggerFactory.Instance, CancellationToken.None);
+        StatusOf(second).Should().Be(StatusCodes.Status409Conflict); // cancelled is not staged/working -- no silent no-op
     }
 
     // --- Entry-method marker across arm / edit / take (gh#181) ---
