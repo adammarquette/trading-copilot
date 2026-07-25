@@ -94,9 +94,12 @@ a **dev task** plus an independent **QA task** (engineering §10).
   three; `ladder` is additionally required on `staging`/`main`, so a promotion can only come from the allowed
   source. `stale-base` is intentionally *not* required (it is skipped on the long-lived branches, and a
   never-running required check would deadlock the merge). Approvals aren't required (single operator); the rulesets
-  carry no bypass. They live in repo settings, recorded in the
-  [deployment runbook](documentation/deployment-runbook.md). Production deploy and any rollback remain
-  **human-approved**.
+  carry no bypass. **One more gate does not appear in the checks tab at all:** a separate `copilot-review-develop` ruleset
+  requires **Copilot to have reviewed** a PR into `develop` before it can merge. Its *findings* are advisory, but
+  the review itself is required — so if Copilot cannot review (quota exhausted), the PR is **silently unmergeable**
+  with everything green and nothing to point at. Only the maintainer can clear it. All the rulesets live in repo
+  settings, recorded in the [deployment runbook](documentation/deployment-runbook.md). Production deploy and any
+  rollback remain **human-approved**.
 
 ## Local development
 `docker compose up -d` from the repo root (ADR-0012 / engineering §8); the database connection string is

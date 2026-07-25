@@ -48,6 +48,12 @@ distinct name so a later `docker compose pull` cannot clobber your build. Buildi
   but the app takes its **connection string from config** (`ConnectionStrings__*` env / `appsettings`), so you can
   point at the compose DB, a local Postgres, or a managed instance instead.
 - **Secrets** stay in a **gitignored `.env`** (copy `.env.example`) — never committed; cloud secrets come from Railway (§8).
+- **`.env` under compose is an allowlist, not a passthrough.** The app service's `environment:` map names every key
+  compose forwards; anything else in `.env` is used for interpolation and then **silently dropped**. Today
+  `Flatten__*` and `Execution__*` are **not** on the map, so those overrides do nothing under `docker compose` —
+  the app runs on its built-in defaults (safe, but not what was asked for). Tracked as
+  [gh#236](https://github.com/adammarquette/trading-copilot/issues/236); the caveat is flagged inline in
+  `.env.example` until it lands. **Adding a bound `Options` section is not done until its keys are on that map.**
 - Schema changes apply via **`dotnet ef database update`** against the configured connection (as the data layer lands).
 
 ## Environments ↔ branches
@@ -127,10 +133,18 @@ Every feature PR targets `develop`, so the first ruleset covers the whole review
 each new commit on an open PR is reviewed, not just the PR's opening. Drafts are excluded so a branch can churn
 without triggering a review per commit.
 
-Copilot review findings are advisory — they do not block a merge. The **blocking** gates are the required status
-checks enforced by the branch-protection rulesets below (gh#45): `build & unit tests`, `commit-hygiene`, the
-pre-merge integration suite (gh#121), and `ladder` on the promoted branches. Repo-specific review guidance lives
-in [`.github/copilot-instructions.md`](../.github/copilot-instructions.md); update it when a review repeatedly
+**This rule gates the merge — it is not advisory.** Copilot's *findings* are advisory (no finding blocks
+anything), but the **rule itself is a ruleset requirement**: a PR into `develop` cannot merge until Copilot has
+actually reviewed it. The failure mode to know, because it is silent: **when Copilot cannot review — quota
+exhausted, service degraded — the PR simply stays unmergeable**, with green CI and 0 required approvals and no
+red check to point at. Nothing in the checks tab explains it. Only the maintainer can unblock it, by
+re-requesting the review once quota returns or by editing the ruleset in repo settings. Budget Copilot quota
+accordingly when several PRs are in flight.
+
+The other **blocking** gates are the required status checks enforced by the branch-protection rulesets below
+(gh#45): `build & unit tests`, `commit-hygiene`, the pre-merge integration suite (gh#121), and `ladder` on the
+promoted branches. Repo-specific review guidance lives in
+[`.github/copilot-instructions.md`](../.github/copilot-instructions.md); update it when a review repeatedly
 misses something this codebase cares about.
 
 ### Branch protection — required-check rulesets (gh#45)
@@ -212,9 +226,14 @@ check.
   rollback is an explicit, approved action — never automatic.
 
 ## Verification / smoke tests
-Post-deploy, the tagged **smoke** subset (engineering §5) confirms the critical paths — health, connectivity, auth,
-and the safety-critical **execution + auto-flatten** path in a **practice** context. *(Define the smoke set as the
-paths land.)*
+Post-deploy, the tagged **smoke** subset (engineering §5) confirms the critical paths. **The set exists**
+(gh#131): `SystemSmokeIntegrationTests`, tagged `Category=Smoke`, **strictly read-only** — `GET /health`,
+`GET /auth/me`, `/firms`, `/connections`, `/connections/{id}/accounts`, `/accounts/{id}/risk`. Nothing
+execution-shaped carries the smoke tag, by design: execution-path checks belong to the staging integration tier,
+because a smoke test runs against **production**. Pointing the suite at a deployed target starts **no** local
+container and needs no Docker (gh#152), and CI excludes `Category=Smoke` from the pre-merge integration job
+(gh#159). *(Extend the set as read-only surfaces land — the auto-flatten path is verified on **staging**, in a
+practice context, not here.)*
 
 ## Cost
 Monthly Railway spend ceiling is **Q-10** (open) — watch always-on ingestion + database costs.
