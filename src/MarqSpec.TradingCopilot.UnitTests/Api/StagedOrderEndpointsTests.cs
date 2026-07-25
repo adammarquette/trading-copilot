@@ -327,6 +327,76 @@ public class StagedOrderEndpointsTests
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
     }
 
+    // --- The take-profit target rides arm → take (gh#173, ADR-0007) ---
+
+    [Fact]
+    public async Task Take_ShouldRoundTripTheTakeProfitTarget_FromArmToTransmission()
+    {
+        // The operator's take-profit must survive arm → take. The staged row persists it, and take rebuilds the
+        // proposal from the row — so the venue receives the target the operator armed, not null.
+        Guid accountId = await SeedAccountAsync();
+        OrderRequest? sent = null;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes((OrderRequest r, CancellationToken _) => sent = r)
+            .Returns(new PlacedOrder(_venueAccount, "889001", DateTimeOffset.UnixEpoch));
+
+        await ArmAsync(accountId, SmallBuy() with { Target = 5310m }); // winning side for a long entered at 5300
+
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context())
+        {
+            Order staged = await read.Orders.SingleAsync();
+            orderId = staged.Id;
+            staged.TakeProfitPrice.Should().Be(5310m); // persisted at arm, whole, for the R-12 rebuild
+        }
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        sent!.ProfitTarget.Should().Be(new Price(5310m)); // rebuilt from the row and transmitted, not dropped
+    }
+
+    [Fact]
+    public async Task Arm_ShouldRefuseAWrongSideTarget_AndStageNothing()
+    {
+        // The domain guard (gh#170) runs at arm too: a take-profit on the losing side is a contradiction,
+        // refused before anything is staged. Here a long entered at 5300 with a target BELOW entry.
+        Guid accountId = await SeedAccountAsync();
+
+        IResult result = await ArmAsync(accountId, SmallBuy() with { Target = 5290m });
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict); // pre-gate refusal maps to Conflict
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.AnyAsync()).Should().BeFalse(); // nothing staged
+    }
+
+    [Fact]
+    public void StagedResponse_ShouldSurfaceTheTakeProfitTarget()
+    {
+        // So the operator sees and can edit the staged target (gh#173).
+        Order order = new()
+        {
+            Id = Guid.NewGuid(),
+            UserId = _operator,
+            AccountId = Guid.NewGuid(),
+            Instrument = "CON.F.US.MES.U26",
+            Side = OrderSide.Buy,
+            Size = 1,
+            Type = OrderType.Market,
+            Status = OrderStatus.Staged,
+            Mode = TradingMode.Practice,
+            PlacedAt = DateTimeOffset.UnixEpoch,
+            EntryPrice = 5300m,
+            TakeProfitPrice = 5310m,
+        };
+
+        StagedOrderResponse response = StagedOrderResponse.From(order, GateDecision.Allow(1, "within every layer"));
+
+        response.Target.Should().Be(5310m);
+    }
+
     [Fact]
     public async Task Take_ShouldConflict_WhenTheOrderIsNotStaged()
     {

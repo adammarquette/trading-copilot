@@ -69,7 +69,7 @@ public static class OrderEndpoints
 
         (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
             composed, request.Symbol, request.TickSize, request.PointValue, request.Side, request.Quantity,
-            request.Entry, request.Stop, request.SafetyStop, request.ReferencePrice, request.Type, cancellationToken);
+            request.Entry, request.Stop, request.SafetyStop, request.ReferencePrice, request.Target, request.Type, cancellationToken);
         if (executionRequest is null)
         {
             return proposalRefusal!;
@@ -116,7 +116,7 @@ public static class OrderEndpoints
 
         (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
             composed, request.Symbol, request.TickSize, request.PointValue, request.Side, request.Quantity,
-            request.Entry, request.Stop, request.SafetyStop, request.ReferencePrice, request.Type, cancellationToken);
+            request.Entry, request.Stop, request.SafetyStop, request.ReferencePrice, request.Target, request.Type, cancellationToken);
         if (executionRequest is null)
         {
             return proposalRefusal!;
@@ -171,7 +171,7 @@ public static class OrderEndpoints
 
         (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
             composed, request.Symbol, request.TickSize, request.PointValue, request.Side, request.Quantity,
-            request.Entry, request.Stop, request.SafetyStop, request.ReferencePrice, request.Type, cancellationToken);
+            request.Entry, request.Stop, request.SafetyStop, request.ReferencePrice, request.Target, request.Type, cancellationToken);
         if (executionRequest is null)
         {
             return proposalRefusal!;
@@ -228,7 +228,7 @@ public static class OrderEndpoints
         (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
             composed, order.Symbol ?? order.Instrument, order.TickSize, order.PointValue, order.Side, order.Size,
             order.EntryPrice, order.WorkingStopPrice, order.SafetyStopPrice,
-            order.ReferencePrice, order.Type, cancellationToken);
+            order.ReferencePrice, order.TakeProfitPrice, order.Type, cancellationToken);
         if (executionRequest is null)
         {
             return proposalRefusal!;
@@ -375,6 +375,7 @@ public static class OrderEndpoints
         decimal stop,
         decimal safetyStop,
         decimal referencePrice,
+        decimal? target,
         OrderType type,
         CancellationToken cancellationToken)
     {
@@ -389,7 +390,8 @@ public static class OrderEndpoints
                 new Price(entry),
                 new Price(stop),
                 new Price(safetyStop),
-                new Price(referencePrice));
+                new Price(referencePrice),
+                target is { } takeProfit ? new Price(takeProfit) : null);
 
             return (new ExecutionRequest(proposal, contract, composed.VenueAccount, composed.Risk, type), null);
         }
@@ -441,6 +443,9 @@ public static class OrderEndpoints
         order.LimitPrice = request.Type == OrderType.Limit ? request.Entry : null;
         // The venue TRIGGER -- only Stop/StopLimit orders carry one; distinct from the working stop above.
         order.StopPrice = request.Type is OrderType.Stop or OrderType.StopLimit ? request.Stop : null;
+        // The take-profit rides the row whole (gh#173), so take re-builds and re-transmits the target the
+        // operator armed -- a Market/Limit ticket carries it just as a stop-type one does.
+        order.TakeProfitPrice = request.Target;
         if (order.Status == OrderStatus.Staged)
         {
             order.Size = request.Quantity;

@@ -254,6 +254,25 @@ public class OrderEndpointsTests
     }
 
     [Fact]
+    public async Task SendOrder_ShouldTransmitAndJournalTheTakeProfitTarget()
+    {
+        // gh#173: a target on the send DTO reaches the venue as the bracket's profit leg AND is journaled on
+        // the order row — so a placed order records the exit the operator asked for.
+        Guid accountId = await SeedAsync();
+        OrderRequest? sent = null;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes((OrderRequest r, CancellationToken _) => sent = r)
+            .Returns(new PlacedOrder(_venueAccount, "889001", DateTimeOffset.UnixEpoch));
+
+        IResult result = await SendAsync(accountId, SmallBuy() with { Target = 5310m }); // winning side for a long
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        sent!.ProfitTarget.Should().Be(new Price(5310m));
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.SingleAsync()).TakeProfitPrice.Should().Be(5310m);
+    }
+
+    [Fact]
     public async Task SendOrder_ShouldAuthorizeAgainstTheDeclaredMode_WhenTheVenueClaimsADifferentOne()
     {
         // The R-14 mode-source guard (gh#148, found by the gh#135 suite). ComposeAsync must hand the execution

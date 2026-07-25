@@ -146,9 +146,16 @@ for free — target and stop cancel one another on fill.
 
 *Still deferred:* the **app-level OCO-cancel-on-exit** — cancelling a *synthetic/hidden* leg, or the safety
 stop, when a position exits by manual flatten or by the promoted actual stop (it needs account-streaming / fill
-events, `VenueCapability.AccountStreaming`); the **operator-facing wiring** — a take-profit field on the send
-DTO and persisting it on the order row so **arm → take** round-trips it (a data-model change of its own); and
-connection-liveness orphan handling.
+events, `VenueCapability.AccountStreaming`); and connection-liveness orphan handling.
+
+## Update (2026-07-25) — the take-profit wiring (gh#173)
+The operator can now set one: `SendOrderRequest.Target` flows through `BuildRequestAsync` into
+`OrderProposal.Target` on **send / arm / edit**, and the `Order` row persists it as `TakeProfitPrice` so
+**arm → take** re-builds and re-transmits the target the operator armed rather than dropping it — the same
+round-trip the working stop gets (gh#134). `StagedOrderResponse` surfaces the staged target for review/edit.
+Defence-in-depth below the domain guard: a side-dependent DB CHECK `CK_Orders_TakeProfit_WinningSide` (the
+mirror of `CK_StopPlans_SafetyBeyondActual`) refuses a persisted wrong-side target — **proven rejecting against
+live Postgres** for both sides, `NULL` (no profit leg) passing.
 
 ## Consequences
 **Positive**
