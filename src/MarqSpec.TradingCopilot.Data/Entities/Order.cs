@@ -99,6 +99,13 @@ public class Order : IUserOwned
     /// </summary>
     public required TradingMode Mode { get; set; }
 
+    /// <summary>
+    /// How the order entered the journal (R-11, ADR-0007, gh#181) — manual ticket, armed take, modified take,
+    /// send-as-is, or a fired conditional. Every new order records a real method; a DB check refuses
+    /// <see cref="OrderEntryMethod.Unknown"/>. Nullable only for rows journaled before this field existed.
+    /// </summary>
+    public OrderEntryMethod? EntryMethod { get; set; }
+
     /// <summary>The venue's own order handle, once placed natively. Null for synthetic / unplaced orders.</summary>
     public string? VenueOrderKey { get; set; }
 

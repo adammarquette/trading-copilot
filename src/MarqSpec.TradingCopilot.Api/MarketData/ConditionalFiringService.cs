@@ -192,7 +192,7 @@ public sealed class ConditionalFiringService
 
             Order journaled = OrderEndpoints.NewOrderRow(
                 owner, composed.Account, proposal, contractKey, OrderStatus.Working,
-                result.Decision?.ApprovedQuantity ?? record.Size);
+                result.Decision?.ApprovedQuantity ?? record.Size, OrderEntryMethod.Conditional);
             journaled.VenueOrderKey = result.Order.VenueOrderId;
             journaled.PlacedAt = result.Order.AcceptedAt;
             database.Orders.Add(journaled);

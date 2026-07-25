@@ -199,6 +199,10 @@ public class TradingCopilotDbContext : TenantDbContext
                 table.HasCheckConstraint("CK_Orders_Status_NotUnknown", "\"Status\" <> 0");
                 table.HasCheckConstraint("CK_Orders_Size_Positive", "\"Size\" > 0");
 
+                // The entry-method taxonomy (R-11, gh#181): a real order records how it was placed, so the sentinel
+                // Unknown (0) is refused -- NULL passes for rows journaled before the field existed (fail-closed zero).
+                table.HasCheckConstraint("CK_Orders_EntryMethod_NotUnknown", "\"EntryMethod\" IS NULL OR \"EntryMethod\" <> 0");
+
                 // The take-profit-on-the-winning-side invariant, below the domain (ADR-0007, gh#173): a
                 // take-profit only means anything above entry for a long, below it for a short -- the mirror of
                 // CK_StopPlans_SafetyBeyondActual. Side-dependent, so a cross-column CHECK expresses it --

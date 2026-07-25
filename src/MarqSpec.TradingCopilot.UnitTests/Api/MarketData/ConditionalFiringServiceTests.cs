@@ -186,6 +186,7 @@ public class ConditionalFiringServiceTests
         journaled.Status.Should().Be(OrderStatus.Working);
         journaled.VenueOrderKey.Should().Be("889001");
         journaled.UserId.Should().Be(_operator);                        // ownership preserved on the journaled row
+        journaled.EntryMethod.Should().Be(OrderEntryMethod.Conditional); // placed by the on-trigger watcher (gh#181)
         (await reload.StopPlans.CountAsync()).Should().Be(1);           // the fired position is protected (stop staged)
         (await reload.GateDecisions.CountAsync()).Should().Be(1);       // the fire-time decision is audited
     }
