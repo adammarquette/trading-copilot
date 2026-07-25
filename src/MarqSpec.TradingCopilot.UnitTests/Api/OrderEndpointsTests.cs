@@ -378,4 +378,161 @@ public class OrderEndpointsTests
         (await reload.GateDecisions.AnyAsync()).Should().BeFalse();
         (await reload.Orders.AnyAsync()).Should().BeFalse();
     }
+
+    [Fact]
+    public async Task SendOrder_ShouldJournalTheDirectSendAsManual()
+    {
+        Guid accountId = await SeedAsync();
+
+        await SendAsync(accountId, SmallBuy());
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.SingleAsync()).EntryMethod.Should().Be(OrderEntryMethod.Manual);
+    }
+
+    // --- Send-as-is fast path (gh#181) ---
+
+    private async Task<IResult> SendAsIsAsync(
+        Guid accountId, SendOrderRequest request, string configuredKey = "topstep-main", IKillSwitch? killSwitch = null)
+    {
+        await using TradingCopilotDbContext context = Context();
+        return await OrderEndpoints.SendAsIsOrderAsync(
+            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(configuredKey), ExecOptions(),
+            Development, killSwitch ?? A.Fake<IKillSwitch>(), CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldPlaceAndJournalAsSendAsIs_WhenTheGateAllows()
+    {
+        Guid accountId = await SeedAsync();
+
+        IResult result = await SendAsIsAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+
+        await using TradingCopilotDbContext reload = Context();
+        Order order = await reload.Orders.SingleAsync();
+        order.Status.Should().Be(OrderStatus.Working);
+        order.EntryMethod.Should().Be(OrderEntryMethod.SendAsIs); // a reader can tell it from an armed / modified take
+        GateDecisionRecord decision = await reload.GateDecisions.SingleAsync();
+        decision.Outcome.Should().Be(GateOutcome.Allowed);
+        decision.OrderId.Should().Be(order.Id); // a sized attempt always leaves the audit pair
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldTransmitTheApprovedQuantity_NotTheRequested()
+    {
+        // The invariant that keeps the gate enforcing, not advisory: five requested, the 3-contract manual cap
+        // resizes, and it is the APPROVED quantity that reaches the venue and the journal.
+        Guid accountId = await SeedAsync();
+        OrderRequest? sent = null;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes((OrderRequest r, CancellationToken _) => sent = r)
+            .Returns(new PlacedOrder(_venueAccount, "889001", DateTimeOffset.UnixEpoch));
+
+        await SendAsIsAsync(accountId, SmallBuy(quantity: 5));
+
+        sent!.Quantity.Should().Be(3);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.SingleAsync()).Size.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldRefuseByKillSwitch_BeforeSizing()
+    {
+        Guid accountId = await SeedAsync();
+        IKillSwitch engaged = A.Fake<IKillSwitch>();
+        A.CallTo(() => engaged.IsEngaged).Returns(true);
+
+        IResult result = await SendAsIsAsync(accountId, SmallBuy(), killSwitch: engaged);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.GateDecisions.AnyAsync()).Should().BeFalse(); // refused at the choke point, before the gate sized
+        (await reload.Orders.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldRefuse_WhenNoRiskProfileIsDeclared()
+    {
+        Guid accountId = await SeedAsync(withRiskProfile: false);
+
+        IResult result = await SendAsIsAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status422UnprocessableEntity); // absence is refusal, not a default
+        (await Context().Orders.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldRefuse_WhenThisProcessHoldsADifferentCredentialKey()
+    {
+        Guid accountId = await SeedAsync(credentialKey: "another-firm");
+
+        IResult result = await SendAsIsAsync(accountId, SmallBuy(), configuredKey: "topstep-main");
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict); // one credential set per process (ADR-0015)
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldRefuse_WhenTheAccountIsNotFlat()
+    {
+        Guid accountId = await SeedAsync();
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>(
+            [
+                new PositionSnapshot(_venueAccount, VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26"), 2, new Price(5300m)),
+            ]);
+
+        IResult result = await SendAsIsAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict); // an open position makes the risk state a guess
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldRefuse_WhenTheVenueCannotHoldTheSafetyStop()
+    {
+        Guid accountId = await SeedAsync();
+        A.CallTo(() => _venue.Capabilities).Returns(VenueCapabilities.Of(VenueCapability.Quotes)); // no BracketOrders
+
+        IResult result = await SendAsIsAsync(accountId, SmallBuy());
+
+        // Better no trade than an unprotected one -- RefusedByUnprotectableStop maps to a conflict; nothing journaled.
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        (await Context().Orders.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldRefusePreGate_WhenTheAccountModeIsUndeclared()
+    {
+        Guid accountId = await SeedAsync(mode: TradingMode.Undeclared);
+        A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
+        [
+            new VenueAccount(_venueAccount, "50KTC-V2", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Undeclared) { Stage = AccountStage.Unknown },
+        ]);
+
+        IResult result = await SendAsIsAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict); // undeclared trades nowhere (R-14)
+        (await Context().Orders.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldPersistTheBlockingDecision_AndNeverAnOrderRow_WhenTheGateBlocks()
+    {
+        Guid accountId = await SeedAsync();
+        SendOrderRequest oversized = SmallBuy(quantity: 10) with { Stop = 5200m, SafetyStop = 5200m };
+
+        IResult result = await SendAsIsAsync(accountId, oversized);
+
+        StatusOf(result).Should().Be(StatusCodes.Status422UnprocessableEntity);
+        await using TradingCopilotDbContext reload = Context();
+        GateDecisionRecord decision = await reload.GateDecisions.SingleAsync();
+        decision.Outcome.Should().Be(GateOutcome.Blocked);
+        decision.OrderId.Should().BeNull();                  // blocked-by-gate: decision row only,
+        (await reload.Orders.AnyAsync()).Should().BeFalse(); // never an orphaned order row
+    }
 }

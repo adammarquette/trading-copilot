@@ -15,11 +15,12 @@ using Microsoft.Extensions.Options;
 namespace MarqSpec.TradingCopilot.Api.Orders;
 
 /// <summary>
-/// The order endpoints (gh#11): direct send (increment 1) and the <b>arm → edit → take</b> flow (increment 2,
-/// ADR-0007). One composition ladder serves them all — declared risk rules (fail-closed when absent), the
-/// credential-key process guard (ADR-0015), the flat-account honesty rule, fresh venue truth — then
-/// <see cref="OrderExecutionService"/>'s own checks. Arming evaluates <b>without transmitting</b>; taking
-/// re-validates <b>everything, fresh</b> (R-12) before the venue sees anything.
+/// The order endpoints (gh#11): direct send (increment 1), the <b>arm → edit → take</b> flow (increment 2,
+/// ADR-0007), and the opt-in <b>send-as-is</b> fast path (gh#181). One composition ladder serves them all —
+/// declared risk rules (fail-closed when absent), the credential-key process guard (ADR-0015), the flat-account
+/// honesty rule, fresh venue truth — then <see cref="OrderExecutionService"/>'s own checks. Arming evaluates
+/// <b>without transmitting</b>; taking re-validates <b>everything, fresh</b> (R-12) before the venue sees anything.
+/// Every path records how the order was placed (<see cref="OrderEntryMethod"/>), so a reader can tell them apart.
 /// </summary>
 public static class OrderEndpoints
 {
@@ -31,6 +32,7 @@ public static class OrderEndpoints
         RouteGroupBuilder accountGroup = endpoints.MapGroup("/accounts/{id:guid}/orders").RequireAuthorization();
         accountGroup.MapPost("/", SendOrderAsync);
         accountGroup.MapPost("/arm", ArmOrderAsync);
+        accountGroup.MapPost("/send-as-is", SendAsIsOrderAsync);
         accountGroup.MapPost("/conditional", CreateConditionalOrderAsync);
 
         RouteGroupBuilder orderGroup = endpoints.MapGroup("/orders/{id:guid}").RequireAuthorization();
@@ -69,6 +71,55 @@ public static class OrderEndpoints
             return refusal!;
         }
 
+        // A manual ticket the operator authored and sent directly (R-11) — one action, the full gate.
+        return await TransmitAsync(
+            composed, request, OrderEntryMethod.Manual, currentUser, database, executionOptions, cancellationToken);
+    }
+
+    internal static async Task<IResult> SendAsIsOrderAsync(
+        Guid id,
+        SendOrderRequest request,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        IProjectXVenueFactory venueFactory,
+        IOptions<ProjectXConnectionOptions> projectXOptions,
+        IOptions<ExecutionOptions> executionOptions,
+        HostTradingEnvironment environment,
+        IKillSwitch killSwitch,
+        CancellationToken cancellationToken)
+    {
+        // The opt-in fast path (R-11, gh#181): the Approve split-button's "Send as-is" — an operator who has
+        // already decided collapses arm → take into one action. It skips the manual review, NEVER the gate: the
+        // same ComposeAsync ladder and the same OrderExecutionService.SendAsync run, so the kill switch, R-14
+        // mode × environment, the mismatch and order-type refusals, the R-5 gate and R-16 caps all apply
+        // unchanged. Only the journal marker differs — SendAsIs, not Manual — so a reader can tell the paths apart.
+        (Composition? composed, IResult? refusal) = await ComposeAsync(
+            id, database, venueFactory, projectXOptions, executionOptions, environment, killSwitch, cancellationToken);
+        if (composed is null)
+        {
+            return refusal!;
+        }
+
+        return await TransmitAsync(
+            composed, request, OrderEntryMethod.SendAsIs, currentUser, database, executionOptions, cancellationToken);
+    }
+
+    /// <summary>
+    /// The shared transmit tail (gh#181): build the proposal, run it through the enforcing gate + venue, and — on
+    /// a placement — journal the order (tagged with <paramref name="entryMethod"/>), stage its hidden stop, and
+    /// persist the gate decision. A blocked or refused attempt journals no order row; a <b>sized</b> attempt
+    /// always leaves a <see cref="GateDecisionRecord"/>. The transmitted quantity is the gate's approved quantity,
+    /// never the requested one — the invariant that keeps the gate enforcing, not advisory.
+    /// </summary>
+    private static async Task<IResult> TransmitAsync(
+        Composition composed,
+        SendOrderRequest request,
+        OrderEntryMethod entryMethod,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        IOptions<ExecutionOptions> executionOptions,
+        CancellationToken cancellationToken)
+    {
         (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
             composed, request.Symbol, request.TickSize, request.PointValue, request.Side, request.Quantity,
             request.Entry, request.Stop, request.SafetyStop, request.ReferencePrice, request.Target, request.Type, cancellationToken);
@@ -84,7 +135,7 @@ public static class OrderEndpoints
         {
             journaled = NewOrderRow(
                 currentUser, composed.Account, request, executionRequest.Contract.Contract.Key,
-                OrderStatus.Working, result.Decision?.ApprovedQuantity ?? request.Quantity);
+                OrderStatus.Working, result.Decision?.ApprovedQuantity ?? request.Quantity, entryMethod);
             journaled.VenueOrderKey = result.Order.VenueOrderId;
             journaled.PlacedAt = result.Order.AcceptedAt;
             database.Orders.Add(journaled);
@@ -132,10 +183,11 @@ public static class OrderEndpoints
         }
 
         // The ticket stages WHATEVER the gate said -- a currently-blocked proposal is exactly what the operator
-        // edits until it passes (ADR-0007). Taking it re-decides from scratch anyway (R-12).
+        // edits until it passes (ADR-0007). Taking it re-decides from scratch anyway (R-12). It starts an
+        // ArmedTake; an edit before take reclassifies it a ModifiedTake (R-11 records deviations).
         Order staged = NewOrderRow(
             currentUser, composed.Account, request, executionRequest.Contract.Contract.Key,
-            OrderStatus.Staged, request.Quantity);
+            OrderStatus.Staged, request.Quantity, OrderEntryMethod.ArmedTake);
         database.Orders.Add(staged);
         PersistDecision(database, currentUser, composed.Account.Id, staged.Id, result.Decision);
         await database.SaveChangesAsync(cancellationToken);
@@ -273,6 +325,9 @@ public static class OrderEndpoints
 
         // Every edit re-gates, and the ticket carries the NEW proposal whole -- take re-builds from these fields.
         ApplyProposal(order, request, executionRequest.Contract.Contract.Key);
+        // An edited ticket is a deviation from the armed proposal: it takes as a ModifiedTake, not an ArmedTake
+        // (R-11 records deviations). Idempotent -- editing an already-modified ticket stays modified.
+        order.EntryMethod = OrderEntryMethod.ModifiedTake;
         PersistDecision(database, currentUser, composed.Account.Id, order.Id, result.Decision);
         await database.SaveChangesAsync(cancellationToken);
 
@@ -498,7 +553,8 @@ public static class OrderEndpoints
         SendOrderRequest request,
         string contractKey,
         OrderStatus status,
-        int size)
+        int size,
+        OrderEntryMethod entryMethod)
     {
         Order order = new()
         {
@@ -511,6 +567,7 @@ public static class OrderEndpoints
             Type = request.Type,
             Status = status,
             Mode = account.Mode,
+            EntryMethod = entryMethod, // how it was placed (R-11) — a manual send is Manual, an armed ticket ArmedTake, ...
             PlacedAt = DateTimeOffset.UtcNow, // provisional at arm; overwritten by the venue's accept when placed
         };
         ApplyProposal(order, request, contractKey);

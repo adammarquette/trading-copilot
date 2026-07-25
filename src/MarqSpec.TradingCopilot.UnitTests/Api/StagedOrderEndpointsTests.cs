@@ -443,4 +443,87 @@ public class StagedOrderEndpointsTests
         IResult second = await OrderEndpoints.CancelStagedOrderAsync(orderId, again, CancellationToken.None);
         StatusOf(second).Should().Be(StatusCodes.Status409Conflict); // cancelled is not staged -- no silent no-op
     }
+
+    // --- Entry-method marker across arm / edit / take (gh#181) ---
+
+    private async Task<Guid> StagedOrderIdAsync()
+    {
+        await using TradingCopilotDbContext read = Context();
+        return (await read.Orders.SingleAsync()).Id;
+    }
+
+    [Fact]
+    public async Task Arm_ShouldStageAsAnArmedTake()
+    {
+        Guid accountId = await SeedAccountAsync();
+
+        await ArmAsync(accountId, SmallBuy());
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.SingleAsync()).EntryMethod.Should().Be(OrderEntryMethod.ArmedTake);
+    }
+
+    [Fact]
+    public async Task Edit_ShouldReclassifyTheStagedTicketAsAModifiedTake()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId = await StagedOrderIdAsync();
+
+        await using (TradingCopilotDbContext context = Context())
+        {
+            await OrderEndpoints.EditStagedOrderAsync(
+                orderId, SmallBuy() with { Entry = 5302m, ReferencePrice = 5302m }, new FixedUser(_operator), context,
+                _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+        }
+
+        // An edit is a deviation from the armed proposal -- it takes as a ModifiedTake (R-11 records deviations).
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.SingleAsync()).EntryMethod.Should().Be(OrderEntryMethod.ModifiedTake);
+    }
+
+    [Fact]
+    public async Task Take_ShouldPreserveTheArmedTakeMarker_WhenTheTicketWasNotEdited()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId = await StagedOrderIdAsync();
+
+        await using (TradingCopilotDbContext context = Context())
+        {
+            await OrderEndpoints.TakeStagedOrderAsync(
+                orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development,
+                A.Fake<IKillSwitch>(), CancellationToken.None);
+        }
+
+        await using TradingCopilotDbContext reload = Context();
+        Order taken = await reload.Orders.SingleAsync();
+        taken.Status.Should().Be(OrderStatus.Working);
+        taken.EntryMethod.Should().Be(OrderEntryMethod.ArmedTake); // an unchanged take stays an armed take
+    }
+
+    [Fact]
+    public async Task Take_ShouldCarryTheModifiedTakeMarker_WhenTheTicketWasEdited()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId = await StagedOrderIdAsync();
+
+        await using (TradingCopilotDbContext edit = Context())
+        {
+            await OrderEndpoints.EditStagedOrderAsync(
+                orderId, SmallBuy() with { Entry = 5302m, ReferencePrice = 5302m }, new FixedUser(_operator), edit,
+                _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+        }
+        await using (TradingCopilotDbContext take = Context())
+        {
+            await OrderEndpoints.TakeStagedOrderAsync(
+                orderId, new FixedUser(_operator), take, _factory, PxOptions(), ExecOptions(), Development,
+                A.Fake<IKillSwitch>(), CancellationToken.None);
+        }
+
+        // The deviation is carried all the way to the placed order -- a reader sees a modified take, not an armed one.
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.SingleAsync()).EntryMethod.Should().Be(OrderEntryMethod.ModifiedTake);
+    }
 }
