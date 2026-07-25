@@ -122,17 +122,41 @@ configuration that exists only in the GitHub UI is otherwise invisible to anyone
 | Ruleset | Target | Rule | Settings |
 | --- | --- | --- | --- |
 | `copilot-review-develop` (**active**) | `refs/heads/develop` | `copilot_code_review` | `review_on_push: true` · `review_draft_pull_requests: false` |
-| `default-main` (**disabled**) | — | `pull_request`, `code_scanning`, … | Required approvals and the promotion guards — deliberately off; see `gh#45` |
 
 Every feature PR targets `develop`, so the first ruleset covers the whole review surface. `review_on_push` means
 each new commit on an open PR is reviewed, not just the PR's opening. Drafts are excluded so a branch can churn
 without triggering a review per commit.
 
-Review findings are advisory — they do not block a merge. The blocking gates remain `dotnet format`, the unit
-tests, the pre-merge integration suite (gh#121), and the `ladder` + `stale-base` + `commit-hygiene` branch-policy
-checks (gh#72, gh#104). Repo-specific review guidance lives in
-[`.github/copilot-instructions.md`](../.github/copilot-instructions.md); update it when a review repeatedly
+Copilot review findings are advisory — they do not block a merge. The **blocking** gates are the required status
+checks enforced by the branch-protection rulesets below (gh#45): `build & unit tests`, `commit-hygiene`, the
+pre-merge integration suite (gh#121), and `ladder` on the promoted branches. Repo-specific review guidance lives
+in [`.github/copilot-instructions.md`](../.github/copilot-instructions.md); update it when a review repeatedly
 misses something this codebase cares about.
+
+### Branch protection — required-check rulesets (gh#45)
+Rulesets make the CI checks **blocking** on the long-lived branches. They live in repo settings, recorded here
+because settings-only config is otherwise invisible to anyone reading the pipeline. Applied 2026-07-24 via the
+rulesets API (possible once the repo went public, `gh#58`); the disabled, mis-targeted `default-main` leftover —
+whose `required_deployments` / `code_scanning` / `code_quality` rules reference features this repo does not have
+and would have deadlocked every merge if enabled — was deleted at the same time.
+
+| Ruleset | Target | Required status checks | Other rules |
+| --- | --- | --- | --- |
+| `protect-develop` (**active**) | `refs/heads/develop` | `build & unit tests` · `commit-hygiene` · `integration tests (pre-merge)` | PR required (0 approvals) · block force-push · block deletion |
+| `protect-staging` (**active**) | `refs/heads/staging` | the develop set **+ `ladder`** | PR required (0 approvals) · block force-push · block deletion |
+| `protect-main` (**active**) | `refs/heads/main` | the develop set **+ `ladder`** | PR required (0 approvals) · block force-push · block deletion |
+
+- **`ladder` is required on `staging`/`main`**, so a promotion PR from a disallowed source fails the check and
+  cannot merge — this is what turns the advisory ladder guard into hard enforcement of `staging ← develop` and
+  `main ← staging`.
+- **`stale-base` and `publish image (GHCR)` are deliberately NOT required** — `stale-base` is skipped on the
+  long-lived branches and `publish image` runs only on `push`, so requiring either would leave a required check
+  forever pending and **deadlock the merge**. This is the trap to remember before adding any required check:
+  confirm it actually runs on that branch's PRs.
+- **Non-strict** (no forced up-to-date-before-merge), **0 required approvals** (single operator — the checks and
+  the ladder are the gate), **no bypass list** (the rules bind even for the admin; that is the point of
+  enforcement). An approval requirement can be added later — `trading-copilot-reviewer[bot]` (gh#141) can satisfy
+  it on your own promotion PRs — as can an emergency bypass if a broken required check ever needs overriding.
 
 ### Reviewer identity — a GitHub App for agent verdicts (gh#141)
 The [Code Reviewer contract](agents/code-reviewer.md) requires an agent to render a **formal verdict** — Approve

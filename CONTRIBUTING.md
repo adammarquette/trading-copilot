@@ -88,11 +88,15 @@ a **dev task** plus an independent **QA task** (engineering §10).
 - Before a PR: `dotnet format --verify-no-changes` + **unit tests green**. **Test-first is the Definition of Done**
   (no new public method without a failing test first). Query code uses **fluent / method syntax, never LINQ
   query-comprehension** (engineering §4).
-- **Merge gate — currently advisory.** GitHub branch protection is **not available on this repo**: it is plan-gated
-  on private repositories, so the protection and rulesets APIs both refuse. CI (`build & unit tests`, `ladder`)
-  therefore reports violations but **cannot block a merge** — treat a red check as blocking by convention. Enabling
-  real protection (GitHub Pro, or making the repo public) is tracked in `gh#45`; the required-check wiring is ready
-  the moment it lands. Production deploy and any rollback are **human-approved**.
+- **Merge gate — enforced (gh#45).** GitHub **rulesets** protect `develop`, `staging`, and `main`: each requires a
+  pull request and green status checks before merge and blocks force-push / deletion, so **a red check now blocks
+  the merge.** `build & unit tests`, `commit-hygiene`, and the pre-merge integration suite are required on all
+  three; `ladder` is additionally required on `staging`/`main`, so a promotion can only come from the allowed
+  source. `stale-base` is intentionally *not* required (it is skipped on the long-lived branches, and a
+  never-running required check would deadlock the merge). Approvals aren't required (single operator); the rulesets
+  carry no bypass. They live in repo settings, recorded in the
+  [deployment runbook](documentation/deployment-runbook.md). Production deploy and any rollback remain
+  **human-approved**.
 
 ## Local development
 `docker compose up -d` from the repo root (ADR-0012 / engineering §8); the database connection string is
