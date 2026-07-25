@@ -157,6 +157,29 @@ Defence-in-depth below the domain guard: a side-dependent DB CHECK `CK_Orders_Ta
 mirror of `CK_StopPlans_SafetyBeyondActual`) refuses a persisted wrong-side target — **proven rejecting against
 live Postgres** for both sides, `NULL` (no profit leg) passing.
 
+## Update (2026-07-25) — the conditional order, model + persistence (gh#176)
+The **second send mode** begins — "send *when conditions met*". `Domain/Execution/ConditionalOrder` is a
+synthetic entry the platform holds and fires when its `ConditionalTrigger` crosses: a trigger price plus a
+**cross direction** (`RisesTo` = fire at/above; `FallsTo` = fire at/below — covers breakout and pullback entries
+venue-neutrally). It self-cancels on an **adverse drift** past a **cancel band** on the *stale side* of the
+trigger, or when its **validity window** passes. The decisions — `ShouldFire(price)`, `ShouldCancel(price, now)`
+— are deterministic and **Pending-only**, and `Fire()`/`Cancel()`/`Expire()` are one-way + idempotent, exactly
+the `StopPlan` discipline, so a retrying watcher never re-fires a resolved order. `now` is passed in, never read
+from a clock, so the decision is pure. Distances are price units — **never % of raw price** (the ADR rule).
+
+Persisted as `ConditionalOrderRecord` (table `ConditionalOrders`), keeping the **proposal whole** (as the order
+row does) so the entry is re-built and **re-gated at fire time (R-12/R-5/R-16)** — creation transmits nothing.
+Created via `POST /accounts/{id}/orders/conditional`: the same compose ladder + `Evaluate` as arm gives the
+operator immediate feedback, but the order rests **`Pending`**, unseen at the broker. Side-dependent DB CHECKs
+mirror the domain (direction declared, cancel band on the stale side) — **proven rejecting against live
+Postgres**.
+
+*Still deferred:* the **firing watcher** — a `market.quote` event-log consumer that fires/cancels pending orders,
+mirroring the stop-promotion watcher (ADR-0001) — and, with it, the fire-time re-gate becoming live;
+**connection-loss orphan handling** (a pending synthetic order → orphaned → emergency; overlaps S4); and
+**named-signal triggers** (they need the R-3 signal pipeline — price-cross only for now). This lands the model
+half of the "spec the synthetic/conditional engine" item below.
+
 ## Consequences
 **Positive**
 - **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move
