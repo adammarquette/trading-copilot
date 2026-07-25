@@ -3,6 +3,7 @@ using MarqSpec.Client.ProjectX.DependencyInjection;
 using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
+using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Risk;
@@ -54,6 +55,16 @@ builder.Services.AddHostedService<MarketDataIngestionHost>();
 // promotes hidden actual stops as price comes within their band. Harmless with no staged stops, so it always runs.
 builder.Services.AddScoped<StopPromotionService>();
 builder.Services.AddHostedService<StopPromotionHost>();
+
+// Auto-flatten (R-13, gh#185, ADR-0013): the PRIMARY scheduler that closes open positions at each instrument's
+// per-market deadline on the DST-aware market clock. On by default and cannot be silently disabled -- so it
+// ALWAYS runs; a market is turned off per-instrument in the Flatten config, not by omitting the host. The
+// redundant / independent watchdog above it is gh#187. Validate the schedule at startup so a malformed deadline
+// fails fast rather than mid-session, the same fail-fast stance as the Jwt signing key above.
+builder.Services.Configure<FlattenOptions>(builder.Configuration.GetSection(FlattenOptions.SectionName));
+_ = (builder.Configuration.GetSection(FlattenOptions.SectionName).Get<FlattenOptions>() ?? new FlattenOptions()).ToSchedules();
+builder.Services.AddScoped<AutoFlattenService>();
+builder.Services.AddHostedService<AutoFlattenHost>();
 
 // The R-14 environment, mapped ONCE at the composition root from the host (gh#9): practice anywhere, live only
 // in production, undeclared nowhere -- and an unrecognised environment name fails closed to Development
