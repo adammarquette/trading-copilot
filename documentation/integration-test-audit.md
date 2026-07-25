@@ -34,6 +34,12 @@ Below is the baseline inventory of current integration tests located under [`src
 | **`RiskEndpointsIntegrationTests.cs`** | `POST /accounts/{id}/risk`, `GET /accounts/{id}/risk` | **Active** (Passing) |
 | **`UserInvitationEndpointsIntegrationTests.cs`** | `POST /auth/invitations`, `POST /auth/invitations/accept`, Primary Operator flag enforcement | **Active** (Passing) |
 | **`UnauthenticatedEndpointsTests.cs`** | Global HTTP 401 unauthenticated challenge verification | **Active** (Passing) |
+| **`StopPlanPersistenceIntegrationTests.cs`** | Staged-stop plan persistence (`POST /accounts/{id}/orders` → `StopPlanRecord`); the four `CK_StopPlans_*` DB CHECK constraints proven by name on **both** safety-beyond-actual sides with a positive control; FK `ON DELETE CASCADE`; ATR not-yet-supported pin (gh#158) | **Active** (Passing) |
+
+> **Inventory drift (tracked by [gh#160](https://github.com/adammarquette/trading-copilot/issues/160)):** this table
+> still omits the already-shipped `OrderEndpointsIntegrationTests.cs` and `SystemSmokeIntegrationTests.cs`, and
+> §4/§5 below carry stale file names and closed-issue statuses. The full realignment is **gh#160's** deliverable,
+> not this PR's — gh#158 adds only its own suite here per the same-PR rule.
 
 ---
 
@@ -132,3 +138,4 @@ The following GitHub issues are registered and tracked on `adammarquette/trading
 | **`#131`** | System Health | `QA(system) - Production-safe read-only smoke test suite` | [gh#131](https://github.com/adammarquette/trading-copilot/issues/131) | `ProductionSmokeTests.cs` |
 | **`#142`** | `#7` | `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite` | [gh#142](https://github.com/adammarquette/trading-copilot/issues/142) | `ConnectionLifecycleIntegrationTests.cs` |
 | **`#143`** | `#10` | `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite` | [gh#143](https://github.com/adammarquette/trading-copilot/issues/143) | `RiskProfileLifecycleIntegrationTests.cs` |
+| **`#158`** | `#153`, `#11` | `QA(task#153) - StopPlan persistence & the safety-beyond-actual DB guard integration suite` | [gh#158](https://github.com/adammarquette/trading-copilot/issues/158) | `StopPlanPersistenceIntegrationTests.cs` ✅ **delivered** |
