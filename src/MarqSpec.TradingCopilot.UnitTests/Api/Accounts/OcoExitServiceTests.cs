@@ -1,10 +1,12 @@
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Accounts;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -27,6 +29,7 @@ public class OcoExitServiceTests
     private readonly DateTimeOffset _now = new(2026, 1, 15, 14, 30, 0, TimeSpan.Zero);
     private readonly IProjectXVenueFactory _factory = A.Fake<IProjectXVenueFactory>();
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
+    private readonly IAuditLog _auditLog = A.Fake<IAuditLog>();
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
@@ -54,6 +57,7 @@ public class OcoExitServiceTests
         Context(),
         new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
         _factory,
+        _auditLog,
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = OurCredentialKey }),
         NullLogger<OcoExitService>.Instance);
 
@@ -337,5 +341,40 @@ public class OcoExitServiceTests
 
         (await StagingAsync(orderId)).Should().Be(StopStaging.Retired); // flat confirmed -> plan retired
         A.CallTo(() => _venue.CancelOrderAsync(A<VenueAccountId>._, A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ProcessExitAsync_ShouldAuditTheRetirement()
+    {
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedOrderWithStopPlanAsync(owner, accountId, "entry-1", OrderStatus.Filled, StopStaging.Native);
+
+        await Service().ProcessExitAsync(Exit("9001", netQuantity: 0), CancellationToken.None);
+
+        // An immutable AuditRecord is written for the retired plan (gh#220) -- owned, a position-exit action, and
+        // NOT synthetic_risk (the position is flat, so no live exposure rested on platform-held protection).
+        A.CallTo(() => _auditLog.WriteAsync(
+            A<IReadOnlyCollection<AuditRecord>>.That.Matches(rows => rows.Any(record =>
+                record.Action == AuditAction.PositionExit
+                && record.After == nameof(StopStaging.Retired)
+                && !record.SyntheticRisk
+                && record.UserId == owner)),
+            A<CancellationToken>._)).MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task ProcessExitAsync_ShouldStillRetireThePlan_WhenTheAuditWriteFails()
+    {
+        // The audit is a SECONDARY write: its failure must never undo the safety action.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        Guid orderId = await SeedOrderWithStopPlanAsync(owner, accountId, "entry-1", OrderStatus.Filled, StopStaging.Native);
+        A.CallTo(() => _auditLog.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("audit store down"));
+
+        await Service().ProcessExitAsync(Exit("9001", netQuantity: 0), CancellationToken.None); // must not throw
+
+        (await StagingAsync(orderId)).Should().Be(StopStaging.Retired); // the retire stands
     }
 }
