@@ -62,8 +62,12 @@ jobs:
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 
+      # `Category!=Smoke` excludes the Smoke-tagged suite: the production smoke subset is a
+      # deploy-time tier (engineering guide §5/§10), not a pre-merge one (gh#159). The deploy step
+      # that runs smoke selects the complement — `--filter "Category=Smoke"` — so the two tiers stay
+      # disjoint and the tier comments above are true statements about the job.
       - name: Integration tests (Testcontainers Postgres)
-        run: dotnet test src/MarqSpec.TradingCopilot.IntegrationTests/MarqSpec.TradingCopilot.IntegrationTests.csproj --configuration Release
+        run: dotnet test src/MarqSpec.TradingCopilot.IntegrationTests/MarqSpec.TradingCopilot.IntegrationTests.csproj --configuration Release --filter "Category!=Smoke"
 
   # Build the deployment image ONCE and publish it to GHCR, so local dev and Railway consume the
   # same artifact rather than each rebuilding from source (ADR-0018, extends ADR-0012).
