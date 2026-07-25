@@ -70,9 +70,12 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
 (accepted — they re-form as new suggestions).
 
 ## Follow-ups
-- **Design the auto-flatten guarantee** (R-13): redundant scheduler / independent watchdog, rejected-order behaviour,
-  a local fallback path — fired at the **configurable pre-MOC deadline**, **ahead of the venue backstop** — the gating
-  safety-critical item. Prove on practice before live.
+- **The auto-flatten guarantee** (R-13): the **primary scheduler** — the supervised, DST-aware host that fires the
+  flatten at each instrument's **configurable pre-MOC deadline**, **ahead of the venue backstop**, verifying against
+  venue truth and journalling every action — is **implemented** (gh#185). Still to build, and the gating
+  safety-critical item: the **redundant / independent** trigger (a watchdog separate from the scheduler), the
+  **rejected-order** behaviour near the deadline, and a **local fallback** path — the piece that makes the flatten
+  fire even when this primary tier is degraded (gh#187). Prove on practice before live.
 - **End-of-day / settlement reconciliation:** venue-as-source-of-truth position reconcile on reconnect,
   maintenance-window awareness, and settlement re-mark handling (wiki: [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md)).
 - **State-rehydration tests:** suggestions / orders / positions / templates rehydrate correctly and **per-user
