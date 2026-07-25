@@ -213,6 +213,26 @@ channel and the audit entity land; and **full per-position re-validation on re-a
 so promotion resumes; a promotion for a since-closed position self-rejects at the venue, the safety stop being
 the floor throughout).
 
+## Update (2026-07-25) — the kill switch landed (gh#189)
+The **kill switch** is now the operator's process-wide override, enforced at a **single choke point**: the
+enforcing send path (`OrderExecutionService.SendAsync`) reads an `IKillSwitch` and, while engaged, refuses
+**every** transmission — manual send, take, or a conditional firing — as `RefusedByKillSwitch`, before the order is
+even sized. Reducing / protective actions (auto-flatten's close, stop promotion) do **not** pass through this path,
+so a killed system can still be flattened and stays protected.
+
+Engaging (`POST /kill-switch`, **hold-to-confirm** required for **both** modes) disables outbound **first** (a
+thread-safe runtime flag backed by a durable `KillSwitchState` row), then **cancels working orders** — the first
+`CancelOrderAsync` path; working `Order` rows are resting entries, so the protective brackets a halt leaves
+standing are untouched — then per `kill-switch mode` either **flattens all** open positions (the native-first
+close/verify, no deadline) or **halts only**. The lock **persists across a restart** — rehydrated into the runtime
+flag at startup — so a crash or redeploy never silently re-enables trading (ADR-0013). Every transition is
+journaled (`killswitch.engaged` / `killswitch.disengaged`).
+
+*Still deferred:* the per-account **`RiskProfile.KillSwitchMode`** preference (the mode rides the engage request
+for now; the persisted Settings preference lands with the UI, gh#25); an **opposing-market-order** fallback close
+if the venue's own close keeps rejecting; and **voiding pending conditionals** on a kill (the send guard already
+stops them firing, so it is cleanliness, not safety).
+
 ## Consequences
 **Positive**
 - **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move
