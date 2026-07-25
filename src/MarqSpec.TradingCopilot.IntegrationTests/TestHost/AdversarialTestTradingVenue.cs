@@ -10,6 +10,14 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
 {
     private readonly List<AdversarialTestTradingVenue> _created = [];
 
+    // Shared, mutable venue-position state for the auto-flatten / kill-switch suites (gh#186/#188/#190). The
+    // service builds a FRESH venue per pass (Create() each time), so open positions and close behaviour must live
+    // on the FACTORY and be read by every created venue. This keeps the seam adversarial: the stub only ever
+    // reports/echoes state the test seeded — it never computes the answer under test.
+    private readonly List<PositionSnapshot> _positions = [];
+    private readonly HashSet<string> _survivingContracts = new(StringComparer.Ordinal);
+    private readonly List<(string AccountKey, string ContractKey)> _closeCalls = [];
+
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
 
     /// <summary>
@@ -23,9 +31,51 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// <summary>The cumulative count behind <see cref="AllPlacedOrderRequests"/>.</summary>
     public int TotalPlacedOrderCount => _created.Sum(venue => venue.PlacedOrdersCount);
 
+    /// <summary>Seeds an OPEN position on a venue account so a flatten / backstop pass has something to close.</summary>
+    public void SeedPosition(string accountKey, string contractKey, int netQuantity, decimal averagePrice = 5_000m) =>
+        _positions.Add(new PositionSnapshot(
+            VenueAccountId.Create(VenueId.Parse("projectx"), accountKey),
+            VenueContractId.Create(VenueId.Parse("projectx"), contractKey),
+            netQuantity,
+            new Price(averagePrice)));
+
+    /// <summary>
+    /// Makes <c>ClosePositionAsync</c> keep reporting the contract OPEN (a reject / partial-fill shape) so the
+    /// flatten verifier retries to the attempt cap and then escalates — the surviving-position failure mode.
+    /// </summary>
+    public void MakeCloseIneffective(string contractKey) => _survivingContracts.Add(contractKey);
+
+    /// <summary>Every <c>ClosePositionAsync</c> the flatten path issued, in order (account key + contract key).</summary>
+    public IReadOnlyList<(string AccountKey, string ContractKey)> ClosePositionCalls => _closeCalls.AsReadOnly();
+
+    /// <summary>Clears seeded positions, close behaviour, and recorded close calls — call at the start of each test.</summary>
+    public void ResetPositions()
+    {
+        _positions.Clear();
+        _survivingContracts.Clear();
+        _closeCalls.Clear();
+    }
+
+    internal IReadOnlyList<PositionSnapshot> PositionsFor(VenueAccountId account) =>
+        [.. _positions.Where(position => position.Account == account)];
+
+    internal PositionSnapshot RecordCloseAndResult(VenueAccountId account, VenueContractId contract)
+    {
+        _closeCalls.Add((account.Key, contract.Key));
+
+        if (_survivingContracts.Contains(contract.Key))
+        {
+            // Echo the seeded (still-open) position — the venue "did not" flatten it.
+            PositionSnapshot? open = _positions.FirstOrDefault(p => p.Account == account && p.Contract == contract);
+            return open ?? new PositionSnapshot(account, contract, 1, new Price(5_000m));
+        }
+
+        return new PositionSnapshot(account, contract, 0, new Price(0m)); // flat
+    }
+
     public ITradingVenue Create(FirmConventions conventions)
     {
-        LastVenueCreated = new AdversarialTestTradingVenue(conventions);
+        LastVenueCreated = new AdversarialTestTradingVenue(conventions, this);
         _created.Add(LastVenueCreated);
         return LastVenueCreated;
     }
@@ -34,11 +84,13 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
 internal class AdversarialTestTradingVenue : ITradingVenue
 {
     private readonly FirmConventions _conventions;
+    private readonly AdversarialTestProjectXVenueFactory _factory;
     private readonly List<OrderRequest> _placedOrders = [];
 
-    public AdversarialTestTradingVenue(FirmConventions conventions)
+    public AdversarialTestTradingVenue(FirmConventions conventions, AdversarialTestProjectXVenueFactory factory)
     {
         _conventions = conventions;
+        _factory = factory;
     }
 
     public VenueId Id => VenueId.Parse("projectx");
@@ -102,7 +154,7 @@ internal class AdversarialTestTradingVenue : ITradingVenue
     }
 
     public Task<IReadOnlyList<PositionSnapshot>> GetPositionsAsync(VenueAccountId account, CancellationToken cancellationToken = default) =>
-        Task.FromResult<IReadOnlyList<PositionSnapshot>>([]);
+        Task.FromResult(_factory.PositionsFor(account));
 
     public Task<PlacedOrder> PlaceOrderAsync(OrderRequest request, CancellationToken cancellationToken = default)
     {
@@ -114,5 +166,5 @@ internal class AdversarialTestTradingVenue : ITradingVenue
         Task.CompletedTask;
 
     public Task<PositionSnapshot> ClosePositionAsync(VenueAccountId account, VenueContractId contract, CancellationToken cancellationToken = default) =>
-        Task.FromResult(new PositionSnapshot(account, contract, 0, new Price(0m)));
+        Task.FromResult(_factory.RecordCloseAndResult(account, contract));
 }
