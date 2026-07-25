@@ -16,6 +16,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     // reports/echoes state the test seeded — it never computes the answer under test.
     private readonly List<PositionSnapshot> _positions = [];
     private readonly HashSet<string> _survivingContracts = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _throwingContracts = new(StringComparer.Ordinal);
     private readonly List<(string AccountKey, string ContractKey)> _closeCalls = [];
 
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
@@ -45,6 +46,12 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// </summary>
     public void MakeCloseIneffective(string contractKey) => _survivingContracts.Add(contractKey);
 
+    /// <summary>
+    /// Makes <c>ClosePositionAsync</c> THROW for the contract — a hard venue rejection of the close order, the
+    /// rejected-order failure mode the watchdog must journal and retry rather than swallow (gh#188).
+    /// </summary>
+    public void MakeCloseThrow(string contractKey) => _throwingContracts.Add(contractKey);
+
     /// <summary>Every <c>ClosePositionAsync</c> the flatten path issued, in order (account key + contract key).</summary>
     public IReadOnlyList<(string AccountKey, string ContractKey)> ClosePositionCalls => _closeCalls.AsReadOnly();
 
@@ -53,6 +60,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     {
         _positions.Clear();
         _survivingContracts.Clear();
+        _throwingContracts.Clear();
         _closeCalls.Clear();
     }
 
@@ -62,6 +70,11 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     internal PositionSnapshot RecordCloseAndResult(VenueAccountId account, VenueContractId contract)
     {
         _closeCalls.Add((account.Key, contract.Key));
+
+        if (_throwingContracts.Contains(contract.Key))
+        {
+            throw new InvalidOperationException($"Venue rejected the close of {contract.Key}.");
+        }
 
         if (_survivingContracts.Contains(contract.Key))
         {
