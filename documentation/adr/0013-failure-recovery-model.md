@@ -70,12 +70,15 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
 (accepted — they re-form as new suggestions).
 
 ## Follow-ups
-- **The auto-flatten guarantee** (R-13): the **primary scheduler** — the supervised, DST-aware host that fires the
-  flatten at each instrument's **configurable pre-MOC deadline**, **ahead of the venue backstop**, verifying against
-  venue truth and journalling every action — is **implemented** (gh#185). Still to build, and the gating
-  safety-critical item: the **redundant / independent** trigger (a watchdog separate from the scheduler), the
-  **rejected-order** behaviour near the deadline, and a **local fallback** path — the piece that makes the flatten
-  fire even when this primary tier is degraded (gh#187). Prove on practice before live.
+- **The auto-flatten guarantee** (R-13): both tiers are **implemented** — the **primary scheduler** (gh#185), the
+  supervised DST-aware host that fires at each instrument's **configurable pre-MOC deadline** verifying against venue
+  truth, and the **redundant / independent watchdog** (gh#187) on its own **separate** loop, which backstops the
+  primary's failures past a grace window, **persists** on a rejected close rather than giving up, and escalates to a
+  **critical** alarm past the firing window rather than firing blind — so the flatten still fires when the primary
+  tier is degraded. Respects a deliberately-disabled market (the operator's own-risk override). Remaining as
+  follow-ups (not the gating spine): an **opposing-market-order** alternative close if the venue's own close
+  primitive keeps rejecting, and a **client-side local fallback** (a future PWA, ADR-0010 — flattens when the whole
+  cloud tier is unreachable). **Prove on practice before live.**
 - **End-of-day / settlement reconciliation:** venue-as-source-of-truth position reconcile on reconnect,
   maintenance-window awareness, and settlement re-mark handling (wiki: [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md)).
 - **State-rehydration tests:** suggestions / orders / positions / templates rehydrate correctly and **per-user
