@@ -170,6 +170,46 @@ public class FlattenCheckInTests
         d.Action.Should().Be(CheckInAction.NotApplicable);
     }
 
+    // --- The cheap gate: is venue truth even worth fetching? ---
+
+    [Fact]
+    public void IsDue_ShouldBeFalse_WhenTheDeadlineHasNotPassed()
+    {
+        FlattenCheckIn.IsDue(Es(), CentralAt(2026, 7, 20, 14, 0), lastCheckedInOn: null).Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsDue_ShouldBeTrue_WhenPastTheDeadlineAndNotYetSentToday()
+    {
+        FlattenCheckIn.IsDue(Es(), CentralAt(2026, 7, 20, 14, 31), lastCheckedInOn: null).Should().BeTrue();
+    }
+
+    [Fact]
+    public void IsDue_ShouldBeFalse_WhenAlreadySentToday()
+    {
+        // The gate exists so the service does not read venue positions once a minute all afternoon for an
+        // instrument that already reported flat.
+        FlattenCheckIn.IsDue(Es(), CentralAt(2026, 7, 20, 15, 30), new DateOnly(2026, 7, 20)).Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsDue_ShouldBeFalse_WhenTheMarketIsDisabled()
+    {
+        FlattenCheckIn.IsDue(Es(enabled: false), CentralAt(2026, 7, 20, 14, 31), lastCheckedInOn: null).Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsDue_ShouldAgreeWithDecide_WhenFlatPastTheDeadline()
+    {
+        // The gate must never hide a decision the authority would have made -- if IsDue is false, Decide is never
+        // consulted, so a disagreement here would silently drop a check-in.
+        DateTimeOffset now = CentralAt(2026, 7, 20, 14, 31);
+
+        FlattenCheckIn.IsDue(Es(), now, lastCheckedInOn: null).Should().BeTrue();
+        FlattenCheckIn.Decide(Es(), now, hasOpenPosition: false, lastCheckedInOn: null)
+            .Action.Should().Be(CheckInAction.Send);
+    }
+
     // --- The reason travels with the decision ---
 
     [Fact]
