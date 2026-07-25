@@ -14,7 +14,7 @@ As the primary QA/SDET for **Trading Copilot**, a comprehensive audit was conduc
 The objective of this audit is to identify high-value integration testing gaps, quantify risk coverage, and define actionable tickets to raise the quality ceiling of the platform.
 
 ### Key Audit Findings (status current as of the gh#160 realignment)
-1. **Existing Integration Coverage**: Firm Onboarding, Risk Profile Declaration, User Invitation / Primary-Operator Auth Guard, the unauthenticated challenge, order execution (direct + staged ladder), the staged-stop plan, the event backbone, and the production smoke suite — see §2 for the full inventory.
+1. **Existing Integration Coverage**: Firm Onboarding, Risk Profile Declaration, User Invitation / Primary-Operator Auth Guard, the unauthenticated challenge, order execution (direct + staged ladder), the staged-stop plan, the event backbone, the synthetic conditional-entry firing engine, and the production smoke suite — see §2 for the full inventory.
 2. **Gaps — delivered (✅) and remaining (⬜):**
    - ✅ **Staged Send Path & Order Execution (`arm` → `edit` → `take` → `cancel`)** — direct send (gh#130), the staged ladder (gh#157), and the stop-plan DB guards (gh#158) all landed against Testcontainers Postgres.
    - ✅ **R-14 Database Mode & Environment Enforcement** — the `Order.mode == Account.mode` trigger and mode × environment refusals are exercised in the order suites (gh#130, gh#157).
@@ -22,6 +22,7 @@ The objective of this audit is to identify high-value integration testing gaps, 
    - ✅ **Connection Lifecycle & Account Stage** — creation, discovery, and stage resolution/override covered (**gh#142**). Credential *rotation* and connection *soft-delete* remain **missing features**, not missing tests → **gh#210** for the Coding Agent.
    - ✅ **Production Read-Only Smoke Test Suite** — gh#131; the lazy-fixture fix so a deployed-target run starts no container is gh#152.
    - ✅ **Event Backbone Storage** — the append-only Timescale log at the storage tier (gh#161).
+   - ✅ **Synthetic Conditional-Entry Firing Engine (ADR-0007 / R-11)** — arm (persist `Pending`, transmit nothing) → a quote crossing the trigger fires it to a **working native order** through the **authoritative fire-time re-gate** (R-5 / R-16 / R-12: a conditional valid at arm but violating the gate at fire is refused, not sent); cancel-if drift, expiry-outranks-fire, fired-then-replayed idempotency, a live-host `market.quote` backbone consume, and the `CK_ConditionalOrders_*` DB guards — **gh#180**, pairing the #198 watcher.
 
 ---
 
@@ -43,6 +44,7 @@ Below is the baseline inventory of current integration tests under [`src/MarqSpe
 | **`MultiTenantIsolationIntegrationTests.cs`** | R-20 default-deny workspace isolation between two operators (ADR-0017): collection-scoping (`GET /connections` excludes the other operator), `GET /connections/{id}/accounts` → 404 for a non-owner, staged-order `take`/`cancel` → 404 (order stays `Staged`), and gate-decision isolation proven at a user-scoped `DbContext`; second operator via the invitation flow (gh#132) | **Active** (Passing) |
 | **`RiskProfileLifecycleIntegrationTests.cs`** | Per-account risk declaration (`PUT /accounts/{id}/risk`) — persistence + one-per-account replace-on-redeclaration; and the **R-12 re-gate**: a profile tightened *after* arming refuses the next `take` (422 `RefusedByRisk`, order stays `Staged`, the refusal journaled as a blocked gate decision) (gh#143) | **Active** (Passing) |
 | **`ConnectionLifecycleIntegrationTests.cs`** | Connection creation, account discovery, and the per-account stage override — the roster persists and reads back with **mode resolved from the firm's declared conventions**, not the venue's flag (Practice, not the stub's Live; unrecognised names stay `Undeclared`, gh#60); one-login-per-firm×platform `409` (ADR-0016); stage override → convention mode / `Unknown` refused; clear reverts to the resolved stage (gh#142) | **Active** (Passing) |
+| **`ConditionalFiringIntegrationTests.cs`** | The **synthetic conditional-entry firing engine** (ADR-0007, pairing the #198 watcher): `POST /accounts/{id}/orders/conditional` arms a pending conditional (persisted `Pending`, **transmits nothing**); the firing watcher (`ConditionalFiringService` / `ConditionalOrderHost`) fires it to a **working native order** when a quote crosses the trigger, **re-running R-5 / R-16 / R-12 at fire time** — a conditional valid at arm but violating the gate at fire is **refused, not sent** (proven by tightening risk between arm and fire); cancel-if drift; expiry outranks a crossing trigger; fired-then-replayed idempotency; a live-background-host `market.quote` backbone consume; and the `CK_ConditionalOrders_CancelDrift_StaleSide` / `_Direction_NotUnknown` DB checks proven by name (gh#180) | **Active** (Passing) |
 
 ---
 
@@ -86,6 +88,7 @@ with status**, not a copy of the bodies. Statuses current as of the gh#160 reali
 | [#161](https://github.com/adammarquette/trading-copilot/issues/161) | Event backbone storage & replay-dedupe | `Data/EventBackboneIntegrationTests.cs` | ✅ Delivered (gh#204) · closed |
 | [#131](https://github.com/adammarquette/trading-copilot/issues/131) | Production-safe read-only smoke suite | `SystemSmokeIntegrationTests.cs` | ✅ Delivered · closed |
 | [#152](https://github.com/adammarquette/trading-copilot/issues/152) | Smoke suite starts no container on a deployed target | `SystemSmokeIntegrationTests.cs` (+ `TestHost/LazySmokeHostFixture.cs`) | ✅ Delivered (gh#205) · closed |
+| [#180](https://github.com/adammarquette/trading-copilot/issues/180) | Synthetic conditional-entry firing engine (pairs the #198 watcher) | `ConditionalFiringIntegrationTests.cs` | ✅ Delivered (gh#216) |
 | [#132](https://github.com/adammarquette/trading-copilot/issues/132) | Multi-tenant workspace & resource isolation | `MultiTenantIsolationIntegrationTests.cs` | ✅ Delivered (gh#213) — realigned to the route map (gh#160) |
 | [#142](https://github.com/adammarquette/trading-copilot/issues/142) | Connection & account-stage suite | `ConnectionLifecycleIntegrationTests.cs` | ✅ Delivered (this PR) — realigned (gh#160); missing endpoints → [#210](https://github.com/adammarquette/trading-copilot/issues/210) |
 | [#143](https://github.com/adammarquette/trading-copilot/issues/143) | Risk profile trailing drawdown & floor tracking | `RiskProfileLifecycleIntegrationTests.cs` | ✅ Delivered (gh#215) — realigned per gh#160 (`PUT` verb, reuses the gh#157 harness) |
