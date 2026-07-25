@@ -115,6 +115,12 @@ builder.Services.AddSingleton<KillSwitch>();
 builder.Services.AddSingleton<IKillSwitch>(services => services.GetRequiredService<KillSwitch>());
 builder.Services.AddScoped<KillSwitchService>();
 
+// Decision-state rehydration (R-20, R-12, ADR-0013, gh#221): an explicit startup pass that reads the decision
+// surface back inertly (nothing resumes) and, on an IMPOSSIBLE combination a crash left, fails safe to no-new-
+// orders (the kill switch, HaltOnly) and loud -- never silently repairing. Scoped: it runs in the startup scope
+// alongside migrate + bootstrap.
+builder.Services.AddScoped<DecisionStateRehydrator>();
+
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
