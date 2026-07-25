@@ -174,11 +174,28 @@ operator immediate feedback, but the order rests **`Pending`**, unseen at the br
 mirror the domain (direction declared, cancel band on the stale side) — **proven rejecting against live
 Postgres**.
 
-*Still deferred:* the **firing watcher** — a `market.quote` event-log consumer that fires/cancels pending orders,
-mirroring the stop-promotion watcher (ADR-0001) — and, with it, the fire-time re-gate becoming live;
-**connection-loss orphan handling** (a pending synthetic order → orphaned → emergency; overlaps S4); and
-**named-signal triggers** (they need the R-3 signal pipeline — price-cross only for now). This lands the model
-half of the "spec the synthetic/conditional engine" item below.
+*Still deferred:* the **firing watcher** (next); **connection-loss orphan handling** (a pending synthetic order
+→ orphaned → emergency; overlaps S4); and **named-signal triggers** (they need the R-3 signal pipeline —
+price-cross only for now). This lands the model half of the "spec the synthetic/conditional engine" item below.
+
+## Update (2026-07-25) — the firing watcher landed (gh#198)
+The conditional order is now **operational**. `ConditionalOrderHost` is the event log's **second consumer**
+(its own `conditional-order` cursor, ADR-0001), the hardened per-pass-scope shape of the stop-promotion host
+(gh#169). On each `market.quote`, `ConditionalFiringService` **cancels/expires** the stale pending orders
+(drift past the band → `Cancelled`, validity window passed → `Expired`) and **fires** the triggered ones. Firing
+is a new entry, so — unlike the stop-promotion watcher's bare transmit — it runs the **authoritative fire-time
+re-gate (R-12 / R-5 / R-16)** through the *same* `OrderExecutionService` and compose ladder the operator's take
+runs: a placed order journals its `Order` + `StopPlan` (so the stop-promotion watcher then protects it) and the
+conditional records `Fired` + its `FiredOrderId`; a **gate-refused** fire stays `Pending` and re-decides on the
+next quote (nothing lost). It is idempotent (a resolved order never re-fires).
+
+To reuse the compose/gate/journal without duplicating a safety guard (the gh#148 drift lesson), the watcher —
+which has no request user — **discovers** pending orders with `IgnoreQueryFilters`, then does each owner's work
+in a DbContext **scoped to that owner**, so `ComposeAsync` stays R-20-correct unchanged.
+
+*Still deferred:* **connection-loss orphan handling** — a pending synthetic order needs the platform live to
+fire, so on a connection drop it must go **orphaned → emergency** (overlaps S4); until then a pending conditional
+carries that `synthetic_risk`. And **named-signal triggers** (R-3).
 
 ## Consequences
 **Positive**

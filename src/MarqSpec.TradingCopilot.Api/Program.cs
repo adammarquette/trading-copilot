@@ -56,6 +56,11 @@ builder.Services.AddHostedService<MarketDataIngestionHost>();
 builder.Services.AddScoped<StopPromotionService>();
 builder.Services.AddHostedService<StopPromotionHost>();
 
+// The event log's second consumer (ADR-0007, gh#198): the conditional-order firing watcher reads market.quote
+// events and fires / cancels / expires pending conditional entries on their trigger. Harmless with none.
+builder.Services.AddScoped<ConditionalFiringService>();
+builder.Services.AddHostedService<ConditionalOrderHost>();
+
 // Auto-flatten (R-13, gh#185, ADR-0013): the PRIMARY scheduler that closes open positions at each instrument's
 // per-market deadline on the DST-aware market clock. On by default and cannot be silently disabled -- so it
 // ALWAYS runs; a market is turned off per-instrument in the Flatten config, not by omitting the host. The
