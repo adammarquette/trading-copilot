@@ -82,8 +82,15 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
   follow-ups (not the gating spine): an **opposing-market-order** alternative close if the venue's own close
   primitive keeps rejecting, and a **client-side local fallback** (a future PWA, ADR-0010 — flattens when the whole
   cloud tier is unreachable). **Prove on practice before live.**
-- **End-of-day / settlement reconciliation:** venue-as-source-of-truth position reconcile on reconnect,
-  maintenance-window awareness, and settlement re-mark handling (wiki: [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md)).
+- **End-of-day / settlement reconciliation:** **the settlement boundary is handled (gh#193, 2026-07-25).**
+  `Domain/Flatten/MarketSession` derives the per-instrument settlement / maintenance window from the instrument's
+  session close on the DST-aware `MarketClock`; `Api/Recovery/PositionReconciliationService` (and `GET
+  /accounts/{id}/positions`) reports positions from **venue truth** tagged with a `PositionMarkBasis` — `Live`,
+  `Settlement` (a re-mark, never read as live movement, R-13), or **`Unknown`** when the venue cannot be reached
+  (declared-unknown, fail-safe, never a stale live view — R-19). *Still open:* firing the reconcile automatically
+  on reconnect (the connection monitor is gh#209; restart rehydration is **gh#221**), **fill**-level reconcile
+  (needs the account-event seam **gh#219**), and per-position mark precision. Wiki:
+  [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md).
 - **State-rehydration tests:** suggestions / orders / positions / templates rehydrate correctly and **per-user
   isolation holds** through a restart (R-20).
 - **Reconnect / backfill** verification (R-1 gap detection) and **recovery event / audit** records (ADR-0001, §9).
