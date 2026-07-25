@@ -47,8 +47,10 @@ owned by its requirement / ADR).
   a connection-liveness monitor over the `IVenueConnection` seam orphans hidden working stops on a drop; and
   **gh#191** — re-arm now **re-validates each stop against venue truth first**, re-arming only a still-open position
   and **retiring** the stop of one that closed during the outage, so the invariant below genuinely holds rather than
-  leaning on the venue to reject a stale promotion; the operator alert is a high-severity log carrying
-  `synthetic_risk` until the Phase-4 SPA channel and the formal `AuditRecord` land).
+  leaning on the venue to reject a stale promotion; and **gh#220** — each transition is now written to the immutable
+  **`AuditRecord`** carrying `synthetic_risk` (a secondary write that never fails the safety action), leaving only the
+  **real-time** operator alert deferred: the interim alert is a high-severity log carrying `synthetic_risk` until the
+  Phase-4 SPA channel lands, gh#222).
 - **The hard case — the auto-flatten guarantee (R-13).** The auto-flatten is **our system feature**, fired at a
   **configurable, per-instrument deadline** (equity-index default ~2:30 PM CT ahead of MOC; **crude / gold settle earlier**) — **earlier than any venue-forced flatten** (Topstep
   ~3:10 PM CT), and a **live brokerage has none**, so we **cannot lean on the venue** as the net. It is
