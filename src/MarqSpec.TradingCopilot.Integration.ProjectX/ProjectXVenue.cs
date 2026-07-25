@@ -69,9 +69,9 @@ public sealed class ProjectXVenue : ITradingVenue
 
     /// <summary>
     /// What this adapter can actually deliver <b>through <see cref="ITradingVenue"/></b>. The gateway itself does
-    /// more — depth, account streaming, OCO brackets, order modify, trailing stops — but none of that is
-    /// reachable through the venue-neutral contract yet, and advertising it would defeat the purpose of the
-    /// capability model: a caller checking before it commits would pick a path that cannot work.
+    /// more — depth, order modify, trailing stops — but none of that is reachable through the venue-neutral
+    /// contract yet, and advertising it would defeat the purpose of the capability model: a caller checking before
+    /// it commits would pick a path that cannot work.
     /// </summary>
     public VenueCapabilities Capabilities { get; } = VenueCapabilities.Of(
         VenueCapability.HistoricalBars
@@ -79,7 +79,10 @@ public sealed class ProjectXVenue : ITradingVenue
         | VenueCapability.ClosePosition
         // The always-native safety stop rides the entry as a stop-loss bracket (gh#11 inc 3): the gateway holds
         // it and attaches it on fill, so the neutral contract genuinely reaches this capability now.
-        | VenueCapability.BracketOrders);
+        | VenueCapability.BracketOrders
+        // Order / position / fill events over the user hub, behind the IAccountEventStream seam (gh#219): the
+        // neutral contract now reaches them, so an order's terminal status and its fills are no longer invisible.
+        | VenueCapability.AccountStreaming);
 
     /// <summary>
     /// The ProjectX derivation-logic version (ADR-0009, gh#9). History: <b>1</b> — the conservative PRAC-only

@@ -56,13 +56,13 @@ public class ProjectXVenueTests
         _venue.Capabilities.Supports(VenueCapability.Quotes).Should().BeTrue();
         _venue.Capabilities.Supports(VenueCapability.ClosePosition).Should().BeTrue();
         _venue.Capabilities.Supports(VenueCapability.BracketOrders).Should().BeTrue(); // the always-native safety stop (gh#11 inc 3)
+        _venue.Capabilities.Supports(VenueCapability.AccountStreaming).Should().BeTrue(); // the user-hub seam (gh#219)
     }
 
     [Theory]
     [InlineData(VenueCapability.TrailingStops)]
     [InlineData(VenueCapability.ModifyOrder)]
     [InlineData(VenueCapability.MarketDepth)]
-    [InlineData(VenueCapability.AccountStreaming)]
     public void Capabilities_ShouldNotAdvertiseWhatTheNeutralContractCannotReach(VenueCapability capability)
     {
         // ProjectX does all of these; ITradingVenue exposes none of them yet. Advertising them would send a

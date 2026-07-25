@@ -145,8 +145,9 @@ alone (the two-leg bracket unchanged). Because the bracket is native, the venue 
 for free — target and stop cancel one another on fill.
 
 *Still deferred:* the **app-level OCO-cancel-on-exit** — cancelling a *synthetic/hidden* leg, or the safety
-stop, when a position exits by manual flatten or by the promoted actual stop (it needs account-streaming / fill
-events, `VenueCapability.AccountStreaming`). *(Connection-liveness orphan handling — listed deferred here — has since landed: gh#209, gh#191.)*
+stop, when a position exits by manual flatten or by the promoted actual stop (its account-streaming / fill-event
+prerequisite, `VenueCapability.AccountStreaming`, **landed gh#219** — see the Update below; the cancel-on-exit
+consumer itself is **gh#183**). *(Connection-liveness orphan handling — listed deferred here — has since landed: gh#209, gh#191.)*
 
 ## Update (2026-07-25) — the take-profit wiring (gh#173)
 The operator can now set one: `SendOrderRequest.Target` flows through `BuildRequestAsync` into
@@ -240,6 +241,33 @@ journaled (`killswitch.engaged` / `killswitch.disengaged`).
 for now; the persisted Settings preference lands with the UI, gh#25); an **opposing-market-order** fallback close
 if the venue's own close keeps rejecting; and **voiding pending conditionals** on a kill (the send guard already
 stops them firing, so it is cleanliness, not safety).
+
+## Update (2026-07-25) — the account-event streaming seam (gh#219)
+The platform is no longer **blind after transmission**. `VenueCapability.AccountStreaming` was declared but reached
+nothing — no `Fill` row was ever written and an order stopped at `Working`, never reaching `Filled` /
+`PartiallyFilled` / `Rejected`. The seam now closes that gap end to end:
+
+- **A venue-neutral seam** — `Domain/Venue/IAccountEventStream` carrying `OrderStateEvent` / `FillEvent` /
+  `PositionEvent`. Like `IVenueConnection` (gh#209), the user hub is **process-wide** (one credential set, ADR-0015),
+  so it is a **singleton** off the scoped `ITradingVenue`. `ProjectXAccountEventStream` implements it over the
+  gateway user hub, translating the vendor payloads at the adapter boundary (no vendor type crosses into the core),
+  and `ProjectXVenue` now **advertises** `AccountStreaming`.
+- **A consumer that persists venue truth** — `AccountEventIngestionService` writes a `Fill` (the entity's first
+  producer) and advances the order: `Filled` / `PartiallyFilled` from the persisted fill total, `Rejected` /
+  `Cancelled` from order-state events (a rejected working order never stays `Working`, R-11). It discovers the owning
+  account across owners (background bypasses the R-20 filter) then writes in a DbContext **scoped to that owner**, so
+  an event for another operator never crosses the R-20 boundary, and an unknown / foreign order is logged and
+  ignored, never fatal. **Idempotency is by construction** — the `{ order, venueFillKey }` unique index rejects a
+  replayed trade id (proven against live Postgres), not an inspecting `SELECT`.
+- **A supervised host** — `AccountEventStreamHost` runs the subscription with the drop-vs-stop reconnect discipline
+  of the quote stream (a drop re-subscribes after a delay; cancellation is a clean stop) and the fresh-scope-per-event
+  teardown shape; the seam and venue resolve **lazily** inside the run (eager injection needs credentials a test host
+  lacks, the gh#212 lesson), and the capability is `Require`d **at the call** (R-17) — a venue that cannot stream is
+  refused, not discovered mid-stream.
+
+*Still deferred:* **OCO-cancel-on-exit** (gh#183, the seam's first real consumer); backfilling fills missed while
+disconnected (venue-truth reconcile, gh#193); cancelling a *working* order through the order API (today only the kill
+switch does). `MarketDepth` / `ModifyOrder` / `TrailingStops` stay declared-but-unreached.
 
 ## Consequences
 **Positive**
