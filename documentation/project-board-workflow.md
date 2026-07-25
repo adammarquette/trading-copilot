@@ -199,13 +199,25 @@ The board predated this process; adopting it was one clean-up pass:
 ## Automation
 
 GitHub Projects can run the mechanical moves. **Configuring the built-in workflows requires the Project's web UI**
-— the GitHub API does not expose them — so these are a maintainer setting, recorded here so the intended state is
-visible:
-- **Auto-add** new repo issues/PRs → **Backlog**, so nothing is orphaned off-board.
-- **Item closed → Done**, **PR merged → Done** (`closed → Done` already appears active — every closed issue sits
-  in Done).
+(Project → **⋯** → **Workflows**) — the GitHub API does not expose them — so these are a maintainer setting,
+recorded here so the intended state is visible and reproducible. **Two are required, and both set the `Status`
+field** — the field that keeps finished or freshly-filed work from stranding in (or beside) an active column:
+
+- **Auto-add → set `Status = Backlog`.** Auto-adding new repo issues/PRs is not enough on its own: the built-in
+  *Auto-add* action leaves `Status` **empty**, and an empty-`Status` card reads as unresolved forever. Pair the
+  auto-add with a **"Set value → Status: Backlog"** step so every new card lands *in* the funnel, not off to its
+  side.
+- **Item closed → set `Status = Done`** (and **PR merged → set `Status = Done`**). A closed issue whose card never
+  advanced is the most common board-rot source — it looks like live work while being finished.
 - Every **forward** gate (`Backlog → Planning → Current ToDo → In Progress`) stays **manual** — those are human /
   agent judgment.
 
-> **Board hygiene note:** a Projects item's title can stop tracking its issue after a retitle (a known GitHub
-> quirk); the fix is to remove + re-add the item (which restores its Status), not another retitle.
+> **Enable-state (2026-07-24): both `Status`-setting workflows were found *off*.** A triage pass found **9 closed
+> issues stranded outside Done** (in *In Progress* / *Current ToDo* / *Backlog*) and **5 cards with no `Status` at
+> all** — exactly the two gaps above. The cards were corrected by hand, but until the two workflows are enabled in
+> the web UI, **closing an issue and filing a new one each need a manual `Status` set** (`gh#200`).
+
+> **Board hygiene note.** Two known GitHub quirks to watch: **(1)** a Projects item's title can stop tracking its
+> issue after a retitle; the fix is to remove + re-add the item (which restores its Status), not another retitle.
+> **(2)** the *Auto-add* action leaves `Status` empty (see *Automation*) — until the Backlog-setting workflow is
+> enabled, set the column by hand on any auto-added card.
