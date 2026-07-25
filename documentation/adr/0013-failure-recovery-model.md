@@ -22,7 +22,19 @@ owned by its requirement / ADR).
 - **On backend restart, state is rehydrated, not replayed live.** Decision state (suggestions, orders, positions,
   rules, templates) **rehydrates from its persisted store**; market / indicator state **rebuilds from the
   clean-historical** store, *not* the short-retention event log (ADR-0001 — "rebuild = reprocess clean-historical");
-  ingestion **backfills gaps on reconnect** (R-1). Rehydration **preserves per-user isolation** (R-20).
+  ingestion **backfills gaps on reconnect** (R-1). Rehydration **preserves per-user isolation** (R-20). An
+  **explicit startup pass** now makes this concrete (**implemented gh#221**): `Api/Recovery/DecisionStateRehydrator`
+  reads the whole decision surface back **inertly** — it *observes* what returned (staged orders, pending
+  conditionals, hidden stops, active suggestions) and resumes **none** of it (every resumption path stays request-
+  or quote-driven and re-validates against fresh truth, R-12). It reads across all owners (background plumbing
+  bypasses the R-20 filter) yet **carries ownership** on every row, and if a crash mid-write left an **impossible
+  cross-entity combination** — a staged order holding a venue key, a fired conditional linked to no order, a native
+  (at-venue) stop with no live order, a stop plan whose owner drifted from its order's — the pure
+  `Domain/Recovery/DecisionStateRehydration.Analyze` flags it and the pass **fails safe and loud**: it engages the
+  **kill switch (HaltOnly — no new orders; open positions rest on their native safety stops)**, persists the durable
+  lock, and alerts (`synthetic_risk`), **never silently repairing**. These are **cross-entity** invariants a
+  single-row DB check cannot express — a crash between two independent writes leaves each row valid but the whole
+  contradictory — and an existing operator kill-switch lock is **preserved**, never downgraded.
 - **No-risk state fails safe by expiring.** A **suggestion carries no risk** (nothing at the broker until taken). On
   any recovery, suggestions apply their normal lifecycle: past the **validity window** or with broken drift / thesis
   → **stale → expired / void**; a survivor must still pass **R-12** before it can be taken; **nothing is auto-taken or
@@ -91,7 +103,13 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
   on reconnect (the connection monitor is gh#209; restart rehydration is **gh#221**), **fill**-level reconcile
   (needs the account-event seam **gh#219**), and per-position mark precision. Wiki:
   [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md).
-- **State-rehydration tests:** suggestions / orders / positions / templates rehydrate correctly and **per-user
-  isolation holds** through a restart (R-20).
+- **State rehydration (gh#221, 2026-07-25):** the explicit startup pass is **implemented** —
+  `DecisionStateRehydrator` brings the decision surface back inertly, preserves ownership (R-20), and fails safe to
+  no-new-orders (kill switch, HaltOnly) + loud on any impossible cross-entity combination, never repairing. *Still
+  open:* the **suggestion validity-window recompute** rides on the R-4 validity field when it lands (today the
+  persisted state returns and the **take** re-gates, R-12); **restart-triggered venue reconcile** pairs with the
+  settlement pass (gh#193) and the connection monitor (gh#209); **fill**-level reconcile needs the account-event
+  seam (gh#219); and the **cross-user-isolation-through-restart** proof (suggestions / orders / positions /
+  templates keep their owner) is the QA suite's.
 - **Reconnect / backfill** verification (R-1 gap detection) and **recovery event / audit** records (ADR-0001, §9).
 - Client **resume** edge cases (dedup, ordering) under the SignalR idempotent-resume pattern.

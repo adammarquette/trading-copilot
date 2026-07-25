@@ -1,5 +1,6 @@
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Kill;
+using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -46,6 +47,14 @@ public static class StartupTasks
             app.Configuration["Bootstrap:Email"],
             app.Configuration["Bootstrap:Password"],
             resetPassword: bool.TryParse(app.Configuration["Bootstrap:ResetPassword"], out bool reset) && reset);
+
+        // Rehydrate the wider decision surface (gh#221): bring it back visibly and INERTLY -- observe what returned
+        // (staged orders, pending conditionals, hidden stops, active suggestions) without resuming any of it, and if
+        // a crash left an IMPOSSIBLE combination, fail safe to no-new-orders (the kill switch, HaltOnly) and loud,
+        // never silently repairing (ADR-0013). Runs after the kill-switch rehydration above, so an operator lock
+        // already in force is seen and preserved rather than overwritten.
+        await scope.ServiceProvider.GetRequiredService<DecisionStateRehydrator>()
+            .RehydrateAsync(DateTimeOffset.UtcNow, CancellationToken.None);
     }
 
     /// <summary>
