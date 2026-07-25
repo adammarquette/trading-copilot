@@ -1,10 +1,12 @@
 using FakeItEasy;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -49,9 +51,9 @@ public class OrphanGuardServiceTests
         new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
             new FixedUser(user ?? Guid.Empty));
 
-    private OrphanGuardService Service(string credentialKey = "topstep-main") =>
+    private OrphanGuardService Service(string credentialKey = "topstep-main", IAuditLog? auditLog = null) =>
         new(Context(), _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
-            NullLogger<OrphanGuardService>.Instance);
+            auditLog ?? new AuditLog(Context()), NullLogger<OrphanGuardService>.Instance);
 
     private static PositionSnapshot Pos(int net) =>
         new(AccountId, VenueContractId.Create(Projectx, Contract), net, new Price(5_000m));
@@ -64,12 +66,14 @@ public class OrphanGuardServiceTests
         A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
             .Throws(new InvalidOperationException("venue unreachable during re-validation"));
 
-    // A bare stop (no order / account) — enough for the OrphanAsync path, which is DB-only.
-    private async Task SeedStopAsync(StopStaging staging, Guid? owner = null)
+    // A bare stop (no order / account) — enough for the OrphanAsync path, which is DB-only. Returns its id.
+    private async Task<Guid> SeedStopAsync(StopStaging staging, Guid? owner = null)
     {
+        Guid planId = Guid.NewGuid();
         await using TradingCopilotDbContext context = Context(_operator);
-        context.StopPlans.Add(NewPlan(Guid.NewGuid(), staging, owner ?? _operator));
+        context.StopPlans.Add(NewPlan(planId, staging, owner ?? _operator));
         await context.SaveChangesAsync();
+        return planId;
     }
 
     // A full orphaned plan with its order + account + connection — what re-arm re-validation needs.
@@ -142,6 +146,27 @@ public class OrphanGuardServiceTests
     {
         await using TradingCopilotDbContext reload = Context();
         return await reload.StopPlans.IgnoreQueryFilters().ToListAsync();
+    }
+
+    private async Task<List<AuditRecord>> AllAuditsAsync()
+    {
+        await using TradingCopilotDbContext reload = Context();
+        return await reload.AuditRecords.IgnoreQueryFilters().ToListAsync();
+    }
+
+    // Reads through the R-20 default-deny filter as a specific operator (no IgnoreQueryFilters).
+    private async Task<List<AuditRecord>> AuditsVisibleToAsync(Guid user)
+    {
+        await using TradingCopilotDbContext reload = Context(user);
+        return await reload.AuditRecords.ToListAsync();
+    }
+
+    private static IAuditLog ThrowingAuditLog()
+    {
+        IAuditLog auditLog = A.Fake<IAuditLog>();
+        A.CallTo(() => auditLog.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("audit store unreachable"));
+        return auditLog;
     }
 
     // --- Orphaning (unchanged from gh#209) ---
@@ -277,5 +302,137 @@ public class OrphanGuardServiceTests
         RearmOutcome outcome = await Service().RearmAsync(CancellationToken.None);
 
         outcome.Should().Be(new RearmOutcome(0, 0, 0));
+    }
+
+    // --- Audit trail (gh#220) ---
+
+    [Fact]
+    public async Task OrphanAsync_ShouldWriteOneSyntheticRiskAuditRow_PerOrphanedStop()
+    {
+        Guid first = await SeedStopAsync(StopStaging.Hidden);
+        Guid second = await SeedStopAsync(StopStaging.Hidden);
+        Guid native = await SeedStopAsync(StopStaging.Native); // never orphaned, so never audited
+
+        await Service().OrphanAsync(CancellationToken.None);
+
+        List<AuditRecord> audits = await AllAuditsAsync();
+        audits.Should().HaveCount(2);
+        audits.Should().OnlyContain(a =>
+            a.Action == AuditAction.ConnectionLoss
+            && a.Placement == AuditPlacement.Synthetic
+            && a.SyntheticRisk
+            && a.Before == "Hidden"
+            && a.After == "Orphaned"
+            && a.UserId == _operator);
+        audits.Select(a => a.StopPlanId!.Value).Should().BeEquivalentTo(new[] { first, second });
+        audits.Should().NotContain(a => a.StopPlanId == native); // the native stop is never in the audit
+    }
+
+    [Fact]
+    public async Task OrphanAsync_ShouldWriteNoAuditRows_WhenNoHiddenStops()
+    {
+        await SeedStopAsync(StopStaging.Native);
+
+        await Service().OrphanAsync(CancellationToken.None);
+
+        (await AllAuditsAsync()).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldWriteASyntheticRiskAuditRow_WhenReArming()
+    {
+        Guid planId = await SeedOrphanedAsync(orderSize: 2, side: OrderSide.Buy);
+        VenuePositions(Pos(2)); // still open — re-arms
+
+        await Service().RearmAsync(CancellationToken.None);
+
+        AuditRecord audit = (await AllAuditsAsync()).Should().ContainSingle().Subject;
+        audit.Before.Should().Be("Orphaned");
+        audit.After.Should().Be("Hidden");
+        audit.SyntheticRisk.Should().BeTrue();
+        audit.Placement.Should().Be(AuditPlacement.Synthetic);
+        audit.Action.Should().Be(AuditAction.ConnectionLoss);
+        audit.StopPlanId.Should().Be(planId);
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldWriteASyntheticRiskAuditRow_WhenRetiring()
+    {
+        Guid planId = await SeedOrphanedAsync(side: OrderSide.Buy);
+        VenuePositions(); // closed during the outage — retires
+
+        await Service().RearmAsync(CancellationToken.None);
+
+        AuditRecord audit = (await AllAuditsAsync()).Should().ContainSingle().Subject;
+        audit.Before.Should().Be("Orphaned");
+        audit.After.Should().Be("Retired");
+        audit.SyntheticRisk.Should().BeTrue();
+        audit.StopPlanId.Should().Be(planId);
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldWriteNoAuditRow_ForAStopLeftOrphaned()
+    {
+        await SeedOrphanedAsync();
+        VenueUnreachable(); // cannot re-validate — the stop stays orphaned, so nothing transitioned to record
+
+        await Service().RearmAsync(CancellationToken.None);
+
+        (await AllAuditsAsync()).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldStampTheAuditRowWithTheStopsOwner()
+    {
+        Guid alice = Guid.NewGuid();
+        await SeedOrphanedAsync(owner: alice);
+        VenuePositions(Pos(2));
+
+        await Service().RearmAsync(CancellationToken.None);
+
+        // Written from background plumbing with no user context, yet owned by the affected stop's operator (R-20).
+        (await AllAuditsAsync()).Should().ContainSingle().Which.UserId.Should().Be(alice);
+    }
+
+    [Fact]
+    public async Task AuditRows_ShouldBeInvisibleToAnotherOperator()
+    {
+        Guid alice = Guid.NewGuid();
+        await SeedStopAsync(StopStaging.Hidden, owner: alice);
+
+        await Service().OrphanAsync(CancellationToken.None);
+
+        (await AuditsVisibleToAsync(alice)).Should().ContainSingle();     // the owner sees their audit row
+        (await AuditsVisibleToAsync(Guid.NewGuid())).Should().BeEmpty();  // another operator sees nothing (R-20)
+    }
+
+    [Fact]
+    public async Task OrphanAsync_ShouldStillOrphanTheStop_WhenTheAuditWriteThrows()
+    {
+        Guid planId = await SeedStopAsync(StopStaging.Hidden);
+        IAuditLog throwing = ThrowingAuditLog();
+
+        int orphaned = 0;
+        Func<Task> act = async () => orphaned = await Service(auditLog: throwing).OrphanAsync(CancellationToken.None);
+
+        // The audit is a secondary write: its failure is swallowed, the safety action still completes (gh#220).
+        await act.Should().NotThrowAsync();
+        orphaned.Should().Be(1);
+        (await ReloadAsync(planId)).Staging.Should().Be(StopStaging.Orphaned);
+        A.CallTo(() => throwing.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .MustHaveHappened(); // the guard did attempt the audit — the failure was tolerated, not skipped
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldStillReArm_WhenTheAuditWriteThrows()
+    {
+        Guid planId = await SeedOrphanedAsync(orderSize: 2, side: OrderSide.Buy);
+        VenuePositions(Pos(2));
+
+        // If the guard did not tolerate the audit failure, this call would throw and the test would fail here.
+        RearmOutcome outcome = await Service(auditLog: ThrowingAuditLog()).RearmAsync(CancellationToken.None);
+
+        outcome.Rearmed.Should().Be(1);
+        (await ReloadAsync(planId)).Staging.Should().Be(StopStaging.Hidden);
     }
 }

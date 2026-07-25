@@ -70,6 +70,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>The durable kill-switch state (gh#189) — one row, rehydrated at startup so the lock survives a restart.</summary>
     public DbSet<KillSwitchState> KillSwitchStates => Set<KillSwitchState>();
 
+    /// <summary>The append-only audit trail (ADR-0007, gh#220) — safety-relevant transitions, immutable. Operator-owned.</summary>
+    public DbSet<AuditRecord> AuditRecords => Set<AuditRecord>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -386,6 +389,27 @@ public class TradingCopilotDbContext : TenantDbContext
         {
             kill.HasKey(k => k.Id);
             kill.Property(k => k.Reason).HasMaxLength(512);
+        });
+
+        modelBuilder.Entity<AuditRecord>(audit =>
+        {
+            audit.Property(a => a.Before).HasMaxLength(32);
+            audit.Property(a => a.After).HasMaxLength(32);
+            audit.Property(a => a.Detail).HasMaxLength(512);
+
+            // The audit reads chronologically per operator.
+            audit.HasIndex(a => new { a.UserId, a.RecordedAt });
+
+            // StopPlanId is a SOFT reference (no FK): the audit is immutable and must survive the stop it records,
+            // so a downstream cascade never rewrites it -- unlike GateDecision's set-null order link.
+
+            audit.ToTable(table =>
+            {
+                // Fail-closed zero, mirroring the other refusable enums (gh#60): an unset action or placement is
+                // never stored, so a row can never read as an audited event that did not happen.
+                table.HasCheckConstraint("CK_AuditRecords_Action_NotUnknown", "\"Action\" <> 0");
+                table.HasCheckConstraint("CK_AuditRecords_Placement_NotUnknown", "\"Placement\" <> 0");
+            });
         });
     }
 }

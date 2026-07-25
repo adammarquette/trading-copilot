@@ -1,6 +1,8 @@
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -18,26 +20,30 @@ namespace MarqSpec.TradingCopilot.Api.Recovery;
 /// <remarks>
 /// Background plumbing with <b>no authenticated user</b>, so its queries <c>IgnoreQueryFilters</c> the R-20
 /// default-deny filter — it acts for the deployment, over whoever owns the stops; ownership is preserved on write
-/// (the same discipline as the stop-promotion watcher). The alert is a high-severity <b>log</b> carrying the
-/// <c>synthetic_risk</c> today; the formal <c>AuditRecord</c> (gh#220) and real-time operator alert (gh#222) are
-/// deferred.
+/// (the same discipline as the stop-promotion watcher). Each transition is recorded as an immutable
+/// <c>AuditRecord</c> carrying the <c>synthetic_risk</c> flag (gh#220), a <b>secondary</b> write that never fails
+/// the safety action; the high-severity <b>log</b> remains the interim operator alert until the real-time channel
+/// (Phase-4 SPA, gh#222) lands.
 /// </remarks>
 public sealed class OrphanGuardService
 {
     private readonly TradingCopilotDbContext _database;
     private readonly IProjectXVenueFactory _venueFactory;
     private readonly ProjectXConnectionOptions _projectX;
+    private readonly IAuditLog _auditLog;
     private readonly ILogger<OrphanGuardService> _logger;
 
     /// <summary>Creates the guard over the scoped database.</summary>
     /// <param name="database">The database.</param>
     /// <param name="venueFactory">Builds a venue for a connection's firm conventions — the source of re-arm truth.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
+    /// <param name="auditLog">Records each synthetic-stop transition — a secondary, failure-tolerant write (gh#220).</param>
     /// <param name="logger">The logger.</param>
     public OrphanGuardService(
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
         IOptions<ProjectXConnectionOptions> projectXOptions,
+        IAuditLog auditLog,
         ILogger<OrphanGuardService> logger)
     {
         ArgumentNullException.ThrowIfNull(projectXOptions);
@@ -45,6 +51,7 @@ public sealed class OrphanGuardService
         _database = database;
         _venueFactory = venueFactory;
         _projectX = projectXOptions.Value;
+        _auditLog = auditLog;
         _logger = logger;
     }
 
@@ -71,12 +78,20 @@ public sealed class OrphanGuardService
             await _database.SaveChangesAsync(cancellationToken);
 
             // An EMERGENCY, not a warning: a live position's tighter protection just degraded. High-severity so
-            // it surfaces as the operator alert until the real-time channel (Phase-4 SPA) and the formal
-            // AuditRecord land. The synthetic_risk marker is the flag the audit will carry.
+            // it surfaces as the operator alert until the real-time channel (Phase-4 SPA, gh#222) lands. The
+            // synthetic_risk marker is the flag the audit carries.
             _logger.LogError(
                 "Venue connection lost — {Count} hidden stop(s) ORPHANED (synthetic_risk). The native safety "
                 + "stop remains the floor; the tighter working stop re-arms on reconnect.",
                 hidden.Count);
+
+            // The audit is a SECONDARY write, after the safety action has already committed: each degradation is
+            // recorded as an immutable synthetic_risk row (gh#220), but a failure here never undoes the orphaning.
+            await AuditSafelyAsync(
+                hidden.Select(plan => AuditFor(
+                    plan, StopStaging.Hidden, StopStaging.Orphaned,
+                    "Venue connection lost — hidden working stop orphaned; native safety stop remains the floor.")),
+                cancellationToken);
         }
 
         return hidden.Count;
@@ -126,6 +141,7 @@ public sealed class OrphanGuardService
         int rearmed = 0;
         int retired = 0;
         int stillOrphaned = 0;
+        List<AuditRecord> auditRows = []; // one per stop that actually transitions; a stop left orphaned records nothing
 
         // Group by the account the order sits on, so the venue and its positions are read once per account.
         foreach (IGrouping<Guid?, StopPlanRecord> byAccount in orphaned.GroupBy(plan =>
@@ -194,6 +210,9 @@ public sealed class OrphanGuardService
                 {
                     plan.Staging = StopStaging.Retired;
                     retired++;
+                    auditRows.Add(AuditFor(
+                        plan, StopStaging.Orphaned, StopStaging.Retired,
+                        "Reconnect re-validation: protected position closed or reversed during the outage — stop retired, never re-armed."));
                     _logger.LogInformation(
                         "Re-arm: {Contract} position closed during the outage — stop plan {Plan} RETIRED, not re-armed (ADR-0013).",
                         order.Instrument, plan.Id);
@@ -212,6 +231,9 @@ public sealed class OrphanGuardService
 
                 plan.Staging = StopStaging.Hidden;
                 rearmed++;
+                auditRows.Add(AuditFor(
+                    plan, StopStaging.Orphaned, StopStaging.Hidden,
+                    "Reconnect re-validation: position verified still open — synthetic working stop re-armed."));
             }
         }
 
@@ -225,7 +247,54 @@ public sealed class OrphanGuardService
             + "{Still} left orphaned (unverifiable, will retry).",
             orphaned.Count, rearmed, retired, stillOrphaned);
 
+        // Secondary write, after the transitions have committed: record each re-arm / retirement (gh#220). A stop
+        // left orphaned transitioned to nothing, so it contributes no row — the exposure window stays reconstructable.
+        await AuditSafelyAsync(auditRows, cancellationToken);
+
         return new RearmOutcome(rearmed, retired, stillOrphaned);
+    }
+
+    // Builds a synthetic-stop audit entry, owned by the affected stop's operator (R-20) — stamped explicitly
+    // because this runs as background plumbing with no ambient user. A working stop is platform-held, so every
+    // transition recorded here is the synthetic_risk case: the placement is Synthetic and the flag is set.
+    private static AuditRecord AuditFor(StopPlanRecord plan, StopStaging before, StopStaging after, string detail) => new()
+    {
+        UserId = plan.UserId,
+        Action = AuditAction.ConnectionLoss,
+        Placement = AuditPlacement.Synthetic,
+        SyntheticRisk = true,
+        StopPlanId = plan.Id,
+        Before = before.ToString(),
+        After = after.ToString(),
+        Detail = detail,
+        RecordedAt = DateTimeOffset.UtcNow, // a record-keeping timestamp, not a decision input
+    };
+
+    // Writes the audit rows tolerating any failure: the safety action has already committed and its high-severity
+    // log stands, so an audit-store failure is logged and swallowed — it must never fail the guard (gh#220). Only a
+    // cooperative cancellation propagates.
+    private async Task AuditSafelyAsync(IEnumerable<AuditRecord> records, CancellationToken cancellationToken)
+    {
+        List<AuditRecord> rows = [.. records];
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await _auditLog.WriteAsync(rows, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error, "Audit write failed for {Count} synthetic_risk transition(s); the safety action still completed.",
+                rows.Count);
+        }
     }
 }
 

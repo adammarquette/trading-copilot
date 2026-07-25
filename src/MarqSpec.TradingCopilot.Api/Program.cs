@@ -2,6 +2,7 @@ using System.Text;
 using MarqSpec.Client.ProjectX.DependencyInjection;
 using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Accounts;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Flatten;
@@ -75,6 +76,10 @@ builder.Services.AddHostedService<StopPromotionHost>();
 // events and fires / cancels / expires pending conditional entries on their trigger. Harmless with none.
 builder.Services.AddScoped<ConditionalFiringService>();
 builder.Services.AddHostedService<ConditionalOrderHost>();
+
+// The immutable audit trail (engineering §9, ADR-0007, gh#220): a secondary, failure-tolerant write the orphan
+// guard uses to record each synthetic-stop transition with its synthetic_risk flag. Scoped alongside the guard.
+builder.Services.AddScoped<IAuditLog, AuditLog>();
 
 // Connection-loss orphan handling (ADR-0007, ADR-0013, gh#209): the monitor watches the venue connection and,
 // on a drop, orphans the hidden synthetic stops (the native safety stop stays the floor); on reconnect it
