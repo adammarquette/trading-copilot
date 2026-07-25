@@ -61,7 +61,12 @@ each hand out account `9001`, and an `ESM25` on one is not the other's, so nothi
 
 **Capabilities are explicit** (`VenueCapability` flags on each adapter; `Require(…)` throws
 `VenueCapabilityNotSupportedException`). Venues really do differ — historical bars sit behind a paid tier on
-Finnhub, order types vary — so a gap fails loudly at the seam instead of surfacing mid-execution (**Q-14**).
+Finnhub, order types vary — so a gap fails loudly at the seam instead of surfacing mid-execution (**Q-14**). The
+**ProjectX adapter** reaches `HistoricalBars`, `Quotes`, `ClosePosition`, `BracketOrders`, and — since **gh#219**
+— `AccountStreaming` (order / position / fill events over the user hub, behind the singleton `IAccountEventStream`
+seam, parallel to the `IVenueConnection` liveness seam); `MarketDepth`, `ModifyOrder`, and `TrailingStops` remain
+**declared-but-unreached** by the neutral contract and stay unadvertised, so a caller never commits to a path that
+cannot work.
 
 **What must not leak across it:** transport shape (ProjectX = one realtime host, two SignalR hubs; Tradovate =
 two separate sockets), auth scheme, and how the venue expresses its **execution mode** (ProjectX exposes a

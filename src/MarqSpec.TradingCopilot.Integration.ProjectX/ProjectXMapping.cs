@@ -245,6 +245,99 @@ public static class ProjectXMapping
         };
     }
 
+    /// <summary>Maps the gateway's bid/ask side onto the venue-neutral buy/sell (gh#219).</summary>
+    /// <param name="side">The gateway's side.</param>
+    /// <returns>Buy or sell.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">The side is not recognized.</exception>
+    public static OrderSide ToVenueSide(ClientModels.OrderSide side)
+    {
+        return side switch
+        {
+            ClientModels.OrderSide.Bid => OrderSide.Buy,
+            ClientModels.OrderSide.Ask => OrderSide.Sell,
+            _ => throw new ArgumentOutOfRangeException(nameof(side), side, "Unrecognized gateway order side."),
+        };
+    }
+
+    /// <summary>Maps the gateway's order status onto the venue-neutral order state (gh#219).</summary>
+    /// <param name="status">The gateway's order status.</param>
+    /// <returns>The neutral state; a status the adapter cannot map becomes <see cref="VenueOrderState.Unknown"/>.</returns>
+    public static VenueOrderState ToVenueOrderState(ClientModels.OrderStatus status)
+    {
+        return status switch
+        {
+            ClientModels.OrderStatus.Open => VenueOrderState.Working,
+            ClientModels.OrderStatus.Filled => VenueOrderState.Filled,
+            ClientModels.OrderStatus.Cancelled => VenueOrderState.Cancelled,
+            ClientModels.OrderStatus.Expired => VenueOrderState.Expired,
+            ClientModels.OrderStatus.Rejected => VenueOrderState.Rejected,
+            ClientModels.OrderStatus.Pending => VenueOrderState.Pending,
+
+            // None, or a status a newer gateway adds, must not read as a real state -- fail closed (gh#60).
+            _ => VenueOrderState.Unknown,
+        };
+    }
+
+    /// <summary>Maps a gateway order-update onto the neutral <see cref="OrderStateEvent"/> (gh#219).</summary>
+    /// <param name="update">The gateway's order update.</param>
+    /// <param name="venue">The venue to tag the event with.</param>
+    /// <returns>The neutral order-state event.</returns>
+    public static OrderStateEvent ToOrderStateEvent(ClientModels.OrderUpdate update, VenueId venue)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+
+        return new OrderStateEvent(
+            VenueAccountId.Create(venue, update.AccountId.ToString(CultureInfo.InvariantCulture)),
+            ToUtc(update.UpdateTimestamp ?? update.CreationTimestamp),
+            update.Id.ToString(CultureInfo.InvariantCulture),
+            ToVenueOrderState(update.Status),
+            update.FillVolume,
+            update.FilledPrice is { } filledPrice ? new Price(filledPrice) : null);
+    }
+
+    /// <summary>Maps a gateway trade notification onto the neutral <see cref="FillEvent"/> (gh#219).</summary>
+    /// <param name="trade">The gateway's trade notification.</param>
+    /// <param name="venue">The venue to tag the event with.</param>
+    /// <returns>The neutral fill event; the gateway trade id is its idempotency key.</returns>
+    public static FillEvent ToFillEvent(ClientModels.TradeNotification trade, VenueId venue)
+    {
+        ArgumentNullException.ThrowIfNull(trade);
+
+        return new FillEvent(
+            VenueAccountId.Create(venue, trade.AccountId.ToString(CultureInfo.InvariantCulture)),
+            ToUtc(trade.CreationTimestamp),
+            trade.OrderId.ToString(CultureInfo.InvariantCulture),
+            trade.Id.ToString(CultureInfo.InvariantCulture),
+            ToVenueSide(trade.Side),
+            trade.Size,
+            new Price(trade.Price),
+            trade.Fees,
+            trade.Voided);
+    }
+
+    /// <summary>Maps a gateway position-update onto the neutral <see cref="PositionEvent"/> (gh#219).</summary>
+    /// <param name="position">The gateway's position update.</param>
+    /// <param name="venue">The venue to tag the event with.</param>
+    /// <returns>The neutral position event, with a signed net exposure.</returns>
+    public static PositionEvent ToPositionEvent(ClientModels.PositionUpdate position, VenueId venue)
+    {
+        ArgumentNullException.ThrowIfNull(position);
+
+        int netQuantity = position.Type switch
+        {
+            ClientModels.PositionType.Long => position.Size,
+            ClientModels.PositionType.Short => -position.Size,
+            _ => 0,
+        };
+
+        return new PositionEvent(
+            VenueAccountId.Create(venue, position.AccountId.ToString(CultureInfo.InvariantCulture)),
+            ToUtc(position.CreationTimestamp),
+            VenueContractId.Create(venue, position.ContractId),
+            netQuantity,
+            new Price(position.AveragePrice));
+    }
+
     /// <summary>Expresses a bar duration as the gateway's unit plus a count.</summary>
     /// <param name="barSize">The bar duration.</param>
     /// <returns>The gateway's unit and unit count.</returns>

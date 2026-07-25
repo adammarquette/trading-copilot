@@ -1,6 +1,7 @@
 using System.Text;
 using MarqSpec.Client.ProjectX.DependencyInjection;
 using MarqSpec.TradingCopilot.Api;
+using MarqSpec.TradingCopilot.Api.Accounts;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Flatten;
@@ -49,6 +50,11 @@ builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
 // orphan guard can watch for a drop. One credential set per process (ADR-0015) -> one connection.
 builder.Services.AddSingleton<IVenueConnection, ProjectXConnection>();
 
+// The account-event streaming seam (R-17, gh#219): a process-wide singleton over the venue's user hub, carrying
+// order / position / fill events. One credential set per process (ADR-0015) -> one user hub, so a singleton like
+// the connection seam above, kept off the scoped ITradingVenue.
+builder.Services.AddSingleton<IAccountEventStream, ProjectXAccountEventStream>();
+
 // The event backbone (ADR-0001) behind its seam: today a Timescale hypertable; a future bus is an adapter
 // change, not a rewrite. Producers/consumers arrive with market-data ingestion (R-1).
 builder.Services.AddScoped<IEventLog, TimescaleEventLog>();
@@ -75,6 +81,14 @@ builder.Services.AddHostedService<ConditionalOrderHost>();
 // re-arms them. Harmless with no hidden stops, so it always runs.
 builder.Services.AddScoped<OrphanGuardService>();
 builder.Services.AddHostedService<VenueConnectionMonitorHost>();
+
+// The account-event consumer (R-17, R-11, gh#219): reads order / fill events off the user-hub seam and turns
+// venue truth into journal state -- writing Fill rows (the entity's first producer) and advancing an order to
+// Filled / PartiallyFilled / Rejected. Before this an order stopped at Working, blind to what the venue did next.
+// Harmless with no accounts / no events, so it always runs; a fresh scope per event holds no scoped dep across
+// the stream, and the capability is Require'd through the seam at the call (R-17).
+builder.Services.AddScoped<AccountEventIngestionService>();
+builder.Services.AddHostedService<AccountEventStreamHost>();
 
 // Settlement-boundary position reconcile (R-13, ADR-0013, gh#193): reports positions from venue truth tagged
 // with their mark basis (live / settlement re-mark / declared-unknown), so a settlement re-mark is never read
