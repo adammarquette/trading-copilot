@@ -92,9 +92,20 @@ public sealed class AccountEventStreamHost : BackgroundService
         {
             // Fresh scope per event: no scoped dependency held across the stream, and a failed write is isolated.
             await using AsyncServiceScope scope = _services.CreateAsyncScope();
-            await scope.ServiceProvider
-                .GetRequiredService<AccountEventIngestionService>()
-                .ProcessAsync(accountEvent, cancellationToken);
+            if (accountEvent is PositionEvent { NetQuantity: 0 } exit)
+            {
+                // A position going flat retires whatever protection stood for it (OCO-cancel-on-exit, gh#183) --
+                // a dangling safety stop is a live resting order with no position behind it.
+                await scope.ServiceProvider
+                    .GetRequiredService<OcoExitService>()
+                    .ProcessExitAsync(exit, cancellationToken);
+            }
+            else
+            {
+                await scope.ServiceProvider
+                    .GetRequiredService<AccountEventIngestionService>()
+                    .ProcessAsync(accountEvent, cancellationToken);
+            }
         }
     }
 }

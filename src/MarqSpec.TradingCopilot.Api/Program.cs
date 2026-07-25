@@ -93,6 +93,13 @@ builder.Services.AddHostedService<VenueConnectionMonitorHost>();
 // Harmless with no accounts / no events, so it always runs; a fresh scope per event holds no scoped dep across
 // the stream, and the capability is Require'd through the seam at the call (R-17).
 builder.Services.AddScoped<AccountEventIngestionService>();
+
+// OCO-cancel-on-exit (R-11, ADR-0007, gh#183): the account-event seam's first real consumer. When the stream
+// reports a position flat, it retires the synthetic stop plans and cancels the dangling native protective legs
+// (safety bracket, promoted stop, take-profit) -- a dangling safety stop is a live resting order with no position
+// behind it. Every exit route (manual flatten, the promoted stop firing, auto-flatten, kill-switch flatten-all)
+// reaches it the same way. Resolved per-event by AccountEventStreamHost.
+builder.Services.AddScoped<OcoExitService>();
 builder.Services.AddHostedService<AccountEventStreamHost>();
 
 // Settlement-boundary position reconcile (R-13, ADR-0013, gh#193): reports positions from venue truth tagged

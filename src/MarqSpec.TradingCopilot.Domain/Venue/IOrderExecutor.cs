@@ -41,4 +41,22 @@ public interface IOrderExecutor : IVenue
         VenueAccountId account,
         VenueContractId contract,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Lists the orders <b>resting live at the venue</b> for an account (gh#183) — the venue's own truth, used by
+    /// OCO-cancel-on-exit to find the protective legs still standing on a contract that has gone flat.
+    /// </summary>
+    /// <remarks>
+    /// A <b>fail-closed default</b>: a venue that cannot list its working orders throws rather than silently
+    /// reporting none, so a caller degrades <b>loudly</b> (R-17) instead of leaving a dangling leg it never saw.
+    /// An adapter that can list overrides this.
+    /// </remarks>
+    /// <param name="account">The account whose working orders to list.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The orders resting at the venue for the account.</returns>
+    /// <exception cref="NotSupportedException">This venue cannot list working orders.</exception>
+    Task<IReadOnlyList<WorkingOrder>> GetWorkingOrdersAsync(
+        VenueAccountId account,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("This venue does not support listing working orders.");
 }

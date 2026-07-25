@@ -288,6 +288,20 @@ public sealed class ProjectXVenue : ITradingVenue
             : ProjectXMapping.ToPositionSnapshot(open, Id);
     }
 
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<WorkingOrder>> GetWorkingOrdersAsync(
+        VenueAccountId account,
+        CancellationToken cancellationToken = default)
+    {
+        // The gateway's open-orders truth (gh#183): OCO-cancel-on-exit reads this to find the protective legs still
+        // resting on a now-flat contract. The gateway returns no parent/OCO linkage, so the caller decides which
+        // legs are dangling by matching against the journaled entries, not a field here.
+        IEnumerable<ClientModels.Order> orders =
+            await _api.GetOpenOrdersAsync(ProjectXMapping.ToAccountId(account, Id), cancellationToken);
+
+        return [.. orders.Select(order => ProjectXMapping.ToWorkingOrder(order, Id))];
+    }
+
     private async IAsyncEnumerable<Quote> ReadQuotesAsync(
         string contractKey,
         [EnumeratorCancellation] CancellationToken cancellationToken)
