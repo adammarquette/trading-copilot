@@ -17,6 +17,7 @@ using MarqSpec.TradingCopilot.Data.Events;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
@@ -123,6 +124,25 @@ builder.Services.AddHostedService<AutoFlattenHost>();
 // trigger/close logic, so a bug in the primary cannot disable it. Always on, like the primary (R-13).
 builder.Services.AddScoped<AutoFlattenWatchdogService>();
 builder.Services.AddHostedService<AutoFlattenWatchdogHost>();
+
+// The dead-man's switch (R-13, gh#244, ADR-0019): the THIRD tier, and the only one that lives OUTSIDE this
+// process. Both tiers above die with the host -- so if it dies before a deadline, the flatten never fires and
+// nothing alerts. This inverts that: the app reports flat to an external monitor, which pages when the report
+// FAILS TO ARRIVE. Silence becomes the alarm. Validate the check URLs at startup so a malformed one fails fast
+// rather than at 14:35; an UNCONFIGURED switch is allowed but warns loudly from the host (never silent).
+builder.Services.Configure<CheckInOptions>(builder.Configuration.GetSection(CheckInOptions.SectionName));
+CheckInOptions checkIn = builder.Configuration.GetSection(CheckInOptions.SectionName).Get<CheckInOptions>() ?? new CheckInOptions();
+_ = checkIn.HeartbeatUri;
+foreach (FlattenSchedule schedule in (builder.Configuration.GetSection(FlattenOptions.SectionName).Get<FlattenOptions>() ?? new FlattenOptions()).ToSchedules())
+{
+    _ = checkIn.UrlFor(schedule.Instrument);
+}
+
+// A short timeout by design: a hung monitor must never become a hung safety path.
+builder.Services.AddHttpClient<IDeadMansSwitch, HttpDeadMansSwitch>(
+    client => { client.Timeout = TimeSpan.FromSeconds(10); });
+builder.Services.AddScoped<FlattenCheckInService>();
+builder.Services.AddHostedService<DeadMansSwitchHost>();
 
 // The R-14 environment, mapped ONCE at the composition root from the host (gh#9): practice anywhere, live only
 // in production, undeclared nowhere -- and an unrecognised environment name fails closed to Development

@@ -101,6 +101,17 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
   follow-ups (not the gating spine): an **opposing-market-order** alternative close if the venue's own close
   primitive keeps rejecting, and a **client-side local fallback** (a future PWA, ADR-0010 — flattens when the whole
   cloud tier is unreachable). **Prove on practice before live.**
+- **The blind spot both tiers shared is closed (gh#244, 2026-07-25, [ADR-0019](0019-alerting-channel-and-thresholds.md)).**
+  This ADR's own argument against a single scheduler — *"a tier outage takes it down too"* — applied just as much to
+  the **alerting**: the primary, the watchdog and any in-stack rule engine all die with the host, so a host that died
+  before a deadline flattened nothing **and said nothing**. The worst failure produced perfect silence. A
+  **dead-man's switch** now inverts it: `Api/Flatten/DeadMansSwitchHost` reports each instrument flat to a monitor on
+  **independent infrastructure** once its deadline has passed and venue truth confirms no exposure, plus an
+  unconditional liveness heartbeat — and the monitor pages when a report **fails to arrive**. `FlattenCheckIn.Decide`
+  withholds the report whenever exposure remains, so **silence is the alarm** exactly when it should be. A flat
+  session still reports (otherwise every quiet day pages), and a deliberately-disabled market reports *not
+  applicable* rather than an all-clear it is not entitled to give. **It makes the failure visible, not self-healing**
+  — a page still needs a human with a phone, which is what the client-side local fallback above would change.
 - **End-of-day / settlement reconciliation:** **the settlement boundary is handled (gh#193, 2026-07-25).**
   `Domain/Flatten/MarketSession` derives the per-instrument settlement / maintenance window from the instrument's
   session close on the DST-aware `MarketClock`; `Api/Recovery/PositionReconciliationService` (and `GET

@@ -223,10 +223,43 @@ nor token is ever printed.
 state. Once the App is live, this fallback is retired and (with `gh#45`) its approval can become a required
 check.
 
+## The dead-man's switch (operator setup — required before live)
+
+The **only** alerting tier that survives this process dying (R-13, `gh#244`,
+[ADR-0019](adr/0019-alerting-channel-and-thresholds.md)). Every other alert assumes something is alive to raise it;
+if the host dies before an auto-flatten deadline, the flatten never fires **and nothing alerts**. The app reports to
+an external monitor, which pages when the report **fails to arrive**.
+
+**A deployment without it is silently missing its most important safety net.** The app starts and warns loudly, but
+nothing else notices.
+
+1. **Create the Pushover application** and note the user key + app token (ADR-0019 — Emergency priority repeats until
+   acknowledged and bypasses Do Not Disturb; a channel without both is not a pager).
+2. **Create the monitor checks** on a cron-monitor (healthchecks.io or equivalent) — **on infrastructure independent
+   of this app.** One sharing this host or this Railway project is not a dead-man's switch, it is a second thing that
+   dies at the same moment.
+   - **Liveness:** period 1 min, grace 3 min.
+   - **Per instrument:** expected on **weekdays**, by that market's flatten deadline **+ 5 min** (ES/NQ ~14:35 CT,
+     CL ~13:20, GC ~12:20 — confirm against your configured deadlines, not these examples).
+3. **Route every check to Pushover** at **Emergency** priority.
+4. **Set the environment variables** (`CheckIn__HeartbeatUrl`, `CheckIn__Instruments__N__Symbol` / `__Url`) — see
+   `.env.example`. Under compose, only the keys named in the app service's `environment:` map are forwarded, and
+   **four instrument slots (0–3)** are wired; a fifth market needs another pair added there.
+5. **Verify it pages.** Stop the app before a deadline and confirm the page arrives. An unverified dead-man's switch
+   is an assumption, not a safety net.
+
+**Ping URLs are capability URLs** — whoever holds one can forge an all-clear on a safety path. Treat them as secrets:
+environment only, never committed, never pasted into an issue. The app never logs them.
+
+**If you deliberately disable auto-flatten for a market** (R-13's warned, own-risk override), **pause that market's
+monitor check too** — the app will correctly refuse to vouch for a market nothing is watching, so the absent check-in
+would otherwise page every day.
+
 ## Deploy procedure
 - **Non-prod (dev / staging):** automatic on merge — CI builds + deploys.
 - **Production:** **human-approved** (§9). Promote `staging → main`; CI deploys; smoke tests verify. A person must be
   aware of and approve any production deploy.
+- **Before the first production deploy:** the dead-man's switch above is provisioned and **proven to page**.
 
 ## Rollback procedure
 - Triggered by a **failed production smoke test** or an operator decision.

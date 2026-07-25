@@ -150,11 +150,22 @@ the rule, not noise to tolerate.
 
 ## Follow-ups
 
-- **Operator, once (record in the [runbook](../deployment-runbook.md)):** create the Pushover application and the
-  external monitor checks; supply both via environment; **pause the monitor check for any market whose
-  auto-flatten is deliberately disabled**, or its absent check-in will page.
-- **`gh#243`** the `INotificationChannel` seam + Pushover adapter · **`gh#244`** the dead-man's switch ·
-  **`gh#245`** Alertmanager rules and routing · **`gh#246`** the QA suite.
+- **Operator, once — now written up in the [runbook](../deployment-runbook.md) §*The dead-man's switch*:** create the
+  Pushover application and the external monitor checks, on **independent infrastructure**; supply both via
+  environment; **pause the monitor check for any market whose auto-flatten is deliberately disabled**, or its absent
+  check-in will page; and **verify it pages** by stopping the app before a deadline — an unverified dead-man's switch
+  is an assumption, not a safety net.
+- **`gh#244` — Layer 3 landed with this ADR.** `Domain/Flatten/FlattenCheckIn` decides when the system has earned the
+  right to report flat (withholding while exposed, reporting on a quiet day, declining for a disabled market);
+  `Api/Flatten/DeadMansSwitchHost` drives the daily per-instrument check-in and the liveness heartbeat;
+  `HttpDeadMansSwitch` pings the monitor and is failure-tolerant by construction — a transport fault returns false
+  rather than throwing, because a report that did not arrive is exactly what should page. **No exchange calendar was
+  needed** after all: a holiday has no exposure, so the market is trivially flat and checks in.
+- **`gh#243`** the `INotificationChannel` seam + Pushover adapter (Layer 1) · **`gh#245`** Alertmanager rules and
+  routing (Layer 2) · **`gh#246`** the QA suite.
+- **Thresholds are recorded but not yet enforced.** The P1/P2/P3 tables above describe what `gh#245` must build; only
+  the dead-man's switch's own rules (check-in absent by deadline + 5 min, heartbeat missed ≥ 3 intervals) are live
+  today, and they live in the **monitor's** configuration rather than in this repo.
 - **Confirm the deadlines against the CME rulebook.** The times here inherit the flatten schedule's own caveat
   that they are operator-provided reference times, not verified exchange data.
 - **Escalation beyond one person.** Out of scope while the operation is an on-call-of-one; revisit if that changes.

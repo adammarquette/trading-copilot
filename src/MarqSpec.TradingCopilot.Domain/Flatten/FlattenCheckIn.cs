@@ -30,6 +30,38 @@ namespace MarqSpec.TradingCopilot.Domain.Flatten;
 public static class FlattenCheckIn
 {
     /// <summary>
+    /// Whether a check-in could possibly be sent for this instrument at <paramref name="now"/> — the cheap gate
+    /// that decides if venue truth is worth fetching at all.
+    /// </summary>
+    /// <remarks>
+    /// Purely an efficiency guard in front of <see cref="Decide"/>, which remains the authority: without it the
+    /// service would read venue positions once a minute all afternoon for an instrument that already reported
+    /// flat. It deliberately answers only the questions that need no venue call — enabled, past the deadline, not
+    /// already sent today — and never the exposure question.
+    /// </remarks>
+    /// <param name="schedule">The instrument's flatten schedule.</param>
+    /// <param name="now">The current instant, in any offset.</param>
+    /// <param name="lastCheckedInOn">The market day a check-in was last sent for this instrument, if any.</param>
+    /// <returns><see langword="true"/> when venue truth should be fetched and <see cref="Decide"/> consulted.</returns>
+    public static bool IsDue(FlattenSchedule schedule, DateTimeOffset now, DateOnly? lastCheckedInOn)
+    {
+        ArgumentNullException.ThrowIfNull(schedule);
+
+        if (!schedule.Enabled)
+        {
+            return false;
+        }
+
+        DateTime marketNow = MarketClock.ToMarketTime(now);
+        if (marketNow < marketNow.Date + schedule.Deadline.ToTimeSpan())
+        {
+            return false;
+        }
+
+        return lastCheckedInOn != DateOnly.FromDateTime(marketNow);
+    }
+
+    /// <summary>
     /// Decides whether to report this instrument flat at <paramref name="now"/>.
     /// </summary>
     /// <param name="schedule">The instrument's flatten schedule — supplies the deadline and the enabled flag.</param>
