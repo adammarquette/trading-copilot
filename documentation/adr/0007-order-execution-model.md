@@ -317,6 +317,25 @@ completes. This is the general rule for the coming order / guardrail / kill / fl
 a safety action must never be able to *prevent* it. *Still deferred within the audit:* those broader write sites, and
 the **real-time operator alert** (gh#222) — the high-severity log remains the interim alert.
 
+## Update (2026-07-25) — the send-as-is fast path (gh#181)
+The opt-in **`Send as-is`** from R-11(b) — the Approve split-button's menu item — now exists as
+`POST /accounts/{id}/orders/send-as-is`. An operator who has already decided collapses **arm → take** into one
+action; it **skips the manual review, never the gate**. The handler shares the *same* `ComposeAsync` ladder and the
+*same* `OrderExecutionService.SendAsync` as the direct send (a single extracted `TransmitAsync` tail — no second
+copy of the guard ladder, the gh#148 drift lesson), so the kill switch, R-14 mode × environment, the mismatch and
+order-type refusals, the flat-account and credential-key (ADR-0015) preconditions, the R-5 gate and R-16 caps all
+apply unchanged, and the transmitted quantity is the gate's **approved** quantity — never the requested one. A
+refused send-as-is journals no order row; a *sized* attempt always leaves its `GateDecisionRecord`.
+
+The journal now records **how** each order entered, via a nullable `Order.EntryMethod`
+(`OrderEntryMethod`: `Manual`, `ArmedTake`, `ModifiedTake`, `SendAsIs`, `Conditional`; the sentinel `Unknown` is
+DB-refused, and NULL admits rows journaled before the field existed). This is the taxonomy this ADR named at the
+top — *"Manual ticket, take-a-suggestion, send-as-is, a modified take, and a conditional"* — made durable: an
+armed ticket stages `ArmedTake`, an edit before take reclassifies it `ModifiedTake` (R-11 records deviations), a
+one-action send is `SendAsIs`, a fired conditional is `Conditional`. *Out of scope (their own increments):* the
+**default entry-action preference** and its practice-only / confirm-to-enable guard (gh#218), and the split-button
+UI (gh#25).
+
 ## Consequences
 **Positive**
 - **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move
