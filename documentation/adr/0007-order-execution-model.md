@@ -133,7 +133,22 @@ an exchange-held stop that does not exist. Because promotion is idempotent (an a
 the consumer commits its cursor per batch and at-least-once redelivery on restart is safe. The watcher reads
 across the R-20 boundary deliberately — it is background plumbing acting for the deployment, not a request-user.
 
-*Still deferred:* OCO-cancel-on-exit, take-profit brackets, and connection-liveness orphan handling.
+## Update (2026-07-24) — the take-profit bracket (gh#170)
+The **third leg** now lands: `OrderProposal.Target` / `OrderRequest.ProfitTarget` carry an optional take-profit,
+and `OrderExecutionService` transmits it as the profit side of a **native OCO bracket** alongside the
+always-native protective stop (ProjectX `takeProfitBracket` — a limit-type bracket at the target). It holds the
+**mirror of safety-beyond-actual**: a take-profit must sit on the **winning** side of entry — above it for a
+long, below it for a short — and a wrong-side target is refused **before the gate**
+(`ExecutionOutcome.RefusedByInvalidTarget`), for arm and send alike, rather than dropped or flipped into
+something the operator did not ask for. A `null` target stays valid: the entry rests with its protective stop
+alone (the two-leg bracket unchanged). Because the bracket is native, the venue gives **exchange-managed OCO**
+for free — target and stop cancel one another on fill.
+
+*Still deferred:* the **app-level OCO-cancel-on-exit** — cancelling a *synthetic/hidden* leg, or the safety
+stop, when a position exits by manual flatten or by the promoted actual stop (it needs account-streaming / fill
+events, `VenueCapability.AccountStreaming`); the **operator-facing wiring** — a take-profit field on the send
+DTO and persisting it on the order row so **arm → take** round-trips it (a data-model change of its own); and
+connection-liveness orphan handling.
 
 ## Consequences
 **Positive**

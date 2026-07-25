@@ -202,6 +202,15 @@ public sealed class ProjectXVenue : ITradingVenue
                     StopPrice = protectiveStop.Value,
                 }
                 : null,
+            // The take-profit leg (ADR-0007, gh#170): the profit side of the OCO, a limit-type bracket at the
+            // target price the gateway holds and attaches on fill. Absent for a stop-only (two-leg) bracket.
+            TakeProfitBracket = request.ProfitTarget is { } profitTarget
+                ? new ClientModels.OrderBracket
+                {
+                    Type = ProjectXMapping.ToClientType(OrderType.Limit),
+                    LimitPrice = profitTarget.Value,
+                }
+                : null,
         };
 
         ClientModels.PlaceOrderResponse response = await _api.PlaceOrderAsync(payload, cancellationToken);

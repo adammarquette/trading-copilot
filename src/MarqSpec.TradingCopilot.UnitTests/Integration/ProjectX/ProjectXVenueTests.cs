@@ -191,6 +191,35 @@ public class ProjectXVenueTests
     }
 
     [Fact]
+    public async Task PlaceOrderAsync_ShouldAttachATakeProfitBracket_FromTheProfitTarget()
+    {
+        // The take-profit leg (gh#170): the target rides the entry as a limit-type take-profit bracket, so the
+        // gateway holds it as the profit side of a native OCO alongside the stop-loss bracket.
+        ClientModels.PlaceOrderRequest? sent = null;
+        A.CallTo(() => _api.PlaceOrderAsync(A<ClientModels.PlaceOrderRequest>._, A<CancellationToken>._))
+            .Invokes((ClientModels.PlaceOrderRequest p, CancellationToken _) => sent = p)
+            .Returns(new ClientModels.PlaceOrderResponse { Success = true, OrderId = 555 });
+
+        await _venue.PlaceOrderAsync(MarketBuy() with { ProfitTarget = new Price(5_010m) }, CancellationToken.None);
+
+        sent!.TakeProfitBracket.Should().NotBeNull();
+        sent.TakeProfitBracket!.LimitPrice.Should().Be(5_010m); // a limit-type bracket at the target price
+    }
+
+    [Fact]
+    public async Task PlaceOrderAsync_ShouldSendNoTakeProfitBracket_WhenThereIsNoProfitTarget()
+    {
+        ClientModels.PlaceOrderRequest? sent = null;
+        A.CallTo(() => _api.PlaceOrderAsync(A<ClientModels.PlaceOrderRequest>._, A<CancellationToken>._))
+            .Invokes((ClientModels.PlaceOrderRequest p, CancellationToken _) => sent = p)
+            .Returns(new ClientModels.PlaceOrderResponse { Success = true, OrderId = 555 });
+
+        await _venue.PlaceOrderAsync(MarketBuy(), CancellationToken.None); // no take-profit on this ticket
+
+        sent!.TakeProfitBracket.Should().BeNull();
+    }
+
+    [Fact]
     public async Task PlaceOrderAsync_ShouldRefuseATrailingStop_WhileTheTicketCarriesNoTrailDistance()
     {
         OrderRequest trailing = MarketBuy() with { Type = OrderType.TrailingStop };
