@@ -48,5 +48,8 @@ strategy; offline scope must be **deliberately narrow** so nothing stale is ever
 - Author the **manifest + icon set** and the **service-worker update flow** (skip-waiting / prompt-to-refresh).
 - Define the **disconnected-shell** UX (the "data stale / reconnecting" surface) and the no-order-while-offline guard.
 - Validate **install + standalone** on Android and **Add to Home Screen** on iOS; record the capability matrix.
-- Wire **web-push** for flatten warnings (P1) once the notification channel is designed.
+- Wire **web-push** for flatten warnings (P1) — **unblocked**: the notification channel is designed
+  ([ADR-0019](0019-alerting-channel-and-thresholds.md), 2026-07-25). Web push lands as a **second adapter behind
+  the same `INotificationChannel` seam**, not a competing path; Pushover carries the pager tier meanwhile, since
+  a browser notification neither repeats until acknowledged nor bypasses Do Not Disturb.
 - Author **Playwright E2E UI tests** covering SPA/PWA standalone launch, SignalR outbox sequence continuity on network drop, and multi-screen `BroadcastChannel` state parity once the SPA lands.
