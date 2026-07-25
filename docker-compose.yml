@@ -46,6 +46,19 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # This block is an ALLOWLIST: compose forwards only the keys named here, so a .env value whose key is
+    # absent is read for interpolation and then silently dropped (gh#236). Two entry shapes, and the
+    # difference matters:
+    #
+    #   KEY: "${KEY:-default}"   sets KEY ALWAYS, falling back to a compose-level default.
+    #   KEY:                     (null value) passes through ONLY IF the var is defined (in .env or the
+    #                            shell); when undefined the key is ABSENT from the container, not empty --
+    #                            identical to a bare `- KEY` list entry (verified via `docker compose config`).
+    #
+    # Prefer the null pass-through for anything the APP already defaults. An empty string BINDS and
+    # overwrites the app's default -- for `Flatten__` that would mean a zeroed attempt cap or an
+    # unparseable deadline on the R-13 safety path, and for a required field (Instruments__N__Symbol)
+    # a startup crash. Absent is the only value that means "the app decides".
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: "http://+:8080"
@@ -96,6 +109,44 @@ services:
       CheckIn__Instruments__2__Url: "${CheckIn__Instruments__2__Url:-}"
       CheckIn__Instruments__3__Symbol: "${CheckIn__Instruments__3__Symbol:-}"
       CheckIn__Instruments__3__Url: "${CheckIn__Instruments__3__Url:-}"
+      # Auto-flatten (R-13, gh#185/gh#187) -- pass-through, never defaulted here. Auto-flatten is ON BY
+      # DEFAULT in the app with built-in per-market deadlines, and it CANNOT be disabled by omission; these
+      # keys only OVERRIDE. Leaving them unset is the normal case and keeps the app's own defaults, which is
+      # why the null-value pass-through is required: a compose-level default here would silently become a
+      # second source of truth for a safety deadline (gh#236).
+      Flatten__PollIntervalSeconds:
+      Flatten__MaxFlattenAttempts:
+      Flatten__WatchdogGraceMinutes:
+      Flatten__WatchdogPollIntervalSeconds:
+      # Per-instrument overrides. Compose cannot forward an open-ended indexed list, so the slots are
+      # ENUMERATED and CAPPED AT FOUR (0-3) -- exactly the four markets that carry built-in deadlines
+      # (ES, NQ, CL, GC), so every governed market can be retimed or deliberately disabled. A FIFTH market
+      # needs another block added here; that is a deliberate edit, not a silent limit. The slots are
+      # INDEPENDENT, not positional: the .NET binder collects whatever indices are present, so using __2__
+      # alone binds correctly and gaps are harmless (verified against the binder, gh#236). Keep each
+      # instrument's fields on the SAME index -- that is what groups them into one entry.
+      Flatten__Instruments__0__Symbol:
+      Flatten__Instruments__0__Enabled:
+      Flatten__Instruments__0__SessionClose:
+      Flatten__Instruments__0__DeadlineOverride:
+      Flatten__Instruments__1__Symbol:
+      Flatten__Instruments__1__Enabled:
+      Flatten__Instruments__1__SessionClose:
+      Flatten__Instruments__1__DeadlineOverride:
+      Flatten__Instruments__2__Symbol:
+      Flatten__Instruments__2__Enabled:
+      Flatten__Instruments__2__SessionClose:
+      Flatten__Instruments__2__DeadlineOverride:
+      Flatten__Instruments__3__Symbol:
+      Flatten__Instruments__3__Enabled:
+      Flatten__Instruments__3__SessionClose:
+      Flatten__Instruments__3__DeadlineOverride:
+      # Execution sanity caps (R-16, gh#11) -- the last-line fat-finger bounds, and the stop-promotion band.
+      # Pass-through for the same reason: the app's conservative defaults must win unless deliberately set.
+      Execution__MaxContractsPerOrder:
+      Execution__MaxNotional:
+      Execution__FatFingerBandTicks:
+      Execution__StopPromotionTicks:
     ports:
       - "8080:8080"
 

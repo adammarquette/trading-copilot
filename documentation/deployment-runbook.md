@@ -48,12 +48,25 @@ distinct name so a later `docker compose pull` cannot clobber your build. Buildi
   but the app takes its **connection string from config** (`ConnectionStrings__*` env / `appsettings`), so you can
   point at the compose DB, a local Postgres, or a managed instance instead.
 - **Secrets** stay in a **gitignored `.env`** (copy `.env.example`) — never committed; cloud secrets come from Railway (§8).
-- **`.env` under compose is an allowlist, not a passthrough.** The app service's `environment:` map names every key
-  compose forwards; anything else in `.env` is used for interpolation and then **silently dropped**. Today
-  `Flatten__*` and `Execution__*` are **not** on the map, so those overrides do nothing under `docker compose` —
-  the app runs on its built-in defaults (safe, but not what was asked for). Tracked as
-  [gh#236](https://github.com/adammarquette/trading-copilot/issues/236); the caveat is flagged inline in
-  `.env.example` until it lands. **Adding a bound `Options` section is not done until its keys are on that map.**
+- **`.env` under compose is an allowlist, not a passthrough.** The app service's `environment:` block names every
+  key compose forwards; anything else in `.env` is used for interpolation and then **silently dropped**.
+  **Adding a bound `Options` section is not done until its keys are on that list** — the omission is invisible at
+  runtime, because the app simply uses its own defaults and says nothing (gh#236 was exactly that, for the
+  `Flatten__` auto-flatten deadlines).
+- **Two entry shapes, and the difference is load-bearing** (gh#236). The `environment:` block is a **map**, so:
+  - `KEY: "${KEY:-default}"` — **always sets** `KEY`, with a compose-level fallback. Use only where compose must
+    impose a value the app cannot know (the DB host, the local-dev signing key).
+  - `KEY:` — a **null** value **passes through only if defined** in `.env` or the shell; when undefined the key is
+    **absent from the container**, not empty (identical to a bare `- KEY` list entry — verified via
+    `docker compose config`). Use this for anything the **app already defaults**.
+
+  The distinction matters because an empty string **binds** and overwrites the app's default. On the `Flatten__`
+  safety path that would mean a zeroed attempt cap or an unparseable deadline, and on a `required` field
+  (`Flatten__Instruments__N__Symbol`) a startup crash. **Absent is the only value that means "the app decides."**
+- **The per-instrument flatten slots are capped at four** (`Flatten__Instruments__0__` … `__3__`) — compose cannot
+  forward an open-ended indexed list. Four covers every market with a built-in deadline (ES, NQ, CL, GC). A fifth
+  needs its keys added to `docker-compose.yml`: a deliberate edit, not a silent limit. The slots are
+  **independent, not positional** — the .NET binder collects whatever indices are present, so gaps are harmless.
 - Schema changes apply via **`dotnet ef database update`** against the configured connection (as the data layer lands).
 
 ## Environments ↔ branches
