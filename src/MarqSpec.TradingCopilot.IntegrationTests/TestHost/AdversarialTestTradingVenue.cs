@@ -18,6 +18,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private readonly HashSet<string> _survivingContracts = new(StringComparer.Ordinal);
     private readonly HashSet<string> _throwingContracts = new(StringComparer.Ordinal);
     private readonly List<(string AccountKey, string ContractKey)> _closeCalls = [];
+    private bool _venueUnreachable;
 
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
 
@@ -55,6 +56,16 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// <summary>Every <c>ClosePositionAsync</c> the flatten path issued, in order (account key + contract key).</summary>
     public IReadOnlyList<(string AccountKey, string ContractKey)> ClosePositionCalls => _closeCalls.AsReadOnly();
 
+    /// <summary>
+    /// Makes the venue read path (<c>GetAccountsAsync</c> / <c>GetPositionsAsync</c>) THROW — the venue is
+    /// unreachable, so venue truth cannot be obtained. The settlement reconcile must then declare-unknown rather
+    /// than present a stale live-looking number (gh#194, R-19). Set AFTER discovery; cleared by <see cref="ResetPositions"/>.
+    /// </summary>
+    public void MakeVenueUnreachable() => _venueUnreachable = true;
+
+    /// <summary>Whether the venue read path should throw (see <see cref="MakeVenueUnreachable"/>).</summary>
+    internal bool VenueUnreachable => _venueUnreachable;
+
     /// <summary>Clears seeded positions, close behaviour, and recorded close calls — call at the start of each test.</summary>
     public void ResetPositions()
     {
@@ -62,6 +73,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _survivingContracts.Clear();
         _throwingContracts.Clear();
         _closeCalls.Clear();
+        _venueUnreachable = false;
     }
 
     internal IReadOnlyList<PositionSnapshot> PositionsFor(VenueAccountId account) =>
@@ -117,6 +129,11 @@ internal class AdversarialTestTradingVenue : ITradingVenue
 
     public Task<IReadOnlyList<VenueAccount>> GetAccountsAsync(CancellationToken cancellationToken = default)
     {
+        if (_factory.VenueUnreachable)
+        {
+            throw new InvalidOperationException("Venue unreachable (test): venue truth cannot be obtained.");
+        }
+
         // ADVERSARIAL STUB: Deliberately report TradingMode.Live for ALL accounts from the venue.
         // This proves that domain logic (AccountModeMapping.RecomputeMode) recomputes mode from conventions
         // rather than trusting whatever mode the venue reports.
