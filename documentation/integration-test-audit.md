@@ -99,7 +99,7 @@ with status**, not a copy of the bodies. Statuses current as of the gh#160 reali
 | [#186](https://github.com/adammarquette/trading-copilot/issues/186) | Auto-flatten scheduler host | `AutoFlattenSchedulerIntegrationTests.cs` (+ shared `TestHost` position stub & `FlattenTestPostgresFactory`) | ✅ Delivered (gh#235) |
 | [#188](https://github.com/adammarquette/trading-copilot/issues/188) | Redundant watchdog + rejected-order | `AutoFlattenWatchdogIntegrationTests.cs` | ✅ Delivered (gh#238) |
 | [#190](https://github.com/adammarquette/trading-copilot/issues/190) | Kill switch — outbound halt, cancel working, flatten/halt, startup rehydration | `KillSwitchIntegrationTests.cs` (reuses the gh#186 position stub) | ✅ Delivered (gh#239) |
-| [#192](https://github.com/adammarquette/trading-copilot/issues/192) | Connection-loss orphan handling (drop → orphan, reconnect → re-arm, restart reconcile) | `OrphanHandlingIntegrationTests.cs` (+ `TestHost/OrphanTestPostgresFactory.cs`) | ✅ Delivered (this PR) |
+| [#192](https://github.com/adammarquette/trading-copilot/issues/192) | Connection-loss orphan handling (drop → orphan, reconnect → re-arm, restart reconcile) | `OrphanHandlingIntegrationTests.cs` (+ `TestHost/OrphanTestPostgresFactory.cs`) | ✅ Delivered (gh#241) |
 | [#210](https://github.com/adammarquette/trading-copilot/issues/210) | *(work:code)* connection credential rotation + soft-delete | Coding Agent — `ConnectionEndpoints.cs` | 📝 Open · filed by gh#160 |
 
 ---
