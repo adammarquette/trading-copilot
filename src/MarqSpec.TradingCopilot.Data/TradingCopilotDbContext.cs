@@ -189,6 +189,16 @@ public class TradingCopilotDbContext : TenantDbContext
                 table.HasCheckConstraint("CK_Orders_Mode_NotUndeclared", "\"Mode\" <> 0");
                 table.HasCheckConstraint("CK_Orders_Status_NotUnknown", "\"Status\" <> 0");
                 table.HasCheckConstraint("CK_Orders_Size_Positive", "\"Size\" > 0");
+
+                // The take-profit-on-the-winning-side invariant, below the domain (ADR-0007, gh#173): a
+                // take-profit only means anything above entry for a long, below it for a short -- the mirror of
+                // CK_StopPlans_SafetyBeyondActual. Side-dependent, so a cross-column CHECK expresses it --
+                // OrderSide.Buy = 0, Sell = 1; NULL (no profit leg) passes.
+                table.HasCheckConstraint(
+                    "CK_Orders_TakeProfit_WinningSide",
+                    "\"TakeProfitPrice\" IS NULL "
+                    + "OR (\"Side\" = 0 AND \"TakeProfitPrice\" > \"EntryPrice\") "
+                    + "OR (\"Side\" = 1 AND \"TakeProfitPrice\" < \"EntryPrice\")");
             });
         });
 

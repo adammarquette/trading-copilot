@@ -82,6 +82,14 @@ public class Order : IUserOwned
     /// <summary>The stop price, for types that carry one.</summary>
     public decimal? StopPrice { get; set; }
 
+    /// <summary>
+    /// The optional take-profit price (ADR-0007, gh#173) — kept whole so a staged ticket's target survives the
+    /// <b>arm → take</b> re-build (R-12). A side-dependent DB check enforces it sits on the winning side of
+    /// <see cref="EntryPrice"/> (above for a long, below for a short); <see langword="null"/> is the two-leg
+    /// bracket (protective stop only).
+    /// </summary>
+    public decimal? TakeProfitPrice { get; set; }
+
     /// <summary>The lifecycle status. <see cref="OrderStatus.Unknown"/> is refused by a DB check.</summary>
     public required OrderStatus Status { get; set; }
 

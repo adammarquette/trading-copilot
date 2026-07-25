@@ -18,6 +18,11 @@ namespace MarqSpec.TradingCopilot.Api.Orders;
 /// <param name="SafetyStop">The safety-stop price — the deterministic worst case (R-5).</param>
 /// <param name="ReferencePrice">The current reference price the fat-finger band measures from.</param>
 /// <param name="Type">How the order rests. Trailing stops are refused (no trail distance on the ticket).</param>
+/// <param name="Target">
+/// The optional take-profit price (ADR-0007, gh#173) — the profit side of a native OCO bracket. It must sit on
+/// the <b>winning</b> side of <paramref name="Entry"/> (above for a long, below for a short); a wrong-side
+/// target is refused before the gate. <see langword="null"/> means no profit leg (the two-leg bracket).
+/// </param>
 public sealed record SendOrderRequest(
     string Symbol,
     decimal TickSize,
@@ -28,7 +33,8 @@ public sealed record SendOrderRequest(
     decimal Stop,
     decimal SafetyStop,
     decimal ReferencePrice,
-    OrderType Type = OrderType.Market);
+    OrderType Type = OrderType.Market,
+    decimal? Target = null);
 
 /// <summary>The outcome of a send attempt — always explains itself (R-5).</summary>
 /// <param name="Outcome">Placed, or which guard refused.</param>
@@ -52,13 +58,15 @@ public sealed record SendOrderResponse(
 /// <param name="ApprovedQuantity">The contracts the gate would authorize right now.</param>
 /// <param name="BindingLayer">The risk layer that bound the decision, when one did.</param>
 /// <param name="Reason">The gate's human-readable why — always populated (R-5).</param>
+/// <param name="Target">The staged take-profit target, when one was set — so the operator sees and edits it (gh#173).</param>
 public sealed record StagedOrderResponse(
     Guid OrderId,
     string Status,
     string Outcome,
     int ApprovedQuantity,
     RiskLayer? BindingLayer,
-    string Reason)
+    string Reason,
+    decimal? Target)
 {
     /// <summary>Projects a staged row and its decision.</summary>
     /// <param name="order">The staged order.</param>
@@ -74,6 +82,7 @@ public sealed record StagedOrderResponse(
             decision.Outcome.ToString(),
             decision.ApprovedQuantity,
             decision.BindingLayer,
-            decision.Reason);
+            decision.Reason,
+            order.TakeProfitPrice);
     }
 }
