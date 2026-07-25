@@ -90,6 +90,13 @@ public sealed class OrderExecutionService : IOrderExecutionService
             return ExecutionResult.RefusedByUnsupportedType(unrepresentable);
         }
 
+        if (WrongSideTarget(request.Proposal) is { } invalidTarget)
+        {
+            // A wrong-side take-profit is a self-contradiction, like a mismatched request -- refused before the
+            // gate, so arm and send alike reject it rather than discovering it at take (gh#170).
+            return ExecutionResult.RefusedByInvalidTarget(invalidTarget);
+        }
+
         return ExecutionResult.Evaluated(_gate.Evaluate(request.Proposal, request.Risk));
     }
 
@@ -136,6 +143,7 @@ public sealed class OrderExecutionService : IOrderExecutionService
             StopPriceFor(request))
         {
             ProtectiveStop = request.Proposal.SafetyStop,
+            ProfitTarget = request.Proposal.Target,
         };
 
         PlacedOrder placed = await _venue.PlaceOrderAsync(order, cancellationToken);
@@ -194,6 +202,33 @@ public sealed class OrderExecutionService : IOrderExecutionService
 
             _ => $"Order type '{(int)type}' is not a recognized type and cannot be expressed.",
         };
+    }
+
+    /// <summary>
+    /// Whether a take-profit target sits on the wrong side of entry, and why if so. A take-profit only means
+    /// anything on the <b>winning</b> side — above entry for a long, below it for a short (the mirror of the
+    /// staged stop's safety-beyond-actual ordering). A wrong-side target contradicts the position's direction,
+    /// so it is refused rather than transmitted as a bracket that would take a loss or flipped into something the
+    /// operator did not ask for. An absent target is nothing to check.
+    /// </summary>
+    private static string? WrongSideTarget(OrderProposal proposal)
+    {
+        if (proposal.Target is not { } target)
+        {
+            return null;
+        }
+
+        bool onWinningSide = proposal.Side switch
+        {
+            OrderSide.Buy => target.Value > proposal.Entry.Value,
+            OrderSide.Sell => target.Value < proposal.Entry.Value,
+            _ => false, // an unrecognized side is refused, never assumed (the fail-open lesson)
+        };
+
+        return onWinningSide
+            ? null
+            : $"A {proposal.Side} take-profit at {target.Value} is not on the winning side of entry "
+                + $"{proposal.Entry.Value} — a long profits above entry, a short below it. Nothing was sized.";
     }
 
     private static Price? LimitPriceFor(ExecutionRequest request)

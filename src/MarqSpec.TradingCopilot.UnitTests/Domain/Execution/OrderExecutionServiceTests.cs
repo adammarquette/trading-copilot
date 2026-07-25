@@ -52,16 +52,23 @@ public class OrderExecutionServiceTests
 
     private static InstrumentSpec Es => InstrumentSpec.Create(InstrumentId.Parse("ES"), 0.25m, 50m);
 
-    private static OrderProposal Proposal(int quantity = 4)
+    private static OrderProposal Proposal(int quantity = 4, Price? target = null, OrderSide side = OrderSide.Buy)
     {
+        // Stops flip with side (both on the losing side of entry, safety beyond the working stop); entry is
+        // 5000 either way. A take-profit target, when present, must ride the winning side.
+        (Price stop, Price safety) = side == OrderSide.Buy
+            ? (new Price(4_995m), new Price(4_990m))
+            : (new Price(5_005m), new Price(5_010m));
+
         return new OrderProposal(
             Es,
-            OrderSide.Buy,
+            side,
             quantity,
             Entry: new Price(5_000m),
-            Stop: new Price(4_995m),
-            SafetyStop: new Price(4_990m),
-            ReferencePrice: new Price(5_000m));
+            Stop: stop,
+            SafetyStop: safety,
+            ReferencePrice: new Price(5_000m),
+            Target: target);
     }
 
     private static RiskContext Context(VenueAccountId? account = null)
@@ -79,10 +86,11 @@ public class OrderExecutionServiceTests
     private static ResolvedContract EsContract =>
         new(VenueContractId.Create(Venue, "CON.F.US.EP.U26"), InstrumentId.Parse("ES"));
 
-    private static ExecutionRequest Request(VenueAccount account, int quantity = 4)
+    private static ExecutionRequest Request(
+        VenueAccount account, int quantity = 4, Price? target = null, OrderSide side = OrderSide.Buy)
     {
         return new ExecutionRequest(
-            Proposal(quantity),
+            Proposal(quantity, target, side),
             EsContract,
             account,
             Context(account.Id));
@@ -133,6 +141,81 @@ public class OrderExecutionServiceTests
         result.Outcome.Should().Be(ExecutionOutcome.RefusedByUnprotectableStop);
         result.Order.Should().BeNull();
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // --- The take-profit target: the third bracket leg (gh#170, ADR-0007) ---
+
+    [Fact]
+    public async Task SendAsync_ShouldAttachTheTakeProfitTarget_AsANativeBracketLeg()
+    {
+        // The profit side of the OCO bracket: an entry rests with its take-profit target (on the winning side)
+        // so the exchange holds it alongside the protective stop and takes the move without the operator watching.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+        OrderRequest? sent = null;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes((OrderRequest r, CancellationToken _) => sent = r)
+            .ReturnsLazily((OrderRequest r, CancellationToken _) =>
+                Task.FromResult(new PlacedOrder(r.Account, "555", DateTimeOffset.UnixEpoch)));
+
+        ExecutionResult result = await _service.SendAsync(
+            Request(Account(TradingMode.Practice), target: new Price(5_010m)), CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.Placed);
+        sent!.ProfitTarget.Should().Be(new Price(5_010m)); // the proposal's target, rode with the entry
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldSendNoProfitTarget_WhenNoTakeProfitIsGiven()
+    {
+        // Regression: a null target is valid -- the two-leg bracket (entry + protective stop) still sends
+        // unchanged, so this increment does not disturb every existing send.
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+        OrderRequest? sent = null;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes((OrderRequest r, CancellationToken _) => sent = r)
+            .ReturnsLazily((OrderRequest r, CancellationToken _) =>
+                Task.FromResult(new PlacedOrder(r.Account, "555", DateTimeOffset.UnixEpoch)));
+
+        await _service.SendAsync(Request(Account(TradingMode.Practice)), CancellationToken.None); // no target
+
+        sent!.ProfitTarget.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(OrderSide.Buy, 4_990)]  // a long taking profit BELOW entry is a loss, not a profit
+    [InlineData(OrderSide.Buy, 5_000)]  // at entry is no profit either
+    [InlineData(OrderSide.Sell, 5_010)] // a short taking profit ABOVE entry is a loss
+    [InlineData(OrderSide.Sell, 5_000)]
+    public async Task SendAsync_ShouldRefuse_WhenTheTakeProfitTargetIsNotOnTheWinningSideOfEntry(
+        OrderSide side, int target)
+    {
+        // The mirror of safety-beyond-actual: a take-profit must sit where the position PROFITS -- above entry
+        // for a long, below it for a short. A wrong-side target is a contradiction; refuse it before sizing,
+        // never silently drop or flip it into a stop.
+        GateReturns(GateDecision.Allow(4, "never reached -- refused before the gate"));
+
+        ExecutionRequest request = Request(Account(TradingMode.Practice), side: side, target: new Price(target));
+
+        ExecutionResult result = await _service.SendAsync(request, CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByInvalidTarget);
+        result.Decision.Should().BeNull();
+        A.CallTo(() => _gate.Evaluate(A<OrderProposal>._, A<RiskContext>._)).MustNotHaveHappened();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public void Evaluate_ShouldRefuseAWrongSideTarget_ExactlyAsSendWould()
+    {
+        // Arm judges a ticket exactly as send does (gh#11 inc 2): a wrong-side target is refused at arm, not
+        // discovered at take.
+        GateReturns(GateDecision.Allow(4, "never reached"));
+
+        ExecutionResult result = _service.Evaluate(
+            Request(Account(TradingMode.Practice), target: new Price(4_990m))); // below entry for a long
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByInvalidTarget);
+        result.Decision.Should().BeNull();
     }
 
     // --- Evaluate: the ladder minus transmission (gh#11 increment 2) ---
@@ -505,6 +588,7 @@ public class OrderExecutionServiceTests
             Request(Account(TradingMode.Practice)) with { Risk = Context(VenueAccountId.Create(Venue, "9999")) },
             Request(Account(TradingMode.Practice)) with { Type = OrderType.TrailingStop },
             Request(Account(TradingMode.Practice)) with { Type = (OrderType)99 },
+            Request(Account(TradingMode.Practice), target: new Price(4_990m)), // wrong-side take-profit
         ];
 
         foreach (ExecutionRequest request in refused)

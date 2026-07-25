@@ -85,4 +85,12 @@ public sealed record ExecutionResult(
     {
         return new ExecutionResult(ExecutionOutcome.RefusedByUnprotectableStop, Order: null, Decision: null, reason);
     }
+
+    /// <summary>A take-profit target sat on the wrong side of entry; refused before the gate (ADR-0007, gh#170).</summary>
+    /// <param name="reason">Why the target contradicts the position's direction.</param>
+    /// <returns>A refused result carrying no gate decision — nothing was sized.</returns>
+    public static ExecutionResult RefusedByInvalidTarget(string reason)
+    {
+        return new ExecutionResult(ExecutionOutcome.RefusedByInvalidTarget, Order: null, Decision: null, reason);
+    }
 }

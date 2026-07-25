@@ -29,4 +29,12 @@ public sealed record OrderRequest(
     /// is being opened (a flatten or a stand-alone exit).
     /// </summary>
     public Price? ProtectiveStop { get; init; }
+
+    /// <summary>
+    /// The optional <b>take-profit target</b> to attach to this entry (ADR-0007, gh#170): the profit side of a
+    /// native OCO bracket the venue holds and attaches <i>on fill</i>, so a favourable move is taken without the
+    /// operator watching. Shares <see cref="VenueCapability.BracketOrders"/> with <see cref="ProtectiveStop"/>.
+    /// <c>null</c> where the entry rests with its protective stop alone — the two-leg bracket.
+    /// </summary>
+    public Price? ProfitTarget { get; init; }
 }

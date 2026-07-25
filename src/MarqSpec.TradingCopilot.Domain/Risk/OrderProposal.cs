@@ -14,6 +14,12 @@ namespace MarqSpec.TradingCopilot.Domain.Risk;
 /// <b>true worst case</b>, so it — not the working stop — is what the hard account limits are measured against.
 /// </param>
 /// <param name="ReferencePrice">The current market price, used for the fat-finger check (R-16).</param>
+/// <param name="Target">
+/// The optional take-profit price — the third bracket leg (ADR-0007, gh#170). It must sit on the <b>winning</b>
+/// side of <paramref name="Entry"/> — above it for a long, below it for a short — the mirror of the
+/// safety-beyond-actual stop ordering; the execution path refuses a wrong-side target rather than flip it.
+/// <see langword="null"/> means no profit leg, which stays valid: the entry rests with its protective stop alone.
+/// </param>
 public sealed record OrderProposal(
     InstrumentSpec Instrument,
     Venue.OrderSide Side,
@@ -21,4 +27,5 @@ public sealed record OrderProposal(
     Price Entry,
     Price Stop,
     Price SafetyStop,
-    Price ReferencePrice);
+    Price ReferencePrice,
+    Price? Target = null);

@@ -54,6 +54,13 @@ public enum ExecutionOutcome
     RefusedByUnprotectableStop,
 
     /// <summary>
+    /// Refused because a take-profit target was given but does not sit on the <b>winning</b> side of entry —
+    /// above it for a long, below it for a short (ADR-0007, gh#170). A wrong-side target contradicts itself;
+    /// it is refused <b>before</b> the gate rather than silently dropped or flipped. Nothing was sized or sent.
+    /// </summary>
+    RefusedByInvalidTarget,
+
+    /// <summary>
     /// The full ladder ran and the gate decided — but nothing was transmitted (the arm/edit path, gh#11).
     /// The decision may be allowing, resizing, or blocking; transmission is a separate, explicit act.
     /// </summary>
