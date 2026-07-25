@@ -38,6 +38,7 @@ public sealed class VenueConnectionMonitorHost : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         bool? wasConnected = null; // reconcile on the first pass (null differs from either state)
+        bool pendingRearm = false; // a re-arm left stops unverifiable (venue unreachable) -- retry while connected (gh#191)
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -49,19 +50,23 @@ public sealed class VenueConnectionMonitorHost : BackgroundService
                 IVenueConnection connection = _services.GetRequiredService<IVenueConnection>();
                 bool isConnected = connection.IsConnected;
 
-                // A change (or the first observation) reconciles the synthetic stops to the current liveness.
-                if (wasConnected != isConnected)
+                // A change (or the first observation) reconciles the synthetic stops to the current liveness. While
+                // connected, a re-arm that left stops unverifiable (venue unreachable) is retried each pass until it
+                // resolves -- a since-closed position's orphaned stop must not linger orphaned forever (gh#191).
+                if (wasConnected != isConnected || (isConnected && pendingRearm))
                 {
                     await using AsyncServiceScope scope = _services.CreateAsyncScope();
                     OrphanGuardService guard = scope.ServiceProvider.GetRequiredService<OrphanGuardService>();
 
                     if (isConnected)
                     {
-                        await guard.RearmAsync(stoppingToken);
+                        RearmOutcome outcome = await guard.RearmAsync(stoppingToken);
+                        pendingRearm = outcome.StillOrphaned > 0;
                     }
                     else
                     {
                         await guard.OrphanAsync(stoppingToken);
+                        pendingRearm = false;
                     }
 
                     wasConnected = isConnected;

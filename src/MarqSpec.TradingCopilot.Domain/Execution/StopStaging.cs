@@ -30,4 +30,13 @@ public enum StopStaging
     /// promotes.
     /// </summary>
     Orphaned = 3,
+
+    /// <summary>
+    /// <b>Retired</b> by re-arm re-validation (ADR-0013, gh#191): on reconnect, the position this stop protected
+    /// was found — against <b>venue truth</b>, never local state — to have <b>closed</b> (or reversed) during the
+    /// outage, so the plan is retired rather than re-armed. A stop for a position that no longer exists must not
+    /// promote (ADR-0013's "never auto-act on rehydrated state — re-validate first"). Terminal: the promotion
+    /// watcher acts only on <see cref="Hidden"/>, so a retired plan never promotes and is never re-armed.
+    /// </summary>
+    Retired = 4,
 }

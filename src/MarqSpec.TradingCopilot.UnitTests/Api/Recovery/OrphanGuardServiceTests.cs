@@ -1,55 +1,141 @@
+using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Recovery;
+using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Recovery;
 
 /// <summary>
-/// The orphan guard (gh#209, ADR-0007/0013): on a venue-connection loss, hidden working stops can no longer
-/// promote, so they are orphaned; on reconnect they re-arm. The safety-relevant behaviours: only <c>Hidden</c>
-/// stops orphan (a native one is exchange-held and untouched), the transition is one-directional per event, and
-/// the guard acts across the R-20 boundary (background plumbing) while preserving each stop's owner.
+/// The orphan guard (gh#209, gh#191, ADR-0007/0013): on a venue-connection loss hidden stops orphan; on reconnect
+/// they re-arm — but only after <b>per-position re-validation against venue truth</b> (gh#191). The safety-relevant
+/// behaviours: a stop whose position is still open re-arms; one whose position closed during the outage is
+/// <b>retired</b>, not re-armed; re-validation that cannot reach the venue leaves the stop orphaned rather than
+/// re-arming on an unverified assumption; a partial close reconciles the protected quantity; and the guard acts
+/// across the R-20 boundary while preserving each stop's owner.
 /// </summary>
 public class OrphanGuardServiceTests
 {
+    private static VenueId Projectx => VenueId.Parse("projectx");
+
+    private static VenueAccountId AccountId => VenueAccountId.Create(Projectx, "9001");
+    private const string Contract = "CON.F.US.MES.U26";
+
+    private readonly Guid _operator = Guid.NewGuid();
     private readonly string _database = Guid.NewGuid().ToString();
+    private readonly IProjectXVenueFactory _factory = A.Fake<IProjectXVenueFactory>();
+    private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
-    private TradingCopilotDbContext Context(Guid? user = null)
+    public OrphanGuardServiceTests()
     {
-        DbContextOptions<TradingCopilotDbContext> options =
-            new DbContextOptionsBuilder<TradingCopilotDbContext>()
-                .UseInMemoryDatabase(_database)
-                .Options;
-
-        return new TradingCopilotDbContext(options, new FixedUser(user ?? Guid.NewGuid()));
+        A.CallTo(() => _factory.Create(A<FirmConventions>._)).Returns(_venue);
+        A.CallTo(() => _venue.Id).Returns(Projectx);
+        A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
+            [new VenueAccount(AccountId, "PRAC-50K", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Practice)]);
+        // Default: the protected position is still open (a 2-lot long) unless a test says otherwise.
+        VenuePositions(Pos(2));
     }
 
-    private OrphanGuardService Service() => new(Context(), NullLogger<OrphanGuardService>.Instance);
+    private TradingCopilotDbContext Context(Guid? user = null) =>
+        new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
+            new FixedUser(user ?? Guid.Empty));
 
+    private OrphanGuardService Service(string credentialKey = "topstep-main") =>
+        new(Context(), _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
+            NullLogger<OrphanGuardService>.Instance);
+
+    private static PositionSnapshot Pos(int net) =>
+        new(AccountId, VenueContractId.Create(Projectx, Contract), net, new Price(5_000m));
+
+    private void VenuePositions(params PositionSnapshot[] positions) =>
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>(positions);
+
+    private void VenueUnreachable() =>
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("venue unreachable during re-validation"));
+
+    // A bare stop (no order / account) — enough for the OrphanAsync path, which is DB-only.
     private async Task SeedStopAsync(StopStaging staging, Guid? owner = null)
     {
-        await using TradingCopilotDbContext context = Context();
-        context.StopPlans.Add(new StopPlanRecord
-        {
-            Id = Guid.NewGuid(),
-            UserId = owner ?? Guid.NewGuid(),
-            OrderId = Guid.NewGuid(),
-            Side = OrderSide.Buy,
-            EntryPrice = 5_000m,
-            ActualStopPrice = 4_995m,
-            SafetyStopPrice = 4_990m,
-            ProximityMetric = StopProximityMetric.Ticks,
-            ProximityValue = 8,
-            Staging = staging,
-        });
+        await using TradingCopilotDbContext context = Context(_operator);
+        context.StopPlans.Add(NewPlan(Guid.NewGuid(), staging, owner ?? _operator));
         await context.SaveChangesAsync();
+    }
+
+    // A full orphaned plan with its order + account + connection — what re-arm re-validation needs.
+    private async Task<Guid> SeedOrphanedAsync(
+        int orderSize = 2, OrderSide side = OrderSide.Buy, string credentialKey = "topstep-main", Guid? owner = null)
+    {
+        Guid who = owner ?? _operator;
+        Guid firmId = Guid.NewGuid();
+        Guid connectionId = Guid.NewGuid();
+        Guid accountId = Guid.NewGuid();
+        Guid orderId = Guid.NewGuid();
+        Guid planId = Guid.NewGuid();
+
+        await using TradingCopilotDbContext seed = Context(who);
+        seed.Firms.Add(new Firm { Id = firmId, UserId = who, Name = "Topstep", Type = FirmType.PropFirm });
+        seed.Connections.Add(new Connection { Id = connectionId, UserId = who, FirmId = firmId, Platform = "projectx", CredentialKey = credentialKey });
+        seed.Accounts.Add(new Account
+        {
+            Id = accountId,
+            UserId = who,
+            ConnectionId = connectionId,
+            VenueAccountKey = "9001",
+            Name = "PRAC-50K",
+            Stage = AccountStage.Practice,
+            Mode = TradingMode.Practice,
+            CanTrade = true,
+            IsVisible = true,
+        });
+        seed.Orders.Add(new Order
+        {
+            Id = orderId,
+            UserId = who,
+            AccountId = accountId,
+            Instrument = Contract,
+            Symbol = "MES",
+            Side = side,
+            Size = orderSize,
+            Type = OrderType.Market,
+            Status = OrderStatus.Working,
+            Mode = TradingMode.Practice,
+            VenueOrderKey = "V-1",
+            PlacedAt = DateTimeOffset.UnixEpoch,
+        });
+        seed.StopPlans.Add(NewPlan(planId, StopStaging.Orphaned, who, orderId, side));
+        await seed.SaveChangesAsync();
+        return planId;
+    }
+
+    private static StopPlanRecord NewPlan(Guid id, StopStaging staging, Guid owner, Guid? orderId = null, OrderSide side = OrderSide.Buy) => new()
+    {
+        Id = id,
+        UserId = owner,
+        OrderId = orderId ?? Guid.NewGuid(),
+        Side = side,
+        EntryPrice = 5_000m,
+        ActualStopPrice = side == OrderSide.Buy ? 4_995m : 5_005m,
+        SafetyStopPrice = side == OrderSide.Buy ? 4_990m : 5_010m,
+        ProximityMetric = StopProximityMetric.Ticks,
+        ProximityValue = 8,
+        Staging = staging,
+    };
+
+    private async Task<StopPlanRecord> ReloadAsync(Guid planId)
+    {
+        await using TradingCopilotDbContext reload = Context();
+        return await reload.StopPlans.IgnoreQueryFilters().SingleAsync(plan => plan.Id == planId);
     }
 
     private async Task<List<StopPlanRecord>> AllStopsAsync()
@@ -58,35 +144,22 @@ public class OrphanGuardServiceTests
         return await reload.StopPlans.IgnoreQueryFilters().ToListAsync();
     }
 
+    // --- Orphaning (unchanged from gh#209) ---
+
     [Fact]
     public async Task OrphanAsync_ShouldMoveOnlyHiddenStopsToOrphaned_LeavingNativeUntouched()
     {
         await SeedStopAsync(StopStaging.Hidden);
         await SeedStopAsync(StopStaging.Hidden);
-        await SeedStopAsync(StopStaging.Native); // exchange-held -- not synthetic, not at risk from a drop
+        await SeedStopAsync(StopStaging.Native);
 
         int orphaned = await Service().OrphanAsync(CancellationToken.None);
 
         orphaned.Should().Be(2);
         List<StopPlanRecord> stops = await AllStopsAsync();
         stops.Count(s => s.Staging == StopStaging.Orphaned).Should().Be(2);
-        stops.Count(s => s.Staging == StopStaging.Native).Should().Be(1); // the native stop is left alone
+        stops.Count(s => s.Staging == StopStaging.Native).Should().Be(1);
         stops.Should().NotContain(s => s.Staging == StopStaging.Hidden);
-    }
-
-    [Fact]
-    public async Task RearmAsync_ShouldMoveOrphanedStopsBackToHidden_SoPromotionResumes()
-    {
-        await SeedStopAsync(StopStaging.Orphaned);
-        await SeedStopAsync(StopStaging.Orphaned);
-        await SeedStopAsync(StopStaging.Native);
-
-        int rearmed = await Service().RearmAsync(CancellationToken.None);
-
-        rearmed.Should().Be(2);
-        List<StopPlanRecord> stops = await AllStopsAsync();
-        stops.Count(s => s.Staging == StopStaging.Hidden).Should().Be(2);
-        stops.Should().NotContain(s => s.Staging == StopStaging.Orphaned);
     }
 
     [Fact]
@@ -100,21 +173,109 @@ public class OrphanGuardServiceTests
         (await AllStopsAsync()).Should().OnlyContain(s => s.Staging == StopStaging.Native);
     }
 
+    // --- Re-arm re-validation (gh#191) ---
+
     [Fact]
-    public async Task OrphanAsync_ShouldActAcrossTheR20Boundary_PreservingEachOwner()
+    public async Task RearmAsync_ShouldReArmToHidden_WhenThePositionIsStillOpen()
     {
-        // Background plumbing acts for the deployment, not a request-user, so it orphans stops it does not "own"
-        // -- but never re-assigns them. (On a single-operator deployment there is one owner; the design holds.)
+        Guid planId = await SeedOrphanedAsync(orderSize: 2, side: OrderSide.Buy);
+        VenuePositions(Pos(2)); // still a 2-lot long
+
+        RearmOutcome outcome = await Service().RearmAsync(CancellationToken.None);
+
+        outcome.Rearmed.Should().Be(1);
+        (await ReloadAsync(planId)).Staging.Should().Be(StopStaging.Hidden);
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldRetire_WhenThePositionClosedDuringTheOutage()
+    {
+        Guid planId = await SeedOrphanedAsync(side: OrderSide.Buy);
+        VenuePositions(); // the venue reports no open position -- it closed during the outage
+
+        RearmOutcome outcome = await Service().RearmAsync(CancellationToken.None);
+
+        // A stop for a position that no longer exists must NOT re-arm and must NOT promote (ADR-0013).
+        outcome.Retired.Should().Be(1);
+        outcome.Rearmed.Should().Be(0);
+        (await ReloadAsync(planId)).Staging.Should().Be(StopStaging.Retired);
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldRetire_WhenThePositionFlippedDirection()
+    {
+        Guid planId = await SeedOrphanedAsync(side: OrderSide.Buy);
+        VenuePositions(Pos(-2)); // the old long is gone; a short exists now -- the old stop does not apply
+
+        RearmOutcome outcome = await Service().RearmAsync(CancellationToken.None);
+
+        outcome.Retired.Should().Be(1);
+        (await ReloadAsync(planId)).Staging.Should().Be(StopStaging.Retired);
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldLeaveOrphaned_WhenTheVenueCannotBeReached()
+    {
+        Guid planId = await SeedOrphanedAsync();
+        VenueUnreachable();
+
+        // Uncertainty resolves to the safe state (engineering §9): never re-arm on an unverified assumption. Do
+        // not throw out of the pass -- leave it orphaned and retry next pass.
+        Func<Task> act = async () => await Service().RearmAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        RearmOutcome outcome = await Service().RearmAsync(CancellationToken.None);
+        outcome.StillOrphaned.Should().BeGreaterThan(0);
+        (await ReloadAsync(planId)).Staging.Should().Be(StopStaging.Orphaned);
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldReconcileTheQuantity_WhenThePositionWasPartiallyClosed()
+    {
+        Guid planId = await SeedOrphanedAsync(orderSize: 2, side: OrderSide.Buy);
+        VenuePositions(Pos(1)); // 2 lots became 1 during the outage
+
+        RearmOutcome outcome = await Service().RearmAsync(CancellationToken.None);
+
+        // Re-arm, but protect the quantity that actually remains -- not the original.
+        outcome.Rearmed.Should().Be(1);
+        (await ReloadAsync(planId)).Staging.Should().Be(StopStaging.Hidden);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.IgnoreQueryFilters().SingleAsync()).Size.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldLeaveOrphaned_ForAnAccountOnAnotherCredentialKey()
+    {
+        Guid planId = await SeedOrphanedAsync(credentialKey: "another-firm");
+
+        RearmOutcome outcome = await Service(credentialKey: "topstep-main").RearmAsync(CancellationToken.None);
+
+        // One credential set per process (ADR-0015): not ours to re-validate; leave it for the process that serves it.
+        outcome.StillOrphaned.Should().BeGreaterThan(0);
+        (await ReloadAsync(planId)).Staging.Should().Be(StopStaging.Orphaned);
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldPreserveOwner_WhenReValidating()
+    {
         Guid alice = Guid.NewGuid();
-        Guid bob = Guid.NewGuid();
-        await SeedStopAsync(StopStaging.Hidden, owner: alice);
-        await SeedStopAsync(StopStaging.Hidden, owner: bob);
+        Guid planId = await SeedOrphanedAsync(owner: alice);
+        VenuePositions(Pos(2));
 
-        int orphaned = await Service().OrphanAsync(CancellationToken.None);
+        await Service().RearmAsync(CancellationToken.None);
 
-        orphaned.Should().Be(2);
-        List<StopPlanRecord> stops = await AllStopsAsync();
-        stops.Should().OnlyContain(s => s.Staging == StopStaging.Orphaned);
-        stops.Select(s => s.UserId).Should().BeEquivalentTo([alice, bob]); // ownership preserved, not re-assigned
+        (await ReloadAsync(planId)).UserId.Should().Be(alice); // ownership preserved, never re-assigned
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldDoNothing_WhenNoOrphanedStops()
+    {
+        await SeedStopAsync(StopStaging.Native);
+
+        RearmOutcome outcome = await Service().RearmAsync(CancellationToken.None);
+
+        outcome.Should().Be(new RearmOutcome(0, 0, 0));
     }
 }
