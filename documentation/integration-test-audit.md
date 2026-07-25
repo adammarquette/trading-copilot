@@ -19,7 +19,7 @@ The objective of this audit is to identify high-value integration testing gaps, 
    - ✅ **Staged Send Path & Order Execution (`arm` → `edit` → `take` → `cancel`)** — direct send (gh#130), the staged ladder (gh#157), and the stop-plan DB guards (gh#158) all landed against Testcontainers Postgres.
    - ✅ **R-14 Database Mode & Environment Enforcement** — the `Order.mode == Account.mode` trigger and mode × environment refusals are exercised in the order suites (gh#130, gh#157).
    - ✅ **Multi-Tenant / Multi-Operator Data Isolation (R-20 / ADR-0017)** — **gh#132**: collection-scoping, cross-tenant `404`s on accounts/orders, and gate-decision isolation proven at the `DbContext` (§2).
-   - ⬜ **Connection Lifecycle & Account Stage** — creation, discovery, and stage resolution are testable now (**gh#142**, realigned). Credential *rotation* and connection *soft-delete* are **missing features**, not missing tests → filed as **gh#210** for the Coding Agent.
+   - ✅ **Connection Lifecycle & Account Stage** — creation, discovery, and stage resolution/override covered (**gh#142**). Credential *rotation* and connection *soft-delete* remain **missing features**, not missing tests → **gh#210** for the Coding Agent.
    - ✅ **Production Read-Only Smoke Test Suite** — gh#131; the lazy-fixture fix so a deployed-target run starts no container is gh#152.
    - ✅ **Event Backbone Storage** — the append-only Timescale log at the storage tier (gh#161).
 
@@ -42,6 +42,7 @@ Below is the baseline inventory of current integration tests under [`src/MarqSpe
 | **`Data/EventBackboneIntegrationTests.cs`** | The append-only event log (ADR-0001) at the **storage tier** via `IEventLog` against the applied `AddEventBackbone` hypertable migration — envelope round-trip (`jsonb` payload, UTC instant), monotonic sequences under concurrent appends, the #156 replay two-rows-one-`Id` contract, id generation, `ReadAfter` ordering + paging, cursor upsert, blank type/source rejection; pins the retention-gap silent-skip (gh#162) and a non-UTC `OccurredAt` rejection (gh#201) (gh#161) | **Active** (Passing) |
 | **`MultiTenantIsolationIntegrationTests.cs`** | R-20 default-deny workspace isolation between two operators (ADR-0017): collection-scoping (`GET /connections` excludes the other operator), `GET /connections/{id}/accounts` → 404 for a non-owner, staged-order `take`/`cancel` → 404 (order stays `Staged`), and gate-decision isolation proven at a user-scoped `DbContext`; second operator via the invitation flow (gh#132) | **Active** (Passing) |
 | **`RiskProfileLifecycleIntegrationTests.cs`** | Per-account risk declaration (`PUT /accounts/{id}/risk`) — persistence + one-per-account replace-on-redeclaration; and the **R-12 re-gate**: a profile tightened *after* arming refuses the next `take` (422 `RefusedByRisk`, order stays `Staged`, the refusal journaled as a blocked gate decision) (gh#143) | **Active** (Passing) |
+| **`ConnectionLifecycleIntegrationTests.cs`** | Connection creation, account discovery, and the per-account stage override — the roster persists and reads back with **mode resolved from the firm's declared conventions**, not the venue's flag (Practice, not the stub's Live; unrecognised names stay `Undeclared`, gh#60); one-login-per-firm×platform `409` (ADR-0016); stage override → convention mode / `Unknown` refused; clear reverts to the resolved stage (gh#142) | **Active** (Passing) |
 
 ---
 
@@ -85,9 +86,9 @@ with status**, not a copy of the bodies. Statuses current as of the gh#160 reali
 | [#161](https://github.com/adammarquette/trading-copilot/issues/161) | Event backbone storage & replay-dedupe | `Data/EventBackboneIntegrationTests.cs` | ✅ Delivered (gh#204) · closed |
 | [#131](https://github.com/adammarquette/trading-copilot/issues/131) | Production-safe read-only smoke suite | `SystemSmokeIntegrationTests.cs` | ✅ Delivered · closed |
 | [#152](https://github.com/adammarquette/trading-copilot/issues/152) | Smoke suite starts no container on a deployed target | `SystemSmokeIntegrationTests.cs` (+ `TestHost/LazySmokeHostFixture.cs`) | ✅ Delivered (gh#205) · closed |
-| [#132](https://github.com/adammarquette/trading-copilot/issues/132) | Multi-tenant workspace & resource isolation | `MultiTenantIsolationIntegrationTests.cs` | ✅ Delivered (this PR) — realigned to the route map (gh#160) |
-| [#142](https://github.com/adammarquette/trading-copilot/issues/142) | Connection & account-stage suite | `ConnectionLifecycleIntegrationTests.cs` | 📝 Open · realigned (gh#160); missing endpoints → [#210](https://github.com/adammarquette/trading-copilot/issues/210) |
-| [#143](https://github.com/adammarquette/trading-copilot/issues/143) | Risk profile trailing drawdown & floor tracking | `RiskProfileLifecycleIntegrationTests.cs` | ✅ Delivered (this PR) — realigned per gh#160 (`PUT` verb, reuses the gh#157 harness) |
+| [#132](https://github.com/adammarquette/trading-copilot/issues/132) | Multi-tenant workspace & resource isolation | `MultiTenantIsolationIntegrationTests.cs` | ✅ Delivered (gh#213) — realigned to the route map (gh#160) |
+| [#142](https://github.com/adammarquette/trading-copilot/issues/142) | Connection & account-stage suite | `ConnectionLifecycleIntegrationTests.cs` | ✅ Delivered (this PR) — realigned (gh#160); missing endpoints → [#210](https://github.com/adammarquette/trading-copilot/issues/210) |
+| [#143](https://github.com/adammarquette/trading-copilot/issues/143) | Risk profile trailing drawdown & floor tracking | `RiskProfileLifecycleIntegrationTests.cs` | ✅ Delivered (gh#215) — realigned per gh#160 (`PUT` verb, reuses the gh#157 harness) |
 | [#210](https://github.com/adammarquette/trading-copilot/issues/210) | *(work:code)* connection credential rotation + soft-delete | Coding Agent — `ConnectionEndpoints.cs` | 📝 Open · filed by gh#160 |
 
 ---
