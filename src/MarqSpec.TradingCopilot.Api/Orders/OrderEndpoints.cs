@@ -42,7 +42,7 @@ public static class OrderEndpoints
     }
 
     /// <summary>Everything the ladder assembled for one evaluation.</summary>
-    private sealed record Composition(
+    internal sealed record Composition(
         Account Account,
         RiskProfileRecord Profile,
         ITradingVenue Venue,
@@ -360,7 +360,7 @@ public static class OrderEndpoints
     }
 
     /// <summary>The shared precondition ladder — identical for send, arm, edit, and take (gh#11).</summary>
-    private static async Task<(Composition? Composition, IResult? Refusal)> ComposeAsync(
+    internal static async Task<(Composition? Composition, IResult? Refusal)> ComposeAsync(
         Guid accountId,
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
@@ -448,7 +448,7 @@ public static class OrderEndpoints
     }
 
     /// <summary>Resolves the contract and builds the execution request; 400 on an invalid proposal.</summary>
-    private static async Task<(ExecutionRequest? Request, IResult? Refusal)> BuildRequestAsync(
+    internal static async Task<(ExecutionRequest? Request, IResult? Refusal)> BuildRequestAsync(
         Composition composed,
         string symbol,
         decimal tickSize,
@@ -486,7 +486,7 @@ public static class OrderEndpoints
     }
 
     /// <summary>Builds an order row carrying the proposal whole — the R-12 rebuild reads it back.</summary>
-    private static Order NewOrderRow(
+    internal static Order NewOrderRow(
         ICurrentUser currentUser,
         Account account,
         SendOrderRequest request,
@@ -563,7 +563,7 @@ public static class OrderEndpoints
     /// <i>is</i> the safety stop and it already rests natively. Staging requires the safety stop strictly
     /// beyond the working one, which is exactly what <see cref="StopPlan.Create"/> (and the DB check) enforce.
     /// </remarks>
-    private static void AddStopPlan(
+    internal static void AddStopPlan(
         TradingCopilotDbContext database,
         ICurrentUser currentUser,
         Order order,
@@ -596,7 +596,7 @@ public static class OrderEndpoints
         });
     }
 
-    private static void PersistDecision(
+    internal static void PersistDecision(
         TradingCopilotDbContext database,
         ICurrentUser currentUser,
         Guid accountId,
