@@ -93,4 +93,12 @@ public sealed record ExecutionResult(
     {
         return new ExecutionResult(ExecutionOutcome.RefusedByInvalidTarget, Order: null, Decision: null, reason);
     }
+
+    /// <summary>The kill switch is engaged; outbound orders are disabled, so the send was refused (ADR-0007, gh#189).</summary>
+    /// <param name="reason">That the kill switch is engaged, and how to trade again.</param>
+    /// <returns>A refused result carrying no gate decision — nothing was sized.</returns>
+    public static ExecutionResult RefusedByKillSwitch(string reason)
+    {
+        return new ExecutionResult(ExecutionOutcome.RefusedByKillSwitch, Order: null, Decision: null, reason);
+    }
 }

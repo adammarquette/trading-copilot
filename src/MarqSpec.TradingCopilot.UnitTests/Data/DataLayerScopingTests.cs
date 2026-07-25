@@ -23,6 +23,7 @@ public class DataLayerScopingTests
         typeof(Invitation),  // anonymous onboarding by token hash (R-18), resolved before a user exists
         typeof(Event),       // the append-only event backbone (ADR-0001): system plumbing, not workspace rows
         typeof(EventCursor), // per-consumer-group replay cursors for the backbone (ADR-0001): system plumbing
+        typeof(KillSwitchState), // the deployment-wide kill switch (gh#189): one row per process, not a workspace row
     };
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;

@@ -28,6 +28,7 @@ public sealed class OrderExecutionService : IOrderExecutionService
     private readonly IRiskGate _gate;
     private readonly IOrderExecutor _venue;
     private readonly DeploymentEnvironment _environment;
+    private readonly IKillSwitch _killSwitch;
 
     /// <summary>Creates the execution service.</summary>
     /// <param name="gate">The enforcing risk gate (R-5 / R-16).</param>
@@ -38,11 +39,13 @@ public sealed class OrderExecutionService : IOrderExecutionService
     /// <see cref="DeploymentEnvironment.Production"/> from a development host could walk a live account straight
     /// through the guard.
     /// </param>
-    public OrderExecutionService(IRiskGate gate, IOrderExecutor venue, DeploymentEnvironment environment)
+    /// <param name="killSwitch">The kill-switch state; while it is engaged, every send is refused (ADR-0007, gh#189).</param>
+    public OrderExecutionService(IRiskGate gate, IOrderExecutor venue, DeploymentEnvironment environment, IKillSwitch killSwitch)
     {
         _gate = gate;
         _venue = venue;
         _environment = environment;
+        _killSwitch = killSwitch;
     }
 
     /// <summary>
@@ -103,6 +106,15 @@ public sealed class OrderExecutionService : IOrderExecutionService
     /// <inheritdoc />
     public async Task<ExecutionResult> SendAsync(ExecutionRequest request, CancellationToken cancellationToken)
     {
+        // The kill switch (ADR-0007, gh#189) sits above the normal flow: while engaged, outbound orders are
+        // disabled, so every transmission -- a manual send, a take, or a conditional firing -- is refused before
+        // the order is even sized. Reducing / protective actions (auto-flatten's close, stop promotion) do not
+        // pass through this path, so a killed system can still be flattened and stays protected.
+        if (_killSwitch.IsEngaged)
+        {
+            return ExecutionResult.RefusedByKillSwitch(
+                "The kill switch is engaged — outbound orders are disabled. Disengage it before trading again.");
+        }
 
         ExecutionResult evaluated = Evaluate(request);
         if (evaluated.Outcome != ExecutionOutcome.Evaluated || evaluated.Decision is null)

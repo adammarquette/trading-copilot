@@ -16,6 +16,7 @@ public class OrderExecutionServiceTests
 
     private readonly IRiskGate _gate = A.Fake<IRiskGate>();
     private readonly IOrderExecutor _venue = A.Fake<IOrderExecutor>();
+    private readonly IKillSwitch _killSwitch = A.Fake<IKillSwitch>(); // defaults IsEngaged == false (not killed)
     private readonly OrderExecutionService _service;
 
     public OrderExecutionServiceTests()
@@ -36,7 +37,7 @@ public class OrderExecutionServiceTests
     {
         // Fixed at construction, never per send: a caller able to name its own environment could walk a live
         // account through the R-14 guard from a development host.
-        return new OrderExecutionService(_gate, _venue, environment);
+        return new OrderExecutionService(_gate, _venue, environment, _killSwitch);
     }
 
     private static VenueAccount Account(TradingMode mode)
@@ -599,6 +600,53 @@ public class OrderExecutionServiceTests
             result.Outcome.Should().NotBe(ExecutionOutcome.Placed);
             result.Reason.Should().NotBeNullOrWhiteSpace();
         }
+    }
+
+    // --- The kill switch: outbound disabled while engaged (ADR-0007, gh#189) ---
+
+    [Fact]
+    public async Task SendAsync_ShouldRefuse_WhenTheKillSwitchIsEngaged()
+    {
+        // The panic button disables outbound: while engaged, no send reaches the venue -- and it is refused above
+        // the normal flow, before the order is even sized (the gate never runs).
+        A.CallTo(() => _killSwitch.IsEngaged).Returns(true);
+        GateReturns(GateDecision.Allow(4, "the gate would allow it -- never reached"));
+
+        ExecutionResult result = await _service.SendAsync(
+            Request(Account(TradingMode.Practice)), CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByKillSwitch);
+        result.Order.Should().BeNull();
+        result.Decision.Should().BeNull();
+        A.CallTo(() => _gate.Evaluate(A<OrderProposal>._, A<RiskContext>._)).MustNotHaveHappened();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldTransmit_WhenTheKillSwitchIsNotEngaged()
+    {
+        // Guards the guard: the default (not killed) state must not block the ordinary path.
+        A.CallTo(() => _killSwitch.IsEngaged).Returns(false);
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+        VenueAccepts();
+
+        ExecutionResult result = await _service.SendAsync(
+            Request(Account(TradingMode.Practice)), CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.Placed);
+    }
+
+    [Fact]
+    public void Evaluate_ShouldStillJudgeATicket_WhenTheKillSwitchIsEngaged()
+    {
+        // The kill switch disables SENDS, not evaluation: arming / editing a ticket transmits nothing, so it is
+        // harmless prep and the gate still runs. Only SendAsync is blocked.
+        A.CallTo(() => _killSwitch.IsEngaged).Returns(true);
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+
+        ExecutionResult result = _service.Evaluate(Request(Account(TradingMode.Practice)));
+
+        result.Outcome.Should().Be(ExecutionOutcome.Evaluated);
     }
 
     [Fact]

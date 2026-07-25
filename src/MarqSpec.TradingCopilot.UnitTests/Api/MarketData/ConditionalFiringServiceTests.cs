@@ -64,6 +64,7 @@ public class ConditionalFiringServiceTests
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
         Microsoft.Extensions.Options.Options.Create(new ExecutionOptions()),
         new HostTradingEnvironment(DeploymentEnvironment.Development),
+        A.Fake<IKillSwitch>(),
         NullLogger<ConditionalFiringService>.Instance);
 
     private async Task<Guid> SeedAccountAsync()
