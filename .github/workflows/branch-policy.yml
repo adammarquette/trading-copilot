@@ -4,10 +4,11 @@ name: Branch policy
 # with exactly one allowed source per step -- and guards stacked PRs against an
 # already-merged base, where a green merge lands work nothing will ever pick up (gh#72).
 #
-# NOTE: these checks are ADVISORY until branch protection is available on the repo (it is
-# plan-gated on private repos -- see gh#45). A red check here does not currently block a
-# merge. Once protection is enabled, mark "ladder" and "stale-base" as required checks and
-# this becomes a hard gate with no changes to this file.
+# ENFORCED (gh#45): rulesets on develop/staging/main require these as status checks, so a red
+# check now BLOCKS the merge. `ladder` is required on staging/main (it is a no-op pass on develop);
+# `commit-hygiene` is required everywhere. `stale-base` is deliberately NOT a required check -- it
+# is skipped on the long-lived branches, and a required check that never runs would deadlock the
+# merge. The rulesets live in repo settings, recorded in the deployment runbook (not this file).
 
 on:
   pull_request:
