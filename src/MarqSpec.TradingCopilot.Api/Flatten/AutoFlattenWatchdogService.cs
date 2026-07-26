@@ -1,4 +1,5 @@
 using System.Text.Json;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -57,6 +58,7 @@ public sealed class AutoFlattenWatchdogService
     private readonly ProjectXConnectionOptions _projectX;
     private readonly FlattenOptions _options;
     private readonly INotificationChannel _notifications;
+    private readonly ExecutionMetrics _metrics;
     private readonly ILogger<AutoFlattenWatchdogService> _logger;
 
     /// <summary>Creates the service over the scoped database and event log.</summary>
@@ -66,6 +68,7 @@ public sealed class AutoFlattenWatchdogService
     /// <param name="projectXOptions">Carries the credential key this process serves (ADR-0015).</param>
     /// <param name="flattenOptions">The per-instrument schedule and the watchdog grace window.</param>
     /// <param name="notifications">Reaches the operator away from the desk (gh#243, ADR-0019).</param>
+    /// <param name="metrics">The execution SLIs (gh#232) — the watchdog tags its own tier.</param>
     /// <param name="logger">The logger.</param>
     public AutoFlattenWatchdogService(
         TradingCopilotDbContext database,
@@ -74,12 +77,14 @@ public sealed class AutoFlattenWatchdogService
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<FlattenOptions> flattenOptions,
         INotificationChannel notifications,
+        ExecutionMetrics metrics,
         ILogger<AutoFlattenWatchdogService> logger)
     {
         ArgumentNullException.ThrowIfNull(projectXOptions);
         ArgumentNullException.ThrowIfNull(flattenOptions);
 
         _notifications = notifications;
+        _metrics = metrics;
 
         _database = database;
         _venueFactory = venueFactory;
@@ -209,6 +214,7 @@ public sealed class AutoFlattenWatchdogService
                     "Auto-flatten watchdog CRITICAL for {Account} {Contract}: {Reason}",
                     account, position.Contract, decision.Reason);
                 await JournalAsync(CriticalEventType, account, position.Contract, decision.Reason, now, cancellationToken);
+                _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenMissed);
 
                 // P1. Shares the primary's incident key on purpose: the operator should be woken ONCE for one
                 // exposed position, not once per tier that noticed (gh#243, ADR-0019 §*The noise budget*).
@@ -248,8 +254,9 @@ public sealed class AutoFlattenWatchdogService
                 _logger.LogWarning(
                     "Auto-flatten watchdog closed {Account} {Contract} — the primary tier had left it open past its deadline.",
                     account, position.Contract);
+                _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenExecuted);
                 await JournalAsync(SavedEventType, account, position.Contract,
-                    $"Watchdog backstop closed the position — the primary did not. {decision.Reason}", now, cancellationToken);
+                        $"Watchdog backstop closed the position — the primary did not. {decision.Reason}", now, cancellationToken);
 
                 // The position is flat, so any outstanding page is cancelled and the incident re-armed. But a tier
                 // is broken: the primary should have done this. P2 — worth the operator's attention before the
@@ -266,6 +273,7 @@ public sealed class AutoFlattenWatchdogService
             }
 
             // The close returned but the venue still shows exposure (partial fill / silent reject): persist.
+            _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenEscalated);
             await JournalAsync(RejectedEventType, account, position.Contract,
                 $"Watchdog close left {position.Contract.Key} still exposed — retrying next pass. {decision.Reason}",
                 now, cancellationToken);
@@ -282,6 +290,7 @@ public sealed class AutoFlattenWatchdogService
             _logger.LogError(
                 error, "Auto-flatten watchdog close was rejected for {Account} {Contract}; will retry next pass.",
                 account, position.Contract);
+            _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenEscalated);
             await JournalAsync(RejectedEventType, account, position.Contract,
                 $"Watchdog close rejected ({error.Message}) — retrying next pass. {decision.Reason}", now, cancellationToken);
             return false;

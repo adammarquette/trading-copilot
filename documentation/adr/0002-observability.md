@@ -89,3 +89,35 @@ draft of the tests asserted a rejection there — that would have pinned a bug.
 
 *Still open:* the **LGTM stack** this exports to (gh#231), the **execution-specific SLIs** (gh#232), AI spend
 (ADR-0008), and a trace **sampling** policy.
+
+## Update (2026-07-26) — the execution SLIs, first increment (gh#232)
+
+gh#230 landed generic RED health. This adds the signals particular to a system that places orders and flattens
+before a close, in a new meter `MarqSpec.TradingCopilot.Execution` registered with the metrics pipeline.
+
+**Landed in this increment — the flatten family**, the one engineering §7 singles out (*"auto-flatten reliability
+is a monitored, alertable metric"*):
+
+- `trading.flatten.deadlines` — a counter, dimensioned by **tier** (`primary` / `watchdog`) and **outcome**
+  (`executed` / `escalated` / `missed` / `disabled` / `nothing-to-do`).
+- `trading.flatten.time_to_flat` — a **histogram**, tagged by tier.
+
+Two properties are load-bearing.
+
+**An absence must be detectable.** A deadline that passes with no exposure still emits, as
+`outcome="nothing-to-do"`. Without it, *"the flatten never fired"* and *"there was nothing to do"* are the same
+silence — and the failure this system exists to prevent would look exactly like an ordinary Tuesday. The health
+signal is the **presence of the series**; a dashboard alerts on its disappearance, which is also what makes this
+complementary to the external dead-man's switch rather than redundant with it.
+
+**The two tiers are never merged.** The whole point of a redundant watchdog is knowing *which* one saved you;
+merged counters would hide a primary quietly failing every day while the watchdog covered for it.
+
+**Cardinality is a safety property.** Dimensions come from a closed set — `outcome`, `binding_layer`, `tier`,
+`consumer_group`. No account id, order id or instrument may ever become a label: an unbounded label set takes the
+metrics backend down, which would mean instrumentation causing the very outage it exists to reveal (§9).
+
+*Still to wire (gh#295, increment 2):* the gate-decision counters, order-ack latency, kill-switch state, the
+orphaned-stop gauge, and pipeline lag / retention-gap counters. Their instruments are **already defined and
+tested** on `ExecutionMetrics`; what remains is threading the sink through five more services and their tests,
+which is a wider blast radius than this increment wanted to carry.

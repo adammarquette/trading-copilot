@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Text.Json;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -61,6 +63,7 @@ public sealed class AutoFlattenService
     private readonly ProjectXConnectionOptions _projectX;
     private readonly FlattenOptions _options;
     private readonly INotificationChannel _notifications;
+    private readonly ExecutionMetrics _metrics;
     private readonly ILogger<AutoFlattenService> _logger;
 
     /// <summary>Creates the service over the scoped database and event log.</summary>
@@ -70,6 +73,7 @@ public sealed class AutoFlattenService
     /// <param name="projectXOptions">Carries the credential key this process serves (ADR-0015).</param>
     /// <param name="flattenOptions">The per-instrument schedule and attempt cap.</param>
     /// <param name="notifications">Reaches the operator away from the desk (gh#243, ADR-0019).</param>
+    /// <param name="metrics">The execution SLIs (gh#232).</param>
     /// <param name="logger">The logger.</param>
     public AutoFlattenService(
         TradingCopilotDbContext database,
@@ -78,6 +82,7 @@ public sealed class AutoFlattenService
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<FlattenOptions> flattenOptions,
         INotificationChannel notifications,
+        ExecutionMetrics metrics,
         ILogger<AutoFlattenService> logger)
     {
         ArgumentNullException.ThrowIfNull(projectXOptions);
@@ -89,6 +94,7 @@ public sealed class AutoFlattenService
         _projectX = projectXOptions.Value;
         _options = flattenOptions.Value;
         _notifications = notifications;
+        _metrics = metrics;
         _logger = logger;
     }
 
@@ -185,7 +191,19 @@ public sealed class AutoFlattenService
         List<PositionSnapshot> open = [.. positions.Where(position => !position.IsFlat)];
         if (open.Count == 0)
         {
-            return 0; // nothing at risk on this account
+            // Nothing at risk -- but say so (gh#232). A deadline that passes quietly must still EMIT, or "the
+            // flatten never fired" and "there was nothing to do" are the same silence, and the failure this
+            // system exists to prevent looks exactly like an ordinary Tuesday. The series being present is the
+            // health signal; its absence is what a dashboard alerts on.
+            foreach (FlattenSchedule idle in schedules)
+            {
+                if (FlattenSchedule.Decide(idle, now, hasOpenPosition: false).TimeUntilDeadline <= TimeSpan.Zero)
+                {
+                    _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenNothingToDo);
+                }
+            }
+
+            return 0;
         }
 
         // Match each open position to its schedule by PRODUCT ROOT, so any month of a configured product finds its
@@ -217,12 +235,20 @@ public sealed class AutoFlattenService
             switch (decision.Action)
             {
                 case FlattenAction.Flatten:
-                    if (await CloseGroupAsync(account, venue, schedule, [.. group], maxAttempts, decision, now, cancellationToken))
                     {
-                        closed++;
-                    }
+                        long startedTicks = Stopwatch.GetTimestamp();
+                        bool flat = await CloseGroupAsync(account, venue, schedule, [.. group], maxAttempts, decision, now, cancellationToken);
+                        if (flat)
+                        {
+                            closed++;
+                            _metrics.RecordTimeToFlat(FlattenTier.Primary, Stopwatch.GetElapsedTime(startedTicks));
+                        }
 
-                    break;
+                        _metrics.RecordFlattenDeadline(
+                            FlattenTier.Primary,
+                            flat ? ExecutionMetrics.FlattenExecuted : ExecutionMetrics.FlattenEscalated);
+                        break;
+                    }
 
                 case FlattenAction.Warn:
                     await JournalAsync(WarningEventType, account, contract, decision.Reason, now, cancellationToken);
@@ -231,6 +257,7 @@ public sealed class AutoFlattenService
                 case FlattenAction.Missed:
                     _logger.LogError("Auto-flatten MISSED for {Account} {Instrument}: {Reason}", account, schedule.Instrument, decision.Reason);
                     await JournalAsync(MissedEventType, account, contract, decision.Reason, now, cancellationToken);
+                    _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenMissed);
 
                     // Also P1. Usually the same incident as the escalation above, so dedup collapses the two --
                     // but a process that only came up AFTER the deadline reaches this without ever escalating, and
@@ -245,6 +272,7 @@ public sealed class AutoFlattenService
 
                 case FlattenAction.Disabled:
                     await JournalAsync(DisabledEventType, account, contract, decision.Reason, now, cancellationToken);
+                    _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenDisabled);
                     break;
 
                 case FlattenAction.None:
