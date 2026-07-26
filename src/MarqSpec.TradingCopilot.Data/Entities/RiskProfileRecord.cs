@@ -89,4 +89,13 @@ public class RiskProfileRecord : IUserOwned
     /// when set, DB-checked. Config only; the evaluation over P&amp;L-by-day arrives with the risk runtime.
     /// </summary>
     public decimal? MaxBestDayFraction { get; set; }
+
+    /// <summary>
+    /// Which entry action is primary on the Approve split button (R-11, gh#218). <b>Not</b> <c>required</c>: the
+    /// zero value <see cref="DefaultEntryAction.ApproveAndArm"/> is the fail-safe default, so an unset row — or one
+    /// written before this field existed — resolves to review-first by construction. Defaulting to
+    /// <see cref="DefaultEntryAction.SendAsIs"/> is guarded practice-only + confirm-to-enable at the PUT boundary;
+    /// it never affects the enforcing gate.
+    /// </summary>
+    public DefaultEntryAction DefaultEntryAction { get; set; }
 }

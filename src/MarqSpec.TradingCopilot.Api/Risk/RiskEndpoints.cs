@@ -2,6 +2,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Risk;
+using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -41,6 +42,29 @@ public static class RiskEndpoints
         if (account is null)
         {
             return Results.NotFound();
+        }
+
+        // The default-entry-action preference (R-11, gh#218): defaulting to Send as-is is practice-only AND
+        // confirm-to-enable, enforced here server-side -- never merely hidden in the UI. Setting ApproveAndArm (the
+        // review-first default) is always free. The mode rule lives in TradingModePolicy, the home of mode rules.
+        if (request.DefaultEntryAction == DefaultEntryAction.SendAsIs)
+        {
+            if (!TradingModePolicy.SendAsIsDefaultAllowed(account.Mode))
+            {
+                return Results.Conflict(new
+                {
+                    error = $"A {account.Mode} account may not default to Send as-is — it is practice-only (R-11). "
+                        + "The send-as-is action stays available and fully gated (R-5 / R-16 / R-12); only defaulting to it is restricted.",
+                });
+            }
+
+            if (!request.ConfirmSendAsIsDefault)
+            {
+                return Results.UnprocessableEntity(new
+                {
+                    error = "Defaulting to Send as-is requires explicit confirmation. Re-send with confirmSendAsIsDefault = true.",
+                });
+            }
         }
 
         // Validate the WHOLE declaration through the domain factories before anything is stored -- the
@@ -119,6 +143,7 @@ public static class RiskEndpoints
         existing.SizingBasis = request.SizingBasis;
         existing.MaxContractsPerOrder = request.MaxContractsPerOrder;
         existing.MaxBestDayFraction = request.MaxBestDayFraction;
+        existing.DefaultEntryAction = request.DefaultEntryAction; // guarded above when SendAsIs
 
         await database.SaveChangesAsync(cancellationToken);
 

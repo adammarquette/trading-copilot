@@ -52,7 +52,7 @@ public class RiskEndpointsTests
         MaxContractsPerOrder: 3,
         MaxBestDayFraction: 0.4m);
 
-    private async Task<Guid> SeedAccountAsync()
+    private async Task<Guid> SeedAccountAsync(TradingMode mode = TradingMode.Practice)
     {
         Guid firmId = Guid.NewGuid();
         Guid connectionId = Guid.NewGuid();
@@ -75,7 +75,7 @@ public class RiskEndpointsTests
             VenueAccountKey = "9001",
             Name = "150KTC-V2-1234",
             Stage = AccountStage.Evaluation,
-            Mode = TradingMode.Practice,
+            Mode = mode,
             Balance = 150_000m,
         });
         await context.SaveChangesAsync();
@@ -227,5 +227,118 @@ public class RiskEndpointsTests
         // Default-deny (R-20): risk limits are the most consequential declaration in the workspace.
         await using TradingCopilotDbContext otherOperator = Context(asUser: Guid.NewGuid());
         (await otherOperator.RiskProfiles.AnyAsync()).Should().BeFalse();
+    }
+
+    // --- Default entry action preference (gh#218) ---
+
+    [Fact]
+    public async Task DeclareRisk_ShouldResolveToApproveAndArm_WhenNoPreferenceIsGiven()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await using TradingCopilotDbContext context = Context();
+
+        // ValidRequest() leaves DefaultEntryAction defaulted -- review-first by construction, not a defaulting branch.
+        await RiskEndpoints.DeclareRiskAsync(accountId, ValidRequest(), new FixedUser(_operator), context, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.RiskProfiles.SingleAsync()).DefaultEntryAction.Should().Be(DefaultEntryAction.ApproveAndArm);
+    }
+
+    [Fact]
+    public async Task DeclareRisk_ShouldRefuseSendAsIsDefault_OnALiveAccount_NamingTheMode()
+    {
+        Guid accountId = await SeedAccountAsync(TradingMode.Live);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await RiskEndpoints.DeclareRiskAsync(
+            accountId,
+            ValidRequest() with { DefaultEntryAction = DefaultEntryAction.SendAsIs, ConfirmSendAsIsDefault = true },
+            new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        ((IValueHttpResult)result).Value!.ToString().Should().Contain("Live"); // the refusal names the mode
+        (await Context().RiskProfiles.AnyAsync()).Should().BeFalse();          // nothing persisted
+    }
+
+    [Fact]
+    public async Task DeclareRisk_ShouldRefuseSendAsIsDefault_OnAnUndeclaredAccount()
+    {
+        Guid accountId = await SeedAccountAsync(TradingMode.Undeclared);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await RiskEndpoints.DeclareRiskAsync(
+            accountId,
+            ValidRequest() with { DefaultEntryAction = DefaultEntryAction.SendAsIs, ConfirmSendAsIsDefault = true },
+            new FixedUser(_operator), context, CancellationToken.None);
+
+        // Mode is declared, never derived (R-14, gh#60): undeclared trades nowhere and cannot default to send-as-is.
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+    }
+
+    [Fact]
+    public async Task DeclareRisk_ShouldRefuseSendAsIsDefault_OnAPracticeAccountWithoutConfirmation()
+    {
+        Guid accountId = await SeedAccountAsync(); // practice
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await RiskEndpoints.DeclareRiskAsync(
+            accountId,
+            ValidRequest() with { DefaultEntryAction = DefaultEntryAction.SendAsIs }, // ConfirmSendAsIsDefault defaults false
+            new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status422UnprocessableEntity);
+        (await Context().RiskProfiles.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task DeclareRisk_ShouldPersistSendAsIsDefault_OnAPracticeAccountWithConfirmation_AndSurviveReload()
+    {
+        Guid accountId = await SeedAccountAsync(); // practice
+        await using (TradingCopilotDbContext context = Context())
+        {
+            IResult result = await RiskEndpoints.DeclareRiskAsync(
+                accountId,
+                ValidRequest() with { DefaultEntryAction = DefaultEntryAction.SendAsIs, ConfirmSendAsIsDefault = true },
+                new FixedUser(_operator), context, CancellationToken.None);
+            StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        }
+
+        // A fresh context reads it back from the store -- the unit-test analogue of surviving a restart.
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.RiskProfiles.SingleAsync()).DefaultEntryAction.Should().Be(DefaultEntryAction.SendAsIs);
+    }
+
+    [Fact]
+    public async Task DeclareRisk_ShouldNotRequireConfirmation_ToSetApproveAndArm()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await using TradingCopilotDbContext context = Context();
+
+        // Setting the review-first default is always free -- no mode gate, no confirmation.
+        IResult result = await RiskEndpoints.DeclareRiskAsync(
+            accountId,
+            ValidRequest() with { DefaultEntryAction = DefaultEntryAction.ApproveAndArm },
+            new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+    }
+
+    [Fact]
+    public async Task GetRisk_ShouldReturnTheDefaultEntryAction()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await using (TradingCopilotDbContext declare = Context())
+        {
+            await RiskEndpoints.DeclareRiskAsync(
+                accountId,
+                ValidRequest() with { DefaultEntryAction = DefaultEntryAction.SendAsIs, ConfirmSendAsIsDefault = true },
+                new FixedUser(_operator), declare, CancellationToken.None);
+        }
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await RiskEndpoints.GetRiskAsync(accountId, context, CancellationToken.None);
+
+        RiskProfileResponse response = ((IValueHttpResult)result).Value.Should().BeOfType<RiskProfileResponse>().Subject;
+        response.DefaultEntryAction.Should().Be(DefaultEntryAction.SendAsIs);
     }
 }
