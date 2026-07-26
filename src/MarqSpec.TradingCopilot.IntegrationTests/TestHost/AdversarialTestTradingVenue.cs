@@ -24,6 +24,9 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private readonly List<(string AccountKey, WorkingOrder Order)> _workingOrders = [];
     private readonly List<(string AccountKey, string VenueOrderKey)> _cancelCalls = [];
     private readonly HashSet<string> _cancelThrowKeys = new(StringComparer.Ordinal);
+    // Reprice dispatches the modify path aims at the resting native leg + the reject the venue can raise (gh#259).
+    private readonly List<(string AccountKey, string VenueOrderKey, decimal? LimitPrice, decimal? StopPrice, int? Size)> _modifyCalls = [];
+    private readonly HashSet<string> _modifyThrowKeys = new(StringComparer.Ordinal);
 
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
 
@@ -97,6 +100,15 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// <summary>Every <c>CancelOrderAsync</c> issued, in order (account key + venue order key).</summary>
     public IReadOnlyList<(string AccountKey, string VenueOrderKey)> CancelOrderCalls => _cancelCalls.AsReadOnly();
 
+    /// <summary>Makes <c>ModifyOrderAsync</c> THROW for a venue order key — a hard venue rejection of the reprice
+    /// (e.g. the resting leg moved to a terminal state). The modify path must surface it as a 409, never force a
+    /// local terminal or record a phantom price change (gh#259).</summary>
+    public void MakeModifyThrow(string venueOrderKey) => _modifyThrowKeys.Add(venueOrderKey);
+
+    /// <summary>Every <c>ModifyOrderAsync</c> issued, in order (account key + venue order key + the reprice targets).</summary>
+    public IReadOnlyList<(string AccountKey, string VenueOrderKey, decimal? LimitPrice, decimal? StopPrice, int? Size)> ModifyOrderCalls =>
+        _modifyCalls.AsReadOnly();
+
     /// <summary>Clears seeded positions, close behaviour, and recorded close calls — call at the start of each test.</summary>
     public void ResetPositions()
     {
@@ -109,6 +121,8 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _workingOrders.Clear();
         _cancelCalls.Clear();
         _cancelThrowKeys.Clear();
+        _modifyCalls.Clear();
+        _modifyThrowKeys.Clear();
     }
 
     internal IReadOnlyList<WorkingOrder> WorkingOrdersFor(VenueAccountId account) =>
@@ -120,6 +134,15 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         if (_cancelThrowKeys.Contains(venueOrderKey))
         {
             throw new InvalidOperationException($"Venue rejected cancel of {venueOrderKey} — order already gone.");
+        }
+    }
+
+    internal void RecordModify(VenueAccountId account, string venueOrderKey, Price? limitPrice, Price? stopPrice, int? size)
+    {
+        _modifyCalls.Add((account.Key, venueOrderKey, limitPrice?.Value, stopPrice?.Value, size));
+        if (_modifyThrowKeys.Contains(venueOrderKey))
+        {
+            throw new InvalidOperationException($"Venue rejected modify of {venueOrderKey} — order gone or filled.");
         }
     }
 
@@ -247,6 +270,18 @@ internal class AdversarialTestTradingVenue : ITradingVenue
     public Task CancelOrderAsync(VenueAccountId account, string venueOrderId, CancellationToken cancellationToken = default)
     {
         _factory.RecordCancel(account, venueOrderId);
+        return Task.CompletedTask;
+    }
+
+    public Task ModifyOrderAsync(
+        VenueAccountId account,
+        string venueOrderId,
+        Price? limitPrice,
+        Price? stopPrice,
+        int? size,
+        CancellationToken cancellationToken = default)
+    {
+        _factory.RecordModify(account, venueOrderId, limitPrice, stopPrice, size);
         return Task.CompletedTask;
     }
 
