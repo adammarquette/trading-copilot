@@ -103,6 +103,11 @@ Server-side only, from the Railway environment — **never in source** (Options 
 - **Data providers:** Finnhub + Tiingo API tokens (free tier).
 - **Database:** connection string (Railway-managed).
 - **Ingestion:** poll intervals; news relevance config (or DB-stored).
+- **Telemetry (gh#230, ADR-0002):** `Telemetry__OtlpEndpoint` — the OTLP collector endpoint (e.g.
+  `http://otel-collector:4317`). **Leave it unset to disable export**: the SDK stays wired and the app runs
+  normally, it simply ships nothing. `Telemetry__ServiceName` overrides the service name stamped on every signal
+  (default `trading-copilot-api`); the deployment environment is taken from `ASPNETCORE_ENVIRONMENT`. Neither is
+  a secret — the collector endpoint is an address, not a credential.
 
 ### Operator password recovery (R-18, ADR-0017 operator lifecycle)
 The operator controls the deployment, so the environment can recover the account — **host control = account

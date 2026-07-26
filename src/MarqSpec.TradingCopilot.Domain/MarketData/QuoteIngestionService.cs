@@ -71,7 +71,7 @@ public sealed class QuoteIngestionService
 
                     // The log is an async boundary, so the producer's trace rides the envelope and the consumer
                     // continues it via a span link (engineering §7).
-                    TraceParent = Activity.Current?.Id,
+                    TraceParent = EventTracing.CurrentTraceParent(),
                 },
                 cancellationToken);
 

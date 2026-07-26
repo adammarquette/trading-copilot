@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain;
@@ -97,6 +99,14 @@ public sealed class StopPromotionHost : BackgroundService
                         ITradingVenue venue = venueFactory.Create(FirmConventions.None);
                         foreach (EventEnvelope evt in batch)
                         {
+                            // Continue the producer's trace across the async gap (gh#230): a LINK, not a parent --
+                            // this consumer may run long after the append and one batch can span many producers.
+                            // An absent or malformed traceparent simply yields no link and a fresh trace.
+                            using Activity? span = EventTracing.TryCreateLink(evt.TraceParent, out ActivityLink link)
+                                ? TelemetryRegistration.Source.StartActivity(
+                                    "stop-promotion.consume", ActivityKind.Consumer, default(ActivityContext), links: [link])
+                                : TelemetryRegistration.Source.StartActivity("stop-promotion.consume", ActivityKind.Consumer);
+
                             if (StopPromotionService.TryDecodeQuote(evt, out StopPromotionService.DecodedQuote quote))
                             {
                                 await promotion.PromoteForQuoteAsync(

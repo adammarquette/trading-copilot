@@ -5,6 +5,13 @@
   <ItemGroup>
     <!-- Identity's PasswordHasher comes from the ASP.NET shared framework (Web SDK); only JWT bearer needs a package. -->
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <!-- Observability (gh#230, ADR-0002): SDK + OTLP export + the instrumentations engineering §7 names. -->
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
+    <PackageReference Include="Npgsql.OpenTelemetry" />
   </ItemGroup>
 
   <ItemGroup>

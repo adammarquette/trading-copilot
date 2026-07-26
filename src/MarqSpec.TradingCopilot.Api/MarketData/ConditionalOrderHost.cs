@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain.Events;
 using Microsoft.Extensions.DependencyInjection;
@@ -91,6 +93,14 @@ public sealed class ConditionalOrderHost : BackgroundService
                     {
                         foreach (EventEnvelope evt in batch)
                         {
+                            // Same span-link discipline as the stop-promotion consumer (gh#230): the fire decision
+                            // becomes part of the trace that produced the quote, so "why did this fire?" is one
+                            // queryable trace from the websocket tick to the placed order.
+                            using Activity? span = EventTracing.TryCreateLink(evt.TraceParent, out ActivityLink link)
+                                ? TelemetryRegistration.Source.StartActivity(
+                                    "conditional-order.consume", ActivityKind.Consumer, default(ActivityContext), links: [link])
+                                : TelemetryRegistration.Source.StartActivity("conditional-order.consume", ActivityKind.Consumer);
+
                             if (StopPromotionService.TryDecodeQuote(evt, out StopPromotionService.DecodedQuote quote))
                             {
                                 await firing.ProcessQuoteAsync(
