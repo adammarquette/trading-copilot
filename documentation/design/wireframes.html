@@ -549,6 +549,29 @@
   .annitem b{color:var(--on-hi);font-weight:600}
   @media(max-width:720px){.otk-grid{grid-template-columns:1fr}}
 
+  /* ---------- order & position management ---------- */
+  .mgmt-grid{display:flex;flex-direction:column;gap:20px}
+  .blot-h{display:flex;align-items:baseline;gap:9px;margin-bottom:9px}
+  .blot-h h3{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--on-med)}
+  .blot-h .muted{color:var(--on-dim);font-size:11.5px}
+  .rowact{display:inline-flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+  .rowbtn{font-family:var(--font);font-size:10.5px;font-weight:600;color:var(--on-med);background:var(--surface-3);
+    border:1px solid var(--outline-soft);border-radius:6px;padding:3px 8px;white-space:nowrap}
+  .rowbtn:hover{color:var(--on-hi);border-color:var(--outline)}
+  .rowbtn.danger{color:var(--short)}
+  .rowbtn.danger:hover{background:var(--short-ctr);border-color:transparent}
+  .rowbtn.planned{opacity:.6;border-style:dashed;color:var(--on-dim);cursor:not-allowed}
+  .rowbtn.planned:hover{color:var(--on-dim);border-color:var(--outline-soft)}
+  .plannedtag{font-family:var(--mono);font-size:9px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+    color:var(--on-dim);border:1px dashed var(--outline);border-radius:5px;padding:1px 6px}
+  .ptbl td.actc{text-align:right}
+  .ptbl td.sidec{font-family:var(--font)}
+  .ptbl .hidden-stop{color:var(--on-dim)}
+  .ptbl .hidden-stop::after{content:" · hidden";color:var(--on-dim);font-size:9.5px}
+  .ptbl .safety-px{color:#ff8a80}
+  :root[data-theme="light"] .safety-px{color:#D8443A} /* mirror the [style*="#ff8a80"] light remap for the class form */
+  .mgmt-modify{margin-top:22px}
+
   /* ---------- account switcher ---------- */
   .acct{margin-top:44px}
   .acct-drop{max-width:540px;background:var(--surface-2);border:1px solid var(--outline);border-radius:var(--r-l);overflow:hidden;box-shadow:var(--e2)}
@@ -1287,6 +1310,103 @@
     </div>
   </section>
 
+  <section class="mgmt">
+    <div class="cap"><h2>Managing working orders &amp; positions — the live blotter</h2><span class="bp">R-11 · R-13 · ADR-0007</span>
+      <span class="muted">the dock's Positions tab, expanded — see and act on what's resting or open</span></div>
+
+    <div class="mgmt-grid">
+      <!-- working orders -->
+      <div>
+        <div class="blot-h"><h3>Working orders</h3><span class="chip ghost">3 resting</span><span class="muted">unfilled · held at the broker</span><span class="tag" style="margin-left:auto">R-11 · gh#259/267/278/292/250</span></div>
+        <div class="ptbl-wrap">
+          <table class="ptbl">
+            <thead><tr><th>Order</th><th>Type</th><th>Size</th><th>Entry</th><th>Working stop</th><th>Safety</th><th>To mkt</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>
+              <tr>
+                <td class="sidec"><span class="side long" style="font-size:12px">ES · buy</span></td>
+                <td>Limit</td><td>2</td><td>5230.25</td>
+                <td class="hidden-stop">5222.00</td><td class="safety-px">5216.00</td><td>+2.8 pt</td>
+                <td><span class="chip ghost" style="font-size:9.5px">working</span></td>
+                <td class="actc"><div class="rowact"><button class="rowbtn">Reprice</button><button class="rowbtn">Move stop</button><button class="rowbtn">Resize</button><button class="rowbtn danger">Cancel</button></div></td>
+              </tr>
+              <tr>
+                <td class="sidec"><span class="side" style="font-size:12px;color:var(--long)">NQ · buy</span></td>
+                <td>Stop</td><td>1</td><td>18420.0</td>
+                <td class="hidden-stop">18380.0</td><td class="safety-px">18360.0</td><td>−14.0 pt</td>
+                <td><span class="chip ghost" style="font-size:9.5px">working</span></td>
+                <td class="actc"><div class="rowact"><button class="rowbtn">Reprice</button><button class="rowbtn">Move stop</button><button class="rowbtn">Resize</button><button class="rowbtn danger">Cancel</button></div></td>
+              </tr>
+              <tr>
+                <td class="sidec"><span class="side" style="font-size:12px;color:var(--short)">MES · sell</span></td>
+                <td>Limit</td><td>3</td><td>5241.00</td>
+                <td class="safety-px">5250.00</td><td class="safety-px">5250.00</td><td>+9.5 pt</td>
+                <td><span class="chip ghost" style="font-size:9.5px">working</span></td>
+                <td class="actc"><div class="rowact"><button class="rowbtn">Reprice</button><button class="rowbtn">Move stop</button><button class="rowbtn">Resize</button><button class="rowbtn danger">Cancel</button></div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="rej-why" style="margin-top:8px">The <b>working stop is hidden</b> (a promotion target, not a venue order); <b>MES</b> rests with its working stop <b>coincident</b> with the safety stop — a valid state with no distinct hidden stop until one is installed. On a <b>connection drop</b> a hidden stop reads <b>orphaned</b> — un-actionable until it re-arms against venue truth on reconnect. (<b>Staged</b> / armed tickets live on the order ticket, not this blotter.)</div>
+      </div>
+
+      <!-- open positions -->
+      <div>
+        <div class="blot-h"><h3>Open positions</h3><span class="chip ghost">2 open</span><span class="muted">monitored · each on an always-native safety stop</span><span class="tag" style="margin-left:auto">R-8 · R-13 · gh#183</span></div>
+        <div class="ptbl-wrap">
+          <table class="ptbl">
+            <thead><tr><th>Position</th><th>Qty</th><th>Avg</th><th>uPnL</th><th>Stop (native)</th><th>Safety</th><th>Target</th><th>Actions</th></tr></thead>
+            <tbody>
+              <tr>
+                <td class="sidec"><span class="side long" style="font-size:12px">ES · long</span></td>
+                <td>+2</td><td>5228.50</td><td class="pos">+$150</td>
+                <td>5222.00</td><td class="safety-px">5216.00</td><td class="pos">5248.50</td>
+                <td class="actc"><div class="rowact"><span class="plannedtag">planned</span><button class="rowbtn planned">Reduce</button><button class="rowbtn planned">Exit</button></div></td>
+              </tr>
+              <tr>
+                <td class="sidec"><span class="side" style="font-size:12px;color:var(--short)">CL · short</span></td>
+                <td>−1</td><td>78.42</td><td class="neg">−$60</td>
+                <td>78.70</td><td class="safety-px">78.90</td><td class="pos">77.80</td>
+                <td class="actc"><div class="rowact"><span class="plannedtag">planned</span><button class="rowbtn planned">Reduce</button><button class="rowbtn planned">Exit</button></div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="rej-why" style="margin-top:8px">A live position is <b>monitored</b> here; today it closes when its <b>stop / target</b> hits, via the deployment-wide <b>kill switch</b> (flatten-all), or the deadline <b>auto-flatten</b> (R-13) — and going <b>flat</b> retires its stop plan and cancels the dangling native legs (<b>OCO-cancel-on-exit</b>, gh#183). Its protective stop is the <b>always-native</b> bracket (invariant) — not operator-moved in-app; to change protection, cancel / flatten. <b>Per-position Exit / Reduce is planned</b> — the flatten primitive exists but no on-demand operator endpoint does yet.</div>
+      </div>
+    </div>
+
+    <!-- in-place modify sheet -->
+    <div class="otk-grid mgmt-modify">
+      <div class="ticket">
+        <div class="th"><span>Modify · ES buy limit</span><span class="chip info" style="padding:1px 7px">in place — keeps queue &amp; bracket</span></div>
+        <div class="trow edited"><span class="k">Entry <span class="chip warn" style="padding:0 6px;font-size:9px">reprice</span></span><span><span class="was">5230.25</span><span class="v">5232.00</span></span></div>
+        <div class="trow edited"><span class="k">Working stop <span class="chip warn" style="padding:0 6px;font-size:9px">move</span></span><span><span class="was">5222.00</span><span class="v">5224.00</span></span></div>
+        <div class="trow edited"><span class="k">Size <span class="chip warn" style="padding:0 6px;font-size:9px">resize</span></span><span><span class="was">2</span><span class="v">3</span></span></div>
+        <div class="blk">
+          <div class="bh">Effective geometry — must hold safety → working → entry (per side)</div>
+          <div class="stp-line"><span class="lbl">Entry</span><span class="px">5232.00</span><span class="meta">limit · reprices at the venue</span></div>
+          <div class="stp-line"><span class="lbl">Working</span><span class="px neg">5224.00</span><span class="meta">hidden · local re-stage</span></div>
+          <div class="stp-line"><span class="lbl">Safety</span><span class="px" style="color:#ff8a80">5216.00</span><span class="meta">unchanged · = max-DD/trade</span><span class="chip ghost tagx" style="padding:0 6px;font-size:8.5px">invariant</span></div>
+        </div>
+        <div class="riskblk">
+          <div class="rr"><span>Re-gated at the new size</span><b>asked 3 → approved 3 ✓</b></div>
+          <div class="rr"><span>Binding layer</span><b>PerTradeRisk · $610 / $700</b></div>
+          <div class="rr"><span>R:R · target 1.5</span><b>1.9 ✓</b></div>
+        </div>
+        <div class="gate">✓ Within the gate at the new terms <span class="tag" style="margin-left:auto">R-5 · R-16 · R-12</span></div>
+        <div class="btns"><button class="btn fill">Re-gate &amp; send</button><button class="btn text">Discard</button></div>
+        <div class="rej-why">A gate <b>downsize is applied, not hidden</b> — if the new size only fits 2, it sends 2 and says so. A move that would cross <b>safety → working → entry</b> is <b>refused before the venue</b> touches the order.</div>
+      </div>
+      <div class="ann">
+        <div class="annitem"><b>One sheet, the whole modify family.</b> Reprice the entry (gh#259), move the hidden working stop (gh#267), resize (gh#292), or any combination in <b>one atomic commit</b> (gh#278) — the same <code>PATCH /orders/{id}/price</code>. <b>Cancel</b> is its own action (gh#250).</div>
+        <div class="annitem"><b>In place, not cancel/replace.</b> The order keeps its <b>queue position</b> and its <b>attached protective bracket</b> — no naked window between a pull and a re-send.</div>
+        <div class="annitem"><b>Re-gated below the model.</b> Every change re-runs the risk gate, sanity caps &amp; re-validation at the <b>new</b> terms; a breach is <b>blocked or resized</b>, never a warning you click past. The <b>kill switch refuses</b> a modify (it's outbound) — but <b>Cancel</b> always works to reduce risk.</div>
+        <div class="annitem"><b>The safety stop never moves here.</b> Its price stays put, so your max-DD-per-trade floor holds. A resize relies on the always-native bracket carrying <b>no size of its own</b> (sized to the realized fill on attach) — a structural inference <b>pending live verification</b> (gh#293) before live. Moving the working stop <b>onto</b> the safety = <b>removing</b> it — out of scope; use Cancel.</div>
+        <div class="annitem"><b>Only a resting, unfilled order.</b> A partially- or fully-filled order can't be modified here — its status reconciles from <b>venue truth</b> (the account-event stream). A venue rejection never forces a wrong status; every modify is <b>audited</b>.</div>
+      </div>
+    </div>
+  </section>
+
   <section class="gov">
     <div class="cap"><h2>Daily risk governor — filters suggestions before the gate</h2><span class="bp">R-5 · R-4</span>
       <span class="muted">a personal daily cap set inside the hard prop limit (shown on a drawdown day)</span></div>
@@ -1780,6 +1900,7 @@
       <div><span class="tag">R-11 · R-12</span> Approve = arm an editable ticket; “send as-is” opt-in; edits re-checked before send</div>
       <div><span class="tag">R-11</span> Send now (native, on the book) vs. send-on-trigger (synthetic/local, hidden until it fires)</div>
       <div><span class="tag">R-11 · R-5</span> Staged stop — synthetic far, native near the level; always-native safety stop; risk sized to worst case</div>
+      <div><span class="tag">R-11 · R-13</span> Order &amp; position management — a live blotter; working orders take in-place reprice / move-stop / resize / cancel (shipped — re-gated below the model, kill switch refuses, safety invariant); open positions are monitored, closing via their stops / kill switch / auto-flatten — per-position exit / reduce is planned</div>
       <div><span class="tag">R-5 · R-4</span> Daily risk governor — personal cap inside the hard prop limit; throttles suggestions as headroom depletes</div>
       <div><span class="tag">R-5 · R-9</span> Consistency target — personal daily profit target; on reach the governor stands down (suppress + optional stop-for-day)</div>
       <div><span class="tag">R-4 · R-9</span> Suggestion lifecycle — active → stale → expired; a scratched setup resolves as no-fill, not a loss</div>
