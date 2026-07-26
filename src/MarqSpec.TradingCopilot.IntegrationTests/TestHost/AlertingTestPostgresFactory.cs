@@ -21,6 +21,13 @@ public sealed class AlertingTestPostgresFactory : StubbedVenuePostgresFactory
     /// <summary>The recording channel every notification lands in.</summary>
     public RecordingNotificationChannel Notifications { get; } = new();
 
+    /// <summary>
+    /// Delivers whatever the last pass enqueued. The hosted services are removed for determinism, so nothing
+    /// drains the notification queue on its own — a test that asserts on what was sent must pump first.
+    /// </summary>
+    public Task DrainNotificationsAsync() =>
+        Services.GetRequiredService<QueuedNotificationChannel>().DrainPendingAsync(CancellationToken.None);
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         base.ConfigureWebHost(builder);
@@ -46,8 +53,19 @@ public sealed class AlertingTestPostgresFactory : StubbedVenuePostgresFactory
             services.Remove(channel);
         }
 
-        services.AddSingleton<INotificationChannel>(provider => new DedupingNotificationChannel(
-            Notifications, provider.GetRequiredService<ILogger<DedupingNotificationChannel>>()));
+        // Mirror PRODUCTION's chain exactly, minus the transport: queue -> dedup -> recorder. The queue is what
+        // keeps the send off the flatten hot path (gh#289); leaving it out here would build a two-layer stack the
+        // suite could never observe that property in -- and would let a future regression back onto the hot path
+        // unnoticed, which is precisely what gh#246 caught the first time.
+        //
+        // Draining is EXPLICIT (see Drain), matching this factory's existing stance that the only flatten pass is
+        // the test's own: with the hosted services removed there is no pump, so the suite pumps.
+        services.AddSingleton(provider => new QueuedNotificationChannel(
+            new DedupingNotificationChannel(
+                Notifications, provider.GetRequiredService<ILogger<DedupingNotificationChannel>>()),
+            provider.GetRequiredService<ILogger<QueuedNotificationChannel>>()));
+        services.AddSingleton<INotificationChannel>(provider =>
+            provider.GetRequiredService<QueuedNotificationChannel>());
 
         // Deterministic: the only flatten pass is the test's explicit RunPassAsync.
         foreach (ServiceDescriptor hosted in services

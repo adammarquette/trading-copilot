@@ -151,16 +151,30 @@ builder.Services.AddHostedService<AutoFlattenWatchdogHost>();
 builder.Services.Configure<PushoverOptions>(builder.Configuration.GetSection(PushoverOptions.SectionName));
 builder.Services.AddHttpClient<PushoverNotificationChannel>(
     client => { client.Timeout = TimeSpan.FromSeconds(10); });
-builder.Services.AddSingleton<INotificationChannel>(provider =>
+// The chain, outermost first: QUEUE -> dedup -> transport.
+//
+// The queue is outermost because the caller is the auto-flatten, and gh#289 showed what awaiting a transport
+// there costs: a 5-second channel made a flatten pass take 5.15 s, on the R-13 path, at the exact moment a
+// position was already failing to close. Enqueue returns immediately; a background pump does the network work.
+//
+// Dedup sits BELOW the queue, not above it, and that ordering is load-bearing: the pump is single-threaded, so
+// the "already reported?" check and the record of reporting can no longer interleave and double-page, and dedup
+// sees the REAL delivery result rather than the queue's "accepted".
+builder.Services.AddSingleton<NullNotificationChannel>();
+builder.Services.AddSingleton<QueuedNotificationChannel>(provider =>
 {
     PushoverOptions pushover = provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<PushoverOptions>>().Value;
-    INotificationChannel inner = pushover.IsConfigured
+    INotificationChannel transport = pushover.IsConfigured
         ? provider.GetRequiredService<PushoverNotificationChannel>()
         : provider.GetRequiredService<NullNotificationChannel>();
 
-    return new DedupingNotificationChannel(inner, provider.GetRequiredService<ILogger<DedupingNotificationChannel>>());
+    DedupingNotificationChannel deduping = new(
+        transport, provider.GetRequiredService<ILogger<DedupingNotificationChannel>>());
+
+    return new QueuedNotificationChannel(deduping, provider.GetRequiredService<ILogger<QueuedNotificationChannel>>());
 });
-builder.Services.AddSingleton<NullNotificationChannel>();
+builder.Services.AddSingleton<INotificationChannel>(provider => provider.GetRequiredService<QueuedNotificationChannel>());
+builder.Services.AddHostedService<NotificationPumpHost>();
 
 // The dead-man's switch (R-13, gh#244, ADR-0019): the THIRD tier, and the only one that lives OUTSIDE this
 // process. Both tiers above die with the host -- so if it dies before a deadline, the flatten never fires and

@@ -168,6 +168,15 @@ the rule, not noise to tolerate.
   deployment booting while logging a Page as an **error**, so unmonitored is never silent. The three P1 flatten
   conditions (`flatten.escalated`, `flatten.missed`, `flatten.watchdog.critical`) push directly, and a successful
   flatten or a watchdog save **resolves** the incident.
+  **Corrected by `gh#289` (2026-07-26).** The first cut awaited the send inline, so a slow channel put its full
+  latency on a flatten pass — on the R-13 path, and at the moment a position was already failing to close. The
+  gh#246 suite caught it (a 5-second channel made a pass take 5.15 s) and pinned it. The chain is now
+  **queue → dedup → transport**: `QueuedNotificationChannel` accepts and returns, a `NotificationPumpHost` drains
+  it. Two properties fall out of the pump being single-threaded that a bare fire-and-forget would not have given —
+  **dedup can no longer race itself** into a double-page, and it still sees the *real* delivery result, so a
+  failed push is not mistaken for one the operator received. The seam's contract shifts with it:
+  `SendAsync` returning true now means **accepted for delivery**, not delivered — a caller on the safety path
+  cannot wait for delivery without reintroducing the defect.
   **One refinement to this ADR:** dedup was specified "in the adapter"; it landed one layer out as
   `DedupingNotificationChannel`, so every future adapter (Discord `gh#100`, web push ADR-0010) inherits it rather
   than reimplementing it, and it is unit-testable without a transport. The requirement is unchanged — one push per
