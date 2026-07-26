@@ -1,5 +1,6 @@
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Flatten;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -58,9 +59,14 @@ public class AutoFlattenServiceTests
             Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
             Options.Create(options ?? new FlattenOptions()),
             _notifications,
+            _metrics,
             NullLogger<AutoFlattenService>.Instance);
 
     private readonly INotificationChannel _notifications = A.Fake<INotificationChannel>();
+
+    // Real instance, not a fake: it is a sealed metrics sink with no behaviour to stub, and recording must be
+    // exercised rather than skipped -- a metrics fault must never fail the flatten it measures (gh#232).
+    private readonly ExecutionMetrics _metrics = new();
 
     private static FlattenSchedule Schedule(string symbol, TimeOnly close, bool enabled = true) =>
         FlattenSchedule.Create(InstrumentId.Parse(symbol), enabled, deadlineOverride: null, sessionClose: close);

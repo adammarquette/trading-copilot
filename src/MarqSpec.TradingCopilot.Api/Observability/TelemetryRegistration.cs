@@ -22,6 +22,7 @@ public static class TelemetryRegistration
     {
         ArgumentNullException.ThrowIfNull(builder);
 
+        builder.Services.AddSingleton<ExecutionMetrics>();
         builder.Services.Configure<TelemetryOptions>(builder.Configuration.GetSection(TelemetryOptions.SectionName));
         TelemetryOptions options =
             builder.Configuration.GetSection(TelemetryOptions.SectionName).Get<TelemetryOptions>() ?? new TelemetryOptions();
@@ -61,7 +62,9 @@ public static class TelemetryRegistration
                     .SetResourceBuilder(resource)
                     .AddAspNetCoreInstrumentation()
                     .AddHttpClientInstrumentation()
-                    .AddRuntimeInstrumentation();
+                    .AddRuntimeInstrumentation()
+                    // The execution-specific SLIs (gh#232) -- this system's own signals, beside the generic RED.
+                    .AddMeter(ExecutionMetrics.MeterName);
 
                 if (options.ExportEnabled)
                 {
