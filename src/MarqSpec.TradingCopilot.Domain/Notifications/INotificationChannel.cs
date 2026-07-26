@@ -25,9 +25,17 @@ namespace MarqSpec.TradingCopilot.Domain.Notifications;
 public interface INotificationChannel
 {
     /// <summary>Sends a notification, at most once per incident (see <see cref="Notification.DedupKey"/>).</summary>
+    /// <remarks>
+    /// <b>Must not block on the transport.</b> Callers include the auto-flatten, and gh#289 showed the cost of
+    /// getting this wrong: an inline await put a slow channel's full latency onto a flatten pass, on the R-13
+    /// path, at the moment a position was already failing to close. The composed channel therefore <b>enqueues</b>
+    /// and delivers on a background pump, which makes the return value mean <b>accepted for delivery</b> rather
+    /// than <i>delivered</i>. A caller on the safety path cannot wait for delivery without reintroducing the
+    /// defect, so the contract says so rather than implying a guarantee it deliberately gives up.
+    /// </remarks>
     /// <param name="notification">What to tell the operator.</param>
     /// <param name="cancellationToken">The caller's token; a genuine cancellation propagates.</param>
-    /// <returns><see langword="true"/> if it reached the operator's channel.</returns>
+    /// <returns><see langword="true"/> if it was accepted for delivery.</returns>
     Task<bool> SendAsync(Notification notification, CancellationToken cancellationToken);
 
     /// <summary>

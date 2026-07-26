@@ -175,22 +175,35 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
     [Fact]
     public async Task Alert_ShouldNotDelayFlatten_WhenChannelHangs()
     {
-        // DEFECT gh#289: the send is AWAITED INLINE in AutoFlattenService.NotifyAsync, so a slow channel adds its
-        // full latency to the flatten pass -- on the R-13 safety path, and contradicting gh#243's own criterion
-        // that "sending is off the hot path". Pins the OBSERVED behaviour (QA contract rule 2) so the suite
-        // documents reality without blessing it; when #289 lands, this assertion INVERTS to
-        // `BeLessThan(TimeSpan.FromSeconds(5))` and becomes that issue's regression guard.
+        // The gh#289 regression guard, FLIPPED from its pin (QA contract rule 2). It previously asserted the
+        // defect -- the send was awaited inline in AutoFlattenService.NotifyAsync, so a 5 s channel made the pass
+        // take 5.15 s on the R-13 safety path, contradicting gh#243's own "sending is off the hot path". gh#289
+        // put a queue in front of the transport, so the pass now enqueues and returns.
+        //
+        // Times the PASS ONLY, deliberately not using RunFlattenAsync: that helper drains afterwards, and the
+        // drain is where the 5 s legitimately lives. Measuring the two together would re-measure the defect.
         string account = await FreshAccountAsync();
         VenueFactory.SeedPosition(account, "ESM25", netQuantity: 1);
         VenueFactory.MakeCloseIneffective("ESM25");
         Notifications.MakeSendHang(TimeSpan.FromSeconds(5));
 
         Stopwatch clock = Stopwatch.StartNew();
-        await RunFlattenAsync(Utc(19, 45));
+        await using (AsyncServiceScope scope = _factory.Services.CreateAsyncScope())
+        {
+            AutoFlattenService service = scope.ServiceProvider.GetRequiredService<AutoFlattenService>();
+            await service.RunPassAsync(Utc(19, 45), CancellationToken.None);
+        }
+
         clock.Stop();
 
-        clock.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromSeconds(5),
-            "OBSERVED gh#289: the notification send blocks the flatten pass — it is not off the hot path");
+        clock.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5),
+            "a hanging channel must not block the flatten pass — the send is enqueued, not awaited");
+
+        // Clear the hang, then drain what this pass left queued. The queue is a singleton for the fixture's
+        // lifetime, so a test that enqueues without draining leaks its notifications into the NEXT test -- which
+        // is exactly how this one first broke Alert_ShouldProduceNoPush_WhenSessionIsClean.
+        Notifications.Reset();
+        await _factory.DrainNotificationsAsync();
     }
 
     // -------------------------------------------------------------------------------------------------------
@@ -205,16 +218,34 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
     private AdversarialTestProjectXVenueFactory VenueFactory =>
         _factory.Services.GetRequiredService<AdversarialTestProjectXVenueFactory>();
 
+    /// <summary>
+    /// Runs one flatten pass, then delivers whatever it enqueued.
+    /// </summary>
+    /// <remarks>
+    /// The drain is deliberately AFTER the timed section and is not part of it. Since gh#289 the send is
+    /// enqueued rather than awaited, so the pass returns before delivery — which is the whole point, and is what
+    /// <see cref="Alert_ShouldNotDelayFlatten_WhenChannelHangs"/> measures. Every other test here asserts on what
+    /// was *delivered*, so it has to pump first; with the hosted services removed for determinism, nothing else
+    /// will.
+    /// </remarks>
     private async Task RunFlattenAsync(DateTimeOffset now)
     {
-        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
-        AutoFlattenService service = scope.ServiceProvider.GetRequiredService<AutoFlattenService>();
-        await service.RunPassAsync(now, CancellationToken.None);
+        await using (AsyncServiceScope scope = _factory.Services.CreateAsyncScope())
+        {
+            AutoFlattenService service = scope.ServiceProvider.GetRequiredService<AutoFlattenService>();
+            await service.RunPassAsync(now, CancellationToken.None);
+        }
+
+        await _factory.DrainNotificationsAsync();
     }
 
     /// <summary>Resets the recorder and the venue, clears accounts, and stands up exactly one tradeable account.</summary>
     private async Task<string> FreshAccountAsync()
     {
+        // Drain BEFORE resetting: the notification queue is a singleton across the fixture, so anything a
+        // previous test enqueued and did not deliver would otherwise arrive mid-test and be attributed here.
+        // Draining into the old recorder state and then clearing it leaves this test a genuinely empty slate.
+        await _factory.DrainNotificationsAsync();
         Notifications.Reset();
         VenueFactory.ResetPositions();
         await ExecuteDbAsync(db => db.Accounts.IgnoreQueryFilters().ExecuteDeleteAsync());
