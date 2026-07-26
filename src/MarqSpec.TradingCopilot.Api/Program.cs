@@ -77,6 +77,16 @@ builder.Services.AddScoped<QuoteIngestionService>();
 builder.Services.Configure<IngestionOptions>(builder.Configuration.GetSection(IngestionOptions.SectionName));
 builder.Services.AddHostedService<MarketDataIngestionHost>();
 
+// R-1's SECOND market-data path (gh#302): the clean-historical bar store, filled by periodic REST backfill.
+// Kept deliberately apart from the live stream above -- R-1 says they are "stored and treated separately", and
+// the historical series, not the live feed, is "the system of record for bars used in journaling and replay".
+// It is also what ADR-0001 means by a full indicator rebuild reprocessing the clean historical store rather than
+// the 24-hour event log. Opt-in and configured independently of Ingestion:Symbols: an operator may want history
+// without a live subscription, or the reverse.
+builder.Services.Configure<BarBackfillOptions>(builder.Configuration.GetSection(BarBackfillOptions.SectionName));
+builder.Services.AddScoped<BarBackfillService>();
+builder.Services.AddHostedService<BarBackfillHost>();
+
 // The event log's first consumer (ADR-0007, gh#153): the stop-promotion watcher reads market.quote events and
 // promotes hidden actual stops as price comes within their band. Harmless with no staged stops, so it always runs.
 builder.Services.AddScoped<StopPromotionService>();

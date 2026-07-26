@@ -64,6 +64,12 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>The append-only event log (ADR-0001). System plumbing — an acknowledged global, not operator-owned.</summary>
     public DbSet<Event> Events => Set<Event>();
 
+    /// <summary>
+    /// The clean-historical bar store (gh#302, R-1) — the <b>system of record</b> the 24-hour event log is not.
+    /// Market data, so global by R-20's own rule, not operator-owned.
+    /// </summary>
+    public DbSet<BarRecord> Bars => Set<BarRecord>();
+
     /// <summary>Per-consumer-group replay cursors over the event log (ADR-0001). System plumbing.</summary>
     public DbSet<EventCursor> EventCursors => Set<EventCursor>();
 
@@ -367,6 +373,25 @@ public class TradingCopilotDbContext : TenantDbContext
                     + "OR (\"TriggerDirection\" = 1 AND \"CancelDriftPrice\" < \"TriggerPrice\") "
                     + "OR (\"TriggerDirection\" = 2 AND \"CancelDriftPrice\" > \"TriggerPrice\")");
             });
+        });
+
+        modelBuilder.Entity<BarRecord>(bar =>
+        {
+            // The composite key IS the idempotence guard, enforced by the database rather than by the writer
+            // remembering to check: a re-poll of an overlapping window can only update the bucket it already
+            // wrote. It includes BucketStart because a hypertable's unique constraints must contain the time
+            // dimension, and ResolutionMinutes because a 1-minute and a 5-minute bar can open at the same
+            // instant -- keyed on time alone they would silently overwrite each other.
+            bar.HasKey(b => new { b.Venue, b.Instrument, b.ResolutionMinutes, b.BucketStart });
+            bar.Property(b => b.Venue).HasMaxLength(64);
+            bar.Property(b => b.Instrument).HasMaxLength(32);
+            bar.Property(b => b.Open).HasPrecision(18, 8);
+            bar.Property(b => b.High).HasPrecision(18, 8);
+            bar.Property(b => b.Low).HasPrecision(18, 8);
+            bar.Property(b => b.Close).HasPrecision(18, 8);
+
+            // The read pattern indicators and replay will use: one instrument's series over a time range.
+            bar.HasIndex(b => new { b.Instrument, b.ResolutionMinutes, b.BucketStart });
         });
 
         modelBuilder.Entity<Event>(evt =>

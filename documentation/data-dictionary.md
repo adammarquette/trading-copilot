@@ -119,7 +119,7 @@ Live stream and clean-historical are **distinct paths** (R-1); the historical se
 
 | Entity | Key fields | Storage | Traces |
 |---|---|---|---|
-| **Bar (OHLCV)** | instrument, resolution, o/h/l/c, volume, bucket ts | TS | R-1 |
+| **Bar (OHLCV)** | venue, instrument, resolution (minutes), o/h/l/c, volume, bucket start, recorded-at. **Implemented** (gh#302) as `BarRecord` / table `Bars` — the **clean-historical system of record** (R-1), distinct from the 24h event log. Hypertable on `BucketStart` where Timescale is available (graceful plain-table degrade), **no retention policy by design**: it is the authoritative series journaling and replay read (R-9), and the store ADR-0001 rebuilds indicators from. Key `(venue, instrument, resolution, bucket)` — that composite **is** the idempotence guard, so an overlapping re-poll can only update the bucket it already wrote. A still-forming bucket is never stored. **Global, not operator-owned** — market data is shared (R-20) | TS | R-1, R-9, ADR-0001 |
 | **Tick / Trade** | instrument, price, size, aggressor side, ts (live tape) | TS | R-1, R-3 |
 | **Quote** | instrument, bid, ask, bid/ask size, ts. **Ingested** (gh#13 inc 1): the venue quote stream is appended to the ADR-0001 event log as `market.quote` events by `QuoteIngestionService` — the backbone's first producer. The event **id is derived from the quote** (venue + contract + instant + bid/ask), so a websocket reconnect replaying an overlapping window yields identical ids and consumers dedupe naturally (ADR-0001 is at-least-once). The **TS projection** is a consumer's job, not the producer's — still to land | TS | R-1, ADR-0001 |
 | **DepthLevel (DOM)** | instrument, side, price, size, ts (order book) | TS | R-1, R-3 |

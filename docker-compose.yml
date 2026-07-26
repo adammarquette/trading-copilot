@@ -89,6 +89,22 @@ services:
       # reach the app (an unset var arrives as "" and normalises back to disabled).
       Ingestion__Symbols__0: "${Ingestion__Symbols__0:-}"
       Ingestion__ReconnectDelaySeconds: "${Ingestion__ReconnectDelaySeconds:-5}"
+      # The clean-historical bar store (R-1, gh#302) -- the SECOND market-data path, and the system of record.
+      # Null pass-through throughout: the app already defaults the cadence and lookback, and an empty value
+      # would bind over those defaults rather than leaving them alone. Unset means the backfill stays idle.
+      #
+      # Indexed lists are ENUMERATED AND CAPPED because compose cannot forward an open-ended list -- four
+      # instruments and three resolutions here. A fifth instrument needs another line; that is a deliberate
+      # edit, not a silent limit (gh#236 records the same constraint, and gh#304 the same gap on Ingestion).
+      Backfill__PollIntervalSeconds:
+      Backfill__LookbackMinutes:
+      Backfill__Instruments__0:
+      Backfill__Instruments__1:
+      Backfill__Instruments__2:
+      Backfill__Instruments__3:
+      Backfill__ResolutionMinutes__0:
+      Backfill__ResolutionMinutes__1:
+      Backfill__ResolutionMinutes__2:
       # The dead-man's switch (R-13, gh#244, ADR-0019) -- the only alerting tier that survives THIS process
       # dying, so a deployment without it is silently missing its most important safety net. Deliberately NOT
       # defaulted: these are capability URLs (whoever holds one can forge an all-clear), so there is no sane
