@@ -164,9 +164,12 @@ public sealed class OcoExitService
         List<Guid> orderIds = [.. orders.Select(order => order.Id)];
 
         // The synthetic / working stop plans for the now-confirmed-flat position -- retire them terminally
-        // (`Retired`) so the promotion watcher stops acting on them going forward. (A promotion already in flight
-        // when this commits is not fully fenced -- StopPromotionService is not yet position-aware, so it could
-        // still place a native stop for a just-flattened position; tracked as a follow-up.)
+        // (`Retired`) so the promotion watcher stops acting on them going forward. This retire is deliberately a
+        // plain write with no concurrency token: a promotion racing it is fenced on the PROMOTION side (the gh#183
+        // follow-up) -- StopPromotionService re-confirms the position is open before placing, and after placing it
+        // re-reads this staging and, finding it no longer Hidden, cancels its own just-placed native stop instead of
+        // clobbering this `Retired`. Keeping the retire token-free means it can never itself lose a race and skip
+        // the CancelNativeLegs cleanup below.
         List<StopPlanRecord> plans = await database.StopPlans
             .Where(plan => orderIds.Contains(plan.OrderId)
                 && (plan.Staging == StopStaging.Hidden

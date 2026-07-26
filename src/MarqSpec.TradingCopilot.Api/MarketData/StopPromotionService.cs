@@ -40,22 +40,25 @@ public sealed class StopPromotionService
     /// <summary>
     /// Promotes every hidden stop on <paramref name="contractKey"/> that this quote brings within its band.
     /// </summary>
-    /// <param name="venue">The venue the quote came from (its id tags the placed stop).</param>
+    /// <param name="venueId">The venue the quote came from — its id tags the placed stop and the accounts read.</param>
     /// <param name="contractKey">The contract the quote is for (e.g. <c>CON.F.US.MES.U26</c>).</param>
     /// <param name="bid">The best bid — the exit price for a long, so a long's promotion is measured on it.</param>
     /// <param name="ask">The best ask — the exit price for a short.</param>
-    /// <param name="executor">The venue executor the native stop is transmitted through.</param>
+    /// <param name="venue">
+    /// The trading venue — used both to <b>confirm the position is still open</b> before promoting and to transmit
+    /// the promoted native stop.
+    /// </param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>How many stops were promoted.</returns>
     public async Task<int> PromoteForQuoteAsync(
-        VenueId venue,
+        VenueId venueId,
         string contractKey,
         decimal bid,
         decimal ask,
-        IOrderExecutor executor,
+        ITradingVenue venue,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(executor);
+        ArgumentNullException.ThrowIfNull(venue);
 
         // Background plumbing: no user context, so the R-20 filter is bypassed deliberately (see the class note).
         // Loaded in steps rather than one join -- the intent reads plainly, and it sidesteps join-composition
@@ -81,6 +84,10 @@ public sealed class StopPromotionService
             .Where(account => accountIds.Contains(account.Id))
             .ToDictionaryAsync(account => account.Id, cancellationToken);
 
+        // Venue positions are read at most once per account per pass and reused across that account's stops (a
+        // null entry records a fetch that failed, so we do not re-hit an unreachable venue for every stop).
+        Dictionary<string, IReadOnlyList<PositionSnapshot>?> positionsByAccount = [];
+
         int promoted = 0;
         foreach (StopPlanRecord record in hidden)
         {
@@ -100,33 +107,163 @@ public sealed class StopPromotionService
                 continue;
             }
 
+            VenueAccountId venueAccount = VenueAccountId.Create(venueId, account.VenueAccountKey);
+
+            // Position-awareness (gh#183 follow-up, review Finding 4). Promote ONLY for a position the venue still
+            // reports open on the entered side. A promotion in flight when a position is flattened -- a manual
+            // flatten, the actual stop firing, auto-flatten, the kill switch -- would otherwise place a native
+            // protective stop for an already-flat position: a live resting order at the exchange with no position
+            // behind it, which the next fill turns into an unasked-for position (the exact hazard gh#183 removes).
+            // Flat, reversed, or unconfirmable all fail closed to NOT promoting -- the always-native safety stop
+            // remains the floor and OcoExitService retires the plan terminally on the exit event. Uncertainty
+            // resolves to the safe state (engineering §9).
+            if (!await IsPositionStillOpenAsync(
+                    venue, venueAccount, contractKey, plan.Side, positionsByAccount, cancellationToken))
+            {
+                continue;
+            }
+
             // Transmit FIRST, then record native. If the venue rejects, the exception propagates and the plan
             // stays Hidden -- marking it Native without an exchange-held stop would be a lie on a safety path.
             OrderRequest stop = new(
-                VenueAccountId.Create(venue, account.VenueAccountKey),
-                VenueContractId.Create(venue, contractKey),
+                venueAccount,
+                VenueContractId.Create(venueId, contractKey),
                 Opposite(plan.Side),
                 OrderType.Stop,
                 order.Size,
                 LimitPrice: null,
                 StopPrice: plan.ActualStop);
 
-            await executor.PlaceOrderAsync(stop, cancellationToken);
+            PlacedOrder placed = await venue.PlaceOrderAsync(stop, cancellationToken);
 
-            record.Staging = StopStaging.Native;
-            promoted++;
+            // Re-read the plan's staging from the DB before recording native (gh#183 follow-up, review Finding 4).
+            // Between the position-check above and this point a concurrent actor may have moved the plan off Hidden
+            // -- OCO-cancel-on-exit retiring it as the position went flat, or the orphan guard on a connection drop.
+            // If it did, the native stop we just transmitted is resting for a position that no longer exists, so we
+            // CANCEL IT OURSELVES rather than leave it for another sweep to miss. Each plan is reconciled
+            // independently (its own reload + save), so one plan's lost race never affects another's promotion.
+            //
+            // This is a re-read, NOT an atomic compare-and-swap: a retire that commits in the narrow window between
+            // this reload and the save below is still overwritten to a stale Native. That residue is benign -- the
+            // watcher never re-acts on a Native plan, and OCO-exit's leg-sweep (which runs after its own retire
+            // commit, so after this leg is resting) still cancels the physical leg -- so it is a rare journal/audit
+            // blemish, not a live dangling stop. A true CAS would need either a concurrency token (rejected: it is
+            // symmetric across every StopPlans writer, so it would turn a lost race in OCO-exit's OWN retire into an
+            // unhandled fault that skips its native-leg cleanup -- the very hazard this exists to prevent) or a
+            // provider that supports ExecuteUpdate (the in-memory unit-test provider does not).
+            await _database.Entry(record).ReloadAsync(cancellationToken);
+            if (record.Staging == StopStaging.Hidden)
+            {
+                record.Staging = StopStaging.Native;
+                await _database.SaveChangesAsync(cancellationToken);
+                promoted++;
 
-            _logger.LogInformation(
-                "Promoted the actual stop for order {OrderId} ({Contract}) to native at {Stop}.",
-                order.Id, contractKey, plan.ActualStop);
-        }
-
-        if (promoted > 0)
-        {
-            await _database.SaveChangesAsync(cancellationToken);
+                _logger.LogInformation(
+                    "Promoted the actual stop for order {OrderId} ({Contract}) to native at {Stop}.",
+                    order.Id, contractKey, plan.ActualStop);
+            }
+            else
+            {
+                await CancelDanglingLegAsync(venue, venueAccount, placed, order.Id, contractKey, record.Staging, cancellationToken);
+            }
         }
 
         return promoted;
+    }
+
+    /// <summary>
+    /// Cancels a native stop that was transmitted for a plan which turned out to be no longer <see cref="StopStaging.Hidden"/>
+    /// (retired or orphaned concurrently) — the position it would protect is gone, so the just-placed stop is a
+    /// dangling resting order. The service that placed it owns cancelling it; a failure here is the
+    /// <c>synthetic_risk</c> case (a live resting order with no position behind it) and is logged at error, never
+    /// thrown — the pass must continue for the other stops.
+    /// </summary>
+    private async Task CancelDanglingLegAsync(
+        ITradingVenue venue,
+        VenueAccountId account,
+        PlacedOrder placed,
+        Guid orderId,
+        string contractKey,
+        StopStaging observed,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await venue.CancelOrderAsync(account, placed.VenueOrderId, cancellationToken);
+            _logger.LogWarning(
+                "Promotion for order {OrderId} ({Contract}) lost a race with a concurrent {Staging}; the plan is no "
+                + "longer Hidden, so the promotion is discarded and the just-placed native stop {Leg} was cancelled.",
+                orderId, contractKey, observed, placed.VenueOrderId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // Could not cancel the dangling leg: a live resting native stop now has no position behind it (synthetic_risk).
+            // Surface it loudly for manual intervention rather than swallowing -- do NOT rethrow (the other stops must
+            // still be processed).
+            _logger.LogError(
+                error,
+                "Promotion for order {OrderId} ({Contract}) lost a race with a concurrent {Staging} AND could not "
+                + "cancel the just-placed native stop {Leg} (synthetic_risk): a live resting order may have no "
+                + "position behind it. Cancel it manually.",
+                orderId, contractKey, observed, placed.VenueOrderId);
+        }
+    }
+
+    /// <summary>
+    /// Whether the venue still reports an open position on <paramref name="contractKey"/> for
+    /// <paramref name="account"/>, on the same <paramref name="side"/> the order entered. Flat or reversed means the
+    /// protected position is gone; an unreachable venue is treated the same (fail closed) so a promotion never rests
+    /// on an unverified assumption. Reads are cached per account for the pass.
+    /// </summary>
+    private async Task<bool> IsPositionStillOpenAsync(
+        ITradingVenue venue,
+        VenueAccountId account,
+        string contractKey,
+        OrderSide side,
+        Dictionary<string, IReadOnlyList<PositionSnapshot>?> cache,
+        CancellationToken cancellationToken)
+    {
+        if (!cache.TryGetValue(account.Key, out IReadOnlyList<PositionSnapshot>? positions))
+        {
+            try
+            {
+                positions = await venue.GetPositionsAsync(account, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                // Cannot confirm the position -- do NOT promote on an unverified assumption. The native safety stop
+                // remains the floor and the next quote retries. Cache the failure so one unreachable venue is not
+                // re-hit for every stop on this account in the same pass.
+                _logger.LogWarning(
+                    error,
+                    "Stop promotion could not read positions for account {Account}; skipping promotion this pass.",
+                    account);
+                positions = null;
+            }
+
+            cache[account.Key] = positions;
+        }
+
+        if (positions is null)
+        {
+            return false; // unverifiable -> fail closed
+        }
+
+        PositionSnapshot? position = positions
+            .FirstOrDefault(candidate => string.Equals(candidate.Contract.Key, contractKey, StringComparison.Ordinal));
+
+        // Open only if the venue reports net exposure on the SAME side the order entered -- flat (zero) or reversed
+        // (opposite sign) means the protected position is gone, so there is nothing to promote a stop for.
+        int expectedSign = side == OrderSide.Buy ? 1 : -1;
+        return position is not null && position.NetQuantity != 0 && Math.Sign(position.NetQuantity) == expectedSign;
     }
 
     /// <summary>The protective exit side for a position: a long is protected by a sell, a short by a buy.</summary>

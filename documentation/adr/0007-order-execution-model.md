@@ -413,6 +413,39 @@ resizable ticket under both and asserts the same approved quantity reaches the v
 split-button UI and Settings surface (gh#25), and the other open per-environment defaults (sizing basis, proximity
 metric).
 
+## Update (2026-07-25) — the promotion race fenced (gh#183 follow-up)
+The gh#183 review (Finding 4, MEDIUM) surfaced a race the OCO-exit landing itself could not close: `StopPromotionService`
+promoted a `Hidden` stop purely on `Staging == Hidden` **and** `ShouldPromote(price)`, with **no position-awareness**
+and no reconciliation of a concurrent exit. A promotion in flight when a position was flattened could (a) place a
+native protective stop for an **already-flat** position — the very dangling-leg hazard gh#183 exists to remove — and
+(b) **clobber** an OCO-exit's `Retired` back to `Native`, leaving the journal asserting live protection for a position
+that no longer exists. It is fenced on the **promotion side** now — deliberately, so the fix touches only the racing
+watcher and never the exit path it races:
+
+- **Position-awareness (venue truth).** Before it places, the watcher reads `GetPositionsAsync` for the contract and
+  promotes **only** when the venue still reports net exposure on the entered side (the `OrphanGuardService` /
+  `OcoExitService` re-validation pattern). Flat, reversed, or **unconfirmable** all fail closed to **not** promoting —
+  the always-native safety stop remains the floor, and OCO-exit retires the plan on the exit event. Uncertainty
+  resolves to the safe state (§9).
+- **Re-check-then-record, and self-cancel the dangling leg.** After transmitting (and per record, so one stop's
+  outcome never rolls back another's), the watcher **re-reads the plan's staging** before recording `Native`. If it
+  observes the plan moved off `Hidden` — an OCO-exit retire, an orphan-guard on a drop, or an order-cancel (gh#250) —
+  it does **not** record `Native`; instead it **cancels the native stop it just placed** (it holds the venue handle),
+  since that stop now
+  rests for a position that is gone. A cancel that fails is the `synthetic_risk` case — logged loudly for manual
+  intervention, never thrown. This closes the residual the earlier draft left open: the promoter cleans up its **own**
+  leg rather than relying on the exit's leg-sweep, which may have already enumerated working orders before the transmit
+  landed. It is a re-read, **not an atomic CAS** — a retire committing in the sub-millisecond window between the
+  re-read and the save is still recorded as a stale `Native`, but that is **benign**: nothing re-acts on a `Native`
+  plan, and OCO-exit's leg-sweep (which runs after its own retire) still cancels the physical leg, so the residue is a
+  rare journal/audit blemish, not a live dangling stop. (A true CAS would need a token — rejected below — or provider
+  `ExecuteUpdate`, which the in-memory test provider lacks.)
+- **Why not an optimistic-concurrency token.** A first pass added an `xmin` token to `StopPlanRecord`. It was
+  **rejected on review**: the token is symmetric across **every** `StopPlans` writer, so it would turn a lost race in
+  OCO-exit's *own* retire into an unhandled `DbUpdateConcurrencyException` that skips its `CancelNativeLegs` cleanup and
+  drops the account-event stream — reintroducing the exact hazard on a different path. The promotion-side re-check needs
+  no token, no migration, and leaves the exit and orphan paths untouched.
+
 ## Consequences
 **Positive**
 - **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move
