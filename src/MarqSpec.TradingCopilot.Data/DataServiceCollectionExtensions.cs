@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace MarqSpec.TradingCopilot.Data;
@@ -15,7 +16,11 @@ public static class DataServiceCollectionExtensions
     /// <returns>The same service collection, for chaining.</returns>
     public static IServiceCollection AddTradingCopilotData(this IServiceCollection services, string connectionString)
     {
-        services.AddDbContext<TradingCopilotDbContext>(options => options.UseNpgsql(connectionString));
+        // Attach any ISaveChangesInterceptor registered by an upper layer (gh#295: the gate-decisions metric counts
+        // GateDecisionRecord rows as they are written). Resolved from DI so the Data layer stays free of any Api
+        // reference; when none is registered this is an empty, harmless no-op.
+        services.AddDbContext<TradingCopilotDbContext>((serviceProvider, options) =>
+            options.UseNpgsql(connectionString).AddInterceptors(serviceProvider.GetServices<ISaveChangesInterceptor>()));
         return services;
     }
 }

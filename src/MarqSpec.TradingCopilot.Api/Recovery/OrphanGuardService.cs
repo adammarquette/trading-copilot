@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Api.Audit;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -31,6 +32,7 @@ public sealed class OrphanGuardService
     private readonly IProjectXVenueFactory _venueFactory;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly IAuditLog _auditLog;
+    private readonly ExecutionMetrics _metrics;
     private readonly ILogger<OrphanGuardService> _logger;
 
     /// <summary>Creates the guard over the scoped database.</summary>
@@ -38,12 +40,14 @@ public sealed class OrphanGuardService
     /// <param name="venueFactory">Builds a venue for a connection's firm conventions — the source of re-arm truth.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
     /// <param name="auditLog">Records each synthetic-stop transition — a secondary, failure-tolerant write (gh#220).</param>
+    /// <param name="metrics">The execution SLIs; the live orphaned-stop gauge is refreshed from here (gh#295).</param>
     /// <param name="logger">The logger.</param>
     public OrphanGuardService(
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IAuditLog auditLog,
+        ExecutionMetrics metrics,
         ILogger<OrphanGuardService> logger)
     {
         ArgumentNullException.ThrowIfNull(projectXOptions);
@@ -52,6 +56,7 @@ public sealed class OrphanGuardService
         _venueFactory = venueFactory;
         _projectX = projectXOptions.Value;
         _auditLog = auditLog;
+        _metrics = metrics;
         _logger = logger;
     }
 
@@ -94,6 +99,9 @@ public sealed class OrphanGuardService
                 cancellationToken);
         }
 
+        // The live synthetic-risk gauge rises here (gh#295). Counted fresh, not `hidden.Count`: the gauge is "how
+        // many are CURRENTLY orphaned", including any left orphaned by an earlier pass, not this pass's delta.
+        await RefreshOrphanedGaugeAsync(cancellationToken);
         return hidden.Count;
     }
 
@@ -115,6 +123,7 @@ public sealed class OrphanGuardService
             .ToListAsync(cancellationToken);
         if (orphaned.Count == 0)
         {
+            await RefreshOrphanedGaugeAsync(cancellationToken); // nothing orphaned — the gauge reads zero (gh#295)
             return new RearmOutcome(0, 0, 0);
         }
 
@@ -251,7 +260,36 @@ public sealed class OrphanGuardService
         // left orphaned transitioned to nothing, so it contributes no row — the exposure window stays reconstructable.
         await AuditSafelyAsync(auditRows, cancellationToken);
 
+        // The gauge falls to whatever remains orphaned — zero once the last stop re-arms or retires (gh#295).
+        await RefreshOrphanedGaugeAsync(cancellationToken);
         return new RearmOutcome(rearmed, retired, stillOrphaned);
+    }
+
+    // Refreshes the live orphaned-stop gauge (gh#295) to the CURRENT count of orphaned plans — a fresh read, so it
+    // reflects the true synthetic-risk exposure regardless of what any one pass transitioned. Background plumbing,
+    // so it bypasses R-20 like every other query here.
+    //
+    // Fault-tolerant, exactly like AuditSafelyAsync below: this runs AFTER the orphan / re-arm write has committed,
+    // and emitting a metric must never fail the safety pass (§9, gh#295). A failed COUNT (a transient DB fault) is
+    // logged and swallowed — never allowed to surface as a failed pass and imply the orphaning did not happen. Only
+    // a cooperative cancellation propagates.
+    private async Task RefreshOrphanedGaugeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            int currentlyOrphaned = await _database.StopPlans
+                .IgnoreQueryFilters()
+                .CountAsync(plan => plan.Staging == StopStaging.Orphaned, cancellationToken);
+            _metrics.SetOrphanedStops(currentlyOrphaned);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(error, "Refreshing the orphaned-stop gauge failed; the safety action still completed.");
+        }
     }
 
     // Builds a synthetic-stop audit entry, owned by the affected stop's operator (R-20) — stamped explicitly

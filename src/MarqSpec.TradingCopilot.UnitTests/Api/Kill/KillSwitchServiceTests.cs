@@ -28,7 +28,7 @@ public class KillSwitchServiceTests
 
     private readonly Guid _operator = Guid.NewGuid();
     private readonly string _database = Guid.NewGuid().ToString();
-    private readonly KillSwitch _killSwitch = new();
+    private readonly KillSwitch _killSwitch = new(new MarqSpec.TradingCopilot.Api.Observability.ExecutionMetrics());
     private readonly IEventLog _log = A.Fake<IEventLog>();
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
 

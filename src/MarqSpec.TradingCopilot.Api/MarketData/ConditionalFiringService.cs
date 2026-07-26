@@ -43,6 +43,7 @@ public sealed class ConditionalFiringService
     private readonly IOptions<ExecutionOptions> _executionOptions;
     private readonly HostTradingEnvironment _environment;
     private readonly IKillSwitch _killSwitch;
+    private readonly IOrderAckRecorder _ackRecorder;
     private readonly ILogger<ConditionalFiringService> _logger;
 
     /// <summary>Creates the service.</summary>
@@ -53,6 +54,7 @@ public sealed class ConditionalFiringService
     /// <param name="executionOptions">The R-16 sanity caps and stop-promotion band.</param>
     /// <param name="environment">The R-14 deployment environment.</param>
     /// <param name="killSwitch">The kill-switch state; a killed system refuses the fire-time send (gh#189).</param>
+    /// <param name="ackRecorder">Records the transmit → venue-ack latency of a fired conditional (gh#295).</param>
     /// <param name="logger">The logger.</param>
     public ConditionalFiringService(
         TradingCopilotDbContext discovery,
@@ -62,6 +64,7 @@ public sealed class ConditionalFiringService
         IOptions<ExecutionOptions> executionOptions,
         HostTradingEnvironment environment,
         IKillSwitch killSwitch,
+        IOrderAckRecorder ackRecorder,
         ILogger<ConditionalFiringService> logger)
     {
         _discovery = discovery;
@@ -71,6 +74,7 @@ public sealed class ConditionalFiringService
         _executionOptions = executionOptions;
         _environment = environment;
         _killSwitch = killSwitch;
+        _ackRecorder = ackRecorder;
         _logger = logger;
     }
 
@@ -162,7 +166,7 @@ public sealed class ConditionalFiringService
 
         // Fire: the authoritative fire-time re-gate (R-12 / R-5 / R-16), the same ladder the operator's take runs.
         (OrderEndpoints.Composition? composed, _) = await OrderEndpoints.ComposeAsync(
-            record.AccountId, database, _venueFactory, _projectXOptions, _executionOptions, _environment, _killSwitch, cancellationToken);
+            record.AccountId, database, _venueFactory, _projectXOptions, _executionOptions, _environment, _killSwitch, _ackRecorder, cancellationToken);
         if (composed is null)
         {
             // A precondition failed (e.g. the account is not flat) -- leave it pending and re-decide next quote.

@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Reflection;
+using MarqSpec.TradingCopilot.Domain.Execution;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -23,6 +25,12 @@ public static class TelemetryRegistration
         ArgumentNullException.ThrowIfNull(builder);
 
         builder.Services.AddSingleton<ExecutionMetrics>();
+        // The Domain-declared ack-latency seam resolves to the same singleton sink (gh#295), so OrderExecutionService
+        // times the true venue round-trip without the Domain referencing the Api.
+        builder.Services.AddSingleton<IOrderAckRecorder>(sp => sp.GetRequiredService<ExecutionMetrics>());
+        // Counts every GateDecisionRecord as it is written, so trading.gate.decisions reconciles 1:1 with the rows
+        // (gh#295). Attached to the DbContext by AddTradingCopilotData, which resolves registered interceptors.
+        builder.Services.AddSingleton<ISaveChangesInterceptor, GateDecisionMetricInterceptor>();
         builder.Services.Configure<TelemetryOptions>(builder.Configuration.GetSection(TelemetryOptions.SectionName));
         TelemetryOptions options =
             builder.Configuration.GetSection(TelemetryOptions.SectionName).Get<TelemetryOptions>() ?? new TelemetryOptions();

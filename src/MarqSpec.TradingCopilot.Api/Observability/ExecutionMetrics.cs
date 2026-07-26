@@ -1,4 +1,5 @@
 using System.Diagnostics.Metrics;
+using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Risk;
 
 namespace MarqSpec.TradingCopilot.Api.Observability;
@@ -33,7 +34,7 @@ public enum FlattenTier
 /// Recording is deliberately total: nothing here throws, so a metrics fault can never fail a trading action.
 /// </para>
 /// </remarks>
-public sealed class ExecutionMetrics : IDisposable
+public sealed class ExecutionMetrics : IDisposable, IOrderAckRecorder
 {
     /// <summary>The meter name — registered with the OpenTelemetry pipeline (gh#230).</summary>
     public const string MeterName = "MarqSpec.TradingCopilot.Execution";

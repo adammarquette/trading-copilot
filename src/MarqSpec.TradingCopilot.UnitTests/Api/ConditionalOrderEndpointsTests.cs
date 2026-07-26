@@ -138,7 +138,7 @@ public class ConditionalOrderEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
         return await OrderEndpoints.CreateConditionalOrderAsync(
-            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
     }
 
     [Fact]

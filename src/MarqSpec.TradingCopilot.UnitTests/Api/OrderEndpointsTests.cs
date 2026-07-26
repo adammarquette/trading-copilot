@@ -154,7 +154,7 @@ public class OrderEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
         return await OrderEndpoints.SendOrderAsync(
-            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(configuredKey), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(configuredKey), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
     }
 
     [Fact]
@@ -399,7 +399,7 @@ public class OrderEndpointsTests
         await using TradingCopilotDbContext context = Context();
         return await OrderEndpoints.SendAsIsOrderAsync(
             accountId, request, new FixedUser(_operator), context, _factory, PxOptions(configuredKey), ExecOptions(),
-            Development, killSwitch ?? A.Fake<IKillSwitch>(), CancellationToken.None);
+            Development, killSwitch ?? A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
     }
 
     [Fact]

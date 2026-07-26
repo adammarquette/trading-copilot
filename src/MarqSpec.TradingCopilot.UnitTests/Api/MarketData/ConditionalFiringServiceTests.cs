@@ -65,6 +65,7 @@ public class ConditionalFiringServiceTests
         Microsoft.Extensions.Options.Options.Create(new ExecutionOptions()),
         new HostTradingEnvironment(DeploymentEnvironment.Development),
         A.Fake<IKillSwitch>(),
+        IOrderAckRecorder.None,
         NullLogger<ConditionalFiringService>.Instance);
 
     private async Task<Guid> SeedAccountAsync()

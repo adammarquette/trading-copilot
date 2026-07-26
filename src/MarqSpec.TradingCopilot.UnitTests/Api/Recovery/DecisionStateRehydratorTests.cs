@@ -20,7 +20,7 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.Recovery;
 public class DecisionStateRehydratorTests
 {
     private readonly string _database = Guid.NewGuid().ToString();
-    private readonly KillSwitch _killSwitch = new();
+    private readonly KillSwitch _killSwitch = new(new MarqSpec.TradingCopilot.Api.Observability.ExecutionMetrics());
     private readonly Guid _owner = Guid.NewGuid();
     private readonly DateTimeOffset _now = new(2026, 1, 15, 9, 0, 0, TimeSpan.Zero);
 

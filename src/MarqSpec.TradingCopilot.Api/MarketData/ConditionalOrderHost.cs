@@ -30,14 +30,17 @@ public sealed class ConditionalOrderHost : BackgroundService
     private static TimeSpan IdlePoll { get; } = TimeSpan.FromSeconds(1);
 
     private readonly IServiceProvider _services;
+    private readonly ExecutionMetrics _metrics;
     private readonly ILogger<ConditionalOrderHost> _logger;
 
     /// <summary>Creates the host.</summary>
     /// <param name="services">The root provider — a scope is opened per pass.</param>
+    /// <param name="metrics">The execution SLIs — retention gaps and pipeline lag per consumer group (gh#295).</param>
     /// <param name="logger">The logger.</param>
-    public ConditionalOrderHost(IServiceProvider services, ILogger<ConditionalOrderHost> logger)
+    public ConditionalOrderHost(IServiceProvider services, ExecutionMetrics metrics, ILogger<ConditionalOrderHost> logger)
     {
         _services = services;
+        _metrics = metrics;
         _logger = logger;
     }
 
@@ -84,6 +87,10 @@ public sealed class ConditionalOrderHost : BackgroundService
                             ConsumerGroup,
                             page.Gap.RequestedAfterSequence,
                             page.Gap.OldestAvailableSequence);
+
+                        // The queryable form of the same gap (gh#295, gh#227): a silent hole becomes a visible
+                        // metric a dashboard can alert on, not only a log line.
+                        _metrics.RecordRetentionGap(ConsumerGroup);
                     }
 
                     IReadOnlyList<EventEnvelope> batch = page.Events;
@@ -100,6 +107,11 @@ public sealed class ConditionalOrderHost : BackgroundService
                                 ? TelemetryRegistration.Source.StartActivity(
                                     "conditional-order.consume", ActivityKind.Consumer, default(ActivityContext), links: [link])
                                 : TelemetryRegistration.Source.StartActivity("conditional-order.consume", ActivityKind.Consumer);
+
+                            // Append -> consume delay for this event (gh#295): the histogram whose p95/p99 reveals
+                            // the pipeline falling behind. RecordedAt is the log's append time, so this is the delay
+                            // this consumer group is running at.
+                            _metrics.RecordPipelineLag(ConsumerGroup, DateTimeOffset.UtcNow - evt.RecordedAt);
 
                             if (StopPromotionService.TryDecodeQuote(evt, out StopPromotionService.DecodedQuote quote))
                             {

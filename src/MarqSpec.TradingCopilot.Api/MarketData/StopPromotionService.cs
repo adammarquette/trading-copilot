@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -26,15 +27,24 @@ namespace MarqSpec.TradingCopilot.Api.MarketData;
 public sealed class StopPromotionService
 {
     private readonly TradingCopilotDbContext _database;
+    private readonly IOrderAckRecorder _ackRecorder;
     private readonly ILogger<StopPromotionService> _logger;
 
     /// <summary>Creates the service over the scoped database.</summary>
     /// <param name="database">The database.</param>
     /// <param name="logger">The logger.</param>
-    public StopPromotionService(TradingCopilotDbContext database, ILogger<StopPromotionService> logger)
+    /// <param name="ackRecorder">
+    /// Records the transmit → venue-acknowledgement latency of a promoted native stop (gh#295) — the same SLI as an
+    /// entry send. Optional, defaulting to the no-op sink so a test needs no metrics pipeline.
+    /// </param>
+    public StopPromotionService(
+        TradingCopilotDbContext database,
+        ILogger<StopPromotionService> logger,
+        IOrderAckRecorder? ackRecorder = null)
     {
         _database = database;
         _logger = logger;
+        _ackRecorder = ackRecorder ?? IOrderAckRecorder.None;
     }
 
     /// <summary>
@@ -142,7 +152,11 @@ public sealed class StopPromotionService
                 LimitPrice: null,
                 StopPrice: plan.ActualStop);
 
+            // Time the venue round-trip — the transmit → ack SLI (gh#295), the same one an entry send records.
+            // Only on a successful ack: a rejection throws and is a different signal.
+            long transmittedAt = Stopwatch.GetTimestamp();
             PlacedOrder placed = await venue.PlaceOrderAsync(stop, cancellationToken);
+            _ackRecorder.RecordOrderAck(Stopwatch.GetElapsedTime(transmittedAt));
 
             // Re-read the plan's staging from the DB before recording native (gh#183 follow-up, review Finding 4).
             // Between the position-check above and this point a concurrent actor may have moved the plan off Hidden

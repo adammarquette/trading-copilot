@@ -121,3 +121,33 @@ metrics backend down, which would mean instrumentation causing the very outage i
 orphaned-stop gauge, and pipeline lag / retention-gap counters. Their instruments are **already defined and
 tested** on `ExecutionMetrics`; what remains is threading the sink through five more services and their tests,
 which is a wider blast radius than this increment wanted to carry.
+
+## Update (2026-07-26) — the execution SLIs, increment 2 (gh#295)
+
+The remaining five wirings landed, so every instrument on `ExecutionMetrics` now emits:
+
+- **`trading.gate.decisions`** — a counter by `outcome` (`Allowed` / `Resized` / `Blocked`) × `binding_layer`.
+  Emitted from a **`SaveChanges` interceptor** (`GateDecisionMetricInterceptor`) that counts every
+  `GateDecisionRecord` as it is written, rather than threading the sink through every send / arm / take / modify
+  handler. Counting the rows themselves makes the counter **track the persisted rows 1:1** — the honest form of
+  PRD §7's *"100% risk-gate coverage"* — and it sidesteps the wide-blast-radius threading the first increment
+  flagged. (Counted in `SavingChanges`, so a rare rolled-back save leaves a small *upward* drift, never an
+  under-count that would hide a gap.) (The interceptor is registered as an `ISaveChangesInterceptor` and
+  attached by `AddTradingCopilotData`, which resolves registered interceptors from DI so the Data layer keeps no
+  Api reference.)
+- **`trading.order.ack_latency`** — a histogram of the true venue transmit → acknowledgement round-trip, timed at
+  the venue call in `OrderExecutionService` (every entry) and `StopPromotionService` (a promoted native stop),
+  recorded only on a successful ack. The Domain times it through a small declared seam (`IOrderAckRecorder`), so
+  the venue boundary is measured without the Domain referencing the Api.
+- **`trading.killswitch.engaged`** — a gauge set from the single `KillSwitch.Engage`/`Disengage` chokepoint, so
+  engage, disengage, startup rehydration, and the recovery fail-safe all update it; a killed system that restarts
+  reads killed in the metric as it does in the durable row.
+- **`trading.stops.orphaned`** — a gauge refreshed from a fresh count in `OrphanGuardService` on every orphan and
+  re-arm pass; it rises on a connection drop and returns to zero once the last orphan clears.
+- **`trading.eventlog.retention_gaps`** / **`trading.eventlog.pipeline_lag`** — a counter and a histogram per
+  `consumer_group`, emitted from the two event-log consumer hosts beside the retention gap they already log; lag is
+  `now − RecordedAt` (the log's append time).
+
+Recording stays **total** everywhere — a metrics fault (including the interceptor's) is swallowed, never failing a
+trade (§9). *Out of scope, unchanged:* alert rules / paging (needs the on-call-channel decision) and Grafana
+dashboards (QA proposes, does not build).

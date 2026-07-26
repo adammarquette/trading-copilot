@@ -136,7 +136,7 @@ public class StagedOrderEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
         return await OrderEndpoints.ArmOrderAsync(
-            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
     }
 
     [Fact]
@@ -190,7 +190,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.EditStagedOrderAsync(
-            orderId, SmallBuy() with { Entry = 5302m, ReferencePrice = 5302m }, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            orderId, SmallBuy() with { Entry = 5302m, ReferencePrice = 5302m }, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         await using TradingCopilotDbContext reload = Context();
@@ -225,7 +225,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.EditStagedOrderAsync(
-            orderId, SmallBuy(), new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            orderId, SmallBuy(), new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
     }
@@ -243,7 +243,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
@@ -277,7 +277,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
 
         // R-12 working as designed: what passed at arm does not pass now -> refused, transmitted nothing,
         // still staged for another edit.
@@ -321,7 +321,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
 
         // Fixed: take rebuilds the working stop, sizes as arm did, and transmits. (Under the defect this is a
         // 422 -- PerTradeRisk sizes against the safety stop and leaves room for zero.)
@@ -354,7 +354,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         sent!.ProfitTarget.Should().Be(new Price(5310m)); // rebuilt from the row and transmitted, not dropped
@@ -415,7 +415,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
@@ -478,7 +478,7 @@ public class StagedOrderEndpointsTests
         {
             await OrderEndpoints.EditStagedOrderAsync(
                 orderId, SmallBuy() with { Entry = 5302m, ReferencePrice = 5302m }, new FixedUser(_operator), context,
-                _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+                _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
         }
 
         // An edit is a deviation from the armed proposal -- it takes as a ModifiedTake (R-11 records deviations).
@@ -497,7 +497,7 @@ public class StagedOrderEndpointsTests
         {
             await OrderEndpoints.TakeStagedOrderAsync(
                 orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development,
-                A.Fake<IKillSwitch>(), CancellationToken.None);
+                A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
         }
 
         await using TradingCopilotDbContext reload = Context();
@@ -517,13 +517,13 @@ public class StagedOrderEndpointsTests
         {
             await OrderEndpoints.EditStagedOrderAsync(
                 orderId, SmallBuy() with { Entry = 5302m, ReferencePrice = 5302m }, new FixedUser(_operator), edit,
-                _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+                _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
         }
         await using (TradingCopilotDbContext take = Context())
         {
             await OrderEndpoints.TakeStagedOrderAsync(
                 orderId, new FixedUser(_operator), take, _factory, PxOptions(), ExecOptions(), Development,
-                A.Fake<IKillSwitch>(), CancellationToken.None);
+                A.Fake<IKillSwitch>(), IOrderAckRecorder.None, CancellationToken.None);
         }
 
         // The deviation is carried all the way to the placed order -- a reader sees a modified take, not an armed one.

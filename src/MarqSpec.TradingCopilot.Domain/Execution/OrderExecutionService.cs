@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 
@@ -29,6 +30,7 @@ public sealed class OrderExecutionService : IOrderExecutionService
     private readonly IOrderExecutor _venue;
     private readonly DeploymentEnvironment _environment;
     private readonly IKillSwitch _killSwitch;
+    private readonly IOrderAckRecorder _ackRecorder;
 
     /// <summary>Creates the execution service.</summary>
     /// <param name="gate">The enforcing risk gate (R-5 / R-16).</param>
@@ -40,12 +42,22 @@ public sealed class OrderExecutionService : IOrderExecutionService
     /// through the guard.
     /// </param>
     /// <param name="killSwitch">The kill-switch state; while it is engaged, every send is refused (ADR-0007, gh#189).</param>
-    public OrderExecutionService(IRiskGate gate, IOrderExecutor venue, DeploymentEnvironment environment, IKillSwitch killSwitch)
+    /// <param name="ackRecorder">
+    /// Records the transmit → venue-acknowledgement latency SLI (gh#295). Optional and defaulting to the no-op sink
+    /// so a test can construct the service without a metrics pipeline; the composition root supplies the real one.
+    /// </param>
+    public OrderExecutionService(
+        IRiskGate gate,
+        IOrderExecutor venue,
+        DeploymentEnvironment environment,
+        IKillSwitch killSwitch,
+        IOrderAckRecorder? ackRecorder = null)
     {
         _gate = gate;
         _venue = venue;
         _environment = environment;
         _killSwitch = killSwitch;
+        _ackRecorder = ackRecorder ?? IOrderAckRecorder.None;
     }
 
     /// <summary>
@@ -158,7 +170,11 @@ public sealed class OrderExecutionService : IOrderExecutionService
             ProfitTarget = request.Proposal.Target,
         };
 
+        // Time the true venue round-trip — the transmit → acknowledgement SLI (gh#295). Recorded only on a
+        // successful ack: a venue rejection throws here and is a different signal, not an ack latency.
+        long transmittedAt = Stopwatch.GetTimestamp();
         PlacedOrder placed = await _venue.PlaceOrderAsync(order, cancellationToken);
+        _ackRecorder.RecordOrderAck(Stopwatch.GetElapsedTime(transmittedAt));
 
         return ExecutionResult.Placed(placed, decision);
     }

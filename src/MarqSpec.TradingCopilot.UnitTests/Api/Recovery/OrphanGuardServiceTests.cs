@@ -1,7 +1,9 @@
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Audit;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Venues;
+using MarqSpec.TradingCopilot.UnitTests.Api.Observability;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
@@ -51,9 +53,9 @@ public class OrphanGuardServiceTests
         new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
             new FixedUser(user ?? Guid.Empty));
 
-    private OrphanGuardService Service(string credentialKey = "topstep-main", IAuditLog? auditLog = null) =>
+    private OrphanGuardService Service(string credentialKey = "topstep-main", IAuditLog? auditLog = null, ExecutionMetrics? metrics = null) =>
         new(Context(), _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
-            auditLog ?? new AuditLog(Context()), NullLogger<OrphanGuardService>.Instance);
+            auditLog ?? new AuditLog(Context()), metrics ?? new ExecutionMetrics(), NullLogger<OrphanGuardService>.Instance);
 
     private static PositionSnapshot Pos(int net) =>
         new(AccountId, VenueContractId.Create(Projectx, Contract), net, new Price(5_000m));
@@ -170,6 +172,35 @@ public class OrphanGuardServiceTests
     }
 
     // --- Orphaning (unchanged from gh#209) ---
+
+    // --- The live orphaned-stop gauge (gh#295): rises on a drop, returns to zero after re-arm ---
+
+    [Fact]
+    public async Task OrphanAsync_ShouldRaiseTheOrphanedGauge_ToTheCurrentCount()
+    {
+        using MetricCapture capture = new();
+        await SeedStopAsync(StopStaging.Hidden);
+        await SeedStopAsync(StopStaging.Hidden);
+
+        await Service(metrics: capture.Metrics).OrphanAsync(CancellationToken.None);
+
+        capture.PumpGauges();
+        capture.For(ExecutionMetrics.OrphanedStops).Last().Value
+            .Should().Be(2, "the gauge is the live count of synthetic-risk exposure");
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldReturnTheOrphanedGaugeToZero_WhenEveryStopReValidates()
+    {
+        using MetricCapture capture = new();
+        await SeedOrphanedAsync(); // default: the position is still open, so the stop re-arms and none stays orphaned
+
+        await Service(metrics: capture.Metrics).RearmAsync(CancellationToken.None);
+
+        capture.PumpGauges();
+        capture.For(ExecutionMetrics.OrphanedStops).Last().Value
+            .Should().Be(0, "the gauge falls to zero once the last orphan clears");
+    }
 
     [Fact]
     public async Task OrphanAsync_ShouldMoveOnlyHiddenStopsToOrphaned_LeavingNativeUntouched()

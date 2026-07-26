@@ -298,7 +298,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 **Safety (hard criteria — pass/fail, not trends):**
 - **Zero busted flattens.** Auto-flatten closes all positions by the **configured deadline (default ~2:30 PM CT)** in 100% of sessions; any residual position past it is a Sev-1 defect.
 - **Zero unconfirmed entries.** No order is ever transmitted without explicit user confirmation (auto-flatten excepted).
-- **100% risk-gate coverage.** No order reaches the broker without passing the R-5 risk gate and R-16 caps.
+- **100% risk-gate coverage.** No order reaches the broker without passing the R-5 risk gate and R-16 caps. *(Observable, not merely asserted: the `trading.gate.decisions` counter counts every `GateDecisionRecord` as it is written, so it reconciles 1:1 with the persisted decisions — gh#295, ADR-0002.)*
 
 **Leading indicators (days–weeks):**
 - Platform used in ≥ 90% of trading sessions

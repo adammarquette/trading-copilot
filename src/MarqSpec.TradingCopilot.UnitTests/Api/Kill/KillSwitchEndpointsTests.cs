@@ -21,7 +21,7 @@ public class KillSwitchEndpointsTests
 {
     private readonly Guid _operator = Guid.NewGuid();
     private readonly string _database = Guid.NewGuid().ToString();
-    private readonly KillSwitch _killSwitch = new();
+    private readonly KillSwitch _killSwitch = new(new MarqSpec.TradingCopilot.Api.Observability.ExecutionMetrics());
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 

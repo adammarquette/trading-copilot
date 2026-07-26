@@ -80,7 +80,7 @@ public class OrderModifyEndpointTests
     private Task<IResult> ModifyAsync(Guid orderId, ModifyWorkingOrderRequest request, Guid? asUser = null, string configuredKey = OurCredentialKey, IKillSwitch? killSwitch = null) =>
         OrderEndpoints.ModifyWorkingOrderPriceAsync(
             orderId, request, new FixedUser(asUser ?? _operator), Context(asUser), _factory, PxOptions(configuredKey),
-            ExecOptions(), Development, killSwitch ?? A.Fake<IKillSwitch>(), _auditLog, NullLoggerFactory.Instance, CancellationToken.None);
+            ExecOptions(), Development, killSwitch ?? A.Fake<IKillSwitch>(), IOrderAckRecorder.None, _auditLog, NullLoggerFactory.Instance, CancellationToken.None);
 
     private async Task<Guid> SeedWorkingOrderAsync(
         OrderStatus status = OrderStatus.Working,

@@ -33,11 +33,11 @@ public class OrderExecutionServiceTests
 
     private static VenueAccountId AccountId => VenueAccountId.Create(Venue, "9001");
 
-    private OrderExecutionService ServiceIn(DeploymentEnvironment environment)
+    private OrderExecutionService ServiceIn(DeploymentEnvironment environment, IOrderAckRecorder? ackRecorder = null)
     {
         // Fixed at construction, never per send: a caller able to name its own environment could walk a live
         // account through the R-14 guard from a development host.
-        return new OrderExecutionService(_gate, _venue, environment, _killSwitch);
+        return new OrderExecutionService(_gate, _venue, environment, _killSwitch, ackRecorder);
     }
 
     private static VenueAccount Account(TradingMode mode)
@@ -107,6 +107,37 @@ public class OrderExecutionServiceTests
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
             .ReturnsLazily((OrderRequest r, CancellationToken _) =>
                 Task.FromResult(new PlacedOrder(r.Account, orderId, DateTimeOffset.UnixEpoch)));
+    }
+
+    // --- Order-ack latency SLI (gh#295): the transmit -> venue-acknowledgement histogram ---
+
+    [Fact]
+    public async Task SendAsync_ShouldRecordOrderAckLatency_OnASuccessfulPlacement()
+    {
+        // The true venue round-trip is timed and recorded — recorded only on a successful ack, since the record
+        // follows the venue call, which a refusal never reaches.
+        IOrderAckRecorder ackRecorder = A.Fake<IOrderAckRecorder>();
+        OrderExecutionService service = ServiceIn(DeploymentEnvironment.Development, ackRecorder);
+        GateReturns(GateDecision.Allow(4, "within every layer"));
+        VenueAccepts();
+
+        await service.SendAsync(Request(Account(TradingMode.Practice)), CancellationToken.None);
+
+        A.CallTo(() => ackRecorder.RecordOrderAck(A<TimeSpan>._)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task SendAsync_ShouldNotRecordOrderAck_WhenNothingReachesTheVenue()
+    {
+        // A refusal never transmits, so it must not pollute the ack histogram with a fast non-transmit. The kill
+        // switch refuses before the venue is touched.
+        IOrderAckRecorder ackRecorder = A.Fake<IOrderAckRecorder>();
+        A.CallTo(() => _killSwitch.IsEngaged).Returns(true);
+        OrderExecutionService service = ServiceIn(DeploymentEnvironment.Development, ackRecorder);
+
+        await service.SendAsync(Request(Account(TradingMode.Practice)), CancellationToken.None);
+
+        A.CallTo(() => ackRecorder.RecordOrderAck(A<TimeSpan>._)).MustNotHaveHappened();
     }
 
     // --- The always-native safety stop (gh#11 increment 3, ADR-0007) ---
