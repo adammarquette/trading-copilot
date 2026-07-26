@@ -31,6 +31,8 @@ public static class ConnectionEndpoints
         group.MapGet("/", ListConnectionsAsync);
         group.MapGet("/{id:guid}/accounts", ListAccountsAsync);
         group.MapPost("/{id:guid}/accounts/discover", DiscoverAccountsAsync);
+        group.MapPut("/{id:guid}/credentials", RotateCredentialsAsync);
+        group.MapDelete("/{id:guid}", DeactivateConnectionAsync);
         return endpoints;
     }
 
@@ -208,5 +210,107 @@ public static class ConnectionEndpoints
         await database.SaveChangesAsync(cancellationToken);
 
         return Results.Ok(responses);
+    }
+
+    /// <summary>Rotates which credential key a connection names (gh#210, R-17, ADR-0015).</summary>
+    /// <param name="id">The connection.</param>
+    /// <param name="request">The new credential key.</param>
+    /// <param name="currentUser">The authenticated operator.</param>
+    /// <param name="database">The scoped context (R-20 default-deny applies).</param>
+    /// <param name="projectXOptions">The credential key this process actually holds.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The updated connection, or a refusal.</returns>
+    internal static async Task<IResult> RotateCredentialsAsync(
+        Guid id,
+        RotateCredentialsRequest request,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        IOptions<ProjectXConnectionOptions> projectXOptions,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (string.IsNullOrWhiteSpace(request.CredentialKey))
+        {
+            return Results.BadRequest(new { error = "A credential key is required." });
+        }
+
+        // The R-20 filter does the scoping: another operator's connection simply is not here, so this is 404 and
+        // never 403 -- a 403 would confirm the row exists to someone with no right to know.
+        Connection? connection = await database.Connections
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (connection is null)
+        {
+            return Results.NotFound();
+        }
+
+        if (!connection.IsActive)
+        {
+            return Results.Conflict(new
+            {
+                error = "This connection is deactivated and is no longer a usable path to the venue. "
+                    + "Reactivating it is a separate, deliberate action.",
+            });
+        }
+
+        // Refuse a key this process cannot serve, rather than persisting it. Accepting it would leave the
+        // connection pointing at an unusable credential set -- and the failure would surface later, at the venue,
+        // on whatever call happened to come first (one credential set per process, ADR-0015).
+        string configuredKey = projectXOptions.Value.CredentialKey;
+        string rotatedKey = request.CredentialKey.Trim();
+        if (!string.Equals(rotatedKey, configuredKey, StringComparison.Ordinal))
+        {
+            return Results.Conflict(new
+            {
+                error = $"This process holds credentials for key '{configuredKey}', not '{rotatedKey}'. "
+                    + "One ProjectX credential set per process (ADR-0015); reconfigure or run a process for that key.",
+            });
+        }
+
+        // No secret moves here BY CONSTRUCTION: the column holds a key that NAMES a credential set held in the
+        // environment, so rotation repoints a pointer and there is no secret in the request, the row, or a log.
+        connection.CredentialKey = rotatedKey;
+        await database.SaveChangesAsync(cancellationToken);
+
+        return Results.Ok(new ConnectionResponse(connection.Id, connection.FirmId, connection.Platform, connection.CredentialKey));
+    }
+
+    /// <summary>Deactivates a connection and cascades to its accounts — a soft delete (gh#210, R-17, R-20).</summary>
+    /// <param name="id">The connection.</param>
+    /// <param name="currentUser">The authenticated operator.</param>
+    /// <param name="database">The scoped context (R-20 default-deny applies).</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>Ok on deactivation (idempotent), or 404 when it is not the operator's.</returns>
+    internal static async Task<IResult> DeactivateConnectionAsync(
+        Guid id,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        CancellationToken cancellationToken)
+    {
+        Connection? connection = await database.Connections
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (connection is null)
+        {
+            return Results.NotFound();
+        }
+
+        // Deactivate, never remove. The journal -- orders, trades, gate decisions -- references these accounts and
+        // is the audit trail; deleting the rows would break it in a way nothing notices until an audit needs them.
+        connection.IsActive = false;
+
+        List<Account> accounts = await database.Accounts
+            .Where(candidate => candidate.ConnectionId == id)
+            .ToListAsync(cancellationToken);
+
+        foreach (Account account in accounts)
+        {
+            account.IsActive = false;
+        }
+
+        // Idempotent: a second call re-asserts the same state and still reports success. Deactivating twice is
+        // not an error, and making it one would punish a retry after a dropped response.
+        await database.SaveChangesAsync(cancellationToken);
+
+        return Results.Ok(new { id = connection.Id, isActive = connection.IsActive, deactivatedAccounts = accounts.Count });
     }
 }

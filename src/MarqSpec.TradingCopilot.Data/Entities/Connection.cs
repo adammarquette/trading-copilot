@@ -36,6 +36,13 @@ public class Connection : IUserOwned
     /// </summary>
     public required string CredentialKey { get; set; }
 
+    /// <summary>
+    /// Whether this login is active. Deactivation (gh#210) is a <b>soft delete</b>: the row and its accounts stay,
+    /// because the journal — orders, trades, gate decisions — references those accounts and is the audit trail.
+    /// A deactivated connection is no longer a usable path to the venue.
+    /// </summary>
+    public bool IsActive { get; set; } = true;
+
     /// <summary>The accounts this login exposes, as discovered from the venue.</summary>
     public ICollection<Account> Accounts { get; set; } = [];
 }
