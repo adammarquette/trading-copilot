@@ -1,0 +1,50 @@
+# Tempo — traces (gh#231, ADR-0002).
+#
+# The backend that makes "websocket event -> append -> processor -> DB write" one queryable waterfall
+# (engineering §7). Local single-binary mode with filesystem storage: this is a developer stack, not a cluster.
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+ingester:
+  # Short flush windows so a trace is queryable seconds after it is produced. On a laptop you are usually
+  # looking for the request you just made, and a five-minute flush would make the stack feel broken.
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    # 7 days, matching Prometheus and Loki. Long enough to investigate last week's incident, short enough that a
+    # dev laptop does not fill its disk unattended.
+    block_retention: 168h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+# Exposes span metrics + service graphs to Prometheus, so Grafana's trace view can pivot to RED metrics for the
+# same service (the tracesToMetrics link in the datasource provisioning).
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics]

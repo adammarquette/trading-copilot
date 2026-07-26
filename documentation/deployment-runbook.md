@@ -250,6 +250,41 @@ nor token is ever printed.
 state. Once the App is live, this fallback is retired and (with `gh#45`) its approval can become a required
 check.
 
+## Observability stack (local, opt-in)
+
+The self-hosted LGTM stack (`gh#231`, [ADR-0002](adr/0002-observability.md)) sits behind the **`observability`
+compose profile**, so it is **off by default**:
+
+```bash
+docker compose up -d                              # app + db only
+docker compose --profile observability up -d      # ...plus the stack
+```
+
+| Service | Port | What it holds |
+|---|---|---|
+| Grafana | 3000 | the single pane; datasources provisioned from `./observability/grafana/provisioning` |
+| Prometheus | 9090 | metrics (remote-write receiver + exemplar storage enabled) |
+| Loki | 3100 | logs |
+| Tempo | 3200 | traces |
+| OTel Collector | 4317 / 4318 | the only address the app exports to |
+
+**The app exports to the collector and knows no backend.** Swapping a backend, adding a second destination, or
+sampling is a change to `./observability/otel-collector-config.yaml`, not to application configuration.
+
+**Footprint** (measured 2026-07-26, idle, all five running): **~263 MB RAM** — Tempo 102, Grafana 63, Loki 40,
+collector 33, Prometheus 25. Limits are set well above that (`mem_limit` 300–512 MB each) so a busy stack has
+headroom without being able to exhaust the host. Images total ~1.7 GB on first pull. Retention is **7 days** on
+all three backends.
+
+**Grafana credentials** default to `admin`/`admin` for local development only, from `GF_SECURITY_ADMIN_USER` /
+`GF_SECURITY_ADMIN_PASSWORD`. A deployed Grafana takes them from that environment's secret store — never from a
+committed file, and never left at the default.
+
+**Everything is provisioned as code.** Nothing in this stack is configured by clicking, and
+`docker compose --profile observability down && up` returns the same stack (verified, including datasource
+re-provisioning and volume persistence). `prometheus.yml` already mounts a `rules/` directory, so `gh#245`'s
+alerting rules arrive as reviewable files rather than console state.
+
 ## The dead-man's switch (operator setup — required before live)
 
 The **only** alerting tier that survives this process dying (R-13, `gh#244`,

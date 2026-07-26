@@ -1,0 +1,5 @@
+# Prometheus alerting rules land here with gh#245 (ADR-0019's Layer 2).
+#
+# The directory is referenced by prometheus.yml and mounted now, while empty, so adding Alertmanager is a matter
+# of dropping rule files in rather than re-plumbing the stack — and so the rules arrive as reviewable code
+# rather than as clicks in a UI.

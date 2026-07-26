@@ -39,6 +39,15 @@ Instrument everything with **OpenTelemetry** and export the three pillars to the
 ## Follow-ups
 - Fix the **event-envelope trace-context fields** (with ADR-0001's envelope schema).
 - **Span conventions** for the agent path: a span per strategy agent and per executor step, so a suggestion's trace shows the full fan-in.
+- **The LGTM stack is stood up (`gh#231`, 2026-07-26).** Prometheus, Loki, Tempo and Grafana behind an
+  **OpenTelemetry Collector**, in `docker-compose.yml` under the **`observability` profile** — off by default, so
+  `docker compose up -d` is unchanged and a developer who does not want five extra containers is not blocked
+  (telemetry export is fire-and-forget, so an absent stack can never become a reason trading does not work).
+  Configuration lives in `./observability/` and is **provisioned as code**, including the Grafana datasources and
+  their cross-pillar links: Prometheus **exemplars** → Tempo, Tempo → Loki (`tracesToLogsV2`), Tempo → Prometheus
+  (`tracesToMetrics`). Metrics arrive by **remote write** rather than by scraping the collector, because remote
+  write is what carries exemplars. Retention is 7 days on all three backends. `prometheus.yml` already references
+  a mounted `rules/` directory so `gh#245` adds alerting by dropping files in rather than re-plumbing.
 - ~~Alert channel + thresholds for the on-call-of-one (auto-flatten reliability must page)~~ — **decided in
   [ADR-0019](0019-alerting-channel-and-thresholds.md)** (2026-07-25, `gh#242`): Pushover behind an
   `INotificationChannel` seam, three layers including an out-of-process dead-man's switch, and the P1/P2/P3
