@@ -24,6 +24,12 @@ public class DataLayerScopingTests
         typeof(Event),       // the append-only event backbone (ADR-0001): system plumbing, not workspace rows
         typeof(EventCursor), // per-consumer-group replay cursors for the backbone (ADR-0001): system plumbing
         typeof(KillSwitchState), // the deployment-wide kill switch (gh#189): one row per process, not a workspace row
+
+        // The clean-historical bar store (gh#302). Global by R-20's OWN rule rather than by exception: the
+        // requirement draws the line explicitly — operator-owned rows carry an owning identity, while
+        // "reference & market data (instruments, venues, data providers, bars/ticks/quotes, raw news) is
+        // shared / global". A tenant filter here would hide the market from the operator trading it.
+        typeof(BarRecord),
     };
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;

@@ -69,6 +69,20 @@ pipeline**, and a **full indicator rebuild reprocesses the clean historical stor
 the log's own replay covers only recent catch-up/recovery. Retention is **configurable**; a future event type
 may warrant a longer window. See engineering §8.
 
+## Update (2026-07-26) — the clean-historical store exists (gh#302)
+This ADR has assumed that store since the update above; it did not exist until now. `BarRecord` / the `Bars`
+hypertable is it: OHLCV filled by a periodic REST backfill (`BarBackfillHost`, default 60 s per engineering §8),
+keyed on `(venue, instrument, resolution, bucket)` so an overlapping re-poll **updates** rather than duplicates,
+and never storing a bucket that has not closed. **It carries no retention policy on purpose** — expiring the
+system of record would defeat what it is for — which is the deliberate contrast with this log's 24 hours.
+
+**Reconciling the numbers above:** the text says *"< 24h, likely < 1h"*; the `AddEventBackbone` migration sets
+**24 hours**, the outer bound. The migration is the operative value and 24h stands — with the clean-historical
+store now real, there is no pressure to shorten it, and the retention-gap signal (gh#227) makes a trailing
+consumer's loss explicit rather than silent either way. Treat 24h as the decision and this text as its range.
+
+Still open: **backfilling a gap** from this store is the R-1 path (gh#306), not this log's.
+
 ## Update (2026-07-26) — the retention contract is explicit, and a trailing consumer is told (gh#227, decision gh#162)
 
 The window above made the log **lossy by design**, but nothing said so at the seam, and the reader did not act
