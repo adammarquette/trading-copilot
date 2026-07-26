@@ -572,6 +572,45 @@
   :root[data-theme="light"] .safety-px{color:#D8443A} /* mirror the [style*="#ff8a80"] light remap for the class form */
   .mgmt-modify{margin-top:22px}
 
+  /* ---------- charting surface ---------- */
+  .chartsurf{margin-top:44px}
+  .chartsurf-frame{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-l);overflow:hidden}
+  .cs-toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:10px 12px;background:var(--surface-2);border-bottom:1px solid var(--outline-soft)}
+  .cs-instr{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--on-hi);background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:8px;padding:5px 10px;font-family:var(--mono)}
+  .cs-instr b{font-family:var(--font);font-weight:700}.cs-instr .car{color:var(--on-dim);font-size:10px}
+  .cs-tool{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--on-med);border:1px solid var(--outline-soft);border-radius:8px;padding:5px 10px;background:var(--bg)}
+  .cs-tool:hover{color:var(--on-hi);border-color:var(--outline)}
+  .cs-live{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--long);font-family:var(--mono)}
+  .cs-dot{width:8px;height:8px;border-radius:50%;background:var(--long);box-shadow:0 0 0 3px rgba(79,191,123,.18)}
+  .cs-body{display:flex;align-items:stretch}
+  .cs-drawrail{flex:none;width:40px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 0;background:var(--surface-2);border-right:1px solid var(--outline-soft)}
+  .cs-drawbtn{width:26px;height:26px;border-radius:7px;border:1px dashed var(--outline);color:var(--on-dim);font-size:13px;cursor:not-allowed;background:none}
+  .cs-tooltag{writing-mode:vertical-rl;transform:rotate(180deg);font-family:var(--mono);font-size:8px;letter-spacing:.1em;text-transform:uppercase;color:var(--on-dim);margin-bottom:4px}
+  .cs-panes{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px;padding:8px 10px}
+  .cs-price{height:320px;position:relative;border:1px solid var(--outline-soft);border-radius:8px;
+    background:linear-gradient(180deg,var(--surface-1),var(--bg));overflow:hidden}
+  .cs-price .lab{position:absolute;top:6px;left:8px;font-size:10.5px;color:var(--on-dim);font-family:var(--mono);z-index:4}
+  .cs-safety-line{position:absolute;left:0;right:70px;border-top:1.4px dashed var(--critical);pointer-events:none;z-index:2}
+  .cs-band{position:absolute;left:0;right:70px;background:var(--warn);opacity:.12;pointer-events:none;z-index:1}
+  .cs-band-lab{position:absolute;right:74px;font-size:8px;color:var(--warn);font-weight:700;letter-spacing:.03em;transform:translateY(-50%);z-index:3}
+  .cs-lvls{position:absolute;top:0;right:0;bottom:0;width:70px;z-index:3}
+  .cs-lvl{position:absolute;right:4px;transform:translateY(-50%);white-space:nowrap;padding:1px 5px;border-radius:4px;
+    font-family:var(--mono);font-size:8.5px;font-weight:700;background:var(--surface-2);border:1px solid var(--outline-soft)}
+  .cs-lvl.tgt{color:var(--long)}.cs-lvl.entry{color:var(--primary)}.cs-lvl.stop{color:var(--short)}
+  .cs-lvl.pos{color:var(--on-hi)}.cs-lvl.safety{color:#ff8a80}.cs-lvl.band{color:var(--warn)}
+  :root[data-theme="light"] .cs-lvl.safety{color:#D8443A}
+  .cs-ind{position:relative;height:60px;flex:none;border:1px solid var(--outline-soft);border-radius:8px;
+    background:linear-gradient(180deg,var(--surface-1),var(--bg));overflow:hidden}
+  .cs-ind .lab{position:absolute;top:5px;left:8px;font-size:10px;color:var(--on-dim);font-family:var(--mono);z-index:2;display:flex;align-items:center;gap:6px}
+  .planned-pane{opacity:.5}
+  .cs-flow{flex:none;width:188px;border-left:1px solid var(--outline-soft);background:var(--surface-2);display:flex;flex-direction:column}
+  .cs-flow-h{font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--on-dim);font-weight:700;padding:9px 11px;border-bottom:1px solid var(--outline-soft);display:flex;flex-direction:column;gap:6px}
+  .cs-flow-dom{padding:9px 10px;opacity:.5}
+  .cs-flow-note{font-size:10px;color:var(--on-dim);line-height:1.45;padding:0 11px 11px}
+  .cs-flow-note b{color:var(--on-med)}
+  @media(max-width:900px){.cs-flow{display:none}}
+  @media(max-width:720px){.cs-drawrail{display:none}}
+
   /* ---------- account switcher ---------- */
   .acct{margin-top:44px}
   .acct-drop{max-width:540px;background:var(--surface-2);border:1px solid var(--outline);border-radius:var(--r-l);overflow:hidden;box-shadow:var(--e2)}
@@ -838,8 +877,8 @@
               <div class="chart">
                 <div class="pane price"><span class="lab">ES · 5m — order flow, positions, fills overlaid</span>
                   <div class="js-price" data-h="240" data-overlay="1"></div></div>
-                <div class="pane ind"><span class="lab">RSI 14 · 58</span><div class="js-rsi" data-h="64"></div></div>
-                <div class="pane ind"><span class="lab">MACD 12/26/9</span><div class="js-macd" data-h="64"></div></div>
+                <div class="pane ind planned-pane"><span class="lab">RSI 14 <span class="plannedtag">R-3 · planned</span></span><div class="js-rsi" data-h="64"></div></div>
+                <div class="pane ind planned-pane"><span class="lab">MACD <span class="plannedtag">R-3 · planned</span></span><div class="js-macd" data-h="64"></div></div>
               </div>
               <div class="bottomdock">
                 <div class="bd">
@@ -933,7 +972,7 @@
               </div>
               <div class="chart">
                 <div class="pane price"><span class="lab">ES · 5m</span><div class="js-price" data-h="188" data-overlay="1"></div></div>
-                <div class="pane ind"><span class="lab">RSI · 58</span><div class="js-rsi" data-h="52"></div></div>
+                <div class="pane ind planned-pane"><span class="lab">RSI <span class="plannedtag">R-3 · planned</span></span><div class="js-rsi" data-h="52"></div></div>
               </div>
               <div class="bottomdock" style="grid-template-columns:1fr;height:120px">
                 <div class="bd"><div class="bd__h">Chat · News <span class="chip ghost">2 tabs</span> <span class="tag" style="margin-left:auto">R-6 · R-2</span></div>
@@ -1083,6 +1122,81 @@
       <span class="pill"><span class="d"></span><b>Kill + countdown</b> in every window</span>
       <span class="pill"><span class="d"></span>execution stays <b>server-side</b></span>
     </div>
+  </section>
+
+  <section class="chartsurf">
+    <div class="cap"><h2>Charting — the central surface</h2><span class="bp">R-10 · R-3</span>
+      <span class="muted">candles + live price are real venue data; your order / position / stop geometry overlays them — indicators &amp; order-flow are marked planned</span></div>
+
+    <div class="chartsurf-frame">
+      <div class="cs-toolbar">
+        <div class="cs-instr"><b>ES</b> · CON.F.US.EP.U26 <span class="car">▾</span></div>
+        <div class="tf"><span>1m</span><span class="on">5m</span><span>15m</span><span>1h</span><span>1D</span></div>
+        <button class="cs-tool">＋ Indicators <span class="plannedtag">R-3 · planned</span></button>
+        <button class="cs-tool">✎ Drawing <span class="plannedtag">planned</span></button>
+        <div class="cs-live"><span class="cs-dot"></span>live · Quotes</div>
+      </div>
+
+      <div class="cs-body">
+        <div class="cs-drawrail">
+          <span class="cs-tooltag">planned</span>
+          <button class="cs-drawbtn" title="Trend line" aria-label="Trend line (planned)">╱</button>
+          <button class="cs-drawbtn" title="Horizontal level" aria-label="Level (planned)">─</button>
+          <button class="cs-drawbtn" title="Zone" aria-label="Zone (planned)">▢</button>
+          <button class="cs-drawbtn" title="Measure" aria-label="Measure (planned)">↕</button>
+        </div>
+
+        <div class="cs-panes">
+          <div class="cs-price">
+            <span class="lab">ES · 5m · candles = HistoricalBars · price = Quotes</span>
+            <div class="js-price" data-h="320" data-overlay="1"></div>
+            <!-- static levels the shared price overlay does not draw: the always-native safety stop + the promotion band -->
+            <div class="cs-band" style="top:107px;height:12px"></div>
+            <div class="cs-band-lab" style="top:113px">promotion band</div>
+            <div class="cs-safety-line" style="top:142px"></div>
+            <!-- right-edge price-axis labels for the overlaid risk geometry (aligned to the shared candle scale) -->
+            <div class="cs-lvls">
+              <span class="cs-lvl tgt" style="top:14px">TGT 5248.50</span>
+              <span class="cs-lvl entry" style="top:86px">ENTRY 5230.25</span>
+              <span class="cs-lvl stop" style="top:118px">WORK 5222.00</span>
+              <span class="cs-lvl safety" style="top:142px">SAFE 5216.00</span>
+            </div>
+          </div>
+
+          <div class="cs-ind planned-pane">
+            <span class="lab">RSI · 14 <span class="plannedtag">R-3 · planned</span></span>
+            <div class="js-rsi" data-h="60"></div>
+          </div>
+          <div class="cs-ind planned-pane">
+            <span class="lab">MACD · 12,26,9 <span class="plannedtag">R-3 · planned</span></span>
+            <div class="js-macd" data-h="60"></div>
+          </div>
+        </div>
+
+        <aside class="cs-flow">
+          <div class="cs-flow-h"><span>Order flow · DOM + tape</span><span class="plannedtag">Phase 3 · bespoke</span></div>
+          <div class="cs-flow-dom">
+            <div class="dom">
+              <div class="drow"><div class="bid"></div><div class="px">5231.00</div><div class="ask"><span class="askbar" style="width:70%"></span><span class="sz">412</span></div></div>
+              <div class="drow"><div class="bid"></div><div class="px">5230.75</div><div class="ask"><span class="askbar" style="width:34%"></span><span class="sz">210</span></div></div>
+              <div class="drow last"><div class="bid"></div><div class="px">5230.25</div><div class="ask"></div></div>
+              <div class="drow"><div class="bid"><span class="bidbar" style="width:60%"></span><span class="sz">338</span></div><div class="px">5230.00</div><div class="ask"></div></div>
+              <div class="drow"><div class="bid"><span class="bidbar" style="width:100%"></span><span class="sz">602</span></div><div class="px">5229.75</div><div class="ask"></div></div>
+            </div>
+          </div>
+          <div class="cs-flow-note">ProjectX advertises <b>HistoricalBars</b> + <b>Quotes</b>, <b>not MarketDepth</b> — a depth feed and a bespoke footprint pane land later.</div>
+        </aside>
+      </div>
+    </div>
+
+    <div class="ann" style="margin-top:16px">
+      <div class="annitem"><b>Real data, your geometry on it.</b> The candles are <b>HistoricalBars</b> (ProjectX REST) and the price is the live <b>Quotes</b> stream. Onto them the chart projects <b>your own risk geometry</b> — a working order's <b>entry</b>, its <b>hidden working stop</b>, the <b>always-native safety stop</b>, the <b>target</b>, and the <b>promotion band</b> (plus open-position fills). This is the shipped value: <b>see your risk on the chart</b> — the same levels the modify family and the stop plan manage (R-8 / R-11; gh#259/267/278/292, gh#183).</div>
+      <div class="annitem"><b>Indicators are planned (R-3).</b> RSI / MACD / VWAP / ATR need the <b>indicator pipeline</b>, which isn't built — and its scope is still being settled (gh#307). The panes render as a <b>planned</b> affordance, not live math; ATR stays refused until it lands.</div>
+      <div class="annitem"><b>The suggestion overlay is planned (R-4).</b> A proposed setup's entry / stop / target would draw here once the <b>suggestion engine</b> ships (Phase 3). Today only <b>your placed</b> orders and positions overlay — nothing is inferred.</div>
+      <div class="annitem"><b>Order-flow is a later bespoke pane.</b> ProjectX exposes <b>no MarketDepth</b>, so the DOM + tape + footprint is a <b>deferred slot</b>, dimmed — not a live feed. Drawing tools are UI-only, also planned.</div>
+    </div>
+
+    <div class="rej-why" style="margin-top:12px">The chart is <b>R-10's central surface</b>, drawn here as a dedicated view rather than the embedded pane of the workspace. What is <b>real today</b> is the honest core: bars and quotes from the venue, and your <b>own execution geometry</b> laid over them — so a resting bracket or an open position is read <i>against price</i>, where the promotion band and the safety floor mean something. What is <b>planned</b> is marked as such: the <b>indicator pipeline</b> (R-3, still being scoped — gh#307), the <b>AI-suggestion overlay</b> (R-4, Phase 3), <b>drawing tools</b>, and the <b>order-flow / footprint</b> pane (no <code>MarketDepth</code> capability yet). Nothing here claims a feed or a computation the system does not have.</div>
   </section>
 
   <section class="perf">
@@ -1883,7 +1997,8 @@
   <section class="key">
     <h3>Region → requirement</h3>
     <div class="key-grid">
-      <div><span class="tag">R-10</span> Central chart — candles, RSI/MACD panes, suggestion &amp; position overlays</div>
+      <div><span class="tag">R-10</span> Central chart — candles, suggestion &amp; position overlays; indicator panes (RSI/MACD) planned (R-3)</div>
+      <div><span class="tag">R-10 · R-3</span> Charting surface — dedicated view: real candles (HistoricalBars) + live price (Quotes) with your order / position / stop-plan geometry overlaid; indicators (R-3), suggestion overlay (R-4), drawing tools &amp; order-flow (no MarketDepth) marked planned</div>
       <div><span class="tag">R-4</span> AI suggestion — levels, confidence, rationale, validity</div>
       <div><span class="tag">R-11</span> Order ticket &amp; take-suggestion — explicit, human-in-the-loop</div>
       <div><span class="tag">R-5 · R-16</span> Risk gate &amp; sanity caps — shown before arming</div>
@@ -1923,7 +2038,7 @@
   <p class="foot">Mid-fidelity wireframes — structure, dark Material language, and adaptive behavior, not final visuals.
   Type shown in a system stack; production uses <b>Roboto</b> / <b>Roboto Mono</b>. Committed to the dark theme
   (the product's default); the theme toggle (top-right, sun / moon) previews the light variant — the same tokens, swapped (ADR-0005). Order-flow / DOM (Bookmap-style) is a later
-  bespoke pane and isn't drawn here.</p>
+  bespoke pane — shown as a marked-<i>planned</i> slot on the charting surface (no <code>MarketDepth</code> capability yet), not a live feed.</p>
 </div>
 
 <script>
