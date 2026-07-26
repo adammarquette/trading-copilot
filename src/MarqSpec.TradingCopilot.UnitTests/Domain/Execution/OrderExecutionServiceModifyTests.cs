@@ -7,12 +7,13 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 namespace MarqSpec.TradingCopilot.UnitTests.Domain.Execution;
 
 /// <summary>
-/// The in-place modify path (gh#259): a reprice of a working order, re-gated through the same enforcing service
-/// as a send. Every case here is about what a reprice must <b>not</b> do — reach the venue while killed, bypass
-/// the gate, or silently change size (which would desync the always-native safety-stop bracket, whose quantity a
-/// modify cannot address). Two guarantees separate it from <see cref="OrderExecutionServiceTests"/> (send): the
-/// kill switch refuses it (a reprice is outbound and risk-additive, unlike a cancel), and the gate must approve
-/// the <b>unchanged</b> size outright — a resize refuses, it does not downsize.
+/// The in-place modify path (gh#259 reprice, gh#292 resize): re-gated through the same enforcing service as a
+/// send. A <b>pure reprice</b> (<c>resize: false</c>) must never reach the venue while killed, bypass the gate,
+/// or silently change size — the gate must approve the <b>unchanged</b> size outright, and a <see cref="GateOutcome.Resized"/>
+/// refuses (silently downsizing would desync the attached safety bracket). A <b>resize</b> (<c>resize: true</c>) is
+/// a deliberate size change, so it honours the gate exactly as a send does — <see cref="GateOutcome.Allowed"/> or
+/// <see cref="GateOutcome.Resized"/> — and transmits the <b>gate-approved</b> quantity (the safety bracket carries
+/// no size and the gateway sizes it to the fill, gh#292). The kill switch refuses either (outbound, unlike a cancel).
 /// </summary>
 public class OrderExecutionServiceModifyTests
 {
@@ -223,6 +224,86 @@ public class OrderExecutionServiceModifyTests
         GateReturns(GateDecision.Allow(4, "the gate would allow it"));
 
         ExecutionResult result = await _service.ModifyAsync(Request(), WorkingOrderKey, CancellationToken.None);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByUnprotectableStop);
+        MustNotHaveModified(_venue);
+    }
+
+    // --- RESIZE (resize: true) honours the gate and transmits the approved size (gh#292) ---
+
+    [Fact]
+    public async Task ModifyAsync_ShouldTransmitTheNewSize_WhenResizeAndTheGateAllowsAtTheNewSize()
+    {
+        // A deliberate resize: the gate allows the new (larger) size, so it is transmitted. Unlike a reprice, the
+        // size IS sent -- you cannot change the quantity without sending it; the on-fill bracket sizes to the fill.
+        GateReturns(GateDecision.Allow(6, "6 within every layer"));
+        VenueAcceptsModify();
+
+        ExecutionResult result = await _service.ModifyAsync(
+            Request(quantity: 6), WorkingOrderKey, CancellationToken.None, resize: true);
+
+        result.Outcome.Should().Be(ExecutionOutcome.Modified);
+        result.Decision!.ApprovedQuantity.Should().Be(6);
+        A.CallTo(() => _venue.ModifyOrderAsync(
+            AccountId, WorkingOrderKey, new Price(5_000m), A<Price?>._, 6, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly(); // the NEW size reaches the venue (not null, unlike a reprice)
+    }
+
+    [Fact]
+    public async Task ModifyAsync_ShouldTransmitTheGateDownsizedQuantity_WhenResizeAndTheGateResizes()
+    {
+        // The core resize property (the inverse of the reprice anchor): a resize HONOURS a gate downsize -- it
+        // transmits decision.ApprovedQuantity (never the asked size), so the gate is never exceeded, never silent.
+        GateReturns(GateDecision.Resize(3, RiskLayer.PerTradeRisk, "only 3 fit at this stop"));
+        VenueAcceptsModify();
+
+        ExecutionResult result = await _service.ModifyAsync(
+            Request(quantity: 6), WorkingOrderKey, CancellationToken.None, resize: true);
+
+        result.Outcome.Should().Be(ExecutionOutcome.Modified);
+        result.Decision!.Outcome.Should().Be(GateOutcome.Resized);
+        result.Decision!.ApprovedQuantity.Should().Be(3);
+        A.CallTo(() => _venue.ModifyOrderAsync(
+            AccountId, WorkingOrderKey, A<Price?>._, A<Price?>._, 3, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly(); // the gate-approved 3, not the asked 6
+    }
+
+    [Fact]
+    public async Task ModifyAsync_ShouldRefuseAndNotTouchTheVenue_WhenResizeAndTheGateBlocks()
+    {
+        GateReturns(GateDecision.Block(RiskLayer.DrawdownFloor, "no room for even one at this size"));
+
+        ExecutionResult result = await _service.ModifyAsync(
+            Request(quantity: 6), WorkingOrderKey, CancellationToken.None, resize: true);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByRisk);
+        MustNotHaveModified(_venue);
+    }
+
+    [Fact]
+    public async Task ModifyAsync_ShouldRefuse_WhenResizeAndTheKillSwitchIsEngaged()
+    {
+        // A resize is outbound and (on an upsize) risk-additive, so the kill switch refuses it, exactly like a reprice.
+        A.CallTo(() => _killSwitch.IsEngaged).Returns(true);
+        GateReturns(GateDecision.Allow(6, "never reached"));
+
+        ExecutionResult result = await _service.ModifyAsync(
+            Request(quantity: 6), WorkingOrderKey, CancellationToken.None, resize: true);
+
+        result.Outcome.Should().Be(ExecutionOutcome.RefusedByKillSwitch);
+        A.CallTo(() => _gate.Evaluate(A<OrderProposal>._, A<RiskContext>._)).MustNotHaveHappened();
+        MustNotHaveModified(_venue);
+    }
+
+    [Fact]
+    public async Task ModifyAsync_ShouldRefuse_WhenResizeAndTheVenueCannotHoldANativeProtectiveStop()
+    {
+        // Fail-closed: a resized fill still needs its exchange-held stop, so a venue that cannot hold one is refused.
+        A.CallTo(() => _venue.Capabilities).Returns(VenueCapabilities.Of(VenueCapability.Quotes)); // no brackets
+        GateReturns(GateDecision.Allow(6, "the gate would allow it"));
+
+        ExecutionResult result = await _service.ModifyAsync(
+            Request(quantity: 6), WorkingOrderKey, CancellationToken.None, resize: true);
 
         result.Outcome.Should().Be(ExecutionOutcome.RefusedByUnprotectableStop);
         MustNotHaveModified(_venue);
