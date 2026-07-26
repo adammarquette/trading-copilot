@@ -138,8 +138,10 @@ the rule, not noise to tolerate.
   than parallel paths.
 
 **Negative / costs**
-- **A third-party dependency on a safety path.** Mitigated: alerting is failure-tolerant and off the hot path — a
-  channel failure is logged and never fails or delays a trading action.
+- **A third-party dependency on a safety path.** Mitigated: alerting is failure-tolerant and held off the hot path
+  by a deliberate per-notification budget (`FlattenOptions.NotificationBudget`, `gh#289`) — a channel that fails,
+  slows, or hangs is logged and abandoned, so it never fails or **delays** a trading action. The budget is a design
+  bound at the caller, not a reliance on the channel's own network timeout.
 - **An external account and a second piece of infrastructure** the operator must provision, and which a fork must
   provision too. It is in the deploy checklist because a deployment without it is silently missing its most
   important safety net.
@@ -173,6 +175,15 @@ the rule, not noise to tolerate.
   than reimplementing it, and it is unit-testable without a transport. The requirement is unchanged — one push per
   incident, re-armed on resolve.
 - **`gh#245`** Alertmanager rules and routing (Layer 2) · **`gh#246`** the QA suite.
+- **`gh#246` → `gh#289` — the send was on the hot path after all.** The QA suite found the Layer-1 send *awaited
+  inline* in the flatten pass, so a hung channel added its full latency to a flatten — the very cost this ADR calls
+  "off the hot path". `gh#289` closed it: every notification round-trip (send **and** resolve) on the flatten and
+  watchdog passes now runs within `FlattenOptions.NotificationBudget`, and an overrun is abandoned and logged. The
+  dedup *recording* is unmoved — an abandoned round-trip is never marked delivered, so a page is never lost to a
+  false dedup (the safe direction). Its *delivery* is unknown, though: a channel that delivers but ACKs slower than
+  the budget can repeat a page (send) or leave one uncancelled (resolve) — the accepted trade for a bounded pass, a
+  P1 erring toward an extra page over a missed one, and one the independent Layers 2/3 backstop. Hardening that
+  slow-but-delivering window is `gh#300`.
 - **Thresholds are recorded but not yet enforced.** The P1/P2/P3 tables above describe what `gh#245` must build; only
   the dead-man's switch's own rules (check-in absent by deadline + 5 min, heartbeat missed ≥ 3 intervals) are live
   today, and they live in the **monitor's** configuration rather than in this repo.

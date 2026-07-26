@@ -175,11 +175,11 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
     [Fact]
     public async Task Alert_ShouldNotDelayFlatten_WhenChannelHangs()
     {
-        // DEFECT gh#289: the send is AWAITED INLINE in AutoFlattenService.NotifyAsync, so a slow channel adds its
-        // full latency to the flatten pass -- on the R-13 safety path, and contradicting gh#243's own criterion
-        // that "sending is off the hot path". Pins the OBSERVED behaviour (QA contract rule 2) so the suite
-        // documents reality without blessing it; when #289 lands, this assertion INVERTS to
-        // `BeLessThan(TimeSpan.FromSeconds(5))` and becomes that issue's regression guard.
+        // gh#289 REGRESSION GUARD (was a pinned DEFECT under #246): the send is now run within a deliberate budget
+        // (FlattenOptions.NotificationBudget) in AutoFlattenService.NotifyAsync, so a slow or hung channel is
+        // abandoned rather than awaited to completion -- sending is off the hot path (gh#243's criterion) on the
+        // R-13 safety path. This assertion was inverted from BeGreaterThanOrEqualTo when #289 landed; a return of
+        // the inline await makes the 5 s hang block the pass again and this fails.
         string account = await FreshAccountAsync();
         VenueFactory.SeedPosition(account, "ESM25", netQuantity: 1);
         VenueFactory.MakeCloseIneffective("ESM25");
@@ -189,8 +189,8 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
         await RunFlattenAsync(Utc(19, 45));
         clock.Stop();
 
-        clock.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromSeconds(5),
-            "OBSERVED gh#289: the notification send blocks the flatten pass — it is not off the hot path");
+        clock.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5),
+            "gh#289: the notification send is budgeted off the flatten hot path — a hung channel cannot delay a flatten");
     }
 
     // -------------------------------------------------------------------------------------------------------

@@ -294,9 +294,12 @@ public sealed class AutoFlattenService
                         $"{decision.Reason} Flat after {attempts} attempt(s).", now, cancellationToken);
 
                     // The incident is over. Cancels any page still nagging from an earlier pass and re-arms the
-                    // key, so a LATER failure today is reported as the new incident it is (gh#243).
-                    await _notifications.ResolveAsync(
-                        IncidentKey(account, schedule.Instrument), cancellationToken);
+                    // key, so a LATER failure today is reported as the new incident it is (gh#243). Budgeted like
+                    // the send (gh#289): a hung resolve must not delay the pass either.
+                    await WithinNotificationBudgetAsync(
+                        token => _notifications.ResolveAsync(IncidentKey(account, schedule.Instrument), token),
+                        IncidentKey(account, schedule.Instrument),
+                        cancellationToken);
                     return true;
 
                 case FlattenVerdict.Retry:
@@ -327,27 +330,58 @@ public sealed class AutoFlattenService
         }
     }
 
-    /// <summary>
-    /// Notifies the operator, absorbing any fault. Alerting is a <b>secondary</b> concern to closing a position:
-    /// a channel that is down, slow, or misconfigured must never fail or abort a flatten — that would be the
-    /// self-inflicted wound ADR-0019 rules out, where the thing meant to report trouble becomes the trouble.
-    /// The adapters are already failure-tolerant; this is the belt to that braces, since a flatten is the one
-    /// action the system takes without confirmation.
-    /// </summary>
-    private async Task NotifyAsync(
+    /// <summary>Pages or notifies the operator (gh#243) within the notification budget — see <see cref="WithinNotificationBudgetAsync"/>.</summary>
+    private Task NotifyAsync(
         NotificationSeverity severity,
         string title,
         string body,
         string incidentKey,
+        CancellationToken cancellationToken) =>
+        WithinNotificationBudgetAsync(
+            token => _notifications.SendAsync(new Notification(severity, title, body, incidentKey), token),
+            incidentKey,
+            cancellationToken);
+
+    /// <summary>
+    /// Runs one operator-notification round-trip — a send or a resolve — within a bounded time budget, absorbing any
+    /// fault. Alerting is a <b>secondary</b> concern to closing a position: a channel that is down, slow, or hanging
+    /// must never fail, abort, <b>or delay</b> a flatten — the self-inflicted wound ADR-0019 rules out, where the
+    /// thing meant to report trouble becomes the trouble (gh#289, R-13, engineering §9). The adapters are already
+    /// fault-tolerant and the interface asks them not to block; this is the belt to those braces, since a flatten is
+    /// the one action the system takes without confirmation, on a path where CL and GC share ~15 minutes of margin.
+    /// </summary>
+    /// <remarks>
+    /// The budget is a <b>deliberate design bound</b> applied here at the caller, not a reliance on the channel's own
+    /// network timeout — and it bites precisely when things are already going wrong, because the page only fires on
+    /// escalation. A round-trip that overruns is abandoned (its linked token is cancelled) and logged, and the pass
+    /// moves on. An abandoned round-trip is <b>never recorded as delivered</b> — the wrapped
+    /// <c>DedupingNotificationChannel</c> records only a <i>successful</i> send — so it is retried next pass and a
+    /// page is never lost to a false "already told them" (the safe direction). Its <b>delivery is unknown</b>,
+    /// though: a channel that delivers but ACKs slower than the budget can repeat a page next pass (send) or leave
+    /// one uncancelled (resolve). That is the accepted trade — a bounded flatten pass outweighs perfect alert dedup,
+    /// a P1 errs toward an extra page rather than a missed one, and ADR-0019's independent Layers 2/3 backstop a
+    /// degraded Layer 1. Hardening the slow-but-delivering window is <c>gh#300</c>.
+    /// </remarks>
+    private async Task WithinNotificationBudgetAsync(
+        Func<CancellationToken, Task> roundTrip,
+        string incidentKey,
         CancellationToken cancellationToken)
     {
+        using CancellationTokenSource budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(_options.NotificationBudget);
         try
         {
-            await _notifications.SendAsync(new Notification(severity, title, body, incidentKey), cancellationToken);
+            await roundTrip(budget.Token);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw; // a real shutdown still stops the host
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogError(
+                "Notifying the operator about {Incident} overran its {Budget} budget and was abandoned; the flatten is unaffected.",
+                incidentKey, _options.NotificationBudget);
         }
         catch (Exception error)
         {

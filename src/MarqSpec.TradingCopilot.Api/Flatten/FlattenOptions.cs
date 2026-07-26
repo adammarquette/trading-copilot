@@ -55,6 +55,20 @@ public sealed class FlattenOptions
     public int MaxFlattenAttempts { get; init; } = 3;
 
     /// <summary>
+    /// The deliberate time budget for a single operator-notification round-trip on a flatten pass (gh#289, R-13,
+    /// ADR-0019, engineering §9). Alerting is <b>secondary</b> to closing a position: a slow, hung, or misbehaving
+    /// channel must never add its latency to a flatten, so a send or resolve that overruns this budget is abandoned
+    /// (and logged) rather than awaited to completion. This is a design bound applied by the <i>caller</i>, not a
+    /// reliance on the channel's own network timeout — the bound bites precisely when things are already going wrong,
+    /// because the page only fires on escalation. Comfortably above a healthy push's round-trip so a normal send is
+    /// never cut short; far below the CME-close margin so an abandoned one costs nothing that matters.
+    /// </summary>
+    public int NotificationBudgetSeconds { get; init; } = 2;
+
+    /// <summary>The per-notification-round-trip budget as a <see cref="TimeSpan"/>.</summary>
+    public TimeSpan NotificationBudget => TimeSpan.FromSeconds(NotificationBudgetSeconds);
+
+    /// <summary>
     /// The redundant watchdog's grace window (gh#187): how long past an instrument's deadline the watchdog waits
     /// before stepping in — giving the primary scheduler (gh#185) its chance first, so the two tiers do not fight.
     /// The watchdog acts only on the primary's <i>failure</i>: a position still open past deadline + this grace.

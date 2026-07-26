@@ -159,6 +159,38 @@ public class AutoFlattenServiceTests
             .MustHaveHappened();
     }
 
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldNotBlockOnTheNotification_WhenTheChannelHangs()
+    {
+        // gh#289 regression guard (found by #246): the escalation page is AWAITED on the flatten hot path, so a slow
+        // or hung channel adds its full latency to a flatten -- on the R-13 safety path, against a ~15-minute close
+        // margin. The send now runs within a deliberate budget: a hang is abandoned and the pass moves on. Without
+        // the fix this never completes (the channel hangs forever) and CompleteWithinAsync fails.
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._))
+            .ReturnsLazily((Notification _, CancellationToken token) => HangUntilCancelled(token));
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2)); // never flat -> escalates -> pages
+        FlattenOptions budget = new() { NotificationBudgetSeconds = 1 };
+
+        Func<Task> pass = () => Service(options: budget).FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+
+        await pass.Should().CompleteWithinAsync(
+            TimeSpan.FromSeconds(4), "a hung notification channel must not block the flatten pass (gh#289)");
+
+        // The page was still ATTEMPTED -- budgeting the send must not skip the escalation, only bound the wait.
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Page), A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    // A send that blocks until its (budget-linked) token is cancelled — the "hung channel" the real HttpClient models
+    // when a connect stalls. It observes the token exactly as PushoverNotificationChannel does.
+    private static async Task<bool> HangUntilCancelled(CancellationToken cancellationToken)
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        return true;
+    }
+
     // --- The deadline boundary: fire when due, and only then ---
 
     [Fact]

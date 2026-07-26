@@ -114,4 +114,13 @@ public class FlattenOptionsTests
         options.WatchdogGrace.Should().Be(TimeSpan.FromMinutes(5));
         options.WatchdogPollInterval.Should().Be(TimeSpan.FromSeconds(45));
     }
+
+    [Fact]
+    public void NotificationBudget_ShouldDefaultAndProjectTheConfiguredValue()
+    {
+        // The per-notification send/resolve budget that holds alerting off the flatten hot path (gh#289). A short,
+        // deliberate default -- comfortably above a healthy push, far below the CME-close margin.
+        new FlattenOptions().NotificationBudget.Should().Be(TimeSpan.FromSeconds(2));
+        new FlattenOptions { NotificationBudgetSeconds = 5 }.NotificationBudget.Should().Be(TimeSpan.FromSeconds(5));
+    }
 }

@@ -226,6 +226,36 @@ public class AutoFlattenWatchdogServiceTests
         AssertAppended(AutoFlattenWatchdogService.CriticalEventType);
     }
 
+    [Fact]
+    public async Task BackstopAccountAsync_ShouldNotBlockOnTheNotification_WhenTheChannelHangs()
+    {
+        // gh#289 regression guard (found by #246): the watchdog's critical page is AWAITED on the flatten hot path,
+        // so a hung channel adds its latency to the LAST tier standing when the primary has already failed. The send
+        // now runs within a deliberate budget: a hang is abandoned and the pass moves on. Without the fix the hung
+        // channel never returns and CompleteWithinAsync fails.
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._))
+            .ReturnsLazily((Notification _, CancellationToken token) => HangUntilCancelled(token));
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
+        FlattenOptions budget = new() { NotificationBudgetSeconds = 1 };
+
+        Func<Task> pass = () => Service(options: budget).BackstopAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(20, 35), Grace, CancellationToken.None);
+
+        await pass.Should().CompleteWithinAsync(
+            TimeSpan.FromSeconds(4), "a hung notification channel must not block the watchdog pass (gh#289)");
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Page), A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    // A send that blocks until its (budget-linked) token is cancelled — the "hung channel" a stalled HttpClient
+    // models. It observes the token exactly as PushoverNotificationChannel does.
+    private static async Task<bool> HangUntilCancelled(CancellationToken cancellationToken)
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        return true;
+    }
+
     // --- Only ever reduces exposure ---
 
     [Fact]

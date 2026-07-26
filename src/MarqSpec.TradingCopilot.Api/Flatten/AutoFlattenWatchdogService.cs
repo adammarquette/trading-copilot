@@ -288,46 +288,64 @@ public sealed class AutoFlattenWatchdogService
         }
     }
 
-    /// <summary>
-    /// Notifies the operator, absorbing any fault. Alerting is <b>secondary</b> to closing a position: this is
-    /// the last tier standing when the primary has already failed, so a notification channel that is down must
-    /// never stop it doing its job (ADR-0019).
-    /// </summary>
-    private async Task NotifyAsync(
+    /// <summary>Pages or notifies the operator (gh#243) within the notification budget — see <see cref="WithinNotificationBudgetAsync"/>.</summary>
+    private Task NotifyAsync(
         NotificationSeverity severity,
         string title,
         string body,
         string incidentKey,
+        CancellationToken cancellationToken) =>
+        WithinNotificationBudgetAsync(
+            token => _notifications.SendAsync(new Notification(severity, title, body, incidentKey), token),
+            incidentKey,
+            cancellationToken);
+
+    /// <summary>Closes an incident within the notification budget — see <see cref="WithinNotificationBudgetAsync"/>.</summary>
+    private Task ResolveAsync(string incidentKey, CancellationToken cancellationToken) =>
+        WithinNotificationBudgetAsync(
+            token => _notifications.ResolveAsync(incidentKey, token),
+            incidentKey,
+            cancellationToken);
+
+    /// <summary>
+    /// Runs one operator-notification round-trip — a send or a resolve — within a bounded time budget, absorbing any
+    /// fault. Alerting is <b>secondary</b> to closing a position: this is the last tier standing when the primary has
+    /// already failed, so a channel that is down, slow, or hanging must never fail, abort, <b>or delay</b> it doing
+    /// its job (gh#289, R-13, ADR-0019, engineering §9).
+    /// </summary>
+    /// <remarks>
+    /// The budget is a <b>deliberate design bound</b> at the caller, not a reliance on the channel's own network
+    /// timeout. A round-trip that overruns is abandoned (its linked token is cancelled) and logged, and the pass
+    /// moves on. An abandoned round-trip is <b>never recorded as delivered</b> (the wrapped
+    /// <c>DedupingNotificationChannel</c> records only a successful send), so it is retried next pass and a page is
+    /// never lost to a false dedup — the safe direction. Its delivery is unknown, though: a channel that delivers
+    /// but ACKs slower than the budget can repeat or orphan a page, the accepted trade for a bounded pass (hardening
+    /// tracked as <c>gh#300</c>).
+    /// </remarks>
+    private async Task WithinNotificationBudgetAsync(
+        Func<CancellationToken, Task> roundTrip,
+        string incidentKey,
         CancellationToken cancellationToken)
     {
+        using CancellationTokenSource budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(_options.NotificationBudget);
         try
         {
-            await _notifications.SendAsync(new Notification(severity, title, body, incidentKey), cancellationToken);
+            await roundTrip(budget.Token);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw; // a real shutdown still stops the host
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogError(
+                "Notifying the operator about {Incident} overran its {Budget} budget and was abandoned; the watchdog is unaffected.",
+                incidentKey, _options.NotificationBudget);
         }
         catch (Exception error)
         {
             _logger.LogError(error, "Could not notify the operator about {Incident}; the watchdog is unaffected.", incidentKey);
-        }
-    }
-
-    /// <summary>Closes an incident, absorbing any fault — same reasoning as <see cref="NotifyAsync"/>.</summary>
-    private async Task ResolveAsync(string incidentKey, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await _notifications.ResolveAsync(incidentKey, cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception error)
-        {
-            _logger.LogError(error, "Could not resolve incident {Incident}; the watchdog is unaffected.", incidentKey);
         }
     }
 
