@@ -19,6 +19,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private readonly HashSet<string> _throwingContracts = new(StringComparer.Ordinal);
     private readonly List<(string AccountKey, string ContractKey)> _closeCalls = [];
     private bool _venueUnreachable;
+    private bool _bracketsUnsupported;
     // Native working legs resting at the venue + the cancels the OCO-exit path issues against them (gh#184).
     private readonly List<(string AccountKey, WorkingOrder Order)> _workingOrders = [];
     private readonly List<(string AccountKey, string VenueOrderKey)> _cancelCalls = [];
@@ -67,6 +68,16 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// </summary>
     public void MakeVenueUnreachable() => _venueUnreachable = true;
 
+    /// <summary>
+    /// Drops <see cref="VenueCapability.BracketOrders"/> from the advertised capabilities — a venue that cannot
+    /// hold an exchange-side protective stop. The send path must then <b>refuse the entry</b> rather than send it
+    /// naked: better no trade than an unprotected one (ADR-0007, gh#11 inc 3). Cleared by <see cref="ResetPositions"/>.
+    /// </summary>
+    public void MakeBracketsUnsupported() => _bracketsUnsupported = true;
+
+    /// <summary>Whether brackets are unsupported (see <see cref="MakeBracketsUnsupported"/>).</summary>
+    internal bool BracketsUnsupported => _bracketsUnsupported;
+
     /// <summary>Whether the venue read path should throw (see <see cref="MakeVenueUnreachable"/>).</summary>
     internal bool VenueUnreachable => _venueUnreachable;
 
@@ -94,6 +105,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _throwingContracts.Clear();
         _closeCalls.Clear();
         _venueUnreachable = false;
+        _bracketsUnsupported = false;
         _workingOrders.Clear();
         _cancelCalls.Clear();
         _cancelThrowKeys.Clear();
@@ -157,7 +169,9 @@ internal class AdversarialTestTradingVenue : ITradingVenue
 
     public int AdapterLogicVersion => 2;
 
-    public VenueCapabilities Capabilities => VenueCapabilities.Of(VenueCapability.HistoricalBars | VenueCapability.Quotes | VenueCapability.BracketOrders);
+    public VenueCapabilities Capabilities => _factory.BracketsUnsupported
+        ? VenueCapabilities.Of(VenueCapability.HistoricalBars | VenueCapability.Quotes)
+        : VenueCapabilities.Of(VenueCapability.HistoricalBars | VenueCapability.Quotes | VenueCapability.BracketOrders);
 
     public int PlacedOrdersCount => _placedOrders.Count;
     public IReadOnlyList<OrderRequest> PlacedOrderRequests => _placedOrders.AsReadOnly();
