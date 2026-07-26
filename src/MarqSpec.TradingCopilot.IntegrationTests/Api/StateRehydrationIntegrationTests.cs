@@ -153,6 +153,11 @@ public class StateRehydrationIntegrationTests : IClassFixture<RehydrationTestPos
         });
         (await StagingAsync(orphanedPlan)).Should().Be(StopStaging.Orphaned, "the restart pass never promotes an orphaned stop");
 
+        // The hidden control promotes only for a position the venue still reports open (position-aware promotion,
+        // gh#263) — a long, so a +1 net. Without it the control fails closed to not-promoting and cannot witness
+        // that the quote promotes. The orphaned stop stays orphaned regardless (Hidden-only promotion).
+        VenueFactory.SeedPosition(venueKey, Contract, netQuantity: 1);
+
         int promoted = await PromoteAsync(bid: 4_991m, ask: 4_991.25m);
 
         promoted.Should().Be(1, "only the hidden control promotes on the promoting quote");

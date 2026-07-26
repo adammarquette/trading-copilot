@@ -133,6 +133,11 @@ public class OrphanHandlingIntegrationTests : IClassFixture<OrphanTestPostgresFa
         Guid hiddenPlan = await SeedStopPlanAsync(fixture.OperatorId, hiddenOrder, StopStaging.Hidden);
         Guid orphanedPlan = await SeedStopPlanAsync(fixture.OperatorId, orphanedOrder, StopStaging.Orphaned);
 
+        // The hidden control promotes only for a position the venue still reports open (position-aware promotion,
+        // gh#263) — a long, so a +1 net. Without it the control would fail closed to not-promoting and could no
+        // longer witness that the quote promotes. The orphaned stop is never a promotion candidate regardless.
+        VenueFactory.SeedPosition(fixture.VenueKey, Contract, netQuantity: 1);
+
         // Buy stop at 4990, 8-tick band (2.0) → a bid at 4991 is within the band and would promote a hidden stop.
         int promoted = await PromoteAsync(bid: 4_991m, ask: 4_991.25m);
 
