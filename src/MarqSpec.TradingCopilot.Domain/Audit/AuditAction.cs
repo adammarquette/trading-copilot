@@ -6,9 +6,9 @@ namespace MarqSpec.TradingCopilot.Domain.Audit;
 /// <remarks>
 /// <see cref="Unknown"/> is the refusable zero (the fail-closed-zero convention, gh#60): an uninitialised action
 /// must never masquerade as a real audited event. This records the <see cref="ConnectionLoss"/> event (gh#220), the
-/// <see cref="PositionExit"/> retirement (gh#183), and an operator <see cref="OrderCancelled"/> (gh#250); the
-/// remaining guardrail / kill / flatten actions the audit will carry are named in the data dictionary and land as
-/// those write sites are wired.
+/// <see cref="PositionExit"/> retirement (gh#183), an operator <see cref="OrderCancelled"/> (gh#250), and an
+/// operator <see cref="OrderModified"/> reprice (gh#259); the remaining guardrail / kill / flatten actions the
+/// audit will carry are named in the data dictionary and land as those write sites are wired.
 /// </remarks>
 public enum AuditAction
 {
@@ -37,4 +37,13 @@ public enum AuditAction
     /// never-filled entry, so its record does <b>not</b> carry <c>synthetic_risk</c> (no live position rested on it).
     /// </summary>
     OrderCancelled = 3,
+
+    /// <summary>
+    /// An operator repriced a <b>working</b> order in place via the order API (ADR-0007, gh#259): the resting
+    /// entry's price (and its hidden working stop) moved, re-gated at the <b>unchanged</b> size, without a
+    /// cancel/replace. The <c>Before</c>/<c>After</c> carry the entry-price transition. A never-filled resting
+    /// entry, so — like <see cref="OrderCancelled"/> — its record does <b>not</b> carry <c>synthetic_risk</c>: no
+    /// live position rested on the reprice, and the always-native safety stop is untouched.
+    /// </summary>
+    OrderModified = 4,
 }

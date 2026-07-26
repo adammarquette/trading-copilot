@@ -38,6 +38,14 @@ public sealed record ExecutionResult(
         return new ExecutionResult(ExecutionOutcome.Evaluated, Order: null, decision, decision.Reason);
     }
 
+    /// <summary>The venue accepted an in-place modify of a working order (gh#259).</summary>
+    /// <param name="decision">The gate decision that authorized the reprice at the unchanged size.</param>
+    /// <returns>A modified result. Carries no <see cref="PlacedOrder"/> — the order keeps its existing handle.</returns>
+    public static ExecutionResult Modified(GateDecision decision)
+    {
+        return new ExecutionResult(ExecutionOutcome.Modified, Order: null, decision, decision.Reason);
+    }
+
     /// <summary>The R-14 mode guard refused before anything was sized.</summary>
     /// <param name="reason">Why the account may not be traded here.</param>
     /// <returns>A refused result carrying no gate decision.</returns>

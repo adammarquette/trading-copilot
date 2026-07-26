@@ -265,10 +265,10 @@ nothing — no `Fill` row was ever written and an order stopped at `Working`, ne
   lacks, the gh#212 lesson), and the capability is `Require`d **at the call** (R-17) — a venue that cannot stream is
   refused, not discovered mid-stream.
 
-*Still deferred:* backfilling fills missed while disconnected (venue-truth reconcile, gh#193); cancelling a
-*working* order through the order API (today only the kill switch does). `MarketDepth` / `ModifyOrder` /
+*Still deferred:* backfilling fills missed while disconnected (venue-truth reconcile, gh#193). `MarketDepth` /
 `TrailingStops` stay declared-but-unreached. **(OCO-cancel-on-exit — the seam's first real consumer — landed
-gh#183; see the Update below.)**
+gh#183; cancelling a working order landed gh#250; modifying one — reaching `ModifyOrder` — landed gh#259; see the
+Updates below.)**
 
 ## Update (2026-07-25) — app-level OCO-cancel-on-exit (gh#183)
 The **last deferred piece of the execution model** is done. When a position exits, whatever protection was
@@ -354,8 +354,42 @@ operator had no way to pull a **single** resting order without engaging the whol
   would mislabel a *filled* order. The journal is left for the account-event stream (gh#219) — the authoritative
   venue-truth reconciler — to advance, and the operator is told why (proven by a red-provable test).
 
-*Still deferred:* discarding a `Staged` order is already covered here; **modifying** a working order
-(`VenueCapability.ModifyOrder`) is the other #219 follow-up, not this one.
+*Then deferred, since landed:* **modifying** a working order (`VenueCapability.ModifyOrder`) — the other #219
+follow-up — **landed gh#259** (see the Update below). Discarding a `Staged` order is already covered here.
+
+## Update (2026-07-25) — modify a working order via the order API (gh#259)
+The sibling of the cancel (gh#250): an operator can **reprice** a resting working order **in place**, keeping its
+queue position and its attached protective bracket — rather than a cancel/replace, which would surrender both and
+open a naked window between the pull and the re-send. `PATCH /orders/{id}/price` — a new verb on the order group,
+distinct from the staged-ticket edit (`PUT /orders/{id}`) and the cancel (`DELETE /orders/{id}`).
+
+- A new venue seam, `IOrderExecutor.ModifyOrderAsync` (**default-throwing** like `GetWorkingOrdersAsync`, so a venue
+  that cannot modify degrades **loudly**, R-17), reaches the gateway's in-place modify; the ProjectX adapter now
+  advertises `VenueCapability.ModifyOrder`.
+- **A reprice re-gates — it is not the cancel's gate-exempt cousin.** Unlike a cancel (risk-reducing), a reprice can
+  *add* risk — a wider stop raises the per-contract loss; an entry moved toward the market is likelier to fill — so
+  it runs the **full** `ComposeAsync` ladder and a new `OrderExecutionService.ModifyAsync`: the **kill switch refuses
+  it** (outbound, like a send), and the gate must approve the new price. Enforcement stays below the model.
+- **Size is held invariant, and the whitelist is stricter than a send's.** `ModifyAsync` transmits only on
+  `Allowed` at the **exact requested (unchanged) size**; a `Resized` decision — which a *send* honours by downsizing
+  — **refuses** the modify. The always-native safety-stop bracket leg has **no addressable size** (attached-on-fill,
+  implicitly sized to the parent fill), so a silent downsize would strand protection — a naked position on increase,
+  an oversized stop on decrease. With size fixed, the bracket's quantity coverage is always exactly right: the
+  sharpest hazard of the feature, sidestepped by construction. (A resize that *also* re-sizes the bracket is a
+  separate increment, gated on verifying the gateway's attached-bracket resize behaviour — "uncertainty resolves to
+  safe", engineering §9.)
+- **Entry-only: both stops are untouched.** A reprice moves the **entry** on the order and the (`Hidden`) stop
+  plan's entry basis in **one commit**; the working stop, the safety stop, and its native bracket leg all stay at
+  their absolute levels, which the re-gate re-validates are still protective relative to the new entry (or the modify
+  is blocked). The entry is refused **before the venue** if it would cross its own stops — otherwise a crossed entry
+  would trip the `StopPlan` safety-beyond-actual DB CHECK *after* the venue already repriced, desyncing the two.
+  Moving the working stop is a separate increment: it can separate a coincident working/safety pair (needing a *new*
+  plan) or diverge from an already-promoted native stop — coordination this increment deliberately does not take on.
+- **A venue rejection never forces a status**, and a fill/cancel landing mid-flight **aborts the price write** (a
+  fresh `Working` re-check before commit — the gh#183 re-open-race discipline): the account-event stream (gh#219) is
+  the authoritative reconciler, exactly as for the cancel. The reprice is **audited** (`AuditAction.OrderModified`,
+  gh#220) as a secondary, failure-tolerant write; **not** `synthetic_risk` — a never-filled resting entry, nothing
+  live rested on it.
 
 ## Consequences
 **Positive**

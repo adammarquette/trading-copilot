@@ -7,6 +7,14 @@ public enum ExecutionOutcome
     Placed,
 
     /// <summary>
+    /// The venue accepted an in-place <b>modify</b> of a working order (gh#259) — a reprice re-gated at the
+    /// <b>unchanged</b> size (a modify that the gate would resize is refused, not silently downsized, so the
+    /// attached protective bracket can never desync). No new <see cref="Venue.PlacedOrder"/> is returned; the
+    /// order keeps its handle and its bracket.
+    /// </summary>
+    Modified,
+
+    /// <summary>
     /// Refused by R-14's <b>environment restriction</b>: this account's mode may not be traded from this
     /// deployment environment — or, for <see cref="Venue.TradingMode.Undeclared"/>, from any environment at all,
     /// because nothing has established whether capital is at risk. Nothing was sized and nothing was sent.

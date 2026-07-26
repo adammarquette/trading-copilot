@@ -57,11 +57,11 @@ public class ProjectXVenueTests
         _venue.Capabilities.Supports(VenueCapability.ClosePosition).Should().BeTrue();
         _venue.Capabilities.Supports(VenueCapability.BracketOrders).Should().BeTrue(); // the always-native safety stop (gh#11 inc 3)
         _venue.Capabilities.Supports(VenueCapability.AccountStreaming).Should().BeTrue(); // the user-hub seam (gh#219)
+        _venue.Capabilities.Supports(VenueCapability.ModifyOrder).Should().BeTrue(); // in-place reprice (gh#259)
     }
 
     [Theory]
     [InlineData(VenueCapability.TrailingStops)]
-    [InlineData(VenueCapability.ModifyOrder)]
     [InlineData(VenueCapability.MarketDepth)]
     public void Capabilities_ShouldNotAdvertiseWhatTheNeutralContractCannotReach(VenueCapability capability)
     {
@@ -419,6 +419,41 @@ public class ProjectXVenueTests
         Func<Task> act = async () => await _venue.CancelOrderAsync(Account, "555", CancellationToken.None);
 
         await act.Should().ThrowAsync<ProjectXVenueException>();
+    }
+
+    // --- Modifying a working order in place (gh#259) ---
+
+    [Fact]
+    public async Task ModifyOrderAsync_ShouldThrow_WhenTheGatewayReportsFailure()
+    {
+        // The same reported-failure-without-throwing hazard as cancel: a false Success must not be read as done.
+        A.CallTo(() => _api.ModifyOrderAsync(A<ClientModels.ModifyOrderRequest>._, A<CancellationToken>._))
+            .Returns(new ClientModels.ModifyOrderResponse { Success = false, ErrorMessage = "Order already filled" });
+
+        Func<Task> act = async () =>
+            await _venue.ModifyOrderAsync(Account, "555", new Price(5_000m), stopPrice: null, size: 2, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ProjectXVenueException>();
+    }
+
+    [Fact]
+    public async Task ModifyOrderAsync_ShouldCallTheGatewayWithMappedIdsAndTheChangedFields()
+    {
+        // Ids go through the venue-qualifier guards (never parsed inline); only the fields the caller passes are
+        // sent, and a null leaves the gateway's current value untouched.
+        ClientModels.ModifyOrderRequest? sent = null;
+        A.CallTo(() => _api.ModifyOrderAsync(A<ClientModels.ModifyOrderRequest>._, A<CancellationToken>._))
+            .Invokes((ClientModels.ModifyOrderRequest r, CancellationToken _) => sent = r)
+            .Returns(new ClientModels.ModifyOrderResponse { Success = true });
+
+        await _venue.ModifyOrderAsync(Account, "555", new Price(5_000m), stopPrice: null, size: 2, CancellationToken.None);
+
+        sent.Should().NotBeNull();
+        sent!.AccountId.Should().Be(9001);
+        sent.OrderId.Should().Be(555);
+        sent.LimitPrice.Should().Be(5_000m);
+        sent.StopPrice.Should().BeNull();
+        sent.Size.Should().Be(2);
     }
 
     // --- Closing a position: the venue's own view is the answer (ADR-0013) ---

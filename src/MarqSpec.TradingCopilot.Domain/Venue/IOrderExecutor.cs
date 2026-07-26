@@ -27,6 +27,33 @@ public interface IOrderExecutor : IVenue
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Modifies a <b>working</b> order in place (gh#259) — reprices and/or resizes it at the venue <b>without</b> a
+    /// cancel/replace, so the order keeps its queue position and its attached protective bracket. A cancel/replace
+    /// would surrender both and open a naked window between the pull and the re-send.
+    /// </summary>
+    /// <remarks>
+    /// A <b>default-throwing capability</b>, like <see cref="GetWorkingOrdersAsync"/>: a venue that cannot modify
+    /// in place refuses <b>loudly</b> (R-17) rather than silently doing nothing. An adapter that can — and that
+    /// advertises <see cref="VenueCapability.ModifyOrder"/> — overrides this. Completes on the venue's acceptance;
+    /// throws on refusal (the order may have filled or left the book, which the caller must not mislabel).
+    /// </remarks>
+    /// <param name="account">The account the order sits on.</param>
+    /// <param name="venueOrderId">The venue's order handle from <see cref="PlacedOrder.VenueOrderId"/>.</param>
+    /// <param name="limitPrice">The new limit price, or <see langword="null"/> to leave it unchanged.</param>
+    /// <param name="stopPrice">The new stop / trigger price, or <see langword="null"/> to leave it unchanged.</param>
+    /// <param name="size">The new size, or <see langword="null"/> to leave it unchanged.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <exception cref="NotSupportedException">This venue cannot modify a working order in place.</exception>
+    Task ModifyOrderAsync(
+        VenueAccountId account,
+        string venueOrderId,
+        Price? limitPrice,
+        Price? stopPrice,
+        int? size,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("This venue does not support modifying a working order in place.");
+
+    /// <summary>
     /// Closes a position outright — the primitive auto-flatten is built on (R-13). Returns the venue's own
     /// post-close view so the caller reconciles against the venue rather than trusting a local belief (ADR-0013).
     /// </summary>
