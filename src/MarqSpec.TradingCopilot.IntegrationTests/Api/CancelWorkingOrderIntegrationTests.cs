@@ -112,6 +112,76 @@ public class CancelWorkingOrderIntegrationTests : IClassFixture<OcoExitTestPostg
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // Granular guards (gh#297) — retire, audit, and record-integrity-on-benign-reject as their OWN named
+    // failure modes, cherry-picked from the superseded duplicate PR #291 (closed) so a regression names the
+    // exact behaviour that broke; the combined happy-path test above cannot tell retire from audit, and it
+    // asserts nothing about a retry-storm.
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Cancel_ShouldRetireTheStopPlan_WhenOrderIsCancelled()
+    {
+        // Protection comes down WITH the order: a cancelled never-filled entry has no position to protect, so its
+        // hidden stop plan must be retired — else the promotion watcher could later place a native stop for an
+        // entry that never filled (the gh#250 hazard).
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, "WORK-1");
+        Guid planId = await SeedStopPlanAsync(operatorId, orderId, StopStaging.Hidden);
+        (await StagingAsync(planId)).Should().Be(StopStaging.Hidden, "precondition: the working order rests with a hidden stop plan");
+
+        using HttpResponseMessage response = await client.DeleteAsync($"/orders/{orderId}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await StagingAsync(planId)).Should().Be(StopStaging.Retired, "the cancelled order's hidden stop plan is retired — it protects nothing now");
+    }
+
+    [Fact]
+    public async Task Cancel_ShouldAudit_WhenOrderIsCancelled()
+    {
+        // The cancellation leaves an immutable audit trail (R-11 / gh#220) tied to the retired plan.
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, "WORK-1");
+        Guid planId = await SeedStopPlanAsync(operatorId, orderId, StopStaging.Hidden);
+
+        using HttpResponseMessage response = await client.DeleteAsync($"/orders/{orderId}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await AuditActionForPlanAsync(planId)).Should().Be(
+            AuditAction.OrderCancelled, "the cancellation writes an OrderCancelled audit record for the plan");
+    }
+
+    [Fact]
+    public async Task Cancel_ShouldNotCorruptRecord_WhenVenueRejectsCancelAsAlreadyGone()
+    {
+        // The venue reports the order already gone (filled or pulled) as the cancel is issued — a benign rejection
+        // the path must swallow WITHOUT a retry-storm and WITHOUT a half-transition (a cancelled order whose plan
+        // is still hidden, or vice versa). The record-integrity lens on the reject the "not-force-terminal" test
+        // above checks for status only.
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, "WORK-1");
+        Guid planId = await SeedStopPlanAsync(operatorId, orderId, StopStaging.Hidden);
+        VenueFactory.MakeCancelThrow("WORK-1");
+
+        using HttpResponseMessage response = await client.DeleteAsync($"/orders/{orderId}");
+
+        ((int)response.StatusCode).Should().BeLessThan(500, "a benign 'already gone' rejection is handled, not a server error");
+        VenueFactory.CancelOrderCalls.Count(call => call.VenueOrderKey == "WORK-1")
+            .Should().Be(1, "one cancel attempt per order — never a retry-storm on a benign rejection");
+
+        OrderStatus status = await OrderStatusAsync(orderId);
+        StopStaging staging = await StagingAsync(planId);
+        bool coherent = (status == OrderStatus.Cancelled && staging == StopStaging.Retired)
+            || (status == OrderStatus.Working && staging == StopStaging.Hidden);
+        coherent.Should().BeTrue($"the record stays coherent after a benign reject (observed {status} / {staging})");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Helpers.
     // ---------------------------------------------------------------------------------------------------------
 
