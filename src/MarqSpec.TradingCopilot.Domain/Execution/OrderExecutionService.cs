@@ -164,6 +164,81 @@ public sealed class OrderExecutionService : IOrderExecutionService
     }
 
     /// <summary>
+    /// Re-gates and, if it survives, transmits an in-place <b>modify</b> of a working order (gh#259) — a reprice
+    /// at the <b>unchanged</b> size. Runs the same ladder as <see cref="SendAsync"/> in the same order, so a
+    /// reprice is judged exactly as the original send was; it is <b>not</b> a way around the gate.
+    /// </summary>
+    /// <remarks>
+    /// Two deliberate differences from <see cref="SendAsync"/>, both safety-driven:
+    /// <list type="bullet">
+    /// <item>Unlike a cancel (risk-reducing, gate-exempt), a reprice is <b>outbound and can add risk</b> — moving
+    /// an entry to a level likelier to fill, or widening the stop distance and the per-contract loss — so it is
+    /// refused while the <b>kill switch</b> is engaged, exactly as a send is.</item>
+    /// <item>The whitelist is <b>stricter</b>: the gate must approve the <b>unchanged</b> size outright
+    /// (<see cref="GateOutcome.Allowed"/> at the requested quantity). A <see cref="GateOutcome.Resized"/> — which
+    /// <see cref="SendAsync"/> honours by downsizing — <b>refuses</b> the modify here, because this increment holds
+    /// size invariant and silently downsizing would desync the attached, un-addressable safety-stop bracket leg
+    /// (gh#259). Size is resized only by a dedicated future increment that also re-sizes the bracket.</item>
+    /// </list>
+    /// </remarks>
+    /// <param name="request">The re-priced execution request — the same size as the resting order.</param>
+    /// <param name="venueOrderId">The venue handle of the working order to modify.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns><see cref="ExecutionOutcome.Modified"/> on a transmitted reprice, or the refusal that stopped it.</returns>
+    public async Task<ExecutionResult> ModifyAsync(
+        ExecutionRequest request, string venueOrderId, CancellationToken cancellationToken)
+    {
+        if (_killSwitch.IsEngaged)
+        {
+            return ExecutionResult.RefusedByKillSwitch(
+                "The kill switch is engaged — outbound orders are disabled. Disengage it before modifying an order.");
+        }
+
+        ExecutionResult evaluated = Evaluate(request);
+        if (evaluated.Outcome != ExecutionOutcome.Evaluated || evaluated.Decision is null)
+        {
+            return evaluated; // a pre-gate refusal -- mode, state, mismatch, or type
+        }
+
+        GateDecision decision = evaluated.Decision;
+
+        // Stricter than SendAsync's "Allowed or Resized": a modify holds SIZE invariant, so the gate must approve
+        // the UNCHANGED size outright. A Resize (the gate wanting a smaller size), a Block, a zero, or any
+        // later-added outcome REFUSES the reprice -- transmitting a changed size would desync the attached
+        // safety-stop bracket, whose quantity is not addressable through a modify (gh#259). Whitelist, not
+        // "anything but Blocked".
+        bool authorizedAtRequestedSize =
+            decision.Outcome is GateOutcome.Allowed
+            && decision.ApprovedQuantity == request.Proposal.RequestedQuantity
+            && decision.ApprovedQuantity > 0;
+
+        if (!authorizedAtRequestedSize)
+        {
+            return ExecutionResult.RefusedByRisk(decision);
+        }
+
+        // The always-native safety stop must still be holdable: on fill, the position rests protected at the
+        // safety level, which the gate has just re-validated as protective against the NEW entry. A venue that
+        // cannot hold one would leave a fill unprotected -- fail-closed and refuse, exactly as a send does.
+        if (!_venue.Capabilities.Supports(VenueCapability.BracketOrders))
+        {
+            return ExecutionResult.RefusedByUnprotectableStop(
+                $"Venue '{_venue.Id}' cannot hold an exchange-native protective stop, so a fill would be "
+                + "unprotected. The modify was not sent.");
+        }
+
+        await _venue.ModifyOrderAsync(
+            request.Account.Id,
+            venueOrderId,
+            LimitPriceFor(request),
+            StopPriceFor(request),
+            request.Proposal.RequestedQuantity,
+            cancellationToken);
+
+        return ExecutionResult.Modified(decision);
+    }
+
+    /// <summary>
     /// Whether the request's parts describe the same trade, and what disagrees if not. Neither pairing is
     /// structurally enforced, and both fail in the same direction: the gate authorizes one thing and the venue
     /// receives another.

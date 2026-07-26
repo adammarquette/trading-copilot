@@ -69,9 +69,9 @@ public sealed class ProjectXVenue : ITradingVenue
 
     /// <summary>
     /// What this adapter can actually deliver <b>through <see cref="ITradingVenue"/></b>. The gateway itself does
-    /// more — depth, order modify, trailing stops — but none of that is reachable through the venue-neutral
-    /// contract yet, and advertising it would defeat the purpose of the capability model: a caller checking before
-    /// it commits would pick a path that cannot work.
+    /// more — depth, trailing stops — but none of that is reachable through the venue-neutral contract yet, and
+    /// advertising it would defeat the purpose of the capability model: a caller checking before it commits would
+    /// pick a path that cannot work.
     /// </summary>
     public VenueCapabilities Capabilities { get; } = VenueCapabilities.Of(
         VenueCapability.HistoricalBars
@@ -82,7 +82,10 @@ public sealed class ProjectXVenue : ITradingVenue
         | VenueCapability.BracketOrders
         // Order / position / fill events over the user hub, behind the IAccountEventStream seam (gh#219): the
         // neutral contract now reaches them, so an order's terminal status and its fills are no longer invisible.
-        | VenueCapability.AccountStreaming);
+        | VenueCapability.AccountStreaming
+        // In-place order modify (gh#259): the gateway's modify endpoint, now reached through the neutral contract
+        // so an operator can reprice a resting working order without a cancel/replace.
+        | VenueCapability.ModifyOrder);
 
     /// <summary>
     /// The ProjectX derivation-logic version (ADR-0009, gh#9). History: <b>1</b> — the conservative PRAC-only
@@ -252,6 +255,41 @@ public sealed class ProjectXVenue : ITradingVenue
         {
             throw new ProjectXVenueException(
                 $"ProjectX refused to cancel order {venueOrderId}: {response.ErrorMessage ?? "no reason given"}.",
+                response.ErrorCode);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task ModifyOrderAsync(
+        VenueAccountId account,
+        string venueOrderId,
+        Price? limitPrice,
+        Price? stopPrice,
+        int? size,
+        CancellationToken cancellationToken = default)
+    {
+        // Fail-closed at the seam: a caller that reached here without the capability is refused loudly rather than
+        // sending a malformed request the gateway would reject obscurely (R-17).
+        Capabilities.Require(VenueCapability.ModifyOrder);
+
+        // Only the fields the caller means to change are sent; a null leaves the gateway's current value untouched.
+        // Ids go through the venue-qualifier guards (ToAccountId / ToOrderId) -- never parsed inline -- so a foreign
+        // handle cannot reach ProjectX on a colliding key.
+        ClientModels.ModifyOrderResponse response = await _api.ModifyOrderAsync(
+            new ClientModels.ModifyOrderRequest
+            {
+                AccountId = ProjectXMapping.ToAccountId(account, Id),
+                OrderId = ProjectXMapping.ToOrderId(venueOrderId),
+                LimitPrice = limitPrice?.Value,
+                StopPrice = stopPrice?.Value,
+                Size = size,
+            },
+            cancellationToken);
+
+        if (!response.Success)
+        {
+            throw new ProjectXVenueException(
+                $"ProjectX refused to modify order {venueOrderId}: {response.ErrorMessage ?? "no reason given"}.",
                 response.ErrorCode);
         }
     }

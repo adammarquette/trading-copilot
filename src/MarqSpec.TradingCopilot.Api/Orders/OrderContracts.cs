@@ -37,6 +37,22 @@ public sealed record SendOrderRequest(
     OrderType Type = OrderType.Market,
     decimal? Target = null);
 
+/// <summary>
+/// The request to reprice a <b>working</b> order in place (gh#259) — a PATCH of the resting <b>entry</b> price at
+/// the venue. <b>Entry-only</b> this increment: size, both stops (working and safety), side, and type are all held
+/// invariant, so the attached safety bracket's coverage stays exact and the resting protection is untouched.
+/// Moving the working stop or the size are their own follow-ups (each carries stop-plan / bracket coordination this
+/// increment deliberately does not take on).
+/// </summary>
+/// <param name="EntryPrice">The new entry price. The gate re-validates both stops are still protective against it.</param>
+/// <param name="ReferencePrice">
+/// The current market reference the fat-finger band re-measures the new entry against — so the re-gate checks the
+/// reprice against fresh truth rather than the stale price the order was armed with (R-16).
+/// </param>
+public sealed record ModifyWorkingOrderRequest(
+    decimal EntryPrice,
+    decimal ReferencePrice);
+
 /// <summary>The outcome of a send attempt — always explains itself (R-5).</summary>
 /// <param name="Outcome">Placed, or which guard refused.</param>
 /// <param name="OrderId">The journaled order's id, when placed.</param>

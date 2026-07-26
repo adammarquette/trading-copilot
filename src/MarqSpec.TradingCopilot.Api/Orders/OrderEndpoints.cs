@@ -1,3 +1,4 @@
+using System.Globalization;
 using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
@@ -42,6 +43,7 @@ public static class OrderEndpoints
         orderGroup.MapPut("/", EditStagedOrderAsync);
         orderGroup.MapPost("/take", TakeStagedOrderAsync);
         orderGroup.MapDelete("/", CancelOrderAsync);
+        orderGroup.MapPatch("/price", ModifyWorkingOrderPriceAsync);
 
         return endpoints;
     }
@@ -520,6 +522,222 @@ public static class OrderEndpoints
         await AuditCancelSafelyAsync(auditLog, loggerFactory, order, plan, retiredFrom, cancellationToken);
 
         return Results.Ok(new { order.Id, status = order.Status.ToString() });
+    }
+
+    /// <summary>
+    /// Reprices a <b>working</b> order in place (gh#259, ADR-0007) — the venue-facing sibling of the cancel. Unlike
+    /// a cancel (risk-reducing, gate-exempt), a reprice can add risk, so it runs the <b>full</b> send ladder and is
+    /// re-gated at the <b>unchanged</b> size before the venue is touched: the gate must approve the new price at the
+    /// current size, or nothing is transmitted (enforcement below the model). Size and the always-native safety
+    /// bracket are held invariant — a resize is a separate increment (it must also re-size the bracket).
+    /// </summary>
+    internal static async Task<IResult> ModifyWorkingOrderPriceAsync(
+        Guid id,
+        ModifyWorkingOrderRequest request,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        IProjectXVenueFactory venueFactory,
+        IOptions<ProjectXConnectionOptions> projectXOptions,
+        IOptions<ExecutionOptions> executionOptions,
+        HostTradingEnvironment environment,
+        IKillSwitch killSwitch,
+        IAuditLog auditLog,
+        ILoggerFactory loggerFactory,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        Order? order = await database.Orders.FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (order is null)
+        {
+            return Results.NotFound(); // not ours (R-20) or gone
+        }
+
+        // Only a WORKING order resting at the venue can be repriced. A Staged ticket edits server-only
+        // (PUT /orders/{id}); a terminal order has no live resting entry to move.
+        if (order.Status != OrderStatus.Working)
+        {
+            return Results.Conflict(new { error = $"Only a working order can be modified — this one is {order.Status}." });
+        }
+
+        if (order.VenueOrderKey is null)
+        {
+            return Results.Conflict(new { error = "This working order has no venue handle to modify." });
+        }
+
+        // ENTRY-ONLY (gh#259): the reprice moves the entry; SIZE, side, type, the WORKING stop, and the SAFETY stop
+        // are all held invariant. Moving the working stop is a separate increment -- it can SEPARATE a coincident
+        // working/safety pair (needing a NEW stop plan) or DIVERGE from an already-promoted native stop, neither of
+        // which this increment handles. Size-invariance keeps the attached safety bracket's coverage exact.
+        decimal newEntry = request.EntryPrice;
+
+        // The new entry must stay on the entry side of the (unchanged) working and safety stops. The gate's
+        // protectiveness check enforces this too, but assert it HERE, before the venue is touched: an entry moved
+        // ACROSS its own stops would otherwise trip the StopPlan safety-beyond-actual DB CHECK at commit -- AFTER
+        // the venue already repriced -- leaving venue and journal desynced with no reconciler for resting price.
+        bool ordered = order.Side switch
+        {
+            OrderSide.Buy => order.WorkingStopPrice < newEntry && order.SafetyStopPrice < newEntry,
+            OrderSide.Sell => newEntry < order.WorkingStopPrice && newEntry < order.SafetyStopPrice,
+            _ => false, // an unrecognised side is refused, never assumed
+        };
+        if (!ordered)
+        {
+            return Results.UnprocessableEntity(new
+            {
+                error = "The new entry would cross its own stops — a working order's entry must stay on the entry "
+                    + "side of its working and safety stops (which this increment does not move).",
+            });
+        }
+
+        (Composition? composed, IResult? refusal) = await ComposeAsync(
+            order.AccountId, database, venueFactory, projectXOptions, executionOptions, environment, killSwitch, cancellationToken);
+        if (composed is null)
+        {
+            return refusal!;
+        }
+
+        // Re-gate the NEW entry at the UNCHANGED size against fresh truth (R-12): a reprice re-passes R-5 / R-16
+        // exactly as the original send did. The working and safety stops ride unchanged; the gate re-validates
+        // BOTH are still protective relative to the new entry (a non-protective stop is refused by the gate).
+        (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
+            composed, order.Symbol ?? order.Instrument, order.TickSize, order.PointValue, order.Side, order.Size,
+            newEntry, order.WorkingStopPrice, order.SafetyStopPrice, request.ReferencePrice, order.TakeProfitPrice, order.Type,
+            cancellationToken);
+        if (executionRequest is null)
+        {
+            return proposalRefusal!;
+        }
+
+        ExecutionResult result;
+        try
+        {
+            result = await composed.Execution.ModifyAsync(executionRequest, order.VenueOrderKey, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // The venue refused the modify -- typically the order left the book (filled, or already cancelled). Do
+            // NOT force a status: it may have FILLED at the OLD price, and guessing would mislabel it. The
+            // account-event stream (gh#219) reconciles the real status; the journal is left untouched for it.
+            return Results.Conflict(new
+            {
+                order.Id,
+                error = $"The venue refused to modify order {order.VenueOrderKey}: {error.Message}. "
+                    + "Its true status reconciles from venue truth (the account-event stream).",
+            });
+        }
+
+        // A gate / kill-switch refusal transmitted nothing and rewrites no price -- journal the decision (if the
+        // gate sized one) and map it like a send. The reprice never touched the venue or the order row.
+        if (result.Outcome != ExecutionOutcome.Modified)
+        {
+            PersistDecision(database, currentUser, composed.Account.Id, order.Id, result.Decision);
+            await database.SaveChangesAsync(cancellationToken);
+            return MapSendResult(result, order.Id);
+        }
+
+        // TOCTOU: between loading the order and committing, a fill / cancel may have landed via the seam. The venue
+        // accepted the modify, but if the local order has already moved terminal, do not rewrite its price -- abort
+        // and let the seam own the reconciliation (the gh#183 re-open-race discipline: mutate only what is still
+        // what we read). A fresh, untracked read -- the tracked entity still says Working.
+        OrderStatus current = await database.Orders
+            .AsNoTracking()
+            .Where(candidate => candidate.Id == id)
+            .Select(candidate => candidate.Status)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (current != OrderStatus.Working)
+        {
+            return Results.Conflict(new
+            {
+                order.Id,
+                error = $"The order moved to {current} while the modify was in flight; the venue accepted the "
+                    + "reprice, but its status reconciles from venue truth.",
+            });
+        }
+
+        // Commit the reprice atomically: the entry (+ reference) on the order, and the plan's entry basis in
+        // lockstep. SIZE, the WORKING stop, the SAFETY stop, and STATUS are never written -- entry-only (gh#259).
+        decimal oldEntry = order.EntryPrice;
+        ApplyReprice(order, newEntry, request.ReferencePrice);
+
+        // Only a HIDDEN plan's entry basis moves with the entry (so a fraction-of-distance promotion band still
+        // aims correctly); its ActualStopPrice -- the working stop -- is NOT touched, because the working stop does
+        // not move. A NATIVE / ORPHANED plan is left alone: its stop is a separate venue order (or awaiting re-arm)
+        // that an entry reprice does not address, so rewriting its journal basis would misrepresent live protection.
+        StopPlanRecord? plan = await database.StopPlans
+            .FirstOrDefaultAsync(candidate => candidate.OrderId == order.Id
+                && candidate.Staging == StopStaging.Hidden, cancellationToken);
+        if (plan is not null)
+        {
+            plan.EntryPrice = newEntry;
+        }
+
+        PersistDecision(database, currentUser, composed.Account.Id, order.Id, result.Decision);
+        await database.SaveChangesAsync(cancellationToken);
+        await AuditModifySafelyAsync(auditLog, loggerFactory, order, plan, oldEntry, cancellationToken);
+
+        return Results.Ok(new
+        {
+            order.Id,
+            status = order.Status.ToString(),
+            entryPrice = order.EntryPrice,
+        });
+    }
+
+    /// <summary>Writes an entry reprice onto the order row (gh#259) — the entry only; side, size, type, and both stops stand.</summary>
+    private static void ApplyReprice(Order order, decimal newEntry, decimal referencePrice)
+    {
+        order.EntryPrice = newEntry;
+        order.ReferencePrice = referencePrice;
+        // A Limit order's venue limit IS the entry, so it moves with the reprice. A stop-type order's journal
+        // StopPrice tracks the (unchanged) working stop per the ApplyProposal convention, so it is left as it is.
+        order.LimitPrice = order.Type == OrderType.Limit ? newEntry : order.LimitPrice;
+    }
+
+    // The immutable audit entry for an operator reprice (gh#259, gh#220): owned by the order's operator (R-20). A
+    // never-filled resting entry, so NOT synthetic_risk (nothing rested on it and the safety stop is untouched);
+    // Native placement. Before/After carry the entry-price transition; when a stop plan moved with it, its id rides.
+    private static async Task AuditModifySafelyAsync(
+        IAuditLog auditLog,
+        ILoggerFactory loggerFactory,
+        Order order,
+        StopPlanRecord? plan,
+        decimal oldEntry,
+        CancellationToken cancellationToken)
+    {
+        string beforeEntry = oldEntry.ToString(CultureInfo.InvariantCulture);
+        string afterEntry = order.EntryPrice.ToString(CultureInfo.InvariantCulture);
+
+        AuditRecord record = new()
+        {
+            UserId = order.UserId,
+            Action = AuditAction.OrderModified,
+            Placement = AuditPlacement.Native,
+            SyntheticRisk = false,
+            StopPlanId = plan?.Id,
+            Before = beforeEntry,
+            After = afterEntry,
+            Detail = $"Working order {order.VenueOrderKey} repriced by the operator: entry {beforeEntry} -> {afterEntry}.",
+            RecordedAt = DateTimeOffset.UtcNow,
+        };
+
+        try
+        {
+            await auditLog.WriteAsync([record], cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
+                error, "Audit write failed for the modify of order {Order}; the modify still completed.", order.Id);
+        }
     }
 
     // The immutable audit entry for an operator cancel (gh#250, gh#220): owned by the order's operator (R-20), a
