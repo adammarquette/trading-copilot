@@ -19,6 +19,10 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private readonly HashSet<string> _throwingContracts = new(StringComparer.Ordinal);
     private readonly List<(string AccountKey, string ContractKey)> _closeCalls = [];
     private bool _venueUnreachable;
+    // Native working legs resting at the venue + the cancels the OCO-exit path issues against them (gh#184).
+    private readonly List<(string AccountKey, WorkingOrder Order)> _workingOrders = [];
+    private readonly List<(string AccountKey, string VenueOrderKey)> _cancelCalls = [];
+    private readonly HashSet<string> _cancelThrowKeys = new(StringComparer.Ordinal);
 
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
 
@@ -66,6 +70,22 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// <summary>Whether the venue read path should throw (see <see cref="MakeVenueUnreachable"/>).</summary>
     internal bool VenueUnreachable => _venueUnreachable;
 
+    /// <summary>Seeds a native working leg resting at the venue (a protective stop / target) for the OCO-exit path to
+    /// find via <c>GetWorkingOrdersAsync</c> (gh#184).</summary>
+    public void SeedWorkingOrder(string accountKey, string venueOrderKey, string contractKey, decimal? stopPrice = 4_980m) =>
+        _workingOrders.Add((accountKey, new WorkingOrder(
+            venueOrderKey,
+            VenueContractId.Create(VenueId.Parse("projectx"), contractKey),
+            stopPrice is null ? null : new Price(stopPrice.Value),
+            LimitPrice: null)));
+
+    /// <summary>Makes <c>CancelOrderAsync</c> THROW for a venue order key — the "already gone" rejection the OCO-exit
+    /// path must swallow without corrupting the record or retry-storming (gh#184).</summary>
+    public void MakeCancelThrow(string venueOrderKey) => _cancelThrowKeys.Add(venueOrderKey);
+
+    /// <summary>Every <c>CancelOrderAsync</c> issued, in order (account key + venue order key).</summary>
+    public IReadOnlyList<(string AccountKey, string VenueOrderKey)> CancelOrderCalls => _cancelCalls.AsReadOnly();
+
     /// <summary>Clears seeded positions, close behaviour, and recorded close calls — call at the start of each test.</summary>
     public void ResetPositions()
     {
@@ -74,6 +94,21 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _throwingContracts.Clear();
         _closeCalls.Clear();
         _venueUnreachable = false;
+        _workingOrders.Clear();
+        _cancelCalls.Clear();
+        _cancelThrowKeys.Clear();
+    }
+
+    internal IReadOnlyList<WorkingOrder> WorkingOrdersFor(VenueAccountId account) =>
+        [.. _workingOrders.Where(entry => entry.AccountKey == account.Key).Select(entry => entry.Order)];
+
+    internal void RecordCancel(VenueAccountId account, string venueOrderKey)
+    {
+        _cancelCalls.Add((account.Key, venueOrderKey));
+        if (_cancelThrowKeys.Contains(venueOrderKey))
+        {
+            throw new InvalidOperationException($"Venue rejected cancel of {venueOrderKey} — order already gone.");
+        }
     }
 
     internal IReadOnlyList<PositionSnapshot> PositionsFor(VenueAccountId account) =>
@@ -192,8 +227,14 @@ internal class AdversarialTestTradingVenue : ITradingVenue
         return Task.FromResult(new PlacedOrder(request.Account, $"STUB-ORDER-{Guid.NewGuid():N}", DateTimeOffset.UtcNow));
     }
 
-    public Task CancelOrderAsync(VenueAccountId account, string venueOrderId, CancellationToken cancellationToken = default) =>
-        Task.CompletedTask;
+    public Task<IReadOnlyList<WorkingOrder>> GetWorkingOrdersAsync(VenueAccountId account, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_factory.WorkingOrdersFor(account));
+
+    public Task CancelOrderAsync(VenueAccountId account, string venueOrderId, CancellationToken cancellationToken = default)
+    {
+        _factory.RecordCancel(account, venueOrderId);
+        return Task.CompletedTask;
+    }
 
     public Task<PositionSnapshot> ClosePositionAsync(VenueAccountId account, VenueContractId contract, CancellationToken cancellationToken = default) =>
         Task.FromResult(_factory.RecordCloseAndResult(account, contract));
