@@ -50,6 +50,20 @@ distinct name so a later `docker compose pull` cannot clobber your build. Buildi
 - **Secrets** stay in a **gitignored `.env`** (copy `.env.example`) — never committed; cloud secrets come from Railway (§8).
 - **`.env` under compose is an allowlist, not a passthrough.** The app service's `environment:` block names every
   key compose forwards; anything else in `.env` is used for interpolation and then **silently dropped**.
+  **Verify a flatten override actually took by reading the startup log** (gh#255) — do not assume a clean start
+  means it applied. The app reports every governed market on boot, naming the deadline **and its source**:
+
+  ```
+  info: Auto-flatten armed for ES at 14:15 CT (2026-07-25 19:15:00Z) — ConfiguredOverride.
+  info: Auto-flatten armed for NQ at 14:30 CT (2026-07-25 19:30:00Z) — BuiltInDefault.
+  warn: Auto-flatten is DISABLED for GC (ConfiguredOverride) — positions will NOT be closed at 12:15 CT.
+  ```
+
+  `ConfiguredOverride` means your setting reached the app; `BuiltInDefault` on a market you *did* configure means
+  it was **dropped** — check the allowlist below first. A market you configured that reads `ConfiguredAddition`
+  when you expected an override is a **misspelled symbol**: it added a new market beside the untouched default. A
+  **disabled** market logs at `warn`, never `info`.
+
   **Adding a bound `Options` section is not done until its keys are on that list** — the omission is invisible at
   runtime, because the app simply uses its own defaults and says nothing (gh#236 was exactly that, for the
   `Flatten__` auto-flatten deadlines).

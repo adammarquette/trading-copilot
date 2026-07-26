@@ -118,6 +118,12 @@ _ = (builder.Configuration.GetSection(FlattenOptions.SectionName).Get<FlattenOpt
 builder.Services.AddScoped<AutoFlattenService>();
 builder.Services.AddHostedService<AutoFlattenHost>();
 
+// ...and REPORT that resolved schedule once the host exists (gh#255): which markets are armed, at what deadline,
+// and -- the load-bearing part -- whether each came from configuration or the built-in default. Validating alone
+// left the safety path silent about its own configuration, so a DROPPED override was indistinguishable from an
+// intended default; that is precisely how gh#236 hid. Singleton: it reads fixed configuration and holds no state.
+builder.Services.AddSingleton<FlattenScheduleReporter>();
+
 // The redundant watchdog (R-13, gh#187, ADR-0013): the INDEPENDENT second tier above the primary scheduler -- a
 // SEPARATE host on its own cadence, so the flatten still fires when the primary is degraded (hung host, per-pass
 // give-up, transient fault). It shares FlattenOptions (schedule + grace) but has its own loop and its own
@@ -186,6 +192,10 @@ builder.Services
 builder.Services.AddAuthorization();
 
 WebApplication app = builder.Build();
+
+// Report the armed flatten schedule FIRST (gh#255, R-13) -- before migration, so the operator still sees which
+// deadlines are configured even on a start that later fails to reach the database.
+app.Services.GetRequiredService<FlattenScheduleReporter>().Report(DateTimeOffset.UtcNow);
 
 await StartupTasks.MigrateAndBootstrapAsync(app);
 
