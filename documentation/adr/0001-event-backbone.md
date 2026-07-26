@@ -68,3 +68,41 @@ long-retention time-series store as the authoritative record. So the event log i
 pipeline**, and a **full indicator rebuild reprocesses the clean historical store**, not the short event log —
 the log's own replay covers only recent catch-up/recovery. Retention is **configurable**; a future event type
 may warrant a longer window. See engineering §8.
+
+## Update (2026-07-26) — the retention contract is explicit, and a trailing consumer is told (gh#227, decision gh#162)
+
+The window above made the log **lossy by design**, but nothing said so at the seam, and the reader did not act
+like it. `ReadAfterAsync` read forward from a cursor with `Sequence > afterSequence`; if retention had since
+dropped everything below the cursor, the call returned the survivors, succeeded, and reported nothing. **A silent
+hole was indistinguishable from an uneventful poll** — on a log whose only two consumers ride safety-critical
+paths (stop promotion gh#153, conditional firing gh#198), where a hole leaves derived state *confidently wrong*
+rather than merely stale.
+
+The contract is now stated rather than implied by a migration parameter:
+
+- **The log is lossy past its retention window.** Events older than the window are gone and are **not** recoverable
+  from this log. The clean-historical store remains the authoritative record for rebuilds (the 2026-07-18 update).
+- **A consumer that has fallen behind the window is told.** `ReadAfterAsync` returns an `EventPage` carrying an
+  optional `EventRetentionGap` (the requested cursor, and the oldest sequence that still survives).
+- **A consumer must handle a gap explicitly.** Silence is the defect; a `catch` or an ignored field reintroduces
+  it. Both current consumers log at high severity naming the group, the cursor, and the surviving bound, then
+  resume deliberately at the head — which is recovery, not a guess, because each re-evaluates from fresh truth on
+  the next quote and the **native safety stop is the physical floor throughout** (ADR-0007, ADR-0013).
+
+**A typed result, not an exception.** A gap is an expected, recoverable condition on a lossy log. An exception on
+a polling loop invites the `catch` that re-hides it; as a field on the result, ignoring it is a visible choice in
+the consumer's code rather than an absence.
+
+**The events are returned either way.** A gap degrades what a consumer *knows*, not its ability to make progress —
+withholding the survivors would turn a reporting improvement into an outage on a safety path.
+
+**What the signal deliberately does not claim.** It reports two bounds, never a count of lost events: sequence
+numbers are not contiguous (a rolled-back append consumes a value), so the span is an **upper bound**. For the
+same reason the detection asks *"does anything at or below the cursor still survive?"* rather than inferring loss
+from a numbering skip — a skip is normal and means nothing was lost, and a signal that cried wolf on every
+rollback would be learned-ignored long before a real gap arrived. Two cases are **not** gaps by definition: a
+brand-new consumer group (cursor `0` reads from the start of whatever survives) and an empty log.
+
+*Still open:* **per-type retention** (option 3 on gh#162) lowers the likelihood of a gap without removing the
+silence, so it complements this rather than replacing it; **backfill** from the clean-historical store is the R-1
+gap-detection path, not this one; and **alerting** on a gap arrives with the observability increment (gh#26).

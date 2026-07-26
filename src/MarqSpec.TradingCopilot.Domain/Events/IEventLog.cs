@@ -26,11 +26,17 @@ public interface IEventLog
     Task<EventEnvelope> AppendAsync(EventDraft draft, CancellationToken cancellationToken);
 
     /// <summary>Reads up to <paramref name="limit"/> events strictly after a sequence, in sequence order.</summary>
-    /// <param name="afterSequence">The consumer's cursor; <c>0</c> reads from the start.</param>
+    /// <remarks>
+    /// <b>The log is lossy past its retention window</b> (ADR-0001), so the page also reports whether the cursor
+    /// had fallen behind it — see <see cref="EventPage.Gap"/>. A consumer must handle a gap explicitly: a silent
+    /// resume at the head is exactly the defect gh#227 closed, because a hole is otherwise indistinguishable from
+    /// an uneventful poll.
+    /// </remarks>
+    /// <param name="afterSequence">The consumer's cursor; <c>0</c> reads from the start of what survives.</param>
     /// <param name="limit">The page size.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>The next page of events; empty when caught up.</returns>
-    Task<IReadOnlyList<EventEnvelope>> ReadAfterAsync(long afterSequence, int limit, CancellationToken cancellationToken);
+    /// <returns>The next page of events (empty when caught up) and any retention gap in front of the cursor.</returns>
+    Task<EventPage> ReadAfterAsync(long afterSequence, int limit, CancellationToken cancellationToken);
 
     /// <summary>Gets a consumer group's committed cursor, or null when the group has never committed.</summary>
     /// <param name="consumerGroup">The consumer group name.</param>

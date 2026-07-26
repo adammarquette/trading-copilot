@@ -70,7 +70,26 @@ public sealed class StopPromotionHost : BackgroundService
                         announced = true;
                     }
 
-                    IReadOnlyList<EventEnvelope> batch = await log.ReadAfterAsync(cursor.Value, BatchSize, stoppingToken);
+                    EventPage page = await log.ReadAfterAsync(cursor.Value, BatchSize, stoppingToken);
+
+                    if (page.Gap is not null)
+                    {
+                        // The log is lossy past its window (ADR-0001, gh#227). Quotes we never saw were dropped,
+                        // so a hidden stop may have crossed its promotion band unobserved -- derived state is now
+                        // confidently wrong, not merely stale. Say so LOUDLY and resume deliberately: the native
+                        // safety stop is the physical floor throughout, and the next quote re-evaluates every
+                        // hidden stop from scratch, so resuming at the head is recovery rather than a guess.
+                        _logger.LogError(
+                            "Event-log retention gap on {ConsumerGroup}: cursor {Cursor} fell behind the window; "
+                            + "the oldest surviving sequence is {OldestAvailable}. Quotes in between were dropped "
+                            + "and are NOT recoverable from this log. Resuming at the head — hidden stops are "
+                            + "re-evaluated on the next quote, and the native safety stop held throughout.",
+                            ConsumerGroup,
+                            page.Gap.RequestedAfterSequence,
+                            page.Gap.OldestAvailableSequence);
+                    }
+
+                    IReadOnlyList<EventEnvelope> batch = page.Events;
                     caughtUp = batch.Count == 0;
 
                     if (!caughtUp)

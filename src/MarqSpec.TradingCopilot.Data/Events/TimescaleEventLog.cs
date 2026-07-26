@@ -62,7 +62,7 @@ public sealed class TimescaleEventLog : IEventLog
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<EventEnvelope>> ReadAfterAsync(
+    public async Task<EventPage> ReadAfterAsync(
         long afterSequence,
         int limit,
         CancellationToken cancellationToken)
@@ -73,7 +73,36 @@ public sealed class TimescaleEventLog : IEventLog
             .Take(limit)
             .ToListAsync(cancellationToken);
 
-        return [.. page.Select(ToEnvelope)];
+        EventEnvelope[] events = [.. page.Select(ToEnvelope)];
+
+        // A fresh group (cursor 0) reads from the start of whatever survives -- by definition not a gap, or every
+        // new consumer would report one forever. Nothing read means nothing to compare against: an empty log and
+        // a caught-up cursor are both ordinary, and a cursor stranded in front of an EMPTY log is reported on the
+        // next read that actually returns something (gh#227).
+        if (afterSequence <= 0 || events.Length == 0)
+        {
+            return EventPage.Of(events);
+        }
+
+        long oldestAvailable = events[0].Sequence;
+
+        // The cheap gate, so the common path costs NO second round trip: when the next surviving sequence is the
+        // very next number, nothing can be missing. Only a numbering hole is worth asking the database about, and
+        // a hole is rare -- appends are contiguous unless one rolled back.
+        if (oldestAvailable <= afterSequence + 1)
+        {
+            return EventPage.Of(events);
+        }
+
+        // The hole is real only if the cursor has fallen off the BACK of the window. Asking "does anything at or
+        // below the cursor still exist?" answers that directly -- and, unlike inferring loss from the numbering,
+        // it does not fire on a rolled-back sequence value, where the cursor's own event is still there.
+        bool cursorStillInsideWindow = await _database.Events
+            .AnyAsync(candidate => candidate.Sequence <= afterSequence, cancellationToken);
+
+        return cursorStillInsideWindow
+            ? EventPage.Of(events)
+            : new EventPage(events, new EventRetentionGap(afterSequence, oldestAvailable));
     }
 
     /// <inheritdoc />
