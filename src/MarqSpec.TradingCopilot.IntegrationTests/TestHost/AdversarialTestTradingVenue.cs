@@ -27,6 +27,12 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     // Reprice dispatches the modify path aims at the resting native leg + the reject the venue can raise (gh#259).
     private readonly List<(string AccountKey, string VenueOrderKey, decimal? LimitPrice, decimal? StopPrice, int? Size)> _modifyCalls = [];
     private readonly HashSet<string> _modifyThrowKeys = new(StringComparer.Ordinal);
+    // Stop-promotion concurrency (gh#274): a side-effect fired inside PlaceOrderAsync lets a test commit a
+    // concurrent retire at the promotion's exact race window; the ids the stub handed back prove a self-cancel
+    // targets the leg the promoter itself just placed; and a global cancel-reject drives the synthetic_risk path.
+    private Func<Task>? _onPlaceOrder;
+    private readonly List<string> _placedVenueOrderIds = [];
+    private bool _allCancelsThrow;
 
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
 
@@ -109,6 +115,19 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     public IReadOnlyList<(string AccountKey, string VenueOrderKey, decimal? LimitPrice, decimal? StopPrice, int? Size)> ModifyOrderCalls =>
         _modifyCalls.AsReadOnly();
 
+    /// <summary>Runs <paramref name="effect"/> inside every <c>PlaceOrderAsync</c>, before it returns — the seam a
+    /// gh#274 test uses to commit a <b>concurrent retire</b> at the promotion's race window (a genuine second-connection
+    /// write against real Postgres). Passing <see langword="null"/> clears it.</summary>
+    public void OnPlaceOrder(Func<Task>? effect) => _onPlaceOrder = effect;
+
+    /// <summary>The venue order ids <c>PlaceOrderAsync</c> has handed back — to prove a self-cancel targets the
+    /// leg the promoter itself just placed, never some other order (gh#274).</summary>
+    public IReadOnlyList<string> PlacedVenueOrderIds => _placedVenueOrderIds.AsReadOnly();
+
+    /// <summary>Makes EVERY <c>CancelOrderAsync</c> throw — drives the self-cancel-fails → <c>synthetic_risk</c>
+    /// path when the just-placed dangling leg cannot be pulled (gh#274).</summary>
+    public void MakeCancelsThrow() => _allCancelsThrow = true;
+
     /// <summary>Clears seeded positions, close behaviour, and recorded close calls — call at the start of each test.</summary>
     public void ResetPositions()
     {
@@ -123,6 +142,9 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _cancelThrowKeys.Clear();
         _modifyCalls.Clear();
         _modifyThrowKeys.Clear();
+        _onPlaceOrder = null;
+        _placedVenueOrderIds.Clear();
+        _allCancelsThrow = false;
     }
 
     internal IReadOnlyList<WorkingOrder> WorkingOrdersFor(VenueAccountId account) =>
@@ -131,11 +153,19 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     internal void RecordCancel(VenueAccountId account, string venueOrderKey)
     {
         _cancelCalls.Add((account.Key, venueOrderKey));
-        if (_cancelThrowKeys.Contains(venueOrderKey))
+        if (_allCancelsThrow || _cancelThrowKeys.Contains(venueOrderKey))
         {
             throw new InvalidOperationException($"Venue rejected cancel of {venueOrderKey} — order already gone.");
         }
     }
+
+    internal string RecordPlaced(string venueOrderId)
+    {
+        _placedVenueOrderIds.Add(venueOrderId);
+        return venueOrderId;
+    }
+
+    internal Task InvokePlaceSideEffectAsync() => _onPlaceOrder?.Invoke() ?? Task.CompletedTask;
 
     internal void RecordModify(VenueAccountId account, string venueOrderKey, Price? limitPrice, Price? stopPrice, int? size)
     {
@@ -258,10 +288,13 @@ internal class AdversarialTestTradingVenue : ITradingVenue
     public Task<IReadOnlyList<PositionSnapshot>> GetPositionsAsync(VenueAccountId account, CancellationToken cancellationToken = default) =>
         Task.FromResult(_factory.PositionsFor(account));
 
-    public Task<PlacedOrder> PlaceOrderAsync(OrderRequest request, CancellationToken cancellationToken = default)
+    public async Task<PlacedOrder> PlaceOrderAsync(OrderRequest request, CancellationToken cancellationToken = default)
     {
         _placedOrders.Add(request);
-        return Task.FromResult(new PlacedOrder(request.Account, $"STUB-ORDER-{Guid.NewGuid():N}", DateTimeOffset.UtcNow));
+        string venueOrderId = _factory.RecordPlaced($"STUB-ORDER-{Guid.NewGuid():N}");
+        // The seam gh#274 uses to interleave a concurrent retire at the exact race window; a no-op otherwise.
+        await _factory.InvokePlaceSideEffectAsync();
+        return new PlacedOrder(request.Account, venueOrderId, DateTimeOffset.UtcNow);
     }
 
     public Task<IReadOnlyList<WorkingOrder>> GetWorkingOrdersAsync(VenueAccountId account, CancellationToken cancellationToken = default) =>
