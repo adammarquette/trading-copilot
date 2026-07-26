@@ -44,7 +44,12 @@ public sealed class TimescaleEventLog : IEventLog
             Id = draft.Id ?? Guid.NewGuid(),
             Type = draft.Type,
             Source = draft.Source,
-            OccurredAt = draft.OccurredAt,
+            // Normalised, not rejected (gh#201). The column is `timestamp with time zone` and Npgsql refuses to
+            // WRITE a non-zero offset to it, so an exchange-local source timestamp threw on append. Rejecting
+            // instead would break the documented contract -- OccurredAt is "when the event happened at the
+            // source", any offset -- and push the burden onto every producer. Normalising loses nothing the log
+            // uses: it orders by the instant, and an offset carries no information beyond it.
+            OccurredAt = draft.OccurredAt.ToUniversalTime(),
             RecordedAt = DateTimeOffset.UtcNow,
             Payload = draft.Payload,
             TraceParent = draft.TraceParent,

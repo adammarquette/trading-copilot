@@ -147,4 +147,78 @@ public class TimescaleEventLogTests
         (await log.GetCursorAsync("indicator-builder", CancellationToken.None)).Should().Be(10);
         (await log.GetCursorAsync("journal-projector", CancellationToken.None)).Should().Be(3);
     }
+
+    // --- OccurredAt is normalised to UTC before storage (regression, gh#201) ---
+    //
+    // The storage column is `timestamp with time zone`, and Npgsql refuses to WRITE a DateTimeOffset whose offset
+    // is not zero -- the append threw. EventDraft.OccurredAt is documented as "when the event happened at the
+    // source" and the domain accepts ANY offset, so the contract and the column disagreed, and the first producer
+    // to emit an exchange-local timestamp would have hit it. Normalising is the fix rather than rejecting: the log
+    // orders by the instant, so an offset carries no information it uses.
+    //
+    // These are InMemory, which does not enforce the column type -- so they cannot reproduce the ORIGINAL throw.
+    // They pin the behaviour that makes it impossible instead, which is what has to hold going forward. The throw
+    // itself is pinned against live Postgres by the gh#161 integration suite.
+
+    [Fact]
+    public async Task AppendAsync_ShouldNormaliseOccurredAtToUtc_WhenTheDraftCarriesANonUtcOffset()
+    {
+        await using TradingCopilotDbContext context = Context();
+        TimescaleEventLog log = new(context);
+        DateTimeOffset nonUtc = new(2026, 7, 20, 9, 30, 0, TimeSpan.FromHours(-5));
+
+        EventEnvelope appended = await log.AppendAsync(
+            new EventDraft("market.quote", "projectx", nonUtc, """{"bid":5301.25}"""), CancellationToken.None);
+
+        appended.OccurredAt.Offset.Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public async Task AppendAsync_ShouldPreserveTheInstant_WhenNormalisingOccurredAt()
+    {
+        // Normalising must move the OFFSET, never the moment. Shifting the instant would silently misdate every
+        // event from a non-UTC producer -- a worse defect than the crash it replaces, because nothing would fail.
+        await using TradingCopilotDbContext context = Context();
+        TimescaleEventLog log = new(context);
+        DateTimeOffset nonUtc = new(2026, 7, 20, 9, 30, 0, TimeSpan.FromHours(-5));
+
+        EventEnvelope appended = await log.AppendAsync(
+            new EventDraft("market.quote", "projectx", nonUtc, """{"bid":5301.25}"""), CancellationToken.None);
+
+        appended.OccurredAt.Should().Be(nonUtc); // DateTimeOffset equality compares the instant
+        appended.OccurredAt.UtcDateTime.Should().Be(new DateTime(2026, 7, 20, 14, 30, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public async Task AppendAsync_ShouldLeaveOccurredAtUnchanged_WhenItIsAlreadyUtc()
+    {
+        await using TradingCopilotDbContext context = Context();
+        TimescaleEventLog log = new(context);
+        DateTimeOffset utc = new(2026, 7, 22, 14, 30, 0, TimeSpan.Zero);
+
+        EventEnvelope appended = await log.AppendAsync(
+            new EventDraft("market.quote", "projectx", utc, """{"bid":5301.25}"""), CancellationToken.None);
+
+        appended.OccurredAt.Should().Be(utc);
+        appended.OccurredAt.Offset.Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public async Task AppendAsync_ShouldStoreTheNormalisedOccurredAt_NotOnlyReturnIt()
+    {
+        // The envelope is built from the stored entity, but assert the read-back too: returning a normalised
+        // value while persisting the original would leave the crash in place behind a green test.
+        await using TradingCopilotDbContext context = Context();
+        TimescaleEventLog log = new(context);
+        DateTimeOffset nonUtc = new(2026, 7, 20, 9, 30, 0, TimeSpan.FromHours(-5));
+
+        await log.AppendAsync(
+            new EventDraft("market.quote", "projectx", nonUtc, """{"bid":5301.25}"""), CancellationToken.None);
+
+        IReadOnlyList<EventEnvelope> page = await log.ReadAfterAsync(0, 10, CancellationToken.None);
+
+        page.Should().ContainSingle();
+        page[0].OccurredAt.Offset.Should().Be(TimeSpan.Zero);
+        page[0].OccurredAt.Should().Be(nonUtc);
+    }
 }

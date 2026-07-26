@@ -41,8 +41,8 @@ public class EventBackboneIntegrationTests : IClassFixture<PostgresApiFactory>
     public async Task Append_ShouldRoundTripEnvelope_ThroughTheAppliedMigration()
     {
         Guid id = Guid.NewGuid();
-        // UTC: the storage column is `timestamp with time zone`, which only accepts UTC on write (a non-UTC
-        // OccurredAt is rejected outright — see Append_ShouldReject_WhenOccurredAtCarriesANonUtcOffset / gh#201).
+        // UTC: the storage column is `timestamp with time zone`, which only accepts UTC on write — a non-UTC
+        // OccurredAt is normalised to it on append (see Append_ShouldNormaliseToUtc_… / gh#201).
         DateTimeOffset occurredAt = new(2026, 7, 20, 14, 30, 0, TimeSpan.Zero);
         const string payload = "{\"symbol\":\"MES\",\"bid\":5000.25}";
         const string traceParent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
@@ -73,22 +73,26 @@ public class EventBackboneIntegrationTests : IClassFixture<PostgresApiFactory>
     }
 
     [Fact]
-    public async Task Append_ShouldReject_WhenOccurredAtCarriesANonUtcOffset()
+    public async Task Append_ShouldNormaliseToUtc_WhenOccurredAtCarriesANonUtcOffset()
     {
-        // DEFECT gh#201 (work:code) — surfaced by this independent suite. EventDraft.OccurredAt is a
-        // DateTimeOffset the domain accepts with ANY offset ("when the event happened at the source"), but the
-        // Events."OccurredAt" column is `timestamp with time zone` and Npgsql refuses to WRITE a non-UTC offset
-        // to it, so the append throws. QuoteIngestionService passes quote.Timestamp raw and deliberately
-        // propagates append failures (#156), so a venue emitting an exchange-local timestamp would drop the
-        // quote rather than store it. Pinned per contract §2: when gh#201 normalises OccurredAt to UTC the
-        // append will succeed and THIS TEST GOES RED — the reminder to flip it to assert the stored instant.
+        // The gh#201 regression guard, FLIPPED from its pin (contract §2). This previously asserted the observed
+        // defect — the append threw, because Events."OccurredAt" is `timestamp with time zone` and Npgsql refuses
+        // to WRITE a non-zero offset — with a note that the fix would turn it red. gh#201 landed: the log now
+        // normalises to UTC on append, so this asserts the fixed behaviour against live Postgres.
+        //
+        // Both halves matter. The offset must be gone (or the write fails), AND the instant must be untouched:
+        // normalising that shifted the moment would silently misdate every event from a non-UTC producer, which
+        // is worse than the crash it replaced because nothing would fail.
         DateTimeOffset nonUtc = new(2026, 7, 20, 9, 30, 0, TimeSpan.FromHours(-5));
 
-        Func<Task> append = () => AppendAsync(Draft(occurredAt: nonUtc));
+        EventEnvelope returned = await AppendAsync(Draft(occurredAt: nonUtc));
 
-        (await append.Should().ThrowAsync<DbUpdateException>("the storage boundary rejects a non-UTC OccurredAt"))
-            .WithInnerException<ArgumentException>(
-                "Npgsql refuses a non-UTC DateTimeOffset for a `timestamp with time zone` column");
+        Event stored = await QueryDbAsync(db =>
+            db.Events.AsNoTracking().SingleAsync(e => e.Sequence == returned.Sequence));
+
+        stored.OccurredAt.Offset.Should().Be(TimeSpan.Zero, "the timestamptz column stores and returns UTC");
+        stored.OccurredAt.Should().Be(nonUtc, "normalising moves the offset, never the instant");
+        stored.OccurredAt.UtcDateTime.Should().Be(new DateTime(2026, 7, 20, 14, 30, 0, DateTimeKind.Utc));
     }
 
     [Fact]

@@ -6,7 +6,12 @@ namespace MarqSpec.TradingCopilot.Domain.Events;
 /// </summary>
 /// <param name="Type">The event type (e.g. <c>market.quote</c>). Namespaced, dot-separated by convention.</param>
 /// <param name="Source">The producing system (e.g. <c>projectx</c>).</param>
-/// <param name="OccurredAt">When the event happened at the source — distinct from when the log recorded it.</param>
+/// <param name="OccurredAt">
+/// When the event happened at the source — distinct from when the log recorded it. <b>Any offset is accepted</b>:
+/// a producer may pass an exchange-local timestamp straight through. The log <b>normalises it to UTC on append</b>
+/// (gh#201), preserving the instant, because storage is <c>timestamp with time zone</c> and the log orders by the
+/// instant regardless.
+/// </param>
 /// <param name="Payload">The event body as JSON. Stored as <c>jsonb</c>; the log does not interpret it.</param>
 public sealed record EventDraft(string Type, string Source, DateTimeOffset OccurredAt, string Payload)
 {
