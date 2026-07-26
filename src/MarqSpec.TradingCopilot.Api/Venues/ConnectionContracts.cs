@@ -88,3 +88,11 @@ public sealed record AccountResponse(
             TradingModePolicy.IsAllowed(account.Mode, environment.Value));
     }
 }
+
+/// <summary>Rotate which credential key a connection names (gh#210, ADR-0015).</summary>
+/// <remarks>
+/// The key <b>names</b> whose credential set the process holds — it is not itself a secret, and no secret is ever
+/// persisted. Rotation therefore changes a pointer, not a credential.
+/// </remarks>
+/// <param name="CredentialKey">The new credential key this connection should name.</param>
+public sealed record RotateCredentialsRequest(string CredentialKey);

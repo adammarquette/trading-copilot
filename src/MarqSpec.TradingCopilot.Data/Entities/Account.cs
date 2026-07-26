@@ -65,6 +65,14 @@ public class Account : IUserOwned
     /// </summary>
     public TradingMode Mode { get; set; }
 
+    /// <summary>
+    /// Whether the account is active, cascaded from its connection (gh#210). Deliberately <b>distinct</b> from
+    /// <see cref="CanTrade"/> and <see cref="IsVisible"/>, which are <b>venue-reported</b> and overwritten on every
+    /// rediscovery — writing deactivation into those would let a rediscovery silently resurrect a deactivated
+    /// login.
+    /// </summary>
+    public bool IsActive { get; set; } = true;
+
     /// <summary>Whether the venue permits trading this account.</summary>
     public bool CanTrade { get; set; }
 
