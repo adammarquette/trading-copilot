@@ -223,38 +223,111 @@ public class EventBackboneIntegrationTests : IClassFixture<PostgresApiFactory>
         after.Should().Be(before, "the guards reject before the row is added — nothing is left behind");
     }
 
+    // -- Retention-gap signal (gh#228, flipping the gh#162 pin now that gh#227 shipped) ------------------------
+    // The gh#227 fix makes ReadAfterAsync SIGNAL a retention gap (EventPage.Gap) instead of silently resuming.
+    // The gap decision is a row-existence query (`Sequence <= cursor` still exists?), NOT a chunk read — so a
+    // DELETE of the oldest rows reproduces the EXACT state a Timescale chunk-drop leaves, faithfully exercising
+    // the same decision path. A genuine `drop_chunks` end-to-end case (isolated container) lives in
+    // RetentionChunkDropIntegrationTests.
+
     [Fact]
-    public async Task RetentionGap_ShouldSkipSilently_WhenACursorTrailsTheDroppedWindow()
+    public async Task RetentionGap_ShouldSignalGap_WhenACursorTrailsTheDroppedWindow()
     {
-        // OBSERVED gh#162 — a PIN, not a guard, and NOT counted as coverage. Retention drops chunks past the
-        // window; a consumer whose cursor trails the dropped window cannot distinguish "no new events" from
-        // "events were dropped". The retention policy is a background job (24h), so this simulates the drop by
-        // deleting the oldest rows directly, then asserts what ReadAfterAsync ACTUALLY does today. It pins that
-        // behaviour until gh#162 decides whether the reader should instead learn events were dropped — at which
-        // point this flips into that issue's regression guard.
-        EventEnvelope[] batch = [
-            await AppendAsync(Draft(payload: "{\"n\":1}")),
-            await AppendAsync(Draft(payload: "{\"n\":2}")),
-            await AppendAsync(Draft(payload: "{\"n\":3}")),
-            await AppendAsync(Draft(payload: "{\"n\":4}")),
-            await AppendAsync(Draft(payload: "{\"n\":5}")),
-        ];
-        long[] seq = [.. batch.Select(e => e.Sequence)];
-        long droppedThrough = seq[2]; // simulate retention dropping the oldest three
+        // THE flipped gh#162 pin (was RetentionGap_ShouldSkipSilently…): a consumer whose cursor trails the
+        // dropped window must be TOLD, not silently resumed.
+        long[] seq = await AppendBatchAsync(5);
+        await DeleteThroughAsync(seq[2]); // retention drops the oldest three
 
-        await ExecuteDbAsync(db =>
-            db.Database.ExecuteSqlInterpolatedAsync($"DELETE FROM \"Events\" WHERE \"Sequence\" <= {droppedThrough}"));
+        EventPage page = await ReadPageAsync(seq[0] - 1, limit: 10);
 
-        // The consumer's cursor sits BELOW the dropped window.
-        IReadOnlyList<EventEnvelope> read = await ReadAfterAsync(seq[0] - 1, limit: 10);
+        page.Gap.Should().NotBeNull("a cursor trailing the dropped window is signalled, never silently resumed (gh#227)");
+        page.Events.Select(e => e.Sequence).Should().Equal(
+            new[] { seq[3], seq[4] }, "the survivors are still returned — a gap degrades what the consumer knows, not its progress");
+    }
 
-        // STALE PIN as of gh#227 — left for QA to flip, not rewritten here (the Coding Agent does not author this
-        // tier). The EVENTS are unchanged, so this assertion still holds and the suite stays green; what changed
-        // is that the read now ALSO carries a gap signal, so "no gap signal" below is no longer true and the test
-        // name overstates the silence. gh#228 is the suite that turns this into a real regression guard by
-        // asserting the signal itself: page.Gap is not null, carrying (requested cursor, oldest available).
-        read.Select(e => e.Sequence).Should().Equal(new[] { seq[3], seq[4] },
-            "the survivors are still returned — a gap degrades what the consumer knows, not its progress (gh#227)");
+    [Fact]
+    public async Task ReadAfter_ShouldCarryActionableDetail_WhenGapSignalled()
+    {
+        // The signal must carry enough to decide: the cursor read from, and the oldest sequence that survives.
+        long[] seq = await AppendBatchAsync(5);
+        await DeleteThroughAsync(seq[2]);
+
+        EventPage page = await ReadPageAsync(seq[0] - 1, limit: 10);
+
+        page.Gap!.RequestedAfterSequence.Should().Be(seq[0] - 1, "the gap reports the cursor the consumer asked from");
+        page.Gap.OldestAvailableSequence.Should().Be(seq[3], "and the oldest sequence still available after the drop");
+    }
+
+    [Fact]
+    public async Task ReadAfter_ShouldNotSignalGap_WhenCursorIsInsideWindow()
+    {
+        // The common path: nothing dropped, the window is intact — clean and silent (and it never pays the
+        // gap-check round trip).
+        long[] seq = await AppendBatchAsync(4);
+
+        EventPage page = await ReadPageAsync(seq[0] - 1, limit: 10);
+
+        page.Gap.Should().BeNull("an intact window never signals a gap");
+        page.Events.Select(e => e.Sequence).Should().Equal(seq, "every appended event is returned in order");
+    }
+
+    [Fact]
+    public async Task ReadAfter_ShouldNotSignalGap_WhenConsumerGroupIsBrandNew()
+    {
+        // A brand-new consumer reads from 0 (no committed cursor) — that is not a gap even if old rows were
+        // dropped, because it never held a position to fall behind.
+        long[] seq = await AppendBatchAsync(5);
+        await DeleteThroughAsync(seq[2]);
+
+        EventPage page = await ReadPageAsync(afterSequence: 0, limit: 10);
+
+        page.Gap.Should().BeNull("reading from the start of what survives is not a gap");
+        page.Events.Select(e => e.Sequence).Should().Equal(new[] { seq[3], seq[4] });
+    }
+
+    [Fact]
+    public async Task ReadAfter_ShouldNotSignalGap_WhenCaughtUpAtTheHead()
+    {
+        // Caught up: an empty page is "no new events", never a dropped window.
+        long[] seq = await AppendBatchAsync(1);
+
+        EventPage page = await ReadPageAsync(seq[0], limit: 10);
+
+        page.Events.Should().BeEmpty();
+        page.Gap.Should().BeNull("no new events is not a gap");
+    }
+
+    [Fact]
+    public async Task ReadAfter_ShouldSignalGapOnce_WhenConsumerResumesAfterGap()
+    {
+        // The gap fires while the cursor trails the window; once the consumer advances to a surviving sequence the
+        // next read is clean — not a gap on every subsequent poll.
+        long[] seq = await AppendBatchAsync(5);
+        await DeleteThroughAsync(seq[2]);
+
+        EventPage first = await ReadPageAsync(seq[0] - 1, limit: 10);
+        first.Gap.Should().NotBeNull("the first read after the drop signals the gap");
+
+        EventPage resumed = await ReadPageAsync(seq[3], limit: 10); // advanced onto a surviving sequence
+        resumed.Gap.Should().BeNull("resuming from inside the surviving window is clean");
+        resumed.Events.Select(e => e.Sequence).Should().Equal(new[] { seq[4] });
+    }
+
+    [Fact]
+    public async Task ReadAfter_ShouldStillSignalGap_WhenConsumerRestartsMidGap()
+    {
+        // The signal is derived from durable state (the cursor vs. what survives), not in-memory — so it survives
+        // a process boundary: a consumer that restarts still learns the gap on its next read.
+        long[] seq = await AppendBatchAsync(5);
+        await DeleteThroughAsync(seq[2]);
+
+        EventPage before = await ReadPageAsync(seq[0] - 1, limit: 10);
+        before.Gap.Should().NotBeNull();
+
+        // Each ReadPageAsync opens its own scope — a fresh scope models the restart, carrying no in-memory state.
+        EventPage afterRestart = await ReadPageAsync(seq[0] - 1, limit: 10);
+        afterRestart.Gap.Should().NotBeNull("the gap is durable — re-derived from the log, not remembered");
+        afterRestart.Gap!.OldestAvailableSequence.Should().Be(seq[3]);
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -289,6 +362,33 @@ public class EventBackboneIntegrationTests : IClassFixture<PostgresApiFactory>
         IEventLog log = scope.ServiceProvider.GetRequiredService<IEventLog>();
         return (await log.ReadAfterAsync(afterSequence, limit, CancellationToken.None)).Events;
     }
+
+    /// <summary>Reads the full page — the retention-gap signal (<see cref="EventPage.Gap"/>) is what gh#228 asserts,
+    /// so unlike <see cref="ReadAfterAsync"/> this keeps it. A fresh scope per call also models a consumer restart.</summary>
+    private async Task<EventPage> ReadPageAsync(long afterSequence, int limit)
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        IEventLog log = scope.ServiceProvider.GetRequiredService<IEventLog>();
+        return await log.ReadAfterAsync(afterSequence, limit, CancellationToken.None);
+    }
+
+    /// <summary>Appends <paramref name="count"/> contiguous events and returns their sequences.</summary>
+    private async Task<long[]> AppendBatchAsync(int count)
+    {
+        List<long> sequences = [];
+        for (int n = 1; n <= count; n++)
+        {
+            EventEnvelope appended = await AppendAsync(Draft(payload: $"{{\"n\":{n}}}"));
+            sequences.Add(appended.Sequence);
+        }
+
+        return [.. sequences];
+    }
+
+    /// <summary>Deletes every row at or below <paramref name="throughSequence"/> — the state a retention chunk-drop
+    /// leaves (the gap decision reads row existence, not chunk metadata, so this is faithful, not a simulation).</summary>
+    private Task DeleteThroughAsync(long throughSequence) => ExecuteDbAsync(db =>
+        db.Database.ExecuteSqlInterpolatedAsync($"DELETE FROM \"Events\" WHERE \"Sequence\" <= {throughSequence}"));
 
     private async Task<long?> GetCursorAsync(string consumerGroup)
     {
