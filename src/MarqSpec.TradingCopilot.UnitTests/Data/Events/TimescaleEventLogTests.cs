@@ -67,7 +67,7 @@ public class TimescaleEventLogTests
         const string traceParent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
 
         EventEnvelope appended = await log.AppendAsync(Draft() with { TraceParent = traceParent }, CancellationToken.None);
-        IReadOnlyList<EventEnvelope> read = await log.ReadAfterAsync(0, 1, CancellationToken.None);
+        IReadOnlyList<EventEnvelope> read = (await log.ReadAfterAsync(0, 1, CancellationToken.None)).Events;
 
         // The log is an async boundary: the consumer continues the producer's trace via a span link, so the
         // traceparent must survive the round trip (engineering §7 -- the envelope decision recorded there).
@@ -100,7 +100,7 @@ public class TimescaleEventLogTests
         await log.AppendAsync(Draft(payload: """{"n":2}"""), CancellationToken.None);
         await log.AppendAsync(Draft(payload: """{"n":3}"""), CancellationToken.None);
 
-        IReadOnlyList<EventEnvelope> page = await log.ReadAfterAsync(first.Sequence, limit: 2, CancellationToken.None);
+        IReadOnlyList<EventEnvelope> page = (await log.ReadAfterAsync(first.Sequence, limit: 2, CancellationToken.None)).Events;
 
         page.Should().HaveCount(2);
         page[0].Payload.Should().Be("""{"n":2}""");
@@ -115,7 +115,7 @@ public class TimescaleEventLogTests
         TimescaleEventLog log = new(context);
         EventEnvelope only = await log.AppendAsync(Draft(), CancellationToken.None);
 
-        (await log.ReadAfterAsync(only.Sequence, limit: 10, CancellationToken.None)).Should().BeEmpty();
+        (await log.ReadAfterAsync(only.Sequence, limit: 10, CancellationToken.None)).Events.Should().BeEmpty();
     }
 
     [Fact]
@@ -215,7 +215,7 @@ public class TimescaleEventLogTests
         await log.AppendAsync(
             new EventDraft("market.quote", "projectx", nonUtc, """{"bid":5301.25}"""), CancellationToken.None);
 
-        IReadOnlyList<EventEnvelope> page = await log.ReadAfterAsync(0, 10, CancellationToken.None);
+        IReadOnlyList<EventEnvelope> page = (await log.ReadAfterAsync(0, 10, CancellationToken.None)).Events;
 
         page.Should().ContainSingle();
         page[0].OccurredAt.Offset.Should().Be(TimeSpan.Zero);

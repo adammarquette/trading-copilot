@@ -65,7 +65,26 @@ public sealed class ConditionalOrderHost : BackgroundService
                         announced = true;
                     }
 
-                    IReadOnlyList<EventEnvelope> batch = await log.ReadAfterAsync(cursor.Value, BatchSize, stoppingToken);
+                    EventPage page = await log.ReadAfterAsync(cursor.Value, BatchSize, stoppingToken);
+
+                    if (page.Gap is not null)
+                    {
+                        // The log is lossy past its window (ADR-0001, gh#227). A quote that would have TRIGGERED a
+                        // pending conditional -- or drifted it past its cancel band -- may have been dropped
+                        // unseen. Nothing fires retroactively: a conditional stays Pending and is re-decided on
+                        // the next quote against fresh truth, and its cancel-if / expiry still stand, so the
+                        // failure direction is "did not fire" rather than "fired on stale grounds" (ADR-0013).
+                        _logger.LogError(
+                            "Event-log retention gap on {ConsumerGroup}: cursor {Cursor} fell behind the window; "
+                            + "the oldest surviving sequence is {OldestAvailable}. Quotes in between were dropped "
+                            + "and are NOT recoverable from this log. Pending conditionals were NOT evaluated "
+                            + "against them — they stay Pending and re-decide on the next quote.",
+                            ConsumerGroup,
+                            page.Gap.RequestedAfterSequence,
+                            page.Gap.OldestAvailableSequence);
+                    }
+
+                    IReadOnlyList<EventEnvelope> batch = page.Events;
                     caughtUp = batch.Count == 0;
 
                     if (!caughtUp)

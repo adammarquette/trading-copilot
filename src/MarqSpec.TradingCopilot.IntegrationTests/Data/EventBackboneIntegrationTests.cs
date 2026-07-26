@@ -248,9 +248,13 @@ public class EventBackboneIntegrationTests : IClassFixture<PostgresApiFactory>
         // The consumer's cursor sits BELOW the dropped window.
         IReadOnlyList<EventEnvelope> read = await ReadAfterAsync(seq[0] - 1, limit: 10);
 
-        // Observed: it silently returns only the survivors — no exception, no gap signal.
+        // STALE PIN as of gh#227 — left for QA to flip, not rewritten here (the Coding Agent does not author this
+        // tier). The EVENTS are unchanged, so this assertion still holds and the suite stays green; what changed
+        // is that the read now ALSO carries a gap signal, so "no gap signal" below is no longer true and the test
+        // name overstates the silence. gh#228 is the suite that turns this into a real regression guard by
+        // asserting the signal itself: page.Gap is not null, carrying (requested cursor, oldest available).
         read.Select(e => e.Sequence).Should().Equal(new[] { seq[3], seq[4] },
-            "OBSERVED gh#162: the dropped sequences are skipped with no signal that they ever existed");
+            "the survivors are still returned — a gap degrades what the consumer knows, not its progress (gh#227)");
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -283,7 +287,7 @@ public class EventBackboneIntegrationTests : IClassFixture<PostgresApiFactory>
     {
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         IEventLog log = scope.ServiceProvider.GetRequiredService<IEventLog>();
-        return await log.ReadAfterAsync(afterSequence, limit, CancellationToken.None);
+        return (await log.ReadAfterAsync(afterSequence, limit, CancellationToken.None)).Events;
     }
 
     private async Task<long?> GetCursorAsync(string consumerGroup)
