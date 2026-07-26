@@ -161,8 +161,18 @@ the rule, not noise to tolerate.
   `HttpDeadMansSwitch` pings the monitor and is failure-tolerant by construction — a transport fault returns false
   rather than throwing, because a report that did not arrive is exactly what should page. **No exchange calendar was
   needed** after all: a holiday has no exposure, so the market is trivially flat and checks in.
-- **`gh#243`** the `INotificationChannel` seam + Pushover adapter (Layer 1) · **`gh#245`** Alertmanager rules and
-  routing (Layer 2) · **`gh#246`** the QA suite.
+- **`gh#243` — Layer 1 landed.** `Domain/Notifications/INotificationChannel` is the transport-free seam
+  (severity / title / body / incident key — no priority numbers, no thread semantics), with
+  `PushoverNotificationChannel` mapping **Page → Emergency (2)**, Notify → 0, Quiet → −1, and cancelling an
+  outstanding page via its receipt when the incident resolves. `NullNotificationChannel` keeps an unconfigured
+  deployment booting while logging a Page as an **error**, so unmonitored is never silent. The three P1 flatten
+  conditions (`flatten.escalated`, `flatten.missed`, `flatten.watchdog.critical`) push directly, and a successful
+  flatten or a watchdog save **resolves** the incident.
+  **One refinement to this ADR:** dedup was specified "in the adapter"; it landed one layer out as
+  `DedupingNotificationChannel`, so every future adapter (Discord `gh#100`, web push ADR-0010) inherits it rather
+  than reimplementing it, and it is unit-testable without a transport. The requirement is unchanged — one push per
+  incident, re-armed on resolve.
+- **`gh#245`** Alertmanager rules and routing (Layer 2) · **`gh#246`** the QA suite.
 - **Thresholds are recorded but not yet enforced.** The P1/P2/P3 tables above describe what `gh#245` must build; only
   the dead-man's switch's own rules (check-in absent by deadline + 5 min, heartbeat missed ≥ 3 intervals) are live
   today, and they live in the **monitor's** configuration rather than in this repo.

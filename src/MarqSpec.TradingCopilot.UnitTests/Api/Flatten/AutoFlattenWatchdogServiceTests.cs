@@ -7,6 +7,7 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Flatten;
+using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -57,7 +58,10 @@ public class AutoFlattenWatchdogServiceTests
             _log,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
             Options.Create(options ?? new FlattenOptions()),
+            _notifications,
             NullLogger<AutoFlattenWatchdogService>.Instance);
+
+    private readonly INotificationChannel _notifications = A.Fake<INotificationChannel>();
 
     private static FlattenSchedule Schedule(string symbol, TimeOnly close, bool enabled = true) =>
         FlattenSchedule.Create(InstrumentId.Parse(symbol), enabled, deadlineOverride: null, sessionClose: close);

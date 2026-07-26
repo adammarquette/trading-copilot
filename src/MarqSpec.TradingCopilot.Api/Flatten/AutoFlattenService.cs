@@ -2,8 +2,10 @@ using System.Text.Json;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Flatten;
+using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.EntityFrameworkCore;
@@ -58,6 +60,7 @@ public sealed class AutoFlattenService
     private readonly IEventLog _eventLog;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly FlattenOptions _options;
+    private readonly INotificationChannel _notifications;
     private readonly ILogger<AutoFlattenService> _logger;
 
     /// <summary>Creates the service over the scoped database and event log.</summary>
@@ -66,6 +69,7 @@ public sealed class AutoFlattenService
     /// <param name="eventLog">The append-only journal every flatten action is recorded on (R-13).</param>
     /// <param name="projectXOptions">Carries the credential key this process serves (ADR-0015).</param>
     /// <param name="flattenOptions">The per-instrument schedule and attempt cap.</param>
+    /// <param name="notifications">Reaches the operator away from the desk (gh#243, ADR-0019).</param>
     /// <param name="logger">The logger.</param>
     public AutoFlattenService(
         TradingCopilotDbContext database,
@@ -73,6 +77,7 @@ public sealed class AutoFlattenService
         IEventLog eventLog,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<FlattenOptions> flattenOptions,
+        INotificationChannel notifications,
         ILogger<AutoFlattenService> logger)
     {
         ArgumentNullException.ThrowIfNull(projectXOptions);
@@ -83,8 +88,17 @@ public sealed class AutoFlattenService
         _eventLog = eventLog;
         _projectX = projectXOptions.Value;
         _options = flattenOptions.Value;
+        _notifications = notifications;
         _logger = logger;
     }
+
+    /// <summary>
+    /// The incident a notification belongs to (gh#243): one account's exposure in one instrument. Scoped this way
+    /// so ES failing never suppresses GC failing — they are different money — while the same ES failure repeating
+    /// every 15 s stays one incident.
+    /// </summary>
+    internal static string IncidentKey(VenueAccountId account, InstrumentId instrument) =>
+        $"flatten:{account.Key}:{instrument}";
 
     /// <summary>
     /// Runs one flatten pass over every account this process serves: for each, builds the venue, reads live
@@ -217,6 +231,16 @@ public sealed class AutoFlattenService
                 case FlattenAction.Missed:
                     _logger.LogError("Auto-flatten MISSED for {Account} {Instrument}: {Reason}", account, schedule.Instrument, decision.Reason);
                     await JournalAsync(MissedEventType, account, contract, decision.Reason, now, cancellationToken);
+
+                    // Also P1. Usually the same incident as the escalation above, so dedup collapses the two --
+                    // but a process that only came up AFTER the deadline reaches this without ever escalating, and
+                    // that operator still needs waking.
+                    await NotifyAsync(
+                        NotificationSeverity.Page,
+                        $"Auto-flatten MISSED — {schedule.Instrument}",
+                        decision.Reason,
+                        IncidentKey(account, schedule.Instrument),
+                        cancellationToken);
                     break;
 
                 case FlattenAction.Disabled:
@@ -268,6 +292,11 @@ public sealed class AutoFlattenService
                 case FlattenVerdict.Flat:
                     await JournalAsync(ExecutedEventType, account, group[0].Contract,
                         $"{decision.Reason} Flat after {attempts} attempt(s).", now, cancellationToken);
+
+                    // The incident is over. Cancels any page still nagging from an earlier pass and re-arms the
+                    // key, so a LATER failure today is reported as the new incident it is (gh#243).
+                    await _notifications.ResolveAsync(
+                        IncidentKey(account, schedule.Instrument), cancellationToken);
                     return true;
 
                 case FlattenVerdict.Retry:
@@ -282,8 +311,47 @@ public sealed class AutoFlattenService
                     await JournalAsync(EscalatedEventType, account, group[0].Contract,
                         $"ESCALATE: {schedule.Instrument} still exposed after {attempts} close attempt(s) — {decision.Reason}",
                         now, cancellationToken);
+
+                    // P1 — page now, not at the firing window (ADR-0019). `flatten.missed` lands 60 min past the
+                    // deadline, AFTER a prop venue's own forced flatten would have closed the position, and a live
+                    // brokerage has no backstop at all. This is the moment the operator can still act.
+                    await NotifyAsync(
+                        NotificationSeverity.Page,
+                        $"Auto-flatten escalated — {schedule.Instrument}",
+                        $"{schedule.Instrument} on {account.Key} is STILL EXPOSED after {attempts} close attempt(s). "
+                        + "The position did not close at its deadline and needs manual intervention now.",
+                        IncidentKey(account, schedule.Instrument),
+                        cancellationToken);
                     return false;
             }
+        }
+    }
+
+    /// <summary>
+    /// Notifies the operator, absorbing any fault. Alerting is a <b>secondary</b> concern to closing a position:
+    /// a channel that is down, slow, or misconfigured must never fail or abort a flatten — that would be the
+    /// self-inflicted wound ADR-0019 rules out, where the thing meant to report trouble becomes the trouble.
+    /// The adapters are already failure-tolerant; this is the belt to that braces, since a flatten is the one
+    /// action the system takes without confirmation.
+    /// </summary>
+    private async Task NotifyAsync(
+        NotificationSeverity severity,
+        string title,
+        string body,
+        string incidentKey,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _notifications.SendAsync(new Notification(severity, title, body, incidentKey), cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw; // a real shutdown still stops the host
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(error, "Could not notify the operator about {Incident}; the flatten is unaffected.", incidentKey);
         }
     }
 

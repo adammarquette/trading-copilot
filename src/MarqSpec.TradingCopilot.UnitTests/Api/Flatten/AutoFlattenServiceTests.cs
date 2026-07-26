@@ -7,6 +7,7 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Flatten;
+using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -56,7 +57,10 @@ public class AutoFlattenServiceTests
             _log,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
             Options.Create(options ?? new FlattenOptions()),
+            _notifications,
             NullLogger<AutoFlattenService>.Instance);
+
+    private readonly INotificationChannel _notifications = A.Fake<INotificationChannel>();
 
     private static FlattenSchedule Schedule(string symbol, TimeOnly close, bool enabled = true) =>
         FlattenSchedule.Create(InstrumentId.Parse(symbol), enabled, deadlineOverride: null, sessionClose: close);
@@ -94,6 +98,66 @@ public class AutoFlattenServiceTests
     private void AssertAppended(string eventType) =>
         A.CallTo(() => _log.AppendAsync(A<EventDraft>.That.Matches(d => d.Type == eventType), A<CancellationToken>._))
             .MustHaveHappened();
+
+    // --- Reaching the operator (gh#243, ADR-0019) ---
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldPageTheOperator_WhenTheFlattenEscalates()
+    {
+        // P1. Paged HERE rather than at the firing window: flatten.missed lands 60 min past the deadline, after a
+        // prop venue's own forced flatten would already have closed the position -- and a live brokerage has no
+        // backstop at all. This is the last moment the operator can still act.
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2)); // never goes flat
+
+        await Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Page), A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldResolveTheIncident_WhenTheFlattenSucceeds()
+    {
+        // Cancels a page still nagging from an earlier pass AND re-arms the key, so a LATER failure today is
+        // reported as the new incident it is rather than suppressed as a duplicate.
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
+
+        await Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+
+        A.CallTo(() => _notifications.ResolveAsync(A<string>._, A<CancellationToken>._)).MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldNotNotify_WhenNothingIsWrong()
+    {
+        // A clean session must be silent. A rule that pages on a healthy day is a defect in the rule.
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
+
+        await Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(17, 0), maxAttempts: 3, CancellationToken.None);
+
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldStillFlatten_WhenTheNotificationChannelThrows()
+    {
+        // Alerting is SECONDARY to closing a position. A channel that is down must never abort the one action the
+        // system takes without confirmation -- that would make the reporter the outage.
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("channel exploded"));
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2));
+
+        Func<Task> act = () => Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
+            .MustHaveHappened();
+    }
 
     // --- The deadline boundary: fire when due, and only then ---
 

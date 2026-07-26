@@ -8,6 +8,7 @@ using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.Kill;
 using MarqSpec.TradingCopilot.Api.MarketData;
+using MarqSpec.TradingCopilot.Api.Notifications;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Risk;
@@ -19,6 +20,7 @@ using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.MarketData;
+using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -130,6 +132,28 @@ builder.Services.AddSingleton<FlattenScheduleReporter>();
 // trigger/close logic, so a bug in the primary cannot disable it. Always on, like the primary (R-13).
 builder.Services.AddScoped<AutoFlattenWatchdogService>();
 builder.Services.AddHostedService<AutoFlattenWatchdogHost>();
+
+// The notification channel (gh#243, ADR-0019): LAYER 1 of alerting -- the push the app sends itself, because it
+// knows first. Routing a P1 through a metrics scrape and a rule evaluation would cost tens of seconds on a path
+// where CL and GC have ~15 minutes of margin in total. Pushover because an on-call-of-one needs a PAGER: its
+// Emergency priority is the only one that repeats until ACKNOWLEDGED and bypasses Do Not Disturb.
+//
+// Registered as a SINGLETON: the dedup decorator holds the open-incident set, and a scoped one would forget it
+// every pass -- turning "one page per incident" into one page per 15-second poll. Unconfigured falls back to a
+// channel that logs what it would have sent, so a fork or a fresh deployment still boots (loudly, never silently).
+builder.Services.Configure<PushoverOptions>(builder.Configuration.GetSection(PushoverOptions.SectionName));
+builder.Services.AddHttpClient<PushoverNotificationChannel>(
+    client => { client.Timeout = TimeSpan.FromSeconds(10); });
+builder.Services.AddSingleton<INotificationChannel>(provider =>
+{
+    PushoverOptions pushover = provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<PushoverOptions>>().Value;
+    INotificationChannel inner = pushover.IsConfigured
+        ? provider.GetRequiredService<PushoverNotificationChannel>()
+        : provider.GetRequiredService<NullNotificationChannel>();
+
+    return new DedupingNotificationChannel(inner, provider.GetRequiredService<ILogger<DedupingNotificationChannel>>());
+});
+builder.Services.AddSingleton<NullNotificationChannel>();
 
 // The dead-man's switch (R-13, gh#244, ADR-0019): the THIRD tier, and the only one that lives OUTSIDE this
 // process. Both tiers above die with the host -- so if it dies before a deadline, the flatten never fires and

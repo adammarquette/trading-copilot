@@ -93,6 +93,14 @@ services:
       # dying, so a deployment without it is silently missing its most important safety net. Deliberately NOT
       # defaulted: these are capability URLs (whoever holds one can forge an all-clear), so there is no sane
       # made-up value -- empty is honest, and the host warns loudly at startup when nothing is set.
+      # The notification channel (gh#243, ADR-0019) -- Layer 1, the push the app sends itself. Both values are
+      # secrets and deliberately UNDEFAULTED: a made-up token would let the app believe it can reach the operator
+      # when it cannot. Absent, the app logs what it would have sent and says so at startup.
+      Pushover__AppToken: "${Pushover__AppToken:-}"
+      Pushover__UserKey: "${Pushover__UserKey:-}"
+      # Defaulted, not passed through empty -- an empty value would bind over the code default.
+      Pushover__PageRetrySeconds: "${Pushover__PageRetrySeconds:-60}"
+      Pushover__PageExpireSeconds: "${Pushover__PageExpireSeconds:-1800}"
       CheckIn__HeartbeatUrl: "${CheckIn__HeartbeatUrl:-}"
       # Defaulted, not passed through empty -- the ProjectX__BaseUrl lesson above: an empty value would bind
       # over the code default rather than leaving it alone.
