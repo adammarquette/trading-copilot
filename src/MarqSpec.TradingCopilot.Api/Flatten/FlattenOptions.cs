@@ -118,6 +118,67 @@ public sealed class FlattenOptions
         ];
     }
 
+    /// <summary>
+    /// Describes the effective schedule per market <b>with its provenance</b>, for the startup report (gh#255).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ToSchedules"/> deliberately returns only the winner of the merge, which is all the enforcing
+    /// path needs. This returns the same resolution plus <i>where each value came from</i> — the one thing that
+    /// distinguishes a configured deadline from a built-in default once both are resolved to the same time, and
+    /// therefore the only way an operator can see that an override was dropped rather than applied.
+    /// </remarks>
+    /// <param name="now">The instant whose market date the deadlines are resolved against.</param>
+    /// <returns>One report per governed market.</returns>
+    /// <exception cref="FormatException">A configured time is not <c>HH:mm</c>.</exception>
+    public IReadOnlyList<FlattenScheduleReport> Describe(DateTimeOffset now)
+    {
+        // Which markets configuration actually names -- the fact ToSchedules throws away. Compared on the same
+        // trimmed, upper-cased key the merge uses, so "es" and " ES " count as naming ES.
+        HashSet<string> configured = Instruments
+            .Select(option => option.Symbol.Trim().ToUpperInvariant())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        DateOnly marketDate = DateOnly.FromDateTime(MarketClock.ToMarketTime(now));
+
+        return
+        [
+            .. ToSchedules().Select(schedule => new FlattenScheduleReport(
+                schedule.Instrument,
+                schedule.Deadline,
+                ToUtc(marketDate, schedule.Deadline),
+                schedule.Enabled,
+                SourceOf(schedule.Instrument.Symbol, configured))),
+        ];
+    }
+
+    private static FlattenScheduleSource SourceOf(string symbol, HashSet<string> configured)
+    {
+        if (!configured.Contains(symbol))
+        {
+            return FlattenScheduleSource.BuiltInDefault;
+        }
+
+        // Configuration named it. Whether that overrode a built-in or added a market is the operator's cue for
+        // "did I spell it right" -- a typo'd symbol shows up as an ADDITION beside the untouched default.
+        return DefaultDeadlines.ContainsKey(symbol)
+            ? FlattenScheduleSource.ConfiguredOverride
+            : FlattenScheduleSource.ConfiguredAddition;
+    }
+
+    private static DateTimeOffset ToUtc(DateOnly marketDate, TimeOnly deadline)
+    {
+        DateTime unspecified = DateTime.SpecifyKind(marketDate.ToDateTime(deadline), DateTimeKind.Unspecified);
+
+        // A deadline landing in the spring-forward gap does not exist as a wall-clock time. It cannot happen with
+        // afternoon deadlines, but resolving it would silently report a time nobody asked for, so take the zone's
+        // offset for the instant instead of inventing one.
+        TimeSpan offset = MarketClock.CentralTime.IsInvalidTime(unspecified)
+            ? MarketClock.CentralTime.GetUtcOffset(marketDate.ToDateTime(TimeOnly.MinValue))
+            : MarketClock.CentralTime.GetUtcOffset(unspecified);
+
+        return new DateTimeOffset(unspecified, offset).ToUniversalTime();
+    }
+
     private static TimeOnly? ParseTime(string? value, string field)
     {
         if (string.IsNullOrWhiteSpace(value))
