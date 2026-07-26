@@ -117,7 +117,6 @@ merged counters would hide a primary quietly failing every day while the watchdo
 `consumer_group`. No account id, order id or instrument may ever become a label: an unbounded label set takes the
 metrics backend down, which would mean instrumentation causing the very outage it exists to reveal (§9).
 
-*Still to wire (gh#295, increment 2):* the gate-decision counters, order-ack latency, kill-switch state, the
-orphaned-stop gauge, and pipeline lag / retention-gap counters. Their instruments are **already defined and
-tested** on `ExecutionMetrics`; what remains is threading the sink through five more services and their tests,
-which is a wider blast radius than this increment wanted to carry.
+**All eight instruments are now wired (gh#295).** The gate counter records at the single choke point every SIZED attempt passes through — `OrderExecutionService`, where the decision object that later becomes a `GateDecisionRecord` is produced — so the metric and the rows reconcile by construction rather than by two call sites agreeing. Order-ack times transmit → acknowledgement around the only call to an executor. The kill-switch gauge is set on the FLAG itself, not the endpoint, so the startup rehydration that restores an operator lock moves the metric too. The orphan gauge is re-counted from the database on both drop and re-arm, so it cannot drift and genuinely returns to zero.
+
+The sink is a Domain seam, `IExecutionMetrics`, because the send path lives in Domain and cannot depend on Api — the same shape as `IEventLog` and the notification channel. `NullExecutionMetrics` is the default, so an un-composed host measures nothing rather than needing a null check on a trading path.

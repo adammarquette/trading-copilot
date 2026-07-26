@@ -8,6 +8,7 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Http;
@@ -77,7 +78,7 @@ public class OrderWorkingStopRestageTests
     private Task<IResult> ModifyAsync(Guid orderId, ModifyWorkingOrderRequest request, Guid? asUser = null) =>
         OrderEndpoints.ModifyWorkingOrderPriceAsync(
             orderId, request, new FixedUser(asUser ?? _operator), Context(asUser), _factory, PxOptions(),
-            ExecOptions(), Development, A.Fake<IKillSwitch>(), _auditLog, NullLoggerFactory.Instance, CancellationToken.None);
+            ExecOptions(), Development, A.Fake<IKillSwitch>(), _auditLog, NullLoggerFactory.Instance, NullExecutionMetrics.Instance, CancellationToken.None);
 
     private async Task<Guid> SeedAsync(
         SizingBasis sizingBasis = SizingBasis.SafetyStop,

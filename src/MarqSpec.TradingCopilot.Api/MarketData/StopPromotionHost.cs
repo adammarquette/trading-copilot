@@ -4,6 +4,7 @@ using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Events;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -62,6 +63,7 @@ public sealed class StopPromotionHost : BackgroundService
                 await using (AsyncServiceScope scope = _services.CreateAsyncScope())
                 {
                     IEventLog log = scope.ServiceProvider.GetRequiredService<IEventLog>();
+                    IExecutionMetrics metrics = scope.ServiceProvider.GetRequiredService<IExecutionMetrics>();
                     StopPromotionService promotion = scope.ServiceProvider.GetRequiredService<StopPromotionService>();
                     IProjectXVenueFactory venueFactory = scope.ServiceProvider.GetRequiredService<IProjectXVenueFactory>();
 
@@ -76,6 +78,9 @@ public sealed class StopPromotionHost : BackgroundService
 
                     if (page.Gap is not null)
                     {
+                        // The silent hole gh#227 made loud in the log, now visible on a dashboard too (gh#295).
+                        metrics.RecordRetentionGap(ConsumerGroup);
+
                         // The log is lossy past its window (ADR-0001, gh#227). Quotes we never saw were dropped,
                         // so a hidden stop may have crossed its promotion band unobserved -- derived state is now
                         // confidently wrong, not merely stale. Say so LOUDLY and resume deliberately: the native
@@ -113,6 +118,7 @@ public sealed class StopPromotionHost : BackgroundService
                                     quote.Venue, quote.ContractKey, quote.Bid, quote.Ask, venue, stoppingToken);
                             }
 
+                            metrics.RecordPipelineLag(ConsumerGroup, DateTimeOffset.UtcNow - evt.RecordedAt);
                             cursor = evt.Sequence;
                         }
 

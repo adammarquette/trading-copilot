@@ -8,6 +8,7 @@ using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Notifications;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.EntityFrameworkCore;
@@ -63,7 +64,7 @@ public sealed class AutoFlattenService
     private readonly ProjectXConnectionOptions _projectX;
     private readonly FlattenOptions _options;
     private readonly INotificationChannel _notifications;
-    private readonly ExecutionMetrics _metrics;
+    private readonly IExecutionMetrics _metrics;
     private readonly ILogger<AutoFlattenService> _logger;
 
     /// <summary>Creates the service over the scoped database and event log.</summary>
@@ -82,7 +83,7 @@ public sealed class AutoFlattenService
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<FlattenOptions> flattenOptions,
         INotificationChannel notifications,
-        ExecutionMetrics metrics,
+        IExecutionMetrics metrics,
         ILogger<AutoFlattenService> logger)
     {
         ArgumentNullException.ThrowIfNull(projectXOptions);
