@@ -7,6 +7,7 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -28,7 +29,7 @@ public class KillSwitchServiceTests
 
     private readonly Guid _operator = Guid.NewGuid();
     private readonly string _database = Guid.NewGuid().ToString();
-    private readonly KillSwitch _killSwitch = new();
+    private readonly KillSwitch _killSwitch = new(NullExecutionMetrics.Instance);
     private readonly IEventLog _log = A.Fake<IEventLog>();
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
 

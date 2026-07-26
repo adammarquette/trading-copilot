@@ -2,6 +2,7 @@ using System.Diagnostics;
 using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain.Events;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -58,6 +59,7 @@ public sealed class ConditionalOrderHost : BackgroundService
                 await using (AsyncServiceScope scope = _services.CreateAsyncScope())
                 {
                     IEventLog log = scope.ServiceProvider.GetRequiredService<IEventLog>();
+                    IExecutionMetrics metrics = scope.ServiceProvider.GetRequiredService<IExecutionMetrics>();
                     ConditionalFiringService firing = scope.ServiceProvider.GetRequiredService<ConditionalFiringService>();
 
                     cursor ??= await log.GetCursorAsync(ConsumerGroup, stoppingToken) ?? 0;
@@ -71,6 +73,9 @@ public sealed class ConditionalOrderHost : BackgroundService
 
                     if (page.Gap is not null)
                     {
+                        // The silent hole gh#227 made loud in the log, now visible on a dashboard too (gh#295).
+                        metrics.RecordRetentionGap(ConsumerGroup);
+
                         // The log is lossy past its window (ADR-0001, gh#227). A quote that would have TRIGGERED a
                         // pending conditional -- or drifted it past its cancel band -- may have been dropped
                         // unseen. Nothing fires retroactively: a conditional stays Pending and is re-decided on
@@ -107,6 +112,7 @@ public sealed class ConditionalOrderHost : BackgroundService
                                     quote.ContractKey, quote.Bid, quote.Ask, DateTimeOffset.UtcNow, stoppingToken);
                             }
 
+                            metrics.RecordPipelineLag(ConsumerGroup, DateTimeOffset.UtcNow - evt.RecordedAt);
                             cursor = evt.Sequence;
                         }
 

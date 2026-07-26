@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 
 namespace MarqSpec.TradingCopilot.Api.Kill;
 
@@ -15,7 +16,21 @@ namespace MarqSpec.TradingCopilot.Api.Kill;
 /// </remarks>
 public sealed class KillSwitch : IKillSwitch
 {
+    private readonly IExecutionMetrics _metrics;
+
     private volatile KillSwitchStatus _status = KillSwitchStatus.Disengaged;
+
+    /// <summary>Creates the flag over the SLI sink.</summary>
+    /// <param name="metrics">
+    /// The execution SLIs (gh#295). The gauge is set HERE rather than in the endpoint, so every path that moves
+    /// the flag moves the metric with it -- including the startup rehydration that restores an operator lock
+    /// after a restart (ADR-0013). Wiring it at the endpoint would leave a restarted-but-killed system reading
+    /// as healthy on the dashboard.
+    /// </param>
+    public KillSwitch(IExecutionMetrics metrics)
+    {
+        _metrics = metrics;
+    }
 
     /// <inheritdoc />
     public bool IsEngaged => _status.Engaged;
@@ -30,12 +45,14 @@ public sealed class KillSwitch : IKillSwitch
     public void Engage(KillSwitchMode mode, DateTimeOffset engagedAt, string? reason)
     {
         _status = new KillSwitchStatus(Engaged: true, mode, engagedAt, reason);
+        _metrics.SetKillSwitchEngaged(engaged: true);
     }
 
     /// <summary>Disengages the kill switch — outbound orders are allowed again.</summary>
     public void Disengage()
     {
         _status = KillSwitchStatus.Disengaged;
+        _metrics.SetKillSwitchEngaged(engaged: false);
     }
 }
 

@@ -8,6 +8,7 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -53,7 +54,7 @@ public class OrphanGuardServiceTests
 
     private OrphanGuardService Service(string credentialKey = "topstep-main", IAuditLog? auditLog = null) =>
         new(Context(), _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
-            auditLog ?? new AuditLog(Context()), NullLogger<OrphanGuardService>.Instance);
+            auditLog ?? new AuditLog(Context()), NullExecutionMetrics.Instance, NullLogger<OrphanGuardService>.Instance);
 
     private static PositionSnapshot Pos(int net) =>
         new(AccountId, VenueContractId.Create(Projectx, Contract), net, new Price(5_000m));

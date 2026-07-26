@@ -4,6 +4,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -31,6 +32,7 @@ public sealed class OrphanGuardService
     private readonly IProjectXVenueFactory _venueFactory;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly IAuditLog _auditLog;
+    private readonly IExecutionMetrics _metrics;
     private readonly ILogger<OrphanGuardService> _logger;
 
     /// <summary>Creates the guard over the scoped database.</summary>
@@ -38,12 +40,14 @@ public sealed class OrphanGuardService
     /// <param name="venueFactory">Builds a venue for a connection's firm conventions — the source of re-arm truth.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
     /// <param name="auditLog">Records each synthetic-stop transition — a secondary, failure-tolerant write (gh#220).</param>
+    /// <param name="metrics">The execution SLIs (gh#295) — live synthetic-risk exposure.</param>
     /// <param name="logger">The logger.</param>
     public OrphanGuardService(
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IAuditLog auditLog,
+        IExecutionMetrics metrics,
         ILogger<OrphanGuardService> logger)
     {
         ArgumentNullException.ThrowIfNull(projectXOptions);
@@ -52,6 +56,7 @@ public sealed class OrphanGuardService
         _venueFactory = venueFactory;
         _projectX = projectXOptions.Value;
         _auditLog = auditLog;
+        _metrics = metrics;
         _logger = logger;
     }
 
@@ -94,8 +99,19 @@ public sealed class OrphanGuardService
                 cancellationToken);
         }
 
+        await PublishOrphanExposureAsync(cancellationToken);
         return hidden.Count;
     }
+
+    /// <summary>
+    /// Publishes how many stops are orphaned RIGHT NOW (gh#295). Re-counted from the database rather than
+    /// incremented, so the gauge cannot drift from reality and re-arming genuinely returns it to zero — a
+    /// counter nudged by deltas would strand a stale non-zero reading after any missed transition.
+    /// </summary>
+    private async Task PublishOrphanExposureAsync(CancellationToken cancellationToken) =>
+        _metrics.SetOrphanedStops(await _database.StopPlans
+            .IgnoreQueryFilters()
+            .CountAsync(plan => plan.Staging == StopStaging.Orphaned, cancellationToken));
 
     /// <summary>
     /// Re-arms every orphaned stop on reconnect — but only after <b>re-validating each against venue truth</b>
@@ -251,6 +267,8 @@ public sealed class OrphanGuardService
         // left orphaned transitioned to nothing, so it contributes no row — the exposure window stays reconstructable.
         await AuditSafelyAsync(auditRows, cancellationToken);
 
+        // Re-arm must refresh the gauge too, or a recovered system reads as permanently degraded (gh#295).
+        await PublishOrphanExposureAsync(cancellationToken);
         return new RearmOutcome(rearmed, retired, stillOrphaned);
     }
 

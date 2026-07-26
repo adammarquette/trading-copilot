@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 
@@ -29,6 +31,7 @@ public sealed class OrderExecutionService : IOrderExecutionService
     private readonly IOrderExecutor _venue;
     private readonly DeploymentEnvironment _environment;
     private readonly IKillSwitch _killSwitch;
+    private readonly IExecutionMetrics _metrics;
 
     /// <summary>Creates the execution service.</summary>
     /// <param name="gate">The enforcing risk gate (R-5 / R-16).</param>
@@ -40,12 +43,21 @@ public sealed class OrderExecutionService : IOrderExecutionService
     /// through the guard.
     /// </param>
     /// <param name="killSwitch">The kill-switch state; while it is engaged, every send is refused (ADR-0007, gh#189).</param>
-    public OrderExecutionService(IRiskGate gate, IOrderExecutor venue, DeploymentEnvironment environment, IKillSwitch killSwitch)
+    /// <param name="metrics">The execution SLIs (gh#295); defaults to the no-op sink when not composed.</param>
+    public OrderExecutionService(
+        IRiskGate gate,
+        IOrderExecutor venue,
+        DeploymentEnvironment environment,
+        IKillSwitch killSwitch,
+        IExecutionMetrics? metrics = null)
     {
         _gate = gate;
         _venue = venue;
         _environment = environment;
         _killSwitch = killSwitch;
+        // Optional, defaulting to the no-op sink: an un-composed host or a test measures nothing rather than
+        // needing a null check on the send path (gh#295).
+        _metrics = metrics ?? NullExecutionMetrics.Instance;
     }
 
     /// <summary>
@@ -100,7 +112,14 @@ public sealed class OrderExecutionService : IOrderExecutionService
             return ExecutionResult.RefusedByInvalidTarget(invalidTarget);
         }
 
-        return ExecutionResult.Evaluated(_gate.Evaluate(request.Proposal, request.Risk));
+        // The single choke point every SIZED attempt passes through -- arm, edit, take, direct send and a
+        // conditional firing all reach the gate here. Counting at the decision itself is what makes the metric
+        // reconcile with the persisted GateDecisionRecord rows: same object, one origin. A pre-gate refusal
+        // never arrives here and never persists a row, so the two agree on the absences too (gh#295).
+        GateDecision decision = _gate.Evaluate(request.Proposal, request.Risk);
+        _metrics.RecordGateDecision(decision.Outcome, decision.BindingLayer);
+
+        return ExecutionResult.Evaluated(decision);
     }
 
     /// <inheritdoc />
@@ -158,7 +177,10 @@ public sealed class OrderExecutionService : IOrderExecutionService
             ProfitTarget = request.Proposal.Target,
         };
 
+        // Transmit -> acknowledgement, the only place it can be measured: this is the sole path to an executor.
+        long transmittedTicks = Stopwatch.GetTimestamp();
         PlacedOrder placed = await _venue.PlaceOrderAsync(order, cancellationToken);
+        _metrics.RecordOrderAck(Stopwatch.GetElapsedTime(transmittedTicks));
 
         return ExecutionResult.Placed(placed, decision);
     }

@@ -6,6 +6,7 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Http;
@@ -138,7 +139,7 @@ public class ConditionalOrderEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
         return await OrderEndpoints.CreateConditionalOrderAsync(
-            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
     }
 
     [Fact]

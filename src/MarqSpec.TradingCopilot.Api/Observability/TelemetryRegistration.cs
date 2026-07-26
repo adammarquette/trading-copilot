@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -23,6 +24,10 @@ public static class TelemetryRegistration
         ArgumentNullException.ThrowIfNull(builder);
 
         builder.Services.AddSingleton<ExecutionMetrics>();
+
+        // Callers depend on the Domain seam; the concrete Meter-backed sink is the composition root's choice.
+        builder.Services.AddSingleton<IExecutionMetrics>(
+            provider => provider.GetRequiredService<ExecutionMetrics>());
         builder.Services.Configure<TelemetryOptions>(builder.Configuration.GetSection(TelemetryOptions.SectionName));
         TelemetryOptions options =
             builder.Configuration.GetSection(TelemetryOptions.SectionName).Get<TelemetryOptions>() ?? new TelemetryOptions();

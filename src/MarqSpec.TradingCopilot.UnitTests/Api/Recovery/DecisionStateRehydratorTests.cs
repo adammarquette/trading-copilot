@@ -4,6 +4,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Recovery;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -20,7 +21,7 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.Recovery;
 public class DecisionStateRehydratorTests
 {
     private readonly string _database = Guid.NewGuid().ToString();
-    private readonly KillSwitch _killSwitch = new();
+    private readonly KillSwitch _killSwitch = new(NullExecutionMetrics.Instance);
     private readonly Guid _owner = Guid.NewGuid();
     private readonly DateTimeOffset _now = new(2026, 1, 15, 9, 0, 0, TimeSpan.Zero);
 

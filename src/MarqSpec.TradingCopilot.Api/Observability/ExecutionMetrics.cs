@@ -1,17 +1,8 @@
 using System.Diagnostics.Metrics;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Risk;
 
 namespace MarqSpec.TradingCopilot.Api.Observability;
-
-/// <summary>Which auto-flatten tier produced a signal (gh#232) — the two must never be merged.</summary>
-public enum FlattenTier
-{
-    /// <summary>The primary scheduler (gh#185).</summary>
-    Primary,
-
-    /// <summary>The independent redundant watchdog (gh#187).</summary>
-    Watchdog,
-}
 
 /// <summary>
 /// The execution-specific SLIs (gh#232, ADR-0002, engineering §7) — the signals particular to a system that
@@ -33,7 +24,7 @@ public enum FlattenTier
 /// Recording is deliberately total: nothing here throws, so a metrics fault can never fail a trading action.
 /// </para>
 /// </remarks>
-public sealed class ExecutionMetrics : IDisposable
+public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
 {
     /// <summary>The meter name — registered with the OpenTelemetry pipeline (gh#230).</summary>
     public const string MeterName = "MarqSpec.TradingCopilot.Execution";
@@ -129,9 +120,7 @@ public sealed class ExecutionMetrics : IDisposable
             description: "Working stops currently orphaned — live synthetic-risk exposure.");
     }
 
-    /// <summary>Counts one gate decision.</summary>
-    /// <param name="outcome">The gate's verdict.</param>
-    /// <param name="bindingLayer">The layer that bound, or <see langword="null"/> when none did.</param>
+    /// <inheritdoc />
     public void RecordGateDecision(GateOutcome outcome, RiskLayer? bindingLayer) =>
         _gateDecisions.Add(
             1,

@@ -5,6 +5,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -21,7 +22,7 @@ public class KillSwitchEndpointsTests
 {
     private readonly Guid _operator = Guid.NewGuid();
     private readonly string _database = Guid.NewGuid().ToString();
-    private readonly KillSwitch _killSwitch = new();
+    private readonly KillSwitch _killSwitch = new(NullExecutionMetrics.Instance);
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 

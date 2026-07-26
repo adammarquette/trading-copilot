@@ -1,5 +1,6 @@
 using System.Diagnostics.Metrics;
 using MarqSpec.TradingCopilot.Api.Observability;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Risk;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Observability;

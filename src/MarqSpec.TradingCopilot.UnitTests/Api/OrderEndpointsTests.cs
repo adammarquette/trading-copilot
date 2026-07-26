@@ -6,6 +6,7 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Http;
@@ -154,7 +155,7 @@ public class OrderEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
         return await OrderEndpoints.SendOrderAsync(
-            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(configuredKey), ExecOptions(), Development, A.Fake<IKillSwitch>(), CancellationToken.None);
+            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(configuredKey), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
     }
 
     [Fact]
@@ -399,7 +400,7 @@ public class OrderEndpointsTests
         await using TradingCopilotDbContext context = Context();
         return await OrderEndpoints.SendAsIsOrderAsync(
             accountId, request, new FixedUser(_operator), context, _factory, PxOptions(configuredKey), ExecOptions(),
-            Development, killSwitch ?? A.Fake<IKillSwitch>(), CancellationToken.None);
+            Development, killSwitch ?? A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
     }
 
     [Fact]
