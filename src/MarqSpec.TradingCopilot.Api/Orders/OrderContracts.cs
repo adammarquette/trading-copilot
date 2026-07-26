@@ -38,20 +38,31 @@ public sealed record SendOrderRequest(
     decimal? Target = null);
 
 /// <summary>
-/// The request to reprice a <b>working</b> order in place (gh#259) — a PATCH of the resting <b>entry</b> price at
-/// the venue. <b>Entry-only</b> this increment: size, both stops (working and safety), side, and type are all held
-/// invariant, so the attached safety bracket's coverage stays exact and the resting protection is untouched.
-/// Moving the working stop or the size are their own follow-ups (each carries stop-plan / bracket coordination this
-/// increment deliberately does not take on).
+/// The request to reprice a <b>working</b> order in place — a PATCH that moves the resting <b>entry</b> at the venue
+/// (gh#259) and/or re-stages the hidden <b>working stop</b> (gh#267). At least one of <see cref="EntryPrice"/> /
+/// <see cref="WorkingStopPrice"/> must be present; moving <b>both</b> in one request is deferred (a follow-up), so
+/// supplying both is refused. <b>Size</b> and the <b>safety stop</b> stay invariant on every path, so the R-5
+/// catastrophic floor and the attached safety bracket's coverage are untouched.
 /// </summary>
-/// <param name="EntryPrice">The new entry price. The gate re-validates both stops are still protective against it.</param>
+/// <param name="EntryPrice">
+/// The new entry price, or <see langword="null"/> to leave it. When present, the entry reprices at the venue and
+/// re-gates (gh#259); <see cref="ReferencePrice"/> is then required.
+/// </param>
+/// <param name="WorkingStopPrice">
+/// The new <b>hidden</b> working-stop price, or <see langword="null"/> to leave it (gh#267). A hidden stop is a
+/// promotion target, not a venue order, so re-staging it is a <b>local</b> write — no venue call. It re-gates
+/// <b>only</b> when it <i>widens</i> under <c>SizingBasis.ActualStop</c> (the one enforced layer measured at the
+/// working stop). Moving it onto the safety stop (removing it) is out of scope.
+/// </param>
 /// <param name="ReferencePrice">
-/// The current market reference the fat-finger band re-measures the new entry against — so the re-gate checks the
-/// reprice against fresh truth rather than the stale price the order was armed with (R-16).
+/// The current market reference the fat-finger band re-measures a new <b>entry</b> against (R-16) — <b>required
+/// when <see cref="EntryPrice"/> is present</b>. A working-stop-only re-stage does not move the entry, so it is
+/// unused there.
 /// </param>
 public sealed record ModifyWorkingOrderRequest(
-    decimal EntryPrice,
-    decimal ReferencePrice);
+    decimal? EntryPrice,
+    decimal? WorkingStopPrice = null,
+    decimal? ReferencePrice = null);
 
 /// <summary>The outcome of a send attempt — always explains itself (R-5).</summary>
 /// <param name="Outcome">Placed, or which guard refused.</param>
