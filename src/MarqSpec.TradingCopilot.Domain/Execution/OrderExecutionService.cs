@@ -227,12 +227,17 @@ public sealed class OrderExecutionService : IOrderExecutionService
                 + "unprotected. The modify was not sent.");
         }
 
+        // Size is invariant this increment and the gate re-confirmed it above, so send it as "leave unchanged"
+        // (null) rather than re-asserting the value (gh#259 review, gh#270): re-sending a size field can reset an
+        // order's queue priority on some gateways -- the very thing an in-place modify exists to keep -- and, in
+        // the narrow window before a partial fill is journaled, could re-inflate a partially-filled resting
+        // quantity. Only the price the operator actually changed is transmitted; uncertainty resolves to safe.
         await _venue.ModifyOrderAsync(
             request.Account.Id,
             venueOrderId,
             LimitPriceFor(request),
             StopPriceFor(request),
-            request.Proposal.RequestedQuantity,
+            size: null,
             cancellationToken);
 
         return ExecutionResult.Modified(decision);

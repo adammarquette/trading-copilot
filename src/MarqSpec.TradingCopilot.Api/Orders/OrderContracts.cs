@@ -55,9 +55,10 @@ public sealed record SendOrderRequest(
 /// working stop). Moving it onto the safety stop (removing it) is out of scope.
 /// </param>
 /// <param name="ReferencePrice">
-/// The current market reference the fat-finger band re-measures a new <b>entry</b> against (R-16) — <b>required
-/// when <see cref="EntryPrice"/> is present</b>. A working-stop-only re-stage does not move the entry, so it is
-/// unused there.
+/// The <b>caller's</b> current market reference the fat-finger band re-measures a new <b>entry</b> against (R-16)
+/// — <b>required when <see cref="EntryPrice"/> is present</b>. Caller-supplied, as on every order path (the server
+/// fetches no venue quote), so it is the client's freshness, not the venue's. A working-stop-only re-stage does
+/// not move the entry, so it is unused there.
 /// </param>
 public sealed record ModifyWorkingOrderRequest(
     decimal? EntryPrice,
