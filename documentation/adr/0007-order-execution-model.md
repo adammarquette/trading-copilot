@@ -383,8 +383,8 @@ distinct from the staged-ticket edit (`PUT /orders/{id}`) and the cancel (`DELET
   their absolute levels, which the re-gate re-validates are still protective relative to the new entry (or the modify
   is blocked). The entry is refused **before the venue** if it would cross its own stops — otherwise a crossed entry
   would trip the `StopPlan` safety-beyond-actual DB CHECK *after* the venue already repriced, desyncing the two.
-  Moving the working stop is a separate increment: it can separate a coincident working/safety pair (needing a *new*
-  plan) or diverge from an already-promoted native stop — coordination this increment deliberately does not take on.
+  Moving the working stop is a separate increment (it can separate a coincident working/safety pair, needing a *new*
+  plan, or diverge from an already-promoted native stop) — **landed gh#267** (see the Update below).
 - **A venue rejection never forces a status**, and a fill/cancel landing mid-flight **aborts the price write** (a
   fresh `Working` re-check before commit — the gh#183 re-open-race discipline): the account-event stream (gh#219) is
   the authoritative reconciler, exactly as for the cancel. The reprice is **audited** (`AuditAction.OrderModified`,
@@ -445,6 +445,36 @@ watcher and never the exit path it races:
   OCO-exit's *own* retire into an unhandled `DbUpdateConcurrencyException` that skips its `CancelNativeLegs` cleanup and
   drops the account-event stream — reintroducing the exact hazard on a different path. The promotion-side re-check needs
   no token, no migration, and leaves the exit and orphan paths untouched.
+
+## Update (2026-07-26) — reprice a working order's working stop (gh#267)
+The gh#259 deferral lands: an operator can now re-stage the **hidden working stop** on a resting working order, alone
+(the entry-only path is unchanged; a combined entry + working-stop move in one request is the remaining follow-up,
+refused for now). `PATCH /orders/{id}/price` gains an optional `WorkingStopPrice`. The key realisation — validated by
+a design pass — is that a hidden working stop is **not at the venue**: it is a *promotion target*, transmitted as a
+native order only on promotion, which gh#263 gated on an **open position** — so an unfilled working order's stop is
+never promoted, and moving it is a **local** write with **no venue call**.
+
+- **Local, and safety-bounded — with one exception that re-gates.** Every **hard** limit (max-DD-per-trade, the
+  drawdown floor, the daily loss / governor) is sized at the **safety** stop, which never moves, so `Q × safetyLoss`
+  is unchanged and those limits are provably preserved. A move therefore runs **no** gate / kill-switch / flat check —
+  *except* one case: the **PerTradeRisk** layer is sized at the **working** stop under `SizingBasis.ActualStop`, so a
+  **widen** there can exceed it at the resting size. That single case re-gates via `Evaluate` (**no transmission** —
+  the arm precedent) and is refused unless the gate still allows the resting size. A **tighten**, or any move under
+  `SizingBasis.SafetyStop` (the working stop is absent from the gate's math), or **creating** a plan (always a
+  tightening vs the prior coincident pair) stays purely local.
+- **The ordering invariant is the backstop.** The new working stop is re-validated **strictly** `safety → working →
+  entry` (per side) **before** any commit — the only guard for the Order row (which has no CHECK) and the pre-empt for
+  `CK_StopPlans_SafetyBeyondActual` on the plan row, which the risk gate does *not* enforce (it checks stops-below-
+  entry only, the gh#259 finding). Moving the working stop **onto** the safety stop is *removing* it — a distinct,
+  out-of-scope action, refused explicitly.
+- **Create, and refuse the promoted / emergency plans.** A coincident-stop order (no plan) gains a `Hidden`
+  `StopPlanRecord` when a distinct working stop is installed (reusing the placement-time `AddStopPlan`). The plan is
+  loaded **without** a staging filter and a **`Native`** (promoted — moot for a working order per gh#263, refused
+  defensively), **`Orphaned`** (connection down — re-arms on reconnect), or **`Retired`** plan is refused; only a
+  `Hidden` plan (or none, for create) re-stages, so a raced promotion's native venue stop can never diverge from the
+  journal. For a stop-type order the journal `StopPrice` moves in lockstep with the working stop (the `ApplyProposal`
+  convention). Re-staged locally in one commit, audited (`AuditAction.OrderModified`); size and the safety stop are
+  never written.
 
 ## Consequences
 **Positive**
