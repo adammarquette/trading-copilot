@@ -89,9 +89,15 @@ public sealed class ExecutionMetrics : IDisposable
     private int _orphanedStops;
 
     /// <summary>Creates the meter and its instruments.</summary>
-    public ExecutionMetrics()
+    /// <param name="meterName">
+    /// Overrides the meter name. Production leaves this null and gets <see cref="MeterName"/>; a test passes a
+    /// unique name so its <c>MeterListener</c> observes <b>only its own</b> instance. Without that isolation a
+    /// listener filtering on the shared name also receives measurements from instances in test classes running
+    /// in parallel — which is a data race on the listener's buffer, not a hypothetical.
+    /// </param>
+    public ExecutionMetrics(string? meterName = null)
     {
-        _meter = new Meter(MeterName);
+        _meter = new Meter(meterName ?? MeterName);
 
         _gateDecisions = _meter.CreateCounter<long>(
             GateDecisions, unit: "{decision}", description: "Risk-gate decisions by outcome and binding layer.");

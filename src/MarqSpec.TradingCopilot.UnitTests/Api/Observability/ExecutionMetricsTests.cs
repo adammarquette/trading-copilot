@@ -15,15 +15,21 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.Observability;
 /// </remarks>
 public class ExecutionMetricsTests : IDisposable
 {
-    private readonly ExecutionMetrics _metrics = new();
+    // A UNIQUE meter per test instance. xUnit runs test classes in parallel and the flatten suites now create
+    // real ExecutionMetrics too -- a listener filtering on the shared meter NAME would receive their
+    // measurements mid-enumeration, which is a data race on this buffer (it failed in CI, not locally).
+    private readonly string _meterName = ExecutionMetrics.MeterName + ".Test." + Guid.NewGuid().ToString("N");
+    private readonly ExecutionMetrics _metrics;
     private readonly MeterListener _listener = new();
     private readonly List<(string Instrument, long Value, Dictionary<string, string?> Tags)> _measurements = [];
 
     public ExecutionMetricsTests()
     {
+        _metrics = new ExecutionMetrics(_meterName);
+
         _listener.InstrumentPublished = (instrument, listener) =>
         {
-            if (instrument.Meter.Name == ExecutionMetrics.MeterName)
+            if (instrument.Meter.Name == _meterName)
             {
                 listener.EnableMeasurementEvents(instrument);
             }
