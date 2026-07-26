@@ -547,21 +547,14 @@ public static class OrderEndpoints
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        // At least one price must move; moving BOTH the entry and the working stop in one request is a deferred
-        // follow-up (its own combined re-gate), so it is refused for now -- move them in separate requests.
+        // At least one price must move. A request that moves the ENTRY -- alone (gh#259) or TOGETHER with the working
+        // stop (gh#278) -- goes through the entry venue path; a working-stop-only move re-stages the hidden plan
+        // locally (gh#267). No venue call is made for the working stop either way -- a hidden stop is not at the venue.
         bool entryChanged = request.EntryPrice is not null;
         bool stopChanged = request.WorkingStopPrice is not null;
         if (!entryChanged && !stopChanged)
         {
             return Results.BadRequest(new { error = "Supply at least one of entryPrice or workingStopPrice." });
-        }
-
-        if (entryChanged && stopChanged)
-        {
-            return Results.BadRequest(new
-            {
-                error = "Move the entry and the working stop in separate requests — a combined move is not yet supported.",
-            });
         }
 
         Order? order = await database.Orders.FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
@@ -583,19 +576,22 @@ public static class OrderEndpoints
         }
 
         return entryChanged
-            ? await RepriceEntryAsync(order, request.EntryPrice!.Value, request.ReferencePrice, currentUser, database,
+            ? await RepriceEntryAsync(order, request.EntryPrice!.Value, request.WorkingStopPrice, request.ReferencePrice, currentUser, database,
                 venueFactory, projectXOptions, executionOptions, environment, killSwitch, auditLog, loggerFactory, cancellationToken)
             : await RestageWorkingStopAsync(order, request.WorkingStopPrice!.Value, currentUser, database, venueFactory,
                 projectXOptions, executionOptions, environment, killSwitch, auditLog, loggerFactory, cancellationToken);
     }
 
     /// <summary>
-    /// Reprices a working order's ENTRY at the venue (gh#259) — re-gated at the unchanged size, both stops held; the
-    /// new entry must stay on the entry side of both. Extracted so gh#267 can dispatch entry vs working-stop moves.
+    /// Reprices a working order's ENTRY at the venue (gh#259), optionally moving the hidden WORKING stop in the same
+    /// commit (gh#278). Re-gated at the unchanged size; the full chain <c>safety → working → entry</c> is re-validated
+    /// <b>before</b> the venue call, so a crossing can never trip the <c>StopPlan</c> DB CHECK <i>after</i> the entry
+    /// already repriced. Only the entry reaches the venue — a hidden working stop is a local promotion target.
     /// </summary>
     private static async Task<IResult> RepriceEntryAsync(
         Order order,
         decimal newEntry,
+        decimal? newWorkingStop,
         decimal? referencePrice,
         ICurrentUser currentUser,
         TradingCopilotDbContext database,
@@ -616,22 +612,68 @@ public static class OrderEndpoints
             });
         }
 
-        // The new entry must stay on the entry side of the (unchanged) working and safety stops. The gate's
-        // protectiveness check enforces this too, but assert it HERE, before the venue is touched: an entry moved
-        // ACROSS its own stops would otherwise trip the StopPlan safety-beyond-actual DB CHECK at commit -- AFTER
-        // the venue already repriced -- leaving venue and journal desynced with no reconciler for resting price.
+        // The working stop moves only on a COMBINED request (gh#278); otherwise it is held (gh#259). effWorking is the
+        // geometry the gate and the DB CHECK will see.
+        decimal safety = order.SafetyStopPrice;
+        decimal effWorking = newWorkingStop ?? order.WorkingStopPrice;
+        bool stopMoves = newWorkingStop is not null;
+
+        // Moving the working stop onto the safety stop removes it -- a distinct "drop the stop" action, out of scope.
+        if (stopMoves && effWorking == safety)
+        {
+            return Results.UnprocessableEntity(new
+            {
+                error = "Moving the working stop onto the safety stop removes it — out of scope. The working stop must "
+                    + "stay strictly between the safety stop and the entry.",
+            });
+        }
+
+        // Ordering on the EFFECTIVE geometry, BEFORE the venue. Two shapes, per side:
+        //   * ENTRY-ONLY (gh#259): both stops must sit below/above the new entry -- and NOT safety-vs-working, because
+        //     a coincident-stop order (working == safety, no plan) is a valid state and repricing its entry is a
+        //     shipped capability. This is byte-identical to the merged gh#259 guard.
+        //   * COMBINED (gh#278): the moving working stop must sit STRICTLY between safety and entry (safety → working →
+        //     entry), pre-empting CK_StopPlans_SafetyBeyondActual so it can never trip at commit -- AFTER the venue
+        //     already repriced the entry -- leaving venue and journal desynced.
         bool ordered = order.Side switch
         {
-            OrderSide.Buy => order.WorkingStopPrice < newEntry && order.SafetyStopPrice < newEntry,
-            OrderSide.Sell => newEntry < order.WorkingStopPrice && newEntry < order.SafetyStopPrice,
+            OrderSide.Buy => stopMoves
+                ? safety < effWorking && effWorking < newEntry
+                : effWorking < newEntry && safety < newEntry,
+            OrderSide.Sell => stopMoves
+                ? safety > effWorking && effWorking > newEntry
+                : effWorking > newEntry && safety > newEntry,
             _ => false, // an unrecognised side is refused, never assumed
         };
         if (!ordered)
         {
             return Results.UnprocessableEntity(new
             {
-                error = "The new entry would cross its own stops — a working order's entry must stay on the entry "
-                    + "side of its working and safety stops (which this increment does not move).",
+                error = stopMoves
+                    ? "The entry and its stops must sit strictly safety → working → entry (per side) — the move "
+                        + "would cross them."
+                    : "The new entry must stay on the far side of both stops (per side) — the move would cross them.",
+            });
+        }
+
+        // The plan (any staging). A COMBINED move that touches the working stop refuses a promoted / orphaned /
+        // terminal plan (its stop is a separate venue order, awaiting re-arm, or done); an entry-only move leaves a
+        // non-Hidden plan alone. Loaded before the venue call so a refusal costs nothing.
+        StopPlanRecord? plan = await database.StopPlans
+            .FirstOrDefaultAsync(candidate => candidate.OrderId == order.Id, cancellationToken);
+        if (stopMoves && plan is not null && plan.Staging != StopStaging.Hidden)
+        {
+            return Results.Conflict(new
+            {
+                order.Id,
+                error = plan.Staging switch
+                {
+                    StopStaging.Native => "The working stop is promoted to a native venue order; moving it is a venue "
+                        + "modify, out of scope. Cancel the order to re-stage.",
+                    StopStaging.Orphaned => "The connection is down and the stop is orphaned; it re-arms against venue "
+                        + "truth on reconnect. Move it after that.",
+                    _ => $"The stop plan is {plan.Staging} and cannot be moved.",
+                },
             });
         }
 
@@ -643,11 +685,12 @@ public static class OrderEndpoints
         }
 
         // Re-gate the NEW entry at the UNCHANGED size against fresh truth (R-12): a reprice re-passes R-5 / R-16
-        // exactly as the original send did. The working and safety stops ride unchanged; the gate re-validates
-        // BOTH are still protective relative to the new entry (a non-protective stop is refused by the gate).
+        // exactly as the original send did. The gate is fed the EFFECTIVE working stop, so a combined move that widens
+        // it is re-validated against the per-trade layer for free -- a risk-increasing widen is refused here, not
+        // silently allowed. The safety stop rides unchanged; the gate re-validates both stops are still protective.
         (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
             composed, order.Symbol ?? order.Instrument, order.TickSize, order.PointValue, order.Side, order.Size,
-            newEntry, order.WorkingStopPrice, order.SafetyStopPrice, referencePrice.Value, order.TakeProfitPrice, order.Type,
+            newEntry, effWorking, order.SafetyStopPrice, referencePrice.Value, order.TakeProfitPrice, order.Type,
             cancellationToken);
         if (executionRequest is null)
         {
@@ -712,32 +755,79 @@ public static class OrderEndpoints
             });
         }
 
-        // Commit the reprice atomically: the entry (+ reference) on the order, and the plan's entry basis in
-        // lockstep. SIZE, the WORKING stop, the SAFETY stop, and STATUS are never written -- entry-only (gh#259).
-        decimal oldEntry = order.EntryPrice;
-        ApplyReprice(order, newEntry, referencePrice.Value);
+        // When the working stop moves onto an existing plan, re-read it is still Hidden (a fill enabling promotion
+        // would have changed Status above, so this is belt-and-suspenders).
+        if (stopMoves && plan is not null)
+        {
+            StopStaging? staging = await database.StopPlans
+                .AsNoTracking()
+                .Where(candidate => candidate.Id == plan.Id)
+                .Select(candidate => (StopStaging?)candidate.Staging)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (staging != StopStaging.Hidden)
+            {
+                return Results.Conflict(new
+                {
+                    order.Id,
+                    error = "The stop plan left Hidden while the modify was in flight; nothing was changed.",
+                });
+            }
+        }
 
-        // Only a HIDDEN plan's entry basis moves with the entry (so a fraction-of-distance promotion band still
-        // aims correctly); its ActualStopPrice -- the working stop -- is NOT touched, because the working stop does
-        // not move. A NATIVE / ORPHANED plan is left alone: its stop is a separate venue order (or awaiting re-arm)
-        // that an entry reprice does not address, so rewriting its journal basis would misrepresent live protection.
-        StopPlanRecord? plan = await database.StopPlans
-            .FirstOrDefaultAsync(candidate => candidate.OrderId == order.Id
-                && candidate.Staging == StopStaging.Hidden, cancellationToken);
-        if (plan is not null)
+        // Commit atomically: the entry (+ reference + limit) on the order; and -- on a COMBINED move (gh#278) -- the
+        // working stop (+ the journal StopPrice in lockstep for a stop-type order) and the plan's ActualStopPrice.
+        // Only a HIDDEN plan's entry basis moves (a fraction-of-distance band still aims); a non-Hidden plan is left
+        // untouched (and already refused above when the working stop moves). SIZE and the SAFETY stop are never written.
+        decimal oldEntry = order.EntryPrice;
+        decimal oldWorking = order.WorkingStopPrice;
+        ApplyReprice(order, newEntry, referencePrice.Value);
+        if (stopMoves)
+        {
+            order.WorkingStopPrice = effWorking;
+            if (order.Type is OrderType.Stop or OrderType.StopLimit)
+            {
+                order.StopPrice = effWorking;
+            }
+        }
+
+        if (plan is { Staging: StopStaging.Hidden })
         {
             plan.EntryPrice = newEntry;
+            if (stopMoves)
+            {
+                plan.ActualStopPrice = effWorking;
+            }
+        }
+        else if (stopMoves)
+        {
+            // A combined move that installs a working stop on a previously-coincident order (no plan) stages a Hidden
+            // plan, exactly as placement would have -- always a tightening vs the prior coincident pair.
+            AddStopPlan(database, currentUser, order, executionOptions.Value.StopPromotionTicks);
+            plan = database.StopPlans.Local.FirstOrDefault(candidate => candidate.OrderId == order.Id);
+        }
+        else
+        {
+            // Entry-only with a non-Hidden (or absent) plan: it is left untouched, so the audit references none.
+            plan = plan is { Staging: StopStaging.Hidden } ? plan : null;
         }
 
         PersistDecision(database, currentUser, composed.Account.Id, order.Id, result.Decision);
         await database.SaveChangesAsync(cancellationToken);
-        await AuditModifySafelyAsync(auditLog, loggerFactory, order, plan, oldEntry, cancellationToken);
+        if (stopMoves)
+        {
+            await AuditRepriceAndRestageSafelyAsync(auditLog, loggerFactory, order, plan, oldEntry, oldWorking, cancellationToken);
+        }
+        else
+        {
+            await AuditModifySafelyAsync(auditLog, loggerFactory, order, plan, oldEntry, cancellationToken);
+        }
 
         return Results.Ok(new
         {
             order.Id,
             status = order.Status.ToString(),
             entryPrice = order.EntryPrice,
+            workingStopPrice = order.WorkingStopPrice,
         });
     }
 
@@ -790,6 +880,53 @@ public static class OrderEndpoints
         {
             loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
                 error, "Audit write failed for the modify of order {Order}; the modify still completed.", order.Id);
+        }
+    }
+
+    // The immutable audit entry for a COMBINED entry + working-stop move (gh#278, gh#220): owned by the order's
+    // operator (R-20), a never-filled resting entry so NOT synthetic_risk. Native placement. Before/After carry the
+    // entry-price transition (the primary venue change); the Detail also records the working-stop transition, and the
+    // (existing or just-created) plan's id rides.
+    private static async Task AuditRepriceAndRestageSafelyAsync(
+        IAuditLog auditLog,
+        ILoggerFactory loggerFactory,
+        Order order,
+        StopPlanRecord? plan,
+        decimal oldEntry,
+        decimal oldWorking,
+        CancellationToken cancellationToken)
+    {
+        string beforeEntry = oldEntry.ToString(CultureInfo.InvariantCulture);
+        string afterEntry = order.EntryPrice.ToString(CultureInfo.InvariantCulture);
+        string beforeStop = oldWorking.ToString(CultureInfo.InvariantCulture);
+        string afterStop = order.WorkingStopPrice.ToString(CultureInfo.InvariantCulture);
+
+        AuditRecord record = new()
+        {
+            UserId = order.UserId,
+            Action = AuditAction.OrderModified,
+            Placement = AuditPlacement.Native,
+            SyntheticRisk = false,
+            StopPlanId = plan?.Id,
+            Before = beforeEntry,
+            After = afterEntry,
+            Detail = $"Working order {order.VenueOrderKey} entry + working stop moved by the operator: "
+                + $"entry {beforeEntry} -> {afterEntry}, working stop {beforeStop} -> {afterStop}.",
+            RecordedAt = DateTimeOffset.UtcNow,
+        };
+
+        try
+        {
+            await auditLog.WriteAsync([record], cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
+                error, "Audit write failed for the combined modify of order {Order}; the modify still completed.", order.Id);
         }
     }
 

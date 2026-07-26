@@ -382,16 +382,7 @@ public class OrderWorkingStopRestageTests
         (await OrderAsync(orderId)).WorkingStopPrice.Should().Be(5_295m);
     }
 
-    [Fact]
-    public async Task Modify_ShouldReturn400_WhenBothEntryAndWorkingStopAreSupplied()
-    {
-        Guid orderId = await SeedAsync(workingStop: 5_295m);
-
-        IResult result = await ModifyAsync(orderId, new ModifyWorkingOrderRequest(EntryPrice: 5_301m, WorkingStopPrice: 5_297m, ReferencePrice: 5_301m));
-
-        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest); // combined move is a deferred follow-up
-        VenueUntouched();
-    }
+    // (Moving BOTH the entry and the working stop together landed in gh#278 -- covered by OrderCombinedModifyTests.)
 
     [Fact]
     public async Task Modify_ShouldReturn400_WhenNeitherPriceIsSupplied()

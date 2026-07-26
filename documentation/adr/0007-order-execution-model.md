@@ -448,8 +448,8 @@ watcher and never the exit path it races:
 
 ## Update (2026-07-26) — reprice a working order's working stop (gh#267)
 The gh#259 deferral lands: an operator can now re-stage the **hidden working stop** on a resting working order, alone
-(the entry-only path is unchanged; a combined entry + working-stop move in one request is the remaining follow-up,
-refused for now). `PATCH /orders/{id}/price` gains an optional `WorkingStopPrice`. The key realisation — validated by
+(the entry-only path is unchanged; moving the **entry and working stop together** in one request **landed gh#278** —
+see the Update below). `PATCH /orders/{id}/price` gains an optional `WorkingStopPrice`. The key realisation — validated by
 a design pass — is that a hidden working stop is **not at the venue**: it is a *promotion target*, transmitted as a
 native order only on promotion, which gh#263 gated on an **open position** — so an unfilled working order's stop is
 never promoted, and moving it is a **local** write with **no venue call**.
@@ -475,6 +475,27 @@ never promoted, and moving it is a **local** write with **no venue call**.
   journal. For a stop-type order the journal `StopPrice` moves in lockstep with the working stop (the `ApplyProposal`
   convention). Re-staged locally in one commit, audited (`AuditAction.OrderModified`); size and the safety stop are
   never written.
+
+## Update (2026-07-26) — move the entry and working stop together (gh#278)
+The last modify follow-up (bar a resize): a single `PATCH /orders/{id}/price` may now carry **both** `EntryPrice`
+and `WorkingStopPrice`. It is the gh#259 **entry venue path** (`ComposeAsync` → `ModifyAsync` re-gates and reprices
+the **entry** at the venue) with the new working stop threaded through — the handler `RepriceEntryAsync` gained an
+optional working stop, so entry-only and combined share one path; a working-stop-only move stays on the gh#267 local
+re-stage. Only the entry ever reaches the venue (the working stop is a hidden local plan).
+
+- **The gate re-validates the moved working stop for free.** `BuildRequestAsync` is fed the **new** working stop, so
+  a risk-increasing widen is caught by the same `ModifyAsync` re-gate the entry already runs — no separate widen
+  branch is needed. The kill switch refuses the combined move (the entry reprice is outbound), like any entry reprice.
+- **Full-chain ordering, pre-venue — the gh#259 desync lesson applied to both prices.** The **effective** geometry
+  (`safety → working → entry`, strict, per side) is re-validated **before** the venue call, so a combined move that
+  crosses the chain is refused before the entry reprices — otherwise the working-stop leg would trip
+  `CK_StopPlans_SafetyBeyondActual` at commit *after* the venue already moved the entry, desyncing the two. `working
+  == safety` (removal) stays out of scope.
+- **Atomic, and the gh#267 plan rules carry over.** The entry (+ reference + limit), the working stop (+ `StopPrice`
+  lockstep for a stop-type order), and the `Hidden` plan's `EntryPrice` **and** `ActualStopPrice` commit in one
+  `SaveChanges`; a venue rejection on the entry leaves **all** of them untouched. A `Native` / `Orphaned` / `Retired`
+  plan is refused; a coincident-stop order gains a `Hidden` plan (`AddStopPlan`). Audited; a sized gate attempt leaves
+  a `GateDecisionRecord`. Only a **resize** (which must also re-size the always-native safety bracket) remains deferred.
 
 ## Consequences
 **Positive**

@@ -39,10 +39,10 @@ public sealed record SendOrderRequest(
 
 /// <summary>
 /// The request to reprice a <b>working</b> order in place — a PATCH that moves the resting <b>entry</b> at the venue
-/// (gh#259) and/or re-stages the hidden <b>working stop</b> (gh#267). At least one of <see cref="EntryPrice"/> /
-/// <see cref="WorkingStopPrice"/> must be present; moving <b>both</b> in one request is deferred (a follow-up), so
-/// supplying both is refused. <b>Size</b> and the <b>safety stop</b> stay invariant on every path, so the R-5
-/// catastrophic floor and the attached safety bracket's coverage are untouched.
+/// (gh#259), re-stages the hidden <b>working stop</b> (gh#267), or does <b>both together</b> in one commit (gh#278).
+/// At least one of <see cref="EntryPrice"/> / <see cref="WorkingStopPrice"/> must be present. <b>Size</b> and the
+/// <b>safety stop</b> stay invariant on every path, so the R-5 catastrophic floor and the attached safety bracket's
+/// coverage are untouched; the full chain <c>safety → working → entry</c> is re-validated before the venue is touched.
 /// </summary>
 /// <param name="EntryPrice">
 /// The new entry price, or <see langword="null"/> to leave it. When present, the entry reprices at the venue and
