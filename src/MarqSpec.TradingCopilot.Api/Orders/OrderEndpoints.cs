@@ -525,11 +525,12 @@ public static class OrderEndpoints
     }
 
     /// <summary>
-    /// Reprices a <b>working</b> order in place (gh#259, ADR-0007) — the venue-facing sibling of the cancel. Unlike
-    /// a cancel (risk-reducing, gate-exempt), a reprice can add risk, so it runs the <b>full</b> send ladder and is
-    /// re-gated at the <b>unchanged</b> size before the venue is touched: the gate must approve the new price at the
-    /// current size, or nothing is transmitted (enforcement below the model). Size and the always-native safety
-    /// bracket are held invariant — a resize is a separate increment (it must also re-size the bracket).
+    /// Modifies a <b>working</b> order in place (gh#259/gh#267/gh#278/gh#292, ADR-0007) — the venue-facing sibling of
+    /// the cancel. Unlike a cancel (risk-reducing, gate-exempt), a modify can add risk (a likelier-to-fill entry, a
+    /// wider stop, a larger size), so it runs the <b>full</b> send ladder and is re-gated before the venue is
+    /// touched: the gate must approve the new terms, or nothing is transmitted (enforcement below the model). It can
+    /// move the entry, re-stage the hidden working stop, and/or <b>resize</b> the order; the <b>safety stop</b> is
+    /// held invariant on every path. A working-stop-only move with no size change re-stages locally (no venue call).
     /// </summary>
     internal static async Task<IResult> ModifyWorkingOrderPriceAsync(
         Guid id,
@@ -547,14 +548,22 @@ public static class OrderEndpoints
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        // At least one price must move. A request that moves the ENTRY -- alone (gh#259) or TOGETHER with the working
-        // stop (gh#278) -- goes through the entry venue path; a working-stop-only move re-stages the hidden plan
-        // locally (gh#267). No venue call is made for the working stop either way -- a hidden stop is not at the venue.
+        // At least one dimension must move: the ENTRY (gh#259), the hidden WORKING stop (gh#267), or the SIZE
+        // (gh#292) -- in any combination (gh#278). A move that touches the entry or the size goes through the venue
+        // path (it reaches the gateway and re-gates); a working-stop-only move with no size change re-stages the
+        // hidden plan locally (no venue call -- a hidden stop is not at the venue).
         bool entryChanged = request.EntryPrice is not null;
         bool stopChanged = request.WorkingStopPrice is not null;
-        if (!entryChanged && !stopChanged)
+        if (!entryChanged && !stopChanged && request.Size is null)
         {
-            return Results.BadRequest(new { error = "Supply at least one of entryPrice or workingStopPrice." });
+            return Results.BadRequest(new { error = "Supply at least one of entryPrice, workingStopPrice, or size." });
+        }
+
+        // A size <= 0 is refused before anything else -- the CHECK(size > 0) floor surfaced as a clean input refusal,
+        // never a DB fault. (Input validation, ahead of loading the order.)
+        if (request.Size is <= 0)
+        {
+            return Results.UnprocessableEntity(new { error = "size must be a positive contract count." });
         }
 
         Order? order = await database.Orders.FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
@@ -564,7 +573,10 @@ public static class OrderEndpoints
         }
 
         // Only a WORKING order resting at the venue can be modified. A Staged ticket edits server-only
-        // (PUT /orders/{id}); a terminal order has no live resting entry or stop plan to move.
+        // (PUT /orders/{id}); a terminal order has no live resting entry or stop plan to move. A PARTIALLY-filled
+        // order is refused here too -- which is exactly the guard that closes the only stale-bracket-size window a
+        // resize could face (gh#292): the always-native bracket materialises fresh at the realized fill, and for a
+        // 0-filled (Working) order that fill is the whole new size.
         if (order.Status != OrderStatus.Working)
         {
             return Results.Conflict(new { error = $"Only a working order can be modified — this one is {order.Status}." });
@@ -575,23 +587,37 @@ public static class OrderEndpoints
             return Results.Conflict(new { error = "This working order has no venue handle to modify." });
         }
 
-        return entryChanged
-            ? await RepriceEntryAsync(order, request.EntryPrice!.Value, request.WorkingStopPrice, request.ReferencePrice, currentUser, database,
-                venueFactory, projectXOptions, executionOptions, environment, killSwitch, auditLog, loggerFactory, cancellationToken)
+        // A Size equal to the current size is not a resize; a request whose ONLY effective field is such a no-op has
+        // nothing to do (a genuine price move with a redundant same-size Size still proceeds on its price).
+        bool sizeChanged = request.Size is { } requestedSize && requestedSize != order.Size;
+        if (!entryChanged && !stopChanged && !sizeChanged)
+        {
+            return Results.BadRequest(new { error = "size equals the order's current size — nothing to change." });
+        }
+
+        // The venue path handles an entry reprice and/or a resize (both reach the gateway and re-gate), threading an
+        // optional working-stop move; a working-stop-only move with no size change stays on the local re-stage.
+        return entryChanged || sizeChanged
+            ? await ModifyAtVenueAsync(order, request.EntryPrice, request.WorkingStopPrice, sizeChanged ? request.Size : null,
+                request.ReferencePrice, currentUser, database, venueFactory, projectXOptions, executionOptions, environment,
+                killSwitch, auditLog, loggerFactory, cancellationToken)
             : await RestageWorkingStopAsync(order, request.WorkingStopPrice!.Value, currentUser, database, venueFactory,
                 projectXOptions, executionOptions, environment, killSwitch, auditLog, loggerFactory, cancellationToken);
     }
 
     /// <summary>
-    /// Reprices a working order's ENTRY at the venue (gh#259), optionally moving the hidden WORKING stop in the same
-    /// commit (gh#278). Re-gated at the unchanged size; the full chain <c>safety → working → entry</c> is re-validated
-    /// <b>before</b> the venue call, so a crossing can never trip the <c>StopPlan</c> DB CHECK <i>after</i> the entry
-    /// already repriced. Only the entry reaches the venue — a hidden working stop is a local promotion target.
+    /// Modifies a working order <b>at the venue</b> — repricing the ENTRY (gh#259), <b>resizing</b> it (gh#292), or
+    /// both, optionally moving the hidden WORKING stop in the same commit (gh#278). Re-gated against fresh truth: a
+    /// reprice at the resting size, a resize at the new size (honouring a gate downsize). The full chain
+    /// <c>safety → working → entry</c> is re-validated on the effective geometry <b>before</b> the venue call, so a
+    /// crossing can never trip the <c>StopPlan</c> DB CHECK <i>after</i> the venue already moved. Only the entry /
+    /// size reach the venue — a hidden working stop is a local promotion target; the safety stop is invariant.
     /// </summary>
-    private static async Task<IResult> RepriceEntryAsync(
+    private static async Task<IResult> ModifyAtVenueAsync(
         Order order,
-        decimal newEntry,
+        decimal? newEntry,
         decimal? newWorkingStop,
+        int? newSize,
         decimal? referencePrice,
         ICurrentUser currentUser,
         TradingCopilotDbContext database,
@@ -604,7 +630,13 @@ public static class OrderEndpoints
         ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
     {
-        if (referencePrice is null)
+        bool entryMoves = newEntry is not null;
+        bool stopMoves = newWorkingStop is not null;
+        bool sizeChanges = newSize is not null;
+
+        // The fat-finger band re-measures a NEW ENTRY against the reference (R-16); a move that does not touch the
+        // entry (a pure resize, or a resize + working-stop) needs none and reuses the order's stored reference.
+        if (entryMoves && referencePrice is null)
         {
             return Results.BadRequest(new
             {
@@ -612,11 +644,13 @@ public static class OrderEndpoints
             });
         }
 
-        // The working stop moves only on a COMBINED request (gh#278); otherwise it is held (gh#259). effWorking is the
-        // geometry the gate and the DB CHECK will see.
+        // The EFFECTIVE geometry the gate and the DB CHECK will see: a dimension the request leaves null holds at the
+        // order's current value. The requested quantity is the NEW size on a resize, else the resting size.
         decimal safety = order.SafetyStopPrice;
+        decimal effEntry = newEntry ?? order.EntryPrice;
         decimal effWorking = newWorkingStop ?? order.WorkingStopPrice;
-        bool stopMoves = newWorkingStop is not null;
+        decimal effReference = referencePrice ?? order.ReferencePrice;
+        int requestedQuantity = newSize ?? order.Size;
 
         // Moving the working stop onto the safety stop removes it -- a distinct "drop the stop" action, out of scope.
         if (stopMoves && effWorking == safety)
@@ -628,32 +662,37 @@ public static class OrderEndpoints
             });
         }
 
-        // Ordering on the EFFECTIVE geometry, BEFORE the venue. Two shapes, per side:
-        //   * ENTRY-ONLY (gh#259): both stops must sit below/above the new entry -- and NOT safety-vs-working, because
-        //     a coincident-stop order (working == safety, no plan) is a valid state and repricing its entry is a
-        //     shipped capability. This is byte-identical to the merged gh#259 guard.
-        //   * COMBINED (gh#278): the moving working stop must sit STRICTLY between safety and entry (safety → working →
+        // Ordering on the EFFECTIVE geometry, BEFORE the venue -- only when the entry or the working stop actually
+        // moves. A pure resize changes no geometry, so the resting order's already-valid ordering stands untouched.
+        // Two shapes, per side:
+        //   * The working stop moves (gh#278): it must sit STRICTLY between safety and entry (safety → working →
         //     entry), pre-empting CK_StopPlans_SafetyBeyondActual so it can never trip at commit -- AFTER the venue
-        //     already repriced the entry -- leaving venue and journal desynced.
-        bool ordered = order.Side switch
+        //     already moved -- leaving venue and journal desynced.
+        //   * Entry moves, stop held (gh#259): both stops must sit below/above the new entry -- and NOT
+        //     safety-vs-working, because a coincident-stop order (working == safety, no plan) is a valid state whose
+        //     entry may be repriced.
+        if (entryMoves || stopMoves)
         {
-            OrderSide.Buy => stopMoves
-                ? safety < effWorking && effWorking < newEntry
-                : effWorking < newEntry && safety < newEntry,
-            OrderSide.Sell => stopMoves
-                ? safety > effWorking && effWorking > newEntry
-                : effWorking > newEntry && safety > newEntry,
-            _ => false, // an unrecognised side is refused, never assumed
-        };
-        if (!ordered)
-        {
-            return Results.UnprocessableEntity(new
+            bool ordered = order.Side switch
             {
-                error = stopMoves
-                    ? "The entry and its stops must sit strictly safety → working → entry (per side) — the move "
-                        + "would cross them."
-                    : "The new entry must stay on the far side of both stops (per side) — the move would cross them.",
-            });
+                OrderSide.Buy => stopMoves
+                    ? safety < effWorking && effWorking < effEntry
+                    : effWorking < effEntry && safety < effEntry,
+                OrderSide.Sell => stopMoves
+                    ? safety > effWorking && effWorking > effEntry
+                    : effWorking > effEntry && safety > effEntry,
+                _ => false, // an unrecognised side is refused, never assumed
+            };
+            if (!ordered)
+            {
+                return Results.UnprocessableEntity(new
+                {
+                    error = stopMoves
+                        ? "The entry and its stops must sit strictly safety → working → entry (per side) — the move "
+                            + "would cross them."
+                        : "The new entry must stay on the far side of both stops (per side) — the move would cross them.",
+                });
+            }
         }
 
         // The plan (any staging). A COMBINED move that touches the working stop refuses a promoted / orphaned /
@@ -684,13 +723,14 @@ public static class OrderEndpoints
             return refusal!;
         }
 
-        // Re-gate the NEW entry at the UNCHANGED size against fresh truth (R-12): a reprice re-passes R-5 / R-16
-        // exactly as the original send did. The gate is fed the EFFECTIVE working stop, so a combined move that widens
-        // it is re-validated against the per-trade layer for free -- a risk-increasing widen is refused here, not
-        // silently allowed. The safety stop rides unchanged; the gate re-validates both stops are still protective.
+        // Re-gate against fresh truth (R-12) at the requested quantity (the NEW size on a resize, else the resting
+        // size) and the EFFECTIVE geometry: a modify re-passes R-5 / R-16 exactly as the original send did. The gate
+        // is fed the effective working stop, so a combined widen is re-validated against the per-trade layer for
+        // free; a resize is re-sized (the gate may approve fewer than asked). The safety stop rides unchanged; the
+        // gate re-validates both stops are still protective.
         (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
-            composed, order.Symbol ?? order.Instrument, order.TickSize, order.PointValue, order.Side, order.Size,
-            newEntry, effWorking, order.SafetyStopPrice, referencePrice.Value, order.TakeProfitPrice, order.Type,
+            composed, order.Symbol ?? order.Instrument, order.TickSize, order.PointValue, order.Side, requestedQuantity,
+            effEntry, effWorking, order.SafetyStopPrice, effReference, order.TakeProfitPrice, order.Type,
             cancellationToken);
         if (executionRequest is null)
         {
@@ -700,7 +740,7 @@ public static class OrderEndpoints
         ExecutionResult result;
         try
         {
-            result = await composed.Execution.ModifyAsync(executionRequest, order.VenueOrderKey!, cancellationToken);
+            result = await composed.Execution.ModifyAsync(executionRequest, order.VenueOrderKey!, cancellationToken, resize: sizeChanges);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -751,7 +791,7 @@ public static class OrderEndpoints
             {
                 order.Id,
                 error = $"The order moved to {current} while the modify was in flight; the venue accepted the "
-                    + "reprice, but its status reconciles from venue truth.",
+                    + "modify, but its status reconciles from venue truth.",
             });
         }
 
@@ -774,13 +814,17 @@ public static class OrderEndpoints
             }
         }
 
-        // Commit atomically: the entry (+ reference + limit) on the order; and -- on a COMBINED move (gh#278) -- the
-        // working stop (+ the journal StopPrice in lockstep for a stop-type order) and the plan's ActualStopPrice.
-        // Only a HIDDEN plan's entry basis moves (a fraction-of-distance band still aims); a non-Hidden plan is left
-        // untouched (and already refused above when the working stop moves). SIZE and the SAFETY stop are never written.
+        // Commit atomically. The entry (+ reference + limit) when it moved; the working stop (+ the journal StopPrice
+        // in lockstep for a stop-type order) when it moved; the SIZE -- the GATE-APPROVED quantity, never the asked
+        // one -- when it changed; and a HIDDEN plan's entry basis / actual stop in step. A non-Hidden plan is left
+        // untouched (and already refused above when the working stop moves). The SAFETY stop is never written.
         decimal oldEntry = order.EntryPrice;
         decimal oldWorking = order.WorkingStopPrice;
-        ApplyReprice(order, newEntry, referencePrice.Value);
+        int oldSize = order.Size;
+        if (entryMoves)
+        {
+            ApplyReprice(order, effEntry, effReference);
+        }
         if (stopMoves)
         {
             order.WorkingStopPrice = effWorking;
@@ -789,10 +833,19 @@ public static class OrderEndpoints
                 order.StopPrice = effWorking;
             }
         }
+        if (sizeChanges)
+        {
+            // The gate-approved quantity, not the one asked -- a gate downsize is honoured (never silently exceeded),
+            // and the same quantity was transmitted to the venue.
+            order.Size = result.Decision!.ApprovedQuantity;
+        }
 
         if (plan is { Staging: StopStaging.Hidden })
         {
-            plan.EntryPrice = newEntry;
+            if (entryMoves)
+            {
+                plan.EntryPrice = effEntry;
+            }
             if (stopMoves)
             {
                 plan.ActualStopPrice = effWorking;
@@ -800,20 +853,26 @@ public static class OrderEndpoints
         }
         else if (stopMoves)
         {
-            // A combined move that installs a working stop on a previously-coincident order (no plan) stages a Hidden
-            // plan, exactly as placement would have -- always a tightening vs the prior coincident pair.
+            // A move that installs a working stop on a previously-coincident order (no plan) stages a Hidden plan,
+            // exactly as placement would have -- always a tightening vs the prior coincident pair.
             AddStopPlan(database, currentUser, order, executionOptions.Value.StopPromotionTicks);
             plan = database.StopPlans.Local.FirstOrDefault(candidate => candidate.OrderId == order.Id);
         }
         else
         {
-            // Entry-only with a non-Hidden (or absent) plan: it is left untouched, so the audit references none.
+            // No working-stop move (an entry reprice and/or a pure resize): a non-Hidden (or absent) plan is left
+            // untouched, so the audit references none; a Hidden plan is untouched by a pure resize (it has no size).
             plan = plan is { Staging: StopStaging.Hidden } ? plan : null;
         }
 
         PersistDecision(database, currentUser, composed.Account.Id, order.Id, result.Decision);
         await database.SaveChangesAsync(cancellationToken);
-        if (stopMoves)
+        if (sizeChanges)
+        {
+            await AuditResizeSafelyAsync(
+                auditLog, loggerFactory, order, plan, oldEntry, oldWorking, oldSize, entryMoves, stopMoves, cancellationToken);
+        }
+        else if (stopMoves)
         {
             await AuditRepriceAndRestageSafelyAsync(auditLog, loggerFactory, order, plan, oldEntry, oldWorking, cancellationToken);
         }
@@ -828,6 +887,9 @@ public static class OrderEndpoints
             status = order.Status.ToString(),
             entryPrice = order.EntryPrice,
             workingStopPrice = order.WorkingStopPrice,
+            size = order.Size,
+            requestedSize = newSize,
+            outcome = result.Decision!.Outcome.ToString(),
         });
     }
 
@@ -927,6 +989,68 @@ public static class OrderEndpoints
         {
             loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
                 error, "Audit write failed for the combined modify of order {Order}; the modify still completed.", order.Id);
+        }
+    }
+
+    // The immutable audit entry for a RESIZE (gh#292, gh#220): owned by the order's operator (R-20), a never-filled
+    // resting entry so NOT synthetic_risk (nothing rested on it; the safety stop is untouched). Native placement.
+    // Before/After carry the size transition (the defining change); the Detail also records any entry / working-stop
+    // move that rode with it, and the (existing or just-created) plan's id rides.
+    private static async Task AuditResizeSafelyAsync(
+        IAuditLog auditLog,
+        ILoggerFactory loggerFactory,
+        Order order,
+        StopPlanRecord? plan,
+        decimal oldEntry,
+        decimal oldWorking,
+        int oldSize,
+        bool entryMoved,
+        bool stopMoved,
+        CancellationToken cancellationToken)
+    {
+        string beforeSize = oldSize.ToString(CultureInfo.InvariantCulture);
+        string afterSize = order.Size.ToString(CultureInfo.InvariantCulture);
+
+        string detail = $"Working order {order.VenueOrderKey} resized by the operator: size {beforeSize} -> {afterSize}";
+        if (entryMoved)
+        {
+            detail += $", entry {oldEntry.ToString(CultureInfo.InvariantCulture)} -> "
+                + order.EntryPrice.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if (stopMoved)
+        {
+            detail += $", working stop {oldWorking.ToString(CultureInfo.InvariantCulture)} -> "
+                + order.WorkingStopPrice.ToString(CultureInfo.InvariantCulture);
+        }
+
+        detail += ".";
+
+        AuditRecord record = new()
+        {
+            UserId = order.UserId,
+            Action = AuditAction.OrderModified,
+            Placement = AuditPlacement.Native,
+            SyntheticRisk = false,
+            StopPlanId = plan?.Id,
+            Before = beforeSize,
+            After = afterSize,
+            Detail = detail,
+            RecordedAt = DateTimeOffset.UtcNow,
+        };
+
+        try
+        {
+            await auditLog.WriteAsync([record], cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
+                error, "Audit write failed for the resize of order {Order}; the resize still completed.", order.Id);
         }
     }
 

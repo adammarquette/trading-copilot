@@ -164,29 +164,39 @@ public sealed class OrderExecutionService : IOrderExecutionService
     }
 
     /// <summary>
-    /// Re-gates and, if it survives, transmits an in-place <b>modify</b> of a working order (gh#259) — a reprice
-    /// at the <b>unchanged</b> size. Runs the same ladder as <see cref="SendAsync"/> in the same order, so a
-    /// reprice is judged exactly as the original send was; it is <b>not</b> a way around the gate.
+    /// Re-gates and, if it survives, transmits an in-place <b>modify</b> of a working order — a reprice (gh#259)
+    /// and/or a <b>resize</b> (gh#292). Runs the same ladder as <see cref="SendAsync"/> in the same order, so a
+    /// modify is judged exactly as the original send was; it is <b>not</b> a way around the gate.
     /// </summary>
     /// <remarks>
-    /// Two deliberate differences from <see cref="SendAsync"/>, both safety-driven:
+    /// Deliberate differences from <see cref="SendAsync"/>, all safety-driven:
     /// <list type="bullet">
-    /// <item>Unlike a cancel (risk-reducing, gate-exempt), a reprice is <b>outbound and can add risk</b> — moving
-    /// an entry to a level likelier to fill, or widening the stop distance and the per-contract loss — so it is
-    /// refused while the <b>kill switch</b> is engaged, exactly as a send is.</item>
-    /// <item>The whitelist is <b>stricter</b>: the gate must approve the <b>unchanged</b> size outright
-    /// (<see cref="GateOutcome.Allowed"/> at the requested quantity). A <see cref="GateOutcome.Resized"/> — which
-    /// <see cref="SendAsync"/> honours by downsizing — <b>refuses</b> the modify here, because this increment holds
-    /// size invariant and silently downsizing would desync the attached, un-addressable safety-stop bracket leg
-    /// (gh#259). Size is resized only by a dedicated future increment that also re-sizes the bracket.</item>
+    /// <item>Unlike a cancel (risk-reducing, gate-exempt), a modify is <b>outbound and can add risk</b> — moving
+    /// an entry to a level likelier to fill, widening the stop distance, or increasing the size — so it is
+    /// refused while the <b>kill switch</b> is engaged, exactly as a send is (a downsize routes through here too and
+    /// so is refused under the kill switch this increment; the operator can still cancel to reduce risk).</item>
+    /// <item>A pure reprice (<paramref name="resize"/> == <see langword="false"/>) holds size invariant: the gate
+    /// must approve the <b>unchanged</b> size outright (<see cref="GateOutcome.Allowed"/> at the requested
+    /// quantity), and a <see cref="GateOutcome.Resized"/> <b>refuses</b> it — silently downsizing a reprice would
+    /// strand the attached safety bracket (gh#259). It is sent with <c>size: null</c> to preserve queue position.</item>
+    /// <item>A <b>resize</b> (<paramref name="resize"/> == <see langword="true"/>) is a deliberate size change, so
+    /// it honours the gate exactly as <see cref="SendAsync"/> does — <see cref="GateOutcome.Allowed"/> or
+    /// <see cref="GateOutcome.Resized"/> — and transmits the <b>gate-approved</b> quantity (never the asked one).
+    /// The gh#259 desync fear does not apply: the always-native safety bracket carries no size of its own, and the
+    /// gateway attaches it <i>on fill</i> sized to the realized fill, so the eventual fill is protected at the
+    /// transmitted quantity by construction (gh#292; verified on practice before live, gh#293).</item>
     /// </list>
     /// </remarks>
-    /// <param name="request">The re-priced execution request — the same size as the resting order.</param>
+    /// <param name="request">The re-priced / re-sized execution request — its proposal carries the requested quantity.</param>
     /// <param name="venueOrderId">The venue handle of the working order to modify.</param>
     /// <param name="cancellationToken">Cancels the operation.</param>
-    /// <returns><see cref="ExecutionOutcome.Modified"/> on a transmitted reprice, or the refusal that stopped it.</returns>
+    /// <param name="resize">
+    /// <see langword="true"/> when the order's size changes (gh#292): honour the gate's approved quantity and send
+    /// it to the venue. <see langword="false"/> (default) for a pure reprice: hold size invariant, send <c>null</c>.
+    /// </param>
+    /// <returns><see cref="ExecutionOutcome.Modified"/> on a transmitted modify, or the refusal that stopped it.</returns>
     public async Task<ExecutionResult> ModifyAsync(
-        ExecutionRequest request, string venueOrderId, CancellationToken cancellationToken)
+        ExecutionRequest request, string venueOrderId, CancellationToken cancellationToken, bool resize = false)
     {
         if (_killSwitch.IsEngaged)
         {
@@ -202,17 +212,23 @@ public sealed class OrderExecutionService : IOrderExecutionService
 
         GateDecision decision = evaluated.Decision;
 
-        // Stricter than SendAsync's "Allowed or Resized": a modify holds SIZE invariant, so the gate must approve
-        // the UNCHANGED size outright. A Resize (the gate wanting a smaller size), a Block, a zero, or any
-        // later-added outcome REFUSES the reprice -- transmitting a changed size would desync the attached
-        // safety-stop bracket, whose quantity is not addressable through a modify (gh#259). Whitelist, not
-        // "anything but Blocked".
-        bool authorizedAtRequestedSize =
-            decision.Outcome is GateOutcome.Allowed
-            && decision.ApprovedQuantity == request.Proposal.RequestedQuantity
-            && decision.ApprovedQuantity > 0;
+        // Two whitelists, both stricter than "anything but Blocked" (GateDecision has a public ctor and IRiskGate is
+        // replaceable, so authorization is opt-in):
+        //   * A pure REPRICE (resize == false) holds SIZE invariant, so the gate must approve the UNCHANGED size
+        //     OUTRIGHT -- Allowed at exactly the requested quantity. A Resize (the gate wanting fewer), a Block, a
+        //     zero, or any later-added outcome REFUSES it: silently changing size on a reprice would strand the
+        //     attached safety bracket (gh#259).
+        //   * A RESIZE (resize == true) is a deliberate size change, so it honours the gate exactly as SendAsync does
+        //     -- Allowed OR Resized, at whatever quantity the gate approved (always <= asked). The gh#259 desync fear
+        //     does not apply: the safety bracket carries no size of its own, and the gateway sizes it to the realized
+        //     fill on attach, so the eventual fill is protected at the transmitted quantity (gh#292; verified on
+        //     practice before live, gh#293).
+        bool authorized = resize
+            ? decision.Outcome is GateOutcome.Allowed or GateOutcome.Resized
+            : decision.Outcome is GateOutcome.Allowed
+                && decision.ApprovedQuantity == request.Proposal.RequestedQuantity;
 
-        if (!authorizedAtRequestedSize)
+        if (!authorized || decision.ApprovedQuantity <= 0)
         {
             return ExecutionResult.RefusedByRisk(decision);
         }
@@ -227,17 +243,18 @@ public sealed class OrderExecutionService : IOrderExecutionService
                 + "unprotected. The modify was not sent.");
         }
 
-        // Size is invariant this increment and the gate re-confirmed it above, so send it as "leave unchanged"
-        // (null) rather than re-asserting the value (gh#259 review, gh#270): re-sending a size field can reset an
-        // order's queue priority on some gateways -- the very thing an in-place modify exists to keep -- and, in
-        // the narrow window before a partial fill is journaled, could re-inflate a partially-filled resting
-        // quantity. Only the price the operator actually changed is transmitted; uncertainty resolves to safe.
+        // A pure reprice holds size invariant, so it is sent as "leave unchanged" (null) rather than re-asserting the
+        // value (gh#259 review, gh#270): re-sending a size can reset queue priority on some gateways -- the very thing
+        // an in-place modify exists to keep -- and could re-inflate a partially-filled resting quantity in the
+        // pre-journal window. A RESIZE must send the gate-approved size to change the quantity, accepting that
+        // queue-priority tradeoff (the re-inflation hazard does not apply -- the caller refuses any non-Working, thus
+        // partially-filled, order, gh#292). The size transmitted is the one the gate APPROVED, never the one asked.
         await _venue.ModifyOrderAsync(
             request.Account.Id,
             venueOrderId,
             LimitPriceFor(request),
             StopPriceFor(request),
-            size: null,
+            size: resize ? decision.ApprovedQuantity : null,
             cancellationToken);
 
         return ExecutionResult.Modified(decision);

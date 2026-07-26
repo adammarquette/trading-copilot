@@ -370,14 +370,15 @@ distinct from the staged-ticket edit (`PUT /orders/{id}`) and the cancel (`DELET
   *add* risk — a wider stop raises the per-contract loss; an entry moved toward the market is likelier to fill — so
   it runs the **full** `ComposeAsync` ladder and a new `OrderExecutionService.ModifyAsync`: the **kill switch refuses
   it** (outbound, like a send), and the gate must approve the new price. Enforcement stays below the model.
-- **Size is held invariant, and the whitelist is stricter than a send's.** `ModifyAsync` transmits only on
-  `Allowed` at the **exact requested (unchanged) size**; a `Resized` decision — which a *send* honours by downsizing
-  — **refuses** the modify. The always-native safety-stop bracket leg has **no addressable size** (attached-on-fill,
-  implicitly sized to the parent fill), so a silent downsize would strand protection — a naked position on increase,
-  an oversized stop on decrease. With size fixed, the bracket's quantity coverage is always exactly right: the
-  sharpest hazard of the feature, sidestepped by construction. (A resize that *also* re-sizes the bracket is a
-  separate increment, gated on verifying the gateway's attached-bracket resize behaviour — "uncertainty resolves to
-  safe", engineering §9.)
+- **Size is held invariant on a pure reprice, and the whitelist is stricter than a send's.** For a *reprice*,
+  `ModifyAsync` transmits only on `Allowed` at the **exact requested (unchanged) size**; a `Resized` decision — which
+  a *send* honours by downsizing — **refuses** the reprice. The always-native safety-stop bracket leg has **no
+  addressable size** through a modify, so silently downsizing a *reprice* would strand protection. With size fixed on
+  a reprice, the bracket's quantity coverage is always exactly right. (Resizing was then deferred as a separate
+  increment, gated on verifying the gateway's attached-bracket resize behaviour — "uncertainty resolves to safe",
+  engineering §9. That gate was settled and the resize **landed gh#292**: the bracket carries *no size of its own* in
+  any authoritative source, so it is sized to the realized fill on attach — there is nothing to desync. See the
+  gh#292 Update below.)
 - **Entry-only: both stops are untouched.** A reprice moves the **entry** on the order and the (`Hidden`) stop
   plan's entry basis in **one commit**; the working stop, the safety stop, and its native bracket leg all stay at
   their absolute levels, which the re-gate re-validates are still protective relative to the new entry (or the modify
@@ -495,7 +496,43 @@ re-stage. Only the entry ever reaches the venue (the working stop is a hidden lo
   lockstep for a stop-type order), and the `Hidden` plan's `EntryPrice` **and** `ActualStopPrice` commit in one
   `SaveChanges`; a venue rejection on the entry leaves **all** of them untouched. A `Native` / `Orphaned` / `Retired`
   plan is refused; a coincident-stop order gains a `Hidden` plan (`AddStopPlan`). Audited; a sized gate attempt leaves
-  a `GateDecisionRecord`. Only a **resize** (which must also re-size the always-native safety bracket) remains deferred.
+  a `GateDecisionRecord`. Only a **resize** — then *assumed* to also require re-sizing the always-native safety
+  bracket — remained deferred; it **landed gh#292**, which found that assumption false (the bracket has no size of
+  its own). See the Update below.
+
+## Update (2026-07-26) — resize a working order (gh#292)
+The **final** modify follow-up: `PATCH /orders/{id}/price` may now carry a **`Size`**, changing a working order's
+contract quantity in place. It reuses the gh#259 venue path — the handler `RepriceEntryAsync` was generalised (and
+renamed **`ModifyAtVenueAsync`**) once more so entry, working stop, and size are each optional, and a **size-only**
+resize routes there too (a size change must reach the gateway and re-gate; only a working-stop-*only* move with no
+size change stays on the gh#267 local re-stage). It composes with an entry reprice and a working-stop move in one
+atomic commit.
+
+- **The size-invariant deferral is lifted, because the premise did not hold.** gh#259 refused a `Resized` decision on
+  a modify for fear of desyncing the attached safety bracket. But the ProjectX `stopLossBracket` carries **no size
+  field** in any authoritative source (the vendored `swagger.json` `PlaceOrderBracket = {ticks, type}`; the live
+  vendor order-place docs — *"size is defined only at the parent order level"*; the wiki; the C# `OrderBracket`
+  model), and the gateway attaches it **on fill**, sized to the realized fill. There is no stored bracket quantity to
+  desync: a resize-up is protected at the larger fill, a resize-down at the smaller. So `ModifyAsync` gained a
+  `resize` flag: a **resize honours the gate like a send** (`Allowed` **or** `Resized`) and transmits the
+  **gate-approved** quantity (never the asked one — a downsize the gate binds is honoured, echoed in the response,
+  never silent); a **reprice keeps the strict whitelist** and its `size: null`.
+- **The `Working`-only guard closes the one real window.** The only case where a *stale* bracket size could exist is a
+  **partially-filled** parent; the handler already refuses any non-`Working` order, so a resize only ever acts on a
+  0-filled order whose bracket materialises fresh at the whole new fill.
+- **Enforcement stays below the model.** A resize re-gates at the **new** size (hard limits at the safety stop; the
+  per-trade layer at the working stop under `ActualStop`); `Block` / zero refuses and transmits nothing; the kill
+  switch refuses the outbound modify (a downsize is *not* kill-switch-exempt this increment — the operator retains
+  `DELETE` to reduce risk; a downsize-as-cancel exemption is a deferred refinement). Only `Size` (the gate-approved
+  quantity) is written — the **safety stop is invariant**; the `StopPlan` is untouched by a pure resize (a hidden plan
+  has no size); the TOCTOU `Working` re-read aborts the size write if a fill lands mid-flight.
+- **Practice-gated, with a live-verification prerequisite.** The sizes-to-fill conclusion is a strong *structural
+  inference* the vendor docs imply but never state, so — matching how gh#259 shipped behind gh#269 — the whitelist
+  relaxation is gated on a practice-account check (**gh#293**, on the Phase-2 pre-live checklist): resize up, fill,
+  read that the native protective-stop quantity equals the new fill; the reverse for a downsize; and a partial fill
+  in the window sizes the bracket to the *realized* fill. *(Also flagged there: a pre-existing client-model /
+  swagger mismatch — the C# `OrderBracket` uses `stopPrice`, the authoritative swagger uses `ticks` — untangled
+  separately.)*
 
 ## Update (2026-07-26) — the promoted stop is sized to the live remaining (gh#277)
 A hazard the gh#263 review flagged as pre-existing (and correctly out of its scope): the promotion watcher placed the

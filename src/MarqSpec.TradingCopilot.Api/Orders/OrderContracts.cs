@@ -38,11 +38,12 @@ public sealed record SendOrderRequest(
     decimal? Target = null);
 
 /// <summary>
-/// The request to reprice a <b>working</b> order in place — a PATCH that moves the resting <b>entry</b> at the venue
-/// (gh#259), re-stages the hidden <b>working stop</b> (gh#267), or does <b>both together</b> in one commit (gh#278).
-/// At least one of <see cref="EntryPrice"/> / <see cref="WorkingStopPrice"/> must be present. <b>Size</b> and the
-/// <b>safety stop</b> stay invariant on every path, so the R-5 catastrophic floor and the attached safety bracket's
-/// coverage are untouched; the full chain <c>safety → working → entry</c> is re-validated before the venue is touched.
+/// The request to modify a <b>working</b> order in place — a PATCH that moves the resting <b>entry</b> at the venue
+/// (gh#259), re-stages the hidden <b>working stop</b> (gh#267), moves <b>both together</b> (gh#278), and/or
+/// <b>resizes</b> the order (gh#292). At least one of <see cref="EntryPrice"/> / <see cref="WorkingStopPrice"/> /
+/// <see cref="Size"/> must be present (a <see cref="Size"/> equal to the order's current size is a no-op). The
+/// <b>safety stop</b> stays invariant on every path, so the R-5 catastrophic floor is untouched; the full chain
+/// <c>safety → working → entry</c> is re-validated before the venue is touched.
 /// </summary>
 /// <param name="EntryPrice">
 /// The new entry price, or <see langword="null"/> to leave it. When present, the entry reprices at the venue and
@@ -50,20 +51,29 @@ public sealed record SendOrderRequest(
 /// </param>
 /// <param name="WorkingStopPrice">
 /// The new <b>hidden</b> working-stop price, or <see langword="null"/> to leave it (gh#267). A hidden stop is a
-/// promotion target, not a venue order, so re-staging it is a <b>local</b> write — no venue call. It re-gates
-/// <b>only</b> when it <i>widens</i> under <c>SizingBasis.ActualStop</c> (the one enforced layer measured at the
-/// working stop). Moving it onto the safety stop (removing it) is out of scope.
+/// promotion target, not a venue order, so re-staging it <b>alone</b> is a <b>local</b> write — no venue call. It
+/// re-gates <b>only</b> when it <i>widens</i> under <c>SizingBasis.ActualStop</c> (the one enforced layer measured
+/// at the working stop). Moving it onto the safety stop (removing it) is out of scope.
 /// </param>
 /// <param name="ReferencePrice">
 /// The <b>caller's</b> current market reference the fat-finger band re-measures a new <b>entry</b> against (R-16)
 /// — <b>required when <see cref="EntryPrice"/> is present</b>. Caller-supplied, as on every order path (the server
-/// fetches no venue quote), so it is the client's freshness, not the venue's. A working-stop-only re-stage does
-/// not move the entry, so it is unused there.
+/// fetches no venue quote), so it is the client's freshness, not the venue's. A move that does not touch the entry
+/// (a working-stop re-stage or a pure resize) does not need it.
+/// </param>
+/// <param name="Size">
+/// The new contract quantity, or <see langword="null"/> to leave it (gh#292). A resize re-gates at the new size and
+/// modifies the order in place at the venue, transmitting the <b>gate-approved</b> quantity (a downsize the gate
+/// binds is honoured, never silently exceeded). The always-native safety bracket carries no size of its own — the
+/// gateway attaches it <i>on fill</i>, sized to the realized fill — so a resize leaves the eventual fill protected
+/// by construction (verified on practice before live, gh#293). <c>&lt;= 0</c> is refused; the order must be
+/// <c>Working</c> (a partially-filled order is refused, closing the only stale-bracket-size window).
 /// </param>
 public sealed record ModifyWorkingOrderRequest(
     decimal? EntryPrice,
     decimal? WorkingStopPrice = null,
-    decimal? ReferencePrice = null);
+    decimal? ReferencePrice = null,
+    int? Size = null);
 
 /// <summary>The outcome of a send attempt — always explains itself (R-5).</summary>
 /// <param name="Outcome">Placed, or which guard refused.</param>
