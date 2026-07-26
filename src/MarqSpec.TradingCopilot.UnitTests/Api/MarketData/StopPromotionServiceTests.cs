@@ -150,6 +150,52 @@ public class StopPromotionServiceTests
     }
 
     [Fact]
+    public async Task PromoteForQuoteAsync_ShouldSizeTheStopToTheRemaining_WhenThePositionIsPartiallyClosed()
+    {
+        // Entered long 2 (order.Size = 2), then scaled out 1 -> the venue reports net long 1. The promoted protective
+        // stop must be sized to what is ACTUALLY open (1), not the original order size (2): a 2-lot sell-stop against a
+        // 1-lot long would, on fire, sell 2 and REVERSE the operator into an unwanted short (gh#277).
+        await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        IReadOnlyList<PositionSnapshot> partiallyClosed =
+        [
+            new PositionSnapshot(VenueAccountId.Create(Venue, "9001"), Contract, 1, new Price(5_300m)),
+        ];
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).Returns(partiallyClosed);
+        await using TradingCopilotDbContext context = Context();
+
+        int promoted = await Service(context).PromoteForQuoteAsync(Venue, "CON.F.US.MES.U26", bid: 5_296m, ask: 5_296.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(1);
+        OrderRequest sent = Fake.GetCalls(_venue)
+            .Single(call => call.Method.Name == nameof(IOrderExecutor.PlaceOrderAsync))
+            .Arguments.Get<OrderRequest>(0)!;
+        sent.Quantity.Should().Be(1); // the live remaining, NOT order.Size (2)
+        sent.StopPrice.Should().Be(new Price(5_295m));
+    }
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldCapTheStopAtOrderSize_WhenTheNetExceedsIt()
+    {
+        // The venue reports a LARGER net than this order (other entries rest on the same contract): this plan protects
+        // only its own order.Size (2), never the whole net (3) -- the excess is other positions' concern (gh#277).
+        await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        IReadOnlyList<PositionSnapshot> largerNet =
+        [
+            new PositionSnapshot(VenueAccountId.Create(Venue, "9001"), Contract, 3, new Price(5_300m)),
+        ];
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).Returns(largerNet);
+        await using TradingCopilotDbContext context = Context();
+
+        int promoted = await Service(context).PromoteForQuoteAsync(Venue, "CON.F.US.MES.U26", bid: 5_296m, ask: 5_296.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(1);
+        OrderRequest sent = Fake.GetCalls(_venue)
+            .Single(call => call.Method.Name == nameof(IOrderExecutor.PlaceOrderAsync))
+            .Arguments.Get<OrderRequest>(0)!;
+        sent.Quantity.Should().Be(2); // capped at order.Size, NOT the net (3)
+    }
+
+    [Fact]
     public async Task PromoteForQuoteAsync_ShouldDoNothing_WhilePriceIsFarFromTheStop()
     {
         await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m); // promote at bid <= 5296
