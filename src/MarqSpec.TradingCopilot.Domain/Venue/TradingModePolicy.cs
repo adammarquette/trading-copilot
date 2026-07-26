@@ -25,6 +25,17 @@ public static class TradingModePolicy
         };
     }
 
+    /// <summary>
+    /// Whether an account in <paramref name="mode"/> may set <b>Send as-is</b> as its default entry action (R-11,
+    /// gh#218). Practice only — a live account never defaults to the one-action send, and an undeclared account
+    /// (tradeable nowhere) cannot either. Deliberately <b>environment-independent</b>: even in production a live
+    /// account is refused, because this guards the default <i>preference</i>, not the send path itself — which
+    /// stays gated by R-5 / R-16 / R-12 on every account regardless of the default.
+    /// </summary>
+    /// <param name="mode">The account's declared trading mode.</param>
+    /// <returns><see langword="true"/> only for <see cref="TradingMode.Practice"/>.</returns>
+    public static bool SendAsIsDefaultAllowed(TradingMode mode) => mode == TradingMode.Practice;
+
     /// <summary>Throws unless <paramref name="mode"/> may be traded in <paramref name="environment"/>.</summary>
     /// <param name="mode">The account's trading mode.</param>
     /// <param name="environment">The environment the platform is running in.</param>

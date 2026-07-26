@@ -87,7 +87,7 @@ public class OrderEndpointsTests
         ReferencePrice: 5300m,
         Type: OrderType.Market);
 
-    private async Task<Guid> SeedAsync(TradingMode mode = TradingMode.Practice, bool withRiskProfile = true, string credentialKey = "topstep-main")
+    private async Task<Guid> SeedAsync(TradingMode mode = TradingMode.Practice, bool withRiskProfile = true, string credentialKey = "topstep-main", DefaultEntryAction defaultEntryAction = DefaultEntryAction.ApproveAndArm)
     {
         Guid firmId = Guid.NewGuid();
         Guid connectionId = Guid.NewGuid();
@@ -142,6 +142,7 @@ public class OrderEndpointsTests
                 DailyDrawdownGovernor = 600m,
                 SizingBasis = SizingBasis.SafetyStop,
                 MaxContractsPerOrder = 3,
+                DefaultEntryAction = defaultEntryAction,
             });
         }
 
@@ -534,5 +535,22 @@ public class OrderEndpointsTests
         decision.Outcome.Should().Be(GateOutcome.Blocked);
         decision.OrderId.Should().BeNull();                  // blocked-by-gate: decision row only,
         (await reload.Orders.AnyAsync()).Should().BeFalse(); // never an orphaned order row
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldTransmitTheApprovedQuantity_EvenWhenTheDefaultEntryActionIsSendAsIs()
+    {
+        // The DefaultEntryAction preference (gh#218) is a UX hint on the risk profile; it never reaches the gate.
+        // With SendAsIs as the default, the same resizable ticket still resizes to the approved 3 -- identical to
+        // the ApproveAndArm case in SendAsIs_ShouldTransmitTheApprovedQuantity_NotTheRequested above.
+        Guid accountId = await SeedAsync(defaultEntryAction: DefaultEntryAction.SendAsIs);
+        OrderRequest? sent = null;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes((OrderRequest r, CancellationToken _) => sent = r)
+            .Returns(new PlacedOrder(_venueAccount, "889001", DateTimeOffset.UnixEpoch));
+
+        await SendAsIsAsync(accountId, SmallBuy(quantity: 5));
+
+        sent!.Quantity.Should().Be(3); // the preference does not bind the gate -- same approved quantity either way
     }
 }

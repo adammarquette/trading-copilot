@@ -23,6 +23,8 @@ namespace MarqSpec.TradingCopilot.Api.Risk;
 /// <param name="SizingBasis">Whether sizing uses the working stop or the safety stop.</param>
 /// <param name="MaxContractsPerOrder">The manual per-order contract cap; 0 means uncapped.</param>
 /// <param name="MaxBestDayFraction">The consistency target — best day ÷ total net profit, in (0, 1]; null means none.</param>
+/// <param name="DefaultEntryAction">Which entry action is primary on the Approve split button (R-11, gh#218). Defaults to <c>ApproveAndArm</c> (review-first); <c>SendAsIs</c> is practice-only and requires <paramref name="ConfirmSendAsIsDefault"/>.</param>
+/// <param name="ConfirmSendAsIsDefault">The explicit confirmation required to default to <c>SendAsIs</c> — a request that sets <c>SendAsIs</c> without it is refused 422 (the kill switch's hold-to-confirm shape).</param>
 public sealed record DeclareRiskProfileRequest(
     decimal? DailyLossLimit,
     decimal? AccountProfitTarget,
@@ -39,7 +41,9 @@ public sealed record DeclareRiskProfileRequest(
     bool StopForDayAtProfitTarget,
     SizingBasis SizingBasis,
     int MaxContractsPerOrder,
-    decimal? MaxBestDayFraction);
+    decimal? MaxBestDayFraction,
+    DefaultEntryAction DefaultEntryAction = DefaultEntryAction.ApproveAndArm,
+    bool ConfirmSendAsIsDefault = false);
 
 /// <summary>An account's declared risk rules, as persisted.</summary>
 /// <param name="AccountId">The account the rules govern.</param>
@@ -59,6 +63,7 @@ public sealed record DeclareRiskProfileRequest(
 /// <param name="SizingBasis">The sizing basis.</param>
 /// <param name="MaxContractsPerOrder">The manual per-order cap; 0 means uncapped.</param>
 /// <param name="MaxBestDayFraction">The consistency target; null when none.</param>
+/// <param name="DefaultEntryAction">Which entry action is primary on the Approve split button (R-11, gh#218).</param>
 public sealed record RiskProfileResponse(
     Guid AccountId,
     decimal? DailyLossLimit,
@@ -76,7 +81,8 @@ public sealed record RiskProfileResponse(
     bool StopForDayAtProfitTarget,
     SizingBasis SizingBasis,
     int MaxContractsPerOrder,
-    decimal? MaxBestDayFraction)
+    decimal? MaxBestDayFraction,
+    DefaultEntryAction DefaultEntryAction)
 {
     /// <summary>Projects a persisted declaration to the response shape.</summary>
     /// <param name="record">The persisted declaration.</param>
@@ -101,6 +107,7 @@ public sealed record RiskProfileResponse(
             record.StopForDayAtProfitTarget,
             record.SizingBasis,
             record.MaxContractsPerOrder,
-            record.MaxBestDayFraction);
+            record.MaxBestDayFraction,
+            record.DefaultEntryAction);
     }
 }
