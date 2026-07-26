@@ -497,6 +497,18 @@ re-stage. Only the entry ever reaches the venue (the working stop is a hidden lo
   plan is refused; a coincident-stop order gains a `Hidden` plan (`AddStopPlan`). Audited; a sized gate attempt leaves
   a `GateDecisionRecord`. Only a **resize** (which must also re-size the always-native safety bracket) remains deferred.
 
+## Update (2026-07-26) — the promoted stop is sized to the live remaining (gh#277)
+A hazard the gh#263 review flagged as pre-existing (and correctly out of its scope): the promotion watcher placed the
+native stop at **`Order.Size`** — the original entry quantity — while gating only on the position's **sign**. A
+**partial scale-out** on the connection-up path (`Order.Size` is reconciled to the remaining only on the *reconnect*
+path, gh#191) left the promoted stop **over-sized**, so on fire it would close more than is held and **reverse** the
+position into an unwanted one — the "next fill opens a position you didn't ask for" class this area exists to remove.
+The fix reuses the live `NetQuantity` gh#263 already reads: the promoted stop is sized to
+**`min(Order.Size, |NetQuantity|)`** — the venue's reported open quantity, capped at this plan's order size (a larger
+net is other entries' concern, not this plan's to double-protect). It mirrors `OrphanGuardService`'s existing
+partial-close reconciliation. The **safety-stop bracket** (placed on entry, exchange-managed OCO) and the
+**conditional-firing** path (which promotes through this same watcher) need no separate change.
+
 ## Consequences
 **Positive**
 - **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move

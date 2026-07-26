@@ -117,11 +117,19 @@ public sealed class StopPromotionService
             // Flat, reversed, or unconfirmable all fail closed to NOT promoting -- the always-native safety stop
             // remains the floor and OcoExitService retires the plan terminally on the exit event. Uncertainty
             // resolves to the safe state (engineering §9).
-            if (!await IsPositionStillOpenAsync(
-                    venue, venueAccount, contractKey, plan.Side, positionsByAccount, cancellationToken))
+            int? openQuantity = await OpenQuantityAsync(
+                venue, venueAccount, contractKey, plan.Side, positionsByAccount, cancellationToken);
+            if (openQuantity is null)
             {
                 continue;
             }
+
+            // Size the promoted stop to what the venue ACTUALLY reports open, capped at this plan's order size
+            // (gh#277). A partial scale-out (net < order.Size) must NOT promote a full-size stop -- firing it would
+            // close more than is held and reverse the position into an unwanted one. A larger net (other entries on
+            // the same contract) is not this plan's to protect, so cap at order.Size. The position was confirmed
+            // non-zero and same-side above, so this is always >= 1.
+            int protectQuantity = Math.Min(order.Size, openQuantity.Value);
 
             // Transmit FIRST, then record native. If the venue rejects, the exception propagates and the plan
             // stays Hidden -- marking it Native without an exchange-held stop would be a lie on a safety path.
@@ -130,7 +138,7 @@ public sealed class StopPromotionService
                 VenueContractId.Create(venueId, contractKey),
                 Opposite(plan.Side),
                 OrderType.Stop,
-                order.Size,
+                protectQuantity,
                 LimitPrice: null,
                 StopPrice: plan.ActualStop);
 
@@ -214,12 +222,13 @@ public sealed class StopPromotionService
     }
 
     /// <summary>
-    /// Whether the venue still reports an open position on <paramref name="contractKey"/> for
-    /// <paramref name="account"/>, on the same <paramref name="side"/> the order entered. Flat or reversed means the
-    /// protected position is gone; an unreachable venue is treated the same (fail closed) so a promotion never rests
-    /// on an unverified assumption. Reads are cached per account for the pass.
+    /// The venue's live open quantity on <paramref name="contractKey"/> for <paramref name="account"/>, on the same
+    /// <paramref name="side"/> the order entered — or <see langword="null"/> when the position is flat, reversed, or
+    /// the venue could not be reached (all fail closed, so a promotion never rests on an unverified assumption). The
+    /// magnitude lets the caller size the promoted stop to what is <b>actually</b> open rather than the original order
+    /// size (gh#277). Reads are cached per account for the pass.
     /// </summary>
-    private async Task<bool> IsPositionStillOpenAsync(
+    private async Task<int?> OpenQuantityAsync(
         ITradingVenue venue,
         VenueAccountId account,
         string contractKey,
@@ -254,16 +263,19 @@ public sealed class StopPromotionService
 
         if (positions is null)
         {
-            return false; // unverifiable -> fail closed
+            return null; // unverifiable -> fail closed
         }
 
         PositionSnapshot? position = positions
             .FirstOrDefault(candidate => string.Equals(candidate.Contract.Key, contractKey, StringComparison.Ordinal));
 
         // Open only if the venue reports net exposure on the SAME side the order entered -- flat (zero) or reversed
-        // (opposite sign) means the protected position is gone, so there is nothing to promote a stop for.
+        // (opposite sign) means the protected position is gone, so there is nothing to promote a stop for. Return the
+        // live remaining magnitude so the caller can size the promoted stop to what is actually open (gh#277).
         int expectedSign = side == OrderSide.Buy ? 1 : -1;
-        return position is not null && position.NetQuantity != 0 && Math.Sign(position.NetQuantity) == expectedSign;
+        return position is not null && position.NetQuantity != 0 && Math.Sign(position.NetQuantity) == expectedSign
+            ? Math.Abs(position.NetQuantity)
+            : null;
     }
 
     /// <summary>The protective exit side for a position: a long is protected by a sell, a short by a buy.</summary>
