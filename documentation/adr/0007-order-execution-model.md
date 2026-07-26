@@ -357,6 +357,28 @@ operator had no way to pull a **single** resting order without engaging the whol
 *Still deferred:* discarding a `Staged` order is already covered here; **modifying** a working order
 (`VenueCapability.ModifyOrder`) is the other #219 follow-up, not this one.
 
+## Update (2026-07-25) — the default entry action preference (gh#218)
+The open follow-up — *"decide the default entry action"* — is settled: **practice-only AND confirm-to-enable**.
+`DefaultEntryAction` (`ApproveAndArm` | `SendAsIs`) persists on the risk profile (`RiskProfileRecord`, where the
+data dictionary homes operator preferences). `ApproveAndArm` is the **zero value** — the `KillSwitchMode.FlattenAll`
+fail-safe pattern, not the refusable-`Unknown` one — so an unset or legacy row resolves review-first by
+construction, and there is deliberately **no `<> 0` check** (it would refuse the safe default). The column is
+non-`required` with a `NOT NULL DEFAULT 0` migration; legacy rows read `ApproveAndArm`.
+
+Two guards, server-side at the `PUT /accounts/{id}/risk` boundary — never merely hidden in the UI:
+- **Practice-only:** defaulting to `SendAsIs` on a **live** or **undeclared** account is refused **409**, naming the
+  mode. The rule lives in `TradingModePolicy.SendAsIsDefaultAllowed(mode)` (= `mode == Practice`) — the home of mode
+  rules, reused rather than re-hand-rolled — and is **environment-independent** (a live account is refused even in
+  production, because this guards the *default preference*, not the send path).
+- **Confirm-to-enable:** a request that sets `SendAsIs` without `confirmSendAsIsDefault = true` is refused **422**
+  (the kill switch's hold-to-confirm shape). Setting `ApproveAndArm` back is always free.
+
+The preference is a **UX hint only** — it selects the split button's primary; it never reaches the enforcing gate,
+so a breaching ticket is blocked or resized identically under either value (a covering test sends the same
+resizable ticket under both and asserts the same approved quantity reaches the venue). *Out of scope:* the
+split-button UI and Settings surface (gh#25), and the other open per-environment defaults (sizing basis, proximity
+metric).
+
 ## Consequences
 **Positive**
 - **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move
@@ -412,7 +434,7 @@ take-a-suggestion path in S3, and the **consistency %** rule needs P&L-by-day hi
   coordination, gap/latency handling, and an availability target.
 - Define **connection-loss detection** (heartbeat / timeout thresholds), the **orphan → emergency** transition +
   operator alert, and the **recovery re-arm** path — each carrying a `synthetic_risk` audit flag.
-- Decide **defaults** (per environment): sizing basis, proximity metric, and the default entry action.
+- Decide **defaults** (per environment): sizing basis and proximity metric. *(The **default entry action** is settled and built — gh#218; see the update below.)*
 - Define the **risk-gate interface** — inputs (live account state, layers, safety stop), outputs (size, binding
   layer, block / resize / acknowledge) — R-5.
 - Wire the **governor → R-4** throttle policy (thresholds, throttle modes).
