@@ -45,3 +45,38 @@ Instrument everything with **OpenTelemetry** and export the three pillars to the
   taxonomy with its noise budget. This ADR's collection decisions are unchanged; ADR-0019 extends them with what
   happens once a signal is worth waking someone for.
 - A trace **sampling** policy if needed.
+
+## Update (2026-07-26) — the SDK and the three signals landed (gh#230)
+
+This ADR specified the target in 2026-07-18; nothing implemented it until now. **Traces, metrics and logs** are
+wired in `Api/Program.cs` over **OTLP**, with ASP.NET Core / HttpClient / Npgsql / runtime instrumentation, and
+resource attributes (service name, version, **`deployment.environment`**) so a staging signal is never mistaken
+for a production one — this system's whole R-14 posture rests on knowing which environment an action came from.
+
+**RED comes from the instrumentation's own instruments**, whose duration is a **histogram** by default, so
+p50/p95/p99 are derivable. A mean would hide precisely the tail that matters on an execution path.
+
+**`/health` and `/ready` are deliberately different contracts.** Liveness answers from the process alone and
+touches **no** dependency — a liveness probe that queries the database restarts a healthy app during a database
+blip, taking the auto-flatten scheduler down with it. Readiness **must** touch the database, because "ready"
+means ready to serve; a failure removes the instance from rotation without killing it. Verified end to end: with
+the database stopped, `/health` stays `200` and `/ready` returns `503 not-ready`.
+
+**Trace context across the log's async gap.** The `traceparent` envelope field already existed (gh#7) and the
+quote producer already stamped it; what was missing was the other half. Both consumers now **span-link** to the
+producer's context, so `websocket → append → consume → DB write` is one queryable trace. A **link, not a parent**:
+the consumer may run long after the append, and one batch can carry events from many producers, so a link
+expresses "caused by" without pretending the consumer's span lives inside the producer's.
+
+**Degradation is the load-bearing property.** With no exporter configured the SDK is still wired and
+instrumentation still runs, but nothing is exported and **the app starts and trades normally** — verified. An
+absent `traceparent` (pre-migration rows, an unstamped producer) starts a fresh trace; a **malformed** one is
+ignored rather than thrown on. Losing a trace is a reporting loss; throwing would stop stop-promotion or
+conditional firing outright. Instrumentation must never be able to break trading (engineering §9).
+
+One correction worth recording: a `traceparent` declaring an **unknown version** (`99-…`) is **not** malformed.
+W3C trace-context is deliberately forward-compatible, so a parser that recognises the shape accepts it. A first
+draft of the tests asserted a rejection there — that would have pinned a bug.
+
+*Still open:* the **LGTM stack** this exports to (gh#231), the **execution-specific SLIs** (gh#232), AI spend
+(ADR-0008), and a trace **sampling** policy.

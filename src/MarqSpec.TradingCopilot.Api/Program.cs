@@ -9,6 +9,7 @@ using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.Kill;
 using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Notifications;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Risk;
@@ -25,8 +26,14 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using Npgsql;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+// Observability first (gh#230, ADR-0002): wire the SDK before anything else registers, so every signal from
+// startup onward is captured. With no exporter configured this is a no-op -- instrumentation must never be able
+// to break trading (engineering §9).
+builder.AddTradingCopilotTelemetry();
 
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
 JwtOptions jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
@@ -233,7 +240,25 @@ app.MapRiskEndpoints();
 app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
 app.MapPositionEndpoints();
+// Liveness: answers from the process alone and touches NO dependency (§7). A liveness probe that queries the
+// database restarts a healthy app during a database blip -- taking the auto-flatten scheduler down with it.
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
+
+// Readiness: the opposite contract -- it MUST touch the database, because "ready" means ready to serve. A failure
+// takes this instance out of rotation without killing it, which is the right response to an unreachable database.
+app.MapGet("/ready", async (TradingCopilotDbContext database, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return await database.Database.CanConnectAsync(cancellationToken)
+            ? Results.Ok(new { status = "ready" })
+            : Results.Json(new { status = "not-ready", reason = "database unreachable" }, statusCode: 503);
+    }
+    catch (Exception error) when (error is InvalidOperationException or NpgsqlException or TimeoutException)
+    {
+        return Results.Json(new { status = "not-ready", reason = "database unreachable" }, statusCode: 503);
+    }
+});
 
 app.Run();
 
