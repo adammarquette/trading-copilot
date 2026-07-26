@@ -260,6 +260,10 @@ an external monitor, which pages when the report **fails to arrive**.
 **A deployment without it is silently missing its most important safety net.** The app starts and warns loudly, but
 nothing else notices.
 
+0. **Set `Pushover__AppToken` and `Pushover__UserKey`** — the app's *own* alerting channel (`gh#243`), separate from
+   the monitor's. Without them the app still runs and still detects everything; it just writes the alert to the log
+   instead of your phone, warning at startup that it is doing so. A Page that reaches no one logs as an **error**.
+   Under compose these are forwarded only because they are named in the app service's `environment:` map.
 1. **Create the Pushover application** and note the user key + app token (ADR-0019 — Emergency priority repeats until
    acknowledged and bypasses Do Not Disturb; a channel without both is not a pager).
 2. **Create the monitor checks** on a cron-monitor (healthchecks.io or equivalent) — **on infrastructure independent
