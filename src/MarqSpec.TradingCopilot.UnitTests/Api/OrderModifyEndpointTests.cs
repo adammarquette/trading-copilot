@@ -88,7 +88,11 @@ public class OrderModifyEndpointTests
         bool withRiskProfile = true,
         bool withStopPlan = true,
         Guid? owner = null,
-        string credentialKey = OurCredentialKey)
+        string credentialKey = OurCredentialKey,
+        OrderSide side = OrderSide.Buy,
+        decimal entry = 5_300m,
+        decimal workingStop = 5_295m,
+        decimal safetyStop = 5_290m)
     {
         Guid user = owner ?? _operator;
         Guid firmId = Guid.NewGuid();
@@ -155,14 +159,14 @@ public class OrderModifyEndpointTests
             AccountId = accountId,
             Instrument = "CON.F.US.MES.U26",
             Symbol = "MES",
-            Side = OrderSide.Buy,
+            Side = side,
             Size = 1,
             Type = OrderType.Limit,
-            EntryPrice = 5_300m,
-            WorkingStopPrice = 5_295m,
-            SafetyStopPrice = 5_290m,
-            ReferencePrice = 5_300m,
-            LimitPrice = 5_300m,
+            EntryPrice = entry,
+            WorkingStopPrice = workingStop,
+            SafetyStopPrice = safetyStop,
+            ReferencePrice = entry,
+            LimitPrice = entry,
             TickSize = 0.25m,
             PointValue = 5m,
             Status = status,
@@ -178,10 +182,10 @@ public class OrderModifyEndpointTests
                 Id = Guid.NewGuid(),
                 UserId = user,
                 OrderId = orderId,
-                Side = OrderSide.Buy,
-                EntryPrice = 5_300m,
-                ActualStopPrice = 5_295m,
-                SafetyStopPrice = 5_290m,
+                Side = side,
+                EntryPrice = entry,
+                ActualStopPrice = workingStop,
+                SafetyStopPrice = safetyStop,
                 ProximityMetric = StopProximityMetric.Ticks,
                 ProximityValue = 4m,
                 Staging = StopStaging.Hidden,
@@ -219,7 +223,7 @@ public class OrderModifyEndpointTests
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         sentLimit.Should().Be(new Price(5_301m)); // a Limit order reprices its limit price
-        sentSize.Should().Be(1);                   // size held invariant -- the bracket coverage stays exact
+        sentSize.Should().BeNull();                // size held invariant -> sent as "leave unchanged" (gh#270), preserving queue position
 
         Order after = await OrderAsync(orderId);
         after.EntryPrice.Should().Be(5_301m);
@@ -257,12 +261,54 @@ public class OrderModifyEndpointTests
             A<VenueAccountId>._, A<string>._, A<Price?>._, A<Price?>._, A<int?>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
+    // --- The SELL side: geometry is mirrored (both stops ABOVE entry), so both branches need their own proof ---
+
+    [Fact]
+    public async Task ModifyPrice_ShouldRepriceTheEntry_ForASellOrder()
+    {
+        // A SELL rests with working (5305) and safety (5310) stops ABOVE entry (5300). Repricing the entry up to
+        // 5301 keeps it below both stops (the Sell branch of the cross-stops guard), and the gate approves at size 1.
+        Guid orderId = await SeedWorkingOrderAsync(side: OrderSide.Sell, entry: 5_300m, workingStop: 5_305m, safetyStop: 5_310m);
+        Price? sentLimit = null;
+        A.CallTo(() => _venue.ModifyOrderAsync(
+            A<VenueAccountId>._, WorkingOrderKey, A<Price?>._, A<Price?>._, A<int?>._, A<CancellationToken>._))
+            .Invokes((VenueAccountId _, string _, Price? limit, Price? _, int? _, CancellationToken _) => sentLimit = limit)
+            .Returns(Task.CompletedTask);
+
+        IResult result = await ModifyAsync(orderId, Reprice(entry: 5_301m, reference: 5_301m));
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        sentLimit.Should().Be(new Price(5_301m));
+        Order after = await OrderAsync(orderId);
+        after.EntryPrice.Should().Be(5_301m);
+        after.WorkingStopPrice.Should().Be(5_305m); // unchanged
+        after.SafetyStopPrice.Should().Be(5_310m);  // unchanged
+    }
+
+    [Fact]
+    public async Task ModifyPrice_ShouldReturn422AndNotTouchVenue_WhenASellEntryCrossesItsStops()
+    {
+        // The mirror of the Buy cross-stops guard: a SELL entry raised ABOVE its working stop (5305) inverts the
+        // geometry and is refused before the venue is touched. A sign error in the Sell branch would slip past a
+        // Buy-only suite (gh#270 review).
+        Guid orderId = await SeedWorkingOrderAsync(side: OrderSide.Sell, entry: 5_300m, workingStop: 5_305m, safetyStop: 5_310m);
+
+        IResult result = await ModifyAsync(orderId, Reprice(entry: 5_306m, reference: 5_306m));
+
+        StatusOf(result).Should().Be(StatusCodes.Status422UnprocessableEntity);
+        (await OrderAsync(orderId)).EntryPrice.Should().Be(5_300m); // journal untouched
+        A.CallTo(() => _venue.ModifyOrderAsync(
+            A<VenueAccountId>._, A<string>._, A<Price?>._, A<Price?>._, A<int?>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
     // --- Only a working order with a venue handle ---
 
     [Theory]
     [InlineData(OrderStatus.Staged)]
     [InlineData(OrderStatus.Filled)]
     [InlineData(OrderStatus.Cancelled)]
+    [InlineData(OrderStatus.PartiallyFilled)] // partly a live position -- repricing its entry is the hazard the guard refuses
+    [InlineData(OrderStatus.Rejected)]
     public async Task ModifyPrice_ShouldReturn409AndNotTouchVenue_WhenTheOrderIsNotWorking(OrderStatus status)
     {
         Guid orderId = await SeedWorkingOrderAsync(status: status);

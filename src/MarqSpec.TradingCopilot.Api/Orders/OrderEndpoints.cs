@@ -689,6 +689,14 @@ public static class OrderEndpoints
         // accepted the modify, but if the local order has already moved terminal, do not rewrite its price -- abort
         // and let the seam own the reconciliation (the gh#183 re-open-race discipline: mutate only what is still
         // what we read). A fresh, untracked read -- the tracked entity still says Working.
+        //
+        // This is a re-read, NOT an atomic compare-and-swap: a fill committing in the sub-ms window between this
+        // read and the save below is an ACCEPTED, benign residue (the gh#263 precedent, gh#270 review). The true
+        // fill price always lives on the Fill rows, so the worst case is a journal EntryPrice that lags a fill --
+        // not a safety or P&L error (the native bracket protects the fill; P&L derives from fills). Neither closure
+        // is proportionate for a LOW journal-accuracy residue: a concurrency token on Order is symmetric and would
+        // fault the seam's / cancel's / take's own writes ("global concurrency token is symmetric"), and a scoped
+        // ExecuteUpdate CAS is unsupported by the in-memory unit-test provider (the same tradeoff gh#263 took).
         OrderStatus current = await database.Orders
             .AsNoTracking()
             .Where(candidate => candidate.Id == order.Id)

@@ -111,10 +111,10 @@ public class OrderExecutionServiceModifyTests
 
         result.Outcome.Should().Be(ExecutionOutcome.Modified);
         result.Order.Should().BeNull(); // no new venue order -- the order keeps its handle
-        result.Decision!.ApprovedQuantity.Should().Be(4);
+        result.Decision!.ApprovedQuantity.Should().Be(4); // the gate approved the unchanged size...
         A.CallTo(() => _venue.ModifyOrderAsync(
-            AccountId, WorkingOrderKey, new Price(5_000m), A<Price?>._, 4, A<CancellationToken>._))
-            .MustHaveHappenedOnceExactly();
+            AccountId, WorkingOrderKey, new Price(5_000m), A<Price?>._, null, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly(); // ...but the venue is sent null size = "leave unchanged" (gh#270), preserving queue position
     }
 
     [Fact]
