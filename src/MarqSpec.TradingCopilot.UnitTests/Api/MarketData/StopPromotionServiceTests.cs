@@ -22,7 +22,7 @@ public class StopPromotionServiceTests
 {
     private readonly Guid _operator = Guid.NewGuid();
     private readonly string _database = Guid.NewGuid().ToString();
-    private readonly IOrderExecutor _venue = A.Fake<IOrderExecutor>();
+    private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
     private static VenueId Venue => VenueId.Parse("projectx");
     private static VenueContractId Contract => VenueContractId.Create(Venue, "CON.F.US.MES.U26");
 
@@ -111,6 +111,18 @@ public class StopPromotionServiceTests
             Staging = staging,
         });
         await seed.SaveChangesAsync();
+
+        // Venue truth for the position-awareness check (gh#183 follow-up): by default the seeded position is OPEN
+        // on the entered side, so a due stop promotes exactly as before. Tests that exercise the skip override this.
+        IReadOnlyList<PositionSnapshot> open =
+        [
+            new PositionSnapshot(
+                VenueAccountId.Create(Venue, "9001"),
+                VenueContractId.Create(Venue, instrument),
+                side == OrderSide.Buy ? 2 : -2,
+                new Price(entry)),
+        ];
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).Returns(open);
         return orderId;
     }
 
@@ -238,5 +250,162 @@ public class StopPromotionServiceTests
         await act.Should().ThrowAsync<InvalidOperationException>();
         await using TradingCopilotDbContext reload = Context();
         (await reload.StopPlans.IgnoreQueryFilters().SingleAsync()).Staging.Should().Be(StopStaging.Hidden);
+    }
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldSkipPromotion_WhenTheVenueReportsThePositionFlat()
+    {
+        await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m); // a due stop: bid 5296 is within the 1.00 band
+        await using TradingCopilotDbContext context = Context();
+
+        // The position has already been flattened (a manual flatten, the actual stop firing, auto-flatten): the
+        // venue reports nothing open. Promoting now would place a native protective stop for a flat position -- a
+        // live resting order with no position behind it (gh#183). Skip, leaving the plan for OcoExitService to retire.
+        IReadOnlyList<PositionSnapshot> flat = [];
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).Returns(flat);
+
+        int promoted = await Service(context).PromoteForQuoteAsync(Venue, "CON.F.US.MES.U26", bid: 5_296m, ask: 5_296.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(0);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.StopPlans.IgnoreQueryFilters().SingleAsync()).Staging.Should().Be(StopStaging.Hidden); // untouched
+    }
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldSkipPromotion_WhenThePositionHasReversed()
+    {
+        await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        await using TradingCopilotDbContext context = Context();
+
+        // A stop-and-reverse during the outage window: the long is gone and a SHORT is now open on the contract. A
+        // long's protective sell-stop must not be placed against a short position -- that is net exposure on the
+        // wrong side, not the position this plan protects.
+        IReadOnlyList<PositionSnapshot> reversed =
+        [
+            new PositionSnapshot(VenueAccountId.Create(Venue, "9001"), Contract, -3, new Price(5_296m)),
+        ];
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).Returns(reversed);
+
+        int promoted = await Service(context).PromoteForQuoteAsync(Venue, "CON.F.US.MES.U26", bid: 5_296m, ask: 5_296.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(0);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldSkipPromotion_WhenThePositionCannotBeConfirmed()
+    {
+        await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        await using TradingCopilotDbContext context = Context();
+
+        // The venue cannot be reached to confirm the position. Uncertainty resolves to the safe state (§9): do not
+        // promote on an unverified assumption. The native safety stop remains the floor and the next quote retries.
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("venue unreachable"));
+
+        int promoted = await Service(context).PromoteForQuoteAsync(Venue, "CON.F.US.MES.U26", bid: 5_296m, ask: 5_296.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(0);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.StopPlans.IgnoreQueryFilters().SingleAsync()).Staging.Should().Be(StopStaging.Hidden);
+    }
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldSelfCancelAndNotClobber_WhenThePlanIsRetiredConcurrentlyDuringPlacement()
+    {
+        // The position reads open, so promotion transmits. But WHILE the place is in flight, OCO-cancel-on-exit
+        // retires the plan (Hidden -> Retired) as the position goes flat. The promotion must, on re-reading the
+        // staging, find it no longer Hidden and (a) NOT clobber Retired back to Native, and (b) cancel the native
+        // stop it just placed -- it is now a dangling resting order with no position behind it (the gh#183 hazard).
+        await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        await using TradingCopilotDbContext context = Context();
+
+        // Simulate the concurrent retire as the side effect of the placement round-trip (a separate context, as the
+        // OcoExitService would use). "STOP-1" is the venue handle the placement returns, and the leg to cancel.
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .ReturnsLazily(async (OrderRequest r, CancellationToken _) =>
+            {
+                await using TradingCopilotDbContext concurrent = Context();
+                StopPlanRecord plan = await concurrent.StopPlans.IgnoreQueryFilters().SingleAsync();
+                plan.Staging = StopStaging.Retired;
+                await concurrent.SaveChangesAsync();
+                return new PlacedOrder(r.Account, "STOP-1", DateTimeOffset.UnixEpoch);
+            });
+
+        int promoted = await Service(context).PromoteForQuoteAsync(Venue, "CON.F.US.MES.U26", bid: 5_296m, ask: 5_296.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(0);
+        // The just-placed dangling stop is cancelled by the promoter itself -- not left for another sweep to miss.
+        A.CallTo(() => _venue.CancelOrderAsync(A<VenueAccountId>._, "STOP-1", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        // The winner's Retired staging survives -- never clobbered back to Native.
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.StopPlans.IgnoreQueryFilters().SingleAsync()).Staging.Should().Be(StopStaging.Retired);
+    }
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldNotThrowAndLeaveRetired_WhenTheDanglingLegCannotBeCancelled()
+    {
+        // Same lost race, but the self-cancel itself fails (the venue rejects it). The pass must not throw -- the
+        // failure is the synthetic_risk case (a live resting order with no position behind it), logged for manual
+        // intervention -- and it must still not clobber the winner's Retired.
+        await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        await using TradingCopilotDbContext context = Context();
+
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .ReturnsLazily(async (OrderRequest r, CancellationToken _) =>
+            {
+                await using TradingCopilotDbContext concurrent = Context();
+                StopPlanRecord plan = await concurrent.StopPlans.IgnoreQueryFilters().SingleAsync();
+                plan.Staging = StopStaging.Retired;
+                await concurrent.SaveChangesAsync();
+                return new PlacedOrder(r.Account, "STOP-1", DateTimeOffset.UnixEpoch);
+            });
+        A.CallTo(() => _venue.CancelOrderAsync(A<VenueAccountId>._, A<string>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("venue rejected the cancel"));
+
+        int promoted = await Service(context).PromoteForQuoteAsync(Venue, "CON.F.US.MES.U26", bid: 5_296m, ask: 5_296.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(0);
+        A.CallTo(() => _venue.CancelOrderAsync(A<VenueAccountId>._, "STOP-1", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.StopPlans.IgnoreQueryFilters().SingleAsync()).Staging.Should().Be(StopStaging.Retired);
+    }
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldPromoteTheOtherStops_WhenOneLosesARaceInTheSamePass()
+    {
+        // Two due stops in one pass, both positions open. On the FIRST placement a concurrent OCO-exit retires plan
+        // A (only). Whichever order that first placement was for, A ends up self-cancelled and B still promotes --
+        // proving one plan's lost race is isolated from the other's (the per-record reconcile, not a batched save
+        // that would roll back B too).
+        Guid orderA = await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        Guid orderB = await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        await using TradingCopilotDbContext context = Context();
+
+        bool firstPlace = true;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .ReturnsLazily(async (OrderRequest r, CancellationToken _) =>
+            {
+                if (firstPlace)
+                {
+                    firstPlace = false;
+                    await using TradingCopilotDbContext concurrent = Context();
+                    StopPlanRecord planA = await concurrent.StopPlans.IgnoreQueryFilters().SingleAsync(p => p.OrderId == orderA);
+                    planA.Staging = StopStaging.Retired;
+                    await concurrent.SaveChangesAsync();
+                }
+
+                return new PlacedOrder(r.Account, "STOP-1", DateTimeOffset.UnixEpoch);
+            });
+
+        int promoted = await Service(context).PromoteForQuoteAsync(Venue, "CON.F.US.MES.U26", bid: 5_296m, ask: 5_296.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(1); // exactly B
+        A.CallTo(() => _venue.CancelOrderAsync(A<VenueAccountId>._, "STOP-1", A<CancellationToken>._)).MustHaveHappenedOnceExactly(); // A's dangling leg
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.StopPlans.IgnoreQueryFilters().Where(p => p.OrderId == orderA).SingleAsync()).Staging.Should().Be(StopStaging.Retired);
+        (await reload.StopPlans.IgnoreQueryFilters().Where(p => p.OrderId == orderB).SingleAsync()).Staging.Should().Be(StopStaging.Native);
     }
 }
