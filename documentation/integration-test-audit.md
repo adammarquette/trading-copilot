@@ -105,7 +105,7 @@ with status**, not a copy of the bodies. Statuses current as of the gh#160 reali
 | [#192](https://github.com/adammarquette/trading-copilot/issues/192) | Connection-loss orphan handling (drop → orphan, reconnect → re-arm, restart reconcile) | `OrphanHandlingIntegrationTests.cs` (+ `TestHost/OrphanTestPostgresFactory.cs`) | ✅ Delivered (gh#241) |
 | [#223](https://github.com/adammarquette/trading-copilot/issues/223) | Decision-state rehydration & R-20-through-restart | `StateRehydrationIntegrationTests.cs` (+ `TestHost/RehydrationTestPostgresFactory.cs`) | ✅ Delivered (gh#251) |
 | [#194](https://github.com/adammarquette/trading-copilot/issues/194) | EOD settlement reconcile (venue-as-truth, settlement re-mark, window awareness, declare-unknown) | `SettlementReconcileIntegrationTests.cs` (+ `TestHost/SettlementTestPostgresFactory.cs`) | ✅ Delivered (gh#257) |
-| [#184](https://github.com/adammarquette/trading-copilot/issues/184) | OCO-cancel-on-exit (retire protection on flat exit; never on a partial) | `OcoCancelOnExitIntegrationTests.cs` (+ `TestHost/OcoExitTestPostgresFactory.cs`) | ✅ Delivered (this PR) |
+| [#184](https://github.com/adammarquette/trading-copilot/issues/184) | OCO-cancel-on-exit (retire protection on flat exit; never on a partial) | `OcoCancelOnExitIntegrationTests.cs` (+ `TestHost/OcoExitTestPostgresFactory.cs`) | ✅ Delivered (gh#258) |
 | [#210](https://github.com/adammarquette/trading-copilot/issues/210) | *(work:code)* connection credential rotation + soft-delete | Coding Agent — `ConnectionEndpoints.cs` | 📝 Open · filed by gh#160 |
 
 ---
