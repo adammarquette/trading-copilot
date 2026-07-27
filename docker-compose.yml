@@ -84,11 +84,32 @@ services:
       # ADR-0015) and which market-data universe they are entitled to (Simulated is the fail-safe default).
       ProjectX__CredentialKey: "${ProjectX__CredentialKey:-projectx}"
       ProjectX__DataTier: "${ProjectX__DataTier:-Simulated}"
-      # Market-data ingestion (R-1, gh#13) -- OPT-IN. Empty (the default) disables the ingestion host; set a
-      # symbol to subscribe. Compose only forwards keys named here, so this mapping is what makes the .env value
-      # reach the app (an unset var arrives as "" and normalises back to disabled).
-      Ingestion__Symbols__0: "${Ingestion__Symbols__0:-}"
-      Ingestion__ReconnectDelaySeconds: "${Ingestion__ReconnectDelaySeconds:-5}"
+      # Market-data ingestion (R-1, gh#13) -- OPT-IN. No symbols means the host stays idle; set one to subscribe.
+      #
+      # The watchlist is ENUMERATED AND CAPPED AT EIGHT (0-7), because compose cannot forward an open-ended
+      # indexed list. Eight covers a realistic futures watchlist including micros (ES, NQ, CL, GC, RTY, YM, MES,
+      # MNQ); a ninth needs another line here, which is a deliberate edit rather than a silent limit. Before
+      # gh#304 only __0 was forwarded while .env.example told operators to add __1, __2 -- so a multi-symbol
+      # watchlist bound exactly one symbol and said nothing, leaving R-1's "watchlist user-configurable without
+      # redeploy" unmet under the documented run path.
+      #
+      # The slots are INDEPENDENT, not positional: the .NET binder collects whatever indices are present, so
+      # setting __2 alone binds correctly and gaps are harmless (verified against the binder, gh#236).
+      #
+      # Null pass-through, not "${...:-}": an empty value BINDS an empty entry into the array. Harmless for a
+      # symbol list, which filters blanks -- but absent is what actually means "not configured", and the
+      # difference stops mattering the moment a future option treats "" and absent differently.
+      Ingestion__Symbols__0:
+      Ingestion__Symbols__1:
+      Ingestion__Symbols__2:
+      Ingestion__Symbols__3:
+      Ingestion__Symbols__4:
+      Ingestion__Symbols__5:
+      Ingestion__Symbols__6:
+      Ingestion__Symbols__7:
+      # Null pass-through for the same reason as the Flatten block below: the app already defaults this to 5 s,
+      # and restating it here would make compose a second source of truth for it.
+      Ingestion__ReconnectDelaySeconds:
       # The clean-historical bar store (R-1, gh#302) -- the SECOND market-data path, and the system of record.
       # Null pass-through throughout: the app already defaults the cadence and lookback, and an empty value
       # would bind over those defaults rather than leaving them alone. Unset means the backfill stays idle.
