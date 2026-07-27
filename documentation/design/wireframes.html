@@ -636,6 +636,37 @@
   .cop-ann{align-self:start}
   @media(max-width:900px){.cop-wrap{grid-template-columns:1fr}}
 
+  /* ---------- news & signals feed ---------- */
+  .feed{margin-top:44px}
+  .feed-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .feed-pick{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--on-hi);background:var(--surface-2);border:1px solid var(--outline-soft);border-radius:8px;padding:5px 11px;font-family:var(--mono)}
+  .feed-pick .car{color:var(--on-dim);font-size:10px}
+  .feed-chip{font-size:11px;padding:4px 10px;border-radius:16px;border:1px solid var(--outline-soft);color:var(--on-med);background:var(--surface-1)}
+  .feed-chip.on{background:var(--primary-ctr);border-color:transparent;color:var(--primary);font-weight:600}
+  .feed-list{display:flex;flex-direction:column;background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-l);overflow:hidden}
+  .fitem{display:grid;grid-template-columns:66px 1fr 132px;gap:12px;align-items:start;padding:12px 14px;border-bottom:1px solid var(--outline-soft)}
+  .fitem:last-child{border-bottom:0}
+  .fitem.hot{background:linear-gradient(90deg,var(--primary-ctr),transparent 55%)}
+  .fitem.muted-item{opacity:.55}
+  .fsrc{display:flex;flex-direction:column;gap:3px;font-family:var(--mono);font-size:9px}
+  .fsrc .s{font-weight:700;letter-spacing:.04em;color:var(--on-med)}
+  .fsrc .t{color:var(--on-dim)}
+  .fmain{min-width:0}
+  .fhead{font-size:12.5px;color:var(--on-hi);line-height:1.4}
+  .fmeta{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px}
+  .finst{font-family:var(--mono);font-size:10px;font-weight:600;color:var(--primary);background:var(--primary-ctr);border-radius:5px;padding:1px 7px}
+  .fwhy{font-size:10px;color:var(--on-dim)}
+  .fright{display:flex;flex-direction:column;align-items:flex-end;gap:7px}
+  .frel{display:flex;align-items:center;gap:6px;font-size:8.5px;color:var(--on-dim);letter-spacing:.03em;text-transform:uppercase}
+  .frel .rtrack{width:56px;height:6px;background:var(--surface-3);border-radius:4px;overflow:hidden}
+  .frel .rfill{display:block;height:100%;background:var(--primary);opacity:.75;border-radius:4px}
+  .frow2{display:flex;align-items:center;gap:8px}
+  .fstar{font-size:15px;line-height:1;color:var(--on-dim);background:none;border:none;cursor:pointer;padding:0}
+  .fstar.on{color:var(--warn)}
+  .fsent{display:flex;gap:4px}
+  .fsent .fth{width:26px;height:22px;border-radius:6px;border:1px solid var(--outline);display:grid;place-items:center;font-size:11px;background:none}
+  @media(max-width:720px){.fitem{grid-template-columns:1fr}.fright{flex-direction:row;align-items:center;justify-content:space-between}}
+
   /* ---------- account switcher ---------- */
   .acct{margin-top:44px}
   .acct-drop{max-width:540px;background:var(--surface-2);border:1px solid var(--outline);border-radius:var(--r-l);overflow:hidden;box-shadow:var(--e2)}
@@ -916,7 +947,7 @@
                   <div class="chat__in">Ask the co-pilot — quotes, journal, edit a rule… <span class="send">➤</span></div>
                 </div>
                 <div class="bd">
-                  <div class="bd__h">News &amp; signals <span class="tag">R-2</span></div>
+                  <div class="bd__h">News &amp; signals <span class="tag">R-2</span> <span class="plannedtag">[D2]</span></div>
                   <div class="news">
                     <div class="ni"><div class="ni__t">Fed's Barkin: policy “moderately restrictive,” data-dependent</div>
                       <div class="ni__m"><span class="src">TIINGO</span> · 2m · <span class="pos">ES ▲</span> ES,SPY</div></div>
@@ -1000,7 +1031,7 @@
                 <div class="pane ind planned-pane"><span class="lab">RSI <span class="plannedtag">R-3 · planned</span></span><div class="js-rsi" data-h="52"></div></div>
               </div>
               <div class="bottomdock" style="grid-template-columns:1fr;height:120px">
-                <div class="bd"><div class="bd__h">Chat · News <span class="plannedtag">chat [A4]</span> <span class="chip ghost">2 tabs</span> <span class="tag" style="margin-left:auto">R-6 · R-2</span></div>
+                <div class="bd"><div class="bd__h">Chat · News <span class="plannedtag">chat [A4] · news [D2]</span> <span class="chip ghost">2 tabs</span> <span class="tag" style="margin-left:auto">R-6 · R-2</span></div>
                   <div class="chat"><div class="msg ai">SPY leading; long scalp sets up at 5230.</div></div>
                 </div>
               </div>
@@ -1132,7 +1163,7 @@
           <div class="msmini"><h4>Positions</h4>
             <div class="li"><span>ES · long</span><span class="mono pos">+2 · +$150</span></div>
             <div class="li"><span>NQ · limit</span><span class="mono" style="color:var(--on-dim)">working</span></div></div>
-          <div class="msmini"><h4>News &amp; signals</h4>
+          <div class="msmini"><h4>News &amp; signals <span class="plannedtag">[D2]</span></h4>
             <div class="li"><span>Barkin: “moderately restrictive”</span><span class="mono pos">ES▲</span></div>
             <div class="li"><span>NVDA extends AI-capex gains</span><span class="mono" style="color:var(--on-dim)">NQ</span></div></div>
           <div class="msmini"><h4>Journal</h4>
@@ -1801,8 +1832,79 @@
     </div>
   </section>
 
+  <section class="feed">
+    <div class="cap"><h2>News &amp; signals feed — what's moving your instruments</h2><span class="bp">R-2 · [D2]</span>
+      <span class="muted">the dock's News tab, expanded · ingestion, dedup, salience weighting &amp; starring are [D2] (Phase 2, not built yet); the sources and the model are the design</span></div>
+
+    <div class="feed-bar">
+      <span class="feed-pick">ES <span class="car">▾</span></span>
+      <span class="feed-chip on">All sources</span><span class="feed-chip">Finnhub</span><span class="feed-chip">Tiingo</span>
+      <span class="feed-chip">★ Starred only</span>
+      <span class="plannedtag" style="margin-left:auto">[D2] · not live</span>
+    </div>
+
+    <div class="feed-list">
+      <div class="fitem hot">
+        <div class="fsrc"><span class="s">TIINGO</span><span class="t">2m ago</span></div>
+        <div class="fmain">
+          <div class="fhead">Fed's Barkin: policy "moderately restrictive," data-dependent</div>
+          <div class="fmeta"><span class="finst">ES</span><span class="finst">SPY</span><span class="fwhy">↑ weighted — you star Fed / macro prints</span></div>
+        </div>
+        <div class="fright">
+          <div class="frel"><span>salience</span><span class="rtrack"><span class="rfill" style="width:88%"></span></span></div>
+          <div class="frow2"><button class="fstar on" aria-label="Important" aria-pressed="true">★</button>
+            <div class="fsent"><span class="fth" title="Bullish">👍</span><span class="fth" title="Bearish">👎</span></div></div>
+        </div>
+      </div>
+      <div class="fitem">
+        <div class="fsrc"><span class="s">FINNHUB</span><span class="t">14m ago</span></div>
+        <div class="fmain">
+          <div class="fhead">ISM services 52.1, above consensus</div>
+          <div class="fmeta"><span class="finst">ES</span><span class="finst">NQ</span><span class="fwhy">macro print · global topic</span></div>
+        </div>
+        <div class="fright">
+          <div class="frel"><span>salience</span><span class="rtrack"><span class="rfill" style="width:64%"></span></span></div>
+          <div class="frow2"><button class="fstar" aria-label="Important" aria-pressed="false">☆</button>
+            <div class="fsent"><span class="fth" title="Bullish">👍</span><span class="fth" title="Bearish">👎</span></div></div>
+        </div>
+      </div>
+      <div class="fitem">
+        <div class="fsrc"><span class="s">FINNHUB</span><span class="t">31m ago</span></div>
+        <div class="fmain">
+          <div class="fhead">NVDA extends gains on AI-capex commentary</div>
+          <div class="fmeta"><span class="finst">NQ</span><span class="fwhy">megacap → index, via your ticker map</span></div>
+        </div>
+        <div class="fright">
+          <div class="frel"><span>salience</span><span class="rtrack"><span class="rfill" style="width:52%"></span></span></div>
+          <div class="frow2"><button class="fstar" aria-label="Important" aria-pressed="false">☆</button>
+            <div class="fsent"><span class="fth" title="Bullish">👍</span><span class="fth" title="Bearish">👎</span></div></div>
+        </div>
+      </div>
+      <div class="fitem muted-item">
+        <div class="fsrc"><span class="s">TIINGO</span><span class="t">1h ago</span></div>
+        <div class="fmain">
+          <div class="fhead">Retailer pre-announces soft holiday guidance</div>
+          <div class="fmeta"><span class="fwhy">no instrument match · muted — down-weighted, not hidden</span></div>
+        </div>
+        <div class="fright">
+          <div class="frel"><span>salience</span><span class="rtrack"><span class="rfill" style="width:14%"></span></span></div>
+          <div class="frow2"><button class="fstar" aria-label="Important" aria-pressed="false">☆</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ann" style="margin-top:16px">
+      <div class="annitem"><b>A signal template, not just headlines.</b> News from <b>Finnhub</b> (equities / index context — SPY↔ES, QQQ↔NQ) and <b>Tiingo</b>, <b>deduped</b>, attached to the instruments you trade via the ticker↔instrument map (see <i>News relevance</i> below), each carrying a <b>salience</b> weight and an importance <b>star</b>.</div>
+      <div class="annitem"><b>The star is a SOFT weight, not a risk control.</b> ★ raises the salience of <b>similar future news</b> — by instrument / topic / source / semantic similarity — so it surfaces higher and informs the co-pilot more. It <b>never gates, blocks, or sizes a trade</b>: the risk gate is <b>untouched by news</b>. Un-star or <b>mute</b> to down-weight, with a floor so material items aren't hidden (R-2 / R-9, ADR-0014, gh#27).</div>
+      <div class="annitem"><b>[D2], not built yet.</b> Ingestion, dedup, salience weighting and the starring feedback (<code>SoftSignalFeedback</code>) are <b>Phase 2 [D2]</b> — drawn here as the design. <b>Sentiment 👍/👎 stays deferred</b> (R-2): a subagent tags it or you rate it later.</div>
+      <div class="annitem"><b>It feeds suggestions and chat — never orders.</b> A weighted signal informs the co-pilot's <b>suggestions</b> (R-4, Phase 3) and its <b>chat</b> answers (R-6); it is one input to a <i>proposal</i>, and <b>enforcement still lives below the model</b> — no headline reaches the venue or moves a limit.</div>
+    </div>
+
+    <div class="rej-why" style="margin-top:12px">The feed turns raw headlines into <b>weighted signals</b> attached to what you trade — the R-2 half of the co-pilot's context. The design decision that matters: news is <b>soft</b>. Starring, muting and salience shape <b>what surfaces and how much it informs a suggestion</b> (ADR-0014); none of it is a risk control, and the <b>gate never sees a headline</b>. Today the <b>sources are declared</b> (Finnhub / Tiingo on the R-17 seam) but the <b>ingestion, dedup, weighting and starring are [D2]</b> (Phase 2, unbuilt), and <b>sentiment is deferred</b> — drawn here to validate the feed UX and the soft-signal contract before it is built.</div>
+  </section>
+
   <section class="nr">
-    <div class="cap"><h2>News relevance — mapping, topics &amp; feedback</h2><span class="bp">R-2 · ADR-0014</span>
+    <div class="cap"><h2>News relevance — mapping, topics &amp; feedback</h2><span class="bp">R-2 · ADR-0014 · [D2]</span>
       <span class="muted">what news attaches to what you trade · <b>star what matters</b> to weight similar future items · the co-pilot suggests, you curate</span></div>
     <div class="nr-grid">
       <div class="nrcard">
@@ -2092,7 +2194,7 @@
       <div><span class="tag">R-14</span> Practice / live mode chip — safety surface</div>
       <div><span class="tag">R-6</span> Co-pilot chat — invokes platform tools ([A4] — the conversational engine is unbuilt; see the Co-pilot chat surface)</div>
       <div><span class="tag">R-6 · [A4]</span> Co-pilot chat surface — grounded (retrieval + citations), tool-calling, and strictly propose-only: writes become a drafted ticket or hold-to-confirm and re-pass the gate; the conversational engine + retrieval are [A4] (unbuilt), the tools + gate it routes through are shipped</div>
-      <div><span class="tag">R-2</span> News &amp; signals — Finnhub + Tiingo feed</div>
+      <div><span class="tag">R-2 · [D2]</span> News &amp; signals feed — Finnhub + Tiingo, deduped, attached to your instruments with a salience weight + importance star; a soft signal (never a risk control) that feeds suggestions / chat, not orders; ingestion + weighting are [D2] (unbuilt)</div>
       <div><span class="tag">R-8 · R-9</span> Positions, fills, journal</div>
       <div><span class="tag">Kill</span> Kill switch — always visible, all breakpoints</div>
       <div><span class="tag">ADR-0006</span> Multi-screen — detachable pop-out windows, one per monitor (web-native)</div>
@@ -2118,7 +2220,7 @@
       <div><span class="tag">R-6 · ADR-0009</span> AI refinement loop — journal + backtest → follow-up questions → confirmed rule / strategy refinements</div>
       <div><span class="tag">R-13 · ADR-0007</span> Kill switch &amp; auto-flatten — countdown escalation, native-first flatten sequence, immutable audit; connection-loss → synthetic-orphan emergency</div>
       <div><span class="tag">R-18 · R-20</span> Sign in — login for a web-exposed deployment; the operator's account is seeded at first start, data access scoped to it at the data layer</div>
-      <div><span class="tag">R-2</span> News relevance — ticker↔instrument maps, per-instrument + global topics (AI-suggested); sentiment thumbs</div>
+      <div><span class="tag">R-2 · [D2]</span> News relevance — ticker↔instrument maps, per-instrument + global topics (AI-suggested); sentiment thumbs (deferred); config for the feed's salience, [D2] unbuilt</div>
     </div>
   </section>
 
