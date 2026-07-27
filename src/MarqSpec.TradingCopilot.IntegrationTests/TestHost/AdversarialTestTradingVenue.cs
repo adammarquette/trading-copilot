@@ -33,6 +33,11 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private Func<Task>? _onPlaceOrder;
     private readonly List<string> _placedVenueOrderIds = [];
     private bool _allCancelsThrow;
+    // Historical-bar backfill (gh#303): the venue FEEDS seeded bars via GetBarsAsync; it can be told to drop the
+    // HistoricalBars capability (refuse loudly, R-17) or to throw, but it never decides the merge — it only feeds.
+    private readonly List<Bar> _seededBars = [];
+    private bool _historicalBarsUnsupported;
+    private bool _getBarsThrows;
 
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
 
@@ -128,6 +133,32 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// path when the just-placed dangling leg cannot be pulled (gh#274).</summary>
     public void MakeCancelsThrow() => _allCancelsThrow = true;
 
+    /// <summary>Feeds one closed/forming OHLCV bar that <c>GetBarsAsync</c> will return within its window (gh#303).
+    /// The stub only feeds inputs — the backfill decides which are final and how to merge.</summary>
+    public void SeedBar(DateTimeOffset openTime, decimal open, decimal high, decimal low, decimal close, long volume) =>
+        _seededBars.Add(new Bar(openTime, new Price(open), new Price(high), new Price(low), new Price(close), volume));
+
+    /// <summary>Clears the fed bars — e.g. to restate the same bucket with a revised value across passes (gh#303).</summary>
+    public void ClearBars() => _seededBars.Clear();
+
+    /// <summary>Drops <see cref="VenueCapability.HistoricalBars"/>, so <c>GetBarsAsync</c> refuses loudly with
+    /// <see cref="VenueCapabilityNotSupportedException"/> (R-17) — a venue with no history to give (gh#303).</summary>
+    public void MakeHistoricalBarsUnsupported() => _historicalBarsUnsupported = true;
+
+    /// <summary>Makes <c>GetBarsAsync</c> THROW — a venue/gateway failure the backfill must ride out and retry next
+    /// pass, never crashing the host (gh#303).</summary>
+    public void MakeGetBarsThrow() => _getBarsThrows = true;
+
+    /// <summary>Whether the venue has dropped historical-bar support (see <see cref="MakeHistoricalBarsUnsupported"/>).</summary>
+    internal bool HistoricalBarsUnsupported => _historicalBarsUnsupported;
+
+    /// <summary>Whether <c>GetBarsAsync</c> should throw (see <see cref="MakeGetBarsThrow"/>).</summary>
+    internal bool GetBarsThrows => _getBarsThrows;
+
+    /// <summary>The fed bars whose open falls in the requested window — the stub echoes inputs, nothing computed.</summary>
+    internal IReadOnlyList<Bar> BarsIn(DateTimeOffset from, DateTimeOffset to) =>
+        [.. _seededBars.Where(bar => bar.OpenTime >= from && bar.OpenTime <= to)];
+
     /// <summary>Clears seeded positions, close behaviour, and recorded close calls — call at the start of each test.</summary>
     public void ResetPositions()
     {
@@ -145,6 +176,9 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _onPlaceOrder = null;
         _placedVenueOrderIds.Clear();
         _allCancelsThrow = false;
+        _seededBars.Clear();
+        _historicalBarsUnsupported = false;
+        _getBarsThrows = false;
     }
 
     internal IReadOnlyList<WorkingOrder> WorkingOrdersFor(VenueAccountId account) =>
@@ -222,9 +256,24 @@ internal class AdversarialTestTradingVenue : ITradingVenue
 
     public int AdapterLogicVersion => 2;
 
-    public VenueCapabilities Capabilities => _factory.BracketsUnsupported
-        ? VenueCapabilities.Of(VenueCapability.HistoricalBars | VenueCapability.Quotes)
-        : VenueCapabilities.Of(VenueCapability.HistoricalBars | VenueCapability.Quotes | VenueCapability.BracketOrders);
+    public VenueCapabilities Capabilities
+    {
+        get
+        {
+            VenueCapability capabilities = VenueCapability.Quotes;
+            if (!_factory.HistoricalBarsUnsupported)
+            {
+                capabilities |= VenueCapability.HistoricalBars;
+            }
+
+            if (!_factory.BracketsUnsupported)
+            {
+                capabilities |= VenueCapability.BracketOrders;
+            }
+
+            return VenueCapabilities.Of(capabilities);
+        }
+    }
 
     public int PlacedOrdersCount => _placedOrders.Count;
     public IReadOnlyList<OrderRequest> PlacedOrderRequests => _placedOrders.AsReadOnly();
@@ -274,8 +323,17 @@ internal class AdversarialTestTradingVenue : ITradingVenue
         DateTimeOffset from,
         DateTimeOffset to,
         TimeSpan barSize,
-        CancellationToken cancellationToken = default) =>
-        Task.FromResult<IReadOnlyList<Bar>>([]);
+        CancellationToken cancellationToken = default)
+    {
+        // Refuse loudly when the capability is absent (R-17) — the same seam the real adapter enforces at the call.
+        Capabilities.Require(VenueCapability.HistoricalBars);
+        if (_factory.GetBarsThrows)
+        {
+            throw new InvalidOperationException("Venue history fetch failed (test).");
+        }
+
+        return Task.FromResult(_factory.BarsIn(from, to));
+    }
 
     public async IAsyncEnumerable<Quote> StreamQuotesAsync(
         VenueContractId contract,
