@@ -6,9 +6,11 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.MarketData;
 
@@ -23,6 +25,7 @@ public class StopPromotionServiceTests
     private readonly Guid _operator = Guid.NewGuid();
     private readonly string _database = Guid.NewGuid().ToString();
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
+    private readonly IIndicatorSource _indicators = A.Fake<IIndicatorSource>();
     private static VenueId Venue => VenueId.Parse("projectx");
     private static VenueContractId Contract => VenueContractId.Create(Venue, "CON.F.US.MES.U26");
 
@@ -43,7 +46,7 @@ public class StopPromotionServiceTests
             new FixedUser(Guid.Empty));
 
     private StopPromotionService Service(TradingCopilotDbContext context) =>
-        new(context, NullLogger<StopPromotionService>.Instance);
+        new(context, _indicators, Options.Create(new IndicatorOptions()), NullLogger<StopPromotionService>.Instance);
 
     private async Task<Guid> SeedStagedStopAsync(
         OrderSide side = OrderSide.Buy,
@@ -52,7 +55,9 @@ public class StopPromotionServiceTests
         decimal safetyStop = 5_290m,
         int promotionTicks = 4,
         StopStaging staging = StopStaging.Hidden,
-        string instrument = "CON.F.US.MES.U26")
+        string instrument = "CON.F.US.MES.U26",
+        StopProximityMetric metric = StopProximityMetric.Ticks,
+        decimal? proximityValue = null)
     {
         Guid firmId = Guid.NewGuid();
         Guid connectionId = Guid.NewGuid();
@@ -106,8 +111,8 @@ public class StopPromotionServiceTests
             EntryPrice = entry,
             ActualStopPrice = actualStop,
             SafetyStopPrice = safetyStop,
-            ProximityMetric = StopProximityMetric.Ticks,
-            ProximityValue = promotionTicks,
+            ProximityMetric = metric,
+            ProximityValue = proximityValue ?? promotionTicks,
             Staging = staging,
         });
         await seed.SaveChangesAsync();
@@ -193,6 +198,99 @@ public class StopPromotionServiceTests
             .Single(call => call.Method.Name == nameof(IOrderExecutor.PlaceOrderAsync))
             .Arguments.Get<OrderRequest>(0)!;
         sent.Quantity.Should().Be(2); // capped at order.Size, NOT the net (3)
+    }
+
+    // --- ATR bands: the metric the domain refused until gh#310 measured it (gh#311) ---
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldPromoteAnAtrBand_AtTheDistanceTheAverageTrueRangeImplies()
+    {
+        // 2 x ATR(1.50) = a 3.00 band on a stop at 5295 -> promote once the bid reaches 5298.00, not before.
+        // The multiple is the SAME number as the default tick band (2), so a promotion at the tick distance
+        // (2 x 0.25 = 0.50) would still be caught here rather than passing by coincidence.
+        await SeedStagedStopAsync(
+            OrderSide.Buy, actualStop: 5_295m, metric: StopProximityMetric.AverageTrueRange, proximityValue: 2m);
+        A.CallTo(() => _indicators.GetAverageTrueRangeAsync(
+            InstrumentId.Parse("MES"), A<int>._, A<DateTimeOffset>._, A<CancellationToken>._)).Returns(1.5m);
+
+        await using (TradingCopilotDbContext outside = Context())
+        {
+            int tooFar = await Service(outside).PromoteForQuoteAsync(
+                Venue, "CON.F.US.MES.U26", bid: 5_298.25m, ask: 5_298.5m, _venue, CancellationToken.None);
+            tooFar.Should().Be(0);
+        }
+
+        await using TradingCopilotDbContext atTheEdge = Context();
+        int promoted = await Service(atTheEdge).PromoteForQuoteAsync(
+            Venue, "CON.F.US.MES.U26", bid: 5_298m, ask: 5_298.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(1);
+        OrderRequest sent = Fake.GetCalls(_venue)
+            .Single(call => call.Method.Name == nameof(IOrderExecutor.PlaceOrderAsync))
+            .Arguments.Get<OrderRequest>(0)!;
+        sent.StopPrice.Should().Be(new Price(5_295m)); // the band moves promotion, never the stop itself
+    }
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldNotPromoteAnAtrBand_WhenNoAverageTrueRangeIsAvailable()
+    {
+        // Insufficient history, or a projection that has not caught up. The band is UNMEASURABLE, so there is no
+        // defensible distance -- and falling back to a default is the silent mis-measurement the original
+        // NotSupportedException existed to prevent. Fail closed: the always-native safety stop stays the floor.
+        await SeedStagedStopAsync(
+            OrderSide.Buy, actualStop: 5_295m, metric: StopProximityMetric.AverageTrueRange, proximityValue: 2m);
+        A.CallTo(() => _indicators.GetAverageTrueRangeAsync(
+                A<InstrumentId>._, A<int>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .Returns((decimal?)null);
+        await using TradingCopilotDbContext context = Context();
+
+        // A price far THROUGH the stop -- any band at all, including zero, would promote here.
+        int promoted = await Service(context).PromoteForQuoteAsync(
+            Venue, "CON.F.US.MES.U26", bid: 5_290m, ask: 5_290.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(0);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.StopPlans.IgnoreQueryFilters().SingleAsync()).Staging.Should().Be(StopStaging.Hidden);
+    }
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldReadTheAverageTrueRangeOnce_ForEveryPlanOnTheSameSeries()
+    {
+        // The watcher runs per quote on a hot path. One read per plan would put N queries on every tick, and the
+        // per-pass log line about a missing value would repeat per plan rather than once. Cached like positions.
+        await SeedStagedStopAsync(
+            OrderSide.Buy, actualStop: 5_295m, metric: StopProximityMetric.AverageTrueRange, proximityValue: 2m);
+        await SeedStagedStopAsync(
+            OrderSide.Buy, actualStop: 5_294m, metric: StopProximityMetric.AverageTrueRange, proximityValue: 2m);
+        A.CallTo(() => _indicators.GetAverageTrueRangeAsync(
+            A<InstrumentId>._, A<int>._, A<DateTimeOffset>._, A<CancellationToken>._)).Returns(1.5m);
+        await using TradingCopilotDbContext context = Context();
+
+        int promoted = await Service(context).PromoteForQuoteAsync(
+            Venue, "CON.F.US.MES.U26", bid: 5_296m, ask: 5_296.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(2);
+        A.CallTo(() => _indicators.GetAverageTrueRangeAsync(
+                A<InstrumentId>._, A<int>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task PromoteForQuoteAsync_ShouldNotReadTheAverageTrueRange_WhenNoPlanNeedsOne()
+    {
+        // A tick band must not pay for an indicator query -- and an ATR outage must not stop a tick plan promoting.
+        await SeedStagedStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        await using TradingCopilotDbContext context = Context();
+
+        int promoted = await Service(context).PromoteForQuoteAsync(
+            Venue, "CON.F.US.MES.U26", bid: 5_296m, ask: 5_296.25m, _venue, CancellationToken.None);
+
+        promoted.Should().Be(1);
+        A.CallTo(() => _indicators.GetAverageTrueRangeAsync(
+                A<InstrumentId>._, A<int>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
     }
 
     [Fact]

@@ -222,26 +222,25 @@ public class StopPlanPersistenceIntegrationTests : IClassFixture<StubbedVenuePos
     }
 
     [Fact]
-    public async Task AtrProximity_ShouldBeRefused_UntilBandResolutionMovesToTheCaller()
+    public async Task AtrProximity_ShouldRoundTripThroughPersistence_NowThatItIsMeasurable()
     {
-        // NOT-YET-SUPPORTED PIN (contract §2) — not a guard, and not counted as coverage. #153 refuses ATR
-        // proximity in the DOMAIN (StopPlan.Create throws NotSupportedException). The database deliberately
-        // does NOT encode that refusal — an ATR metric (3) satisfies CK_StopPlans_ProximityMetric_NotUnknown —
-        // so the domain rebuild is the only gate.
+        // FLIPPED PIN (#311). This was a NOT-YET-SUPPORTED PIN (contract §2): #153 refused ATR proximity in the
+        // DOMAIN (StopPlan.Create threw NotSupportedException) because no indicator pipeline could measure it,
+        // and the pin recorded that the DB deliberately does NOT encode that refusal — an ATR metric (3)
+        // satisfies CK_StopPlans_ProximityMetric_NotUnknown, so the domain rebuild was the only gate. #310
+        // landed the projection and #311 moved resolution to the caller, so the pin went red as designed and is
+        // now a real guard on the persist-then-reconstruct path it was reserving.
         //
-        // The indicator pipeline (R-3) LANDED in #310, so ATR is now measurable — and the refusal still
-        // stands, by design: #310 scoped the lift out because the band must resolve at the caller (the
-        // promotion watcher), never inside this immutable value object reconstructed from the database.
-        // #311 makes that change and deletes the throw. WHEN #311 LANDS, THIS TEST GOES RED: a deliberate
-        // reminder that the persist-then-reconstruct ATR path is now live and needs real coverage.
-        (Guid accountId, Guid operatorId) = await SeedTenantAsync("Topstep-AtrPin");
+        // What is guarded: an ATR plan must come back out of the database as an ATR plan. Reconstructing it as
+        // anything else — silently as ticks, the hazard #153 named — would promote the stop at a distance
+        // nobody chose, and nothing downstream could tell.
+        (Guid accountId, Guid operatorId) = await SeedTenantAsync("Topstep-AtrRoundTrip");
         Guid orderId = await SeedParentOrderAsync(accountId, OrderSide.Buy);
 
         StopPlanRecord atrPlan = PlanFor(
             operatorId, orderId, OrderSide.Buy, entry: 5_000m, actual: 4_990m, safety: 4_980m,
             metric: StopProximityMetric.AverageTrueRange, proximityValue: 2m);
 
-        // The DB accepts the ATR row — persistence is not where ATR is refused.
         await InsertStopPlanAsync(atrPlan);
 
         (StopPlanRecord record, Order order) = await QueryDbContextAsync(async db =>
@@ -251,10 +250,20 @@ public class StopPlanPersistenceIntegrationTests : IClassFixture<StubbedVenuePos
             return (r, o);
         });
 
-        // Reconstructing the domain plan for promotion (what StopPromotionService does) is where ATR is refused.
-        Action reconstruct = () => record.ToStopPlan(order);
-        reconstruct.Should().Throw<NotSupportedException>(
-            "until #311 moves band resolution to the caller, the domain refuses to rebuild an ATR plan rather than mis-measure it as ticks");
+        StopPlan plan = record.ToStopPlan(order);
+
+        plan.Proximity.Metric.Should().Be(
+            StopProximityMetric.AverageTrueRange,
+            "an ATR plan reconstructed as any other metric would promote at a distance nobody configured");
+        plan.Proximity.Value.Should().Be(2m);
+        plan.Staging.Should().Be(StopStaging.Hidden);
+
+        // The band is now resolved by the CALLER (#311), and an unmeasurable one yields no distance at all —
+        // which the promotion watcher must read as "do not promote", never as a zero-width band.
+        plan.Proximity.ResolveDistance(plan.Instrument, plan.Entry, plan.ActualStop, averageTrueRange: null)
+            .Should().BeNull("a missing ATR must abstain, not collapse to a band that promotes on touch");
+        plan.Proximity.ResolveDistance(plan.Instrument, plan.Entry, plan.ActualStop, averageTrueRange: 4m)
+            .Should().Be(8m);
     }
 
     // ---------------------------------------------------------------------------------------------------------

@@ -2,11 +2,13 @@ using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 
@@ -138,7 +140,15 @@ public class StopPromotionConcurrencyIntegrationTests : IClassFixture<OcoExitTes
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         TradingCopilotDbContext db = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
         CapturingLogger log = new();
-        StopPromotionService service = new(db, log);
+
+        // The indicator seam and its options come from the real container (gh#311) — these plans all carry TICK
+        // bands, so nothing here queries an indicator; wiring the genuine services keeps that true by construction
+        // rather than by a stub that would agree with whatever the service asked for.
+        StopPromotionService service = new(
+            db,
+            scope.ServiceProvider.GetRequiredService<IIndicatorSource>(),
+            scope.ServiceProvider.GetRequiredService<IOptions<IndicatorOptions>>(),
+            log);
         ITradingVenue venue = VenueFactory.Create(FirmConventions.None);
         int promoted = await service.PromoteForQuoteAsync(
             VenueId.Parse("projectx"), ContractKey, bid, ask, venue, CancellationToken.None);

@@ -14,9 +14,16 @@ namespace MarqSpec.TradingCopilot.Domain.Execution;
 /// ADR-0007 makes physical at the max-drawdown-per-trade — would be neither deterministic nor the one declared.
 /// </para>
 /// <para>
-/// Immutable: <see cref="Promote"/> returns a new plan. The <i>watcher</i> that feeds live price into
-/// <see cref="ShouldPromote"/> and transmits the promoted order arrives with market-data ingestion (R-1); this
-/// type is the deterministic decision it will consult.
+/// Immutable: <see cref="Promote"/> returns a new plan. The <i>watcher</i> feeds live price into
+/// <see cref="ShouldPromote"/> and transmits the promoted order; this type is the deterministic decision it
+/// consults.
+/// </para>
+/// <para>
+/// <b>This type does not know what a proximity metric means (gh#311).</b> It carries <see cref="Proximity"/> as
+/// persisted configuration and compares a price to a <i>distance the caller resolved</i> — because an ATR band
+/// needs a measurement no pure, database-reconstructable value object should be reaching out for, and a band
+/// fixed at construction would silently go stale as ATR moved. <see cref="StopProximity.ResolveDistance"/> is
+/// where a metric becomes a number.
 /// </para>
 /// </remarks>
 public sealed record StopPlan
@@ -69,7 +76,6 @@ public sealed record StopPlan
     /// <param name="proximity">The promotion band.</param>
     /// <returns>The hidden-stage plan.</returns>
     /// <exception cref="ArgumentOutOfRangeException">A stop sits on the wrong side, or safety is not beyond actual.</exception>
-    /// <exception cref="NotSupportedException">The band uses a metric no data source can measure yet.</exception>
     public static StopPlan Create(
         InstrumentSpec instrument,
         OrderSide side,
@@ -80,14 +86,6 @@ public sealed record StopPlan
     {
         ArgumentNullException.ThrowIfNull(instrument);
         ArgumentNullException.ThrowIfNull(proximity);
-
-        if (proximity.Metric == StopProximityMetric.AverageTrueRange)
-        {
-            // Whitelist discipline: the ADR names ATR, but no indicator pipeline exists to measure it (R-3).
-            // Refusing beats silently treating the multiple as ticks and promoting at the wrong distance.
-            throw new NotSupportedException(
-                "ATR proximity needs the indicator pipeline (R-3), which has not landed. Use ticks or a distance fraction.");
-        }
 
         // Both stops must sit on the losing side of entry, and the safety stop strictly beyond the actual one.
         bool ordered = side switch
@@ -116,21 +114,35 @@ public sealed record StopPlan
     /// retrying watcher must not re-transmit an order already resting at the venue.
     /// </summary>
     /// <param name="currentPrice">The current market price.</param>
+    /// <param name="bandDistance">
+    /// The promotion band as an <b>absolute price distance</b>, already resolved by the caller — see
+    /// <see cref="StopProximity.ResolveDistance"/>. A caller that could not resolve one must not call this at
+    /// all: there is no value here that means "unmeasurable", because zero is a real band meaning
+    /// <i>promote on touch</i>.
+    /// </param>
     /// <returns><see langword="true"/> when the stop should be promoted now.</returns>
-    public bool ShouldPromote(Price currentPrice)
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="bandDistance"/> is negative.</exception>
+    public bool ShouldPromote(Price currentPrice, decimal bandDistance)
     {
+        if (bandDistance < 0m)
+        {
+            // Every metric resolves to a non-negative distance, so this is a logic error rather than a
+            // configuration one -- and a negative band would quietly hold the stop hidden until price was already
+            // PAST it, protecting later than the plan says. Refuse rather than silently protect late.
+            throw new ArgumentOutOfRangeException(
+                nameof(bandDistance), bandDistance, "A promotion band cannot be a negative distance.");
+        }
+
         if (Staging != StopStaging.Hidden)
         {
             return false;
         }
 
-        decimal band = BandDistance();
-
         // Promote once price is within the band of the stop -- or already through it.
         return Side switch
         {
-            OrderSide.Buy => currentPrice.Value <= ActualStop.Value + band,
-            OrderSide.Sell => currentPrice.Value >= ActualStop.Value - band,
+            OrderSide.Buy => currentPrice.Value <= ActualStop.Value + bandDistance,
+            OrderSide.Sell => currentPrice.Value >= ActualStop.Value - bandDistance,
             _ => false,
         };
     }
@@ -145,19 +157,5 @@ public sealed record StopPlan
         return Staging == StopStaging.Native
             ? this
             : new StopPlan(Instrument, Side, Entry, ActualStop, SafetyStop, Proximity, StopStaging.Native);
-    }
-
-    /// <summary>The band as a price distance, in the instrument's units.</summary>
-    private decimal BandDistance()
-    {
-        return Proximity.Metric switch
-        {
-            StopProximityMetric.Ticks => Proximity.Value * Instrument.TickSize,
-            StopProximityMetric.DistanceFraction => Proximity.Value * Math.Abs(Entry.Value - ActualStop.Value),
-
-            // Unreachable via Create, which refuses ATR and an unknown metric -- but a band that cannot be
-            // measured must never become a wide-open one, so it collapses to zero rather than promoting early.
-            _ => 0m,
-        };
     }
 }

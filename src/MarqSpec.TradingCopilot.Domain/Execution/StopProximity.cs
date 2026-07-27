@@ -46,8 +46,8 @@ public sealed record StopProximity
     }
 
     /// <summary>
-    /// A band of average-true-range multiples. <b>Constructable but not yet usable</b> — the indicator pipeline
-    /// (R-3) does not exist, so <see cref="StopPlan.Create"/> refuses it rather than silently mis-measuring.
+    /// A band of average-true-range multiples. Measured by the indicator projection (gh#310) and resolved by the
+    /// caller through <see cref="ResolveDistance"/>.
     /// </summary>
     /// <param name="multiple">The ATR multiple; must be positive.</param>
     /// <returns>The proximity band.</returns>
@@ -57,5 +57,57 @@ public sealed record StopProximity
         return multiple <= 0m
             ? throw new ArgumentOutOfRangeException(nameof(multiple), multiple, "An ATR multiple must be positive.")
             : new StopProximity(StopProximityMetric.AverageTrueRange, multiple);
+    }
+
+    /// <summary>
+    /// Turns this band into an <b>absolute price distance</b> — or <see langword="null"/> when it cannot be
+    /// measured (gh#311).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the seam the delivery decision (gh#13, 2026-07-26) put in the <b>caller</b>: the promotion watcher
+    /// fetches whatever an ATR band needs and calls this, then hands the resulting distance to
+    /// <see cref="StopPlan.ShouldPromote"/>. So the metric is interpreted in exactly one place, the plan itself
+    /// stays a pure comparison, and a future metric is a new arm here rather than a change to a safety-critical
+    /// value object.
+    /// </para>
+    /// <para>
+    /// <b>Null is "cannot measure", and the caller must not promote on it.</b> Every arm that cannot produce a
+    /// defensible number returns null rather than a fallback: a substituted distance would place the stop at a
+    /// distance nobody chose, which is the silent mis-measurement this band's original refusal existed to
+    /// prevent. Note that null is <i>not</i> the same as zero — zero is a real band meaning "promote once price
+    /// touches the stop", so collapsing an unmeasurable band to it would promote, not abstain.
+    /// </para>
+    /// </remarks>
+    /// <param name="instrument">The instrument, for its tick size.</param>
+    /// <param name="entry">The entry price — one end of the risk distance a fractional band measures.</param>
+    /// <param name="actualStop">The working stop — the other end.</param>
+    /// <param name="averageTrueRange">
+    /// The current ATR, when one could be read. Ignored by every metric that does not use it, so a caller may
+    /// pass what it has without first knowing which metric this is.
+    /// </param>
+    /// <returns>The distance in the instrument's price units, or <see langword="null"/> when unmeasurable.</returns>
+    public decimal? ResolveDistance(
+        InstrumentSpec instrument,
+        Price entry,
+        Price actualStop,
+        decimal? averageTrueRange)
+    {
+        ArgumentNullException.ThrowIfNull(instrument);
+
+        return Metric switch
+        {
+            StopProximityMetric.Ticks => Value * instrument.TickSize,
+            StopProximityMetric.DistanceFraction => Value * Math.Abs(entry.Value - actualStop.Value),
+
+            // A non-positive ATR is not a narrow band, it is an absent measurement: Wilder's smoothing cannot
+            // produce one from real bars, so zero or below means no history, a stalled projection, or corruption.
+            StopProximityMetric.AverageTrueRange => averageTrueRange is > 0m ? Value * averageTrueRange : null,
+
+            // Unreachable -- the factories above are the only way to build one -- but an unrecognized metric must
+            // fail CLOSED. Returning zero here would promote at the stop rather than abstain, and that is the
+            // difference between a band nobody chose and no promotion at all.
+            _ => null,
+        };
     }
 }

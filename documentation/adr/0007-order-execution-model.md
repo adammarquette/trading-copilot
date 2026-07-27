@@ -115,11 +115,10 @@ The **hidden actual stop** now has its model and its persistence: `Domain/Execut
 working stop, the safety stop beyond it, and the promotion band, starting at `StopStaging.Hidden`;
 `ShouldPromote(price)` is the deterministic decision a watcher will consult, and `Promote()` is one-way and
 idempotent so a retrying watcher cannot re-transmit. The band is **ticks** or a **fraction of the entry→stop
-distance** — the ADR's "not % of raw price" made structural — and **ATR is refused outright** (`NotSupportedException`),
-rather than silently mis-measuring. The indicator pipeline (R-3) **landed in gh#310**, so ATR is now measurable;
-the refusal nonetheless stands until **gh#311** moves band resolution to the caller (the promotion watcher). That
-ordering is deliberate: resolving ATR inside `StopPlan` would let the band go stale as ATR moves, and an
-I/O-shaped dependency inside an immutable value object reconstructed from the database is a bad trade.
+distance** — the ADR's "not % of raw price" made structural — and **ATR is refused outright** (`NotSupportedException`)
+until the indicator pipeline (R-3) can measure it, rather than silently mis-measuring.
+*(That refusal has since been lifted: the pipeline landed gh#310 and the band moved to the caller, gh#311 — see the
+update below. `ShouldPromote` now takes a resolved distance rather than deriving one.)*
 
 The invariant the type exists to hold is **safety-beyond-actual**: the catastrophic floor must rest *further*
 from entry than the working stop, or it fires first and the deterministic worst case is neither. It is enforced
@@ -569,6 +568,49 @@ partial-close reconciliation. The **safety-stop bracket** (placed on entry, exch
   auto-flatten, and **active connection-loss detection** (orphan → emergency + operator alert, `synthetic_risk` audit).
 - **Gate / re-validation latency is on the hot path** — must stay low for scalping.
 - A **config surface** (limits, defaults, proximity, governor) to design and validate-on-start.
+
+## Update (2026-07-27) — the ATR band is live, and the caller resolves it (gh#311)
+
+This ADR has named the promotion band as *"ticks / ATR / fraction of the entry→stop distance"* since it was
+written, and ATR has been the one it could not honour: gh#153 refused the metric outright rather than mis-measure
+it. gh#310 made ATR measurable, so **the refusal is gone** and all three metrics the ADR names are now real.
+
+**Where a metric becomes a number moved.** `StopPlan` no longer derives a distance from its own band — it takes
+one. `StopProximity.ResolveDistance(...)` turns a metric into an absolute price distance, the **promotion watcher**
+calls it, and `ShouldPromote(price, bandDistance)` compares. Two alternatives were rejected:
+
+- **Resolve ATR at construction.** The band would be frozen at the moment the plan was built and would go
+  **stale as ATR moved** — a stop whose promotion distance silently drifted from its intent, which is the failure
+  this model exists to prevent rather than commit.
+- **Inject an indicator source into `StopPlan`.** A pure, immutable value object *reconstructed from the
+  database* is the wrong place for an I/O-shaped dependency, and this one sits on a safety-critical path.
+
+The gain beyond ATR: **a future metric is a new arm in the resolver, not a change to the domain type**, and the
+whitelist-refusal pattern stops being the only way to keep the domain honest about what it can measure.
+
+**An unmeasurable band does not promote.** `ResolveDistance` returns *no distance* when ATR is unavailable —
+insufficient history, a projection behind, a band resolution the backfill is not archiving — and the watcher
+skips the plan. It deliberately does **not** fall back to a default: a substituted distance is exactly the silent
+mis-measurement the original refusal existed to prevent. Note this is a real distinction from a **zero** band,
+which is a legitimate configuration meaning *promote on touch* — collapsing an unmeasurable band to zero would
+promote, not abstain, so the old `BandDistance()` zero-collapse arm was removed rather than reused.
+
+Fail-closed here means the working stop **stays hidden**, which is a genuine cost, not a free choice: it leaves
+that stop dependent on platform liveness for longer. It is accepted because **the always-native safety stop is
+the physical floor throughout** (this ADR's central provision), and because promoting at a distance nobody chose
+is the worse of the two errors. The condition is **logged at warning** naming the instrument, the period, and the
+resolution — the symptom is otherwise invisible, since "never promoted" looks identical to "price never came
+close." Alerting on it belongs to the observability increment (gh#26 / gh#245, ADR-0019).
+
+**Which ATR a band means** is `Indicators:AtrPeriod` × `Indicators:BandResolutionMinutes` — 2 × ATR on 1-minute
+bars is a very different distance from 2 × ATR on 15-minute bars, and this ADR does not say which, so it is
+configuration rather than an assumption buried in code. The resolution **must be one the backfill is archiving**
+(`Backfill:ResolutionMinutes`); if it is not, there is no value and ATR-banded stops do not promote — hence the
+warning naming that setting.
+
+**No migration.** `CK_StopPlans_ProximityMetric_NotUnknown` only ever rejected zero, so an ATR plan already
+persisted fine; the domain rebuild was the only gate, and it is now open. The `StopPlanPersistenceIntegrationTests`
+pin reserved for this path was flipped into real round-trip coverage in the same PR.
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 

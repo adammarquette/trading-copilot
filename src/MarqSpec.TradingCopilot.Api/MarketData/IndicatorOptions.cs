@@ -21,6 +21,19 @@ public sealed class IndicatorOptions
     /// </summary>
     public int AtrPeriod { get; init; } = 14;
 
+    /// <summary>
+    /// The bar size, in minutes, whose ATR an <b>ATR promotion band</b> means (gh#311). ADR-0007 names ATR as a
+    /// proximity metric but not which series it is measured on, and 2 × ATR on 1-minute bars is a very different
+    /// distance from 2 × ATR on 15-minute bars — so it is stated here rather than assumed.
+    /// </summary>
+    /// <remarks>
+    /// <b>Must be a resolution the backfill is archiving</b> (<c>Backfill:ResolutionMinutes</c>) — the default 1
+    /// matches that option's own default. If it is not, no value exists, and per gh#311 an ATR-banded stop then
+    /// <i>does not promote</i>. That is the safe direction, but it is silent, so the promotion watcher logs a
+    /// warning naming this setting when it finds nothing.
+    /// </remarks>
+    public int BandResolutionMinutes { get; init; } = 1;
+
     /// <summary>How often the projection runs. Bars arrive on a minute scale, so a minute is ample.</summary>
     public int PollIntervalSeconds { get; init; } = 60;
 

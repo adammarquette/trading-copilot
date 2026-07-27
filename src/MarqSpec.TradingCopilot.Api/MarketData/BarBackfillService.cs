@@ -120,13 +120,19 @@ public sealed class BarBackfillService
         }
 
         string venueKey = venue.Id.ToString();
+
+        // Key on the NORMALIZED symbol, not the raw config string (gh#311). Everything that reads this store back
+        // arrives through InstrumentId -- the promotion watcher resolves an ATR band from `MES` however the
+        // operator spelled it in Backfill:Instruments -- so storing `mes` would make the series unfindable by its
+        // own instrument. The failure would be silent: no value, therefore no promotion.
+        string instrumentKey = instrument.ToString();
         List<DateTimeOffset> buckets = [.. closed.Select(bar => bar.OpenTime.ToUniversalTime())];
 
         // Load the overlap once, then merge in memory. EF-first per the coding contract; the window is a couple
         // of hundred rows at most, so a round trip per bar would be the wrong trade.
         Dictionary<DateTimeOffset, BarRecord> existing = await _database.Bars
             .Where(bar => bar.Venue == venueKey
-                && bar.Instrument == symbol
+                && bar.Instrument == instrumentKey
                 && bar.ResolutionMinutes == resolutionMinutes
                 && buckets.Contains(bar.BucketStart))
             .ToDictionaryAsync(bar => bar.BucketStart, cancellationToken);
@@ -150,7 +156,7 @@ public sealed class BarBackfillService
             _database.Bars.Add(new BarRecord
             {
                 Venue = venueKey,
-                Instrument = symbol,
+                Instrument = instrumentKey,
                 ResolutionMinutes = resolutionMinutes,
                 BucketStart = bucket,
                 Open = bar.Open.Value,

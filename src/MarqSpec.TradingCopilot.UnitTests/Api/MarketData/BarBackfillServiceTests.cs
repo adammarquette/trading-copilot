@@ -106,6 +106,21 @@ public class BarBackfillServiceTests
         stored.Instrument.Should().Be("ES");
     }
 
+    [Fact]
+    public async Task BackfillAsync_ShouldStoreTheNormalizedInstrumentKey_WhateverTheConfigSpelling()
+    {
+        // Found while wiring the ATR band (gh#311). Everything that reads this store back arrives through
+        // InstrumentId, which upper-cases: the promotion watcher asks for `MES`. Keying the row on the raw config
+        // string meant a lower-case Backfill:Instruments entry archived a series its own instrument could not
+        // find -- and the symptom is not an error, it is an ATR-banded stop that silently never promotes.
+        await using TradingCopilotDbContext context = Context();
+        ITradingVenue venue = Venue([Bar(Now.AddMinutes(-3))]);
+
+        await Service(context, Config("mes")).BackfillAsync(venue, Now, CancellationToken.None);
+
+        (await context.Bars.SingleAsync()).Instrument.Should().Be("MES");
+    }
+
     // --- Idempotence: the normal case, not an edge one ---
 
     [Fact]
