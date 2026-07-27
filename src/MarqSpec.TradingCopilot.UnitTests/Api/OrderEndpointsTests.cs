@@ -88,7 +88,13 @@ public class OrderEndpointsTests
         ReferencePrice: 5300m,
         Type: OrderType.Market);
 
-    private async Task<Guid> SeedAsync(TradingMode mode = TradingMode.Practice, bool withRiskProfile = true, string credentialKey = "topstep-main", DefaultEntryAction defaultEntryAction = DefaultEntryAction.ApproveAndArm)
+    private async Task<Guid> SeedAsync(
+        TradingMode mode = TradingMode.Practice,
+        bool withRiskProfile = true,
+        string credentialKey = "topstep-main",
+        DefaultEntryAction defaultEntryAction = DefaultEntryAction.ApproveAndArm,
+        bool connectionActive = true,
+        bool accountActive = true)
     {
         Guid firmId = Guid.NewGuid();
         Guid connectionId = Guid.NewGuid();
@@ -112,6 +118,7 @@ public class OrderEndpointsTests
             FirmId = firmId,
             Platform = "projectx",
             CredentialKey = credentialKey,
+            IsActive = connectionActive,
         });
         context.Accounts.Add(new Account
         {
@@ -125,6 +132,7 @@ public class OrderEndpointsTests
             CanTrade = true,
             IsVisible = true,
             Balance = 50_000m,
+            IsActive = accountActive,
         });
         if (withRiskProfile)
         {
@@ -164,6 +172,43 @@ public class OrderEndpointsTests
         await SeedAsync();
 
         StatusOf(await SendAsync(Guid.NewGuid(), SmallBuy())).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    // --- A deactivated connection / account is not a usable send path (gh#322, R-17, ADR-0015) ---
+
+    [Fact]
+    public async Task SendOrder_ShouldRefuse_WhenTheConnectionIsDeactivated()
+    {
+        // gh#322 regression guard (found by QA gh#229): soft-delete exists so an operator can retire a login while
+        // keeping its journal. If a retired connection still routes live orders the deactivation is cosmetic — on a
+        // live real-money account, a real hazard. Refused at the choke point, BEFORE the gate sizes or the venue is
+        // touched, exactly as the credential-rotation endpoint already refuses a deactivated connection.
+        Guid accountId = await SeedAsync(connectionActive: false);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.GateDecisions.AnyAsync()).Should().BeFalse("refused before the gate ever sized it");
+        (await reload.Orders.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task SendOrder_ShouldRefuse_WhenTheAccountIsDeactivated()
+    {
+        // The cascade half of the same guard: DELETE /connections/{id} deactivates the connection AND its accounts,
+        // so an account deactivated on its own (or by that cascade) must refuse too — checking only the connection
+        // would leave the cascaded rows a usable path.
+        Guid accountId = await SeedAsync(accountActive: false);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.GateDecisions.AnyAsync()).Should().BeFalse("refused before the gate ever sized it");
+        (await reload.Orders.AnyAsync()).Should().BeFalse();
     }
 
     [Fact]
