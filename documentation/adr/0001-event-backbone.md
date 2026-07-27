@@ -83,6 +83,24 @@ consumer's loss explicit rather than silent either way. Treat 24h as the decisio
 
 Still open: **backfilling a gap** from this store is the R-1 path (gh#306), not this log's.
 
+## Update (2026-07-27) — projections exist, and rebuild really is replay (gh#310)
+The "indicators are projections … rebuild = replay" line above is now implemented rather than intended.
+`IndicatorValueRecord` / the `IndicatorValues` hypertable holds them, and the first is **ATR** — the indicator
+`StopPlan` has refused a promotion band for since ADR-0007 was written (gh#311 lifts that refusal).
+
+Two properties are worth recording because they are what make the rebuild claim true rather than aspirational:
+
+- **`AverageTrueRange.Compute` is a pure function of the bars handed to it** — no clock, no storage, no state.
+  Each pass recomputes from the *start* of the stored series, so the derived values are a function of the store
+  and nothing else. Seeding from a moving window would have made a value depend on when it happened to run.
+- **A revised bar corrects the values derived from it.** gh#302 upserts a restated bar in place; the projection
+  upserts the values that depended on it, so the store never holds a number its own data no longer supports.
+
+Chosen deliberately: **Wilder's smoothing**, not a simple moving average of true range — that is what "ATR" means
+on the operator's chart, and a stop distance that disagrees with their chart gives them no way to tell a bug from
+a definition. And **no value at all until the period is satisfied**: a partial average looks entirely ordinary and
+would place a stop at the wrong distance, which is the silent mis-measurement the refusal existed to prevent.
+
 ## Update (2026-07-26) — the retention contract is explicit, and a trailing consumer is told (gh#227, decision gh#162)
 
 The window above made the log **lossy by design**, but nothing said so at the seam, and the reader did not act

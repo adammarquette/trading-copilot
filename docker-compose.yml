@@ -126,6 +126,11 @@ services:
       Backfill__ResolutionMinutes__0:
       Backfill__ResolutionMinutes__1:
       Backfill__ResolutionMinutes__2:
+      # Indicator projections over that store (gh#310). No symbol list: the projection's work is whatever the bar
+      # store holds, so bars can never exist without their indicators. Null pass-through -- the app defaults the
+      # period to Wilder's 14 and the cadence to 60 s.
+      Indicators__AtrPeriod:
+      Indicators__PollIntervalSeconds:
       # The dead-man's switch (R-13, gh#244, ADR-0019) -- the only alerting tier that survives THIS process
       # dying, so a deployment without it is silently missing its most important safety net. Deliberately NOT
       # defaulted: these are capability URLs (whoever holds one can forge an all-clear), so there is no sane

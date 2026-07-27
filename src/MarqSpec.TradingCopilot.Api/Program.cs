@@ -87,6 +87,15 @@ builder.Services.Configure<BarBackfillOptions>(builder.Configuration.GetSection(
 builder.Services.AddScoped<BarBackfillService>();
 builder.Services.AddHostedService<BarBackfillHost>();
 
+// Indicator projections over that store (gh#310, R-1, ADR-0001: "indicators are projections… rebuild = replay").
+// ALWAYS runs and needs no symbol list of its own -- its work is whatever the bar store holds, so bars can never
+// exist without their indicators. IIndicatorSource is the read seam the promotion watcher will consult (gh#311)
+// once the band is resolved by the caller rather than inside StopPlan, which stays pure.
+builder.Services.Configure<IndicatorOptions>(builder.Configuration.GetSection(IndicatorOptions.SectionName));
+builder.Services.AddScoped<IndicatorProjectionService>();
+builder.Services.AddScoped<IIndicatorSource, StoredIndicatorSource>();
+builder.Services.AddHostedService<IndicatorProjectionHost>();
+
 // The event log's first consumer (ADR-0007, gh#153): the stop-promotion watcher reads market.quote events and
 // promotes hidden actual stops as price comes within their band. Harmless with no staged stops, so it always runs.
 builder.Services.AddScoped<StopPromotionService>();
