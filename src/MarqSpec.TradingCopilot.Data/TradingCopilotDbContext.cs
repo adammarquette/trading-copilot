@@ -70,6 +70,12 @@ public class TradingCopilotDbContext : TenantDbContext
     /// </summary>
     public DbSet<BarRecord> Bars => Set<BarRecord>();
 
+    /// <summary>
+    /// Pre-computed indicator values (gh#310) — projections over <see cref="Bars"/>, reproducible from it
+    /// (ADR-0001: rebuild = replay). Derived market data, so global like the bars they come from (R-20).
+    /// </summary>
+    public DbSet<IndicatorValueRecord> IndicatorValues => Set<IndicatorValueRecord>();
+
     /// <summary>Per-consumer-group replay cursors over the event log (ADR-0001). System plumbing.</summary>
     public DbSet<EventCursor> EventCursors => Set<EventCursor>();
 
@@ -373,6 +379,29 @@ public class TradingCopilotDbContext : TenantDbContext
                     + "OR (\"TriggerDirection\" = 1 AND \"CancelDriftPrice\" < \"TriggerPrice\") "
                     + "OR (\"TriggerDirection\" = 2 AND \"CancelDriftPrice\" > \"TriggerPrice\")");
             });
+        });
+
+        modelBuilder.Entity<IndicatorValueRecord>(value =>
+        {
+            // Indicator and Period are in the key, not merely columns: an ATR(14) and an ATR(3) are different
+            // numbers over the same bars, and this value sets where a live stop sits (gh#311). BucketStart is
+            // present because a hypertable's unique constraints must include the time dimension.
+            value.HasKey(v => new
+            {
+                v.Venue,
+                v.Instrument,
+                v.ResolutionMinutes,
+                v.Indicator,
+                v.Period,
+                v.BucketStart,
+            });
+            value.Property(v => v.Venue).HasMaxLength(64);
+            value.Property(v => v.Instrument).HasMaxLength(32);
+            value.Property(v => v.Indicator).HasMaxLength(32);
+            value.Property(v => v.Value).HasPrecision(18, 8);
+
+            // The read the execution path makes: this series' latest value at or before a moment.
+            value.HasIndex(v => new { v.Instrument, v.ResolutionMinutes, v.Indicator, v.Period, v.BucketStart });
         });
 
         modelBuilder.Entity<BarRecord>(bar =>

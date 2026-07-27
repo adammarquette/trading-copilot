@@ -30,6 +30,10 @@ public class DataLayerScopingTests
         // "reference & market data (instruments, venues, data providers, bars/ticks/quotes, raw news) is
         // shared / global". A tenant filter here would hide the market from the operator trading it.
         typeof(BarRecord),
+
+        // Indicator projections over those bars (gh#310). Derived market data, so global for the same R-20
+        // reason: a tenant filter would hide the market from the operator trading it.
+        typeof(IndicatorValueRecord),
     };
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
