@@ -27,6 +27,14 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # The compose `environment:` map is an ALLOWLIST, so a key documented in .env.example but missing from it
+      # is silently dropped -- the operator sets it, the app never sees it, nothing says so. That has landed on
+      # the R-13 flatten deadlines (gh#236) and the watchlist (gh#304), and three more were caught only because
+      # the author happened to remember. Runs early: it needs no build, and a config gap is worth knowing about
+      # before spending three minutes on tests. Same script developers run locally (gh#325).
+      - name: Env forwarding (compose allowlist)
+        run: ./scripts/check-env-forwarding.sh
+
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 

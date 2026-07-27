@@ -133,6 +133,14 @@ independently: ingestion (websocket) · poller · processor(s) · trigger engine
 1. Push / merge to a long-lived branch triggers the pipeline.
 2. `dotnet format --verify-no-changes` + **unit tests** + the **pre-merge integration suite** (venue-independent,
    on a throwaway real-Postgres container — gh#121) must pass.
+   - **Env forwarding (`gh#325`).** `./scripts/check-env-forwarding.sh` fails the build when a key documented in
+     `.env.example` is not forwarded by `docker-compose.yml`. The compose `environment:` map is an **allowlist**,
+     so a missing key is read for interpolation and then dropped — the operator sets it, the app never sees it,
+     nothing says so. That has hit the **R-13 flatten deadlines** (`gh#236`) and the **watchlist** (`gh#304`).
+     **When it fails:** add the key to the app service's `environment:` map, using the **null pass-through**
+     (`Key__Name:` with no value) for anything the app already defaults — an empty string *binds* and overwrites
+     that default. For an indexed list, add the specific index; the caps are deliberate and documented in
+     `.env.example`. **Run it locally** before a PR that adds configuration; it needs only Docker.
 3. **Publish image to GHCR** — CI builds the `Dockerfile` **once** and pushes `ghcr.io/adammarquette/trading-copilot`
    tagged `:<branch>` + `:sha-<short>`. Merge-only (`if: github.event_name == 'push'`); a PR never publishes.
 4. **Railway deploys that image** (the pushed tag) to the branch's environment — the tested artifact, not a rebuild

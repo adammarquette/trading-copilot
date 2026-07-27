@@ -159,8 +159,17 @@ services:
       # Telemetry export (gh#230/gh#231, ADR-0002). Null pass-through: with the `observability` profile off
       # there is no collector to export to, and an endpoint pointing at nothing would have the app retrying a
       # dead address forever. Set it (or run the profile) to turn export on.
-      OTEL_EXPORTER_OTLP_ENDPOINT:
-      OTEL_SERVICE_NAME:
+      # Telemetry export (gh#230/gh#231, ADR-0002). These are the app's OWN Options section (TelemetryOptions,
+      # SectionName = "Telemetry") -- NOT the OpenTelemetry SDK's OTEL_* variables, which this app does not read.
+      # gh#231 forwarded OTEL_* by mistake, so the LGTM stack it shipped could not be pointed at by anything
+      # documented; gh#325's check caught it. Null pass-through: unset means no export, and the app runs normally.
+      Telemetry__OtlpEndpoint:
+      Telemetry__ServiceName:
+      # Data-only market providers and the embeddings key (R-1, R-2, R-8). Documented for the operator and
+      # forwarded now so the wiring is right the day each adapter lands; unset until then, which is the default.
+      Finnhub__ApiKey:
+      Tiingo__ApiKey:
+      Cohere__ApiKey:
       # Auto-flatten (R-13, gh#185/gh#187) -- pass-through, never defaulted here. Auto-flatten is ON BY
       # DEFAULT in the app with built-in per-market deadlines, and it CANNOT be disabled by omission; these
       # keys only OVERRIDE. Leaving them unset is the normal case and keeps the app's own defaults, which is
