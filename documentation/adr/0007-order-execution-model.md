@@ -115,8 +115,11 @@ The **hidden actual stop** now has its model and its persistence: `Domain/Execut
 working stop, the safety stop beyond it, and the promotion band, starting at `StopStaging.Hidden`;
 `ShouldPromote(price)` is the deterministic decision a watcher will consult, and `Promote()` is one-way and
 idempotent so a retrying watcher cannot re-transmit. The band is **ticks** or a **fraction of the entry→stop
-distance** — the ADR's "not % of raw price" made structural — and **ATR is refused outright** (`NotSupportedException`)
-until the indicator pipeline (R-3) can measure it, rather than silently mis-measuring.
+distance** — the ADR's "not % of raw price" made structural — and **ATR is refused outright** (`NotSupportedException`),
+rather than silently mis-measuring. The indicator pipeline (R-3) **landed in gh#310**, so ATR is now measurable;
+the refusal nonetheless stands until **gh#311** moves band resolution to the caller (the promotion watcher). That
+ordering is deliberate: resolving ATR inside `StopPlan` would let the band go stale as ATR moves, and an
+I/O-shaped dependency inside an immutable value object reconstructed from the database is a bad trade.
 
 The invariant the type exists to hold is **safety-beyond-actual**: the catastrophic floor must rest *further*
 from entry than the working stop, or it fires first and the deterministic worst case is neither. It is enforced
