@@ -4,10 +4,17 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
+using MarqSpec.TradingCopilot.Api.Orders;
+using MarqSpec.TradingCopilot.Api.Risk;
 using MarqSpec.TradingCopilot.Api.Venues;
+using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 
@@ -142,8 +149,184 @@ public class ConnectionLifecycleIntegrationTests : IClassFixture<StubbedVenuePos
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // Credential rotation — PUT /connections/{id}/credentials (gh#229 ⇒ gh#210, R-17, R-20, ADR-0015).
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task UpdateCredentials_ShouldRotateKey_WhenCallerOwnsConnection()
+    {
+        HttpClient client = await AuthenticatedClientAsync();
+        Guid firmId = await CreateFirmAsync(client, $"Topstep-Rotate-{Guid.NewGuid():N}");
+        Guid connectionId = await CreateConnectionWithKeyAsync(client, firmId, LegacyKey);
+
+        using HttpResponseMessage response = await client.PutAsJsonAsync(
+            $"/connections/{connectionId}/credentials", new RotateCredentialsRequest(HeldKey));
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        ConnectionResponse? updated = await response.Content.ReadFromJsonAsync<ConnectionResponse>(_jsonOptions);
+        updated!.CredentialKey.Should().Be(HeldKey, "the response reflects the repointed key");
+        (await CredentialKeyAsync(connectionId)).Should().Be(HeldKey, "the rotated key is persisted");
+    }
+
+    [Fact]
+    public async Task UpdateCredentials_ShouldReinitialiseVenueSession_WhenKeyRotated()
+    {
+        HttpClient client = await AuthenticatedClientAsync();
+        Guid firmId = await CreateFirmAsync(client, $"Topstep-Reinit-{Guid.NewGuid():N}");
+        await DeclareConventionsAsync(client, firmId, new StageConventionDto(AccountStage.Practice, CapitalAtRisk: false));
+        Guid connectionId = await CreateConnectionWithKeyAsync(client, firmId, LegacyKey);
+
+        // Under the OLD (unheld) key the venue path refuses — the process holds `topstep-main`, not `legacy-key`.
+        using HttpResponseMessage beforeRotation = await client.PostAsync($"/connections/{connectionId}/accounts/discover", content: null);
+        beforeRotation.StatusCode.Should().Be(HttpStatusCode.Conflict, "the venue path refuses a key this process does not hold");
+
+        (await RotateAsync(client, connectionId, HeldKey)).EnsureSuccessStatusCode();
+
+        // After rotation the venue path uses the NEW key on the very next call — no stale session keeps the old one.
+        using HttpResponseMessage afterRotation = await client.PostAsync($"/connections/{connectionId}/accounts/discover", content: null);
+        afterRotation.StatusCode.Should().Be(HttpStatusCode.OK, "the rotated key takes effect immediately on the venue path");
+    }
+
+    [Fact]
+    public async Task UpdateCredentials_ShouldNeverPersistSecret_WhenKeyRotated()
+    {
+        HttpClient client = await AuthenticatedClientAsync();
+        Guid firmId = await CreateFirmAsync(client, $"Topstep-NoSecret-{Guid.NewGuid():N}");
+        Guid connectionId = await CreateConnectionWithKeyAsync(client, firmId, LegacyKey);
+
+        (await RotateAsync(client, connectionId, HeldKey)).EnsureSuccessStatusCode();
+
+        // ADR-0015: the column NAMES an env-held credential set; it is not the secret. The stored value is exactly
+        // the key name the operator sent — never a secret, hash, or transformed credential. Asserted by construction
+        // against the raw row: a rotation that derived/stored anything but the verbatim name would fail here.
+        (await CredentialKeyAsync(connectionId)).Should().Be(HeldKey,
+            "the stored credential key is the verbatim env-entry name — no secret material is derived or persisted");
+    }
+
+    [Fact]
+    public async Task UpdateCredentials_ShouldReturn404_WhenConnectionBelongsToAnotherOperator()
+    {
+        HttpClient owner = await AuthenticatedClientAsync();
+        Guid firmId = await CreateFirmAsync(owner, $"Topstep-RotateR20-{Guid.NewGuid():N}");
+        Guid connectionId = await CreateConnectionWithKeyAsync(owner, firmId, LegacyKey);
+
+        HttpClient intruder = await SecondOperatorClientAsync();
+        using HttpResponseMessage response = await intruder.PutAsJsonAsync(
+            $"/connections/{connectionId}/credentials", new RotateCredentialsRequest(HeldKey));
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound, "R-20 default-deny: another operator's connection is invisible — 404, never 403");
+        (await CredentialKeyAsync(connectionId)).Should().Be(LegacyKey, "the owner's connection is untouched");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Soft-delete — DELETE /connections/{id} (gh#229 ⇒ gh#210, R-17, R-20, ADR-0015).
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task DeleteConnection_ShouldDeactivateRatherThanRemove_WhenCalled()
+    {
+        HttpClient client = await AuthenticatedClientAsync();
+        Guid firmId = await CreateFirmAsync(client, $"Topstep-SoftDelete-{Guid.NewGuid():N}");
+        Guid connectionId = await CreateConnectionAsync(client, firmId);
+
+        using HttpResponseMessage response = await client.DeleteAsync($"/connections/{connectionId}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await ConnectionExistsAsync(connectionId)).Should().BeTrue("a soft delete leaves the row in place — nothing is removed");
+        (await ConnectionIsActiveAsync(connectionId)).Should().BeFalse("the surviving row is marked inactive");
+    }
+
+    [Fact]
+    public async Task DeleteConnection_ShouldCascadeDeactivationToChildAccounts_WhenCalled()
+    {
+        HttpClient client = await AuthenticatedClientAsync();
+        Guid firmId = await CreateFirmAsync(client, $"Topstep-Cascade-{Guid.NewGuid():N}");
+        await DeclareConventionsAsync(client, firmId, new StageConventionDto(AccountStage.Practice, CapitalAtRisk: false));
+        Guid connectionId = await CreateConnectionAsync(client, firmId);
+        (await DiscoverAsync(client, connectionId)).Should().NotBeEmpty("the roster persisted");
+
+        (await DeleteConnectionAsync(client, connectionId)).EnsureSuccessStatusCode();
+
+        IReadOnlyList<bool> childActive = await AccountActiveStatesAsync(connectionId);
+        childActive.Should().NotBeEmpty("the discovered child accounts persisted");
+        childActive.Should().OnlyContain(active => active == false, "deactivation cascades to every child account");
+    }
+
+    [Fact]
+    public async Task DeleteConnection_ShouldPreserveJournalRows_WhenDeactivated()
+    {
+        // The highest-value guard: a soft delete must NOT take the journal with it. Orders (and the trades / gate
+        // decisions) referencing the deactivated account are the audit trail — a cascade that removed them would be
+        // invisible until an audit needed the rows.
+        HttpClient client = await AuthenticatedClientAsync();
+        Guid firmId = await CreateFirmAsync(client, $"Topstep-Journal-{Guid.NewGuid():N}");
+        await DeclareConventionsAsync(client, firmId, new StageConventionDto(AccountStage.Practice, CapitalAtRisk: false));
+        Guid connectionId = await CreateConnectionAsync(client, firmId);
+        Guid accountId = (await DiscoverAsync(client, connectionId)).First(account => account.CanTrade).Id;
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedJournalOrderAsync(accountId, operatorId);
+
+        (await DeleteConnectionAsync(client, connectionId)).EnsureSuccessStatusCode();
+
+        (await OrderExistsAsync(orderId)).Should().BeTrue(
+            "a soft delete preserves the journal — an order referencing the deactivated account survives for audit");
+    }
+
+    [Fact]
+    public async Task DeleteConnection_ShouldRefuseNewOrders_WhenConnectionDeactivated()
+    {
+        HttpClient client = await AuthenticatedClientAsync();
+        Guid firmId = await CreateFirmAsync(client, $"Topstep-RefuseSend-{Guid.NewGuid():N}");
+        await DeclareConventionsAsync(client, firmId, new StageConventionDto(AccountStage.Practice, CapitalAtRisk: false));
+        Guid connectionId = await CreateConnectionAsync(client, firmId);
+        Guid accountId = (await DiscoverAsync(client, connectionId)).First(account => account.CanTrade).Id;
+        await DeclareRiskProfileAsync(client, accountId);
+        (await DeleteConnectionAsync(client, connectionId)).EnsureSuccessStatusCode();
+
+        using HttpResponseMessage send = await client.PostAsJsonAsync($"/accounts/{accountId}/orders/", ValidProposal());
+
+        // DEFECT gh#322: the send / compose path never consults Connection.IsActive or Account.IsActive, so a
+        // deactivated connection STILL transmits orders to the venue (R-17 soft-delete bypass). Pins the OBSERVED
+        // behaviour until #322 lands; the fix flips this to a refusal (409/422) and this test becomes its regression
+        // guard. A deactivated connection must not remain a usable send path — deactivation is meaningless otherwise.
+        send.StatusCode.Should().Be(HttpStatusCode.OK,
+            "DEFECT gh#322: deactivation is not enforced on the send path — a retired connection still routes orders");
+    }
+
+    [Fact]
+    public async Task DeleteConnection_ShouldReturn404_WhenConnectionBelongsToAnotherOperator()
+    {
+        HttpClient owner = await AuthenticatedClientAsync();
+        Guid firmId = await CreateFirmAsync(owner, $"Topstep-DeleteR20-{Guid.NewGuid():N}");
+        Guid connectionId = await CreateConnectionAsync(owner, firmId);
+
+        HttpClient intruder = await SecondOperatorClientAsync();
+        using HttpResponseMessage response = await intruder.DeleteAsync($"/connections/{connectionId}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound, "R-20 default-deny: another operator cannot deactivate the owner's connection");
+        (await ConnectionIsActiveAsync(connectionId)).Should().BeTrue("the owner's connection is untouched");
+    }
+
+    [Fact]
+    public async Task DeleteConnection_ShouldBeIdempotent_WhenCalledTwice()
+    {
+        HttpClient client = await AuthenticatedClientAsync();
+        Guid firmId = await CreateFirmAsync(client, $"Topstep-Idempotent-{Guid.NewGuid():N}");
+        Guid connectionId = await CreateConnectionAsync(client, firmId);
+
+        (await DeleteConnectionAsync(client, connectionId)).StatusCode.Should().Be(HttpStatusCode.OK);
+        using HttpResponseMessage second = await client.DeleteAsync($"/connections/{connectionId}");
+
+        second.StatusCode.Should().Be(HttpStatusCode.OK, "deactivating twice is not an error — a retry after a dropped response must still succeed");
+        (await ConnectionIsActiveAsync(connectionId)).Should().BeFalse("the connection stays deactivated");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Helpers.
     // ---------------------------------------------------------------------------------------------------------
+
+    private const string HeldKey = "topstep-main";
+    private const string LegacyKey = "legacy-key";
 
     private async Task<HttpClient> AuthenticatedClientAsync()
     {
@@ -214,5 +397,145 @@ public class ConnectionLifecycleIntegrationTests : IClassFixture<StubbedVenuePos
         AccountResponse? account = await response.Content.ReadFromJsonAsync<AccountResponse>(_jsonOptions);
         ArgumentNullException.ThrowIfNull(account);
         return account;
+    }
+
+    // --- gh#229 helpers ---
+
+    private sealed record IssueInvitationResponse(Guid Id, string Token, DateTimeOffset ExpiresUtc);
+
+    private async Task<Guid> CreateConnectionWithKeyAsync(HttpClient client, Guid firmId, string credentialKey)
+    {
+        using HttpResponseMessage response = await client.PostAsJsonAsync(
+            "/connections", new CreateConnectionRequest(firmId, "projectx", credentialKey));
+        response.EnsureSuccessStatusCode();
+        ConnectionResponse? connection = await response.Content.ReadFromJsonAsync<ConnectionResponse>(_jsonOptions);
+        ArgumentNullException.ThrowIfNull(connection);
+        return connection.Id;
+    }
+
+    private static Task<HttpResponseMessage> RotateAsync(HttpClient client, Guid connectionId, string credentialKey) =>
+        client.PutAsJsonAsync($"/connections/{connectionId}/credentials", new RotateCredentialsRequest(credentialKey));
+
+    private static Task<HttpResponseMessage> DeleteConnectionAsync(HttpClient client, Guid connectionId) =>
+        client.DeleteAsync($"/connections/{connectionId}");
+
+    private async Task<HttpClient> SecondOperatorClientAsync()
+    {
+        string email = $"intruder-{Guid.NewGuid():N}@example.com";
+        const string password = "Password123!";
+        HttpClient owner = await AuthenticatedClientAsync();
+
+        using HttpResponseMessage invite = await owner.PostAsJsonAsync("/auth/invitations", new IssueInvitationRequest(email));
+        invite.EnsureSuccessStatusCode();
+        IssueInvitationResponse? issued = await invite.Content.ReadFromJsonAsync<IssueInvitationResponse>(_jsonOptions);
+        ArgumentNullException.ThrowIfNull(issued);
+
+        using HttpResponseMessage accept = await _factory.CreateClient().PostAsJsonAsync(
+            "/auth/accept-invite", new AcceptInviteRequest(issued.Token, password, "Intruder"));
+        accept.EnsureSuccessStatusCode();
+
+        HttpClient intruder = _factory.CreateClient();
+        using HttpResponseMessage login = await intruder.PostAsJsonAsync("/auth/login", new LoginRequest(email, password));
+        login.EnsureSuccessStatusCode();
+        LoginTokenResponse? auth = await login.Content.ReadFromJsonAsync<LoginTokenResponse>(_jsonOptions);
+        ArgumentNullException.ThrowIfNull(auth);
+        intruder.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", auth.Token);
+        return intruder;
+    }
+
+    private Task DeclareRiskProfileAsync(HttpClient client, Guid accountId) =>
+        client.PutAsJsonAsync(
+            $"/accounts/{accountId}/risk",
+            new DeclareRiskProfileRequest(
+                DailyLossLimit: 1_000m,
+                AccountProfitTarget: 3_000m,
+                FloorSource: FloorSource.FirmImposed,
+                TrailingMode: TrailingMode.Intraday,
+                TrailingAmount: 2_000m,
+                LocksAt: 50_100m,
+                PerTradeRiskFraction: 0.15m,
+                TargetRewardRatio: 1.5m,
+                MaxDrawdownPerTrade: 300m,
+                DailyDrawdownGovernor: 600m,
+                DailyProfitTarget: 1_500m,
+                StopForDayAtProfitTarget: true,
+                SizingBasis: SizingBasis.SafetyStop,
+                MaxContractsPerOrder: 5,
+                MaxBestDayFraction: 0.4m,
+                StartingBalance: 50_000m));
+
+    private static SendOrderRequest ValidProposal() => new(
+        Symbol: "MES",
+        TickSize: 0.25m,
+        PointValue: 5m,
+        Side: OrderSide.Buy,
+        Quantity: 1,
+        Entry: 5_000m,
+        Stop: 4_990m,
+        SafetyStop: 4_980m,
+        ReferencePrice: 5_000m,
+        Type: OrderType.Market);
+
+    private async Task<Guid> SeedJournalOrderAsync(Guid accountId, Guid userId)
+    {
+        Guid orderId = Guid.NewGuid();
+        await ExecuteDbAsync(async db =>
+        {
+            db.Orders.Add(new Order
+            {
+                Id = orderId,
+                UserId = userId,
+                AccountId = accountId,
+                Instrument = "CON.F.US.MES.U26",
+                Symbol = "MES",
+                Side = OrderSide.Buy,
+                Size = 1,
+                Type = OrderType.Market,
+                EntryPrice = 5_000m,
+                WorkingStopPrice = 4_990m,
+                SafetyStopPrice = 4_980m,
+                ReferencePrice = 5_000m,
+                TickSize = 0.25m,
+                PointValue = 5m,
+                Status = OrderStatus.Filled,
+                Mode = TradingMode.Practice,
+                VenueOrderKey = "JOURNAL-1",
+                PlacedAt = DateTimeOffset.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        });
+        return orderId;
+    }
+
+    private Task<string> CredentialKeyAsync(Guid connectionId) => QueryDbAsync(db =>
+        db.Connections.IgnoreQueryFilters().Where(c => c.Id == connectionId).Select(c => c.CredentialKey).SingleAsync());
+
+    private Task<bool> ConnectionExistsAsync(Guid connectionId) => QueryDbAsync(db =>
+        db.Connections.IgnoreQueryFilters().AnyAsync(c => c.Id == connectionId));
+
+    private Task<bool> ConnectionIsActiveAsync(Guid connectionId) => QueryDbAsync(db =>
+        db.Connections.IgnoreQueryFilters().Where(c => c.Id == connectionId).Select(c => c.IsActive).SingleAsync());
+
+    private Task<List<bool>> AccountActiveStatesAsync(Guid connectionId) => QueryDbAsync(db =>
+        db.Accounts.IgnoreQueryFilters().Where(a => a.ConnectionId == connectionId).Select(a => a.IsActive).ToListAsync());
+
+    private Task<bool> OrderExistsAsync(Guid orderId) => QueryDbAsync(db =>
+        db.Orders.IgnoreQueryFilters().AnyAsync(o => o.Id == orderId));
+
+    private Task<Guid> OperatorIdAsync() =>
+        QueryDbAsync(async db => (await db.Users.FirstAsync(u => u.Email == PostgresApiFactory.OperatorEmail)).Id);
+
+    private async Task<T> QueryDbAsync<T>(Func<TradingCopilotDbContext, Task<T>> query)
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext db = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        return await query(db);
+    }
+
+    private async Task ExecuteDbAsync(Func<TradingCopilotDbContext, Task> action)
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext db = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        await action(db);
     }
 }
