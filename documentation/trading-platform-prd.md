@@ -98,7 +98,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 ### Must-Have (P0)
 
 **R-1: Market data ingestion (ProjectX).** Always-on cloud service ingesting the configurable watchlist via `MarqSpec.Client.ProjectX` on two distinct paths: a **live real-time stream** (ProjectX websockets — ticks/quotes/trades sufficient to reconstruct tape, footprint/delta, and volume profile) and **clean historical data** (periodic REST backfill of OHLCV bars, multiple resolutions). The live stream is **not conflated with** the authoritative historical series — they are stored and treated separately. Persist to time-series storage.
-- [ ] Watchlist user-configurable without redeploy
+- [x] Watchlist user-configurable without redeploy — **`gh#304`**: eight slots (`Ingestion__Symbols__0`–`__7`) reach the app under `docker compose up`. Previously only `__0` was forwarded while `.env.example` said to add `__1`, `__2`, so a multi-symbol watchlist bound one symbol and said nothing. *Compose cannot forward an open-ended indexed list, so the cap is enumerated and documented; a ninth symbol is a deliberate one-line edit, not a redeploy.*
 - [ ] Bars and ticks persisted with gap detection and backfill on reconnect
 - [ ] Ingestion uptime covers the full CME session with automatic recovery
 - [ ] Account state (balance, daily P&L, drawdown headroom), working orders, and fills are ingested for risk sizing, execution, and journal resolution
