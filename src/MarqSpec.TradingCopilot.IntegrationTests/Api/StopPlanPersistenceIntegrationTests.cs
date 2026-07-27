@@ -222,15 +222,18 @@ public class StopPlanPersistenceIntegrationTests : IClassFixture<StubbedVenuePos
     }
 
     [Fact]
-    public async Task AtrProximity_ShouldBeRefused_UntilTheIndicatorPipelineExists()
+    public async Task AtrProximity_ShouldBeRefused_UntilBandResolutionMovesToTheCaller()
     {
         // NOT-YET-SUPPORTED PIN (contract §2) — not a guard, and not counted as coverage. #153 refuses ATR
-        // proximity in the DOMAIN (StopPlan.Create throws NotSupportedException) because no indicator pipeline
-        // (R-3, #109) can measure it yet. The database deliberately does NOT encode that refusal — an ATR
-        // metric (3) satisfies CK_StopPlans_ProximityMetric_NotUnknown — so the domain rebuild is the only
-        // gate. When R-3 / #109 lands and ATR becomes measurable, StopPlan.Create will stop throwing and THIS
-        // TEST GOES RED: a deliberate reminder that the persist-then-reconstruct ATR path is now live and needs
-        // real coverage.
+        // proximity in the DOMAIN (StopPlan.Create throws NotSupportedException). The database deliberately
+        // does NOT encode that refusal — an ATR metric (3) satisfies CK_StopPlans_ProximityMetric_NotUnknown —
+        // so the domain rebuild is the only gate.
+        //
+        // The indicator pipeline (R-3) LANDED in #310, so ATR is now measurable — and the refusal still
+        // stands, by design: #310 scoped the lift out because the band must resolve at the caller (the
+        // promotion watcher), never inside this immutable value object reconstructed from the database.
+        // #311 makes that change and deletes the throw. WHEN #311 LANDS, THIS TEST GOES RED: a deliberate
+        // reminder that the persist-then-reconstruct ATR path is now live and needs real coverage.
         (Guid accountId, Guid operatorId) = await SeedTenantAsync("Topstep-AtrPin");
         Guid orderId = await SeedParentOrderAsync(accountId, OrderSide.Buy);
 
@@ -251,7 +254,7 @@ public class StopPlanPersistenceIntegrationTests : IClassFixture<StubbedVenuePos
         // Reconstructing the domain plan for promotion (what StopPromotionService does) is where ATR is refused.
         Action reconstruct = () => record.ToStopPlan(order);
         reconstruct.Should().Throw<NotSupportedException>(
-            "until the indicator pipeline (R-3, #109) lands, the domain refuses to rebuild an ATR plan rather than mis-measure it as ticks");
+            "until #311 moves band resolution to the caller, the domain refuses to rebuild an ATR plan rather than mis-measure it as ticks");
     }
 
     // ---------------------------------------------------------------------------------------------------------
