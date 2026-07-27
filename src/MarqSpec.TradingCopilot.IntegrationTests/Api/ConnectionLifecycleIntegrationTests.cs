@@ -285,12 +285,13 @@ public class ConnectionLifecycleIntegrationTests : IClassFixture<StubbedVenuePos
 
         using HttpResponseMessage send = await client.PostAsJsonAsync($"/accounts/{accountId}/orders/", ValidProposal());
 
-        // DEFECT gh#322: the send / compose path never consults Connection.IsActive or Account.IsActive, so a
-        // deactivated connection STILL transmits orders to the venue (R-17 soft-delete bypass). Pins the OBSERVED
-        // behaviour until #322 lands; the fix flips this to a refusal (409/422) and this test becomes its regression
-        // guard. A deactivated connection must not remain a usable send path — deactivation is meaningless otherwise.
-        send.StatusCode.Should().Be(HttpStatusCode.OK,
-            "DEFECT gh#322: deactivation is not enforced on the send path — a retired connection still routes orders");
+        // gh#322 REGRESSION GUARD (was a pinned DEFECT under #229): the shared composition now consults
+        // Connection.IsActive and Account.IsActive, so a retired connection is refused at the choke point — before
+        // the gate sizes and before the venue is touched (R-17 soft-delete is enforced on the send path, not only on
+        // connection management). This assertion was flipped from OK when #322 landed; losing either guard makes a
+        // deactivated connection route live orders again and this fails.
+        send.StatusCode.Should().Be(HttpStatusCode.Conflict,
+            "gh#322: a deactivated connection is not a usable send path — deactivation is meaningless otherwise");
     }
 
     [Fact]

@@ -1377,6 +1377,20 @@ public static class OrderEndpoints
             return (null, Results.NotFound());
         }
 
+        // A deactivated account is not a usable path to the venue (gh#322, R-17). Soft-delete exists so an operator
+        // can retire a login while KEEPING its journal, so the row is still readable here -- and it must therefore be
+        // refused explicitly rather than by absence. Checked before the risk profile so a retired account gives the
+        // honest reason rather than "no risk profile declared". DELETE /connections/{id} cascades IsActive to the
+        // accounts, so this also catches the cascaded rows.
+        if (!account.IsActive)
+        {
+            return (null, Results.Conflict(new
+            {
+                error = "This account is deactivated and is no longer a usable path to the venue. "
+                    + "Reactivating its connection is a separate, deliberate action.",
+            }));
+        }
+
         // No declared limits, no evaluation (gh#10): the gate's input is fail-closed, never a fabricated default.
         RiskProfileRecord? profile = await database.RiskProfiles
             .FirstOrDefaultAsync(candidate => candidate.AccountId == accountId, cancellationToken);
@@ -1393,6 +1407,23 @@ public static class OrderEndpoints
         if (connection is null)
         {
             return (null, Results.NotFound(new { error = "The account's connection no longer exists." }));
+        }
+
+        // The same guard on the connection itself (gh#322) -- the enforcement the credential-rotation endpoint has
+        // always had, which this path was missing, so deactivation was enforced on connection management but
+        // bypassable for order entry. Checked here in the SHARED composition, so every outbound path built on it
+        // (send, send-as-is, arm, edit, take, modify, conditional) inherits it from one place.
+        //
+        // Deliberately NOT on the cancel path: CancelOrderAsync resolves its own account/connection and is
+        // risk-reducing, so an operator can still pull a retired connection's resting orders. Deactivation must
+        // retire a send path, never trap live exposure behind it.
+        if (!connection.IsActive)
+        {
+            return (null, Results.Conflict(new
+            {
+                error = "This account's connection is deactivated and is no longer a usable path to the venue. "
+                    + "Reactivating it is a separate, deliberate action.",
+            }));
         }
 
         // One credential set per process (ADR-0015) -- the same guard discovery enforces.
