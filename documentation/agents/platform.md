@@ -53,6 +53,14 @@ Three constraints that bite in CI:
 
 - The repo has a **submodule** under `external/` — checkout needs `submodules: true`.
 - `dotnet format` must be run with `--exclude external/`, or it reformats vendored code.
+- **The compose `environment:` map is an ALLOWLIST.** A key documented in `.env.example` but not named there is
+  read for interpolation and then **silently dropped** — the operator sets it, the app never sees it, and nothing
+  says so. This has landed on the **R-13 flatten deadlines** (`gh#236`) and the **watchlist** (`gh#304`), and
+  three more were caught only because the author happened to remember. `./scripts/check-env-forwarding.sh` now
+  fails CI on it (`gh#325`); run it locally before a PR that adds configuration. Two rules it enforces the
+  reasoning behind: prefer the **null pass-through** (`Key__Name:` with no value) for anything the app already
+  defaults, because an empty string *binds* and overwrites that default; and **indexed lists are enumerated and
+  capped** on purpose, so a new index needs its own line and the cap belongs in `.env.example`.
 - **Line endings are LF everywhere**, pinned in both `.gitattributes` and `.editorconfig`. They have to agree:
   `dotnet format` otherwise defaults to the host's line ending, so a Windows contributor sees whitespace
   violations that CI (`ubuntu-latest`) does not, and the local pre-PR check stops predicting the gate.
