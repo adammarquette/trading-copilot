@@ -211,6 +211,26 @@
   .ni__t{font-size:12px;color:var(--on-hi);line-height:1.35}
   .ni__m{display:flex;align-items:center;gap:7px;font-size:10px;color:var(--on-dim);font-family:var(--mono)}
   .src{font-weight:700;letter-spacing:.03em}
+  /* dock news — compact live feed (the #326 feed, brought into the workspace dock) */
+  .dockfeed{flex:1;display:flex;flex-direction:column;gap:6px;padding:6px 10px;overflow:auto}
+  .dfi{display:flex;flex-direction:column;gap:3px;padding:6px 8px;border-radius:7px;border:1px solid transparent}
+  .dfi.hot{background:var(--primary-ctr)}
+  .dfi.muted-item{opacity:.5}
+  .dfi-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:9px;font-family:var(--mono);color:var(--on-dim)}
+  .dfi-meta .src{color:var(--on-med)}
+  .dfi-meta .finst{font-size:8.5px;padding:0 5px}
+  .dfi.hot .finst{background:var(--surface-1)}
+  .dfrel{width:32px;height:5px;background:var(--surface-3);border-radius:3px;overflow:hidden;display:inline-block}
+  .dfrel i{display:block;height:100%;background:var(--primary);opacity:.7}
+  .dfstar{font-size:11px;line-height:1;color:var(--on-dim);background:none;border:0;cursor:pointer;padding:0}
+  .dfstar.on{color:var(--warn)}
+  .dfwhy{color:var(--long);font-family:var(--font);font-size:8.5px}
+  .dfi.muted-item .dfwhy{color:var(--on-dim)}
+  .dfi-head{font-size:11px;color:var(--on-hi);line-height:1.3;overflow:hidden;text-overflow:ellipsis;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .dockfeed-foot{font-size:9px;color:var(--on-dim);padding:6px 11px;border-top:1px solid var(--outline-soft);
+    display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-family:var(--font)}
+  .dockfeed-foot .mlink2{color:var(--primary);font-weight:600}
 
   /* region tag */
   .tag{font-family:var(--mono);font-size:9.5px;font-weight:600;color:var(--primary);background:var(--primary-ctr);
@@ -947,15 +967,22 @@
                   <div class="chat__in">Ask the co-pilot — quotes, journal, edit a rule… <span class="send">➤</span></div>
                 </div>
                 <div class="bd">
-                  <div class="bd__h">News &amp; signals <span class="tag">R-2</span> <span class="plannedtag">[D2]</span></div>
-                  <div class="news">
-                    <div class="ni"><div class="ni__t">Fed's Barkin: policy “moderately restrictive,” data-dependent</div>
-                      <div class="ni__m"><span class="src">TIINGO</span> · 2m · <span class="pos">ES ▲</span> ES,SPY</div></div>
-                    <div class="ni"><div class="ni__t">NVDA extends gains as AI capex commentary lifts semis</div>
-                      <div class="ni__m"><span class="src">FINNHUB</span> · 6m · NQ,NVDA</div></div>
-                    <div class="ni"><div class="ni__t">Crude inventories draw larger than expected</div>
-                      <div class="ni__m"><span class="src">TIINGO</span> · 11m · CL</div></div>
+                  <div class="bd__h">News &amp; signals <span class="tag">R-2</span> <span class="plannedtag">[D2]</span> <span class="chip ghost" style="margin-left:auto;font-size:9px">salience-ranked</span></div>
+                  <div class="dockfeed">
+                    <div class="dfi hot">
+                      <div class="dfi-meta"><span class="src">TIINGO</span><span>2m</span><span class="dfrel" title="salience 88% — you star Fed / macro prints"><i style="width:88%"></i></span><span class="dfstar on">★</span><span class="finst">ES</span><span class="finst">SPY</span><span class="dfwhy">↑ starred macro</span></div>
+                      <div class="dfi-head">Fed's Barkin: policy “moderately restrictive,” data-dependent</div>
+                    </div>
+                    <div class="dfi">
+                      <div class="dfi-meta"><span class="src">FINNHUB</span><span>31m</span><span class="dfrel" title="salience 52%"><i style="width:52%"></i></span><span class="dfstar">☆</span><span class="finst">NQ</span><span class="dfwhy">megacap → index</span></div>
+                      <div class="dfi-head">NVDA extends gains on AI-capex commentary</div>
+                    </div>
+                    <div class="dfi muted-item">
+                      <div class="dfi-meta"><span class="src">TIINGO</span><span>1h</span><span class="dfrel" title="salience 14%"><i style="width:14%"></i></span><span class="dfstar">☆</span><span class="dfwhy">no instrument match · muted</span></div>
+                      <div class="dfi-head">Retailer pre-announces soft holiday guidance</div>
+                    </div>
                   </div>
+                  <div class="dockfeed-foot">soft salience — <b>never a risk control</b> · <span class="mlink2">full feed →</span> <span class="plannedtag">ingestion [D2]</span></div>
                 </div>
               </div>
             </div>
@@ -2194,7 +2221,7 @@
       <div><span class="tag">R-14</span> Practice / live mode chip — safety surface</div>
       <div><span class="tag">R-6</span> Co-pilot chat — invokes platform tools ([A4] — the conversational engine is unbuilt; see the Co-pilot chat surface)</div>
       <div><span class="tag">R-6 · [A4]</span> Co-pilot chat surface — grounded (retrieval + citations), tool-calling, and strictly propose-only: writes become a drafted ticket or hold-to-confirm and re-pass the gate; the conversational engine + retrieval are [A4] (unbuilt), the tools + gate it routes through are shipped</div>
-      <div><span class="tag">R-2 · [D2]</span> News &amp; signals feed — Finnhub + Tiingo, deduped, attached to your instruments with a salience weight + importance star; a soft signal (never a risk control) that feeds suggestions / chat, not orders; ingestion + weighting are [D2] (unbuilt)</div>
+      <div><span class="tag">R-2 · [D2]</span> News &amp; signals feed — Finnhub + Tiingo, deduped, attached to your instruments with a salience weight + importance star; a soft signal (never a risk control) that feeds suggestions / chat, not orders; surfaced both as a dedicated feed and, compact + salience-ranked, in the workspace dock; ingestion + weighting are [D2] (unbuilt)</div>
       <div><span class="tag">R-8 · R-9</span> Positions, fills, journal</div>
       <div><span class="tag">Kill</span> Kill switch — always visible, all breakpoints</div>
       <div><span class="tag">ADR-0006</span> Multi-screen — detachable pop-out windows, one per monitor (web-native)</div>
