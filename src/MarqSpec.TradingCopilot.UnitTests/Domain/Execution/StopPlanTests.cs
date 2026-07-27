@@ -14,6 +14,13 @@ public class StopPlanTests
 {
     private static InstrumentSpec Mes => InstrumentSpec.Create(InstrumentId.Parse("MES"), 0.25m, 5m);
 
+    /// <summary>
+    /// The band the default plans' 4-tick proximity resolves to (4 × 0.25). Since gh#311 the <i>caller</i>
+    /// resolves the metric and hands <see cref="StopPlan.ShouldPromote"/> an absolute distance, so these tests
+    /// pass the resolved number the same way the promotion watcher does.
+    /// </summary>
+    private const decimal Band = 1.00m;
+
     private static StopPlan BuyPlan(
         decimal entry = 5_300m,
         decimal actualStop = 5_295m,
@@ -87,10 +94,10 @@ public class StopPlanTests
     [Fact]
     public void ShouldPromote_ShouldBeFalse_WhilePriceIsFarFromTheActualStop()
     {
-        StopPlan plan = BuyPlan(); // actual 5295, 4 ticks x 0.25 = 1.00 -> promote at <= 5296.00
+        StopPlan plan = BuyPlan(); // actual 5295, band 1.00 -> promote at <= 5296.00
 
-        plan.ShouldPromote(new Price(5_299m)).Should().BeFalse();
-        plan.ShouldPromote(new Price(5_296.25m)).Should().BeFalse();
+        plan.ShouldPromote(new Price(5_299m), Band).Should().BeFalse();
+        plan.ShouldPromote(new Price(5_296.25m), Band).Should().BeFalse();
     }
 
     [Fact]
@@ -98,9 +105,9 @@ public class StopPlanTests
     {
         StopPlan plan = BuyPlan();
 
-        plan.ShouldPromote(new Price(5_296m)).Should().BeTrue();    // exactly at the band edge
-        plan.ShouldPromote(new Price(5_295.5m)).Should().BeTrue();
-        plan.ShouldPromote(new Price(5_294m)).Should().BeTrue();    // already through the stop
+        plan.ShouldPromote(new Price(5_296m), Band).Should().BeTrue();    // exactly at the band edge
+        plan.ShouldPromote(new Price(5_295.5m), Band).Should().BeTrue();
+        plan.ShouldPromote(new Price(5_294m), Band).Should().BeTrue();    // already through the stop
     }
 
     [Fact]
@@ -108,21 +115,20 @@ public class StopPlanTests
     {
         StopPlan plan = SellPlan(); // actual 5305, band 1.00 -> promote at >= 5304.00
 
-        plan.ShouldPromote(new Price(5_301m)).Should().BeFalse();
-        plan.ShouldPromote(new Price(5_304m)).Should().BeTrue();
-        plan.ShouldPromote(new Price(5_306m)).Should().BeTrue();
+        plan.ShouldPromote(new Price(5_301m), Band).Should().BeFalse();
+        plan.ShouldPromote(new Price(5_304m), Band).Should().BeTrue();
+        plan.ShouldPromote(new Price(5_306m), Band).Should().BeTrue();
     }
 
     [Fact]
-    public void ShouldPromote_ShouldMeasureAFractionOfTheEntryToStopDistance_NotOfRawPrice()
+    public void ShouldPromote_ShouldRefuseANegativeBand()
     {
-        // ADR-0007 is explicit: proximity is ticks / ATR / a fraction of the entry->stop distance -- NEVER a
-        // percentage of raw price, which would scale with the instrument's absolute level rather than the risk.
-        StopPlan plan = BuyPlan(entry: 5_300m, actualStop: 5_290m, safetyStop: 5_280m,
-            proximity: StopProximity.DistanceFraction(0.2m)); // 20% of a 10-point distance = 2.00
+        // Unreachable by construction -- every metric resolves to a non-negative distance -- so reaching here is a
+        // logic error, and a NEGATIVE band silently delays promotion past the stop rather than at it. Refuse it
+        // loudly instead of quietly protecting later than the plan says.
+        Func<bool> act = () => BuyPlan().ShouldPromote(new Price(5_294m), -0.25m);
 
-        plan.ShouldPromote(new Price(5_292.25m)).Should().BeFalse();
-        plan.ShouldPromote(new Price(5_292m)).Should().BeTrue();
+        act.Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]
@@ -144,7 +150,7 @@ public class StopPlanTests
         StopPlan plan = BuyPlan().Promote();
 
         // Nothing left to promote -- the watcher must not re-transmit an order that already rests at the venue.
-        plan.ShouldPromote(new Price(5_294m)).Should().BeFalse();
+        plan.ShouldPromote(new Price(5_294m), Band).Should().BeFalse();
     }
 
     // --- Proximity construction ---
@@ -170,13 +176,84 @@ public class StopPlanTests
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
 
-    [Fact]
-    public void Create_ShouldRefuseAnAverageTrueRangeBand_WhileIndicatorDataIsUnavailable()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-2)]
+    public void AverageTrueRange_ShouldRefuseANonPositiveMultiple(decimal multiple)
     {
-        // The ADR names ATR as a proximity metric; the indicator pipeline (R-3) does not exist yet. Refuse it
-        // loudly rather than silently treating it as ticks -- the whitelist discipline.
-        Func<StopPlan> act = () => BuyPlan(proximity: StopProximity.AverageTrueRange(2m));
+        Func<StopProximity> act = () => StopProximity.AverageTrueRange(multiple);
 
-        act.Should().Throw<NotSupportedException>();
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void Create_ShouldAcceptAnAverageTrueRangeBand_NowThatTheIndicatorPipelineExists()
+    {
+        // FLIPPED PIN (gh#311). This asserted a NotSupportedException while no indicator pipeline could measure
+        // ATR (R-3). gh#310 landed the projection and resolution moved to the caller, so the domain no longer
+        // refuses the metric -- an unmeasurable band is now refused where it is RESOLVED, not where it is built.
+        StopPlan plan = BuyPlan(proximity: StopProximity.AverageTrueRange(2m));
+
+        plan.Proximity.Metric.Should().Be(StopProximityMetric.AverageTrueRange);
+        plan.Staging.Should().Be(StopStaging.Hidden);
+    }
+
+    // --- Proximity resolution: metric -> an absolute distance (gh#311) ---
+
+    [Fact]
+    public void ResolveDistance_ShouldMeasureTicks_InTheInstrumentsOwnUnits()
+    {
+        StopProximity.Ticks(4)
+            .ResolveDistance(Mes, new Price(5_300m), new Price(5_295m), averageTrueRange: null)
+            .Should().Be(1.00m); // 4 x 0.25
+    }
+
+    [Fact]
+    public void ResolveDistance_ShouldMeasureAFractionOfTheEntryToStopDistance_NotOfRawPrice()
+    {
+        // ADR-0007 is explicit: proximity is ticks / ATR / a fraction of the entry->stop distance -- NEVER a
+        // percentage of raw price, which would scale with the instrument's absolute level rather than the risk.
+        // At 5300 a 0.2% -of-price band would be 10.60; the correct answer is 20% of the 10-point risk = 2.00.
+        StopProximity.DistanceFraction(0.2m)
+            .ResolveDistance(Mes, new Price(5_300m), new Price(5_290m), averageTrueRange: null)
+            .Should().Be(2.00m);
+    }
+
+    [Fact]
+    public void ResolveDistance_ShouldMultiplyTheAverageTrueRange_WhenAValueIsAvailable()
+    {
+        StopProximity.AverageTrueRange(2m)
+            .ResolveDistance(Mes, new Price(5_300m), new Price(5_295m), averageTrueRange: 3.5m)
+            .Should().Be(7.0m);
+    }
+
+    [Fact]
+    public void ResolveDistance_ShouldBeNull_WhenNoAverageTrueRangeIsAvailable()
+    {
+        // Insufficient history, or a projection that has not caught up. Null means "cannot measure", which the
+        // caller must turn into NOT PROMOTING. Substituting a default distance here is exactly the silent
+        // mis-measurement the old NotSupportedException existed to prevent.
+        StopProximity.AverageTrueRange(2m)
+            .ResolveDistance(Mes, new Price(5_300m), new Price(5_295m), averageTrueRange: null)
+            .Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(0)]   // a flat-to-the-tick series is not a measurement, and a zero band is not this plan's intent
+    [InlineData(-1)]  // impossible from Wilder's smoothing; if it ever arrives it is corruption, not a distance
+    public void ResolveDistance_ShouldBeNull_WhenTheAverageTrueRangeIsNotPositive(decimal atr)
+    {
+        StopProximity.AverageTrueRange(2m)
+            .ResolveDistance(Mes, new Price(5_300m), new Price(5_295m), atr)
+            .Should().BeNull();
+    }
+
+    [Fact]
+    public void ResolveDistance_ShouldIgnoreTheAverageTrueRange_ForAMetricThatDoesNotUseIt()
+    {
+        // A stray ATR reading must never perturb a tick band -- the metric alone decides which inputs matter.
+        StopProximity.Ticks(4)
+            .ResolveDistance(Mes, new Price(5_300m), new Price(5_295m), averageTrueRange: 99m)
+            .Should().Be(1.00m);
     }
 }

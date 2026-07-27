@@ -128,8 +128,11 @@ services:
       Backfill__ResolutionMinutes__2:
       # Indicator projections over that store (gh#310). No symbol list: the projection's work is whatever the bar
       # store holds, so bars can never exist without their indicators. Null pass-through -- the app defaults the
-      # period to Wilder's 14 and the cadence to 60 s.
+      # period to Wilder's 14, the band resolution to 1 minute, and the cadence to 60 s.
+      # BandResolutionMinutes is which bar size an ATR PROMOTION BAND is measured on (gh#311); it must be one of
+      # Backfill__ResolutionMinutes above, or ATR-banded stops find no value and do not promote.
       Indicators__AtrPeriod:
+      Indicators__BandResolutionMinutes:
       Indicators__PollIntervalSeconds:
       # The dead-man's switch (R-13, gh#244, ADR-0019) -- the only alerting tier that survives THIS process
       # dying, so a deployment without it is silently missing its most important safety net. Deliberately NOT

@@ -8,6 +8,7 @@ using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.Api.MarketData;
 
@@ -26,14 +27,29 @@ namespace MarqSpec.TradingCopilot.Api.MarketData;
 public sealed class StopPromotionService
 {
     private readonly TradingCopilotDbContext _database;
+    private readonly IIndicatorSource _indicators;
+    private readonly IndicatorOptions _indicatorOptions;
     private readonly ILogger<StopPromotionService> _logger;
 
     /// <summary>Creates the service over the scoped database.</summary>
     /// <param name="database">The database.</param>
+    /// <param name="indicators">
+    /// The indicator read seam (gh#310) — consulted only for an ATR band, and the reason <c>StopPlan</c> never
+    /// has to reach for a measurement itself.
+    /// </param>
+    /// <param name="indicatorOptions">Identifies <i>which</i> ATR a band means: the period and the bar size.</param>
     /// <param name="logger">The logger.</param>
-    public StopPromotionService(TradingCopilotDbContext database, ILogger<StopPromotionService> logger)
+    public StopPromotionService(
+        TradingCopilotDbContext database,
+        IIndicatorSource indicators,
+        IOptions<IndicatorOptions> indicatorOptions,
+        ILogger<StopPromotionService> logger)
     {
+        ArgumentNullException.ThrowIfNull(indicatorOptions);
+
         _database = database;
+        _indicators = indicators;
+        _indicatorOptions = indicatorOptions.Value;
         _logger = logger;
     }
 
@@ -88,6 +104,12 @@ public sealed class StopPromotionService
         // null entry records a fetch that failed, so we do not re-hit an unreachable venue for every stop).
         Dictionary<string, IReadOnlyList<PositionSnapshot>?> positionsByAccount = [];
 
+        // Indicator values are read at most once per instrument per pass, and only for a plan that actually needs
+        // one. One "as of" for the whole pass, so two plans on the same series can never resolve their bands from
+        // different moments.
+        Dictionary<string, decimal?> atrByInstrument = [];
+        DateTimeOffset asOf = DateTimeOffset.UtcNow;
+
         int promoted = 0;
         foreach (StopPlanRecord record in hidden)
         {
@@ -100,9 +122,21 @@ public sealed class StopPromotionService
 
             StopPlan plan = record.ToStopPlan(order);
 
+            // Resolve the band HERE, in the caller, and hand StopPlan an absolute distance (gh#311). An ATR band
+            // needs a measurement; a pure value object reconstructed from the database is the wrong place to
+            // reach for one, and a distance fixed at construction would silently go stale as ATR moved.
+            decimal? band = await ResolveBandAsync(plan, atrByInstrument, asOf, order.Id, cancellationToken);
+            if (band is null)
+            {
+                // Unmeasurable -> DO NOT PROMOTE. Substituting a default distance would place the stop at a
+                // distance nobody chose; the always-native safety stop remains the floor and the next quote
+                // retries once the projection catches up. (Logged once per instrument per pass, inside.)
+                continue;
+            }
+
             // The side that would hit the protective stop: a long exits at the bid, a short at the ask.
             decimal price = plan.Side == OrderSide.Buy ? bid : ask;
-            if (!plan.ShouldPromote(new Price(price)))
+            if (!plan.ShouldPromote(new Price(price), band.Value))
             {
                 continue;
             }
@@ -219,6 +253,58 @@ public sealed class StopPromotionService
                 + "position behind it. Cancel it manually.",
                 orderId, contractKey, observed, placed.VenueOrderId);
         }
+    }
+
+    /// <summary>
+    /// This plan's promotion band as an absolute price distance — or <see langword="null"/> when it cannot be
+    /// measured, which the caller must treat as <b>do not promote</b>.
+    /// </summary>
+    /// <remarks>
+    /// Only an ATR band consults the indicator store, so a tick or distance-fraction plan costs no query and is
+    /// unaffected by an indicator outage. The read is cached per instrument for the pass: the watcher runs on
+    /// every quote, so a read per plan would put N queries on a hot path and repeat the missing-value warning
+    /// once per plan instead of once per pass.
+    /// </remarks>
+    private async Task<decimal?> ResolveBandAsync(
+        StopPlan plan,
+        Dictionary<string, decimal?> cache,
+        DateTimeOffset asOf,
+        Guid orderId,
+        CancellationToken cancellationToken)
+    {
+        decimal? atr = null;
+        if (plan.Proximity.Metric == StopProximityMetric.AverageTrueRange)
+        {
+            string symbol = plan.Instrument.Id.ToString();
+            if (!cache.TryGetValue(symbol, out atr))
+            {
+                atr = await _indicators.GetAverageTrueRangeAsync(
+                    plan.Instrument.Id, _indicatorOptions.BandResolutionMinutes, asOf, cancellationToken);
+                cache[symbol] = atr;
+
+                if (atr is null or <= 0m)
+                {
+                    // Named loudly because the failure is otherwise INVISIBLE: the stop simply never promotes,
+                    // and "no promotion" looks identical to "price never came close". Causes worth checking are
+                    // insufficient bar history, a stalled projection, and a band resolution the backfill is not
+                    // archiving (Indicators:BandResolutionMinutes vs Backfill:ResolutionMinutes).
+                    _logger.LogWarning(
+                        "No ATR({Period}) on {Instrument} at {Resolution}m as of {AsOf}; ATR-banded stops are NOT "
+                        + "being promoted. The native safety stop remains the floor until a value exists.",
+                        _indicatorOptions.AtrPeriod, symbol, _indicatorOptions.BandResolutionMinutes, asOf);
+                }
+            }
+        }
+
+        decimal? band = plan.Proximity.ResolveDistance(plan.Instrument, plan.Entry, plan.ActualStop, atr);
+        if (band is null)
+        {
+            _logger.LogDebug(
+                "Stop plan for order {OrderId} has an unresolvable {Metric} band this pass; not promoting.",
+                orderId, plan.Proximity.Metric);
+        }
+
+        return band;
     }
 
     /// <summary>
