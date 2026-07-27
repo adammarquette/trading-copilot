@@ -818,6 +818,46 @@
   .audit .ar2:last-child{border-bottom:0}
   .audit .ar2 .ts2{color:var(--on-dim)}
   @media(max-width:720px){.kill-grid{grid-template-columns:1fr}}
+  /* ---------- orphan / safety alerts ---------- */
+  .alerts{margin-top:44px}
+  .alertbanner{display:flex;align-items:stretch;gap:14px;background:linear-gradient(90deg,var(--critical-ctr),var(--warn-ctr));
+    border:1px solid rgba(255,90,78,.45);border-radius:var(--r-l);padding:15px 16px;box-shadow:var(--e2)}
+  .ab-sev{flex:none;align-self:flex-start;font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;
+    color:#FFB4AC;background:var(--critical);border-radius:6px;padding:5px 9px;white-space:nowrap}
+  :root[data-theme="light"] .ab-sev{color:#fff}
+  .ab-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}
+  .ab-h{font-size:13px;color:var(--on-hi);font-weight:600;line-height:1.4}
+  .ab-line{font-size:12px;color:var(--on-med);line-height:1.5}
+  .ab-line b.ok{color:var(--long)}
+  .ab-affected{display:flex;flex-direction:column;gap:5px;background:var(--bg);border:1px solid var(--outline-soft);border-radius:9px;padding:9px 11px}
+  .ab-item{font-size:11px;font-family:var(--mono);color:var(--on-med);display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .ab-foot{font-size:11px;color:var(--on-dim);line-height:1.45}
+  .ab-tag{flex:none;align-self:flex-start;font-family:var(--mono);font-size:8.5px;letter-spacing:.04em;text-transform:uppercase;
+    color:var(--warn);border:1px solid rgba(242,180,80,.4);border-radius:5px;padding:2px 7px;white-space:nowrap}
+  .alerts-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start;margin-top:18px}
+  .pushcard{max-width:344px;background:var(--surface-2);border:1px solid var(--outline);border-radius:14px;padding:13px 15px;box-shadow:var(--e2);display:flex;flex-direction:column;gap:6px}
+  .push-app{display:flex;align-items:center;gap:7px;font-size:10.5px;color:var(--on-dim);font-weight:600}
+  .push-app .push-ic{font-size:13px}.push-app .push-t{margin-left:auto;font-family:var(--mono)}
+  .push-title{font-size:13px;font-weight:700;color:var(--on-hi)}
+  .push-body{font-size:12px;color:var(--on-med);line-height:1.45}
+  .push-meta{font-size:9.5px;color:var(--on-dim);font-family:var(--mono);margin-top:2px}
+  .dms{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);padding:13px 14px;display:flex;flex-direction:column;gap:8px}
+  .dms-row{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--on-med)}
+  .dms-row b{color:var(--on-hi);font-family:var(--mono)}
+  .dms-dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .dms-dot.ok{background:var(--long);box-shadow:0 0 0 3px rgba(79,191,123,.18)}
+  .dms-note{font-size:11px;color:var(--on-dim);line-height:1.5}
+  .dms-note b{color:var(--on-med)}
+  .alertlist{display:flex;flex-direction:column;background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-m);overflow:hidden}
+  .al{display:flex;gap:10px;align-items:flex-start;padding:11px 13px;border-bottom:1px solid var(--outline-soft)}
+  .al:last-child{border-bottom:0}
+  .al-dot{width:8px;height:8px;border-radius:50%;background:var(--on-dim);flex:none;margin-top:4px}
+  .al.crit{background:var(--critical-ctr)}.al.crit .al-dot{background:var(--critical);box-shadow:0 0 0 3px rgba(255,90,78,.18)}
+  .al-b{flex:1;min-width:0}
+  .al-t{font-size:12px;color:var(--on-hi);font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .al-m{font-size:10.5px;color:var(--on-dim);font-family:var(--mono);margin-top:3px}
+  .al-note{font-size:11px;color:var(--on-dim);line-height:1.5;margin-top:10px}
+  @media(max-width:720px){.alerts-grid{grid-template-columns:1fr}.alertbanner{flex-direction:column}}
   /* ---------- auth: sign in ---------- */
   .auth{margin-top:44px}
   .auth-stage{display:flex;gap:24px;flex-wrap:wrap;justify-content:center;padding:32px 20px;border-radius:var(--r-l);background:radial-gradient(120% 150% at 50% -20%,#171c24,#0c0e12);border:1px solid var(--outline-soft)}
@@ -2209,6 +2249,62 @@
     <div class="rej-why" style="margin-top:12px">Auto-flatten is <b>safety-critical</b> (R-13): it runs from a <b>deterministic timer</b>, prefers <b>native</b> (exchange-held) actions so a connection blip can't strand a position, <b>verifies flat</b>, and writes an <b>immutable audit record</b> (eng §9). The manual <b>kill switch</b> is the same sequence on demand — always visible at every breakpoint.</div>
   </section>
 
+  <section class="alerts">
+    <div class="cap"><h2>Orphan &amp; safety alerts — you learn immediately, and know what still protects you</h2><span class="bp">R-11 · R-5 · ADR-0013</span>
+      <span class="muted">the real-time in-app alert is <b>Phase 4</b> (gh#222, blocked on the SPA shell); the detection, the synthetic_risk audit, the notification channel + dead-man's switch are <b>shipped</b> — the interim alert is a high-severity log</span></div>
+
+    <!-- the persistent degraded-protection banner — the alert itself -->
+    <div class="alertbanner">
+      <span class="ab-sev">⚠ degraded</span>
+      <div class="ab-body">
+        <div class="ab-h">Connection to <b>TopstepX</b> dropped 0:38 ago — <b>2 working stops orphaned</b>, reconnecting.</div>
+        <div class="ab-line"><b class="ok">Your native safety floor still holds</b> at the exchange — it's your <b>tighter working stops</b> that are un-managed until reconnect. This is <b>degraded protection, not an unprotected position</b>.</div>
+        <div class="ab-affected">
+          <span class="ab-item">ES long +2 · working 5222 <span class="chip warn" style="font-size:9px;padding:1px 6px">orphaned</span> · safety 5216 <span class="chip good" style="font-size:9px;padding:1px 6px">native · holds</span></span>
+          <span class="ab-item">CL short −1 · working 78.70 <span class="chip warn" style="font-size:9px;padding:1px 6px">orphaned</span> · safety 78.90 <span class="chip good" style="font-size:9px;padding:1px 6px">native · holds</span></span>
+        </div>
+        <div class="ab-foot">Stays up until <b>every</b> stop re-arms against venue truth. Auto-flatten still fires at the deadline regardless (R-13).</div>
+      </div>
+      <span class="ab-tag">persistent · not a toast</span>
+    </div>
+
+    <div class="alerts-grid">
+      <div>
+        <div class="mini-h">Out-of-app push — Pushover</div>
+        <div class="pushcard">
+          <div class="push-app"><span class="push-ic">📈</span> Trading Co-Pilot <span class="push-t">now</span></div>
+          <div class="push-title">⚠ Synthetic protection orphaned</div>
+          <div class="push-body">TopstepX connection dropped — 2 working stops orphaned. <b>Native safety floor holds.</b> Reconnecting…</div>
+          <div class="push-meta">P2 · synthetic_risk · single push — P1 Emergency is reserved for a flatten failure or an actually-unprotected position, which this is not (ADR-0019)</div>
+        </div>
+        <div class="mini-h" style="margin-top:18px">Dead-man's switch — silence is the alarm <span class="tag">ADR-0019</span></div>
+        <div class="dms">
+          <div class="dms-row"><span class="dms-dot ok"></span>Out-of-process watchdog · last check-in <b>4s ago</b></div>
+          <div class="dms-note">The worst R-13 failure is the <b>host dying and taking the alerting with it</b>. So an <b>independent</b> process expects a check-in; if one <b>fails to arrive</b>, it pages — <b>silence is the alarm</b>. It pages on <b>flatten.escalated</b> (deadline + seconds), never the too-late <i>flatten.missed</i>.</div>
+        </div>
+      </div>
+
+      <div>
+        <div class="mini-h">Alert center — persistent while degraded, cleared only on re-arm</div>
+        <div class="alertlist">
+          <div class="al crit"><span class="al-dot"></span><div class="al-b"><div class="al-t">Synthetic protection orphaned · 2 stops <span class="chip bad" style="font-size:9px;padding:1px 6px">active</span></div><div class="al-m">TopstepX drop · 0:38 ago · synthetic_risk · safety floor holds</div></div></div>
+          <div class="al"><span class="al-dot"></span><div class="al-b"><div class="al-t">ES working stop re-armed <span class="chip good" style="font-size:9px;padding:1px 6px">would clear</span></div><div class="al-m">reconnect · re-validated vs venue truth · position still open</div></div></div>
+          <div class="al"><span class="al-dot"></span><div class="al-b"><div class="al-t">Auto-flatten check-in healthy</div><div class="al-m">dead-man's-switch watchdog · 4s ago</div></div></div>
+        </div>
+        <div class="al-note">A stop that <b>cannot</b> re-arm — venue unreachable, or the position <b>closed during the outage</b> — does <b>not</b> silently clear; the alert stays until it's resolved from venue truth (gh#191). Re-arm on reconnect clears it; a retire (position gone) closes it out.</div>
+      </div>
+    </div>
+
+    <div class="ann" style="margin-top:16px">
+      <div class="annitem"><b>Never “you're unprotected” — because you're not.</b> The always-native <b>safety stop rests at the exchange</b> and caps the position through any outage (R-5 / ADR-0007). An orphan means your <b>tighter working stop</b> is un-managed until reconnect — the alert says exactly that, and never overstates the risk (R-11 · R-5).</div>
+      <div class="annitem"><b>Persistent, not a toast.</b> The degraded state shows for <b>as long as protection is degraded</b> — a toast can be missed; this can't. It clears only when <b>every</b> stop re-arms; one that can't re-arm keeps it up.</div>
+      <div class="annitem"><b>You learn on reconnect, even if you were away.</b> A client that was disconnected when the drop happened gets the alert <b>on resume</b> over the resume-safe channel (SignalR outbox + idempotent resume) — the alert is <b>not lost with the socket</b> (ADR-0013).</div>
+      <div class="annitem"><b>Shipped vs Phase 4.</b> The orphan <b>detection</b> + state machine (<code>OrphanGuardService</code>), the <b>synthetic_risk audit</b> (gh#220), the <b>notification channel</b> (dedup + budget, gh#243/300) and the <b>dead-man's switch</b> (ADR-0019) are built; the interim alert is a high-severity <b>log</b>. The real-time <b>in-app</b> surface drawn here is <b>Phase 4</b> (gh#222), pushed once the SPA shell (gh#23) + trading surfaces (gh#25) exist.</div>
+    </div>
+
+    <div class="rej-why" style="margin-top:12px">R-11 requires that on a connection drop the operator is <b>alerted immediately</b> — and that the alert be <b>truthful</b> (its connection-loss bullet names the safety stop as the physical floor): an orphaned synthetic stop is <b>degraded, not absent</b> protection, because the always-native safety stop is the physical floor at the exchange. So this surface is built to be <b>impossible to miss</b> (persistent, out-of-app push, resume-safe) and <b>impossible to misread</b> (it names the tighter stop as orphaned and the safety floor as holding). The detection, audit, notification channel and dead-man's switch are shipped today; the interim alert is a log, and this real-time in-app surface is the Phase-4 client piece (gh#222) it feeds.</div>
+  </section>
+
   <section class="key">
     <h3>Region → requirement</h3>
     <div class="key-grid">
@@ -2246,6 +2342,7 @@
       <div><span class="tag">R-7 · ADR-0008</span> Rulebook &amp; triggers — plain-language rules compile to confirmed deterministic triggers (alert vs. agent-review)</div>
       <div><span class="tag">R-6 · ADR-0009</span> AI refinement loop — journal + backtest → follow-up questions → confirmed rule / strategy refinements</div>
       <div><span class="tag">R-13 · ADR-0007</span> Kill switch &amp; auto-flatten — countdown escalation, native-first flatten sequence, immutable audit; connection-loss → synthetic-orphan emergency</div>
+      <div><span class="tag">R-11 · R-5</span> Orphan &amp; safety alerts — persistent degraded-protection banner (never “unprotected”: the native safety floor holds), Pushover push, dead-man's switch (silence is the alarm), resume-safe alert center; detection + audit + channel + DMS shipped, the real-time in-app surface is Phase 4 (gh#222)</div>
       <div><span class="tag">R-18 · R-20</span> Sign in — login for a web-exposed deployment; the operator's account is seeded at first start, data access scoped to it at the data layer</div>
       <div><span class="tag">R-2 · [D2]</span> News relevance — ticker↔instrument maps, per-instrument + global topics (AI-suggested); sentiment thumbs (deferred); config for the feed's salience, [D2] unbuilt</div>
     </div>
