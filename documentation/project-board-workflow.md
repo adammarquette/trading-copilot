@@ -173,11 +173,42 @@ them.
 An **epic** (`epic` label) is a **container**, not a unit of work, so it does not move like a task:
 - It sits in **Backlog** (future phase) or **Planning** (its first increment being scoped), then moves to **In
   Progress** and *stays there* while its child tasks flow through the columns individually.
-- It reaches **Done** only when every child task is Done (GitHub's *Sub-issues progress* field tracks this).
+- It reaches **Done** only when every child task is Done **and its body checklist is satisfied** — which is *not*
+  what GitHub's *Sub-issues progress* field reports. See *Closing an epic* below.
 - The things that actually traverse Current ToDo → In Progress → Review → Done are the **child tasks**, each a
   `feature/<id>_…` branch with (per the QA contract) an independent test task.
 - **Epics are not `Work Estimate`-tagged** — the estimate is a per-task routing signal; a container has no single
   tier. Its child tasks each carry their own.
+
+### Closing an epic — the progress bar is not the signal
+
+**GitHub's *Sub-issues progress* counts only what was linked.** An epic's actual definition of done is its
+**body checklist**, and the two drift independently — so **100% progress is not evidence of completeness**. An
+epic can read fully green while a third of its stated scope was never carded at all.
+
+Both failure directions are real (found 2026-07-28 on **gh#26** and **gh#13**, each at 100% with every sub-issue
+closed):
+
+| Drift | What it looks like | Seen as |
+|---|---|---|
+| **Checklist scope never carded** | the bar says done; a task line has no issue behind it | `gh#13`'s Finnhub/Tiingo **market** providers (`gh#411`) and `gh#26`'s AI-spend dashboards (`gh#412`) — neither existed |
+| **Delivered work left parentless** | the bar under-reports; shipped issues sit outside the tree | `gh#155`, `gh#164`, `gh#163`, `gh#161` on D1 |
+| **Delivered work mis-parented** | progress credited to the wrong container | `gh#220` sat under `gh#12` though it delivered X1's audit-records task |
+| **A whole workstream with no checklist line** | shipped work is invisible, and so is its *open* remainder | X1's alerting (`gh#242`–`gh#246`), still carrying `gh#408` / `gh#400` |
+
+**So audit an epic before closing it — diff the body checklist against the sub-issue tree, item by item:**
+
+1. For every checklist line with no obvious sub-issue, **search closed issues by keyword before concluding it is
+   undone** — delivered-but-unlinked is the common case.
+2. **Beware near-miss titles.** `gh#358` / `gh#383` are *news* Finnhub/Tiingo under epic `gh#14`, and read at a
+   glance as covering D1's *market* line. They do not; `gh#383` explicitly carves that surface out.
+3. **File a card for genuinely uncovered scope**, re-parent stray deliveries, and **tick the boxes with issue
+   citations** so the body stops needing the same audit next time.
+4. Check the checklist wording still reflects current decisions — an epic body written early keeps asserting
+   superseded ones (X1's spend task still said *"operator-only"* long after ADR-0015 reversed that premise).
+
+*Done is Done* applies to containers too: an epic closed on a green progress bar silently drops whatever its
+checklist still names.
 
 ## Time-boxing
 
@@ -219,6 +250,13 @@ field** — the field that keeps finished or freshly-filed work from stranding i
 > web UI, and the stranded cards were corrected by hand (`gh#200`).
 
 > **Board hygiene note.** Two known GitHub quirks to watch: **(1)** a Projects item's title can stop tracking its
-> issue after a retitle; the fix is to remove + re-add the item (which restores its Status), not another retitle.
-> **(2)** if a card ever appears with an empty `Status` (some add paths can bypass the *Item added → Backlog*
-> workflow), set the column by hand — an empty-`Status` card reads as unresolved forever.
+> issue after a retitle; the fix is to remove + re-add the item, not another retitle — but the re-added item goes
+> through *Item added → Backlog* and lands in **Backlog**, so **its Status is not restored; set the column again
+> by hand** (observed 2026-07-25). **(2)** if a card ever appears with an empty `Status` (some add paths can
+> bypass the *Item added → Backlog* workflow), set the column by hand — an empty-`Status` card reads as
+> unresolved forever.
+>
+> For *placing* an item, prefer the primitive that avoids the dance entirely: **`addProjectV2ItemById` is
+> idempotent by content** — given an already-carded issue it returns the **existing** item id rather than
+> duplicating it — so `addProjectV2ItemById` → `updateProjectV2ItemFieldValue` places any issue uniformly,
+> whether it is new, auto-added, or long since carded. No delete/re-add, so no lost Status.
