@@ -70,6 +70,14 @@ public static class TelemetryRegistration
                 // hide exactly the tail that matters on an execution path.
                 metrics
                     .SetResourceBuilder(resource)
+                    // Exemplars are what make a latency spike CLICKABLE: each carries the trace id of the span the
+                    // measurement was taken in, so Grafana jumps metric -> trace (ADR-0002, §7). Without this the
+                    // SDK's default is off and the pivot both documents promise silently does not exist (gh#338).
+                    //
+                    // TRACE-BASED, not always-on: an exemplar is attached only when the measurement was recorded
+                    // inside a sampled span, which is the only case the pivot can be followed. Always-on would
+                    // decorate every series with a dead link and pay the storage for nothing.
+                    .SetExemplarFilter(ExemplarFilterType.TraceBased)
                     .AddAspNetCoreInstrumentation()
                     .AddHttpClientInstrumentation()
                     .AddRuntimeInstrumentation()
