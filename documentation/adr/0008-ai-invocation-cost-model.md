@@ -43,7 +43,12 @@ discipline to **how and when the LLM is invoked at all**, so cost is bounded and
   a budget (`Q-10`); in the **multi-user** model (R-20) it is a **platform-level** cap the **operator** sets — one
   shared LLM + embeddings account funds every user, so usage & spend is reported in **Grafana, not surfaced to end
   users** *(revisit per-user if invitees later bring their own LLM accounts; gh#4)*. Every invocation is **traced** ([ADR-0002](0002-observability.md)) so cost and latency are
-  observable.
+  observable. **The first governor-input signal is emitting** (gh#403): every Cohere embed call records tokens,
+  estimated cost and latency on the `MarqSpec.TradingCopilot.Ai` meter, by model and outcome — the metrics the
+  governor reads to know spend-so-far, and a failover is counted so a degrade is visible. Cost is estimated from
+  a single pinned rate. The **persisted `AIUsage`** record — the in-app spend meter and the durable governor
+  ledger — is still deferred to A2 (gh#16), where the LLM half of the spend signal lands with the real
+  `ILlmProvider` adapter.
 - **The strategy-agent → executor flow attaches here.** Strategy agents are the "review / enrich on fire"
   consumers; the executor synthesizes their outputs into a timely suggestion — invoked **on triggers, not
   continuously**. Their proposals still pass the deterministic risk / execution gate ([ADR-0007](0007-order-execution-model.md)):

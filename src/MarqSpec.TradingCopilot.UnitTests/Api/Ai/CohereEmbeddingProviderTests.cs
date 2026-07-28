@@ -1,0 +1,229 @@
+using System.Net;
+using System.Text;
+using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Domain.Ai;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+
+namespace MarqSpec.TradingCopilot.UnitTests.Api.Ai;
+
+/// <summary>
+/// The Cohere embedding provider (gh#403) behind the gh#109 <see cref="IEmbeddingProvider"/> seam. Two jobs it
+/// must never get wrong: it <b>degrades to sparse rather than throwing</b> on any provider trouble (a retrieval
+/// path cannot take an exception from a rate limit), and it <b>meters every call</b> — an unmetered embed is
+/// invisible spend on the operator's own key.
+/// </summary>
+/// <remarks>No key and no network: every test drives a stubbed transport (engineering §5, gh#403 acceptance).</remarks>
+public class CohereEmbeddingProviderTests
+{
+    private const string Key = "cohere-key-not-a-secret";
+
+    private readonly RecordingEmbeddingMetrics _metrics = new();
+
+    private static CohereOptions Configured() => new() { ApiKey = Key };
+
+    private CohereEmbeddingProvider Provider(StubHandler handler, CohereOptions? options = null) =>
+        new(
+            new StubHttpClientFactory(handler),
+            Options.Create(options ?? Configured()),
+            _metrics,
+            NullLogger<CohereEmbeddingProvider>.Instance);
+
+    private static string EmbedResponse(int dimensions = 1024, int inputTokens = 7)
+    {
+        string vector = string.Join(",", Enumerable.Repeat("0.01", dimensions));
+        return "{\"id\":\"x\",\"embeddings\":{\"float\":[[" + vector
+            + "]]},\"meta\":{\"billed_units\":{\"input_tokens\":" + inputTokens + "}}}";
+    }
+
+    // --- Availability & the unset key ---
+
+    [Fact]
+    public void IsAvailable_ShouldBeTrue_WhenAKeyIsConfigured() =>
+        Provider(new StubHandler()).IsAvailable.Should().BeTrue();
+
+    [Fact]
+    public void IsAvailable_ShouldBeFalse_WhenNoKeyIsConfigured() =>
+        Provider(new StubHandler(), new CohereOptions { ApiKey = null }).IsAvailable.Should().BeFalse();
+
+    [Fact]
+    public void Dimensions_ShouldMatchThePgvectorColumnWidth() =>
+        Provider(new StubHandler()).Dimensions.Should().Be(1024);
+
+    [Fact]
+    public async Task EmbedAsync_ShouldReturnNull_WhenNotConfigured()
+    {
+        StubHandler handler = new() { Body = EmbedResponse() };
+
+        IReadOnlyList<float>? vector = await Provider(handler, new CohereOptions { ApiKey = " " })
+            .EmbedAsync("text", CancellationToken.None);
+
+        vector.Should().BeNull();
+        handler.Requests.Should().BeEmpty("an unconfigured provider must not reach the network");
+    }
+
+    // --- The happy path ---
+
+    [Fact]
+    public async Task EmbedAsync_ShouldReturnTheVector_WhenCohereSucceeds()
+    {
+        StubHandler handler = new() { Body = EmbedResponse() };
+
+        IReadOnlyList<float>? vector = await Provider(handler).EmbedAsync("Fed holds rates", CancellationToken.None);
+
+        vector.Should().NotBeNull();
+        vector!.Should().HaveCount(1024);
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ShouldSendTheKeyAsABearerToken_AndNeverInTheBody()
+    {
+        StubHandler handler = new() { Body = EmbedResponse() };
+
+        await Provider(handler).EmbedAsync("text", CancellationToken.None);
+
+        handler.LastRequest!.Headers.Authorization!.ToString().Should().Be($"Bearer {Key}");
+        handler.LastBody.Should().NotContain(Key, "the key authenticates the request; it is never request content");
+    }
+
+    // --- Fallback to sparse rather than throwing (the core safety property) ---
+
+    [Fact]
+    public async Task EmbedAsync_ShouldReturnNull_WhenRateLimited()
+    {
+        StubHandler handler = new() { Status = HttpStatusCode.TooManyRequests };
+
+        IReadOnlyList<float>? vector = await Provider(handler).EmbedAsync("text", CancellationToken.None);
+
+        vector.Should().BeNull("a 429 degrades retrieval to sparse — it must not throw into the caller");
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ShouldReturnNull_WhenCohereReturnsAServerError()
+    {
+        StubHandler handler = new() { Status = HttpStatusCode.InternalServerError };
+
+        (await Provider(handler).EmbedAsync("text", CancellationToken.None)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ShouldReturnNull_WhenTheTransportThrows()
+    {
+        StubHandler handler = new() { Throw = new HttpRequestException("connection reset") };
+
+        (await Provider(handler).EmbedAsync("text", CancellationToken.None)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ShouldReturnNull_WhenTheResponseBodyIsUnparseable()
+    {
+        StubHandler handler = new() { Body = "not json" };
+
+        (await Provider(handler).EmbedAsync("text", CancellationToken.None)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ShouldRethrow_WhenTheCallerCancels()
+    {
+        StubHandler handler = new() { Throw = new OperationCanceledException() };
+        using CancellationTokenSource cts = new();
+        await cts.CancelAsync();
+
+        Func<Task> act = () => Provider(handler).EmbedAsync("text", cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>(
+            "a genuine caller cancellation is host shutdown, not a provider failure to swallow");
+    }
+
+    // --- Metering: every call, including a failover (gh#403: an unmetered call is invisible spend) ---
+
+    [Fact]
+    public async Task EmbedAsync_ShouldMeterTokensAndCost_WhenTheCallSucceeds()
+    {
+        StubHandler handler = new() { Body = EmbedResponse(inputTokens: 1_000_000) };
+
+        await Provider(handler).EmbedAsync("text", CancellationToken.None);
+
+        RecordedEmbed embed = _metrics.Records.Should().ContainSingle().Subject;
+        embed.Outcome.Should().Be(EmbeddingOutcome.Embedded);
+        embed.BilledTokens.Should().Be(1_000_000);
+        embed.EstimatedCostUsd.Should().Be(0.10m, "one million tokens at the pinned $0.10/M rate");
+        embed.Model.Should().Be("embed-english-v3.0");
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ShouldMeterAFailover_AsRateLimitedWithZeroCost()
+    {
+        StubHandler handler = new() { Status = HttpStatusCode.TooManyRequests };
+
+        await Provider(handler).EmbedAsync("text", CancellationToken.None);
+
+        RecordedEmbed embed = _metrics.Records.Should().ContainSingle(
+            "a call that failed over is still a call — leaving it unmetered would hide the degrade").Subject;
+        embed.Outcome.Should().Be(EmbeddingOutcome.RateLimited);
+        embed.BilledTokens.Should().Be(0);
+        embed.EstimatedCostUsd.Should().Be(0m);
+        embed.Latency.Should().BeGreaterThanOrEqualTo(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ShouldMeterATransportFailure_AsFailed()
+    {
+        StubHandler handler = new() { Throw = new HttpRequestException("boom") };
+
+        await Provider(handler).EmbedAsync("text", CancellationToken.None);
+
+        _metrics.Records.Should().ContainSingle().Which.Outcome.Should().Be(EmbeddingOutcome.Failed);
+    }
+
+    // --- Doubles ---
+
+    private sealed record RecordedEmbed(
+        string Model, EmbeddingOutcome Outcome, int BilledTokens, decimal EstimatedCostUsd, TimeSpan Latency);
+
+    private sealed class RecordingEmbeddingMetrics : IEmbeddingMetrics
+    {
+        public List<RecordedEmbed> Records { get; } = [];
+
+        public void RecordEmbed(string model, EmbeddingOutcome outcome, int billedTokens, decimal estimatedCostUsd, TimeSpan latency) =>
+            Records.Add(new RecordedEmbed(model, outcome, billedTokens, estimatedCostUsd, latency));
+    }
+
+    private sealed class StubHttpClientFactory : IHttpClientFactory
+    {
+        private readonly StubHandler _handler;
+
+        public StubHttpClientFactory(StubHandler handler) => _handler = handler;
+
+        public HttpClient CreateClient(string name) => new(_handler) { BaseAddress = new Uri("https://api.cohere.test") };
+    }
+
+    private sealed class StubHandler : HttpMessageHandler
+    {
+        public List<HttpRequestMessage> Requests { get; } = [];
+
+        public HttpRequestMessage? LastRequest { get; private set; }
+
+        public string? LastBody { get; private set; }
+
+        public HttpStatusCode Status { get; set; } = HttpStatusCode.OK;
+
+        public string Body { get; set; } = "{}";
+
+        public Exception? Throw { get; set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requests.Add(request);
+            LastRequest = request;
+            LastBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+
+            if (Throw is not null)
+            {
+                throw Throw;
+            }
+
+            return new HttpResponseMessage(Status) { Content = new StringContent(Body, Encoding.UTF8, "application/json") };
+        }
+    }
+}
