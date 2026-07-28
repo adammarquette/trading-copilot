@@ -341,7 +341,7 @@ public static class ProjectXMapping
     /// <summary>Maps a gateway open order onto the venue-neutral <see cref="WorkingOrder"/> (gh#183).</summary>
     /// <param name="order">The gateway's order (from an open-orders query).</param>
     /// <param name="venue">The venue to tag it with.</param>
-    /// <returns>The neutral working-order view — the handle, contract, and resting price.</returns>
+    /// <returns>The neutral working-order view — the handle, contract, resting price, and size.</returns>
     public static WorkingOrder ToWorkingOrder(ClientModels.Order order, VenueId venue)
     {
         ArgumentNullException.ThrowIfNull(order);
@@ -350,7 +350,12 @@ public static class ProjectXMapping
             order.Id.ToString(CultureInfo.InvariantCulture),
             VenueContractId.Create(venue, order.ContractId),
             order.StopPrice is { } stopPrice ? new Price(stopPrice) : null,
-            order.LimitPrice is { } limitPrice ? new Price(limitPrice) : null);
+            order.LimitPrice is { } limitPrice ? new Price(limitPrice) : null,
+
+            // The gateway has always carried this; the projection dropped it (gh#381). Without it, a protective
+            // leg sized to LESS than the position it guards is invisible -- and a partially-covered position is
+            // not a protected one.
+            order.Size);
     }
 
     /// <summary>Expresses a bar duration as the gateway's unit plus a count.</summary>

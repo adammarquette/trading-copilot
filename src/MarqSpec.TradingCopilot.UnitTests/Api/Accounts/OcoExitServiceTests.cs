@@ -66,7 +66,7 @@ public class OcoExitServiceTests
             VenueContractId.Create(Projectx, contract), netQuantity, new Price(5_300m));
 
     private static WorkingOrder Leg(string key, decimal? stop = null, string contract = Contract) =>
-        new(key, VenueContractId.Create(Projectx, contract), stop is { } s ? new Price(s) : null, null);
+        new(key, VenueContractId.Create(Projectx, contract), stop is { } s ? new Price(s) : null, null, Size: 1);
 
     private async Task<Guid> SeedAccountAsync(Guid owner, string venueAccountKey, string credentialKey = OurCredentialKey)
     {

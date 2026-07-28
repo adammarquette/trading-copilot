@@ -131,3 +131,25 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
   templates keep their owner) is the QA suite's.
 - **Reconnect / backfill** verification (R-1 gap detection) and **recovery event / audit** records (ADR-0001, §9).
 - Client **resume** edge cases (dedup, ordering) under the SignalR idempotent-resume pattern.
+
+## Update (2026-07-28) — the venue-truth read family gains a resting-orders sibling (gh#381)
+
+This ADR's venue-as-truth reconcile had one HTTP read: `GET /accounts/{id}/positions` (gh#193). It now has two.
+`GET /accounts/{id}/orders` reports the **working orders resting at the venue**, including the attached
+protective bracket and its size, under the **same discipline**:
+
+- the same **Live / Settlement / Unknown** basis vocabulary, so a caller has one way to judge how far to trust
+  either payload;
+- **declared-unknown on unreachable**, with the payload withheld rather than returned empty;
+- the same **ADR-0015 credential-key guard** — a connection this process holds no credentials for is unknown, and
+  the venue is not even asked;
+- the same **R-20 default-deny**: an account not owned by the caller is *not found*, never "found but empty".
+
+**One nuance worth stating rather than inheriting silently.** For positions the basis describes a *price mark* —
+a settlement re-mark must never read as live movement. An order has no mark, so for this read `Settlement` means
+the view was taken **inside the maintenance window**, when the venue's own book may be mid-transition. Same
+vocabulary, and deliberately so; a second enum would be a second thing to keep straight for no gain.
+
+**Why declared-unknown matters more here than anywhere.** The question this read answers is *"is protection
+standing?"* — and for that question, **"we could not ask" and "nothing is there" are opposite answers**. Returning
+an empty list for an unreachable venue would be the single most dangerous shape this endpoint could take.

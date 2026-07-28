@@ -17,7 +17,7 @@ public class OcoExitSelectionTests
     private static VenueContractId Es { get; } = VenueContractId.Create(Venue, "CON.F.US.EP.U26");
 
     private static WorkingOrder Order(string key, VenueContractId contract, decimal? stop = null, decimal? limit = null) =>
-        new(key, contract, stop is { } s ? new Price(s) : null, limit is { } l ? new Price(l) : null);
+        new(key, contract, stop is { } s ? new Price(s) : null, limit is { } l ? new Price(l) : null, Size: 1);
 
     [Fact]
     public void LegsToCancel_ShouldCancelTheUnjournaledProtectiveLegs_OnTheFlatContract()

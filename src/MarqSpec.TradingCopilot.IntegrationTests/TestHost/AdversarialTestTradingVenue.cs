@@ -102,7 +102,8 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
             venueOrderKey,
             VenueContractId.Create(VenueId.Parse("projectx"), contractKey),
             stopPrice is null ? null : new Price(stopPrice.Value),
-            LimitPrice: null)));
+            LimitPrice: null,
+            Size: 1)));
 
     /// <summary>Makes <c>CancelOrderAsync</c> THROW for a venue order key — the "already gone" rejection the OCO-exit
     /// path must swallow without corrupting the record or retry-storming (gh#184).</summary>

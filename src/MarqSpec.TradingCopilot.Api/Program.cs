@@ -152,6 +152,10 @@ builder.Services.AddHostedService<AccountEventStreamHost>();
 // as live and an unreachable venue is not shown as a stale live view.
 builder.Services.AddScoped<PositionReconciliationService>();
 
+// The resting-orders sibling of the positions read (gh#381): venue truth for the working orders standing on an
+// account, including the attached protective bracket and its SIZE. Read-only -- the gate is untouched.
+builder.Services.AddScoped<WorkingOrderReconciliationService>();
+
 // Auto-flatten (R-13, gh#185, ADR-0013): the PRIMARY scheduler that closes open positions at each instrument's
 // per-market deadline on the DST-aware market clock. On by default and cannot be silently disabled -- so it
 // ALWAYS runs; a market is turned off per-instrument in the Flatten config, not by omitting the host. The
@@ -289,6 +293,7 @@ app.MapRiskEndpoints();
 app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
 app.MapPositionEndpoints();
+app.MapWorkingOrderEndpoints();
 // Liveness: answers from the process alone and touches NO dependency (§7). A liveness probe that queries the
 // database restarts a healthy app during a database blip -- taking the auto-flatten scheduler down with it.
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
