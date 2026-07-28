@@ -88,6 +88,10 @@ and cross-agent heads-ups with no formal home. **Check it before starting work**
   **`<type>/<work-item-id>_<title>`** (`feature` | `bug` | `hotfix`; the tracking issue #). **Agents must use
   `git worktree` isolation** (e.g. `git worktree add .worktrees/<branch> <branch>`) so concurrent working trees
   never dirty each other's work. Detail: [`CONTRIBUTING.md`](CONTRIBUTING.md).
+- **Claim work before you start it — `scripts/claim.sh <issue-id>`** (gh#375). Sessions run in parallel and a
+  local worktree is invisible to them, so **the pushed branch is the claim**: create it and push it *empty*
+  first. Skipping this duplicated roughly a full session's work in one evening. A claim whose branch tip has not
+  moved for **4 hours** is fair game — but say so on the issue before taking it over.
 
 *This file is a lightweight, evolving scaffold — it deepens as the plan and `src/` do. Keep it small: every line
 here is paid by every agent in every session, so anything role- or subtree-specific belongs in its contract.*
