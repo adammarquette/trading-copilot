@@ -3,6 +3,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.MarketData;
+using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -33,6 +34,31 @@ public class IndicatorProjectionServiceTests
     private readonly string _database = Guid.NewGuid().ToString();
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
+
+    /// <summary>
+    /// Throws on its FIRST <see cref="Compute"/> and yields nothing thereafter — so whichever series is projected
+    /// first fails mid-loop (after ATR has staged its rows), and the next series' commit would flush the failed
+    /// series' rows unless the change tracker was cleared. Order-independent by design.
+    /// </summary>
+    private sealed class OnceThrowingIndicator : IIndicator
+    {
+        private bool _thrown;
+
+        public string Name => "throw";
+
+        public int Period => 1;
+
+        public IReadOnlyList<decimal?> Compute(IReadOnlyList<Bar> bars)
+        {
+            if (!_thrown)
+            {
+                _thrown = true;
+                throw new InvalidOperationException("simulated projection fault");
+            }
+
+            return new decimal?[bars.Count]; // all null -> stages nothing
+        }
+    }
 
     private TradingCopilotDbContext Context() =>
         new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
@@ -225,6 +251,25 @@ public class IndicatorProjectionServiceTests
         });
 
         (await context.IndicatorValues.CountAsync()).Should().Be(4);
+    }
+
+    [Fact]
+    public async Task ProjectAsync_ShouldNotLeakAFailedSeriesRowsIntoAnotherSeriesCommit()
+    {
+        // gh#372 review: the save is once-per-series after every indicator, so a later indicator throwing leaves
+        // an earlier one's rows staged on the shared context. Without clearing the tracker on failure they would
+        // be flushed by the NEXT series' commit -- a partial series leaking into an unrelated one. With two series
+        // and an indicator that throws for whichever runs first, exactly ONE series' ATR must survive (2 rows).
+        await using TradingCopilotDbContext context = Context();
+        await SeedWorkedSeriesAsync(context, "ES");
+        await SeedWorkedSeriesAsync(context, "NQ");
+
+        IndicatorProjectionService service = new(
+            context, [new AtrIndicator(3), new OnceThrowingIndicator()],
+            NullLogger<IndicatorProjectionService>.Instance);
+        await service.ProjectAsync(CancellationToken.None);
+
+        (await context.IndicatorValues.CountAsync(v => v.Indicator == "atr")).Should().Be(2);
     }
 
     [Fact]

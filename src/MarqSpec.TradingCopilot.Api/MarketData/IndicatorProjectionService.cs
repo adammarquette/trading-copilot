@@ -77,6 +77,13 @@ public sealed class IndicatorProjectionService
                 _logger.LogError(
                     error, "Indicator projection failed for {Instrument} {Resolution}m; the next pass retries.",
                     key.Instrument, key.ResolutionMinutes);
+
+                // Abandon the failed series ATOMICALLY. The save is once-per-series after every indicator, so a
+                // later indicator throwing mid-series leaves earlier indicators' rows staged-but-unsaved on the
+                // shared context; without this they would be flushed by the NEXT series' SaveChanges, leaking a
+                // partial series into an unrelated commit. Clearing the tracker discards them (they recompute next
+                // pass -- rebuild = replay), so a failed series contributes nothing.
+                _database.ChangeTracker.Clear();
             }
         }
 
