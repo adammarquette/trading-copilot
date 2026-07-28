@@ -3,7 +3,7 @@
 # EVERY RULE HERE READS A METRIC THAT IS ACTUALLY EMITTED. That is the single discipline this file lives by: a
 # rule referencing a metric nothing produces evaluates forever without firing and looks identical to "healthy",
 # which is precisely the silent failure ADR-0019 exists to close. The conditions ADR-0019 names that have no
-# instrument behind them yet are listed at the bottom of this file and tracked, NOT written as dead rules.
+# instrument behind them yet are listed at the bottom of this file and tracked in gh#370 -- NOT written as dead rules.
 #
 # Metric names are the OTLP -> Prometheus remote-write translation of the instruments in ExecutionMetrics.cs:
 # dots become underscores, counters gain `_total`, and `ms` histograms gain `_milliseconds`.
@@ -179,12 +179,12 @@ groups:
           summary: "Alerting pipeline heartbeat — its absence means the pipeline is dead"
 
 # -----------------------------------------------------------------------------------------------------------
-# DELIBERATELY NOT WRITTEN — conditions ADR-0019 names that no instrument emits yet (gh#245 follow-up).
+# DELIBERATELY NOT WRITTEN — conditions ADR-0019 names that no instrument emits yet. Tracked: gh#370.
 #
 # Writing these against invented metric names would produce rules that never fire and read as healthy, which is
 # the failure this file exists to prevent. They need instrumentation FIRST, from the Coding Agent:
 #
-#   * "open position with no native safety stop"   — no metric. `trading_stops_orphaned` is the nearest and is a
+#   * "open position with no native safety stop"   — no metric. `trading_stops_orphaned` is the nearest, and is a
 #                                                    different condition (a stop that WAS native and was orphaned).
 #   * flatten.watchdog.rejected                    — no outcome constant; the watchdog emits escalated / missed.
 #   * flatten.unconfigured with exposure           — folded into `disabled` today; the two are not distinguished.
