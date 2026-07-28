@@ -31,6 +31,16 @@ internal static class StagingConfig
     public static bool VenueExecutionConfigured =>
         ApiConfigured && AllSet(VenueCredentialKey, PracticeAccountKey, ExecutionInstrument);
 
+    // --- Direct ProjectX gateway read for the bracket pre-live gates (gh#269, gh#293) ---
+    // The reserved PRACTICE credentials the venue-truth contract read authenticates to ProjectX with DIRECTLY, to
+    // observe the resting protective-stop leg the deployed API does not surface (its WorkingOrder view drops the
+    // size). PRACTICE ONLY (R-14) — never a live account. BaseUrl is optional; the client defaults to its endpoint.
+    public static string? GatewayApiKey => Env("STAGING_PROJECTX_API_KEY");
+    public static string? GatewayApiSecret => Env("STAGING_PROJECTX_API_SECRET");
+    public static string? GatewayBaseUrl => Env("STAGING_PROJECTX_API_BASE_URL");
+    public static bool GatewayContractConfigured =>
+        VenueExecutionConfigured && AllSet(GatewayApiKey, GatewayApiSecret);
+
     // --- Observability backends (gh#234 staging portion) ---
     public static string? PrometheusBaseUrl => Env("STAGING_PROMETHEUS_URL");
     public static string? LokiBaseUrl => Env("STAGING_LOKI_URL");
