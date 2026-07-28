@@ -76,6 +76,13 @@ public class TradingCopilotDbContext : TenantDbContext
     /// </summary>
     public DbSet<IndicatorValueRecord> IndicatorValues => Set<IndicatorValueRecord>();
 
+    /// <summary>
+    /// The raw news / soft-signal store of record (gh#358, R-2) — deduped across sources, the reference template
+    /// for non-market feeds. Shared / global reference data (R-20) like the bars; the per-user salience that
+    /// reweights it (gh#27) is a separate operator-owned entity, not this row.
+    /// </summary>
+    public DbSet<NewsRecord> News => Set<NewsRecord>();
+
     /// <summary>Per-consumer-group replay cursors over the event log (ADR-0001). System plumbing.</summary>
     public DbSet<EventCursor> EventCursors => Set<EventCursor>();
 
@@ -421,6 +428,23 @@ public class TradingCopilotDbContext : TenantDbContext
 
             // The read pattern indicators and replay will use: one instrument's series over a time range.
             bar.HasIndex(b => new { b.Instrument, b.ResolutionMinutes, b.BucketStart });
+        });
+
+        modelBuilder.Entity<NewsRecord>(news =>
+        {
+            // The DedupKey (a canonicalized URL, NewsDedupKey) IS the idempotence guard, DB-enforced rather than
+            // trusted to the writer: the same story from Finnhub and Tiingo collapses to one row, and an
+            // overlapping re-poll updates in place instead of duplicating -- exactly as the bar composite key
+            // works, for news. Capped so the natural key stays inside the btree index bound; a canonical key
+            // (host + path, tracking stripped, no scheme) is short in practice.
+            news.HasKey(n => n.DedupKey);
+            news.Property(n => n.DedupKey).HasMaxLength(512);
+            news.Property(n => n.Type).HasMaxLength(32);
+            news.Property(n => n.Url).HasMaxLength(2048);
+            news.Property(n => n.Title).HasMaxLength(1024);
+
+            // The read pattern relevance (gh#359) and the co-pilot will use: recent news by publication time.
+            news.HasIndex(n => n.PublishedAt);
         });
 
         modelBuilder.Entity<Event>(evt =>
