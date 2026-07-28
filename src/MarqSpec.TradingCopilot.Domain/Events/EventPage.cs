@@ -10,7 +10,16 @@ namespace MarqSpec.TradingCopilot.Domain.Events;
 /// </remarks>
 /// <param name="RequestedAfterSequence">The cursor the consumer read from — the last sequence it fully processed.</param>
 /// <param name="OldestAvailableSequence">The oldest sequence that still survives; everything between is gone.</param>
-public sealed record EventRetentionGap(long RequestedAfterSequence, long OldestAvailableSequence);
+/// <param name="OldestAvailableOccurredAt">
+/// When the oldest surviving event occurred — the <b>end of the blind window</b> in wall-clock terms (gh#306).
+/// Recovery reads the clean-historical store, which is keyed on time buckets rather than this log's sequence, so
+/// a sequence pair alone cannot say what to fetch. The log is the only thing that knows this boundary, so it
+/// reports it rather than leaving each consumer to guess.
+/// </param>
+public sealed record EventRetentionGap(
+    long RequestedAfterSequence,
+    long OldestAvailableSequence,
+    DateTimeOffset OldestAvailableOccurredAt);
 
 /// <summary>
 /// A page of events read from the backbone, plus whatever the read learned about <b>what it could not return</b>

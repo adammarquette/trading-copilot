@@ -137,4 +137,51 @@ brand-new consumer group (cursor `0` reads from the start of whatever survives) 
 
 *Still open:* **per-type retention** (option 3 on gh#162) lowers the likelihood of a gap without removing the
 silence, so it complements this rather than replacing it; **backfill** from the clean-historical store is the R-1
-gap-detection path, not this one; and **alerting** on a gap arrives with the observability increment (gh#26).
+gap-detection path, not this one *(landed gh#306 — see the update below)*; and **alerting** on a gap arrives with
+the observability increment (gh#26).
+
+## Update (2026-07-27) — the gap signal has a recovery path (gh#306)
+
+gh#227 above ends by handing backfill to R-1 as *"not this one"*. That path now exists, so a trailing consumer is
+no longer merely **told** what it lost — what is still recoverable is recovered, from the clean-historical store
+(gh#302), which is where ADR-0001 has always said a rebuild comes from.
+
+**The gap is reported in sequences; the store is keyed in time.** So recovery works on a window:
+`EventRetentionGap` gained `OldestAvailableOccurredAt` (the end — only the log knows it), and `IEventLog` gained
+`GetCursorCommittedAtAsync` (the start). The start is a **commit** time, not the last event's occurred-at — the
+event at the cursor is gone, which is what a gap *is*, so its own timestamp cannot be read back. That makes the
+window very slightly wide; recovery is idempotent, so covering a little too much is the safe direction of that
+error.
+
+**Extremes, not a bar-by-bar replay.** Both questions this answers — *did price come within the promotion band?*
+and *did price cross this trigger?* — are monotone in the window's extremes, so the deepest adverse excursion
+answers them exactly. Replaying each bar would cost a venue round trip per bar to reach the same answer.
+
+**The two consumers are treated differently, and the difference is the decision:**
+
+- **Stop promotion recovers.** A hidden stop whose band was crossed while the consumer was blind is promoted.
+  Promoting is protective, one-way, and still fully gated — the venue is asked whether the position is open, the
+  stop is sized to the live remaining, transmit-then-record is unchanged. The backfill supplies a *price*, not an
+  exemption, so acting late is strictly safer than not acting.
+- **Conditional firing deliberately does not**, and that is now recorded rather than omitted. A conditional fires
+  an **entry**; firing one on a cross that happened minutes ago would open a position at a price that has moved
+  on — acting on stale grounds, which ADR-0013 forbids and R-12's validity tolerance exists to prevent. The
+  failure direction stays *"did not fire"*. What it gains is **specificity**: the operator is told *which*
+  conditionals were crossed while blind, which is what makes the signal actionable rather than merely alarming,
+  and the decision to re-arm stays theirs.
+
+**A partial recovery is never reported as a whole one.** `GapCoverage` measures what the store actually covered
+against what was asked for, and any shortfall is logged separately, at error, naming the instrument and the
+duration. This is the one place the increment could have made things worse than the silence gh#227 replaced: a
+backfill that said "recovered" while covering half a window would be *believed*. It deliberately does not measure
+an **interior** hole — coverage runs first-bucket to last — because bars arrive from one periodic REST poll over a
+contiguous window, so an interior hole is a venue omission rather than the partial-coverage case this measures.
+
+**Backfilling is in addition to the signal, never instead of it.** The gh#227 error log fires unchanged, and the
+`RecordRetentionGap` metric with it. Recovery that quietened the signal would trade a known hole for an unknown
+one. Backfill also **never throws into the live path**: it runs inside its own consumer's pass (so a consumer
+catching up cannot stall one that is current), and a failure degrades to the pre-gh#306 behaviour — resume at the
+head — rather than escalating a recovery problem into an outage on a safety path.
+
+*Still open:* **alerting** on a gap or a shortfall (gh#26 / gh#232, ADR-0019) — this increment logs at error;
+routing that to a push is the observability increment's.

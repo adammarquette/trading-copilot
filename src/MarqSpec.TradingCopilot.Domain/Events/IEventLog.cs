@@ -44,6 +44,21 @@ public interface IEventLog
     /// <returns>The last committed sequence, or null.</returns>
     Task<long?> GetCursorAsync(string consumerGroup, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Gets when a consumer group last committed, or <see langword="null"/> when it never has.
+    /// </summary>
+    /// <remarks>
+    /// The <b>start of the blind window</b> when a gap is reported (gh#306). The event at the cursor is by
+    /// definition gone — that is what a gap means — so its own timestamp cannot be read back; the commit time is
+    /// the last moment the consumer is known to have been keeping up, which is the honest lower bound. It is a
+    /// <i>commit</i> time rather than an <i>occurred-at</i>, so it can sit a moment after the last event actually
+    /// processed; recovery is idempotent, so covering slightly too much is the safe direction of that error.
+    /// </remarks>
+    /// <param name="consumerGroup">The consumer group name.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The last commit time, or null.</returns>
+    Task<DateTimeOffset?> GetCursorCommittedAtAsync(string consumerGroup, CancellationToken cancellationToken);
+
     /// <summary>Commits a consumer group's cursor — an upsert; backwards commits are deliberate resets.</summary>
     /// <param name="consumerGroup">The consumer group name.</param>
     /// <param name="sequence">The last fully-processed sequence.</param>

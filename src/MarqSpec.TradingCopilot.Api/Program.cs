@@ -99,6 +99,10 @@ builder.Services.AddHostedService<IndicatorProjectionHost>();
 // The event log's first consumer (ADR-0007, gh#153): the stop-promotion watcher reads market.quote events and
 // promotes hidden actual stops as price comes within their band. Harmless with no staged stops, so it always runs.
 builder.Services.AddScoped<StopPromotionService>();
+
+// The recovery path for an event-log retention gap (gh#306): what a blind window is still recoverable from, read
+// from the clean-historical bar store rather than the log, which by then no longer has it.
+builder.Services.AddScoped<GapBackfillService>();
 builder.Services.AddHostedService<StopPromotionHost>();
 
 // The event log's second consumer (ADR-0007, gh#198): the conditional-order firing watcher reads market.quote
