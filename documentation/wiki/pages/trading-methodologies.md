@@ -12,7 +12,7 @@ How a named trading methodology becomes a **StrategyTemplate** (R-21). Every met
 
 | Layer | What the methodology specifies | Maps to |
 |---|---|---|
-| **Data / features** | the indicators / structures it reads | R-1 / R-3 (some need **custom detectors**) |
+| **Data / features** | the indicators / structures it reads | R-1 / R-3 / R-22 (some need **custom detectors**) |
 | **Setups** | the machine-checkable conditions for a valid setup | R-7 → triggers (ADR-0008) |
 | **Suggestion shape** | how a setup becomes entry / stop / target / size | R-4 |
 | **Risk defaults** | per-trade %, target R:R, session / kill-zone limits | R-5 |

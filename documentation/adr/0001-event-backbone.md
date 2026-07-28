@@ -1,7 +1,7 @@
 # ADR-0001: Event backbone — append-only Timescale event log
 
 **Status:** Accepted · **Date:** 2026-07-18 · **Deciders:** Adam (operator)
-**Relates to:** [architecture](../trading-platform-architecture.md) (event pipeline), [engineering](../trading-platform-engineering.md) §2 (storage), PRD `R-1` / `R-3` / `R-4` / `R-9`.
+**Relates to:** [architecture](../trading-platform-architecture.md) (event pipeline), [engineering](../trading-platform-engineering.md) §2 (storage), PRD `R-1` / `R-3` / `R-4` / `R-9` / `R-22`.
 
 ## Context
 The architecture routes ingested data through an **event pipeline**: thin ingestion/poller services publish

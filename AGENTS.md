@@ -31,7 +31,7 @@ compiling — the same-PR rule below is this layer's build rule, and the stable 
 `gh#N`) are its symbol table.
 
 **Start at `README.md`, then [`documentation/`](documentation/)** — it is authoritative; this file only points to it:
-[PRD](documentation/trading-platform-prd.md) (`R-1…R-21`; every capability traces to one) ·
+[PRD](documentation/trading-platform-prd.md) (`R-1…R-22`; every capability traces to one) ·
 [engineering guide](documentation/trading-platform-engineering.md) (stack, testing, observability, deployment,
 safety-critical discipline) · [architecture](documentation/trading-platform-architecture.md) ·
 [data dictionary](documentation/data-dictionary.md) (+ its ERD) ·

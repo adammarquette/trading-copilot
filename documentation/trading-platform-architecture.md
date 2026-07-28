@@ -249,12 +249,12 @@ process it. One polling framework **fans out** across many sources, of the same 
 data kinds (market/trade data, news, social). This dovetails with the venue
 abstraction (R-17) and the soft-signal sources (R-2), and keeps all processing uniform and in one place.
 
-### Processor service(s) — process, persist, pre-compute (R-3, R-4, R-8/R-9)
+### Processor service(s) — process, persist, pre-compute (R-3, R-4, R-8/R-9, R-22)
 Consumes a **data type** off the event pipeline, processes it, and writes to the data stores (Timescale /
 pgvector / relational — engineering §2). Crucially, the processor **pre-computes indicator data** so indicators
 are not recomputed on demand: the AI agents that generate suggestions and revise strategies (R-4) are weak at
 numeric indicator computation, so **pre-computed indicators are both faster and higher-quality** inputs. Feeds
-order-flow analytics (R-3) and the journal (R-8/R-9). Indicators are **projections over the append-only event log** (ADR-0001): those that fit are TimescaleDB continuous aggregates, the rest are replay consumers — so **adding or rebuilding an indicator is a new consumer replaying the log**, no re-ingest.
+order-flow analytics (R-3) and the journal (R-8/R-9). Indicators (R-22) are **projections over the append-only event log** (ADR-0001): those that fit are TimescaleDB continuous aggregates, the rest are replay consumers — so **adding or rebuilding an indicator is a new consumer replaying the log**, no re-ingest.
 
 ### News & soft-signal ingestion (R-2)
 The **reference implementation** of the non-market template. Two REST sources (no free news websocket): **Tiingo**

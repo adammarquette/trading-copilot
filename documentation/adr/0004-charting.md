@@ -1,7 +1,7 @@
 # ADR-0004: Charting — Lightweight Charts for the central chart; bespoke canvas/WebGL for order flow
 
 **Status:** Accepted · **Date:** 2026-07-18 · **Deciders:** Adam (operator)
-**Relates to:** PRD `R-10` (charting — the central UI surface), `R-3` (order-flow analytics), `R-1` (market data / DOM), engineering §2, [architecture](../trading-platform-architecture.md).
+**Relates to:** PRD `R-10` (charting — the central UI surface), `R-3` (order-flow analytics), `R-22` (indicator pipeline — the pre-computed indicator panes / overlays the chart renders), `R-1` (market data / DOM), engineering §2, [architecture](../trading-platform-architecture.md).
 
 ## Context
 The **chart is the central UI component** (R-10) — a candlestick chart onto which indicators (incl. custom), price levels, suggestion zones, and live positions / orders / fills overlay. Requirements:

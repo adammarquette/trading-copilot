@@ -190,7 +190,7 @@ public class StopPlanTests
     public void Create_ShouldAcceptAnAverageTrueRangeBand_NowThatTheIndicatorPipelineExists()
     {
         // FLIPPED PIN (gh#311). This asserted a NotSupportedException while no indicator pipeline could measure
-        // ATR (R-3). gh#310 landed the projection and resolution moved to the caller, so the domain no longer
+        // ATR (R-22). gh#310 landed the projection and resolution moved to the caller, so the domain no longer
         // refuses the metric -- an unmeasurable band is now refused where it is RESOLVED, not where it is built.
         StopPlan plan = BuyPlan(proximity: StopProximity.AverageTrueRange(2m));
 

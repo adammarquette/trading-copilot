@@ -14,6 +14,6 @@ public enum StopProximityMetric
     /// <summary>A fraction of the entry→actual-stop distance — scales with the risk taken, not the price level.</summary>
     DistanceFraction = 2,
 
-    /// <summary>Multiples of average true range. Needs the indicator pipeline (R-3); refused until it lands.</summary>
+    /// <summary>Multiples of average true range — measured by the indicator pipeline (R-22, gh#310) and resolved to a distance by the caller (StopProximity.ResolveDistance, gh#311).</summary>
     AverageTrueRange = 3,
 }

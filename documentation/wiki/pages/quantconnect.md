@@ -6,7 +6,7 @@
 > once, then untracked (gh#50) and **purged from history** (gh#52); `sources/` is local-only, so only this
 > original summary is published. Redistributing the manual is not licensed — don't re-add it.
 > **Use:** **reference / example system — for insights only.** A comparable algo-trading platform catalogued to learn from; **not** a golden example, **not** a template to clone, and **nothing here is a requirement** for our system. Where it *differs* from ours is usually the most useful part.
-> **Informs:** design thinking around R-1 (data), R-3/R-4 (indicators/suggestions), R-9 (replay), R-11 (execution).
+> **Informs:** design thinking around R-1 (data), R-22/R-4 (indicators/suggestions), R-9 (replay), R-11 (execution).
 
 QuantConnect is a cloud **algorithmic-trading platform** built on **LEAN**, its open-source backtesting-and-live-trading engine. One engine runs research, backtesting, optimization, and live deployment, so strategy code isn't rewritten between stages. Algorithms are Python/C# against a common `QCAlgorithm` API, developed in the browser IDE or (this manual's scope) a local VS Code + Docker setup; it ships a large managed data library and a Jupyter research environment (`QuantBook`).
 
@@ -20,7 +20,7 @@ QuantConnect is a cloud **algorithmic-trading platform** built on **LEAN**, its 
 - **Live-only mechanics.** Brokerage 2FA re-auth, best-effort auto-restart, a manual **Liquidate** kill switch; no hot-editing live (stop → edit → redeploy).
 
 ## Insights worth *considering* (not adopting)
-- **Subscription ≠ indicator bar size.** Separating "subscribed resolution" from "consolidated bar feeding an indicator" is a clean market-data mental model (R-1/R-3), even without a general consolidation framework.
+- **Subscription ≠ indicator bar size.** Separating "subscribed resolution" from "consolidated bar feeding an indicator" is a clean market-data mental model (R-1/R-22), even without a general consolidation framework.
 - **One code path for historical and live.** Reusing the *same* generation path for replay-evaluation and live avoids "worked in sim, broke in prod" drift — relevant to R-9 (evaluate suggestion quality on recorded data via the same path, not a parallel backtest-only implementation).
 - **Typed, separately-instrumented event streams** (data / schedule / universe / order / corporate-action) keep a growing event loop legible — a structural pattern worth emulating (pairs with our tracing, ADR-0002).
 - **Order-event vocabulary** (submit / fill / partial fill / update / cancel / exercise) is a sane reference state machine for execution tracking (R-11).
