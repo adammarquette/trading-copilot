@@ -88,6 +88,15 @@ builder.Services.Configure<BarBackfillOptions>(builder.Configuration.GetSection(
 builder.Services.AddScoped<BarBackfillService>();
 builder.Services.AddHostedService<BarBackfillHost>();
 
+// R-2's news / soft-signal ingestion (gh#358): every registered INewsSource polled into the deduped NewsRecord
+// store of record -- the news analogue of the bar store above, collapsed across sources by the dedup key. News is
+// deliberately multi-source (Finnhub + Tiingo) where price data is single-source. Opt-in via News:Enabled. The
+// concrete provider adapters are follow-ons (their own MarqSpec.Client.* submodules), so no INewsSource is
+// registered yet -- an enabled poller resolves an empty source set and writes nothing until one lands.
+builder.Services.Configure<NewsIngestionOptions>(builder.Configuration.GetSection(NewsIngestionOptions.SectionName));
+builder.Services.AddScoped<NewsIngestionService>();
+builder.Services.AddHostedService<NewsIngestionHost>();
+
 // Indicator projections over that store (gh#310, R-1, ADR-0001: "indicators are projections… rebuild = replay").
 // ALWAYS runs and needs no symbol list of its own -- its work is whatever the bar store holds, so bars can never
 // exist without their indicators. IIndicatorSource is the read seam the promotion watcher will consult (gh#311)
