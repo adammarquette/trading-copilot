@@ -23,8 +23,10 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
 {
     private const int MaxOutputTokens = 1024;
 
-    // The structured answer the model is asked for. The reviewer -- not the schema -- is the enforcer, because the
-    // provider is not guaranteed to constrain the model to it; the mapping below fails closed on anything unusable.
+    // The structured answer the model is asked for. `additionalProperties: false` keeps it within Anthropic's
+    // structured-output contract (A2, gh#423) so the provider will accept it as an output_config format. The reviewer
+    // -- not the schema -- remains the enforcer: the provider is not guaranteed to honour the constraint, so the
+    // mapping below still fails closed on anything unusable.
     private const string ReviewSchema = """
         {
           "type": "object",
@@ -37,7 +39,8 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
             "rationale": { "type": "string" },
             "reason": { "type": "string" }
           },
-          "required": ["decision"]
+          "required": ["decision"],
+          "additionalProperties": false
         }
         """;
 

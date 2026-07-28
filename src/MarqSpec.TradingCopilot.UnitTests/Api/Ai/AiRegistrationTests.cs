@@ -35,11 +35,21 @@ public class AiRegistrationTests
     }
 
     [Fact]
-    public void AddTradingCopilotAi_ShouldAlwaysBindTheStubProvider_ThisIncrement()
+    public void AddTradingCopilotAi_ShouldBindTheStubProvider_WhenNoApiKeyIsConfigured()
     {
         using ServiceProvider provider = Build(apiKey: null);
 
-        provider.GetRequiredService<ILlmProvider>().Should().BeOfType<StubLlmProvider>();
+        provider.GetRequiredService<ILlmProvider>().Should().BeOfType<StubLlmProvider>(
+            "an unconfigured deployment must never fabricate a suggestion -- the stub only suppresses");
+    }
+
+    [Fact]
+    public void AddTradingCopilotAi_ShouldBindTheAnthropicProvider_WhenAnApiKeyIsConfigured()
+    {
+        using ServiceProvider provider = Build(apiKey: "sk-test-key");
+
+        provider.GetRequiredService<ILlmProvider>().Should().BeOfType<AnthropicLlmProvider>(
+            "a configured deployment wakes the real model through the same seam");
     }
 
     private static ServiceProvider Build(string? apiKey)
