@@ -94,6 +94,7 @@ erDiagram
   Trade         ||--|| Outcome                : resolves
 
   Rule          ||--o{ Trigger                : "compiles to"
+  Trigger       ||--o{ TriggerFiring          : "fires"
   Rule          }o--o{ Instrument             : "scopes (snapshot)"
   SoftSignal    }o--o{ NewsTopic              : matched
   NewsTopic     ||--o{ RelevanceConfig        : "mapped by"
@@ -185,7 +186,8 @@ a **self-imposed** max-loss (R-5) that reuses the same trailing-floor machinery.
 | Entity | Key fields | Storage | Traces |
 |---|---|---|---|
 | **Rule** | intent text, structured form, enabled, source conversation, confirmed, **`instrument_dependency_snapshot`** (the Instrument / RelevanceConfig metadata the rule resolved against **at confirmation**), **`needs_revalidation`** — if that metadata later changes (symbol reclassified, topic remapped) the rule is **flagged for review** so a stale trigger can't fire on the wrong asset | REL + VEC | R-7 |
-| **Trigger / Condition** | compiled condition (DSL), route (**mechanical-alert / agent-review**), debounce / rate-limit, enabled, source rule | REL | ADR-0008, R-4/R-7 |
+| **Trigger / Condition** | compiled condition, route (**mechanical-alert / agent-review**), debounce / rate-limit, enabled, source rule. **Implemented — mechanical route** (gh#385): `TriggerRecord` (IUserOwned, R-20) carries an **indicator-threshold** condition (indicator / period / resolution / **comparison** / threshold + optional **hysteresis** dead-band, over the R-22 store), `Route` (**mechanical** built; **agent-review** refused until it lands), `Severity`, `Enabled`, the **3-state debounce** (`ArmState` {Unseeded → Armed → Fired} + `ArmCycle`) that fires **once** on the arming edge and re-arms on the opposite (a level + edge = a cross; a null indicator holds — fail-closed), and a nullable **`SourceRuleId`** — the only R-7 seam (no FK). A periodic **`TriggerScanHost`** (aligned to the indicator cadence) reads the indicator, applies the pure `TriggerDebounce`, and on a crossing **sends a mechanical alert** through `INotificationChannel` (**send-before-commit**) — it **notifies, never places an order** (enforcement stays below the model). **Deferred:** the NL → condition compiler (R-7), the agent-review route, order-flow (R-3) / composite / cross-asset / time conditions, a wall-clock rate-limit (`LastFiredAt` seam shipped). Six DB CHECKs mirror the refusable-zero enums + positivity | REL | ADR-0008, R-4/R-7, R-22 |
+| **TriggerFiring** | the trigger layer's **append-only firing journal** (gh#385): trigger, fired-at, **observed value**, threshold, comparison, **dedup key** (`trigger:{id}:{armCycle}` — a distinct incident per crossing, stable within an armed episode). IUserOwned (R-20). This is the layer's durable record of what fired; **no `AuditAction` is minted** for it — a mechanical alert touches no order or position, so it does not belong in the order/synthetic-risk audit schema | REL | ADR-0008, R-4 |
 
 ## 9. Non-market / soft signals
 News is the reference template; other non-market feeds reuse this shape (R-2).
@@ -262,7 +264,7 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 ## Open items
 - Surrogate-key type (GUID vs. `bigint`) and natural keys.
 - TimescaleDB hypertable + retention / compression choices per series.
-- The **trigger / condition DSL** schema (ADR-0008 follow-up).
+- The **trigger / condition DSL** — only if a future condition kind needs one. gh#385 shipped the first kind (indicator-threshold) as **typed columns + a `ConditionKind` discriminator**, so a second kind (order-flow, composite) is additive nullable columns rather than a DSL (ADR-0008 follow-up).
 - Embedding model / dimensions (Cohere) and which entities are embedded.
 - Fees / commission model; multi-currency.
 

@@ -81,8 +81,17 @@ discipline to **how and when the LLM is invoked at all**, so cost is bounded and
 - **Coverage-vs-cost tradeoff** — cheap-model triage may under-surface; needs evaluation and is tunable.
 
 ## Follow-ups
+**Update (2026-07-28, gh#385) — the deterministic mechanical route landed.** A structured **indicator-threshold**
+condition (typed columns + a `ConditionKind` discriminator — *not* a DSL, since one kind serves no DSL yet), a pure
+**edge-debounce** state machine (`Unseeded → Armed → Fired`: fire once on the arming edge, re-arm on the opposite,
+seed pre-existing truth silently, and hold fail-closed on a null indicator), and a **periodic evaluator** that fires
+a **mechanical alert** through the notification channel — no LLM. Structural authoring via the API stands in for the
+compiler for now; a nullable `SourceRuleId` is the seam the compiler will fill. Still open below: the NL→condition
+compiler + the `Rule` entity, the **agent-review** route, order-flow / composite / cross-asset / time conditions,
+the wall-clock **rate-limit** (a `LastFiredAt` seam shipped), and the **AI-spend governor**.
+
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
-  compiler.
+  compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*
 - Spec the **deterministic trigger evaluator** as a processor / consumer over the event log (ADR-0001) — inputs
   (indicators / order-flow / price / state), outputs (fire → alert or agent-review).
 - Design the **agent-review path** (strategy agents → executor) invoked on fire; define its contract and output
