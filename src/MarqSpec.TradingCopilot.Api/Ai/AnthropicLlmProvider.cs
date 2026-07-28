@@ -132,15 +132,24 @@ public sealed class AnthropicLlmProvider : ILlmProvider
             using JsonDocument document = JsonDocument.Parse(payload);
             JsonElement root = document.RootElement;
 
+            // A syntactically-valid but non-object 2xx body (a scalar, an array, an error envelope) is not an answer.
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                throw new AnthropicLlmException("the model provider returned a non-object body");
+            }
+
             string text = ExtractText(root);
-            string? stopReason = root.TryGetProperty("stop_reason", out JsonElement sr) ? sr.GetString() : null;
+            string? stopReason = root.TryGetProperty("stop_reason", out JsonElement sr) && sr.ValueKind == JsonValueKind.String
+                ? sr.GetString()
+                : null;
             return new LlmCompletion(text, MapStopReason(stopReason), ExtractUsage(root));
         }
-        catch (JsonException error)
+        catch (Exception error) when (error is JsonException or InvalidOperationException)
         {
-            // A 2xx whose body is not the shape the Messages API promises is a protocol violation, not an answer.
+            // A 2xx whose body is not the shape the Messages API promises is a protocol violation, not an answer. The
+            // broad filter also nets any JsonElement accessor that throws on an unexpected shape -- fail closed, total.
             _logger.LogWarning(error, "Anthropic returned a body that could not be parsed; treating as unavailable.");
-            throw new AnthropicLlmException("the model provider returned an unparseable body");
+            throw new AnthropicLlmException("the model provider returned an unexpected body");
         }
     }
 
@@ -154,10 +163,12 @@ public sealed class AnthropicLlmProvider : ILlmProvider
         StringBuilder builder = new();
         foreach (JsonElement block in content.EnumerateArray())
         {
-            if (block.TryGetProperty("type", out JsonElement type)
+            if (block.ValueKind == JsonValueKind.Object
+                && block.TryGetProperty("type", out JsonElement type)
                 && type.ValueKind == JsonValueKind.String
                 && type.GetString() == "text"
-                && block.TryGetProperty("text", out JsonElement blockText))
+                && block.TryGetProperty("text", out JsonElement blockText)
+                && blockText.ValueKind == JsonValueKind.String)
             {
                 builder.Append(blockText.GetString());
             }
@@ -176,7 +187,7 @@ public sealed class AnthropicLlmProvider : ILlmProvider
 
     private static LlmUsage ExtractUsage(JsonElement root)
     {
-        if (!root.TryGetProperty("usage", out JsonElement usage))
+        if (!root.TryGetProperty("usage", out JsonElement usage) || usage.ValueKind != JsonValueKind.Object)
         {
             return LlmUsage.None;
         }
