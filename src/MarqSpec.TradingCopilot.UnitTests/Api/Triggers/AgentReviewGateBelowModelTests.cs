@@ -1,4 +1,5 @@
 using System.Reflection;
+using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Api.Triggers;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Triggers;
@@ -31,6 +32,8 @@ public class AgentReviewGateBelowModelTests
     [InlineData(typeof(TriggerEvaluationService))]
     [InlineData(typeof(LlmTriggerReviewer))]
     [InlineData(typeof(NullTriggerReviewer))]
+    [InlineData(typeof(AnthropicLlmProvider))] // the real provider the reviewer calls (A2, gh#423) -- still no execution reach
+    [InlineData(typeof(StubLlmProvider))]      // the inert provider bound when unconfigured
     public void ConstructorDependencies_ShouldNotReachExecution(Type type)
     {
         List<string> dependencyTypeNames = type.GetConstructors()

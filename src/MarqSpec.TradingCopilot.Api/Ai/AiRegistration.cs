@@ -19,9 +19,10 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// single switch keeps the route from ever silently vanishing — the same posture as the null notification channel.
 /// </para>
 /// <para>
-/// <see cref="ILlmProvider"/> defaults to the no-I/O <see cref="StubLlmProvider"/> for this increment; A2 swaps the
-/// real Anthropic client behind the same seam. <b>Enforcement lives below the model:</b> nothing bound here can place
-/// or size an order — the reviewer only proposes.
+/// <see cref="ILlmProvider"/> resolves to the real <see cref="AnthropicLlmProvider"/> when a key is present (A2,
+/// gh#423) and the no-I/O <see cref="StubLlmProvider"/> otherwise — the <i>same</i> switch that picks the reviewer,
+/// so a configured deployment gets a live model and an unconfigured one cannot fabricate a suggestion. <b>Enforcement
+/// lives below the model:</b> nothing bound here can place or size an order — the reviewer only proposes.
 /// </para>
 /// </remarks>
 public static class AiRegistration
@@ -37,9 +38,17 @@ public static class AiRegistration
 
         services.Configure<LlmOptions>(config.GetSection(LlmOptions.SectionName));
 
-        // The provider seam (ADR-0008): the stub does NO I/O and only ever suppresses, so a stub build cannot
-        // fabricate a suggestion. A2 replaces it with the real Anthropic client behind this same interface.
-        services.AddSingleton<ILlmProvider, StubLlmProvider>();
+        // The provider seam (ADR-0008). The real Anthropic client is a typed HttpClient (so the factory owns handler
+        // rotation + the timeout); the stub does NO I/O and only ever suppresses. The INTERFACE resolves to exactly
+        // one of them by whether a key is present -- a stub build cannot fabricate a suggestion, and a configured one
+        // wakes a live model. The key never leaves the provider (header only).
+        services.AddHttpClient<AnthropicLlmProvider>((provider, client) =>
+            client.Timeout = TimeSpan.FromSeconds(provider.GetRequiredService<IOptions<LlmOptions>>().Value.TimeoutSeconds));
+        services.AddSingleton<StubLlmProvider>();
+        services.AddTransient<ILlmProvider>(provider =>
+            provider.GetRequiredService<IOptions<LlmOptions>>().Value.IsConfigured
+                ? provider.GetRequiredService<AnthropicLlmProvider>()
+                : provider.GetRequiredService<StubLlmProvider>());
 
         // Both concrete reviewers are registered; the INTERFACE resolves to exactly one of them by whether a key is
         // present. The reviewer is ALWAYS bound -- an unconfigured deployment gets the inert-but-announced one, not a
