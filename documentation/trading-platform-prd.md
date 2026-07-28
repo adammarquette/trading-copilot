@@ -278,7 +278,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 - [x] Each value is **reconstructable by replay** — adding or rebuilding an indicator is a new / re-run projection over the same bars, no re-ingest (ADR-0001); **no retention policy** (kept as long as the bars it derives from, so a journal or replay finds the number actually used, not today's recomputation)
 - [x] A value exists only once its **period is satisfied**; a partial or unmeasurable value is **never stored** and is read as **absent**, never as a default — the execution stop-promotion **ATR band** (gh#311, [ADR-0007](adr/0007-order-execution-model.md)) treats "no value" as *do not promote*, never as a zero or fallback distance
 - [x] Read through **`IIndicatorSource`**, which returns the **latest value at or before a moment**, so a replay / journal query sees the number that was actually available then
-- [ ] **Beyond ATR:** RSI / MACD / VWAP / EMA (bar-derived) follow behind a small calculator abstraction; order-flow-derived features (delta, volume profile) are **R-3**, not this requirement
+- [x] **Beyond ATR — the pipeline is a framework:** the **`IIndicator`** calculator abstraction + **RSI** landed (gh#372), so the projection loops a configured set and MACD / VWAP / EMA are one adapter each; order-flow-derived features (delta, volume profile) are **R-3**, not this requirement
 
 ### Nice-to-Have (P1)
 
