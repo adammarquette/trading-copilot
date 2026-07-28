@@ -19,6 +19,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private readonly HashSet<string> _throwingContracts = new(StringComparer.Ordinal);
     private readonly List<(string AccountKey, string ContractKey)> _closeCalls = [];
     private bool _venueUnreachable;
+    private int _positionReads;
     private bool _bracketsUnsupported;
     // Native working legs resting at the venue + the cancels the OCO-exit path issues against them (gh#184).
     private readonly List<(string AccountKey, WorkingOrder Order)> _workingOrders = [];
@@ -164,6 +165,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     public void ResetPositions()
     {
         _positions.Clear();
+        _positionReads = 0;
         _survivingContracts.Clear();
         _throwingContracts.Clear();
         _closeCalls.Clear();
@@ -211,8 +213,18 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         }
     }
 
-    internal IReadOnlyList<PositionSnapshot> PositionsFor(VenueAccountId account) =>
-        [.. _positions.Where(position => position.Account == account)];
+    /// <summary>
+    /// How many times venue position truth has been read (gh#408). Lets a test witness that a pass did <b>no venue
+    /// work at all</b> — an assertion an empty result cannot make, since "nothing reported" is equally true when the
+    /// pass read the venue and withheld.
+    /// </summary>
+    public int PositionReadCount => _positionReads;
+
+    internal IReadOnlyList<PositionSnapshot> PositionsFor(VenueAccountId account)
+    {
+        _positionReads++;
+        return [.. _positions.Where(position => position.Account == account)];
+    }
 
     internal PositionSnapshot RecordCloseAndResult(VenueAccountId account, VenueContractId contract)
     {
