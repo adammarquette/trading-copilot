@@ -1574,13 +1574,18 @@ public static class OrderEndpoints
 
     private static IResult MapSendResult(ExecutionResult result, Guid? orderId)
     {
+        // Advisories ride out with every outcome, not only the refusals (gh#407). The whole point of an advisory
+        // layer is that it is visible while the operator can still act -- a warning that appears only once the
+        // order is refused is not an early warning, and the consistency target's Advisory posture (the migration
+        // default) never refuses at all, so on those accounts this is the ONLY signal there is.
         SendOrderResponse response = new(
             result.Outcome.ToString(),
             orderId,
             result.Order?.VenueOrderId,
             result.Decision?.ApprovedQuantity ?? 0,
             result.Decision?.BindingLayer,
-            result.Reason);
+            result.Reason,
+            result.Decision?.Advisories ?? []);
 
         return result.Outcome switch
         {
@@ -1654,6 +1659,10 @@ public static class OrderEndpoints
             ApprovedQuantity = decision.ApprovedQuantity,
             BindingLayer = decision.BindingLayer,
             Reason = decision.Reason,
+            // Journalled with the decision so "was the operator warned before the payout was disqualified?" is
+            // answerable after the fact (gh#407). Null when nothing was raised, which is also what every row
+            // written before the column existed says.
+            Advisories = GateAdvisoryJson.Serialize(decision.Advisories),
             DecidedAt = DateTimeOffset.UtcNow,
         });
     }

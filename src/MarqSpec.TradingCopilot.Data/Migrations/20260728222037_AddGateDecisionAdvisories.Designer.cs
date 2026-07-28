@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using MarqSpec.TradingCopilot.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -13,9 +14,11 @@ using Pgvector;
 namespace MarqSpec.TradingCopilot.Data.Migrations
 {
     [DbContext(typeof(TradingCopilotDbContext))]
-    partial class TradingCopilotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260728222037_AddGateDecisionAdvisories")]
+    partial class AddGateDecisionAdvisories
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -647,21 +650,10 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .HasMaxLength(512)
                         .HasColumnType("character varying(512)");
 
-                    b.PrimitiveCollection<List<string>>("MatchedInstruments")
-                        .IsRequired()
-                        .HasColumnType("text[]");
-
-                    b.PrimitiveCollection<List<string>>("MatchedTopics")
-                        .IsRequired()
-                        .HasColumnType("text[]");
-
                     b.Property<DateTimeOffset>("PublishedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset>("RecordedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTimeOffset?>("RelevanceResolvedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.PrimitiveCollection<List<string>>("SourceFeeds")
@@ -695,42 +687,7 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
 
                     b.HasIndex("PublishedAt");
 
-                    b.HasIndex("RelevanceResolvedAt");
-
                     b.ToTable("News");
-                });
-
-            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.NewsTopic", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Instrument")
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.PrimitiveCollection<List<string>>("Keywords")
-                        .IsRequired()
-                        .HasColumnType("text[]");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<int>("Scope")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Name")
-                        .IsUnique();
-
-                    b.ToTable("NewsTopics", t =>
-                        {
-                            t.HasCheckConstraint("CK_NewsTopics_Scope_NotUnknown", "\"Scope\" <> 0");
-                        });
                 });
 
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.Order", b =>
@@ -827,20 +784,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
 
                             t.HasCheckConstraint("CK_Orders_TakeProfit_WinningSide", "\"TakeProfitPrice\" IS NULL OR (\"Side\" = 0 AND \"TakeProfitPrice\" > \"EntryPrice\") OR (\"Side\" = 1 AND \"TakeProfitPrice\" < \"EntryPrice\")");
                         });
-                });
-
-            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.RelevanceConfigState", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("RelevanceConfigStates");
                 });
 
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.RiskProfileRecord", b =>
@@ -1039,21 +982,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         });
                 });
 
-            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.TickerInstrumentMap", b =>
-                {
-                    b.Property<string>("Ticker")
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.Property<string>("Instrument")
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.HasKey("Ticker", "Instrument");
-
-                    b.ToTable("TickerInstrumentMaps");
-                });
-
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.Trade", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1153,9 +1081,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<Guid?>("AccountId")
-                        .HasColumnType("uuid");
-
                     b.Property<int>("ArmCycle")
                         .HasColumnType("integer");
 
@@ -1202,9 +1127,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                     b.Property<int>("Severity")
                         .HasColumnType("integer");
 
-                    b.Property<int?>("Size")
-                        .HasColumnType("integer");
-
                     b.Property<Guid?>("SourceRuleId")
                         .HasColumnType("uuid");
 
@@ -1222,21 +1144,15 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("AccountId");
-
                     b.HasIndex("Enabled", "Route");
 
                     b.ToTable("Triggers", null, t =>
                         {
-                            t.HasCheckConstraint("CK_Triggers_AgentReview_RequiresAccountAndSize", "\"Route\" <> 2 OR (\"AccountId\" IS NOT NULL AND \"Size\" > 0)");
-
                             t.HasCheckConstraint("CK_Triggers_Comparison_NotUnknown", "\"Comparison\" <> 0");
 
                             t.HasCheckConstraint("CK_Triggers_ConditionKind_NotUnknown", "\"ConditionKind\" <> 0");
 
                             t.HasCheckConstraint("CK_Triggers_Hysteresis_PositiveOrNull", "\"Hysteresis\" IS NULL OR \"Hysteresis\" > 0");
-
-                            t.HasCheckConstraint("CK_Triggers_Mechanical_NoAccount", "\"Route\" = 2 OR (\"AccountId\" IS NULL AND \"Size\" IS NULL)");
 
                             t.HasCheckConstraint("CK_Triggers_Period_Positive", "\"Period\" > 0");
 
@@ -1405,14 +1321,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .WithMany()
                         .HasForeignKey("SuggestionId")
                         .OnDelete(DeleteBehavior.SetNull);
-                });
-
-            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.TriggerRecord", b =>
-                {
-                    b.HasOne("MarqSpec.TradingCopilot.Data.Entities.Account", null)
-                        .WithMany()
-                        .HasForeignKey("AccountId")
-                        .OnDelete(DeleteBehavior.Cascade);
                 });
 
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.Connection", b =>

@@ -712,3 +712,19 @@ concerned" outcome would silently change the meaning of every existing exhaustiv
 path; `GateDecision.Advisories` leaves callers that ignore it behaving exactly as before. It is raised whenever
 a target is configured — not only on breach — because an operator who first hears about the constraint when an
 order is refused has already spent the evaluation it was protecting.
+
+**Completed by `gh#407` (2026-07-28).** The clause above — "leaves callers that ignore it behaving exactly as
+before" — turned out to describe *every* caller: the advisory was built, attached, and then **dropped at the API
+boundary**. `SendOrderResponse` had no advisory member and `GateDecisionRecord` persisted none, so the warning
+existed only in memory. That made the rule inert precisely where it mattered most: `Advisory` is the migration
+default, so on every pre-existing account the consistency target neither refused (by design) nor warned (the
+defect) — configurable, persisted, validated, evaluated on every order, and invisible. Found by QA `gh#394`,
+which pinned it rather than blessing it.
+
+The advisories now ride out on `SendOrderResponse` and `StagedOrderResponse` — **on every outcome, not only
+refusals**, since an advisory account never refuses and this is its only signal — and are journalled on the gate
+decision as `jsonb`, so *"was the operator warned before the payout was disqualified?"* is answerable after the
+fact. The column is **nullable with no default**: null means "no advisory", which is exactly what every row
+written before it existed means, so old and new rows read alike rather than the migration claiming historical
+decisions were known to carry none. A `Block`-posture refusal is unchanged — it already surfaced through
+`BindingLayer` and `Reason`.

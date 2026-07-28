@@ -330,6 +330,7 @@ public class TradingCopilotDbContext : TenantDbContext
         {
             decision.ToTable("GateDecisions");
             decision.Property(d => d.Reason).HasMaxLength(512);
+            decision.Property(d => d.Advisories).HasColumnType("jsonb");
 
             decision.HasOne<Account>()
                 .WithMany()

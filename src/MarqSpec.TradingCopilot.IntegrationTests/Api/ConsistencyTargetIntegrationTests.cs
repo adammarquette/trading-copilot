@@ -38,11 +38,11 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// fraction the system is supposed to compute. Every window in this suite is built from <c>Trade</c> rows.
 /// </para>
 /// <para>
-/// <b>Two guards pin a DEFECT rather than the intended behaviour</b> — see <c>gh#407</c>. The gate <i>computes</i>
-/// a <c>GateAdvisory</c> and attaches it to the decision, but nothing carries it across the API boundary:
-/// <c>SendOrderResponse</c> has no advisory field and <c>GateDecisionRecord</c> does not persist one. Since
-/// <c>Advisory</c> is the migration default, every pre-existing account is on the one posture that produces no
-/// observable output at all. Pinned per the QA contract's rule 2; the pins flip when gh#407 lands.
+/// <b>Two guards were pinned DEFECTs and are now gh#407's regression guards</b> (flipped when that fix landed).
+/// The gate <i>computed</i> a <c>GateAdvisory</c> and attached it to the decision, but nothing carried it across the
+/// API boundary. Since <c>Advisory</c> is the migration default, every pre-existing account sat on the one posture
+/// that produced no observable output at all. They now assert the advisory <b>is</b> surfaced — breached when it is,
+/// and raised-but-not-breached while the operator can still act.
 /// </para>
 /// </remarks>
 public class ConsistencyTargetIntegrationTests : IClassFixture<StubbedVenuePostgresFactory>
@@ -131,14 +131,20 @@ public class ConsistencyTargetIntegrationTests : IClassFixture<StubbedVenuePostg
         decision.BindingLayer.Should().NotBe(
             RiskLayer.ConsistencyTarget, "advisory means it did not bind — it must not masquerade as the binding layer");
 
-        // DEFECT gh#407: the gate BUILDS a GateAdvisory and attaches it to the decision, then nothing carries it
-        // out -- SendOrderResponse has no advisory field and GateDecisionRecord persists none. So the posture that
-        // is the MIGRATION DEFAULT produces no observable output whatsoever: it does not refuse (by design) and it
-        // does not warn (the defect). Pins the OBSERVED behaviour per QA contract rule 2; when #407 lands this
-        // flips to asserting the advisory is present and breached, and becomes its regression guard.
-        CarriesAdvisory(body).Should().BeFalse(
-            "DEFECT gh#407: the advisory is computed and dropped at the API boundary, so an operator on the "
-            + "default posture is never told their best day is disqualifying the evaluation");
+        // gh#407's regression guard (was a pinned defect until that fix landed): the advisory must actually reach
+        // the operator. Advisory is the MIGRATION DEFAULT, so on every pre-existing account this warning is the
+        // ONLY output the consistency target produces -- it does not refuse, by design. Dropping it again would
+        // make the rule invisible rather than merely permissive.
+        CarriesAdvisory(body).Should().BeTrue("the operator must be told their best day breaches the target");
+        decision.Advisories.Should().ContainSingle().Which.Should().Match<GateAdvisory>(
+            advisory => advisory.Layer == RiskLayer.ConsistencyTarget && advisory.IsBreached,
+            "the warning names its layer and reports itself breached — a number with no verdict is not a warning");
+
+        // The audit half of gh#407, and the half nothing else covers: the response and the journal are wired
+        // SEPARATELY, so surfacing the advisory to the caller does not imply recording it. Without this, "was the
+        // operator warned before the payout was disqualified?" stays unanswerable after the fact.
+        (await JournalledAdvisoriesAsync(accountId)).Should().ContainSingle()
+            .Which.Layer.Should().Be(RiskLayer.ConsistencyTarget, "the gate decision row records the warning it carried");
     }
 
     [Fact]
@@ -153,13 +159,18 @@ public class ConsistencyTargetIntegrationTests : IClassFixture<StubbedVenuePostg
 
         using HttpResponseMessage response = await SendOrderAsync(client, accountId);
         string body = await response.Content.ReadAsStringAsync();
+        SendOrderResponse? decision = await response.Content.ReadFromJsonAsync<SendOrderResponse>(_jsonOptions);
 
         response.StatusCode.Should().Be(HttpStatusCode.OK, "well inside the target, nothing should bind");
 
-        // DEFECT gh#407 (the same drop, one step earlier): below the threshold there is likewise nothing to see.
-        CarriesAdvisory(body).Should().BeFalse(
-            "DEFECT gh#407: no advisory crosses the API boundary at all, breached or not, so the early-warning "
-            + "behaviour ADR-0007 describes does not exist for any account");
+        // gh#407's regression guard for the EARLY-warning half. A warning that only appears once the target is
+        // already breached is not an early warning -- by then the evaluation is disqualified and there is nothing
+        // left to steer. ADR-0007 puts the consumed fraction in front of the operator while still compliant.
+        CarriesAdvisory(body).Should().BeTrue("the fraction is visible while the operator can still act on it");
+        decision!.Advisories.Should().ContainSingle().Which.Should().Match<GateAdvisory>(
+            advisory => advisory.Layer == RiskLayer.ConsistencyTarget && !advisory.IsBreached,
+            "raised but NOT breached — reporting a compliant account as breached would be a false alarm, and "
+            + "raising nothing at all is the gh#407 defect");
     }
 
     // -------------------------------------------------------------------------------------------------------
@@ -422,6 +433,19 @@ public class ConsistencyTargetIntegrationTests : IClassFixture<StubbedVenuePostg
 
     private Task<int> OrderCountAsync(Guid accountId) => QueryDbAsync(db =>
         db.Orders.IgnoreQueryFilters().CountAsync(order => order.AccountId == accountId));
+
+    /// <summary>The advisories recorded on the account's most recent gate-decision row (gh#407).</summary>
+    private async Task<IReadOnlyList<GateAdvisory>> JournalledAdvisoriesAsync(Guid accountId)
+    {
+        string? json = await QueryDbAsync(db => db.GateDecisions
+            .IgnoreQueryFilters()
+            .Where(decision => decision.AccountId == accountId)
+            .OrderByDescending(decision => decision.DecidedAt)
+            .Select(decision => decision.Advisories)
+            .FirstOrDefaultAsync());
+
+        return GateAdvisoryJson.Deserialize(json);
+    }
 
     private async Task ExecuteDbAsync(Func<TradingCopilotDbContext, Task> action)
     {
