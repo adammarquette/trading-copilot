@@ -62,7 +62,7 @@ public class QueuedNotificationChannelTests
         // Resolve runs on the SUCCESS path of a flatten -- the common case, every session. Blocking here would
         // put channel latency on a pass that is working correctly.
         A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._))
-            .ReturnsLazily(async () => await Task.Delay(TimeSpan.FromSeconds(5)));
+            .ReturnsLazily(async () => { await Task.Delay(TimeSpan.FromSeconds(5)); return true; });
         QueuedNotificationChannel channel = Channel();
 
         Stopwatch clock = Stopwatch.StartNew();
@@ -88,12 +88,76 @@ public class QueuedNotificationChannelTests
     [Fact]
     public async Task DrainPendingAsync_ShouldForwardResolves()
     {
+        // Returns(true) is now load-bearing, not ceremony: after gh#300 a resolve reports whether the cancel
+        // landed, and an unconfigured fake returns default(bool) == false -- which the pump correctly reads as
+        // "the page is still nagging" and retries. Saying so keeps this test about forwarding.
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(true);
         QueuedNotificationChannel channel = Channel();
         await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
 
         await channel.DrainPendingAsync(CancellationToken.None);
 
         A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // --- gh#300: the pump owns the cancel-retry ---
+
+    [Fact]
+    public async Task DrainPendingAsync_ShouldRetryTheResolve_WhenTheCancelIsNotConfirmed()
+    {
+        // gh#300: an Emergency page nags until acknowledged, so a cancel that did not land leaves the operator
+        // being woken for a position that is already flat. The pump is the "background best-effort cancel-retry,
+        // off the hot path" the issue asked for -- retrying here costs the flatten nothing.
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(false).Once()
+            .Then.Returns(true);
+        QueuedNotificationChannel channel = Channel();
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedTwiceExactly();
+    }
+
+    [Fact]
+    public async Task DrainPendingAsync_ShouldNotRetryTheResolve_WhenTheCancelIsConfirmed()
+    {
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(true);
+        QueuedNotificationChannel channel = Channel();
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task DrainPendingAsync_ShouldBoundTheCancelRetries_WhenTheCancelNeverSucceeds()
+    {
+        // Unbounded retry would turn a permanently-rejected receipt into a spin that starves every other
+        // delivery on this single-reader pump -- alerting breaking trading is the wound ADR-0019 rules out.
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(false);
+        QueuedNotificationChannel channel = Channel();
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._))
+            .MustHaveHappened(QueuedNotificationChannel.MaxResolveAttempts, Times.Exactly);
+    }
+
+    [Fact]
+    public async Task DrainPendingAsync_ShouldNotRetryASend_WhenDeliveryFails()
+    {
+        // Only the resolve is retried. A failed SEND is already handled below by DedupingNotificationChannel,
+        // which declines to record the incident so the next escalation pass re-sends it naturally -- retrying
+        // here as well would double-page.
+        A.CallTo(() => _inner.SendAsync(A<Notification>._, A<CancellationToken>._)).Returns(false);
+        QueuedNotificationChannel channel = Channel();
+        await channel.SendAsync(Note(), CancellationToken.None);
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => _inner.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
     }
 
     [Fact]
@@ -105,7 +169,7 @@ public class QueuedNotificationChannelTests
         A.CallTo(() => _inner.SendAsync(A<Notification>._, A<CancellationToken>._))
             .ReturnsLazily(() => { order.Add("send"); return Task.FromResult(true); });
         A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._))
-            .ReturnsLazily(() => { order.Add("resolve"); return Task.CompletedTask; });
+            .ReturnsLazily(() => { order.Add("resolve"); return Task.FromResult(true); });
         QueuedNotificationChannel channel = Channel();
 
         await channel.SendAsync(Note(), CancellationToken.None);

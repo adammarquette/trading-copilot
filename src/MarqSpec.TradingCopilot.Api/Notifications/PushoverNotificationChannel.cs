@@ -120,11 +120,15 @@ public sealed class PushoverNotificationChannel : INotificationChannel
     }
 
     /// <inheritdoc />
-    public async Task ResolveAsync(string dedupKey, CancellationToken cancellationToken)
+    public async Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken)
     {
-        if (!_options.IsConfigured || !_receipts.TryRemove(dedupKey, out string? receipt))
+        // gh#300: PEEK, do not remove. This used to TryRemove before awaiting the cancel below, so a cancel that
+        // faulted or was rejected threw away the only handle to the outstanding page -- which then kept nagging
+        // until it self-expired, about an incident that had already cleared. The receipt is now surrendered only
+        // once the cancel is confirmed, which is what makes the pump's retry able to reach it.
+        if (!_options.IsConfigured || !_receipts.TryGetValue(dedupKey, out string? receipt))
         {
-            return; // nothing outstanding for this incident
+            return true; // nothing outstanding for this incident -- closed, not failed
         }
 
         try
@@ -139,7 +143,11 @@ public sealed class PushoverNotificationChannel : INotificationChannel
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("Pushover would not cancel the page for {Incident} ({Status}).", dedupKey, (int)response.StatusCode);
+                return false; // receipt retained, so this stays retryable
             }
+
+            _receipts.TryRemove(dedupKey, out _);
+            return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -147,9 +155,11 @@ public sealed class PushoverNotificationChannel : INotificationChannel
         }
         catch (Exception error) when (error is HttpRequestException or OperationCanceledException)
         {
-            // A page that keeps nagging after the condition cleared is an annoyance; throwing here would be a
-            // fault on the flatten path. The annoyance is the better trade.
+            // Still never throw into the caller -- this sits beside the auto-flatten and a fault here would be
+            // alerting breaking trading. But the failure is now REPORTED rather than swallowed: the receipt
+            // survives and the caller can try the cancel again (gh#300).
             _logger.LogWarning(error, "Could not cancel the outstanding page for {Incident}.", dedupKey);
+            return false;
         }
     }
 

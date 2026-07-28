@@ -36,6 +36,17 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// </remarks>
 public sealed class QueuedNotificationChannel : INotificationChannel
 {
+    /// <summary>
+    /// How many times the pump will try to cancel an outstanding page before giving up (gh#300).
+    /// </summary>
+    /// <remarks>
+    /// Bounded on purpose. A receipt Pushover permanently refuses to cancel would otherwise spin forever on this
+    /// single-reader pump and starve every delivery queued behind it — including a page for a *live* incident,
+    /// which is far worse than the stale nag being retried. Three attempts covers a transient fault or timeout;
+    /// past that the page is left to expire on its own and the give-up is logged.
+    /// </remarks>
+    public const int MaxResolveAttempts = 3;
+
     private readonly INotificationChannel _inner;
     private readonly ILogger<QueuedNotificationChannel> _logger;
     private readonly Channel<Delivery> _queue;
@@ -77,14 +88,17 @@ public sealed class QueuedNotificationChannel : INotificationChannel
 
     /// <inheritdoc />
     /// <remarks>Enqueued like a send, so ordering with the send it clears is preserved.</remarks>
-    public Task ResolveAsync(string dedupKey, CancellationToken cancellationToken)
+    public Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken)
     {
         if (!_queue.Writer.TryWrite(Delivery.Resolve(dedupKey)))
         {
             _logger.LogWarning("Notification queue is full — dropped the resolve for {Incident}.", dedupKey);
+            return Task.FromResult(false);
         }
 
-        return Task.CompletedTask;
+        // Accepted for delivery, like SendAsync -- not "the page is cancelled". The retry on a failed cancel is
+        // the pump's job (gh#300); a caller on the flatten path must not wait to find out.
+        return Task.FromResult(true);
     }
 
     /// <summary>
@@ -145,11 +159,33 @@ public sealed class QueuedNotificationChannel : INotificationChannel
             // let a finished pass -- or a stopping host -- cancel the very page explaining why it failed.
             if (item.Notification is not null)
             {
+                // A failed SEND is deliberately not retried here: DedupingNotificationChannel below declines to
+                // record an incident it could not report, so the next escalation pass re-sends it naturally.
+                // Retrying here as well would double-page.
                 await _inner.SendAsync(item.Notification, CancellationToken.None);
+                return;
             }
-            else
+
+            if (await _inner.ResolveAsync(item.DedupKey, CancellationToken.None))
             {
-                await _inner.ResolveAsync(item.DedupKey, CancellationToken.None);
+                return;
+            }
+
+            // gh#300: the cancel did not land, so an Emergency page is still nagging about a condition that has
+            // already cleared. Retry it here -- this is off the flatten hot path, so it costs the safety path
+            // nothing. Bounded, because a permanently-rejected receipt would otherwise spin on this single-reader
+            // pump and starve every delivery behind it.
+            if (item.Attempt + 1 >= MaxResolveAttempts)
+            {
+                _logger.LogWarning(
+                    "Gave up cancelling the page for {Incident} after {Attempts} attempts — it will nag until it expires.",
+                    item.DedupKey, MaxResolveAttempts);
+                return;
+            }
+
+            if (!_queue.Writer.TryWrite(item.NextAttempt()))
+            {
+                _logger.LogWarning("Notification queue is full — dropped the cancel retry for {Incident}.", item.DedupKey);
             }
         }
         catch (Exception error)
@@ -159,10 +195,13 @@ public sealed class QueuedNotificationChannel : INotificationChannel
     }
 
     /// <summary>One queued unit of work: a notification to send, or an incident to close.</summary>
-    private sealed record Delivery(Notification? Notification, string DedupKey)
+    private sealed record Delivery(Notification? Notification, string DedupKey, int Attempt = 0)
     {
         public static Delivery Send(Notification notification) => new(notification, notification.DedupKey);
 
         public static Delivery Resolve(string dedupKey) => new(null, dedupKey);
+
+        /// <summary>The same resolve, counted as one more attempt (gh#300).</summary>
+        public Delivery NextAttempt() => this with { Attempt = Attempt + 1 };
     }
 }

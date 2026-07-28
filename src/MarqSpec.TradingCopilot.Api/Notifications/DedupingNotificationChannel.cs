@@ -68,14 +68,23 @@ public sealed class DedupingNotificationChannel : INotificationChannel
     }
 
     /// <inheritdoc />
-    public async Task ResolveAsync(string dedupKey, CancellationToken cancellationToken)
+    public async Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken)
     {
-        if (!_reported.TryRemove(dedupKey, out _))
+        // gh#300: the two halves of a resolve are decided separately, because when the cancel fails they pull in
+        // opposite directions.
+        //
+        // RE-ARM unconditionally. This is local state and its failure mode is a duplicate page, which is the
+        // safe direction; holding the key back because the transport could not confirm a cancel would suppress
+        // the NEXT genuine incident as a stale duplicate -- silence, which is what this system exists to remove.
+        if (_reported.TryRemove(dedupKey, out _))
         {
-            return; // never reported, so nothing to cancel and nothing to re-arm
+            _logger.LogInformation("Incident {Incident} resolved.", dedupKey);
         }
 
-        _logger.LogInformation("Incident {Incident} resolved.", dedupKey);
-        await _inner.ResolveAsync(dedupKey, cancellationToken);
+        // FORWARD unconditionally, even when this layer had nothing recorded. The pump retries a failed cancel
+        // by calling this method again, and by then the re-arm above has already cleared the key -- an early
+        // return would swallow every retry before it reached the transport. The transport no-ops cheaply when it
+        // holds no receipt, so the redundant call costs nothing.
+        return await _inner.ResolveAsync(dedupKey, cancellationToken);
     }
 }

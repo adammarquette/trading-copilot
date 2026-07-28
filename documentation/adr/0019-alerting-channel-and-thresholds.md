@@ -181,6 +181,22 @@ the rule, not noise to tolerate.
   `DedupingNotificationChannel`, so every future adapter (Discord `gh#100`, web push ADR-0010) inherits it rather
   than reimplementing it, and it is unit-testable without a transport. The requirement is unchanged — one push per
   incident, re-armed on resolve.
+  **Completed by `gh#300` (2026-07-28).** Resolving had the mirror-image of the send problem: an Emergency page
+  nags *until acknowledged*, and `PushoverNotificationChannel` surrendered its receipt **before** the cancel POST
+  was awaited — so a cancel that faulted or was rejected discarded the only handle to the page, which then kept
+  waking the operator about a position that was already flat, until it self-expired. A failed cancel was also
+  indistinguishable from a successful one, so nothing could retry it. `ResolveAsync` therefore now **returns
+  whether the incident is definitively closed**, the receipt is surrendered only once the cancel is confirmed, and
+  the pump — already off the hot path — retries an unconfirmed cancel up to
+  `QueuedNotificationChannel.MaxResolveAttempts` (3) before logging that it is giving up.
+  Two deliberate asymmetries fall out. **Re-arm is unconditional** even when the cancel fails: it is local state
+  whose failure mode is a duplicate page (safe), whereas withholding it would suppress the *next* genuine incident
+  as a stale duplicate (silent). And **only the resolve is retried** — a failed *send* is already re-driven by
+  dedup declining to record an incident it could not report, so retrying it here too would double-page.
+  The residual is now bounded and stated rather than open-ended: after three failed cancels the page is left to
+  expire on its own. Unbounded retry was rejected because this pump is single-reader, so a permanently-rejected
+  receipt would starve every delivery behind it — including a page for a *live* incident, which is far worse than
+  a stale nag.
 - **`gh#245`** Alertmanager rules and routing (Layer 2) · **`gh#246`** the QA suite.
 - **Thresholds are recorded but not yet enforced.** The P1/P2/P3 tables above describe what `gh#245` must build; only
   the dead-man's switch's own rules (check-in absent by deadline + 5 min, heartbeat missed ≥ 3 intervals) are live
