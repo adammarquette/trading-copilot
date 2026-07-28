@@ -63,6 +63,29 @@ cd "$REPO_ROOT"
 git fetch origin --prune --quiet
 
 # ---------------------------------------------------------------------------------------------------------
+# 0. Is it already DONE? (gh#427)
+# ---------------------------------------------------------------------------------------------------------
+# The branch check below answers "is anyone working on this?" but not "is this already finished?" -- and the
+# second case costs exactly as much. gh#360 was picked up after a parallel session had already delivered and
+# merged it: their branch had auto-deleted, so there was correctly no claim to find, and the work was simply
+# done. Nothing caught it until the first file turned out to already exist.
+#
+# Fails closed: a closed issue is nearly always finished work, and deliberately reopening one is rare enough to
+# deserve an explicit second look. Degrades to a warning when gh is missing or unauthenticated -- an unreachable
+# API must never be the thing that stops work.
+if command -v gh >/dev/null 2>&1; then
+    STATE="$(gh issue view "$ID" --json state --jq .state 2>/dev/null || echo "")"
+    if [ "$STATE" = "CLOSED" ]; then
+        echo "CLOSED — #${ID} is already closed."
+        echo "Its work is very likely already on develop; check before claiming (a parallel session may have"
+        echo "delivered it while this one was busy). Reopen it deliberately if the pickup is still right."
+        exit 1
+    elif [ -z "$STATE" ]; then
+        echo "note: could not read #${ID}'s state from GitHub — proceeding without the already-done check." >&2
+    fi
+fi
+
+# ---------------------------------------------------------------------------------------------------------
 # 1. Is it already claimed?
 # ---------------------------------------------------------------------------------------------------------
 # The separator before the id is a SLASH, not an underscore -- `<type>/<id>_<title>`. Matching on `_<id>_`
