@@ -166,3 +166,25 @@ Two consequences worth recording here rather than only in ADR-0019:
   still required, so a deployment that never enables it has no Layer 1 alerting at all. That is acceptable only
   because ADR-0019's **Layer 2 dead-man's switch is external and independent of this stack** — it is the tier that
   survives this stack, and the host, not existing.
+
+## Update (2026-07-28) — the exemplar pivot actually works (gh#338)
+
+This ADR's *Decision* has promised **cross-pillar correlation** since it was accepted — *"`trace_id` in logs +
+Prometheus **exemplars** → jump trace ↔ logs ↔ metrics in one click"* — and engineering §7 repeats it. The logs
+half was real from `gh#230`. **The exemplar half was not**: the metrics pipeline configured no exemplar filter and
+OpenTelemetry's default is `AlwaysOff`, so no measurement ever carried one. An operator clicking through from an
+`ack_latency` spike to the trace that caused it found nothing to click. Found by QA `gh#329`.
+
+`SetExemplarFilter(ExemplarFilterType.TraceBased)` closes it. **Trace-based rather than always-on** deliberately:
+an exemplar is attached only when the measurement was taken inside a **sampled span**, which is the only case the
+pivot can actually be followed. Always-on would decorate every series with a dead link and pay the storage for
+nothing.
+
+Two notes for whoever meets this next. The **cost is bounded** — one exemplar per series per collection cycle, on
+metrics whose dimensions are already a closed set (`gh#232`) — so this does not reopen the cardinality concern
+above. And a **unit test that builds the real telemetry configuration** now guards it: the defect lived in the
+*configuration*, so a test that assembled its own provider would have passed while production stayed dark. That
+test also asserts a measurement was collected at all, because the failure mode it replaced was an assertion that
+was quietly vacuous.
+
+*With this, everything ADR-0002's Decision section claims is now true in code.*
