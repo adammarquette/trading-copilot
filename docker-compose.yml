@@ -134,6 +134,10 @@ services:
       Indicators__AtrPeriod:
       Indicators__BandResolutionMinutes:
       Indicators__PollIntervalSeconds:
+      # The deterministic trigger scan (R-4, gh#385) evaluates enabled indicator triggers over the projections
+      # above and fires a mechanical alert on the arming edge. Always on -- its work is whatever triggers exist.
+      # Null pass-through, not an empty value: an empty string BINDS and would overwrite the app's 60s default.
+      Triggers__PollIntervalSeconds:
       # News / soft-signal ingestion (R-2, gh#358) -- the deduped store of record, the news analogue of the bar
       # store above. Scalar options, so there is no indexed list to enumerate and cap here. OPT-IN via
       # News__Enabled (off unless set); null pass-through leaves the app's defaults (cadence 300 s, lookback
