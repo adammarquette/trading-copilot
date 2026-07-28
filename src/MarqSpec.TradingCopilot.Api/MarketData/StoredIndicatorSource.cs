@@ -32,8 +32,10 @@ public sealed class StoredIndicatorSource : IIndicatorSource
     }
 
     /// <inheritdoc />
-    public async Task<decimal?> GetAverageTrueRangeAsync(
+    public async Task<decimal?> GetValueAsync(
         InstrumentId instrument,
+        string indicator,
+        int period,
         int resolutionMinutes,
         DateTimeOffset asOf,
         CancellationToken cancellationToken)
@@ -43,11 +45,19 @@ public sealed class StoredIndicatorSource : IIndicatorSource
         return await _database.IndicatorValues
             .Where(value => value.Instrument == symbol
                 && value.ResolutionMinutes == resolutionMinutes
-                && value.Indicator == IndicatorProjectionService.Atr
-                && value.Period == _options.AtrPeriod
+                && value.Indicator == indicator
+                && value.Period == period
                 && value.BucketStart <= asOf)
             .OrderByDescending(value => value.BucketStart)
             .Select(value => (decimal?)value.Value)
             .FirstOrDefaultAsync(cancellationToken);
     }
+
+    /// <inheritdoc />
+    public Task<decimal?> GetAverageTrueRangeAsync(
+        InstrumentId instrument,
+        int resolutionMinutes,
+        DateTimeOffset asOf,
+        CancellationToken cancellationToken) =>
+        GetValueAsync(instrument, AtrIndicator.IndicatorName, _options.AtrPeriod, resolutionMinutes, asOf, cancellationToken);
 }

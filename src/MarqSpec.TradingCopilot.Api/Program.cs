@@ -25,6 +25,7 @@ using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
 
@@ -92,6 +93,10 @@ builder.Services.AddHostedService<BarBackfillHost>();
 // exist without their indicators. IIndicatorSource is the read seam the promotion watcher will consult (gh#311)
 // once the band is resolved by the caller rather than inside StopPlan, which stays pure.
 builder.Services.Configure<IndicatorOptions>(builder.Configuration.GetSection(IndicatorOptions.SectionName));
+// The bar-derived indicator set (R-22): ATR at the safety band's period + RSI. Built from options in one place
+// (IndicatorSet), so the safety band's producer cannot be configured away. A third indicator is one line there.
+builder.Services.AddSingleton<IReadOnlyList<IIndicator>>(sp =>
+    IndicatorSet.FromOptions(sp.GetRequiredService<IOptions<IndicatorOptions>>().Value));
 builder.Services.AddScoped<IndicatorProjectionService>();
 builder.Services.AddScoped<IIndicatorSource, StoredIndicatorSource>();
 builder.Services.AddHostedService<IndicatorProjectionHost>();

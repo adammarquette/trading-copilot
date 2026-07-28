@@ -21,9 +21,34 @@ namespace MarqSpec.TradingCopilot.Domain.MarketData;
 public interface IIndicatorSource
 {
     /// <summary>
+    /// The most recent value of a named indicator at or before <paramref name="asOf"/>, or <see langword="null"/>
+    /// when none can be measured (R-22).
+    /// </summary>
+    /// <param name="instrument">The instrument.</param>
+    /// <param name="indicator">The stored indicator name — e.g. <c>"atr"</c>, <c>"rsi"</c>.</param>
+    /// <param name="period">The period, which is part of a value's identity.</param>
+    /// <param name="resolutionMinutes">The bar size the indicator was computed over.</param>
+    /// <param name="asOf">The moment to read as of — values after it are ignored, so a replay stays honest.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The value, or <see langword="null"/> when unavailable.</returns>
+    Task<decimal?> GetValueAsync(
+        InstrumentId instrument,
+        string indicator,
+        int period,
+        int resolutionMinutes,
+        DateTimeOffset asOf,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// The most recent average true range at or before <paramref name="asOf"/>, or <see langword="null"/> when
     /// none can be measured.
     /// </summary>
+    /// <remarks>
+    /// <b>Retained deliberately as a typed method</b> even though <see cref="GetValueAsync"/> generalises it: the
+    /// stop-promotion watcher — a safety-critical caller — reads the ATR band through exactly this signature, so
+    /// keeping it named removes any chance of transposing the indicator / period / resolution arguments at that
+    /// call site. It resolves the ATR period from configuration and defers to <see cref="GetValueAsync"/>.
+    /// </remarks>
     /// <param name="instrument">The instrument.</param>
     /// <param name="resolutionMinutes">The bar size the indicator was computed over.</param>
     /// <param name="asOf">The moment to read as of — values after it are ignored, so a replay stays honest.</param>

@@ -22,6 +22,13 @@ public sealed class IndicatorOptions
     public int AtrPeriod { get; init; } = 14;
 
     /// <summary>
+    /// The RSI period (R-22). Wilder's default is 14 — the same reason as <see cref="AtrPeriod"/>: it is what the
+    /// operator's chart shows. RSI is a soft signal for suggestions and charting, not a safety input, so unlike
+    /// the ATR band nothing enforces a particular value.
+    /// </summary>
+    public int RsiPeriod { get; init; } = 14;
+
+    /// <summary>
     /// The bar size, in minutes, whose ATR an <b>ATR promotion band</b> means (gh#311). ADR-0007 names ATR as a
     /// proximity metric but not which series it is measured on, and 2 × ATR on 1-minute bars is a very different
     /// distance from 2 × ATR on 15-minute bars — so it is stated here rather than assumed.

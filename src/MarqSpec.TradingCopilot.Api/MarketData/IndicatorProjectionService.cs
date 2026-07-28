@@ -5,7 +5,6 @@ using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.Api.MarketData;
 
@@ -28,26 +27,26 @@ namespace MarqSpec.TradingCopilot.Api.MarketData;
 /// </remarks>
 public sealed class IndicatorProjectionService
 {
-    /// <summary>The indicator name stored for average true range.</summary>
-    public const string Atr = "atr";
+    /// <summary>The indicator name stored for average true range (aliases <see cref="AtrIndicator.IndicatorName"/>).</summary>
+    public const string Atr = AtrIndicator.IndicatorName;
 
     private readonly TradingCopilotDbContext _database;
-    private readonly IndicatorOptions _options;
+    private readonly IReadOnlyList<IIndicator> _indicators;
     private readonly ILogger<IndicatorProjectionService> _logger;
 
     /// <summary>Creates the service over the scoped database.</summary>
     /// <param name="database">The scoped database.</param>
-    /// <param name="options">The indicator parameters and cadence.</param>
+    /// <param name="indicators">The bar-derived indicators to project — each carries its own name and period.</param>
     /// <param name="logger">The logger.</param>
     public IndicatorProjectionService(
         TradingCopilotDbContext database,
-        IOptions<IndicatorOptions> options,
+        IReadOnlyList<IIndicator> indicators,
         ILogger<IndicatorProjectionService> logger)
     {
-        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(indicators);
 
         _database = database;
-        _options = options.Value;
+        _indicators = indicators;
         _logger = logger;
     }
 
@@ -106,22 +105,46 @@ public sealed class IndicatorProjectionService
                 bar.Volume)),
         ];
 
-        IReadOnlyList<decimal?> atr = AverageTrueRange.Compute(bars, _options.AtrPeriod);
+        DateTimeOffset computedAt = DateTimeOffset.UtcNow;
+        int written = 0;
 
+        // Bars are loaded once; every configured indicator projects over the same series into its own
+        // (Indicator, Period) family of rows. A third indicator later is one more entry in the collection.
+        foreach (IIndicator indicator in _indicators)
+        {
+            written += await UpsertSeriesAsync(
+                key, indicator.Name, indicator.Period, indicator.Compute(bars), bars, computedAt, cancellationToken);
+        }
+
+        if (written > 0)
+        {
+            await _database.SaveChangesAsync(cancellationToken);
+        }
+
+        return written;
+    }
+
+    private async Task<int> UpsertSeriesAsync(
+        SeriesKey key,
+        string indicator,
+        int period,
+        IReadOnlyList<decimal?> values,
+        IReadOnlyList<Bar> bars,
+        DateTimeOffset computedAt,
+        CancellationToken cancellationToken)
+    {
         Dictionary<DateTimeOffset, IndicatorValueRecord> existing = await _database.IndicatorValues
             .Where(value => value.Venue == key.Venue
                 && value.Instrument == key.Instrument
                 && value.ResolutionMinutes == key.ResolutionMinutes
-                && value.Indicator == Atr
-                && value.Period == _options.AtrPeriod)
+                && value.Indicator == indicator
+                && value.Period == period)
             .ToDictionaryAsync(value => value.BucketStart, cancellationToken);
 
-        DateTimeOffset computedAt = DateTimeOffset.UtcNow;
         int written = 0;
-
         for (int i = 0; i < bars.Count; i++)
         {
-            if (atr[i] is not decimal value)
+            if (values[i] is not decimal value)
             {
                 continue; // period not satisfied -- no value is deliberate, and better than a partial one
             }
@@ -144,18 +167,13 @@ public sealed class IndicatorProjectionService
                 Venue = key.Venue,
                 Instrument = key.Instrument,
                 ResolutionMinutes = key.ResolutionMinutes,
-                Indicator = Atr,
-                Period = _options.AtrPeriod,
+                Indicator = indicator,
+                Period = period,
                 BucketStart = bucket,
                 Value = value,
                 RecordedAt = computedAt,
             });
             written++;
-        }
-
-        if (written > 0)
-        {
-            await _database.SaveChangesAsync(cancellationToken);
         }
 
         return written;
