@@ -1,0 +1,149 @@
+{
+  "uid": "tc-execution-gate",
+  "title": "Execution & risk gate",
+  "description": "PRD §7's '100% risk-gate coverage' made visible, plus venue round-trip latency and the kill switch (gh#366, proposed by gh#332).",
+  "tags": ["trading-copilot", "safety-critical"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Kill switch",
+      "description": "A killed system must be visible on a dashboard, not only in a log.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "max(trading_killswitch_engaged)" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "armed", "color": "green", "index": 0 },
+                "1": { "text": "ENGAGED", "color": "red", "index": 1 }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Unprotected positions",
+      "description": "Live positions with NO stop resting at the exchange (gh#370). ADR-0019's P1 — the state the staged-stop model exists to make impossible.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "max(trading_positions_unprotected)" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Open positions",
+      "description": "The '…with exposure' qualifier several ADR-0019 conditions depend on.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "max(trading_positions_open)" }],
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Venue connection",
+      "description": "Synthetic protection depends on this process reaching the venue.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "min(trading_venue_connected)" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "DOWN", "color": "red", "index": 0 },
+                "1": { "text": "up", "color": "green", "index": 1 }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Gate decisions — by outcome",
+      "description": "Every order passes the gate. This is that coverage, made visible.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(trading_gate_decisions_total[1h]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } }, "min": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "barchart",
+      "title": "Which limit is binding? — refusals by layer (24h)",
+      "description": "The tuning signal. A layer that never binds may be mis-set; one that always binds is the real constraint.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (binding_layer) (increase(trading_gate_decisions_total{outcome!=\"Allowed\"}[24h]))",
+          "legendFormat": "{{binding_layer}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Order acknowledgement latency — p95 / p99",
+      "description": "Venue round-trip. Exemplars click through to the trace (gh#338 landed, so this works).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(trading_order_ack_latency_milliseconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "exemplar": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(trading_order_ack_latency_milliseconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "exemplar": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms", "min": 0 }, "overrides": [] }
+    }
+  ]
+}

@@ -275,7 +275,7 @@ docker compose --profile observability up -d      # ...plus the stack
 
 | Service | Port | What it holds |
 |---|---|---|
-| Grafana | 3000 | the single pane; datasources provisioned from `./observability/grafana/provisioning` |
+| Grafana | 3000 | the single pane; datasources **and dashboards** provisioned from `./observability/grafana` (`gh#366`) |
 | Prometheus | 9090 | metrics (remote-write receiver + exemplar storage enabled); evaluates `./observability/rules` |
 | Alertmanager | 9093 | routing, dedup, quiet hours and the Pushover receivers (`gh#245`, ADR-0019) |
 | Loki | 3100 | logs |
@@ -293,6 +293,31 @@ all three backends.
 **Grafana credentials** default to `admin`/`admin` for local development only, from `GF_SECURITY_ADMIN_USER` /
 `GF_SECURITY_ADMIN_PASSWORD`. A deployed Grafana takes them from that environment's secret store — never from a
 committed file, and never left at the default.
+
+### Dashboards (`gh#366`)
+
+Three dashboards provision from `./observability/grafana/dashboards`, in the **Trading Co-Pilot** folder:
+
+| Dashboard | UID | What it answers |
+|---|---|---|
+| Auto-flatten reliability | `tc-auto-flatten` | Did R-13's obligation run, how fast, did the backstop save it |
+| Execution & risk gate | `tc-execution-gate` | Gate coverage, which limit binds, order-ack latency, kill switch, unprotected exposure |
+| Synthetic risk & pipeline health | `tc-synthetic-risk` | Platform-held protection, and whether the log's consumers keep up |
+
+**They are read-only in the UI on purpose.** The provider sets `allowUiUpdates: false` and the mount is
+read-only, so a dashboard cannot drift into console state that no PR reviewed. **To change one, edit the JSON and
+commit it** — Grafana re-reads every 30 s, so a local edit shows up without a restart.
+
+**The most important thing to know when reading them:** on the auto-flatten board, **a blank panel is the alarm,
+not a quiet day.** The deadline metric is emitted on every evaluation including `nothing-to-do`, so absence means
+the loop did not run. The board says this in a text panel and reports *reporting / SILENT* as a stat rather than
+leaving it to be inferred.
+
+To check they loaded after a change:
+
+```bash
+curl -s -u admin:admin "http://localhost:3000/api/search?type=dash-db"
+```
 
 ### Alerting — receiver configuration (`gh#245`, ADR-0019)
 

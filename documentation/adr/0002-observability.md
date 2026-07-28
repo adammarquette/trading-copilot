@@ -196,3 +196,41 @@ test also asserts a measurement was collected at all, because the failure mode i
 was quietly vacuous.
 
 *With this, everything ADR-0002's Decision section claims is now true in code.*
+
+## Update (2026-07-28) — the dashboards exist, as files (gh#366)
+
+This ADR chose the LGTM stack and the 2026-07-28 update above gave it alerting. It now has the **single pane**
+the choice was made for: three provisioned dashboards, proposed by QA on gh#332 and built here.
+
+| Dashboard | What it answers |
+|---|---|
+| **Auto-flatten reliability** | Did the R-13 obligation run, how fast did it flatten, did the backstop have to save it |
+| **Execution & risk gate** | Is every order gated, which limit is binding, venue round-trip, kill switch, unprotected exposure |
+| **Synthetic risk & pipeline health** | Protection that is platform-held rather than exchange-held, and whether the log's two safety consumers are keeping up |
+
+**Provisioned as files, and deliberately not editable in the UI.** The provider sets `allowUiUpdates: false` and
+the mount is read-only, so a dashboard cannot become console state that no PR reviewed and no `down -v` survives —
+the Platform contract's *"configuration that exists only in a provider's web console does not exist"*, made
+structural rather than aspirational. Editing a dashboard is a commit.
+
+**The absence of a series is the alarm.** The auto-flatten board leads with that in a text panel, because it is
+the one thing a reader gets wrong by default: `trading_flatten_deadlines_total` is emitted on **every** deadline
+evaluation including `outcome="nothing-to-do"`, so a blank panel means the loop did not run — a zero bar and no
+bar mean opposite things. A dedicated stat panel reports *reporting / SILENT* rather than leaving that inference
+to the viewer.
+
+**A defect found while building, worth recording because the class recurs.** gh#366's proposed queries named
+`trading_flatten_time_to_flat_bucket`, `trading_order_ack_latency_bucket` and
+`trading_eventlog_pipeline_lag_bucket`. **None of those series exist**: all three instruments declare `unit: "ms"`
+and the collector's `prometheusremotewrite` exporter appends the unit, so the real families end
+`_milliseconds_bucket`. A panel over a non-existent series renders *"No data"* — **indistinguishable from a
+healthy quiet period**, which is precisely the failure this board exists to reveal. It is the same class as
+gh#245's refusal to write alert rules over unemitted metrics, and it is why the queries here were validated
+against a live Prometheus rather than transcribed.
+
+**Exemplar drill-through is wired.** gh#366 was written while gh#338 was open and noted the metric → trace pivot
+did not work. It landed, so the latency panels set `exemplar: true` and click through to Tempo.
+
+*Still open:* the two **alert candidates** gh#366 proposed alongside the panels (`absent_over_time` on the
+flatten family, and a sustained `trading_stops_orphaned > 0`) are close cousins of rules gh#245/gh#370 already
+ship — `TelemetryPipelineSilent` and `OrphanedStopsWithExposure` — and are deliberately not duplicated here.

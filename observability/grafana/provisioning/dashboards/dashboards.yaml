@@ -1,0 +1,22 @@
+# Grafana dashboard provisioning (gh#366, ADR-0002).
+#
+# Dashboards are FILES, not console state. The Platform contract is explicit that "configuration that exists only
+# in a provider's web console does not exist" — a dashboard clicked together in the UI cannot be reviewed in a PR,
+# does not survive `down -v`, and cannot be reproduced by a fork. These are provisioned from the repo.
+
+apiVersion: 1
+
+providers:
+  - name: trading-copilot
+    orgId: 1
+    folder: Trading Co-Pilot
+    type: file
+    # Grafana would otherwise let a UI edit overwrite the file on disk, which quietly re-creates the console-state
+    # problem this provisioning exists to remove. Edits are welcome — as commits.
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      # Keeps the on-disk layout as the folder structure, so adding a subdirectory is a real organising tool.
+      foldersFromFilesStructure: false
