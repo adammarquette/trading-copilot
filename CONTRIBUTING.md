@@ -96,6 +96,13 @@ collision. If you abandon work yourself, **delete the remote branch** (`git push
 prune the worktree, rather than leaving a phantom claim; one sweep found 29 stale worktrees and 6 branches with
 no PR.
 
+**Also delete it when your PR *merged* but the branch outlived it** (gh#424). Auto-delete-on-merge skips a branch
+that received a commit after the merge, so a late push leaves the branch alive — and because the staleness rule
+reads the branch *tip*, that push also refreshes it, so the branch looks **actively claimed indefinitely**. Worse,
+the late commit is orphaned: it is on no PR and will never reach `develop`. After your PR merges, check
+`git ls-remote --heads origin | grep "/<id>_"` — anything still there is either a phantom claim, unmerged work, or
+both. That is exactly how gh#375's own fix went missing.
+
 ### What this does not do
 
 It does not make claiming atomic — two sessions can check in the same second and both proceed. It narrows the
