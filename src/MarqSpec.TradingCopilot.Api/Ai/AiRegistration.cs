@@ -43,7 +43,10 @@ public static class AiRegistration
         // one of them by whether a key is present -- a stub build cannot fabricate a suggestion, and a configured one
         // wakes a live model. The key never leaves the provider (header only).
         services.AddHttpClient<AnthropicLlmProvider>((provider, client) =>
-            client.Timeout = TimeSpan.FromSeconds(provider.GetRequiredService<IOptions<LlmOptions>>().Value.TimeoutSeconds));
+                client.Timeout = TimeSpan.FromSeconds(provider.GetRequiredService<IOptions<LlmOptions>>().Value.TimeoutSeconds))
+            // Keep "the key is never in a log" true by construction: the HttpClient factory's request-header logging
+            // (active at Trace) would otherwise emit x-api-key in cleartext. Redact it regardless of log level.
+            .RedactLoggedHeaders(["x-api-key"]);
         services.AddSingleton<StubLlmProvider>();
         services.AddTransient<ILlmProvider>(provider =>
             provider.GetRequiredService<IOptions<LlmOptions>>().Value.IsConfigured

@@ -197,6 +197,37 @@ public class AnthropicLlmProviderTests
         await act.Should().ThrowAsync<AnthropicLlmException>();
     }
 
+    [Theory]
+    [InlineData("[]")]              // a JSON array
+    [InlineData("\"warming up\"")]  // a JSON string
+    [InlineData("42")]              // a JSON number
+    public async Task CompleteAsync_ShouldThrow_WhenA200BodyIsValidJsonButNotAnObject(string body)
+    {
+        StubHandler handler = new(_ => Json(HttpStatusCode.OK, body));
+
+        Func<Task> act = () => Provider(handler).CompleteAsync(Request(), CancellationToken.None);
+
+        // The contract is total: a well-formed-JSON-but-wrong-shape 2xx fails closed as AnthropicLlmException, not a
+        // stray InvalidOperationException from a JsonElement accessor.
+        await act.Should().ThrowAsync<AnthropicLlmException>();
+    }
+
+    [Theory]
+    // A scalar content-array element, and a text block whose "text" is a number: both are junk the extractor must
+    // SKIP without crashing an accessor -- yielding empty text, which the reviewer then fails closed on downstream.
+    // (This is the same "ignore anything that isn't a well-formed text block" posture as a non-"text" block type.)
+    [InlineData("""{"content":[42],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}""")]
+    [InlineData("""{"content":[{"type":"text","text":123}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}""")]
+    public async Task CompleteAsync_ShouldSkipAJunkContentBlock_AndReturnNoTextForIt(string body)
+    {
+        StubHandler handler = new(_ => Json(HttpStatusCode.OK, body));
+
+        LlmCompletion completion = await Provider(handler).CompleteAsync(Request(), CancellationToken.None);
+
+        completion.Text.Should().BeEmpty();
+        completion.StopReason.Should().Be(LlmStopReason.Completed);
+    }
+
     [Fact]
     public async Task CompleteAsync_ShouldPropagate_WhenTheCallerCancels()
     {
