@@ -34,4 +34,10 @@ public enum VenueCapability
 
     /// <summary>Closing a position outright — the capability auto-flatten depends on (R-13).</summary>
     ClosePosition = 1 << 7,
+
+    /// <summary>
+    /// Non-market <b>news</b> / soft-signal items over REST (R-2). A data-only news provider (Finnhub, Tiingo)
+    /// grants this and little else.
+    /// </summary>
+    News = 1 << 8,
 }
