@@ -1,8 +1,8 @@
 using MarqSpec.TradingCopilot.Data;
-using MarqSpec.TradingCopilot.Domain.AI;
+using MarqSpec.TradingCopilot.Domain.Ai;
 using Microsoft.Extensions.Logging;
 
-namespace MarqSpec.TradingCopilot.Api.AI;
+namespace MarqSpec.TradingCopilot.Api.Ai;
 
 /// <summary>
 /// The default <see cref="IEmbeddingProvider"/> (gh#109): reports itself unavailable and embeds nothing.
