@@ -2,6 +2,7 @@ using System.Text;
 using MarqSpec.Client.ProjectX.DependencyInjection;
 using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Accounts;
+using MarqSpec.TradingCopilot.Api.AI;
 using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
@@ -18,6 +19,7 @@ using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Events;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.AI;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Flatten;
@@ -147,6 +149,10 @@ builder.Services.AddHostedService<VenueConnectionMonitorHost>();
 // and publishes how many live positions have no protective stop resting at the exchange. ADR-0019 makes that a
 // P1, and until now nothing measured it -- so the rule gh#245 wanted could not be written. Measurement only: it
 // reports on the protection the execution path is responsible for, and never places an order itself.
+// The embedding seam (gh#109, engineering §2). The KEYLESS default until the Cohere provider (gh#403) lands:
+// the substrate must be usable, and every test must run, without an API key or any spend.
+builder.Services.AddSingleton<IEmbeddingProvider, UnavailableEmbeddingProvider>();
+
 builder.Services.AddScoped<ProtectionMonitorService>();
 builder.Services.AddHostedService<ProtectionMonitorHost>();
 

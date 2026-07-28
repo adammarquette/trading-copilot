@@ -83,6 +83,18 @@ public class TradingCopilotDbContext : TenantDbContext
     /// </summary>
     public DbSet<NewsRecord> News => Set<NewsRecord>();
 
+    /// <summary>
+    /// The stored vector width (gh#109). Cohere's embed-v3 family is 1024, and an ANN index requires a fixed
+    /// width — so this is a schema constant, not configuration: changing it is a migration.
+    /// </summary>
+    public const int EmbeddingDimensions = 1024;
+
+    /// <summary>
+    /// The polymorphic embedding store (gh#109, ADR-0001, engineering §2) — the system's third storage shape.
+    /// Global / not operator-owned (R-20), following the owners it embeds.
+    /// </summary>
+    public DbSet<EmbeddingRecord> Embeddings => Set<EmbeddingRecord>();
+
     /// <summary>Per-consumer-group replay cursors over the event log (ADR-0001). System plumbing.</summary>
     public DbSet<EventCursor> EventCursors => Set<EventCursor>();
 
@@ -472,6 +484,22 @@ public class TradingCopilotDbContext : TenantDbContext
             bar.HasIndex(b => new { b.Instrument, b.ResolutionMinutes, b.BucketStart });
         });
 
+        // The embedding store is RELATIONAL-ONLY (gh#109). `Vector` has no mapping on the in-memory provider that
+        // every unit test uses, and adding it unconditionally breaks the model for all of them — not just the
+        // embedding tests. Excluding it there is the honest shape: a vector column cannot exist without pgvector,
+        // so this entity is exercisable only against real Postgres, and its coverage is integration-tier.
+        //
+        // Deliberately NOT solved with a float[] value converter: that would let the in-memory provider pretend
+        // to store embeddings while the similarity operators — the entire point — silently do not exist.
+        if (Database.IsNpgsql())
+        {
+            ConfigureEmbeddings(modelBuilder);
+        }
+        else
+        {
+            modelBuilder.Ignore<EmbeddingRecord>();
+        }
+
         modelBuilder.Entity<NewsRecord>(news =>
         {
             // The DedupKey (a canonicalized URL, NewsDedupKey) IS the idempotence guard, DB-enforced rather than
@@ -534,6 +562,35 @@ public class TradingCopilotDbContext : TenantDbContext
                 table.HasCheckConstraint("CK_AuditRecords_Action_NotUnknown", "\"Action\" <> 0");
                 table.HasCheckConstraint("CK_AuditRecords_Placement_NotUnknown", "\"Placement\" <> 0");
             });
+        });
+    }
+
+    /// <summary>
+    /// The embedding store (gh#109) — split out because it is applied <b>conditionally</b>: <c>Vector</c> has no
+    /// mapping on the in-memory provider, so this runs only against a relational (Npgsql) model.
+    /// </summary>
+    /// <param name="modelBuilder">The model builder.</param>
+    private static void ConfigureEmbeddings(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<EmbeddingRecord>(embedding =>
+        {
+            // Owner kind + id + model IS the key, so re-embedding an owner UPDATES rather than appends -- the
+            // same DB-enforced idempotence the bar and news stores use. Model is in the key on purpose: vectors
+            // from different models are not comparable, so they must coexist as separate rows rather than one
+            // silently overwriting the other and leaving a mixed-model index nobody can trust.
+            embedding.HasKey(e => new { e.OwnerKind, e.OwnerId, e.Model });
+            embedding.Property(e => e.OwnerId).HasMaxLength(512);
+            embedding.Property(e => e.Model).HasMaxLength(128);
+            embedding.Property(e => e.ContentHash).HasMaxLength(64);
+
+            // The width is fixed at the column because an ANN index requires it. Cohere's embed-v3 family is
+            // 1024; a different width is a different column and therefore a migration, which is the honest
+            // consequence of indexing vectors at all.
+            embedding.Property(e => e.Embedding).HasColumnType($"vector({EmbeddingDimensions})");
+
+            // Retrieval filters by owner kind before ranking -- "the nearest news item", not "the nearest
+            // anything" -- so the filter column leads.
+            embedding.HasIndex(e => new { e.OwnerKind, e.RecordedAt });
         });
     }
 }

@@ -22,6 +22,11 @@
     <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.4" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.4" />
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <!-- pgvector (gh#109): the typed `Vector` mapping + the similarity operators EF has no vocabulary for.
+         MIT, by the pgvector author. Without it, every read, write and nearest-neighbour query on the embedding
+         store would be raw SQL, which the contract allows for extension features but not for a core storage type. -->
+    <PackageVersion Include="Pgvector" Version="0.3.2" />
+    <PackageVersion Include="Pgvector.EntityFrameworkCore" Version="0.3.0" />
   </ItemGroup>
 
   <ItemGroup>

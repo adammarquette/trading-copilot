@@ -17,7 +17,8 @@ public sealed class TradingCopilotDbContextFactory : IDesignTimeDbContextFactory
     {
         DbContextOptions<TradingCopilotDbContext> options =
             new DbContextOptionsBuilder<TradingCopilotDbContext>()
-                .UseNpgsql("Host=localhost;Database=tradingcopilot;Username=postgres;Password=postgres")
+                .UseNpgsql("Host=localhost;Database=tradingcopilot;Username=postgres;Password=postgres",
+                    npgsql => npgsql.UseVector())
                 .Options;
 
         return new TradingCopilotDbContext(options, new DesignTimeCurrentUser());
