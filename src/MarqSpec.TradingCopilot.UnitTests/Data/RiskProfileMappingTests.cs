@@ -59,6 +59,45 @@ public class RiskProfileMappingTests
     }
 
     [Fact]
+    public void ToAccountRiskRules_ShouldCarryTheConsistencyTarget_FromMaxBestDayFraction()
+    {
+        // THE gh#380 GAP, and the whole reason the rule was configurable without being enforced:
+        // MaxBestDayFraction has been persisted, validated (0,1], check-constrained and exposed on the risk API
+        // since the profile landed -- but it was never mapped here, so the gate never saw it and no order was
+        // ever measured against it. This is the guard on that last mile.
+        AccountRiskRules rules = Record().ToAccountRiskRules();
+
+        rules.ConsistencyTarget.Should().Be(0.4m);
+    }
+
+    [Fact]
+    public void ToAccountRiskRules_ShouldCarryTheEnforcementPosture()
+    {
+        RiskProfileRecord record = Record();
+        record.ConsistencyEnforcement = ConsistencyEnforcement.Block;
+
+        record.ToAccountRiskRules().ConsistencyEnforcement.Should().Be(ConsistencyEnforcement.Block);
+    }
+
+    [Fact]
+    public void ToAccountRiskRules_ShouldDefaultToAdvisory_WhenThePostureWasNeverDeclared()
+    {
+        // Existing rows migrate in as Advisory. A profile that has been storing a target nothing enforced must
+        // not start refusing orders because a column appeared.
+        Record().ToAccountRiskRules().ConsistencyEnforcement.Should().Be(ConsistencyEnforcement.Advisory);
+    }
+
+    [Fact]
+    public void ToAccountRiskRules_ShouldCarryNoTarget_WhenTheAccountHasNoConsistencyRule()
+    {
+        // Null means "no such rule", not zero -- zero would mean no day may contribute any profit at all.
+        RiskProfileRecord record = Record();
+        record.MaxBestDayFraction = null;
+
+        record.ToAccountRiskRules().ConsistencyTarget.Should().BeNull();
+    }
+
+    [Fact]
     public void ToTrailingDrawdown_ShouldStartTheFloor_FromTheGivenStartingBalance()
     {
         // The entity persists the CONFIG (mode, amount, lock); the floor itself is runtime state the risk

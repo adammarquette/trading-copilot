@@ -17,6 +17,10 @@ namespace MarqSpec.TradingCopilot.Domain.Risk;
 /// <param name="Profile">The operator's configured risk tolerance.</param>
 /// <param name="Manual">The operator's manual contract caps.</param>
 /// <param name="Sanity">The execution sanity caps (R-16).</param>
+/// <param name="Consistency">
+/// The evaluation window a consistency target is measured against (gh#380). <see langword="null"/> when the
+/// caller has not read it — treated as no consumption, so an unsupplied window can never refuse an order.
+/// </param>
 public sealed record RiskContext(
     Venue.VenueAccountId Account,
     AccountRiskState State,
@@ -24,4 +28,5 @@ public sealed record RiskContext(
     AccountRiskRules Rules,
     RiskProfile Profile,
     ManualCaps Manual,
-    SanityCaps Sanity);
+    SanityCaps Sanity,
+    ConsistencyWindow? Consistency = null);

@@ -13,6 +13,46 @@ public sealed class RiskGate : IRiskGate
     /// <inheritdoc />
     public GateDecision Evaluate(OrderProposal proposal, RiskContext context)
     {
+        ArgumentNullException.ThrowIfNull(context);
+
+        // The consistency target is evaluated around the rest of the gate rather than inside it (gh#380),
+        // because it is the one layer that can bind WITHOUT changing the decision. When it only advises, the
+        // order must be sized by every other layer exactly as before and simply carry the warning out.
+        GateDecision decision = EvaluateCore(proposal, context);
+        GateAdvisory? consistency = ConsistencyAdvisory(context);
+
+        return consistency is null ? decision : decision.With(consistency);
+    }
+
+    /// <summary>
+    /// Builds the consistency advisory when the account has a target, whether or not it is breached.
+    /// </summary>
+    /// <remarks>
+    /// Raised even well below the threshold on purpose: gh#380 asks for the constraint to be visible <i>before</i>
+    /// it binds. An operator who first hears about a consistency target when an order is refused has already
+    /// spent the evaluation it was protecting.
+    /// </remarks>
+    private static GateAdvisory? ConsistencyAdvisory(RiskContext context)
+    {
+        if (context.Rules.ConsistencyTarget is not { } target)
+        {
+            return null;
+        }
+
+        ConsistencyWindow window = context.Consistency ?? ConsistencyWindow.Empty;
+        decimal consumed = window.ConsumedFraction;
+
+        return new GateAdvisory(
+            RiskLayer.ConsistencyTarget,
+            consumed,
+            target,
+            window.Breaches(target)
+                ? $"The best day is {consumed:P0} of cumulative profit, over the {target:P0} consistency target — a payout would be disqualified."
+                : $"The best day is {consumed:P0} of cumulative profit, against a {target:P0} consistency target.");
+    }
+
+    private static GateDecision EvaluateCore(OrderProposal proposal, RiskContext context)
+    {
         InstrumentSpec instrument = proposal.Instrument;
         AccountRiskState state = context.State;
         RiskProfile profile = context.Profile;
@@ -81,6 +121,19 @@ public sealed class RiskGate : IRiskGate
             return GateDecision.Block(
                 RiskLayer.DailyProfitTarget,
                 FormattableString.Invariant($"The daily profit target of {target} is reached and stop-for-the-day is on."));
+        }
+
+        // The consistency target refuses only when the account is configured for it (gh#380). Unlike every other
+        // block above, this one protects payout ELIGIBILITY rather than capital -- breaching it does not blow the
+        // account, it disqualifies an otherwise-passing evaluation -- so whether that is worth refusing a trade
+        // for belongs to the account, not to this gate. Advisory accounts fall through and carry the warning out.
+        if (context.Rules.ConsistencyTarget is { } consistencyTarget
+            && context.Rules.ConsistencyEnforcement == ConsistencyEnforcement.Block
+            && (context.Consistency ?? ConsistencyWindow.Empty).Breaches(consistencyTarget))
+        {
+            return GateDecision.Block(
+                RiskLayer.ConsistencyTarget,
+                $"The best day is already {(context.Consistency ?? ConsistencyWindow.Empty).ConsumedFraction:P0} of cumulative profit, over the {consistencyTarget:P0} consistency target.");
         }
 
         // --- Size every layer; the most restrictive wins ---

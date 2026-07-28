@@ -31,7 +31,17 @@ public static class RiskProfileMapping
     public static AccountRiskRules ToAccountRiskRules(this RiskProfileRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
-        return new AccountRiskRules(record.DailyLossLimit, record.AccountProfitTarget, record.FloorSource);
+
+        // MaxBestDayFraction IS the consistency target (gh#380). It has been persisted, validated and exposed on
+        // the risk API since the profile landed, but was never mapped through to the domain -- so the gate could
+        // not see it and the rule was configurable without being enforced. The names differ deliberately: the
+        // column says what it measures (best day / total), the domain rule says what it is.
+        return new AccountRiskRules(
+            record.DailyLossLimit,
+            record.AccountProfitTarget,
+            record.FloorSource,
+            record.MaxBestDayFraction,
+            record.ConsistencyEnforcement);
     }
 
     /// <summary>

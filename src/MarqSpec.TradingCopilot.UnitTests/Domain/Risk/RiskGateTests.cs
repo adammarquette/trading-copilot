@@ -45,7 +45,10 @@ public class RiskGateTests
         int manualMaxContracts = 5,
         int sanityMaxContracts = 10,
         decimal sanityMaxNotional = 10_000_000m,
-        TrailingMode trailingMode = TrailingMode.EndOfDay)
+        TrailingMode trailingMode = TrailingMode.EndOfDay,
+        decimal? consistencyTarget = null,
+        ConsistencyEnforcement consistencyEnforcement = ConsistencyEnforcement.Advisory,
+        ConsistencyWindow? consistency = null)
     {
         return new RiskContext(
             VenueAccountId.Create(VenueId.Parse("projectx"), "9001"),
@@ -53,7 +56,8 @@ public class RiskGateTests
             // The realized balance already carries the day's result.
             new AccountRiskState(Balance: 55_000m + dayRealizedPnL, unrealizedPnL, dayRealizedPnL),
             TrailingDrawdown.Start(trailingMode, trailingAmount: 5_000m, startingBalance: 55_000m, locksAt: null),
-            new AccountRiskRules(dailyLossLimit, ProfitTarget: null, FloorSource.FirmImposed),
+            new AccountRiskRules(
+                dailyLossLimit, ProfitTarget: null, FloorSource.FirmImposed, consistencyTarget, consistencyEnforcement),
             new RiskProfile(
                 perTradeRiskFraction,
                 TargetRewardRatio: 1.5m,
@@ -63,7 +67,119 @@ public class RiskGateTests
                 stopForDay,
                 sizingBasis),
             ManualCaps.Create(manualMaxContracts),
-            new SanityCaps(sanityMaxContracts, sanityMaxNotional, FatFingerBandTicks: 40));
+            new SanityCaps(sanityMaxContracts, sanityMaxNotional, FatFingerBandTicks: 40),
+            consistency);
+    }
+
+    // --- The consistency target (gh#380) ---
+    //
+    // The one layer that can bind without changing the decision, because it protects payout ELIGIBILITY rather
+    // than capital. Its posture is per-account, so both postures are exercised against the same breach.
+
+    [Fact]
+    public void Evaluate_ShouldBlock_WhenTheConsistencyTargetIsBreachedAndTheAccountEnforcesIt()
+    {
+        GateDecision decision = new RiskGate().Evaluate(
+            Proposal(),
+            Context(
+                consistencyTarget: 0.4m,
+                consistencyEnforcement: ConsistencyEnforcement.Block,
+                consistency: new ConsistencyWindow(CumulativeProfit: 10_000m, BestDayProfit: 6_000m)));
+
+        decision.Outcome.Should().Be(GateOutcome.Blocked);
+        decision.BindingLayer.Should().Be(RiskLayer.ConsistencyTarget);
+        decision.ApprovedQuantity.Should().Be(0);
+    }
+
+    [Fact]
+    public void Evaluate_ShouldNotBlock_WhenTheConsistencyTargetIsBreachedButTheAccountOnlyWarns()
+    {
+        // The default posture. Refusing here would stop trading on a day that is going well, for a rule that is
+        // not protecting the account -- so the order goes and the operator is told.
+        GateDecision decision = new RiskGate().Evaluate(
+            Proposal(),
+            Context(
+                consistencyTarget: 0.4m,
+                consistencyEnforcement: ConsistencyEnforcement.Advisory,
+                consistency: new ConsistencyWindow(CumulativeProfit: 10_000m, BestDayProfit: 6_000m)));
+
+        decision.Outcome.Should().NotBe(GateOutcome.Blocked);
+        decision.BindingLayer.Should().NotBe(RiskLayer.ConsistencyTarget);
+        decision.Advisories.Should().ContainSingle()
+            .Which.IsBreached.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Evaluate_ShouldAdviseBeforeItBinds_WhenTheTargetIsSetButNotYetBreached()
+    {
+        // gh#380 asks for the constraint to be visible BEFORE it binds: an operator who first hears about it
+        // when an order is refused has already spent the evaluation it was protecting.
+        GateDecision decision = new RiskGate().Evaluate(
+            Proposal(),
+            Context(
+                consistencyTarget: 0.4m,
+                consistency: new ConsistencyWindow(CumulativeProfit: 10_000m, BestDayProfit: 2_500m)));
+
+        GateAdvisory advisory = decision.Advisories.Should().ContainSingle().Subject;
+        advisory.Layer.Should().Be(RiskLayer.ConsistencyTarget);
+        advisory.ConsumedFraction.Should().Be(0.25m);
+        advisory.Threshold.Should().Be(0.4m);
+        advisory.IsBreached.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Evaluate_ShouldRaiseNoAdvisory_WhenTheAccountHasNoConsistencyTarget()
+    {
+        // The common case -- most accounts have no such rule, and they must not gain a warning about one.
+        new RiskGate().Evaluate(Proposal(), Context()).Advisories.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Evaluate_ShouldNotBlock_WhenTheWindowIsAtALossAndEnforcementIsOn()
+    {
+        // A window that is not in profit cannot disqualify a payout that will not happen. Without the guard in
+        // ConsistencyWindow the negative denominator makes this look like a breach and refuses the order.
+        GateDecision decision = new RiskGate().Evaluate(
+            Proposal(),
+            Context(
+                consistencyTarget: 0.4m,
+                consistencyEnforcement: ConsistencyEnforcement.Block,
+                consistency: new ConsistencyWindow(CumulativeProfit: -5_000m, BestDayProfit: 2_000m)));
+
+        decision.Outcome.Should().NotBe(GateOutcome.Blocked);
+    }
+
+    [Fact]
+    public void Evaluate_ShouldTreatAMissingWindowAsNoConsumption_WhenTheTargetIsSet()
+    {
+        // A caller that has not supplied the window must not have an order refused by an unknown -- the rule
+        // needs evidence of a breach, and absence of evidence is not it.
+        GateDecision decision = new RiskGate().Evaluate(
+            Proposal(),
+            Context(
+                consistencyTarget: 0.4m,
+                consistencyEnforcement: ConsistencyEnforcement.Block,
+                consistency: null));
+
+        decision.Outcome.Should().NotBe(GateOutcome.Blocked);
+        decision.Advisories.Should().ContainSingle().Which.ConsumedFraction.Should().Be(0m);
+    }
+
+    [Fact]
+    public void Evaluate_ShouldStillCarryTheAdvisory_WhenAnotherLayerBlocksTheOrder()
+    {
+        // The advisory describes the account, not the order, so a block for an unrelated reason must not hide
+        // that the evaluation is also at risk.
+        GateDecision decision = new RiskGate().Evaluate(
+            Proposal(),
+            Context(
+                dayRealizedPnL: -3_000m,
+                consistencyTarget: 0.4m,
+                consistency: new ConsistencyWindow(CumulativeProfit: 10_000m, BestDayProfit: 6_000m)));
+
+        decision.Outcome.Should().Be(GateOutcome.Blocked);
+        decision.BindingLayer.Should().NotBe(RiskLayer.ConsistencyTarget);
+        decision.Advisories.Should().ContainSingle();
     }
 
     // --- The happy path ---

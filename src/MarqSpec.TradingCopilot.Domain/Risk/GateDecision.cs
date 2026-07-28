@@ -15,6 +15,25 @@ public sealed record GateDecision(
     RiskLayer? BindingLayer,
     string Reason)
 {
+    /// <summary>
+    /// What the gate wants the operator to know without it having changed the decision (gh#380) — empty for a
+    /// decision with nothing to add.
+    /// </summary>
+    /// <remarks>
+    /// Rides alongside the outcome rather than becoming one, so every existing exhaustive switch on
+    /// <see cref="GateOutcome"/> keeps its meaning and a caller that ignores advisories behaves exactly as it did.
+    /// </remarks>
+    public IReadOnlyList<GateAdvisory> Advisories { get; init; } = [];
+
+    /// <summary>Returns this decision carrying <paramref name="advisory"/>.</summary>
+    /// <param name="advisory">The advisory to attach.</param>
+    /// <returns>A copy with the advisory appended.</returns>
+    public GateDecision With(GateAdvisory advisory)
+    {
+        ArgumentNullException.ThrowIfNull(advisory);
+        return this with { Advisories = [.. Advisories, advisory] };
+    }
+
     /// <summary>The order passes at the size asked for.</summary>
     /// <param name="quantity">The approved quantity.</param>
     /// <param name="reason">Why it passed.</param>

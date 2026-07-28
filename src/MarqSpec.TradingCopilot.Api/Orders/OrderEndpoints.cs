@@ -1472,7 +1472,8 @@ public static class OrderEndpoints
             profile.ToAccountRiskRules(),
             profile.ToRiskProfile(),
             profile.ToManualCaps(),
-            executionOptions.Value.ToSanityCaps());
+            executionOptions.Value.ToSanityCaps(),
+            await database.ConsistencyWindowForAccountAsync(account.Id, cancellationToken));
 
         OrderExecutionService execution = new(
             new RiskGate(), venue, environment.Value, killSwitch, metrics ?? NullExecutionMetrics.Instance);
