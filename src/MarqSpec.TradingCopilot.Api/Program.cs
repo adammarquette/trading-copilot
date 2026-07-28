@@ -113,10 +113,17 @@ builder.Services.AddScoped<IndicatorProjectionService>();
 builder.Services.AddScoped<IIndicatorSource, StoredIndicatorSource>();
 builder.Services.AddHostedService<IndicatorProjectionHost>();
 
-// The deterministic trigger layer (gh#385, R-4 / R-7, ADR-0008): a standing-alert scan over the projected
-// indicators above. Each pass evaluates every enabled MECHANICAL trigger and fires the crossing edges through the
-// notification channel -- no LLM in the loop (the agent-review route is deferred). Reads indicators globally
-// (derived market data), reads/writes triggers per-owner (R-20). Harmless with no triggers, so it always runs.
+// The AI seam for the agent-review route (gh#402, R-4, ADR-0008): the provider-neutral ILlmProvider (a no-I/O stub
+// this increment) and the ALWAYS-bound ITriggerReviewer -- the real LlmTriggerReviewer when an Llm:ApiKey is
+// configured, else the honest inert NullTriggerReviewer. Enforcement lives below the model: nothing bound here can
+// place or size an order. Registered before the trigger scan below, which now depends on ITriggerReviewer.
+builder.Services.AddTradingCopilotAi(builder.Configuration);
+
+// The deterministic trigger layer (gh#385, gh#402, R-4 / R-7, ADR-0008): a standing-alert scan over the projected
+// indicators above. Each pass evaluates every enabled MECHANICAL and AGENT-REVIEW trigger and fires the crossing
+// edges -- a mechanical fire alerts through the notification channel; an agent-review fire wakes the reviewer once,
+// stages a Suggestion (never an order), and advises. Reads indicators globally (derived market data), reads/writes
+// triggers per-owner (R-20). Harmless with no triggers, so it always runs.
 builder.Services.Configure<TriggerOptions>(builder.Configuration.GetSection(TriggerOptions.SectionName));
 builder.Services.AddScoped<TriggerEvaluationService>();
 builder.Services.AddHostedService<TriggerScanHost>();

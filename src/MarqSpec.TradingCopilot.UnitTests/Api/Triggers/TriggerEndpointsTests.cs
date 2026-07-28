@@ -4,6 +4,7 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Triggers;
+using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 
@@ -66,6 +67,26 @@ public class TriggerEndpointsTests
         await context.SaveChangesAsync();
         return id;
     }
+
+    private async Task<Guid> SeedAccountAsync(Guid owner, TradingMode mode = TradingMode.Practice)
+    {
+        Guid id = Guid.NewGuid();
+        await using TradingCopilotDbContext context = Context(owner);
+        context.Accounts.Add(new Account
+        {
+            Id = id,
+            UserId = owner,
+            ConnectionId = Guid.NewGuid(),
+            VenueAccountKey = "9001",
+            Name = "PRAC-50K",
+            Mode = mode,
+        });
+        await context.SaveChangesAsync();
+        return id;
+    }
+
+    private static CreateTriggerRequest AgentReviewRequest(Guid accountId, int size = 2) =>
+        ValidRequest() with { Route = TriggerRoute.AgentReview, AccountId = accountId, Size = size };
 
     // --- Create ---
 
@@ -179,15 +200,135 @@ public class TriggerEndpointsTests
         (await Context().Triggers.AnyAsync()).Should().BeFalse();
     }
 
+    // --- Create: the mechanical route takes no account or size ---
+
     [Fact]
-    public async Task Create_ShouldReturn422_ForTheAgentReviewRoute_WhichIsNotYetAvailable()
+    public async Task Create_ShouldStoreNoAccountOrSize_ForAMechanicalTrigger()
     {
         await using TradingCopilotDbContext context = Context();
 
         IResult result = await TriggerEndpoints.CreateTriggerAsync(
-            ValidRequest() with { Route = TriggerRoute.AgentReview }, new FixedUser(_operator), context, CancellationToken.None);
+            ValidRequest(), new FixedUser(_operator), context, CancellationToken.None);
 
-        StatusOf(result).Should().Be(StatusCodes.Status422UnprocessableEntity);
+        StatusOf(result).Should().Be(StatusCodes.Status201Created);
+        TriggerRecord stored = await Context().Triggers.SingleAsync();
+        stored.AccountId.Should().BeNull();
+        stored.Size.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Create_ShouldReject_WhenMechanicalCarriesAnAccount()
+    {
+        Guid accountId = await SeedAccountAsync(_operator);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+            ValidRequest() with { AccountId = accountId }, new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+        (await Context().Triggers.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Create_ShouldReject_WhenMechanicalCarriesASize()
+    {
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+            ValidRequest() with { Size = 1 }, new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+        (await Context().Triggers.AnyAsync()).Should().BeFalse();
+    }
+
+    // --- Create: the agent-review route requires an owned, mode-declared account and a positive size ---
+
+    [Fact]
+    public async Task Create_ShouldPersistAnAgentReviewTrigger_ThatRoundTripsItsAccountAndSize()
+    {
+        Guid accountId = await SeedAccountAsync(_operator, TradingMode.Practice);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+            AgentReviewRequest(accountId, size: 3), new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status201Created);
+        TriggerResponse response = ((IValueHttpResult)result).Value.Should().BeOfType<TriggerResponse>().Subject;
+        response.Route.Should().Be(TriggerRoute.AgentReview);
+        response.AccountId.Should().Be(accountId);
+        response.Size.Should().Be(3);
+
+        TriggerRecord stored = await Context().Triggers.SingleAsync();
+        stored.AccountId.Should().Be(accountId);
+        stored.Size.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task Create_ShouldReject_WhenAgentReviewHasNoAccount()
+    {
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+            ValidRequest() with { Route = TriggerRoute.AgentReview, Size = 2 },
+            new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+        (await Context().Triggers.AnyAsync()).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task Create_ShouldReject_WhenAgentReviewSizeIsNotPositive(int size)
+    {
+        Guid accountId = await SeedAccountAsync(_operator);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+            ValidRequest() with { Route = TriggerRoute.AgentReview, AccountId = accountId, Size = size },
+            new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+        (await Context().Triggers.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Create_ShouldReject_WhenAgentReviewHasNoSize()
+    {
+        Guid accountId = await SeedAccountAsync(_operator);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+            ValidRequest() with { Route = TriggerRoute.AgentReview, AccountId = accountId }, // Size left null
+            new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+        (await Context().Triggers.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Create_ShouldReturnNotFound_WhenAgentReviewAccountIsAnothersOrMissing()
+    {
+        Guid theirs = await SeedAccountAsync(Guid.NewGuid()); // another operator's -- the R-20 filter hides it
+        await using TradingCopilotDbContext context = Context(); // as _operator
+
+        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+            AgentReviewRequest(theirs), new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
+        (await Context().Triggers.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Create_ShouldReject_WhenAgentReviewAccountModeIsUndeclared()
+    {
+        Guid accountId = await SeedAccountAsync(_operator, TradingMode.Undeclared);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+            AgentReviewRequest(accountId), new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
         (await Context().Triggers.AnyAsync()).Should().BeFalse();
     }
 

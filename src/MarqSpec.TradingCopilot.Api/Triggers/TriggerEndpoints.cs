@@ -5,6 +5,7 @@ using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Triggers;
+using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -61,12 +62,7 @@ public static class TriggerEndpoints
 
         if (request.Route == TriggerRoute.Unknown)
         {
-            return Results.BadRequest(new { error = "The route must be Mechanical (agent-review is not yet available)." });
-        }
-
-        if (request.Route == TriggerRoute.AgentReview)
-        {
-            return Results.UnprocessableEntity(new { error = "The agent-review route is not yet available." });
+            return Results.BadRequest(new { error = "The route must be Mechanical or AgentReview." });
         }
 
         if (request.Period <= 0)
@@ -93,6 +89,54 @@ public static class TriggerEndpoints
             return Results.BadRequest(new { error = "The hysteresis band must be positive when set — null means none." });
         }
 
+        // Account + size are the agent-review route's alone: it issues a sized suggestion against an account on fire,
+        // where a mechanical trigger only alerts. Validated whole here (the DB check constraints are the backstop):
+        // an agent-review trigger REQUIRES an owned, mode-declared account and a positive size; a mechanical trigger
+        // must carry neither. Mode is read LIVE from the account here only to REFUSE an undeclared one -- it is never
+        // stored on the trigger; the suggestion re-reads it at issuance.
+        Guid? accountId = null;
+        int? size = null;
+        if (request.Route == TriggerRoute.AgentReview)
+        {
+            if (request.AccountId is not { } requestedAccount)
+            {
+                return Results.BadRequest(new { error = "An agent-review trigger needs an account to issue against." });
+            }
+
+            if (request.Size is not > 0)
+            {
+                return Results.BadRequest(new { error = "An agent-review trigger needs a positive size." });
+            }
+
+            // The default-deny R-20 filter scopes this read to the caller, so another operator's account -- or one
+            // that does not exist -- is indistinguishable from absent, and reads as 404.
+            Account? account = await database.Accounts
+                .FirstOrDefaultAsync(candidate => candidate.Id == requestedAccount, cancellationToken);
+            if (account is null)
+            {
+                return Results.NotFound(new { error = "No such account for this operator." });
+            }
+
+            if (account.Mode == TradingMode.Undeclared)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "The account's trading mode is undeclared — declare it before issuing suggestions on it.",
+                });
+            }
+
+            accountId = requestedAccount;
+            size = request.Size;
+        }
+        else if (request.AccountId is not null || request.Size is not null)
+        {
+            // Mechanical (the only other buildable route): an account or size is a category error, not a variant.
+            return Results.BadRequest(new
+            {
+                error = "A mechanical trigger takes no account or size — those are for the agent-review route.",
+            });
+        }
+
         TriggerRecord trigger = new()
         {
             Id = Guid.NewGuid(),
@@ -106,6 +150,8 @@ public static class TriggerEndpoints
             Threshold = request.Threshold,
             Hysteresis = request.Hysteresis,
             Route = request.Route,
+            AccountId = accountId,
+            Size = size,
             Severity = request.Severity,
             Enabled = true,
             ArmState = TriggerArmState.Unseeded,
@@ -233,9 +279,17 @@ public static class TriggerEndpoints
 /// <param name="ResolutionMinutes">The bar size in minutes; must be positive.</param>
 /// <param name="Comparison">Below or Above; Unknown is refused.</param>
 /// <param name="Threshold">The threshold to compare against.</param>
-/// <param name="Route">Where a fire routes; only Mechanical is available.</param>
+/// <param name="Route">Where a fire routes; Mechanical or AgentReview.</param>
 /// <param name="Hysteresis">The optional re-arm dead-band; null means none, and it must be positive when set.</param>
 /// <param name="Severity">How loudly the alert arrives; defaults to <see cref="NotificationSeverity.Notify"/>.</param>
+/// <param name="AccountId">
+/// The account a fired agent-review suggestion issues against — <b>required</b> for AgentReview (owned + mode
+/// declared), <b>refused</b> for Mechanical. Null otherwise.
+/// </param>
+/// <param name="Size">
+/// The contract size a fired agent-review suggestion issues at — <b>required</b> and positive for AgentReview,
+/// <b>refused</b> for Mechanical. The operator's size, never the model's.
+/// </param>
 public sealed record CreateTriggerRequest(
     string Symbol,
     string Indicator,
@@ -245,7 +299,9 @@ public sealed record CreateTriggerRequest(
     decimal Threshold,
     TriggerRoute Route,
     decimal? Hysteresis = null,
-    NotificationSeverity Severity = NotificationSeverity.Notify);
+    NotificationSeverity Severity = NotificationSeverity.Notify,
+    Guid? AccountId = null,
+    int? Size = null);
 
 /// <summary>
 /// The body of a patch-trigger request (gh#385). Every field is optional — null means "leave unchanged". The
@@ -274,6 +330,8 @@ public sealed record PatchTriggerRequest(
 /// <param name="Threshold">The threshold.</param>
 /// <param name="Hysteresis">The re-arm dead-band, if any.</param>
 /// <param name="Route">Where a fire routes.</param>
+/// <param name="AccountId">The agent-review account a fire issues against, or null for a mechanical trigger.</param>
+/// <param name="Size">The agent-review contract size a fire issues at, or null for a mechanical trigger.</param>
 /// <param name="Severity">The alert severity.</param>
 /// <param name="Enabled">Whether the scan evaluates it.</param>
 /// <param name="ArmState">The debounce state.</param>
@@ -291,6 +349,8 @@ public sealed record TriggerResponse(
     decimal Threshold,
     decimal? Hysteresis,
     TriggerRoute Route,
+    Guid? AccountId,
+    int? Size,
     NotificationSeverity Severity,
     bool Enabled,
     TriggerArmState ArmState,
@@ -312,6 +372,8 @@ public sealed record TriggerResponse(
         record.Threshold,
         record.Hysteresis,
         record.Route,
+        record.AccountId,
+        record.Size,
         record.Severity,
         record.Enabled,
         record.ArmState,

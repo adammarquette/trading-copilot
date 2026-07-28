@@ -437,8 +437,18 @@ public class TradingCopilotDbContext : TenantDbContext
             trigger.Property(t => t.Hysteresis).HasPrecision(18, 8);
             trigger.Property(t => t.LastEvaluatedValue).HasPrecision(18, 8);
 
-            // The scan discovers ENABLED, MECHANICAL triggers first; this composite leads that read (gh#385).
+            // The scan discovers ENABLED, MECHANICAL/AGENT-REVIEW triggers first; this composite leads that read (gh#385).
             trigger.HasIndex(t => new { t.Enabled, t.Route });
+
+            // The AGENT-REVIEW route issues a sized suggestion against an account (R-14); a mechanical trigger has
+            // neither. On account delete, CASCADE -- an agent-review trigger is meaningless without its account, and
+            // this matches every other account FK (Order / Trade / Suggestion / RiskProfile). SetNull would be wrong
+            // here: it cannot null an AccountId the AgentReview-route CHECK requires non-null (the delete would roll
+            // back). A mechanical trigger keeps AccountId null, so it is untouched by any account delete.
+            trigger.HasOne<Account>()
+                .WithMany()
+                .HasForeignKey(t => t.AccountId)
+                .OnDelete(DeleteBehavior.Cascade);
 
             trigger.ToTable("Triggers", table =>
             {
@@ -450,6 +460,17 @@ public class TradingCopilotDbContext : TenantDbContext
                 table.HasCheckConstraint("CK_Triggers_Period_Positive", "\"Period\" > 0");
                 table.HasCheckConstraint("CK_Triggers_ResolutionMinutes_Positive", "\"ResolutionMinutes\" > 0");
                 table.HasCheckConstraint("CK_Triggers_Hysteresis_PositiveOrNull", "\"Hysteresis\" IS NULL OR \"Hysteresis\" > 0");
+
+                // The route pairs with account+size, below the endpoint validation (TriggerRoute.AgentReview = 2):
+                // an agent-review trigger MUST carry an account and a positive size (it issues a sized suggestion on
+                // fire), and a mechanical trigger must carry NEITHER (it only alerts). A defaulted or corrupt row can
+                // never read as a sized suggestion with no account, nor a mechanical alert with a stray size.
+                table.HasCheckConstraint(
+                    "CK_Triggers_AgentReview_RequiresAccountAndSize",
+                    "\"Route\" <> 2 OR (\"AccountId\" IS NOT NULL AND \"Size\" > 0)");
+                table.HasCheckConstraint(
+                    "CK_Triggers_Mechanical_NoAccount",
+                    "\"Route\" = 2 OR (\"AccountId\" IS NULL AND \"Size\" IS NULL)");
             });
         });
 

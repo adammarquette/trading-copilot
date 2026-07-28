@@ -7,6 +7,7 @@ using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Triggers;
+using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -29,6 +30,7 @@ public class TriggerEvaluationServiceTests
     private readonly string _database = Guid.NewGuid().ToString();
     private readonly IIndicatorSource _indicators = A.Fake<IIndicatorSource>();
     private readonly INotificationChannel _notifications = A.Fake<INotificationChannel>();
+    private readonly ITriggerReviewer _reviewer = A.Fake<ITriggerReviewer>();
     private static DateTimeOffset Now { get; } = DateTimeOffset.UnixEpoch.AddYears(56);
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
@@ -45,7 +47,28 @@ public class TriggerEvaluationServiceTests
     private TradingCopilotDbContext Context(Guid? asUser = null) => new(Options, new FixedUser(asUser ?? _operator));
 
     private TriggerEvaluationService Service() => new(
-        Context(), Options, _indicators, _notifications, NullLogger<TriggerEvaluationService>.Instance);
+        Context(), Options, _indicators, _notifications, _reviewer, NullLogger<TriggerEvaluationService>.Instance);
+
+    private void ReviewerReturns(ReviewOutcome outcome) =>
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).Returns(outcome);
+
+    private async Task<Guid> SeedAccountAsync(Guid? owner = null, TradingMode mode = TradingMode.Practice)
+    {
+        Guid ownerId = owner ?? _operator;
+        Guid id = Guid.NewGuid();
+        await using TradingCopilotDbContext context = Context(ownerId);
+        context.Accounts.Add(new Account
+        {
+            Id = id,
+            UserId = ownerId,
+            ConnectionId = Guid.NewGuid(),
+            VenueAccountKey = "9001",
+            Name = "PRAC-50K",
+            Mode = mode,
+        });
+        await context.SaveChangesAsync();
+        return id;
+    }
 
     private void IndicatorReturns(decimal? value) =>
         A.CallTo(() => _indicators.GetValueAsync(
@@ -61,7 +84,9 @@ public class TriggerEvaluationServiceTests
         TriggerRoute route = TriggerRoute.Mechanical,
         NotificationSeverity severity = NotificationSeverity.Notify,
         bool enabled = true,
-        decimal? hysteresis = null)
+        decimal? hysteresis = null,
+        Guid? accountId = null,
+        int? size = null)
     {
         Guid ownerId = owner ?? _operator;
         Guid id = Guid.NewGuid();
@@ -79,6 +104,8 @@ public class TriggerEvaluationServiceTests
             Threshold = threshold,
             Hysteresis = hysteresis,
             Route = route,
+            AccountId = accountId,
+            Size = size,
             Severity = severity,
             Enabled = enabled,
             ArmState = armState,
@@ -210,14 +237,13 @@ public class TriggerEvaluationServiceTests
             .MustHaveHappenedOnceExactly();
     }
 
-    // --- Disabled and agent-review triggers are skipped entirely ---
+    // --- Disabled triggers are skipped entirely ---
 
     [Fact]
-    public async Task ScanAsync_ShouldSkipDisabledAndAgentReviewTriggers_NeitherReadingNorFiring()
+    public async Task ScanAsync_ShouldSkipDisabledTriggers_NeitherReadingNorFiring()
     {
         await AddTriggerAsync(enabled: false, armState: TriggerArmState.Armed);
-        await AddTriggerAsync(route: TriggerRoute.AgentReview, armState: TriggerArmState.Armed);
-        IndicatorReturns(25m); // would satisfy if either were read
+        IndicatorReturns(25m); // would satisfy if it were read
 
         int fires = await Service().ScanAsync(Now, CancellationToken.None);
 
@@ -300,5 +326,174 @@ public class TriggerEvaluationServiceTests
         TriggerFiringRecord firingB = await reloadB.TriggerFirings.SingleAsync();
         firingB.UserId.Should().Be(ownerB);
         firingB.TriggerId.Should().Be(idB);
+    }
+
+    // =====================================================================================================
+    // AGENT-REVIEW route (gh#402, ADR-0008): a fire wakes the reviewer once per arming edge, stages a Suggestion
+    // (never an order) on a coherent proposal, and journals the firing regardless -- COMMIT-THEN-NOTIFY.
+    // =====================================================================================================
+
+    // (a) A coherent suggestion is staged once, sized from the trigger, moded live from the account, then advised.
+    [Fact]
+    public async Task ScanAsync_ShouldStageOneSuggestionAndAdvise_WhenAgentReviewFiresWithACoherentSuggestion()
+    {
+        Guid accountId = await SeedAccountAsync(mode: TradingMode.Practice);
+        Guid id = await AddTriggerAsync(
+            route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion suggestion = await reload.Suggestions.SingleAsync();
+        suggestion.UserId.Should().Be(_operator);
+        suggestion.AccountId.Should().Be(accountId);
+        suggestion.Instrument.Should().Be(Symbol);
+        suggestion.Side.Should().Be(OrderSide.Buy);
+        suggestion.Size.Should().Be(3);                     // from the TRIGGER, never the model
+        suggestion.EntryPrice.Should().Be(100m);
+        suggestion.StopPrice.Should().Be(99m);
+        suggestion.TargetPrice.Should().Be(103m);
+        suggestion.Mode.Should().Be(TradingMode.Practice);  // read LIVE from the account
+        suggestion.State.Should().Be(SuggestionState.Active);
+
+        TriggerRecord trigger = await reload.Triggers.SingleAsync(t => t.Id == id);
+        trigger.ArmState.Should().Be(TriggerArmState.Fired);
+        trigger.LastFiredAt.Should().Be(Now);
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();
+
+        // The advisory is best-effort and sent AFTER the commit (commit-then-notify).
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // (b) The review runs ONCE per arming edge -- a persistently-true condition must not re-review every pass.
+    [Fact]
+    public async Task ScanAsync_ShouldReviewOncePerArmCycle_NotEveryPass()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+        await Service().ScanAsync(Now, CancellationToken.None);
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        (await Context().Suggestions.CountAsync()).Should().Be(1); // no duplicate on the debounced passes
+    }
+
+    // (c) NotWorthSurfacing: no suggestion, no notify -- but the fire is still journaled and the arm advances.
+    [Fact]
+    public async Task ScanAsync_ShouldFireSilently_WhenAgentReviewSuppressesNotWorthSurfacing()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suppress(SuppressReason.NotWorthSurfacing, "chop"));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.AnyAsync()).Should().BeFalse();
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // (d) NoReviewerConfigured: a fallback advisory tells the operator a setup fired that could not be reviewed.
+    [Fact]
+    public async Task ScanAsync_ShouldSendAFallbackAdvisory_WhenNoReviewerIsConfigured()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suppress(SuppressReason.NoReviewerConfigured, "no LLM reviewer is configured"));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.AnyAsync()).Should().BeFalse();
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // (e) An incoherent proposal (a Buy with the stop ABOVE entry) is rejected by SuggestionGeometry before persist.
+    [Fact]
+    public async Task ScanAsync_ShouldStageNoSuggestion_WhenTheProposedGeometryIsIncoherent()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 105m, 110m, "broken"));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.AnyAsync()).Should().BeFalse();
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // (f) An undeclared account mode cannot be traded -- nothing is suggested on it (mode is read live).
+    [Fact]
+    public async Task ScanAsync_ShouldStageNoSuggestion_WhenTheAccountModeIsUndeclared()
+    {
+        Guid accountId = await SeedAccountAsync(mode: TradingMode.Undeclared);
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.AnyAsync()).Should().BeFalse();
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+    }
+
+    // (g) COMMIT-THEN-NOTIFY: a failed advisory leaves the Suggestion durable and never re-arms (no duplicate).
+    [Fact]
+    public async Task ScanAsync_ShouldKeepTheSuggestionAndStayFired_WhenTheAdvisoryNotifyFails()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 2, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).Returns(false);
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        (await Context().Suggestions.CountAsync()).Should().Be(1); // durable regardless of the best-effort notify
+        TriggerRecord trigger = await Context().Triggers.SingleAsync(t => t.Id == id);
+        trigger.ArmState.Should().Be(TriggerArmState.Fired);
+        trigger.LastFiredAt.Should().Be(Now);
+
+        // A second pass must NOT re-review or duplicate -- re-arming on a failed notify would do exactly that.
+        await Service().ScanAsync(Now, CancellationToken.None);
+        (await Context().Suggestions.CountAsync()).Should().Be(1);
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // (h) A mechanical trigger in the same scan still fires its alert unchanged, alongside the agent-review route.
+    [Fact]
+    public async Task ScanAsync_ShouldStillFireMechanicalUnchanged_AlongsideAgentReview()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.Mechanical, armState: TriggerArmState.Armed);
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suppress(SuppressReason.NotWorthSurfacing, "x")); // agent-review stays silent
+
+        int fires = await Service().ScanAsync(Now, CancellationToken.None);
+
+        fires.Should().Be(2); // the mechanical alert and the agent-review fire
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.TriggerFirings.CountAsync()).Should().Be(2);
+
+        // Exactly one send: the mechanical alert (the agent-review suppressed silently).
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
     }
 }
