@@ -2,9 +2,9 @@ using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.MarketData;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.MarketData;
 
@@ -38,9 +38,10 @@ public class IndicatorProjectionServiceTests
         new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
             new FixedUser(Guid.NewGuid()));
 
+    // Regression pin: the ATR path is now one indicator in a collection. Re-pointing the ctor while keeping every
+    // assertion below verbatim is the proof the generalisation did not move a single stored ATR value.
     private static IndicatorProjectionService Service(TradingCopilotDbContext context, int period = 3) =>
-        new(context, Options.Create(new IndicatorOptions { AtrPeriod = period }),
-            NullLogger<IndicatorProjectionService>.Instance);
+        new(context, [new AtrIndicator(period)], NullLogger<IndicatorProjectionService>.Instance);
 
     /// <summary>The worked series from the ATR tests: true ranges 10, 20, 30, 50 → ATR 20 then 30.</summary>
     private static async Task SeedWorkedSeriesAsync(TradingCopilotDbContext context, string instrument = "ES")
@@ -193,6 +194,37 @@ public class IndicatorProjectionServiceTests
         await Service(context, period: 3).ProjectAsync(CancellationToken.None);
 
         (await context.IndicatorValues.FirstAsync()).Period.Should().Be(3);
+    }
+
+    // --- The framework runs more than one indicator ---
+
+    [Fact]
+    public async Task ProjectAsync_ShouldWriteEveryIndicator_KeptApartByName()
+    {
+        // The whole point of the increment: a second indicator projects over the SAME bars into its own
+        // (Indicator, Period) family, and the safety-critical ATR is untouched by RSI riding alongside it.
+        await using TradingCopilotDbContext context = Context();
+        await SeedWorkedSeriesAsync(context);
+
+        IndicatorProjectionService service = new(
+            context, [new AtrIndicator(3), new RsiIndicator(3)], NullLogger<IndicatorProjectionService>.Instance);
+        await service.ProjectAsync(CancellationToken.None);
+
+        List<IndicatorValueRecord> atr = await context.IndicatorValues
+            .Where(v => v.Indicator == "atr").OrderBy(v => v.BucketStart).ToListAsync();
+        atr.Select(v => v.Value).Should().Equal(20m, 30m); // unchanged from the ATR-only case
+
+        // The worked closes only rise (100 → 105 → 120 → 140 → 180), so RSI is a pure-gains 100.
+        List<IndicatorValueRecord> rsi = await context.IndicatorValues
+            .Where(v => v.Indicator == "rsi").OrderBy(v => v.BucketStart).ToListAsync();
+        rsi.Should().HaveCount(2);
+        rsi.Should().AllSatisfy(v =>
+        {
+            v.Period.Should().Be(3);
+            v.Value.Should().Be(100m);
+        });
+
+        (await context.IndicatorValues.CountAsync()).Should().Be(4);
     }
 
     [Fact]
