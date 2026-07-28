@@ -75,6 +75,14 @@ public sealed class FailureTolerantExecutionMetrics : IExecutionMetrics
         Safely(() => _inner.SetOrphanedStops(count), nameof(SetOrphanedStops));
 
     /// <inheritdoc />
+    public void SetPositionProtection(int open, int unprotected) =>
+        Safely(() => _inner.SetPositionProtection(open, unprotected), nameof(SetPositionProtection));
+
+    /// <inheritdoc />
+    public void SetVenueConnected(bool connected) =>
+        Safely(() => _inner.SetVenueConnected(connected), nameof(SetVenueConnected));
+
+    /// <inheritdoc />
     public void RecordRetentionGap(string consumerGroup) =>
         Safely(() => _inner.RecordRetentionGap(consumerGroup), nameof(RecordRetentionGap));
 

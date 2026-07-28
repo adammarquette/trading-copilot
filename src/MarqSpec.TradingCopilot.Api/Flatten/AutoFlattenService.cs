@@ -229,6 +229,11 @@ public sealed class AutoFlattenService
                 await JournalAsync(UnconfiguredEventType, account, contract,
                     $"Open position in an unconfigured product ({group.Key}) — no auto-flatten deadline is set for it.",
                     now, cancellationToken);
+
+                // Metered distinctly from `disabled` (gh#370): a market nobody configured and one deliberately
+                // switched off are different operator errors, and only the first is a surprise. Folding them
+                // together meant an unconfigured product with a live position could not be alerted on at all.
+                _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenUnconfigured);
                 continue;
             }
 
@@ -253,6 +258,10 @@ public sealed class AutoFlattenService
 
                 case FlattenAction.Warn:
                     await JournalAsync(WarningEventType, account, contract, decision.Reason, now, cancellationToken);
+
+                    // The pre-deadline warning PRD P1 asks for. Journalled since gh#12 but never metered, so the
+                    // one signal that arrives BEFORE exposure becomes a problem could not raise an alert (gh#370).
+                    _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenWarning);
                     break;
 
                 case FlattenAction.Missed:

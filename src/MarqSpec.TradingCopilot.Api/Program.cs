@@ -125,6 +125,13 @@ builder.Services.AddScoped<IAuditLog, AuditLog>();
 builder.Services.AddScoped<OrphanGuardService>();
 builder.Services.AddHostedService<VenueConnectionMonitorHost>();
 
+// The protection census (gh#370, ADR-0019): periodically reconciles venue POSITIONS against venue WORKING ORDERS
+// and publishes how many live positions have no protective stop resting at the exchange. ADR-0019 makes that a
+// P1, and until now nothing measured it -- so the rule gh#245 wanted could not be written. Measurement only: it
+// reports on the protection the execution path is responsible for, and never places an order itself.
+builder.Services.AddScoped<ProtectionMonitorService>();
+builder.Services.AddHostedService<ProtectionMonitorHost>();
+
 // The account-event consumer (R-17, R-11, gh#219): reads order / fill events off the user-hub seam and turns
 // venue truth into journal state -- writing Fill rows (the entity's first producer) and advancing an order to
 // Filled / PartiallyFilled / Rejected. Before this an order stopped at Working, blind to what the venue did next.

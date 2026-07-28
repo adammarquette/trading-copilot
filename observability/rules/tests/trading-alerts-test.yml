@@ -31,6 +31,12 @@ tests:
         values: "0x60"
       - series: "trading_stops_orphaned"
         values: "0x60"
+      - series: "trading_positions_open"
+        values: "1x60"
+      - series: "trading_positions_unprotected"
+        values: "0x60"
+      - series: "trading_venue_connected"
+        values: "1x60"
     alert_rule_test:
       - eval_time: 10m
         alertname: FlattenEscalated
@@ -55,6 +61,21 @@ tests:
         exp_alerts: []
       - eval_time: 12m
         alertname: EventLogRetentionGap
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: UnprotectedPosition
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: FlattenWarning
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: FlattenUnconfiguredWithExposure
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WatchdogCloseRejected
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: VenueDisconnectedWithExposure
         exp_alerts: []
 
   # ---------------------------------------------------------------------------------------------------------
@@ -197,3 +218,141 @@ tests:
               priority: heartbeat
             exp_annotations:
               summary: "Alerting pipeline heartbeat — its absence means the pipeline is dead"
+
+  # ---------------------------------------------------------------------------------------------------------
+  # The conditions gh#245 could not write, now that gh#370 instruments them.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "a position with no stop at the exchange pages — but not during a bracket attach"
+    input_series:
+      # A position appears at 1m and stays unprotected. `for: 2m` means a normal entry, where the bracket lands
+      # seconds after the fill, never reaches the pager.
+      - series: "trading_positions_unprotected"
+        values: "0x4 1x60"
+      - series: "trading_positions_open"
+        values: "0x4 1x60"
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="nothing-to-do"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: UnprotectedPosition
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: UnprotectedPosition
+        exp_alerts:
+          - exp_labels:
+              priority: P1
+              component: execution
+            exp_annotations:
+              summary: "1 live position(s) have NO stop resting at the exchange"
+              description: >-
+                The venue reports open exposure with no protective stop order behind it. This is the failure the
+                staged-stop model exists to prevent. Place a stop manually NOW, or flatten.
+              runbook: "documentation/deployment-runbook.md#unprotected-position"
+
+  - interval: 15s
+    name: "a venue disconnect only alerts while something is actually exposed"
+    input_series:
+      - series: "trading_venue_connected"
+        values: "0x60"
+      - series: "trading_positions_open"
+        values: "0x20 1x60"
+    alert_rule_test:
+      # Down the whole time, but flat for the first five minutes: nothing at risk, so nothing to say.
+      - eval_time: 4m
+        alertname: VenueDisconnectedWithExposure
+        exp_alerts: []
+      # Exposure appears at 5m; two more minutes of `for:` and it fires.
+      - eval_time: 8m
+        alertname: VenueDisconnectedWithExposure
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: execution
+            exp_annotations:
+              summary: "Venue connection down for over 2 minutes with a position open"
+              description: >-
+                Synthetic protection depends on this process reaching the venue. Hidden stops have been orphaned
+                and the native safety stop is the floor until the connection returns.
+
+  - interval: 15s
+    name: "a rejected watchdog close is distinct from an escalation"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="watchdog",outcome="rejected"}'
+        values: "0+0x4 1+0x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: WatchdogCloseRejected
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: flatten
+              tier: watchdog
+              outcome: rejected
+            exp_annotations:
+              summary: "A watchdog close was rejected or left exposure open"
+              description: >-
+                The watchdog attempted a close and the venue did not fully honour it. It retries next pass; if it
+                keeps failing, the P1 escalation or missed alert follows.
+      # It must NOT read as the tier giving up — that is the distinction gh#370 drew.
+      - eval_time: 3m
+        alertname: FlattenEscalated
+        exp_alerts: []
+
+  - interval: 15s
+    name: "an unconfigured product with a live position notifies"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="unconfigured"}'
+        values: "0+0x4 1+0x60"
+      - series: "trading_positions_open"
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: FlattenUnconfiguredWithExposure
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: flatten
+              tier: primary
+              outcome: unconfigured
+            exp_annotations:
+              summary: "Open position in a product with NO configured flatten deadline"
+              description: >-
+                A live position sits in a product that has no auto-flatten deadline configured, so R-13 cannot
+                time its flatten. Configure a deadline for it, or do not hold it overnight.
+      # And it must NOT be reported as merely "disabled" — the two are different operator errors (gh#370).
+      - eval_time: 3m
+        alertname: FlattenDisabledWithExposure
+        exp_alerts: []
+
+  - interval: 15s
+    name: "a disabled deadline on a FLAT book says nothing"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="disabled"}'
+        values: "0+0x4 1+0x60"
+      - series: "trading_positions_open"
+        values: "0x60"
+    alert_rule_test:
+      # gh#245's version fired here, despite its own name promising "with exposure". Nothing is at risk on a
+      # flat book, and a disabled deadline is a configuration choice.
+      - eval_time: 3m
+        alertname: FlattenDisabledWithExposure
+        exp_alerts: []
+
+  - interval: 15s
+    name: "the pre-deadline warning notifies while it can still be acted on"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="warning"}'
+        values: "0+0x4 1+0x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: FlattenWarning
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: flatten
+              tier: primary
+              outcome: warning
+            exp_annotations:
+              summary: "Auto-flatten deadline approaching with a position still open"
+              description: "The flatten will run shortly. Close on your own terms first if you would rather."

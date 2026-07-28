@@ -3,7 +3,8 @@
 # EVERY RULE HERE READS A METRIC THAT IS ACTUALLY EMITTED. That is the single discipline this file lives by: a
 # rule referencing a metric nothing produces evaluates forever without firing and looks identical to "healthy",
 # which is precisely the silent failure ADR-0019 exists to close. The conditions ADR-0019 names that have no
-# instrument behind them yet are listed at the bottom of this file and tracked in gh#370 -- NOT written as dead rules.
+# instrument behind them was listed at the bottom of this file rather than written as a dead rule; gh#370 closed
+# that list out.
 #
 # Metric names are the OTLP -> Prometheus remote-write translation of the instruments in ExecutionMetrics.cs:
 # dots become underscores, counters gain `_total`, and `ms` histograms gain `_milliseconds`.
@@ -65,6 +66,27 @@ groups:
             floor, but the working stop is no longer where the plan says it is.
           runbook: "documentation/deployment-runbook.md#orphaned-stops"
 
+      - alert: UnprotectedPosition
+        # THE condition ADR-0019 named first and gh#245 could not write, because nothing measured it. gh#370's
+        # protection census reconciles venue positions against venue working orders; this is a live position with
+        # no stop resting at the exchange — the state the whole staged-stop model exists to make impossible.
+        #
+        # `for: 2m` is not timidity: a bracket attaches on FILL, so a position is legitimately unprotected for the
+        # moment between the two. Paging on that would page on every single entry, and a pager that cries on
+        # normal operation is one nobody reads. Two minutes is far longer than an attach and far shorter than a
+        # session.
+        expr: trading_positions_unprotected > 0
+        for: 2m
+        labels:
+          priority: P1
+          component: execution
+        annotations:
+          summary: "{{ $value }} live position(s) have NO stop resting at the exchange"
+          description: >-
+            The venue reports open exposure with no protective stop order behind it. This is the failure the
+            staged-stop model exists to prevent. Place a stop manually NOW, or flatten.
+          runbook: "documentation/deployment-runbook.md#unprotected-position"
+
       - alert: TelemetryPipelineSilent
         # A rule engine reading a dead feed reports "healthy" forever. ADR-0019 calls the silent monitor the same
         # failure class as the silent fault, so absence of the app's own heartbeat metric is itself a P1.
@@ -101,15 +123,71 @@ groups:
             is broken and must be fixed before the next session.
 
       - alert: FlattenDisabledWithExposure
-        expr: increase(trading_flatten_deadlines_total{outcome="disabled"}[5m]) > 0
+        # The name promised "with exposure" and the expression did not check it (gh#245). gh#370's open-position
+        # gauge makes the name true: a disabled deadline on a flat book is a configuration choice, not an alert.
+        expr: increase(trading_flatten_deadlines_total{outcome="disabled"}[5m]) > 0 and on() trading_positions_open > 0
         labels:
           priority: P2
           component: flatten
         annotations:
-          summary: "A flatten deadline evaluated as DISABLED"
+          summary: "A flatten deadline evaluated as DISABLED while a position is open"
           description: >-
-            A market with a disabled or unconfigured flatten deadline was evaluated. If that market can hold
-            exposure, R-13's guarantee does not apply to it.
+            A market with a deliberately disabled flatten deadline was evaluated while exposure is open. R-13's
+            guarantee does not apply to that market.
+
+      - alert: FlattenUnconfiguredWithExposure
+        # Distinct from `disabled` since gh#370. Deliberately switched off and never configured at all are
+        # different operator errors, and only the second is a surprise — which is exactly why it deserves its own
+        # alert rather than being folded into the one above. The emit site fires only with a live position.
+        expr: increase(trading_flatten_deadlines_total{outcome="unconfigured"}[5m]) > 0
+        labels:
+          priority: P2
+          component: flatten
+        annotations:
+          summary: "Open position in a product with NO configured flatten deadline"
+          description: >-
+            A live position sits in a product that has no auto-flatten deadline configured, so R-13 cannot time
+            its flatten. Configure a deadline for it, or do not hold it overnight.
+
+      - alert: FlattenWarning
+        # The pre-deadline warning PRD P1 asks for. Journalled since gh#12, metered since gh#370 — the one signal
+        # that arrives BEFORE exposure becomes a problem, and therefore the only one that can still be acted on
+        # calmly.
+        expr: increase(trading_flatten_deadlines_total{outcome="warning"}[5m]) > 0
+        labels:
+          priority: P2
+          component: flatten
+        annotations:
+          summary: "Auto-flatten deadline approaching with a position still open"
+          description: "The flatten will run shortly. Close on your own terms first if you would rather."
+
+      - alert: WatchdogCloseRejected
+        # Separated from `escalated` by gh#370: escalation means attempts EXHAUSTED, this means one attempt
+        # bounced. Conflated, a single bad close looked identical to the tier giving up.
+        expr: increase(trading_flatten_deadlines_total{tier="watchdog",outcome="rejected"}[5m]) > 0
+        labels:
+          priority: P2
+          component: flatten
+        annotations:
+          summary: "A watchdog close was rejected or left exposure open"
+          description: >-
+            The watchdog attempted a close and the venue did not fully honour it. It retries next pass; if it
+            keeps failing, the P1 escalation or missed alert follows.
+
+      - alert: VenueDisconnectedWithExposure
+        # ADR-0019's "connection lost > 2 min with a position open". The duration lives in `for:` rather than in
+        # application code — which is why gh#370 emits connection state as a GAUGE re-stated every pass rather
+        # than as a transition event.
+        expr: trading_venue_connected == 0 and on() trading_positions_open > 0
+        for: 2m
+        labels:
+          priority: P2
+          component: execution
+        annotations:
+          summary: "Venue connection down for over 2 minutes with a position open"
+          description: >-
+            Synthetic protection depends on this process reaching the venue. Hidden stops have been orphaned and
+            the native safety stop is the floor until the connection returns.
 
       - alert: KillSwitchEngaged
         expr: trading_killswitch_engaged > 0
@@ -179,17 +257,16 @@ groups:
           summary: "Alerting pipeline heartbeat — its absence means the pipeline is dead"
 
 # -----------------------------------------------------------------------------------------------------------
-# DELIBERATELY NOT WRITTEN — conditions ADR-0019 names that no instrument emits yet. Tracked: gh#370.
+# EVERY CONDITION ADR-0019 NAMES NOW HAS A RULE (gh#370 closed the last gap).
 #
-# Writing these against invented metric names would produce rules that never fire and read as healthy, which is
-# the failure this file exists to prevent. They need instrumentation FIRST, from the Coding Agent:
+# gh#245 shipped this file with a list here of conditions it deliberately refused to write, because no instrument
+# emitted them and a rule over a non-existent metric fires nothing while reading as healthy. gh#370 added the
+# instruments — the protection census, the venue-connected gauge, and distinct `warning` / `unconfigured` /
+# `rejected` flatten outcomes — so the list is empty and this comment is its receipt.
 #
-#   * "open position with no native safety stop"   — no metric. `trading_stops_orphaned` is the nearest, and is a
-#                                                    different condition (a stop that WAS native and was orphaned).
-#   * flatten.watchdog.rejected                    — no outcome constant; the watchdog emits escalated / missed.
-#   * flatten.unconfigured with exposure           — folded into `disabled` today; the two are not distinguished.
-#   * flatten.warning                              — no metric emitted before a deadline.
-#   * connection lost > 2 min with a position open — no connection-state metric.
-#   * the daily check-in absent (gh#244)           — Layer 2 by design, external, and deliberately NOT dependent
-#                                                    on this stack. Not a gap.
-# -----------------------------------------------------------------------------------------------------------
+# The one deliberate absence remains, and is not a gap: the **daily check-in** (gh#244) is ADR-0019's Layer 2,
+# external by design and deliberately NOT dependent on this stack — a dead-man's switch that ran here would die
+# with the thing it watches.
+#
+# If you add a rule, add its promtool test in ./tests, and keep the clean-session fixture asserting ZERO P1 and
+# P2. A rule that pages on a healthy day is a defect in the rule.

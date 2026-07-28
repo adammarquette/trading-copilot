@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -49,6 +50,12 @@ public sealed class VenueConnectionMonitorHost : BackgroundService
                 // does). The other watchers defer their venue resolution the same way (gh#169).
                 IVenueConnection connection = _services.GetRequiredService<IVenueConnection>();
                 bool isConnected = connection.IsConnected;
+
+                // Published EVERY pass, not only on a change (gh#370): a gauge that stops being written looks
+                // identical to one whose value never changed, and this one is read by an alert whose whole job is
+                // "how long has it been down". Re-stating it each pass also keeps the series alive so `for: 2m`
+                // measures wall-clock rather than time-since-last-transition.
+                _services.GetRequiredService<IExecutionMetrics>().SetVenueConnected(isConnected);
 
                 // A change (or the first observation) reconciles the synthetic stops to the current liveness. While
                 // connected, a re-arm that left stops unverifiable (venue unreachable) is retried each pass until it
