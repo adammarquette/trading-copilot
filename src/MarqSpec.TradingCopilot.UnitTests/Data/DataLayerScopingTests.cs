@@ -39,6 +39,13 @@ public class DataLayerScopingTests
         // names explicitly — "reference & market data ... raw news is shared / global". The per-user salience
         // that reweights it (SoftSignalFeedback, gh#27) will be operator-owned; the news items themselves are not.
         typeof(NewsRecord),
+
+        // Embeddings follow their OWNERS (gh#109). Every owner that exists today is itself global — news, market
+        // snapshots — so a tenant filter here would hide derived data from the operator whose deployment
+        // produced it. This entry is deliberately scoped to that reasoning: if an operator-owned type ever
+        // becomes embeddable (a private rulebook rule, R-7), the ownership question reopens and this allowlist
+        // entry is the place it must be re-argued rather than silently inherited.
+        typeof(EmbeddingRecord),
     };
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;

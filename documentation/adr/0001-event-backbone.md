@@ -185,3 +185,47 @@ head — rather than escalating a recovery problem into an outage on a safety pa
 
 *Still open:* **alerting** on a gap or a shortfall (gh#26 / gh#232, ADR-0019) — this increment logs at error;
 routing that to a push is the observability increment's.
+
+## Update (2026-07-28) — the third storage shape is real, and its degrade is not the Timescale degrade (gh#109)
+
+This ADR chose Postgres and named three shapes: relational, time-series via TimescaleDB, and **vector via
+pgvector**. The third existed only on paper until now. `EmbeddingRecord` / the `Embeddings` table is it — the
+data dictionary's polymorphic `VEC` row, keyed on **owner kind + owner id + model**.
+
+**Model is in the key on purpose.** Vectors from different models are not comparable, so two models' vectors must
+coexist as separate rows rather than one silently overwriting the other and leaving a mixed-model index nobody
+can trust. The key doubles as the idempotence guard, the same DB-enforced pattern the bar and news stores use: a
+re-embed **updates** rather than appends, which matters because embedding is a *paid* call and re-ingestion is
+normal.
+
+**The degrade needed its own decision, because it is genuinely unlike Timescale's.** Without `timescaledb` the
+`Events` table still exists and every query still works — you lose compression and retention. Without `vector`
+**there is no column type at all**, so the table cannot be created. The choice was: skip the table and start, or
+refuse to start.
+
+**Decided: skip and start, loudly.** Refusing to start would let an unavailable *retrieval* feature take down the
+**safety-critical auto-flatten** (R-13) — a system that will not run before the CME close because semantic search
+is missing has its priorities exactly inverted, and nothing on the trading path depends on embeddings. But
+skipping *silently* is the failure this codebase refuses everywhere else (gh#227's silent hole, gh#245's
+unemitted metrics, gh#306's declared-unknown), so the absence is **declared**: the migration raises a warning
+naming the consequence, and `IEmbeddingProvider.IsAvailable` reports false so retrieval **refuses** rather than
+returning an empty result set that reads as *"nothing is relevant"*.
+
+Verified against both: applied to `timescale/timescaledb-ha:pg17` (table + HNSW index created) and to plain
+`postgres:17` (table skipped, **the other 24 tables created normally**, migration succeeded).
+
+**Two smaller choices worth recording.** The index is **HNSW, not IVFFlat**: IVFFlat must be built after
+representative data exists and needs a list count tuned to row count, so an empty-table migration cannot build a
+good one, while HNSW builds usefully on an empty table and stays correct as rows arrive. And the operator class is
+**cosine**, because embedding models emit direction-normalised vectors — L2 over them would rank partly by
+magnitude, which here is noise.
+
+**The store is relational-only in the EF model.** `Vector` has no in-memory-provider mapping, so the entity is
+configured only when the provider is Npgsql and ignored otherwise. That is the honest shape rather than a
+workaround — a vector column cannot exist without pgvector — and it means the store's coverage is
+**integration-tier**, with unit tests covering the seam. A `float[]` value converter was rejected: it would let
+the in-memory provider *pretend* to store embeddings while the similarity operators, the entire point, silently
+did not exist.
+
+*Still open:* the real provider (**gh#403**, Cohere with its sparse fallback and per-call cost metering) and the
+first consumer wiring (**gh#377**, news).
