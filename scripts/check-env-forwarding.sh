@@ -70,6 +70,21 @@ forwarded="$(printf '%s\n' "$resolved" | awk '
     }
 ')"
 
+# The OTHER way a value legitimately reaches a container: a top-level `secrets:` entry with an `environment:`
+# source, mounted into a service as a file under /run/secrets (gh#245). Compose reads the named variable and
+# materialises it, so the operator's .env value DOES arrive -- it simply never appears in an `environment:` map,
+# which is the only shape the block above can see.
+#
+# Found by this check failing on gh#245's own Alertmanager credentials. Suppressing them with an ignore-list
+# entry would have been the wrong fix: they are container configuration, they are forwarded, and the checker was
+# the thing that was wrong. Secrets are matched WITHOUT a service (any service may mount them) because a secret's
+# consumers are listed on the service, not on the secret.
+secret_sourced="$(printf '%s\n' "$resolved" | awk '
+    /^secrets:$/                              { in_secrets = 1; next }
+    /^[A-Za-z0-9_-]+:$/                       { in_secrets = 0 }
+    in_secrets && /^    environment: [A-Za-z_][A-Za-z0-9_]*$/ { print $2 }
+')"
+
 # Keys that are NOT container configuration, and so are correctly absent from every service.
 #
 # This list is deliberately tiny and each entry carries its reason. An ignore list is where a check like this
@@ -98,6 +113,9 @@ for key in $documented; do
         [[ "$key" == "$ignored" ]] && skip="yes" && break
     done
     [[ -n "$skip" ]] && continue
+
+    # A secret-sourced value reaches a container as a mounted file, which satisfies either rule below.
+    printf '%s\n' "$secret_sourced" | grep -qx "$key" && continue
 
     if [[ "$key" == *"__"* ]]; then
         # ASP.NET config key: must reach the app itself, not merely some container.

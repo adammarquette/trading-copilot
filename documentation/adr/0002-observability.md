@@ -149,3 +149,20 @@ protection to be exercised — the shape `gh#331`'s harness now uses.
 The shipped `ExecutionMetrics` is total by construction (counter `Add`, `Interlocked`), so this guards the
 **seam** rather than a present-day bug: the interface is what a later exporter-backed or further-decorating sink
 would be registered as, and that is where the fault would come from.
+
+## Update (2026-07-28) — the stack now alerts (gh#245)
+
+This ADR chose the LGTM stack for **seeing** what the system did. It now also **tells you** when something is
+wrong: **Alertmanager** joins the `observability` profile, delivering to Pushover per ADR-0019, with rules
+evaluated by the Prometheus this ADR already chose.
+
+Two consequences worth recording here rather than only in ADR-0019:
+
+- **The stack acquires a duty it did not have.** Until now it was pure diagnosis — if it was down, you lost
+  visibility, not safety. It is now part of a safety-adjacent path, which is why the rules include an
+  always-firing **heartbeat** whose *absence* is the alarm, and a **P1 on the app's own telemetry going silent**.
+  A monitor that fails quietly is the same failure class as the fault it was watching for.
+- **The profile stays opt-in, and that is a deliberate limit.** `docker compose --profile observability up -d` is
+  still required, so a deployment that never enables it has no Layer 1 alerting at all. That is acceptable only
+  because ADR-0019's **Layer 2 dead-man's switch is external and independent of this stack** — it is the tier that
+  survives this stack, and the host, not existing.

@@ -1,0 +1,195 @@
+# Alerting rules — the in-system rule engine, Layer 1 of ADR-0019 (gh#245, R-13).
+#
+# EVERY RULE HERE READS A METRIC THAT IS ACTUALLY EMITTED. That is the single discipline this file lives by: a
+# rule referencing a metric nothing produces evaluates forever without firing and looks identical to "healthy",
+# which is precisely the silent failure ADR-0019 exists to close. The conditions ADR-0019 names that have no
+# instrument behind them yet are listed at the bottom of this file and tracked, NOT written as dead rules.
+#
+# Metric names are the OTLP -> Prometheus remote-write translation of the instruments in ExecutionMetrics.cs:
+# dots become underscores, counters gain `_total`, and `ms` histograms gain `_milliseconds`.
+#
+# THE BACKSTOP CONTRACT (gh#242): the app pushes the P1 flatten conditions directly, because a scrape plus a rule
+# evaluation costs tens of seconds on a path where CL and GC have ~15 minutes of total margin. These rules are the
+# backstop for when the app is alive but NOT self-reporting, so every flatten P1 here carries `for: 2m` — longer
+# than the direct push's latency, so the fast path wins the race and this layer fires only when it did not.
+
+groups:
+  # ---------------------------------------------------------------------------------------------------------
+  # P1 — page. Pushover Emergency: repeats until acknowledged, bypasses DND, never quiet-hour suppressed.
+  # ---------------------------------------------------------------------------------------------------------
+  - name: trading-p1
+    interval: 15s
+    rules:
+      - alert: FlattenEscalated
+        # The primary exhausted MaxFlattenAttempts with exposure remaining. ADR-0019 is explicit that this, not
+        # `missed`, is the page-worthy signal: `missed` fires 60 minutes late, after Topstep's ~15:10 backstop.
+        expr: increase(trading_flatten_deadlines_total{tier="primary",outcome="escalated"}[5m]) > 0
+        for: 2m
+        labels:
+          priority: P1
+          component: flatten
+        annotations:
+          summary: "Auto-flatten ESCALATED — exposure remains after the primary's close attempts"
+          description: >-
+            The primary auto-flatten exhausted its close attempts with a position still open. Three closes failed
+            against the venue, and the watchdog uses the same venue. Flatten manually NOW.
+          runbook: "documentation/deployment-runbook.md#auto-flatten-failure"
+
+      - alert: FlattenMissed
+        # Exposure past the firing window, from either tier. The watchdog's own `missed` is ADR-0019's
+        # `flatten.watchdog.critical` — the last line having failed.
+        expr: increase(trading_flatten_deadlines_total{outcome="missed"}[5m]) > 0
+        for: 2m
+        labels:
+          priority: P1
+          component: flatten
+        annotations:
+          summary: "Auto-flatten MISSED on {{ $labels.tier }} — exposure past the firing window"
+          description: >-
+            A flatten deadline passed with exposure still open. On the watchdog tier this is the last line having
+            failed (ADR-0019's watchdog.critical). Flatten manually NOW.
+          runbook: "documentation/deployment-runbook.md#auto-flatten-failure"
+
+      - alert: OrphanedStopsWithExposure
+        # `trading_stops_orphaned` is set by the orphan guard: working stops that are no longer venue-held while a
+        # position is live. ADR-0007's synthetic_risk case, made pageable.
+        expr: trading_stops_orphaned > 0
+        for: 2m
+        labels:
+          priority: P1
+          component: execution
+        annotations:
+          summary: "{{ $value }} working stop(s) ORPHANED — protection is platform-held, not exchange-held"
+          description: >-
+            A venue-connection drop moved working stops to Orphaned. The native safety stop is still the physical
+            floor, but the working stop is no longer where the plan says it is.
+          runbook: "documentation/deployment-runbook.md#orphaned-stops"
+
+      - alert: TelemetryPipelineSilent
+        # A rule engine reading a dead feed reports "healthy" forever. ADR-0019 calls the silent monitor the same
+        # failure class as the silent fault, so absence of the app's own heartbeat metric is itself a P1.
+        expr: absent(trading_flatten_deadlines_total)
+        for: 15m
+        labels:
+          priority: P1
+          component: observability
+        annotations:
+          summary: "No flatten-deadline metrics for 15m — the app is not reporting"
+          description: >-
+            The auto-flatten loop emits a deadline metric on EVERY evaluation, including idle ones, so silence
+            here means the app is down, the collector is broken, or remote write has stopped. Every other rule in
+            this file is blind until it clears — assume unmonitored, not healthy.
+          runbook: "documentation/deployment-runbook.md#telemetry-pipeline"
+
+  # ---------------------------------------------------------------------------------------------------------
+  # P2 — notify. Single normal-priority push, suppressed outside 06:00–17:00 CT.
+  # ---------------------------------------------------------------------------------------------------------
+  - name: trading-p2
+    interval: 15s
+    rules:
+      - alert: WatchdogSaved
+        # The watchdog firing at all means the primary tier is broken. Nothing is exposed right now, so it is not
+        # a page — but it must be fixed before the next session.
+        expr: increase(trading_flatten_deadlines_total{tier="watchdog",outcome="executed"}[5m]) > 0
+        labels:
+          priority: P2
+          component: flatten
+        annotations:
+          summary: "The WATCHDOG flattened — the primary tier did not"
+          description: >-
+            Exposure was closed by the last line rather than the first. Nothing is open now, but the primary tier
+            is broken and must be fixed before the next session.
+
+      - alert: FlattenDisabledWithExposure
+        expr: increase(trading_flatten_deadlines_total{outcome="disabled"}[5m]) > 0
+        labels:
+          priority: P2
+          component: flatten
+        annotations:
+          summary: "A flatten deadline evaluated as DISABLED"
+          description: >-
+            A market with a disabled or unconfigured flatten deadline was evaluated. If that market can hold
+            exposure, R-13's guarantee does not apply to it.
+
+      - alert: KillSwitchEngaged
+        expr: trading_killswitch_engaged > 0
+        for: 1m
+        labels:
+          priority: P2
+          component: execution
+        annotations:
+          summary: "The kill switch is ENGAGED — outbound order capability is disabled"
+          description: "Deliberate if you engaged it. If you did not, something else did."
+
+      - alert: EventLogRetentionGap
+        # gh#227's signal, raised to a notification. gh#306 backfills what it can; a shortfall is still lost.
+        expr: increase(trading_eventlog_retention_gaps_total[15m]) > 0
+        labels:
+          priority: P2
+          component: eventlog
+        annotations:
+          summary: "Consumer {{ $labels.consumer_group }} fell behind the event-log retention window"
+          description: >-
+            Its cursor dropped off the back of the 24h window. gh#306 backfills the blind window from the
+            clean-historical store where it can; check the logs for a reported shortfall.
+
+      - alert: TimeToFlatSlow
+        # ADR-0019's p95 > 60s. Not yet a failure — a warning that the margin is being eaten.
+        expr: >-
+          histogram_quantile(0.95,
+            sum by (le, tier) (rate(trading_flatten_time_to_flat_milliseconds_bucket[30m]))) > 60000
+        for: 5m
+        labels:
+          priority: P2
+          component: flatten
+        annotations:
+          summary: "Time-to-flat p95 above 60s on {{ $labels.tier }}"
+          description: >-
+            Flattens are completing, but slowly enough that the margin before the close is being consumed.
+
+  # ---------------------------------------------------------------------------------------------------------
+  # P3 — quiet push. Delivered, no sound: the flatten confirmation PRD P1 asks for, at zero fatigue cost.
+  # ---------------------------------------------------------------------------------------------------------
+  - name: trading-p3
+    interval: 15s
+    rules:
+      - alert: FlattenExecuted
+        expr: increase(trading_flatten_deadlines_total{tier="primary",outcome="executed"}[5m]) > 0
+        labels:
+          priority: P3
+          component: flatten
+        annotations:
+          summary: "Auto-flatten completed normally"
+          description: "The primary tier closed exposure at the deadline. Nothing to do."
+
+  # ---------------------------------------------------------------------------------------------------------
+  # The Alertmanager heartbeat. Always firing, by design.
+  # ---------------------------------------------------------------------------------------------------------
+  - name: trading-heartbeat
+    interval: 15s
+    rules:
+      - alert: Watchdog
+        # Routed to a dead-man's-switch receiver: an alert that ALWAYS fires proves the whole chain — scrape,
+        # rule evaluation, routing, delivery — is alive. Its ABSENCE is the signal. ADR-0019: a silent rule
+        # engine is the same failure class this decision exists to close.
+        expr: vector(1)
+        labels:
+          priority: heartbeat
+        annotations:
+          summary: "Alerting pipeline heartbeat — its absence means the pipeline is dead"
+
+# -----------------------------------------------------------------------------------------------------------
+# DELIBERATELY NOT WRITTEN — conditions ADR-0019 names that no instrument emits yet (gh#245 follow-up).
+#
+# Writing these against invented metric names would produce rules that never fire and read as healthy, which is
+# the failure this file exists to prevent. They need instrumentation FIRST, from the Coding Agent:
+#
+#   * "open position with no native safety stop"   — no metric. `trading_stops_orphaned` is the nearest and is a
+#                                                    different condition (a stop that WAS native and was orphaned).
+#   * flatten.watchdog.rejected                    — no outcome constant; the watchdog emits escalated / missed.
+#   * flatten.unconfigured with exposure           — folded into `disabled` today; the two are not distinguished.
+#   * flatten.warning                              — no metric emitted before a deadline.
+#   * connection lost > 2 min with a position open — no connection-state metric.
+#   * the daily check-in absent (gh#244)           — Layer 2 by design, external, and deliberately NOT dependent
+#                                                    on this stack. Not a gap.
+# -----------------------------------------------------------------------------------------------------------

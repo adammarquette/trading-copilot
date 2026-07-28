@@ -1,0 +1,199 @@
+# Executable tests for the alerting rules (gh#245, ADR-0019). Run by `promtool test rules`.
+#
+# THE CLEAN-SESSION FIXTURE IS THE POINT. gh#245's first acceptance criterion is that a normal day with a normal
+# flatten produces ZERO P1 and ZERO P2 pushes — "a rule that pages on a healthy day is a defect in the rule, not
+# noise to tolerate". That is asserted here as a test rather than reasoned about in a PR description, so it stays
+# true as rules are added.
+#
+# These are unit tests over PromQL, so they also catch the failure this whole file exists to prevent: a rule whose
+# metric name or label does not match what the app emits produces no series, fires nothing, and looks healthy. A
+# renamed instrument turns these red.
+
+rule_files:
+  - ../trading-alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # ---------------------------------------------------------------------------------------------------------
+  # THE CLEAN SESSION — the criterion that matters most.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "a clean session pages nobody"
+    input_series:
+      # The flatten loop evaluates on every pass and finds nothing to do, then closes out normally at the
+      # deadline. This is what an ordinary day looks like in metrics.
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="nothing-to-do"}'
+        values: "0+1x60"
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="executed"}'
+        values: "0+0x40 1+0x20"
+      - series: "trading_killswitch_engaged"
+        values: "0x60"
+      - series: "trading_stops_orphaned"
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: FlattenEscalated
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: FlattenMissed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: OrphanedStopsWithExposure
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: TelemetryPipelineSilent
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WatchdogSaved
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: KillSwitchEngaged
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: FlattenDisabledWithExposure
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: EventLogRetentionGap
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------------------------------------
+  # P1 conditions actually fire — and only after the direct push has had its chance.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "an escalated flatten pages, but not before the direct push wins the race"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="escalated"}'
+        values: "0+0x8 1+0x60"
+    alert_rule_test:
+      # The escalation lands at 2m. `for: 2m` means this layer stays quiet until 4m — the gh#242 backstop
+      # contract: the app's direct push is faster and should win.
+      - eval_time: 3m
+        alertname: FlattenEscalated
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: FlattenEscalated
+        exp_alerts:
+          - exp_labels:
+              priority: P1
+              component: flatten
+              tier: primary
+              outcome: escalated
+            exp_annotations:
+              summary: "Auto-flatten ESCALATED — exposure remains after the primary's close attempts"
+              description: >-
+                The primary auto-flatten exhausted its close attempts with a position still open. Three closes
+                failed against the venue, and the watchdog uses the same venue. Flatten manually NOW.
+              runbook: "documentation/deployment-runbook.md#auto-flatten-failure"
+
+  - interval: 15s
+    name: "an orphaned working stop pages"
+    input_series:
+      - series: "trading_stops_orphaned"
+        values: "0x8 2x60"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: OrphanedStopsWithExposure
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: OrphanedStopsWithExposure
+        exp_alerts:
+          - exp_labels:
+              priority: P1
+              component: execution
+            exp_annotations:
+              summary: "2 working stop(s) ORPHANED — protection is platform-held, not exchange-held"
+              description: >-
+                A venue-connection drop moved working stops to Orphaned. The native safety stop is still the
+                physical floor, but the working stop is no longer where the plan says it is.
+              runbook: "documentation/deployment-runbook.md#orphaned-stops"
+
+  # ---------------------------------------------------------------------------------------------------------
+  # A silent app is itself a P1 — the failure class ADR-0019 exists to close.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "no metrics at all is a page, not a healthy silence"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TelemetryPipelineSilent
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: TelemetryPipelineSilent
+        exp_alerts:
+          - exp_labels:
+              priority: P1
+              component: observability
+            exp_annotations:
+              summary: "No flatten-deadline metrics for 15m — the app is not reporting"
+              description: >-
+                The auto-flatten loop emits a deadline metric on EVERY evaluation, including idle ones, so
+                silence here means the app is down, the collector is broken, or remote write has stopped. Every
+                other rule in this file is blind until it clears — assume unmonitored, not healthy.
+              runbook: "documentation/deployment-runbook.md#telemetry-pipeline"
+
+  # ---------------------------------------------------------------------------------------------------------
+  # P2s fire as notifications — the watchdog saving the day is not a page, but it is not nothing either.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "a watchdog save notifies without paging"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="watchdog",outcome="executed"}'
+        values: "0+0x4 1+0x60"
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="nothing-to-do"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: WatchdogSaved
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: flatten
+              tier: watchdog
+              outcome: executed
+            exp_annotations:
+              summary: "The WATCHDOG flattened — the primary tier did not"
+              description: >-
+                Exposure was closed by the last line rather than the first. Nothing is open now, but the primary
+                tier is broken and must be fixed before the next session.
+      # It must NOT also page. The watchdog executing is a broken primary, not live exposure.
+      - eval_time: 3m
+        alertname: FlattenEscalated
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: FlattenMissed
+        exp_alerts: []
+
+  - interval: 15s
+    name: "a retention gap notifies the consumer that lost events"
+    input_series:
+      - series: 'trading_eventlog_retention_gaps_total{consumer_group="stop-promotion"}'
+        values: "0+0x4 1+0x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: EventLogRetentionGap
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: eventlog
+              consumer_group: stop-promotion
+            exp_annotations:
+              summary: "Consumer stop-promotion fell behind the event-log retention window"
+              description: >-
+                Its cursor dropped off the back of the 24h window. gh#306 backfills the blind window from the
+                clean-historical store where it can; check the logs for a reported shortfall.
+
+  # ---------------------------------------------------------------------------------------------------------
+  # The heartbeat must always fire. Its absence is the alarm, so a broken heartbeat breaks the alarm.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "the heartbeat always fires"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels:
+              priority: heartbeat
+            exp_annotations:
+              summary: "Alerting pipeline heartbeat — its absence means the pipeline is dead"

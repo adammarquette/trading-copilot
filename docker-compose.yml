@@ -265,6 +265,31 @@ services:
       - "9090:9090"
     mem_limit: 512m
 
+  # Alertmanager -- routing, dedup and delivery for the rules Prometheus evaluates (gh#245, ADR-0019, R-13).
+  # Chosen over Grafana unified alerting because ADR-0019's noise budget is written in this component's own
+  # vocabulary (group_wait / group_interval / repeat_interval / inhibition), and because rules stay plain files a
+  # PR can review and `promtool test rules` can execute.
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    # Alertmanager has NO env-var expansion in its config, so credentials cannot be passed as `environment:` and
+    # referenced as ${VAR} -- they would be sent to Pushover as that literal string, and every page would fail
+    # auth while the stack looked healthy. `secrets:` with an `environment:` source keeps `.env` as the single
+    # place the operator configures, while Alertmanager reads real files via its `*_file` options.
+    secrets:
+      - pushover_user_key
+      - pushover_token
+      - heartbeat_url
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "9093:9093"
+    mem_limit: 256m
+
   loki:
     image: grafana/loki:3.3.2
     profiles: ["observability"]
@@ -306,9 +331,25 @@ services:
     depends_on: [prometheus, loki, tempo]
     mem_limit: 384m
 
+# Alertmanager's credentials, materialised as files from .env values (gh#245). Sourced from the environment
+# rather than checked-in files so nothing secret lands in the repo, and so the operator configures one place.
+# Defaulted to obvious placeholders: an unset token must not stop the container starting, or a missing credential
+# would take down the thing that reports every other failure. The runbook's "send a test page" step is what
+# surfaces a bad token.
+secrets:
+  pushover_user_key:
+    environment: PUSHOVER_USER_KEY
+  pushover_token:
+    environment: PUSHOVER_API_TOKEN
+  heartbeat_url:
+    environment: ALERTMANAGER_HEARTBEAT_URL
+
 volumes:
   db-data:
   prometheus-data:
+  # Alertmanager's notification log and silences. Persisted so a restart does not re-page every open incident
+  # (its dedup state lives here) and does not forget a silence you set (gh#245).
+  alertmanager-data:
   loki-data:
   tempo-data:
   grafana-data:
