@@ -103,6 +103,21 @@ never fabricates geometry, and an honest inert reviewer *tells* the operator a s
 open: the NL→condition compiler + `Rule` entity, order-flow / composite conditions, model-tiering escalation, and
 the AI-spend governor.
 
+**Update (2026-07-28, gh#423) — the real Anthropic adapter landed; the seam is now live.** `ILlmProvider` binds a
+real **`AnthropicLlmProvider`** when a key is present (the *same* switch that picks the reviewer), and the **stub**
+now stands in **only when unconfigured** — so a configured deployment wakes a live model and an unconfigured one
+still cannot fabricate a suggestion. It is a **raw `HttpClient` adapter, not an SDK** (dependency-minimal +
+permissive-licence posture + trivially faked; mirrors `PushoverNotificationChannel`), one POST to the Messages API
+per fire. **Model tiering is settled**: `LlmModelTier.Triage → claude-haiku-4-5`, `Deep → claude-sonnet-5`,
+operator-overridable via `LlmOptions` (non-secret). The **key rides the `x-api-key` header, never the body, never a
+log** (redacted from the factory's request-header logging too). **Fail-closed reuses gh#402's chain by
+construction**: a non-2xx, a transport fault, a timeout, or an unparseable / wrong-shape body **throws**, which the
+reviewer maps to `Suppress(ReviewerUnavailable)`; a `refusal` maps to a non-complete stop → suppress. Ships
+**inert** — no live call in code/tests/CI; the operator activates it by adding their key to `.env`. Still open (now
+the whole of "AI-spend"): the **`AIUsage`** per-call token+cost+latency record → Grafana, and the **platform-level
+spend governor** — plus **model-tiering escalation policy** (both tiers resolve to real models; *when* triage
+escalates to deep is a follow-up).
+
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*
 - Spec the **deterministic trigger evaluator** as a processor / consumer over the event log (ADR-0001) — inputs
