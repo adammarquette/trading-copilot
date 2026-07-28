@@ -282,7 +282,26 @@ public sealed class TriggerEvaluationService
             observed,
             now);
 
-        ReviewOutcome outcome = await _reviewer.ReviewAsync(context, cancellationToken);
+        // The reviewer seam is fail-closed BY CONTRACT (LlmTriggerReviewer maps every unusable output to a Suppress),
+        // but the seam admits any ITriggerReviewer -- a future provider-backed one can THROW on a transient fault. A
+        // throw must debounce like every other outcome (one review attempt per arming edge, the arm still advancing to
+        // Fired below), never escape to the per-owner guard: that would leave the arm Armed and re-review every pass
+        // (unbounded LLM cost) AND roll back a co-owner's already-sent mechanical fire. Map it to ReviewerUnavailable.
+        ReviewOutcome outcome;
+        try
+        {
+            outcome = await _reviewer.ReviewAsync(context, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(error, "Agent-review trigger {Id} reviewer threw; treating as unavailable.", trigger.Id);
+            outcome = new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the reviewer threw");
+        }
+
         switch (outcome)
         {
             case ReviewOutcome.Suggest suggest:
@@ -295,6 +314,17 @@ public sealed class TriggerEvaluationService
                     NotificationSeverity.Notify,
                     $"Setup needs review — {TitleFor(trigger)}",
                     "A setup fired that needs agent review; no reviewer is configured yet.",
+                    dedupKey));
+                break;
+
+            case ReviewOutcome.Suppress { Reason: SuppressReason.ReviewerUnavailable }:
+                // A configured reviewer was tried and failed (a provider fault or an empty completion). Fail-closed but
+                // NOT silent: tell the operator a setup fired that could not be reviewed, so an outage never quietly
+                // eats fires. Bounded to one advisory per arming edge, since the arm still advances to Fired below.
+                advisories.Add(new Notification(
+                    NotificationSeverity.Notify,
+                    $"Setup needs review — {TitleFor(trigger)}",
+                    "A setup fired that needs agent review; the reviewer was unavailable. Review it manually.",
                     dedupKey));
                 break;
 

@@ -75,7 +75,24 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
             LlmResponseFormat.Json(ReviewSchema),
             MaxOutputTokens);
 
-        LlmCompletion completion = await _llm.CompleteAsync(request, cancellationToken);
+        LlmCompletion completion;
+        try
+        {
+            completion = await _llm.CompleteAsync(request, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Our own shutdown -- not a review outcome. Let it propagate.
+            throw;
+        }
+        catch (Exception error)
+        {
+            // A provider fault (a network error, a timeout, a 429, a 5xx) -- including a TaskCanceledException that is
+            // a request timeout rather than our cancellation. The reviewer's fail-closed contract is TOTAL: a throw is
+            // never a proposal and never escapes, it becomes a suppression like any other unusable outcome.
+            _logger.LogWarning(error, "Trigger {TriggerId} review provider call failed; suppressing.", context.TriggerId);
+            return new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the review provider call failed");
+        }
 
         // FAIL-CLOSED on anything but a clean completion: a refusal or a truncation is not a proposal.
         if (completion.StopReason != LlmStopReason.Completed)
@@ -86,6 +103,14 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
                 completion.StopReason);
             return new ReviewOutcome.Suppress(
                 SuppressReason.MalformedOutput, $"the model stopped with {completion.StopReason}");
+        }
+
+        // A Completed stop with empty or absent text is not a proposal either -- and a genuine null would throw out of
+        // the deserializer (ArgumentNullException, which the JsonException catch below would miss), so guard it here.
+        if (string.IsNullOrWhiteSpace(completion.Text))
+        {
+            _logger.LogWarning("Trigger {TriggerId} review returned empty text on a clean stop; suppressing.", context.TriggerId);
+            return new ReviewOutcome.Suppress(SuppressReason.MalformedOutput, "the model output was empty");
         }
 
         ReviewDto? dto;

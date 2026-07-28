@@ -90,6 +90,44 @@ public class LlmTriggerReviewerTests
             .Should().BeOfType<ReviewOutcome.Suppress>().Which.Reason.Should().Be(SuppressReason.MalformedOutput);
     }
 
+    [Theory]
+    [InlineData(null)]  // a genuine null Text -- would throw ArgumentNullException out of the deserializer if unguarded
+    [InlineData("   ")] // whitespace-only, on an otherwise-clean stop
+    public async Task ReviewAsync_ShouldSuppressMalformed_WhenTheCompletionTextIsEmpty(string? body)
+    {
+        ProviderReturns(body!);
+
+        (await Reviewer().ReviewAsync(Context(), CancellationToken.None))
+            .Should().BeOfType<ReviewOutcome.Suppress>().Which.Reason.Should().Be(SuppressReason.MalformedOutput);
+    }
+
+    [Fact]
+    public async Task ReviewAsync_ShouldSuppressReviewerUnavailable_WhenTheProviderThrows()
+    {
+        // The seam is provider-neutral; a real HTTP-backed provider throws on a network error / timeout / 429 / 5xx.
+        // The reviewer's fail-closed contract is TOTAL: a throw becomes a suppression, never an escape and never a
+        // suggestion -- distinctly ReviewerUnavailable (a configured reviewer was tried and failed).
+        A.CallTo(() => _llm.CompleteAsync(A<LlmRequest>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("provider 503"));
+
+        (await Reviewer().ReviewAsync(Context(), CancellationToken.None))
+            .Should().BeOfType<ReviewOutcome.Suppress>().Which.Reason.Should().Be(SuppressReason.ReviewerUnavailable);
+    }
+
+    [Fact]
+    public async Task ReviewAsync_ShouldPropagate_WhenTheCallerCancels()
+    {
+        // Our own shutdown is NOT a review outcome: a cancellation on the caller's token propagates, never suppresses.
+        using CancellationTokenSource cts = new();
+        await cts.CancelAsync();
+        A.CallTo(() => _llm.CompleteAsync(A<LlmRequest>._, A<CancellationToken>._))
+            .Throws(new OperationCanceledException(cts.Token));
+
+        Func<Task> act = () => Reviewer().ReviewAsync(Context(), cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+    }
+
     [Fact]
     public async Task ReviewAsync_ShouldRequestTheTriageTierAndAJsonSchema()
     {

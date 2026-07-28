@@ -47,6 +47,14 @@ public enum SuppressReason
 
     /// <summary>The proposed geometry was incoherent (wrong-side stop/target, non-positive price) — rejected before persist.</summary>
     InvalidGeometry = 4,
+
+    /// <summary>
+    /// The reviewer could not be reached — a provider fault (a network error, a timeout, a rate-limit or a 5xx), or a
+    /// bad completion with no usable text. Fail-closed like the rest: no suggestion, but the operator <b>is</b> told a
+    /// setup fired that could not be reviewed. Distinct from <see cref="MalformedOutput"/> (the model answered, badly)
+    /// and <see cref="NoReviewerConfigured"/> (there is no reviewer) — here a configured reviewer was tried and failed.
+    /// </summary>
+    ReviewerUnavailable = 5,
 }
 
 /// <summary>

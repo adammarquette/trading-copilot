@@ -5,13 +5,15 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.Triggers;
 
 /// <summary>
 /// GATE-BELOW-MODEL (gh#402, AGENTS.md "enforcement lives below the model"): the agent-review path <b>proposes</b> —
-/// it persists a Suggestion and at most an advisory, and NOTHING else. This asserts, structurally, that neither the
-/// scan service nor the reviewer takes a constructor dependency that could reach execution: no order executor, no
-/// risk gate, no venue / ProjectX client. A future edit that wired one in would fail here rather than in production.
+/// it persists a Suggestion and at most an advisory, and NOTHING else. This asserts, structurally, that no type on the
+/// path takes a constructor dependency that could reach execution: no order executor, no risk gate, no venue / ProjectX
+/// client, and no <b>kill switch / auto-flatten</b> (which cancel working orders and close positions). A future edit
+/// that wired one in would fail here rather than in production. Both reviewer implementations are covered, since the
+/// inert one is the ACTIVE reviewer whenever no LLM is configured.
 /// </summary>
 public class AgentReviewGateBelowModelTests
 {
-    // Fragments of type names that can place, size, route, or gate an order. The agent-review path must reach NONE.
+    // Fragments of type names that can place, size, route, gate, or FLATTEN an order/position. The path must reach NONE.
     private static readonly string[] _forbiddenTypeFragments =
     [
         "IOrderExecutor",
@@ -21,11 +23,14 @@ public class AgentReviewGateBelowModelTests
         "IVenueConnection",
         "IAccountEventStream",
         "ProjectX",
+        "KillSwitch", // IKillSwitch / KillSwitchService -- flattens positions, cancels working orders, locks trading
+        "Flatten",    // AutoFlattenService / FlattenCheckInService / the watchdog -- the pre-close forced exit
     ];
 
     [Theory]
     [InlineData(typeof(TriggerEvaluationService))]
     [InlineData(typeof(LlmTriggerReviewer))]
+    [InlineData(typeof(NullTriggerReviewer))]
     public void ConstructorDependencies_ShouldNotReachExecution(Type type)
     {
         List<string> dependencyTypeNames = type.GetConstructors()
