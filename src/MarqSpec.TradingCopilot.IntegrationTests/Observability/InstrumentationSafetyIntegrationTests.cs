@@ -6,12 +6,14 @@ using System.Text.Json;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Kill;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Risk;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
@@ -38,9 +40,16 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Observability;
 /// implementation is a reachable state rather than a hypothetical one.
 /// </para>
 /// <para>
-/// <b>Three of these guards pin a DEFECT rather than asserting the intended behaviour</b> — see
-/// <c>gh#343</c>. The QA contract's rule is to document reality without blessing it; when that issue lands, the
-/// pinned assertions flip and become its regression guards.
+/// <b>Three of these guards began as pinned DEFECTS and are now gh#343's regression guards (flipped in gh#382).</b>
+/// As first written they recorded the system failing a trade because a metric throw was unguarded; the fix
+/// (<c>FailureTolerantExecutionMetrics</c>) absorbs the fault, so each now asserts that the trade <b>completes</b>.
+/// </para>
+/// <para>
+/// <b>The fault is injected inside that decorator, not in place of it.</b> Between gh#343 landing and gh#382 these
+/// pins passed <i>vacuously</i>: the harness re-registered <c>IExecutionMetrics</c> with the bare fault injector,
+/// which removed the shipped guard from the host, so the suite kept observing — and blessing — the pre-fix
+/// behaviour. <see cref="Harness_ShouldWrapTheFaultInjector_InTheSameDecoratorProductionRegisters"/> exists so that
+/// cannot recur silently.
 /// </para>
 /// </remarks>
 public class InstrumentationSafetyIntegrationTests : IClassFixture<InstrumentationSafetyPostgresFactory>
@@ -88,9 +97,8 @@ public class InstrumentationSafetyIntegrationTests : IClassFixture<Instrumentati
     [Fact]
     public async Task Telemetry_ShouldNotFailTheSend_WhenTheSinkThrowsBeforeTheVenueIsReached()
     {
-        // A sink that throws while counting the GATE decision, i.e. before anything is transmitted. Per engineering
-        // §9 the send should still succeed. It does not — but the failure direction here is SAFE: nothing was sent,
-        // so the operator's 500 is honest and no exposure exists.
+        // A sink that throws while counting the GATE decision, i.e. before anything is transmitted. Engineering §9:
+        // "a metrics failure is logged and the action completes". Regression guard for gh#343 (was a pinned defect).
         HttpClient client = await AuthenticatedClientAsync();
         Guid accountId = await SetupTradeableAccountAsync(client);
         _factory.Metrics.ThrowOnGateDecision = true;
@@ -98,14 +106,16 @@ public class InstrumentationSafetyIntegrationTests : IClassFixture<Instrumentati
 
         using HttpResponseMessage response = await client.PostAsJsonAsync($"/accounts/{accountId}/orders/", ValidProposal());
 
-        // DEFECT gh#343: the metrics call at the gate is unguarded, so a throwing sink fails the send. Engineering
-        // §9 requires "a metrics failure is logged and the action completes". Pins the OBSERVED behaviour (QA
-        // contract rule 2) until #343 lands; the fix flips this to OK and this becomes its regression guard.
         response.StatusCode.Should().Be(
-            HttpStatusCode.InternalServerError,
-            "DEFECT gh#343: instrumentation is not isolated from the send path — a throwing sink fails the trade");
+            HttpStatusCode.OK, "a throwing metrics sink at the gate must not fail the send (gh#343, engineering §9)");
+
+        // Note the direction of travel: BEFORE the fix this assertion read `before` — the throw aborted the send, so
+        // nothing was transmitted, and that was the one consoling thing about the defect. Absorbing the fault means
+        // the send now runs to completion, so the order genuinely reaches the venue and is journaled. Asserting the
+        // old value here would pass only while the bug was present.
         VenueFactory.TotalPlacedOrderCount.Should().Be(
-            before, "the failure direction is at least safe here — nothing was transmitted");
+            before + 1, "the send completed, so the order reached the venue");
+        (await OrderCountAsync(accountId)).Should().Be(1, "and it was journaled as usual — the measurement is what was lost");
     }
 
     [Fact]
@@ -122,16 +132,15 @@ public class InstrumentationSafetyIntegrationTests : IClassFixture<Instrumentati
 
         using HttpResponseMessage response = await client.PostAsJsonAsync($"/accounts/{accountId}/orders/", ValidProposal());
 
-        // DEFECT gh#343 (the high-severity half): pins the OBSERVED behaviour until #343 lands. The fix flips the
-        // status to OK and the journal count to 1, and this becomes its regression guard.
+        // The high-severity half of gh#343, now its regression guard: the live order must be journaled and the
+        // operator told the truth. A regression here re-creates orphaned exposure caused by instrumentation.
         response.StatusCode.Should().Be(
-            HttpStatusCode.InternalServerError,
-            "DEFECT gh#343: a throwing sink after the venue ack fails the send");
+            HttpStatusCode.OK, "a throwing sink after the venue ack must not fail the send (gh#343)");
         VenueFactory.TotalPlacedOrderCount.Should().Be(
             before + 1, "the order IS live at the venue — the transmit already succeeded");
         (await OrderCountAsync(accountId)).Should().Be(
-            0,
-            "DEFECT gh#343: and it was never journaled — a live order with no Order row and no stop plan, "
+            1,
+            "and it MUST be journaled: the whole hazard was a live order with no Order row and no stop plan, "
             + "reported to the operator as a failure");
     }
 
@@ -147,11 +156,39 @@ public class InstrumentationSafetyIntegrationTests : IClassFixture<Instrumentati
             "/kill-switch",
             new EngageKillSwitchRequest(KillSwitchMode.HaltOnly, Confirmed: true, Reason: "instrumentation-safety probe"));
 
-        // DEFECT gh#343: pins the OBSERVED behaviour. When #343 lands this flips to a success status and becomes the
-        // regression guard for "the halt engages even when its gauge cannot be written".
+        // gh#343's regression guard: the halt engages even when its gauge cannot be written. The original defect was
+        // doubly bad — the switch DID engage and the operator was told it had not, so the reported state and the
+        // real state disagreed on the one control that must never be ambiguous. Both halves are asserted.
         response.StatusCode.Should().Be(
-            HttpStatusCode.InternalServerError,
-            "DEFECT gh#343: a throwing gauge fails the operator's emergency halt — the one control that must always work");
+            HttpStatusCode.OK,
+            "a throwing gauge must not fail the operator's emergency halt — the one control that must always work (gh#343)");
+        _factory.Services.GetRequiredService<KillSwitch>().IsEngaged.Should().BeTrue(
+            "and the halt really took effect — the operator's view and the system's state must agree");
+    }
+
+    [Fact]
+    public void Harness_ShouldWrapTheFaultInjector_InTheSameDecoratorProductionRegisters()
+    {
+        // The guard on the guards (gh#382). Every fault-injection case above is only meaningful if the fault is
+        // raised INSIDE the shipped FailureTolerantExecutionMetrics; a harness that registers its double as
+        // IExecutionMetrics outright deletes that decorator from the host, and the three cases then pass whatever
+        // production does. That is exactly what happened between gh#343 landing and gh#382 — the pins sat green over
+        // a system nobody was deploying. This asserts the registration the factory DISPLACED was itself the
+        // decorator, so the chain being reproduced is production's and not an invention of this test project.
+        _factory.DisplacedRegistration.Should().NotBeNull(
+            "the composition root must register IExecutionMetrics — if it stopped, the harness is reproducing nothing");
+
+        object? production = _factory.DisplacedRegistration!.ImplementationFactory?.Invoke(_factory.Services)
+            ?? _factory.DisplacedRegistration.ImplementationInstance;
+
+        production.Should().BeOfType<FailureTolerantExecutionMetrics>(
+            "production binds IExecutionMetrics to the failure-tolerant decorator (gh#343), which is the shape this "
+            + "harness reproduces with the fault injector as the inner sink; if production's chain changes, these "
+            + "cases must be re-pointed at the new one rather than silently testing the old");
+
+        _factory.Services.GetRequiredService<IExecutionMetrics>().Should().BeOfType<FailureTolerantExecutionMetrics>(
+            "the host these cases actually run against must be wrapped the same way — this is the assertion that "
+            + "catches a harness which swaps the decorator out instead of wrapping the fault injector in it");
     }
 
     // ---------------------------------------------------------------------------------------------------------

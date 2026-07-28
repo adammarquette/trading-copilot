@@ -144,7 +144,15 @@ takes no cancellation token, so a cancellation surfacing from a sink is not a co
 action but a sink fault like any other — elsewhere a caller's token *is* available and its cancellation is
 deliberately rethrown, and that difference is why this one does not. And **a test that replaces the registered
 `IExecutionMetrics` outright bypasses this guard**, so the fault must be injected *inside* the decorator for the
-protection to be exercised — the shape `gh#331`'s harness now uses.
+protection to be exercised — the shape `gh#331`'s harness uses.
+
+That last point was written here as already true and **was not**: `gh#331`'s harness went on replacing the
+registration, so from this fix landing until `gh#382` its three probes ran against a host with no decorator in it,
+kept observing the pre-fix behaviour, and passed *vacuously* over the very invariant they were cited as
+establishing. `gh#382` wraps the fault injector in the shipped decorator and adds a guard asserting that the
+registration it displaced **is** `FailureTolerantExecutionMetrics`, so the same bypass fails loudly instead of
+silently. Recorded because the failure mode is general: **a doc that states an intended shape does not make the
+harness adopt it**, and a green suite is not evidence that it did.
 
 The shipped `ExecutionMetrics` is total by construction (counter `Add`, `Interlocked`), so this guards the
 **seam** rather than a present-day bug: the interface is what a later exporter-backed or further-decorating sink

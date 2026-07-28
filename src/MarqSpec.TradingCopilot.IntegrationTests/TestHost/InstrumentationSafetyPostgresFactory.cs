@@ -1,7 +1,9 @@
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 
@@ -11,10 +13,33 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 /// bad day, harder than the "no exporter configured" case ADR-0002 already records as verified — and swaps the
 /// execution-metrics sink for one that can be made to <b>throw on a chosen measurement</b>.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <b>The fault is injected INSIDE the shipped decorator, not in place of it (gh#382).</b> The composition root binds
+/// <see cref="IExecutionMetrics"/> to <see cref="FailureTolerantExecutionMetrics"/> wrapping the real sink (gh#343);
+/// a harness that simply re-registers <see cref="IExecutionMetrics"/> with its own double <b>removes that guard from
+/// the host</b>, so the suite measures a system the deployment does not have and its pins pass whatever production
+/// does. This factory therefore reproduces the production chain with the fault injector as the <i>inner</i> sink —
+/// the object under test is the <b>shipped</b> decorator. ADR-0002's gh#343 Update records the same trap.
+/// </para>
+/// <para>
+/// Reproducing the chain is still an assumption about the composition root, so <see cref="DisplacedRegistration"/>
+/// exposes the descriptor this factory replaced and
+/// <c>InstrumentationSafetyIntegrationTests.Harness_ShouldWrapTheFaultInjector_InTheSameDecoratorProductionRegisters</c>
+/// asserts it really was the decorator. If production stops decorating, or wraps something further, that guard fails
+/// rather than the suite going quietly vacuous a second time.
+/// </para>
+/// </remarks>
 public sealed class InstrumentationSafetyPostgresFactory : StubbedVenuePostgresFactory
 {
     /// <summary>The sink under the system, with a switch per measurement — set a flag to make that call throw.</summary>
     public FaultInjectingExecutionMetrics Metrics { get; } = new();
+
+    /// <summary>
+    /// The <see cref="IExecutionMetrics"/> registration this factory displaced — i.e. what the composition root binds
+    /// in production. Kept so a test can resolve it and assert the shape this harness reproduces (gh#382).
+    /// </summary>
+    public ServiceDescriptor? DisplacedRegistration { get; private set; }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -32,10 +57,15 @@ public sealed class InstrumentationSafetyPostgresFactory : StubbedVenuePostgresF
         ServiceDescriptor? sink = services.FirstOrDefault(descriptor => descriptor.ServiceType == typeof(IExecutionMetrics));
         if (sink is not null)
         {
+            DisplacedRegistration = sink;
             services.Remove(sink);
         }
 
-        services.AddSingleton<IExecutionMetrics>(Metrics);
+        // The fault injector goes UNDER the production decorator, never in place of it: arming a fault must exercise
+        // FailureTolerantExecutionMetrics, which is the thing gh#331 found missing and gh#343 shipped.
+        services.AddSingleton<IExecutionMetrics>(provider => new FailureTolerantExecutionMetrics(
+            Metrics,
+            provider.GetRequiredService<ILogger<FailureTolerantExecutionMetrics>>()));
     }
 }
 
