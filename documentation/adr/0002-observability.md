@@ -120,3 +120,32 @@ metrics backend down, which would mean instrumentation causing the very outage i
 **All eight instruments are now wired (gh#295).** The gate counter records at the single choke point every SIZED attempt passes through — `OrderExecutionService`, where the decision object that later becomes a `GateDecisionRecord` is produced — so the metric and the rows reconcile by construction rather than by two call sites agreeing. Order-ack times transmit → acknowledgement around the only call to an executor. The kill-switch gauge is set on the FLAG itself, not the endpoint, so the startup rehydration that restores an operator lock moves the metric too. The orphan gauge is re-counted from the database on both drop and re-arm, so it cannot drift and genuinely returns to zero.
 
 The sink is a Domain seam, `IExecutionMetrics`, because the send path lives in Domain and cannot depend on Api — the same shape as `IEventLog` and the notification channel. `NullExecutionMetrics` is the default, so an un-composed host measures nothing rather than needing a null check on a trading path.
+
+## Update (2026-07-27) — instrumentation cannot fail a trade (gh#343)
+
+`IExecutionMetrics` is a Domain seam injected into six services and measured from more places than that, and
+**every call site invoked it unguarded**. QA `gh#331` probed the seam with a throwing sink and found three ways
+observability could break trading — the outcome engineering §9 rules out:
+
+- a throw while counting the gate decision **failed the send** (safe direction: nothing transmitted);
+- a throw while recording **order-ack latency** failed the send **after the venue had accepted the order and
+  before the journal was written**, leaving a **live order with no `Order` row and no stop plan** while the
+  operator was told the send had failed — orphaned exposure caused by instrumentation;
+- a throw while setting the kill-switch gauge **failed the operator's emergency halt**, although the switch had
+  in fact engaged: the halt took effect and the operator was told it had not.
+
+**Resolved by decorating the seam, not by guarding each call site.** `FailureTolerantExecutionMetrics` wraps the
+real sink at the one place the composition root binds `IExecutionMetrics`: every fault is absorbed and logged at
+**error** — never silently — so the invariant holds for every current and future measurement and cannot be
+forgotten by whoever adds the next one.
+
+Two consequences worth recording. **All faults are absorbed, including `OperationCanceledException`:** the seam
+takes no cancellation token, so a cancellation surfacing from a sink is not a cooperative stop of the trading
+action but a sink fault like any other — elsewhere a caller's token *is* available and its cancellation is
+deliberately rethrown, and that difference is why this one does not. And **a test that replaces the registered
+`IExecutionMetrics` outright bypasses this guard**, so the fault must be injected *inside* the decorator for the
+protection to be exercised — the shape `gh#331`'s harness now uses.
+
+The shipped `ExecutionMetrics` is total by construction (counter `Add`, `Interlocked`), so this guards the
+**seam** rather than a present-day bug: the interface is what a later exporter-backed or further-decorating sink
+would be registered as, and that is where the fault would come from.
