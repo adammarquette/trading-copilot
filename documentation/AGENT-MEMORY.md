@@ -31,7 +31,7 @@ Working practices Adam has asked agents to follow that have no formal-doc home.
 - **[2026-07-18] Apply, then review.** Make non-trivial changes directly in the files and let Adam review the
   diff (version control makes it safe), rather than proposing every change for approval first. Trivial factual
   corrections always go straight in.
-- **[2026-07-22] Always use `git worktree` for isolated work.** When working on features, tests, or fixes, use isolated `git worktree` directories (or `Workspace: "share"` subagents) to prevent stepping on or dirtying other active agents' working trees.
+- **[2026-07-22] Always use `git worktree` for isolated work.** When working on features, tests, or fixes, use isolated `git worktree` directories (or `Workspace: "share"` subagents) to prevent stepping on or dirtying other active agents' working trees. **[2026-07-28] And *claim* it first** — a worktree is local, so it stops other sessions dirtying your tree but not from doing your work; push the branch empty before you start (`scripts/claim.sh`, gh#375).
 
 ## Notes & communications
 
@@ -42,7 +42,17 @@ Cross-agent heads-ups and in-session decisions that don't have a formal home yet
   - **Issue #132 — `QA(task#128) - Multi-tenant workspace & resource isolation integration suite`** (Spec: [gh#132](https://github.com/adammarquette/trading-copilot/issues/132)): R-20 default-deny workspace isolation test suite verifying User A's resources (connections, accounts, risk profiles, staged orders, gate decisions) are completely invisible (`HTTP 404` / empty `[]`) to User B (ADR-0017).
   - **Issue #131 — `QA(system) - Production-safe read-only smoke test suite`** (Spec: [gh#131](https://github.com/adammarquette/trading-copilot/issues/131)): Production deploy smoke suite tagged `Category=Smoke` covering read-only endpoints (`GET /auth/me`, `/firms`, `/connections`, `/connections/{id}/accounts`, `/accounts/{id}/risk`).
   - **Issue #142 — `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite`** (Spec: [gh#142](https://github.com/adammarquette/trading-copilot/issues/142)): Suite covering `POST /connections`, `GET /connections/{id}`, `PUT /connections/{id}/credentials`, `DELETE /connections/{id}`, and `PUT /accounts/{id}/stage` validating credential rotation, soft-delete cascading, and firm stage convention enforcement.
-  - **Issue #143 — `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite`** (Spec: [gh#143](https://github.com/adammarquette/trading-copilot/issues/143)): Suite validating dynamic risk profile updates under live trading conditions (`POST /accounts/{id}/risk`) and immediate risk limit enforcement on staged orders.
+  - **Issue #143 — `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite`
+- **[2026-07-28] HEADS-UP — claim work by pushing the branch first (gh#375).** A new rule landed in
+  [`CONTRIBUTING.md` §*Claiming work*](../CONTRIBUTING.md) and the root `AGENTS.md`: **create the branch and push
+  it empty *before* you start**, via `scripts/claim.sh <issue-id>`. Flagged here because **a session already in
+  flight will not re-read the contracts** — if that is you, claim your current branch now.
+  *Why:* on 2026-07-27/28 four items were built twice (gh#289, gh#295, gh#330, and one four-line compile break
+  that produced three issues and three fixes) — roughly a full session wasted in one evening, because a claim was
+  only ever a **local** worktree and the first globally visible artifact appeared when the work was already done.
+  *Also:* a claim whose tip has not moved for **4 hours** is fair game, but **say so on the issue** before taking
+  it over; and **delete your remote branch if you abandon work**, or it becomes a phantom claim that blocks
+  instead. Grep claims as `/<id>_` — anchoring on `_<id>_` matches nothing and reports every claimed issue free.** (Spec: [gh#143](https://github.com/adammarquette/trading-copilot/issues/143)): Suite validating dynamic risk profile updates under live trading conditions (`POST /accounts/{id}/risk`) and immediate risk limit enforcement on staged orders.
 
 ---
 

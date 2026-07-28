@@ -56,6 +56,56 @@ hotfix/60_kill-switch-regression
 
 Every branch traces back to the work item it delivers.
 
+## Claiming work — push the branch **before** you start (gh#375)
+
+Sessions run in parallel, so **the branch is the claim**. Create and push it *empty*, before writing anything:
+
+```bash
+scripts/claim.sh <issue-id>          # check + worktree + branch + push, in one step
+scripts/claim.sh <issue-id> --check  # report only
+```
+
+Equivalently, by hand:
+
+```bash
+git ls-remote --heads origin | grep -E "^.*refs/heads/[a-z]+/<id>_"   # is it already claimed?
+git worktree list | grep "<id>"                                        # same machine only
+git worktree add .worktrees/<id>_<slug> -b <type>/<id>_<slug> origin/develop
+git push -u origin <type>/<id>_<slug>                                  # <- the claim
+```
+
+**Why this and not something else.** Every other signal fails: the **assignee** is `adammarquette` on every
+issue in a single-operator repo; the **board column** is manual and goes stale; a **local worktree** is invisible
+to other machines. The remote branch is the only signal that is both global and self-describing — `<type>/<id>_<title>`
+embeds the issue number, so claims are greppable with no registry to maintain. The only thing wrong with it today
+is *timing*: it appears at first push, which is after the duplicated work, not before it.
+
+**Match on `/<id>_`, not `_<id>_`.** The separator before the id is a slash. A pattern anchored on an underscore
+matches nothing and reports every claimed issue as free — worse than no check, because it fails in the direction
+that permits the collision.
+
+**Push your commits as you go.** The branch tip is the heartbeat the staleness rule below reads.
+
+### Staleness — a claim expires, so it cannot block forever
+
+A claim whose branch tip has not moved for **4 hours** is presumed abandoned and is fair game.
+
+**Before taking one over, say so on the issue**, naming the branch. Announcing is what makes a wrong staleness
+call recoverable — the original session sees it on the issue it is working — instead of causing a second
+collision. If you abandon work yourself, **delete the remote branch** (`git push origin --delete <branch>`) and
+prune the worktree, rather than leaving a phantom claim; one sweep found 29 stale worktrees and 6 branches with
+no PR.
+
+### What this does not do
+
+It does not make claiming atomic — two sessions can check in the same second and both proceed. It narrows the
+collision window from **hours of work to seconds**. A genuinely atomic claim needs a lock, which is
+disproportionate for this repo. It also adds a step to every task, including the many that never collide; that
+is the price of the ones that do, which cost roughly a full session in a single evening (gh#375 has the tally).
+
+The **merge-side** half of the same problem — two PRs that pass separately and break `develop` together — is
+gh#357, and is independent of this.
+
 ## Issue-first — no orphaned PRs
 Every change starts from a **tracking issue** opened *before* the branch/PR; the PR references it (`Closes #N` /
 `Related to #N`). Work is planned as epics → tasks on the GitHub **Project board**; the
