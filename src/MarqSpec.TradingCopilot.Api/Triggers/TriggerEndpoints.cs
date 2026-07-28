@@ -193,9 +193,13 @@ public static class TriggerEndpoints
         }
 
         // A condition that became true while disabled or under an old definition must re-seed SILENTLY, not fire on
-        // re-enable -- so any edit resets the debounce to Unseeded. The incident counter and firing history are the
-        // journal's, never the request's, so they are untouched.
+        // re-enable -- so any edit resets the debounce to Unseeded. Bump the incident cycle too: a currently-fired
+        // trigger has an OPEN dedup incident under its current cycle key, and without a fresh cycle the next genuine
+        // crossing would mint that same key and be SUPPRESSED as a duplicate -- a silent miss, with a firing row
+        // that lies it fired. The counter only ever moves forward; the firing history is the journal's, not the
+        // request's. (The old incident lingers open until it ages out; it is a tell-once Notify, not a nagging Page.)
         trigger.ArmState = TriggerArmState.Unseeded;
+        trigger.ArmCycle++;
         await database.SaveChangesAsync(cancellationToken);
 
         return Results.Ok(TriggerResponse.From(trigger));

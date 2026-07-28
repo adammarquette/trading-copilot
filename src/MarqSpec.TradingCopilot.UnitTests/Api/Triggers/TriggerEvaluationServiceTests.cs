@@ -228,24 +228,51 @@ public class TriggerEvaluationServiceTests
         A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
-    // --- Send-before-commit ---
+    // --- Send-before-commit: neither a thrown send nor a rejected (false) send leaves a fired-but-unsent trigger ---
 
     [Fact]
-    public async Task ScanAsync_ShouldSendBeforeCommittingFired_SoAFailedSendLeavesTheTriggerUnfired()
+    public async Task ScanAsync_ShouldLeaveTheTriggerUnfired_WhenTheSendThrows()
     {
+        // The channel contract says SendAsync never throws, but if a buggy channel does, the per-owner guard catches
+        // it and the fired state -- set in memory but not yet committed -- is discarded with the scoped context, so
+        // the trigger stays Armed and re-attempts next pass rather than being left silently fired.
         Guid id = await AddTriggerAsync(armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
         A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._))
             .Throws(new InvalidOperationException("transport down"));
 
-        Func<Task> scan = async () => await Service().ScanAsync(Now, CancellationToken.None);
+        int fires = await Service().ScanAsync(Now, CancellationToken.None); // caught per owner -- does not propagate
 
-        // The alert is attempted first: its failure aborts the pass BEFORE the fired state is committed, so the next
-        // scan retries -- an alert layer fails toward notifying, never toward a silently-fired trigger.
-        await scan.Should().ThrowAsync<InvalidOperationException>();
+        fires.Should().Be(0);
         await using TradingCopilotDbContext reload = Context();
         (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Armed);
         (await reload.TriggerFirings.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldStayArmedAndNotJournal_WhenTheSendIsNotAccepted()
+    {
+        // The real production channel returns false (never throws) when it cannot accept the alert -- e.g. a wedged
+        // transport has filled the bounded queue. A non-delivery must NOT commit Fired: that would be a lost alert
+        // with a firing row that lies. The trigger stays Armed so the next pass re-attempts the send.
+        Guid id = await AddTriggerAsync(armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).Returns(false);
+
+        int fires = await Service().ScanAsync(Now, CancellationToken.None);
+
+        fires.Should().Be(0);
+        await using (TradingCopilotDbContext reload = Context())
+        {
+            TriggerRecord trigger = await reload.Triggers.SingleAsync(t => t.Id == id);
+            trigger.ArmState.Should().Be(TriggerArmState.Armed);
+            trigger.LastFiredAt.Should().BeNull();
+            (await reload.TriggerFirings.AnyAsync()).Should().BeFalse();
+        }
+
+        // The next pass re-attempts the send rather than debouncing the never-delivered alert away.
+        await Service().ScanAsync(Now, CancellationToken.None);
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedTwiceExactly();
     }
 
     // --- R-20: two owners, each in their own context, owner-stamped firings ---
