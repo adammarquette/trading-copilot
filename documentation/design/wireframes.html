@@ -993,8 +993,8 @@
               <div class="chart">
                 <div class="pane price"><span class="lab">ES · 5m — order flow, positions, fills overlaid</span>
                   <div class="js-price" data-h="240" data-overlay="1"></div></div>
-                <div class="pane ind planned-pane"><span class="lab">RSI 14 <span class="plannedtag">R-3 · planned</span></span><div class="js-rsi" data-h="64"></div></div>
-                <div class="pane ind planned-pane"><span class="lab">MACD <span class="plannedtag">R-3 · planned</span></span><div class="js-macd" data-h="64"></div></div>
+                <div class="pane ind planned-pane"><span class="lab">RSI 14 <span class="plannedtag">R-22 · planned</span></span><div class="js-rsi" data-h="64"></div></div>
+                <div class="pane ind planned-pane"><span class="lab">MACD <span class="plannedtag">R-22 · planned</span></span><div class="js-macd" data-h="64"></div></div>
               </div>
               <div class="bottomdock">
                 <div class="bd">
@@ -1095,7 +1095,7 @@
               </div>
               <div class="chart">
                 <div class="pane price"><span class="lab">ES · 5m</span><div class="js-price" data-h="188" data-overlay="1"></div></div>
-                <div class="pane ind planned-pane"><span class="lab">RSI <span class="plannedtag">R-3 · planned</span></span><div class="js-rsi" data-h="52"></div></div>
+                <div class="pane ind planned-pane"><span class="lab">RSI <span class="plannedtag">R-22 · planned</span></span><div class="js-rsi" data-h="52"></div></div>
               </div>
               <div class="bottomdock" style="grid-template-columns:1fr;height:120px">
                 <div class="bd"><div class="bd__h">Chat · News <span class="plannedtag">chat [A4] · news [D2]</span> <span class="chip ghost">2 tabs</span> <span class="tag" style="margin-left:auto">R-6 · R-2</span></div>
@@ -1248,14 +1248,14 @@
   </section>
 
   <section class="chartsurf">
-    <div class="cap"><h2>Charting — the central surface</h2><span class="bp">R-10 · R-3</span>
+    <div class="cap"><h2>Charting — the central surface</h2><span class="bp">R-10 · R-3 · R-22</span>
       <span class="muted">candles + live price are real venue data; your order / position / stop geometry overlays them — indicators &amp; order-flow are marked planned</span></div>
 
     <div class="chartsurf-frame">
       <div class="cs-toolbar">
         <div class="cs-instr"><b>ES</b> · CON.F.US.EP.U26 <span class="car">▾</span></div>
         <div class="tf"><span>1m</span><span class="on">5m</span><span>15m</span><span>1h</span><span>1D</span></div>
-        <button class="cs-tool">＋ Indicators <span class="plannedtag">R-3 · planned</span></button>
+        <button class="cs-tool">＋ Indicators <span class="plannedtag">R-22 · planned</span></button>
         <button class="cs-tool">✎ Drawing <span class="plannedtag">planned</span></button>
         <div class="cs-live"><span class="cs-dot"></span>live · Quotes</div>
       </div>
@@ -1287,11 +1287,11 @@
           </div>
 
           <div class="cs-ind planned-pane">
-            <span class="lab">RSI · 14 <span class="plannedtag">R-3 · planned</span></span>
+            <span class="lab">RSI · 14 <span class="plannedtag">R-22 · planned</span></span>
             <div class="js-rsi" data-h="60"></div>
           </div>
           <div class="cs-ind planned-pane">
-            <span class="lab">MACD · 12,26,9 <span class="plannedtag">R-3 · planned</span></span>
+            <span class="lab">MACD · 12,26,9 <span class="plannedtag">R-22 · planned</span></span>
             <div class="js-macd" data-h="60"></div>
           </div>
         </div>
@@ -1314,13 +1314,13 @@
 
     <div class="ann" style="margin-top:16px">
       <div class="annitem"><b>Real data, your geometry on it.</b> The candles are <b>HistoricalBars</b> (ProjectX REST) and the price is the live <b>Quotes</b> stream. Onto them the chart projects <b>your own risk geometry</b> — a working order's <b>entry</b>, its <b>hidden working stop</b>, the <b>always-native safety stop</b>, the <b>target</b>, and the <b>promotion band</b> (plus open-position fills). This is the shipped value: <b>see your risk on the chart</b> — the same levels the modify family and the stop plan manage (R-8 / R-11; gh#259/267/278/292, gh#183).</div>
-      <div class="annitem"><b>ATR is live; the indicator panes are not (R-3).</b> The <b>indicator pipeline</b> landed for <b>ATR</b> (gh#310, projected over the clean-historical bar store) and ATR is now a real <b>stop-promotion band</b> (gh#311) — so the band drawn above can be an ATR multiple, and it <b>tracks a moving ATR</b> rather than being frozen when the plan was made. RSI / MACD / VWAP are still unbuilt and the pipeline's wider scope is still being settled (gh#307), so <b>these panes</b> remain a <b>planned</b> affordance, not live math.</div>
+      <div class="annitem"><b>ATR is live; the indicator panes are not (R-22).</b> The <b>indicator pipeline</b> — now its own requirement, <b>R-22</b> (gh#307), no longer borrowing R-3 — landed for <b>ATR</b> (gh#310, projected over the clean-historical bar store), and ATR is a real <b>stop-promotion band</b> (gh#311): the band drawn above can be an ATR multiple, and it <b>tracks a moving ATR</b> rather than being frozen when the plan was made. RSI / MACD / VWAP are still unbuilt, so <b>these panes</b> remain a <b>planned</b> affordance, not live math.</div>
       <div class="annitem"><b>An unmeasurable ATR does not promote.</b> If no ATR value can be resolved, the working stop simply <b>stays hidden</b> — there is no fallback distance, and deliberately not a zero band (zero is a real setting meaning <i>promote on touch</i>, so collapsing to it would promote rather than abstain). The <b>always-native safety stop</b> remains the floor, and the watcher logs a warning, because "never promoted" is otherwise indistinguishable from "price never came close" (gh#311).</div>
       <div class="annitem"><b>The suggestion overlay is planned (R-4).</b> A proposed setup's entry / stop / target would draw here once the <b>suggestion engine</b> ships (Phase 3). Today only <b>your placed</b> orders and positions overlay — nothing is inferred.</div>
       <div class="annitem"><b>Order-flow is a later bespoke pane.</b> ProjectX exposes <b>no MarketDepth</b>, so the DOM + tape + footprint is a <b>deferred slot</b>, dimmed — not a live feed. Drawing tools are UI-only, also planned.</div>
     </div>
 
-    <div class="rej-why" style="margin-top:12px">The chart is <b>R-10's central surface</b>, drawn here as a dedicated view rather than the embedded pane of the workspace. What is <b>real today</b> is the honest core: bars and quotes from the venue, and your <b>own execution geometry</b> laid over them — so a resting bracket or an open position is read <i>against price</i>, where the promotion band and the safety floor mean something. What is <b>planned</b> is marked as such: the <b>indicator pipeline</b> (R-3, still being scoped — gh#307), the <b>AI-suggestion overlay</b> (R-4, Phase 3), <b>drawing tools</b>, and the <b>order-flow / footprint</b> pane (no <code>MarketDepth</code> capability yet). Nothing here claims a feed or a computation the system does not have.</div>
+    <div class="rej-why" style="margin-top:12px">The chart is <b>R-10's central surface</b>, drawn here as a dedicated view rather than the embedded pane of the workspace. What is <b>real today</b> is the honest core: bars and quotes from the venue, and your <b>own execution geometry</b> laid over them — so a resting bracket or an open position is read <i>against price</i>, where the promotion band and the safety floor mean something. What is <b>planned</b> is marked as such: the <b>indicator pipeline</b> (R-22 — ATR live, RSI/MACD/VWAP still to come), the <b>AI-suggestion overlay</b> (R-4, Phase 3), <b>drawing tools</b>, and the <b>order-flow / footprint</b> pane (no <code>MarketDepth</code> capability yet). Nothing here claims a feed or a computation the system does not have.</div>
   </section>
 
   <section class="copilot">
@@ -2309,8 +2309,8 @@
   <section class="key">
     <h3>Region → requirement</h3>
     <div class="key-grid">
-      <div><span class="tag">R-10</span> Central chart — candles, suggestion &amp; position overlays; indicator panes (RSI/MACD) planned (R-3)</div>
-      <div><span class="tag">R-10 · R-3</span> Charting surface — dedicated view: real candles (HistoricalBars) + live price (Quotes) with your order / position / stop-plan geometry overlaid; indicators (R-3), suggestion overlay (R-4), drawing tools &amp; order-flow (no MarketDepth) marked planned</div>
+      <div><span class="tag">R-10</span> Central chart — candles, suggestion &amp; position overlays; indicator panes (RSI/MACD) planned (R-22)</div>
+      <div><span class="tag">R-10 · R-3 · R-22</span> Charting surface — dedicated view: real candles (HistoricalBars) + live price (Quotes) with your order / position / stop-plan geometry overlaid; indicators (R-22), suggestion overlay (R-4), drawing tools &amp; order-flow (R-3, no MarketDepth) marked planned</div>
       <div><span class="tag">R-4</span> AI suggestion — levels, confidence, rationale, validity</div>
       <div><span class="tag">R-11</span> Order ticket &amp; take-suggestion — explicit, human-in-the-loop</div>
       <div><span class="tag">R-5 · R-16</span> Risk gate &amp; sanity caps — shown before arming</div>

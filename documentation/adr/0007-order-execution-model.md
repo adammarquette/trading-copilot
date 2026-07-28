@@ -116,7 +116,7 @@ working stop, the safety stop beyond it, and the promotion band, starting at `St
 `ShouldPromote(price)` is the deterministic decision a watcher will consult, and `Promote()` is one-way and
 idempotent so a retrying watcher cannot re-transmit. The band is **ticks** or a **fraction of the entry→stop
 distance** — the ADR's "not % of raw price" made structural — and **ATR is refused outright** (`NotSupportedException`)
-until the indicator pipeline (R-3) can measure it, rather than silently mis-measuring.
+until the indicator pipeline (R-22) can measure it, rather than silently mis-measuring.
 *(That refusal has since been lifted: the pipeline landed gh#310 and the band moved to the caller, gh#311 — see the
 update below. `ShouldPromote` now takes a resolved distance rather than deriving one.)*
 
@@ -178,8 +178,7 @@ mirror the domain (direction declared, cancel band on the stale side) — **prov
 Postgres**.
 
 *Still deferred:* the **firing watcher** (next); **connection-loss orphan handling** (a pending synthetic order
-→ orphaned → emergency; overlaps S4); and **named-signal triggers** (they need the R-3 signal pipeline —
-price-cross only for now). This lands the model half of the "spec the synthetic/conditional engine" item below.
+→ orphaned → emergency; overlaps S4); and **named-signal triggers** (they need the derived-signal pipeline — order-flow (R-3) and/or the indicator pipeline (R-22) — price-cross only for now). This lands the model half of the "spec the synthetic/conditional engine" item below.
 
 ## Update (2026-07-25) — the firing watcher landed (gh#198)
 The conditional order is now **operational**. `ConditionalOrderHost` is the event log's **second consumer**
@@ -196,7 +195,7 @@ To reuse the compose/gate/journal without duplicating a safety guard (the gh#148
 which has no request user — **discovers** pending orders with `IgnoreQueryFilters`, then does each owner's work
 in a DbContext **scoped to that owner**, so `ComposeAsync` stays R-20-correct unchanged.
 
-*Still deferred:* **named-signal triggers** (they need the R-3 signal pipeline — price-cross only for now).
+*Still deferred:* **named-signal triggers** (they need the derived-signal pipeline — order-flow (R-3) and/or the indicator pipeline (R-22) — price-cross only for now).
 
 ## Update (2026-07-25) — connection-loss orphan handling landed (gh#209)
 The at-risk safety net (ADR-0013). A new R-17 seam `IVenueConnection` (a **process-wide singleton**, one
