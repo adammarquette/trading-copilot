@@ -26,8 +26,13 @@ public static class TelemetryRegistration
         builder.Services.AddSingleton<ExecutionMetrics>();
 
         // Callers depend on the Domain seam; the concrete Meter-backed sink is the composition root's choice.
-        builder.Services.AddSingleton<IExecutionMetrics>(
-            provider => provider.GetRequiredService<ExecutionMetrics>());
+        //
+        // Wrapped so a sink fault can never reach the trading action being measured (gh#343, engineering §9). Done
+        // here, at the ONE place the seam is bound, rather than by guarding each of the many call sites — which
+        // would leave the invariant to be re-remembered by whoever adds the next measurement.
+        builder.Services.AddSingleton<IExecutionMetrics>(provider => new FailureTolerantExecutionMetrics(
+            provider.GetRequiredService<ExecutionMetrics>(),
+            provider.GetRequiredService<ILogger<FailureTolerantExecutionMetrics>>()));
         builder.Services.Configure<TelemetryOptions>(builder.Configuration.GetSection(TelemetryOptions.SectionName));
         TelemetryOptions options =
             builder.Configuration.GetSection(TelemetryOptions.SectionName).Get<TelemetryOptions>() ?? new TelemetryOptions();
