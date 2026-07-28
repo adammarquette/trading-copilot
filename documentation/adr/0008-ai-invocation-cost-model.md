@@ -90,6 +90,19 @@ compiler for now; a nullable `SourceRuleId` is the seam the compiler will fill. 
 compiler + the `Rule` entity, the **agent-review** route, order-flow / composite / cross-asset / time conditions,
 the wall-clock **rate-limit** (a `LastFiredAt` seam shipped), and the **AI-spend governor**.
 
+**Update (2026-07-28, gh#402) — the agent-review route landed, seam-first.** A trigger routing to **agent-review**
+now, on a fire, wakes a reviewer (**one LLM call per fire**) behind a provider-neutral **`ILlmProvider`** seam that
+**proposes a `Suggestion` or suppresses** — the first place an LLM enters the system, at the edges. **Enforcement
+stays below the model, proven structurally**: the review path reaches no order / venue / gate type (a
+constructor-graph test guards it), and a malformed or hostile output is stopped by **three layers** — a fail-closed
+reviewer (a non-complete stop, bad JSON, unknown decision/direction, or a missing price → suppress, never a
+suggestion; the wire uses a *string* direction so a missing field can't read as Buy), a pure geometry sanity check,
+and the take-time risk gate. **Size is the operator's trigger's, never the model's; mode is read live from the
+account.** The real **Anthropic client + `AIUsage` cost tracking** are still A2 — a **stub** stands in, so production
+never fabricates geometry, and an honest inert reviewer *tells* the operator a setup fired needing review. Still
+open: the NL→condition compiler + `Rule` entity, order-flow / composite conditions, model-tiering escalation, and
+the AI-spend governor.
+
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*
 - Spec the **deterministic trigger evaluator** as a processor / consumer over the event log (ADR-0001) — inputs
