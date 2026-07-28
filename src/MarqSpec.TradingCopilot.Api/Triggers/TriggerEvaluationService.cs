@@ -81,50 +81,83 @@ public sealed class TriggerEvaluationService
         int fires = 0;
         foreach (Guid owner in owners)
         {
-            // Per-owner context: the R-20 filter now applies, so every trigger read and every firing written is this
-            // owner's alone -- one owner's SaveChanges can never persist another's rows.
-            await using TradingCopilotDbContext database = new(_options, new OwnerUser(owner));
-
-            List<TriggerRecord> triggers = await database.Triggers
-                .Where(trigger => trigger.Enabled && trigger.Route == TriggerRoute.Mechanical)
-                .ToListAsync(cancellationToken);
-
-            // Cache the global indicator read per series for the pass: many triggers can share one series, and the
-            // read is a pure function of `now`.
-            Dictionary<(string Symbol, string Indicator, int Period, int Resolution), decimal?> cache = new();
-            bool changed = false;
-
-            foreach (TriggerRecord trigger in triggers)
+            try
             {
-                IndicatorThresholdCondition condition = trigger.ToCondition();
+                fires += await ProcessOwnerAsync(owner, now, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                // One owner's fault (a DB blip, a wedged read/send) must not starve the others this pass. Its
+                // scoped context is discarded with its uncommitted changes; the owner's triggers recompute next
+                // pass (idempotent), so a fault costs at most a one-interval delay.
+                _logger.LogError(error, "Trigger scan failed for owner {Owner}; the next pass retries.", owner);
+            }
+        }
 
-                (string, string, int, int) key = (trigger.Symbol, trigger.Indicator, trigger.Period, trigger.ResolutionMinutes);
-                if (!cache.TryGetValue(key, out decimal? value))
+        if (fires > 0)
+        {
+            _logger.LogInformation("Trigger scan fired {Count} mechanical alert(s).", fires);
+        }
+
+        return fires;
+    }
+
+    /// <summary>Evaluates one owner's enabled mechanical triggers in a per-owner (R-20-scoped) context.</summary>
+    private async Task<int> ProcessOwnerAsync(Guid owner, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // Per-owner context: the R-20 filter applies, so every trigger read and every firing written is this
+        // owner's alone -- one owner's SaveChanges can never persist another's rows.
+        await using TradingCopilotDbContext database = new(_options, new OwnerUser(owner));
+
+        List<TriggerRecord> triggers = await database.Triggers
+            .Where(trigger => trigger.Enabled && trigger.Route == TriggerRoute.Mechanical)
+            .ToListAsync(cancellationToken);
+
+        // Cache the global indicator read per series for the pass: many triggers can share one series, and the
+        // read is a pure function of `now`.
+        Dictionary<(string Symbol, string Indicator, int Period, int Resolution), decimal?> cache = new();
+        int fires = 0;
+        bool changed = false;
+
+        foreach (TriggerRecord trigger in triggers)
+        {
+            IndicatorThresholdCondition condition = trigger.ToCondition();
+
+            (string, string, int, int) key = (trigger.Symbol, trigger.Indicator, trigger.Period, trigger.ResolutionMinutes);
+            if (!cache.TryGetValue(key, out decimal? value))
+            {
+                value = await _indicators.GetValueAsync(
+                    condition.Instrument, trigger.Indicator, trigger.Period, trigger.ResolutionMinutes, now, cancellationToken);
+                cache[key] = value;
+            }
+
+            ConditionSatisfaction satisfaction = condition.Evaluate(value);
+            TriggerDecision decision = TriggerDebounce.Decide(trigger.ArmState, satisfaction);
+
+            // Every pass records what it measured and the next arm state, fire or not.
+            trigger.LastEvaluatedValue = value;
+            trigger.ArmState = decision.NextState;
+            changed = true;
+
+            if (decision.ShouldFire)
+            {
+                string dedupKey = DedupKeyFor(trigger);
+
+                // SEND-BEFORE-COMMIT: emit BEFORE the SaveChanges that commits Fired. The channel returns
+                // false -- it never throws, per INotificationChannel's contract -- when it could not accept the
+                // alert (a wedged transport filling the bounded queue). Treat that as NON-DELIVERY: leave the
+                // trigger ARMED so the next pass re-attempts the arming edge, rather than committing a
+                // fired-but-unsent alert that would then debounce and be lost. The value is non-null here (a fire
+                // needs a measured, satisfied reading), so the `!` is sound.
+                bool sent = await _notifications.SendAsync(
+                    new Notification(trigger.Severity, TitleFor(trigger), BodyFor(trigger, value!.Value), dedupKey),
+                    cancellationToken);
+                if (sent)
                 {
-                    value = await _indicators.GetValueAsync(
-                        condition.Instrument, trigger.Indicator, trigger.Period, trigger.ResolutionMinutes, now, cancellationToken);
-                    cache[key] = value;
-                }
-
-                ConditionSatisfaction satisfaction = condition.Evaluate(value);
-                TriggerDecision decision = TriggerDebounce.Decide(trigger.ArmState, satisfaction);
-
-                // Every pass records what it measured and the next arm state, fire or not.
-                trigger.LastEvaluatedValue = value;
-                trigger.ArmState = decision.NextState;
-                changed = true;
-
-                if (decision.ShouldFire)
-                {
-                    string dedupKey = DedupKeyFor(trigger);
-
-                    // SEND-BEFORE-COMMIT: the alert goes out BEFORE the SaveChanges that commits the fired state, so a
-                    // failed send never yields a fired-but-unsent trigger. The value is non-null here (a fire needs a
-                    // measured, satisfied reading), so the `!` is sound.
-                    await _notifications.SendAsync(
-                        new Notification(trigger.Severity, TitleFor(trigger), BodyFor(trigger, value!.Value), dedupKey),
-                        cancellationToken);
-
                     database.TriggerFirings.Add(new TriggerFiringRecord
                     {
                         Id = Guid.NewGuid(),
@@ -139,24 +172,26 @@ public sealed class TriggerEvaluationService
                     trigger.LastFiredAt = now;
                     fires++;
                 }
-                else if (decision.ReArmed)
+                else
                 {
-                    // Close the incident under the CURRENT cycle key, THEN bump the cycle so the next crossing mints a
-                    // fresh key -- a distinct incident even if this resolve is missed.
-                    await _notifications.ResolveAsync(DedupKeyFor(trigger), cancellationToken);
-                    trigger.ArmCycle++;
+                    trigger.ArmState = TriggerArmState.Armed; // was set to Fired above; a non-delivery must re-attempt
+                    _logger.LogWarning(
+                        "Trigger {Id} alert was not accepted for delivery; it stays armed and re-attempts next scan.",
+                        trigger.Id);
                 }
             }
-
-            if (changed)
+            else if (decision.ReArmed)
             {
-                await database.SaveChangesAsync(cancellationToken);
+                // Close the incident under the CURRENT cycle key, THEN bump the cycle so the next crossing mints a
+                // fresh key -- a distinct incident even if this resolve is missed.
+                await _notifications.ResolveAsync(DedupKeyFor(trigger), cancellationToken);
+                trigger.ArmCycle++;
             }
         }
 
-        if (fires > 0)
+        if (changed)
         {
-            _logger.LogInformation("Trigger scan fired {Count} mechanical alert(s).", fires);
+            await database.SaveChangesAsync(cancellationToken);
         }
 
         return fires;

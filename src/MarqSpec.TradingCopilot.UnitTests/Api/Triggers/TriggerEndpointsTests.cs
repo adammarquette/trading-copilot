@@ -194,9 +194,11 @@ public class TriggerEndpointsTests
     // --- Patch ---
 
     [Fact]
-    public async Task Patch_ShouldEditAndResetArmState_WithoutTouchingTheArmCycle()
+    public async Task Patch_ShouldEditReSeedAndBumpTheArmCycle_SoTheNextFireIsAFreshIncident()
     {
-        // The trigger has already fired twice (cycle 2, currently Fired) -- an edit must re-seed silently.
+        // The trigger has already fired (cycle 2, currently Fired) -- its open incident key is trigger:{id}:2. An
+        // edit must re-seed silently AND bump the cycle (the gh#385-review HIGH finding): without a fresh cycle the
+        // next genuine crossing would mint the SAME key and be suppressed as a duplicate -- a silent miss.
         Guid id = await SeedTriggerAsync(_operator, armState: TriggerArmState.Fired, armCycle: 2);
         await using TradingCopilotDbContext context = Context();
 
@@ -209,7 +211,7 @@ public class TriggerEndpointsTests
         stored.Enabled.Should().BeFalse();
         stored.Threshold.Should().Be(25m);
         stored.ArmState.Should().Be(TriggerArmState.Unseeded); // re-seeded
-        stored.ArmCycle.Should().Be(2);                        // untouched by the request
+        stored.ArmCycle.Should().Be(3);                        // bumped so the next fire's dedup key is fresh
     }
 
     [Fact]
