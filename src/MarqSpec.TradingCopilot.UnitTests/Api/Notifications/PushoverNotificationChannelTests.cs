@@ -196,6 +196,95 @@ public class PushoverNotificationChannelTests
         await act.Should().NotThrowAsync();
     }
 
+    // --- gh#300: a cancel that did not happen must stay retryable ---
+
+    [Fact]
+    public async Task ResolveAsync_ShouldReportResolved_WhenTheCancelSucceeds()
+    {
+        StubHandler handler = new() { ReceiptJson = """{"status":1,"receipt":"rcpt-123"}""" };
+        PushoverNotificationChannel channel = Channel(Configured(), handler);
+        await channel.SendAsync(Note(NotificationSeverity.Page), CancellationToken.None);
+
+        bool resolved = await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        resolved.Should().BeTrue("the page was cancelled, so the incident is definitively closed");
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldReportResolved_WhenNoPageIsOutstandingForThatKey()
+    {
+        // Nothing to cancel is not a failure -- reporting false here would make the pump retry forever.
+        bool resolved = await Channel(Configured(), new StubHandler()).ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        resolved.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldReportNotResolved_WhenTheCancelFaults()
+    {
+        StubHandler handler = new() { ReceiptJson = """{"status":1,"receipt":"rcpt-123"}""" };
+        PushoverNotificationChannel channel = Channel(Configured(), handler);
+        await channel.SendAsync(Note(NotificationSeverity.Page), CancellationToken.None);
+        handler.Throw = new HttpRequestException("boom");
+
+        bool resolved = await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        resolved.Should().BeFalse("an Emergency page is still nagging about a position that is already flat");
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldReportNotResolved_WhenPushoverRejectsTheCancel()
+    {
+        StubHandler handler = new() { ReceiptJson = """{"status":1,"receipt":"rcpt-123"}""" };
+        PushoverNotificationChannel channel = Channel(Configured(), handler);
+        await channel.SendAsync(Note(NotificationSeverity.Page), CancellationToken.None);
+        handler.Status = HttpStatusCode.InternalServerError;
+
+        bool resolved = await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        resolved.Should().BeFalse("a non-success status means the page was not cancelled");
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldRetainTheReceipt_WhenTheCancelFaults()
+    {
+        // THE gh#300 DEFECT. The receipt was removed before the cancel POST was awaited, so a failed cancel
+        // discarded the only handle to the outstanding page -- it then nagged until it self-expired, about an
+        // incident that had already cleared. Retaining it makes the retry below possible at all.
+        StubHandler handler = new() { ReceiptJson = """{"status":1,"receipt":"rcpt-123"}""" };
+        PushoverNotificationChannel channel = Channel(Configured(), handler);
+        await channel.SendAsync(Note(NotificationSeverity.Page), CancellationToken.None);
+        handler.Throw = new HttpRequestException("boom");
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        handler.Throw = null;
+        bool resolved = await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        // COUNT the cancels, do not just look at the last one. Asserting "resolved is true" or "the last request
+        // mentioned the receipt" both pass against the defect: dropping the receipt makes the second call return
+        // true down the nothing-to-cancel path, and the stub records the faulting request before it throws. Only
+        // a second cancel actually reaching Pushover proves the receipt survived the first failure.
+        int cancels = handler.Requests.Count(request =>
+            request.RequestUri!.ToString().Contains("rcpt-123", StringComparison.Ordinal));
+
+        resolved.Should().BeTrue();
+        cancels.Should().Be(2, "the failed cancel must remain retryable, so the receipt has to outlive it");
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldStopRetrying_OnceTheCancelSucceeds()
+    {
+        StubHandler handler = new() { ReceiptJson = """{"status":1,"receipt":"rcpt-123"}""" };
+        PushoverNotificationChannel channel = Channel(Configured(), handler);
+        await channel.SendAsync(Note(NotificationSeverity.Page), CancellationToken.None);
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+        int afterFirstResolve = handler.Requests.Count;
+
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        handler.Requests.Should().HaveCount(afterFirstResolve, "a cancelled page has no receipt left to cancel again");
+    }
+
     // --- Doubles ---
 
     private sealed class StubHandler : HttpMessageHandler
@@ -204,7 +293,9 @@ public class PushoverNotificationChannelTests
 
         public Dictionary<string, string>? LastForm { get; private set; }
 
-        public HttpStatusCode Status { get; init; } = HttpStatusCode.OK;
+        // Settable, not init-only: gh#300's cancel-failure cases need the send to succeed and the *cancel* to
+        // fail, which is two different statuses from one handler.
+        public HttpStatusCode Status { get; set; } = HttpStatusCode.OK;
 
         public string ReceiptJson { get; init; } = """{"status":1}""";
 

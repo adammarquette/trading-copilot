@@ -69,9 +69,11 @@ public sealed class RecordingNotificationChannel : INotificationChannel
     }
 
     /// <inheritdoc />
-    public Task ResolveAsync(string dedupKey, CancellationToken cancellationToken)
+    // Signature follows gh#300's INotificationChannel change. True: this recorder always "cancels" successfully,
+    // so the pump's cancel-retry never fires and existing alerting assertions are unaffected.
+    public Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken)
     {
         _resolved.Enqueue(dedupKey);
-        return Task.CompletedTask;
+        return Task.FromResult(true);
     }
 }

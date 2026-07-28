@@ -50,5 +50,21 @@ public interface INotificationChannel
     /// </remarks>
     /// <param name="dedupKey">The incident key that has cleared.</param>
     /// <param name="cancellationToken">The caller's token.</param>
-    Task ResolveAsync(string dedupKey, CancellationToken cancellationToken);
+    /// <returns>
+    /// <see langword="true"/> when the incident is <b>definitively</b> closed — the outstanding page was
+    /// cancelled, or there was none to cancel. <see langword="false"/> when the cancel could not be confirmed,
+    /// which asks the caller to try again.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// The result exists because a cancel that silently failed is indistinguishable from one that worked, and
+    /// the difference is an Emergency page still nagging about a position that is already flat (gh#300). Only a
+    /// caller that can see the failure can retry it.
+    /// </para>
+    /// <para>
+    /// "Nothing to cancel" is <see langword="true"/>, not <see langword="false"/>: reporting failure for an
+    /// incident that was never paged would make a retrying caller loop forever over nothing.
+    /// </para>
+    /// </remarks>
+    Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken);
 }

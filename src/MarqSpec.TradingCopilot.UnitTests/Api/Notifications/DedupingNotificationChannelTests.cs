@@ -99,11 +99,61 @@ public class DedupingNotificationChannelTests
     }
 
     [Fact]
-    public async Task ResolveAsync_ShouldNotForward_WhenNothingWasSentForThatKey()
+    public async Task ResolveAsync_ShouldStillForward_WhenNothingWasSentForThatKey()
     {
+        // CHANGED BY gh#300, deliberately. This used to return early when the key was not in _reported, which
+        // read as a harmless optimisation -- the transport no-ops without a receipt anyway. It is not harmless:
+        // the pump retries a failed cancel by calling THIS layer again, and by then _reported has already been
+        // cleared by the first attempt. The early return therefore swallowed every retry before it could reach
+        // the transport, which is precisely the cancel-retry gh#300 asks for. Forwarding unconditionally costs
+        // one no-op call and is what makes the retry reachable at all.
         await Channel().ResolveAsync("flatten:9001:ES", CancellationToken.None);
 
-        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // --- gh#300: re-arm and cancel-retry are separate concerns ---
+
+    [Fact]
+    public async Task ResolveAsync_ShouldReArmTheKey_EvenWhenTheInnerCancelFails()
+    {
+        // The two halves of resolve pull in opposite directions when the cancel fails, so they are decided
+        // separately. Re-arming is LOCAL state and its failure mode is a duplicate page (safe); withholding it
+        // would suppress the next genuine incident as a "duplicate" (silent, and the thing this system exists to
+        // prevent). So re-arm unconditionally and let the transport own the retry.
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(false);
+        DedupingNotificationChannel channel = Channel();
+        await channel.SendAsync(Note(), CancellationToken.None);
+
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+        await channel.SendAsync(Note(), CancellationToken.None);
+
+        A.CallTo(() => _inner.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedTwiceExactly();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldReportNotResolved_WhenTheInnerCancelFails()
+    {
+        // The pump can only retry what it can see fail.
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(false);
+        DedupingNotificationChannel channel = Channel();
+        await channel.SendAsync(Note(), CancellationToken.None);
+
+        bool resolved = await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        resolved.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldReportResolved_WhenTheInnerCancelSucceeds()
+    {
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(true);
+        DedupingNotificationChannel channel = Channel();
+        await channel.SendAsync(Note(), CancellationToken.None);
+
+        bool resolved = await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        resolved.Should().BeTrue();
     }
 
     [Fact]

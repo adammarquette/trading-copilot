@@ -43,5 +43,7 @@ public sealed class NullNotificationChannel : INotificationChannel
     }
 
     /// <inheritdoc />
-    public Task ResolveAsync(string dedupKey, CancellationToken cancellationToken) => Task.CompletedTask;
+    // True: an unconfigured channel never paged anyone, so there is nothing outstanding to cancel and nothing
+    // for a retrying caller to chase (gh#300).
+    public Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken) => Task.FromResult(true);
 }
