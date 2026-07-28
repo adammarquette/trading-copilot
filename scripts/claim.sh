@@ -34,7 +34,12 @@
 # disproportionate here. See CONTRIBUTING.md for the staleness rule that stops claims from becoming permanent.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The MAIN clone, never the worktree this script happens to live in. Agents run this from inside a worktree far
+# more often than from the main checkout, and `dirname $BASH_SOURCE/..` would then resolve to that worktree --
+# so `git worktree add .worktrees/<id>` would NEST a worktree inside a worktree. The common git dir is shared by
+# every worktree and always points at the main clone's `.git`, so its parent is the root regardless of where
+# this is invoked from.
+REPO_ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
 STALE_AFTER_HOURS=4
 
 die() { echo "error: $*" >&2; exit 1; }
