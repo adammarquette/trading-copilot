@@ -13,6 +13,7 @@ using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Risk;
+using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Events;
@@ -109,6 +110,13 @@ builder.Services.AddSingleton<IReadOnlyList<IIndicator>>(sp =>
 builder.Services.AddScoped<IndicatorProjectionService>();
 builder.Services.AddScoped<IIndicatorSource, StoredIndicatorSource>();
 builder.Services.AddHostedService<IndicatorProjectionHost>();
+
+// The deterministic trigger scan (gh#385, A1): evaluates every enabled indicator trigger over the projections
+// above and fires a mechanical alert on the arming edge -- no LLM in the loop (ADR-0008). Always on like the
+// projection, because its work is whatever triggers the operator authored. It notifies; it never places an order.
+builder.Services.Configure<TriggerOptions>(builder.Configuration.GetSection(TriggerOptions.SectionName));
+builder.Services.AddScoped<TriggerEvaluationService>();
+builder.Services.AddHostedService<TriggerScanHost>();
 
 // The event log's first consumer (ADR-0007, gh#153): the stop-promotion watcher reads market.quote events and
 // promotes hidden actual stops as price comes within their band. Harmless with no staged stops, so it always runs.
@@ -303,6 +311,7 @@ app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
 app.MapPositionEndpoints();
 app.MapWorkingOrderEndpoints();
+app.MapTriggerEndpoints();
 // Liveness: answers from the process alone and touches NO dependency (§7). A liveness probe that queries the
 // database restarts a healthy app during a database blip -- taking the auto-flatten scheduler down with it.
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
