@@ -53,6 +53,18 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <summary>Append → consume delay, per consumer group.</summary>
     public const string PipelineLag = "trading.eventlog.pipeline_lag";
 
+    /// <summary>Positions the venue reports open — the "…with exposure" qualifier ADR-0019 conditions need.</summary>
+    public const string OpenPositions = "trading.positions.open";
+
+    /// <summary>
+    /// Open positions with <b>no protective stop resting at the venue</b> — ADR-0019's P1, and the thing the
+    /// staged-stop model exists to make impossible.
+    /// </summary>
+    public const string UnprotectedPositions = "trading.positions.unprotected";
+
+    /// <summary>Whether the venue connection is up (1/0).</summary>
+    public const string VenueConnected = "trading.venue.connected";
+
     /// <summary>Outcome tag: the flatten closed the position.</summary>
     public const string FlattenExecuted = "executed";
 
@@ -68,6 +80,26 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <summary>Outcome tag: the market is deliberately disabled (R-13's warned override).</summary>
     public const string FlattenDisabled = "disabled";
 
+    /// <summary>
+    /// Outcome tag: the deadline is near with exposure open — the escalating warning that precedes the flatten
+    /// (R-13). Journalled as <c>flatten.warning</c> since gh#12; metered since gh#370.
+    /// </summary>
+    public const string FlattenWarning = "warning";
+
+    /// <summary>
+    /// Outcome tag: the market has <b>no configured deadline at all</b> — distinct from <see cref="FlattenDisabled"/>
+    /// (gh#370). Deliberately disabled and never configured are different operator errors, and only one of them
+    /// is a surprise; folding them together hid that.
+    /// </summary>
+    public const string FlattenUnconfigured = "unconfigured";
+
+    /// <summary>
+    /// Outcome tag: a close attempt came back with exposure still open — a partial fill, a silent reject, or a
+    /// faulted call (gh#370). Previously indistinguishable from <see cref="FlattenEscalated"/>, which ADR-0019
+    /// separates because escalation means <i>attempts exhausted</i> while this means <i>one attempt bounced</i>.
+    /// </summary>
+    public const string FlattenRejected = "rejected";
+
     private readonly Meter _meter;
     private readonly Counter<long> _gateDecisions;
     private readonly Counter<long> _flattenDeadlines;
@@ -78,6 +110,9 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
 
     private int _killSwitchEngaged;
     private int _orphanedStops;
+    private int _openPositions;
+    private int _unprotectedPositions;
+    private int _venueConnected = 1; // assume up until told otherwise; the monitor corrects on its first pass
 
     /// <summary>Creates the meter and its instruments.</summary>
     /// <param name="meterName">
@@ -118,6 +153,18 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
         _meter.CreateObservableGauge(
             OrphanedStops, () => (long)_orphanedStops, unit: "{stop}",
             description: "Working stops currently orphaned — live synthetic-risk exposure.");
+
+        _meter.CreateObservableGauge(
+            OpenPositions, () => (long)_openPositions, unit: "{position}",
+            description: "Positions the venue reports open.");
+
+        _meter.CreateObservableGauge(
+            UnprotectedPositions, () => (long)_unprotectedPositions, unit: "{position}",
+            description: "Open positions with no protective stop resting at the venue.");
+
+        _meter.CreateObservableGauge(
+            VenueConnected, () => (long)_venueConnected, unit: "{connected}",
+            description: "1 while the venue connection is up.");
     }
 
     /// <inheritdoc />
@@ -155,6 +202,16 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <summary>Sets how many working stops are currently orphaned.</summary>
     /// <param name="count">The count.</param>
     public void SetOrphanedStops(int count) => Interlocked.Exchange(ref _orphanedStops, count);
+
+    /// <inheritdoc />
+    public void SetPositionProtection(int open, int unprotected)
+    {
+        Interlocked.Exchange(ref _openPositions, open);
+        Interlocked.Exchange(ref _unprotectedPositions, unprotected);
+    }
+
+    /// <inheritdoc />
+    public void SetVenueConnected(bool connected) => Interlocked.Exchange(ref _venueConnected, connected ? 1 : 0);
 
     /// <summary>Counts one retention gap observed by a consumer (gh#227).</summary>
     /// <param name="consumerGroup">The consumer group whose cursor fell behind.</param>

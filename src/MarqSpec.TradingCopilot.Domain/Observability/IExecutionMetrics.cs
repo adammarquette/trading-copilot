@@ -57,6 +57,29 @@ public interface IExecutionMetrics
     /// <param name="count">The count.</param>
     void SetOrphanedStops(int count);
 
+    /// <summary>
+    /// Sets the protection census (gh#370): how many positions the venue reports open, and how many of those
+    /// have <b>no protective stop resting at the venue</b>.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="unprotected"/> is <b>ADR-0019's P1</b> — a live position with nothing exchange-held behind
+    /// it is the state the staged-stop model exists to prevent, and nothing measured it before. It is distinct
+    /// from <see cref="SetOrphanedStops"/>, which counts a stop that <i>was</i> venue-held and was orphaned on a
+    /// connection drop: a known, handled transition rather than unaccounted exposure.
+    /// <paramref name="open"/> supplies the "…with exposure" qualifier that several ADR-0019 conditions need.
+    /// </remarks>
+    /// <param name="open">Positions with non-zero net exposure.</param>
+    /// <param name="unprotected">Of those, how many have no resting stop on the same contract.</param>
+    void SetPositionProtection(int open, int unprotected);
+
+    /// <summary>
+    /// Sets whether the venue connection is up (gh#370). A gauge rather than an event, so a rule can express
+    /// ADR-0019's <i>"connection lost &gt; 2 min"</i> as a duration over the series rather than the app having to
+    /// track elapsed time itself.
+    /// </summary>
+    /// <param name="connected">Whether the venue connection is currently up.</param>
+    void SetVenueConnected(bool connected);
+
     /// <summary>Counts one retention gap observed by a consumer (gh#227).</summary>
     /// <param name="consumerGroup">The consumer group whose cursor fell behind.</param>
     void RecordRetentionGap(string consumerGroup);
@@ -81,6 +104,16 @@ public sealed class NullExecutionMetrics : IExecutionMetrics
 
     /// <inheritdoc />
     public void RecordGateDecision(GateOutcome outcome, RiskLayer? bindingLayer)
+    {
+    }
+
+    /// <inheritdoc />
+    public void SetPositionProtection(int open, int unprotected)
+    {
+    }
+
+    /// <inheritdoc />
+    public void SetVenueConnected(bool connected)
     {
     }
 

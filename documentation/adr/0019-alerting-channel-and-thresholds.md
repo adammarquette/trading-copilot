@@ -232,3 +232,51 @@ nothing secret in the repo.
 
 *Still open:* the conditions listed above, once instrumented; and routing the gh#306 backfill **shortfall** —
 today a high-severity log, not yet a metric a rule can read.
+
+## Update (2026-07-28) — every named condition is now instrumented and ruled (gh#370)
+
+The gh#245 update above closed with a list of conditions this ADR names that **no instrument emitted**, and said
+they were listed in the rules file rather than written as dead rules. That list is now empty.
+
+**What was added, and why each was missing.** Three were already *journalled* and simply never metered —
+`flatten.warning`, `flatten.unconfigured`, and the watchdog's rejected close — so the events existed and only the
+signal did not. The other two needed new measurement:
+
+- **`trading.positions.unprotected`** — the P1 this ADR names first, and the one with no near-equivalent.
+  `trading.stops.orphaned` was the closest existing metric and counts a *different* thing: a stop that **was**
+  venue-held and was orphaned on a drop, which is a known and handled transition. This counts exposure with
+  nothing behind it **at all**, including cases nothing ever recorded. A new `ProtectionMonitorService`
+  reconciles venue positions against venue working orders every 30 s to produce it.
+- **`trading.venue.connected`** — a **gauge, re-stated every pass**, not a transition event. That is what lets
+  *"connection lost > 2 min"* live in the rule's `for:` rather than as elapsed-time bookkeeping in application
+  code; a gauge written only on change is indistinguishable from one that stopped being written.
+
+**Venue truth on both sides, deliberately.** The protection census consults no local state. Every local record of
+protection — a `StopPlan`'s staging, an order row — is a *belief* about the venue, and this measurement exists to
+catch a wrong belief; reconciling against our own records would make it agree with itself and detect nothing.
+
+**Unknown is not zero.** If the venue cannot be read, the census is not published at all. A stale or invented zero
+reads as *"nothing unprotected"* — an outage becoming a false all-clear on the one metric this ADR pages on. An
+unwritten gauge goes stale visibly, and the P1 on a silent telemetry pipeline covers that case.
+
+**`unconfigured` split from `disabled`.** Deliberately switched off and never configured are different operator
+errors and only the second is a surprise; folding them together meant a live position in an unconfigured product
+could not be alerted on at all. Likewise the watchdog's **rejected** close is now distinct from **escalated** —
+escalation means attempts *exhausted*, rejection means one attempt *bounced*, and conflated they made a single
+bad close look like the tier giving up.
+
+**A rule whose name lied is fixed.** `FlattenDisabledWithExposure` promised *"with exposure"* and checked no such
+thing; the new open-position gauge makes the name true, so a disabled deadline on a flat book — a configuration
+choice, not an incident — no longer notifies.
+
+**The clean-session fixture still asserts zero P1 and zero P2**, now with the new series present and the new
+rules included. That criterion has held across both increments, which is the only evidence worth having that the
+noise budget above is real.
+
+**The pages now lead somewhere.** gh#245's `runbook` annotations pointed at deployment-runbook anchors that did
+not exist — a page linking nowhere is worse than one with no link. The four incident sections they name are
+written (*when a page arrives*).
+
+*Still open:* routing the gh#306 backfill **shortfall**, which remains a high-severity log rather than a metric a
+rule can read. The **daily check-in** (gh#244) stays deliberately outside this stack — Layer 2 is external, and a
+dead-man's switch that ran here would die with the thing it watches.

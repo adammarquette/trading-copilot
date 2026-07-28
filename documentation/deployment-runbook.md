@@ -365,6 +365,76 @@ stops as soon as a real URL is set.
 re-provisioning and volume persistence). `prometheus.yml` already mounts a `rules/` directory, so `gh#245`'s
 alerting rules arrive as reviewable files rather than console state.
 
+## When a page arrives
+
+Every alert's `runbook` annotation links to one of the sections below — these are what you read at 03:00, so
+they lead with the action, not the explanation. **Assume the system is already doing what it can**: the
+always-native safety stop is the physical floor throughout every one of these.
+
+*(These four sections exist because `gh#245` shipped rules whose `runbook` annotations pointed at anchors that
+did not exist. A page linking nowhere is worse than one with no link — `gh#370` added them.)*
+
+### Auto-flatten failure
+
+**Alert:** `FlattenEscalated` (P1) · `FlattenMissed` (P1)
+
+Exposure is open past its deadline and the system could not close it. `FlattenEscalated` means the primary tier
+exhausted its attempts; `FlattenMissed` means the firing window passed with exposure remaining — on the
+`watchdog` tier that is the last line having failed.
+
+1. **Flatten manually, now**, in the broker platform. Do not wait for the next watchdog pass — if it is escalating,
+   three closes already failed against the same venue.
+2. Check whether the venue is rejecting orders generally (`VenueDisconnectedWithExposure`, broker status page).
+3. Afterwards: `flatten.escalated` / `flatten.missed` journal entries carry the reason per attempt.
+
+Prop-firm note: Topstep's own backstop runs ~15:10 CT. `FlattenMissed` fires **after** it, so a P1 here means the
+firm may already have acted.
+
+### Unprotected position
+
+**Alert:** `UnprotectedPosition` (P1)
+
+The venue reports a live position with **no stop order resting behind it** — the state the staged-stop model
+exists to make impossible. The census (`gh#370`) compares venue positions against venue working orders every
+30 s, so this is venue truth, not a local belief.
+
+1. **Place a protective stop manually, or flatten the position.**
+2. Then find out why: was the entry's bracket rejected at attach; did a cancel remove the wrong leg; is the
+   working stop still `Hidden` and not yet promoted (which is normal, but the *safety* stop should be native
+   regardless)?
+3. `trading_positions_unprotected` and the `ERROR` log from `ProtectionMonitorService` name the count.
+
+This fires only after 2 minutes: a bracket attaches on fill, so a brief unprotected window during entry is
+normal and deliberately not paged.
+
+### Orphaned stops
+
+**Alert:** `OrphanedStopsWithExposure` (P1)
+
+A venue-connection drop moved working stops to `Orphaned` — protection is platform-held rather than
+exchange-held (ADR-0007's `synthetic_risk`). The native safety stop is still resting at the exchange.
+
+1. Check the connection first — the orphan guard **re-arms automatically on reconnect** and re-validates each
+   stop against venue truth, so a brief drop needs no action.
+2. If the connection is up and stops stay orphaned, they could not be re-validated (venue unreachable per-stop).
+   Verify each position's protection at the broker directly.
+3. Persisting past a session: treat as unprotected and act as above.
+
+### Telemetry pipeline
+
+**Alert:** `TelemetryPipelineSilent` (P1)
+
+No flatten-deadline metric for 15 minutes. The flatten loop emits one on **every** evaluation including idle
+ones, so silence means the app is down, the collector is broken, or remote write stopped.
+
+**Read this as *unmonitored*, not as *healthy*.** Every other rule in the file is blind while it fires, which is
+why the flatten alerts are inhibited by it — the actionable page is this one.
+
+1. Is the app running? `docker compose ps`, then its logs.
+2. Is the collector up and receiving? `docker compose --profile observability logs otel-collector`.
+3. Until it clears, **check positions manually at the broker** — the automation may be fine and merely unobserved,
+   or it may be down. You cannot tell from here, which is the point of the alert.
+
 ## The dead-man's switch (operator setup — required before live)
 
 The **only** alerting tier that survives this process dying (R-13, `gh#244`,

@@ -88,6 +88,16 @@ public sealed class FaultInjectingExecutionMetrics : IExecutionMetrics
     }
 
     /// <inheritdoc />
+    public void SetPositionProtection(int open, int unprotected)
+    {
+    }
+
+    /// <inheritdoc />
+    public void SetVenueConnected(bool connected)
+    {
+    }
+
+    /// <inheritdoc />
     public void RecordRetentionGap(string consumerGroup)
     {
     }

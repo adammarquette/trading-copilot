@@ -274,7 +274,7 @@ public sealed class AutoFlattenWatchdogService
             }
 
             // The close returned but the venue still shows exposure (partial fill / silent reject): persist.
-            _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenEscalated);
+            _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenRejected);
             await JournalAsync(RejectedEventType, account, position.Contract,
                 $"Watchdog close left {position.Contract.Key} still exposed — retrying next pass. {decision.Reason}",
                 now, cancellationToken);
@@ -291,7 +291,7 @@ public sealed class AutoFlattenWatchdogService
             _logger.LogError(
                 error, "Auto-flatten watchdog close was rejected for {Account} {Contract}; will retry next pass.",
                 account, position.Contract);
-            _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenEscalated);
+            _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenRejected);
             await JournalAsync(RejectedEventType, account, position.Contract,
                 $"Watchdog close rejected ({error.Message}) — retrying next pass. {decision.Reason}", now, cancellationToken);
             return false;
