@@ -91,6 +91,14 @@ public class RiskProfileRecord : IUserOwned
     public decimal? MaxBestDayFraction { get; set; }
 
     /// <summary>
+    /// Whether breaching <see cref="MaxBestDayFraction"/> refuses the order or only warns (gh#380). Only
+    /// consulted when a target is set. Defaults to <see cref="ConsistencyEnforcement.Advisory"/> so that
+    /// existing profiles — which were saving a target that nothing enforced — do not silently begin refusing
+    /// orders on upgrade; turning on the refusal is an explicit act.
+    /// </summary>
+    public ConsistencyEnforcement ConsistencyEnforcement { get; set; }
+
+    /// <summary>
     /// Which entry action is primary on the Approve split button (R-11, gh#218). <b>Not</b> <c>required</c>: the
     /// zero value <see cref="DefaultEntryAction.ApproveAndArm"/> is the fail-safe default, so an unset row — or one
     /// written before this field existed — resolves to review-first by construction. Defaulting to

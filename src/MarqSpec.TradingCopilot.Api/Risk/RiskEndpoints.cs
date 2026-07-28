@@ -143,6 +143,7 @@ public static class RiskEndpoints
         existing.SizingBasis = request.SizingBasis;
         existing.MaxContractsPerOrder = request.MaxContractsPerOrder;
         existing.MaxBestDayFraction = request.MaxBestDayFraction;
+        existing.ConsistencyEnforcement = request.ConsistencyEnforcement;
         existing.DefaultEntryAction = request.DefaultEntryAction; // guarded above when SendAsIs
 
         await database.SaveChangesAsync(cancellationToken);

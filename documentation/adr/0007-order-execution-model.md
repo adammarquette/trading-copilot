@@ -680,3 +680,35 @@ different and much larger change.
 gateway **directly**, around the app, to witness a resting protective leg and its size — because the app had no
 such read. Every future venue-truth gate would have repeated that, coupling test and observability code to the
 gateway instead of the app boundary. Those gates remain as they are; what changes is that the next one need not.
+## Update (2026-07-28) — the consistency target binds, and its posture is per-account (gh#380)
+
+The last unshipped S2 risk rule. `MaxBestDayFraction` had been persisted, range-checked and settable over the
+risk API since the risk profile landed, but it was **never mapped into `AccountRiskRules`** — so the gate never
+saw it. The rule was configurable without being enforced, which is the worst of both: an operator could set a
+consistency target, see it saved, and trade an evaluation it never once measured.
+
+**It is measured as _best day ÷ cumulative realized profit_**, not *today ÷ total*. The firm's rule caps the
+largest single day, so an evaluation already disqualified by an outsized day last week must stay disqualified —
+a today-relative reading would clear itself every midnight. Days are bucketed in **US Central** via
+`MarketClock`, the same boundary the auto-flatten uses: a UTC date splits a CME session and halves a day's
+apparent share, which is the direction that hides a breach. Only **closed** trades count, because a consistency
+target is a realized-profit rule and counting open positions would make the fraction move with the market
+rather than with what happened.
+
+**Enforcement is per-account (`ConsistencyEnforcement`: `Advisory` | `Block`), not a property of the gate.**
+Every other layer here protects **capital** — breach the drawdown floor and the account is gone, so refusing is
+the only defensible answer. A consistency target protects **payout eligibility**: breaching it does not blow the
+account, it silently disqualifies one that is otherwise passing. Refusing an order for it therefore costs real
+trading on a day that is going well, while permitting it costs an evaluation — and which of those is worse
+belongs to the account, not to this ADR. A funded prop account wants `Block`; a personal account with no payout
+rules wants `Advisory`, or no target at all.
+
+**`Advisory` is the default, including for every pre-existing row.** Those rows have been storing a target that
+nothing enforced; backfilling them as `Block` would let a *migration* start refusing orders on accounts whose
+operator never asked for it. Turning the refusal on is an explicit act.
+
+**The advisory rides alongside the decision rather than becoming a `GateOutcome`.** A fourth "allowed but
+concerned" outcome would silently change the meaning of every existing exhaustive `switch` on a safety-critical
+path; `GateDecision.Advisories` leaves callers that ignore it behaving exactly as before. It is raised whenever
+a target is configured — not only on breach — because an operator who first hears about the constraint when an
+order is refused has already spent the evaluation it was protecting.

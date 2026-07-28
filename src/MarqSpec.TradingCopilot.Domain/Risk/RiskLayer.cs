@@ -29,4 +29,7 @@ public enum RiskLayer
 
     /// <summary>The execution sanity caps — contracts, notional, and fat-finger bounds (R-16).</summary>
     SanityCap,
+
+    /// <summary>The prop-firm consistency target -- one day's share of cumulative profit (gh#380).</summary>
+    ConsistencyTarget,
 }
