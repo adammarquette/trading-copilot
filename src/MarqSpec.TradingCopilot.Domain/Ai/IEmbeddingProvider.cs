@@ -1,4 +1,4 @@
-namespace MarqSpec.TradingCopilot.Domain.AI;
+namespace MarqSpec.TradingCopilot.Domain.Ai;
 
 /// <summary>
 /// Turns text into an embedding vector (gh#109, engineering §2) — the seam a real provider (Cohere, gh#403)

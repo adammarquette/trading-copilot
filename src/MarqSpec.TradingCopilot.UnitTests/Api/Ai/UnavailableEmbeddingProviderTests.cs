@@ -1,10 +1,10 @@
-using MarqSpec.TradingCopilot.Api.AI;
+using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Data;
-using MarqSpec.TradingCopilot.Domain.AI;
+using MarqSpec.TradingCopilot.Domain.Ai;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
-namespace MarqSpec.TradingCopilot.UnitTests.Api.AI;
+namespace MarqSpec.TradingCopilot.UnitTests.Api.Ai;
 
 /// <summary>
 /// The default embedding provider (gh#109): the one registered until Cohere (gh#403) lands, so the substrate is
