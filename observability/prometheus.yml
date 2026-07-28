@@ -11,10 +11,17 @@ global:
     # Distinguishes series if a second environment ever writes into the same Prometheus.
     environment: local
 
-# Alerting rules live here when gh#245 lands. The directory is referenced now, and mounted empty, so adding
-# Alertmanager is a matter of dropping files in rather than re-plumbing the stack.
+# Alerting rules (gh#245). `tests/` holds promtool rule tests, which are NOT rules -- the glob is one level deep
+# on purpose so Prometheus never tries to load them as rule files.
 rule_files:
   - /etc/prometheus/rules/*.yml
+
+# Where the fired alerts go (gh#245, ADR-0019). Alertmanager owns grouping, quiet hours, inhibition and the
+# Pushover receivers; Prometheus only evaluates and hands off.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   # Prometheus watching itself -- the cheapest way to notice the metrics backend is unhealthy.

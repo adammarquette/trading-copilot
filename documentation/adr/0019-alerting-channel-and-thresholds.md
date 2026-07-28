@@ -188,3 +188,47 @@ the rule, not noise to tolerate.
 - **Confirm the deadlines against the CME rulebook.** The times here inherit the flatten schedule's own caveat
   that they are operator-provided reference times, not verified exchange data.
 - **Escalation beyond one person.** Out of scope while the operation is an on-call-of-one; revisit if that changes.
+
+## Update (2026-07-28) — Layer 1 is live: Alertmanager + Pushover (gh#245)
+
+The thresholds above stopped being "recorded but not yet enforced". The in-system rule engine is
+**Alertmanager**, on the gh#231 stack, behind the opt-in `observability` compose profile.
+
+**Alertmanager rather than Grafana unified alerting** (gh#245 asked for the choice and its reason): this ADR's
+noise budget is written in Alertmanager's own vocabulary — `group_wait`, `group_interval`, `repeat_interval`,
+inhibition — so implementing it there is a transcription rather than a translation; rules stay **plain files** a
+PR can review and `promtool test rules` can **execute**; and rule evaluation sits next to the data Prometheus
+already holds. The cost, stated: one more container. Accepted, because it is the component whose absence would
+make every other guarantee here untrue.
+
+**The noise budget is enforced, not aspirational.** `group_wait` 30 s, `group_interval` 5 m, `repeat_interval`
+4 h. P2 is delivered only inside 06:00–17:00 CT via an `active_time_intervals` window on `America/Chicago` (so it
+follows DST rather than drifting twice a year); **P1 carries no time restriction at all** — a 03:00 page is the
+entire point. Three inhibitions keep one incident to one page: P1 suppresses same-component P2, a silent
+telemetry pipeline suppresses the flatten rules it has blinded, and `FlattenEscalated` suppresses the
+`FlattenMissed` that follows it 60 minutes later.
+
+**The backstop contract with the direct push** (gh#242) is implemented as a `for: 2m` on every flatten P1 —
+longer than the direct push's latency, so the fast path wins the race and this layer fires only when the app was
+alive but not self-reporting.
+
+**A clean session pages nobody, and that is a test.** `observability/rules/tests/` holds `promtool` rule tests,
+and the first fixture is an ordinary day — idle evaluations, a normal flatten — asserting **zero** P1 and zero P2.
+That criterion is now executable rather than argued, and it stays true as rules are added.
+
+**What was deliberately NOT built.** Several conditions this ADR names have no instrument behind them yet:
+*open position with no native safety stop*, `flatten.watchdog.rejected`, `flatten.unconfigured` distinct from
+`disabled`, `flatten.warning`, and *connection lost > 2 min with a position open*. Writing rules against invented
+metric names would produce rules that never fire and read as healthy — **the exact failure this ADR exists to
+close**. They are listed in the rules file and tracked as a follow-up for the Coding Agent; the instrumentation
+comes first.
+
+**Credentials are files, not `${VAR}`.** Alertmanager has **no environment-variable expansion in its config** —
+a trap, because nearly every other component in this stack does. `${PUSHOVER_API_TOKEN}` written there is sent to
+Pushover as that literal string: the config loads, the stack looks healthy, and every page fails authentication.
+The receivers therefore use `token_file` / `user_key_file` / `url_file`, and compose materialises those files from
+`.env` values through a `secrets:` block with an `environment:` source — one place for the operator to configure,
+nothing secret in the repo.
+
+*Still open:* the conditions listed above, once instrumented; and routing the gh#306 backfill **shortfall** —
+today a high-severity log, not yet a metric a rule can read.

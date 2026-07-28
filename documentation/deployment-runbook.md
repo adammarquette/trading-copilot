@@ -276,7 +276,8 @@ docker compose --profile observability up -d      # ...plus the stack
 | Service | Port | What it holds |
 |---|---|---|
 | Grafana | 3000 | the single pane; datasources provisioned from `./observability/grafana/provisioning` |
-| Prometheus | 9090 | metrics (remote-write receiver + exemplar storage enabled) |
+| Prometheus | 9090 | metrics (remote-write receiver + exemplar storage enabled); evaluates `./observability/rules` |
+| Alertmanager | 9093 | routing, dedup, quiet hours and the Pushover receivers (`gh#245`, ADR-0019) |
 | Loki | 3100 | logs |
 | Tempo | 3200 | traces |
 | OTel Collector | 4317 / 4318 | the only address the app exports to |
@@ -292,6 +293,72 @@ all three backends.
 **Grafana credentials** default to `admin`/`admin` for local development only, from `GF_SECURITY_ADMIN_USER` /
 `GF_SECURITY_ADMIN_PASSWORD`. A deployed Grafana takes them from that environment's secret store — never from a
 committed file, and never left at the default.
+
+### Alerting — receiver configuration (`gh#245`, ADR-0019)
+
+Alerting is **Layer 1** of ADR-0019: Prometheus evaluates `./observability/rules/*.yml`, Alertmanager routes them
+to Pushover. Layer 2 — the dead-man's switch (`gh#244`) — is external by design and does **not** depend on any of
+this.
+
+Set three values in `.env`:
+
+| Variable | What it is |
+|---|---|
+| `PUSHOVER_USER_KEY` | your Pushover user key |
+| `PUSHOVER_API_TOKEN` | the Pushover **application** token |
+| `ALERTMANAGER_HEARTBEAT_URL` | a dead-man's-switch check URL (healthchecks.io, Dead Man's Snitch, …) |
+
+**These are separate variables from the app's `Pushover__*` settings on purpose.** Those configure the app's own
+direct push (the fast path, `gh#243`); these configure the rule engine's backstop. They may hold the same values,
+but they are read by different processes — and a stack whose alerting silently inherited the app's config would
+give you no way to test one without the other.
+
+**Alertmanager has no environment-variable expansion in its config**, unlike almost everything else in this
+stack. A `${PUSHOVER_API_TOKEN}` written into `alertmanager.yml` would be sent to Pushover as that literal
+string — the config loads, the stack looks healthy, and every page fails authentication. The receivers therefore
+use `token_file` / `user_key_file` / `url_file`, and compose materialises those files from `.env` through a
+`secrets:` block. **Do not "simplify" this back to `environment:`.**
+
+An unset token does not stop the container starting — deliberately, so a bad credential cannot take down the
+thing that reports every other failure. Which is why the next step is not optional.
+
+#### Send a test page (do this after any credential change)
+
+Do **not** wait for a real incident to discover the pager is broken. Fire a synthetic alert straight at
+Alertmanager:
+
+```bash
+curl -s -XPOST http://localhost:9093/api/v2/alerts -H 'Content-Type: application/json' -d '[{"labels":{"alertname":"TestPage","priority":"P1","component":"flatten"},"annotations":{"summary":"Test page — ignore","description":"Verifying the Pushover receiver end to end."}}]'
+```
+
+A P1 must arrive as a Pushover **Emergency** notification that repeats until you acknowledge it. If nothing
+arrives, check `docker compose --profile observability logs alertmanager` — an authentication failure appears
+there as a notify error.
+
+Substitute `"priority":"P2"` to check the quiet-hours behaviour: it should arrive between 06:00–17:00 CT and be
+suppressed outside that window. **A P1 is never suppressed** — that is the entire point of the tier.
+
+#### Verify the rules without deploying
+
+The rules carry executable tests, including a **clean-session fixture** asserting a normal day pages nobody:
+
+```bash
+docker run --rm -v "$PWD/observability:/obs" -w /obs/rules/tests --entrypoint promtool prom/prometheus:v3.0.1 test rules trading-alerts-test.yml
+```
+
+#### Confirm the alerting chain is alive
+
+The `Watchdog` rule fires **permanently** by design and posts to `ALERTMANAGER_HEARTBEAT_URL` every 5 minutes;
+its **absence** is what the external check alarms on. To confirm the chain end to end:
+
+```bash
+curl -s http://localhost:9090/api/v1/alertmanagers   # Prometheus must list the Alertmanager
+curl -s http://localhost:9093/api/v2/alerts          # Watchdog must be present and firing
+```
+
+While `ALERTMANAGER_HEARTBEAT_URL` is left at its placeholder default, that route logs a delivery failure every
+5 minutes. That is intentional — an unconfigured dead-man's switch should be visible rather than silent — and it
+stops as soon as a real URL is set.
 
 **Everything is provisioned as code.** Nothing in this stack is configured by clicking, and
 `docker compose --profile observability down && up` returns the same stack (verified, including datasource

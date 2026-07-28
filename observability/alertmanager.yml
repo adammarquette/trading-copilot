@@ -1,0 +1,142 @@
+# Alertmanager — routing, deduplication and delivery for the rules in ./rules (gh#245, ADR-0019, R-13).
+#
+# WHY ALERTMANAGER RATHER THAN GRAFANA UNIFIED ALERTING (the choice gh#245 asks us to make and justify):
+#   * ADR-0019's noise budget is written in Alertmanager's own vocabulary — group_wait, group_interval,
+#     repeat_interval, inhibition. Implementing it here is a transcription; in Grafana it is a translation.
+#   * Rules stay PLAIN FILES that a PR can review and `promtool test rules` can execute. Grafana's alert state
+#     lives in its own database, and its provisioning is a less direct route to the same place.
+#   * The stack already remote-writes to Prometheus, so rule evaluation sits next to the data with no extra hop.
+# The cost, stated: one more container in the observability profile. Accepted — the profile is opt-in and this is
+# the component whose absence would make every other alerting guarantee here untrue.
+#
+# NO SECRETS IN THIS FILE, and no `${VAR}` either. Alertmanager has NO environment-variable expansion in its
+# config — unlike almost every other component in this stack, and unlike what a reader would reasonably assume.
+# A `${PUSHOVER_API_TOKEN}` written here is sent to Pushover as that literal string: the config loads, the stack
+# looks healthy, and every page fails authentication. On a pager, that is the worst possible failure.
+#
+# So credentials are read from FILES (`*_file`), and compose materialises those files from `.env` values via its
+# `secrets:` block — the operator still configures one place, and nothing secret is written down here.
+
+global:
+  resolve_timeout: 5m
+
+# ---------------------------------------------------------------------------------------------------------
+# Quiet hours. ADR-0019: P2 is suppressed outside 06:00–17:00 CT; P1 NEVER is.
+# ---------------------------------------------------------------------------------------------------------
+time_intervals:
+  - name: trading-hours-ct
+    time_intervals:
+      # America/Chicago, so this follows DST rather than drifting an hour twice a year — the same wall-clock
+      # Central obligation R-13 places on the flatten deadline itself.
+      - location: America/Chicago
+        times:
+          - start_time: "06:00"
+            end_time: "17:00"
+
+route:
+  # Grouped by priority and component so one incident is one notification, not one per instrument.
+  group_by: ["priority", "component", "alertname"]
+
+  # ADR-0019's noise budget, verbatim. repeat_interval is 4h and NOT shorter: the repeat-until-acknowledged
+  # nagging belongs to Pushover Emergency, not here. Both repeating is double-nagging, and a double-nagging
+  # pager gets muted -- which is how a pager stops working.
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  receiver: pushover-p2
+
+  routes:
+    # The heartbeat never reaches a human. It goes to a dead-man's-switch endpoint whose ABSENCE is the alarm.
+    # Every 5 minutes, not every minute: the check on the other end needs a period comfortably shorter than its
+    # own grace, and 5m is that without turning an UNCONFIGURED heartbeat into a per-minute error flood. When the
+    # URL is left at its placeholder default this route logs a delivery failure at that cadence — deliberately
+    # visible, matching gh#244's rule that an unset dead-man's switch is never a silent default, and quiet enough
+    # that a recurring error still reads as a real signal rather than background noise.
+    - matchers: ['priority = "heartbeat"']
+      receiver: heartbeat
+      group_wait: 0s
+      group_interval: 5m
+      repeat_interval: 5m
+      continue: false
+
+    # P1: Emergency priority, and deliberately NO mute_time_intervals — a 03:00 page is the entire point.
+    - matchers: ['priority = "P1"']
+      receiver: pushover-p1
+      continue: false
+
+    # P2: normal priority, delivered ONLY inside trading hours. Expressed as `active_time_intervals` over the
+    # window ADR-0019 names, rather than a mute over its inverse -- one interval to keep correct instead of two
+    # that must stay complementary.
+    - matchers: ['priority = "P2"']
+      receiver: pushover-p2
+      active_time_intervals: ["trading-hours-ct"]
+      continue: false
+
+    # P3: quiet confirmation. Grouped long and never repeated -- it is a receipt, not an incident.
+    - matchers: ['priority = "P3"']
+      receiver: pushover-p3
+      group_wait: 60s
+      repeat_interval: 24h
+      continue: false
+
+# ---------------------------------------------------------------------------------------------------------
+# Inhibition — one incident, one page.
+# ---------------------------------------------------------------------------------------------------------
+inhibit_rules:
+  # A P1 already has the operator's attention; the P2s from the same component are the same story.
+  - source_matchers: ['priority = "P1"']
+    target_matchers: ['priority = "P2"']
+    equal: ["component"]
+
+  # If the app is not reporting at all, every other flatten rule is blind rather than healthy. Suppress them so
+  # the page that arrives says "unmonitored", which is the actionable one.
+  - source_matchers: ['alertname = "TelemetryPipelineSilent"']
+    target_matchers: ['component = "flatten"']
+
+  # An escalation already paged; the `missed` that follows 60 minutes later is the same incident continuing.
+  - source_matchers: ['alertname = "FlattenEscalated"']
+    target_matchers: ['alertname = "FlattenMissed"']
+
+receivers:
+  # P1 — Emergency (2): repeats until ACKNOWLEDGED and bypasses silent mode / DND. ADR-0019's retry/expire.
+  - name: pushover-p1
+    pushover_configs:
+      - user_key_file: /run/secrets/pushover_user_key
+        token_file: /run/secrets/pushover_token
+        priority: "2"
+        retry: 60s
+        expire: 30m
+        title: '[P1] {{ .CommonAnnotations.summary }}'
+        message: |-
+          {{ .CommonAnnotations.description }}
+          {{ if .CommonAnnotations.runbook }}Runbook: {{ .CommonAnnotations.runbook }}{{ end }}
+          Firing: {{ .Alerts.Firing | len }} · Resolved: {{ .Alerts.Resolved | len }}
+        # A resolution closes the incident so an acknowledged page does not linger as an open one.
+        send_resolved: true
+
+  # P2 — normal priority, single push.
+  - name: pushover-p2
+    pushover_configs:
+      - user_key_file: /run/secrets/pushover_user_key
+        token_file: /run/secrets/pushover_token
+        priority: "0"
+        title: '[P2] {{ .CommonAnnotations.summary }}'
+        message: '{{ .CommonAnnotations.description }}'
+        send_resolved: true
+
+  # P3 — quiet: delivered, no sound. A confirmation at zero fatigue cost.
+  - name: pushover-p3
+    pushover_configs:
+      - user_key_file: /run/secrets/pushover_user_key
+        token_file: /run/secrets/pushover_token
+        priority: "-1"
+        title: '{{ .CommonAnnotations.summary }}'
+        message: '{{ .CommonAnnotations.description }}'
+        send_resolved: false
+
+  # The heartbeat sink -- an always-firing alert whose ABSENCE is the alarm.
+  - name: heartbeat
+    webhook_configs:
+      - url_file: /run/secrets/heartbeat_url
+        send_resolved: false
