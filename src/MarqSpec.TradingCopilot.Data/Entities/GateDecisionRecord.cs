@@ -40,6 +40,13 @@ public class GateDecisionRecord : IUserOwned
     /// <summary>The gate's human-readable explanation — always populated (R-5).</summary>
     public required string Reason { get; set; }
 
+    /// <summary>
+    /// Warnings the gate raised that did not by themselves refuse the order, as <c>jsonb</c> (gh#407) —
+    /// <see langword="null"/> when it raised none, which is also what every row written before this column says.
+    /// Recorded so "was the operator warned before the payout was disqualified?" is answerable after the fact.
+    /// </summary>
+    public string? Advisories { get; set; }
+
     /// <summary>When the gate decided.</summary>
     public required DateTimeOffset DecidedAt { get; set; }
 }

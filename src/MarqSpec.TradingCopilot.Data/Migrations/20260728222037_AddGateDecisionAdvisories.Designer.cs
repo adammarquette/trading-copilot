@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using MarqSpec.TradingCopilot.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -13,9 +14,11 @@ using Pgvector;
 namespace MarqSpec.TradingCopilot.Data.Migrations
 {
     [DbContext(typeof(TradingCopilotDbContext))]
-    partial class TradingCopilotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260728222037_AddGateDecisionAdvisories")]
+    partial class AddGateDecisionAdvisories
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1078,9 +1081,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<Guid?>("AccountId")
-                        .HasColumnType("uuid");
-
                     b.Property<int>("ArmCycle")
                         .HasColumnType("integer");
 
@@ -1127,9 +1127,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                     b.Property<int>("Severity")
                         .HasColumnType("integer");
 
-                    b.Property<int?>("Size")
-                        .HasColumnType("integer");
-
                     b.Property<Guid?>("SourceRuleId")
                         .HasColumnType("uuid");
 
@@ -1147,21 +1144,15 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("AccountId");
-
                     b.HasIndex("Enabled", "Route");
 
                     b.ToTable("Triggers", null, t =>
                         {
-                            t.HasCheckConstraint("CK_Triggers_AgentReview_RequiresAccountAndSize", "\"Route\" <> 2 OR (\"AccountId\" IS NOT NULL AND \"Size\" > 0)");
-
                             t.HasCheckConstraint("CK_Triggers_Comparison_NotUnknown", "\"Comparison\" <> 0");
 
                             t.HasCheckConstraint("CK_Triggers_ConditionKind_NotUnknown", "\"ConditionKind\" <> 0");
 
                             t.HasCheckConstraint("CK_Triggers_Hysteresis_PositiveOrNull", "\"Hysteresis\" IS NULL OR \"Hysteresis\" > 0");
-
-                            t.HasCheckConstraint("CK_Triggers_Mechanical_NoAccount", "\"Route\" = 2 OR (\"AccountId\" IS NULL AND \"Size\" IS NULL)");
 
                             t.HasCheckConstraint("CK_Triggers_Period_Positive", "\"Period\" > 0");
 
@@ -1330,14 +1321,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .WithMany()
                         .HasForeignKey("SuggestionId")
                         .OnDelete(DeleteBehavior.SetNull);
-                });
-
-            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.TriggerRecord", b =>
-                {
-                    b.HasOne("MarqSpec.TradingCopilot.Data.Entities.Account", null)
-                        .WithMany()
-                        .HasForeignKey("AccountId")
-                        .OnDelete(DeleteBehavior.Cascade);
                 });
 
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.Connection", b =>

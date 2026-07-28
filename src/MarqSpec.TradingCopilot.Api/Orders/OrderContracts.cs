@@ -81,14 +81,16 @@ public sealed record ModifyWorkingOrderRequest(
 /// <param name="VenueOrderKey">The venue's own order handle, when placed.</param>
 /// <param name="ApprovedQuantity">The contracts the gate authorized (0 when blocked or never sized).</param>
 /// <param name="BindingLayer">The risk layer that bound the decision, when one did.</param>
-/// <param name="Reason">The human-readable why — always populated.</param>
+/// <param name="Reason">The gate's human-readable why — always populated (R-5).</param>
+/// <param name="Advisories">Warnings the gate raised that did not by themselves refuse the order — the consistency target the operator is approaching or has passed (gh#407, ADR-0007). Empty, never null.</param>
 public sealed record SendOrderResponse(
     string Outcome,
     Guid? OrderId,
     string? VenueOrderKey,
     int ApprovedQuantity,
     RiskLayer? BindingLayer,
-    string Reason);
+    string Reason,
+    IReadOnlyList<GateAdvisory> Advisories);
 
 /// <summary>A staged (armed) order with its latest gate decision (gh#11 increment 2, ADR-0007).</summary>
 /// <param name="OrderId">The staged order's id.</param>
@@ -98,6 +100,7 @@ public sealed record SendOrderResponse(
 /// <param name="BindingLayer">The risk layer that bound the decision, when one did.</param>
 /// <param name="Reason">The gate's human-readable why — always populated (R-5).</param>
 /// <param name="Target">The staged take-profit target, when one was set — so the operator sees and edits it (gh#173).</param>
+/// <param name="Advisories">Warnings the gate raised that did not refuse the order (gh#407). Empty, never null.</param>
 public sealed record StagedOrderResponse(
     Guid OrderId,
     string Status,
@@ -105,7 +108,8 @@ public sealed record StagedOrderResponse(
     int ApprovedQuantity,
     RiskLayer? BindingLayer,
     string Reason,
-    decimal? Target)
+    decimal? Target,
+    IReadOnlyList<GateAdvisory> Advisories)
 {
     /// <summary>Projects a staged row and its decision.</summary>
     /// <param name="order">The staged order.</param>
@@ -122,7 +126,8 @@ public sealed record StagedOrderResponse(
             decision.ApprovedQuantity,
             decision.BindingLayer,
             decision.Reason,
-            order.TakeProfitPrice);
+            order.TakeProfitPrice,
+            decision.Advisories);
     }
 }
 
