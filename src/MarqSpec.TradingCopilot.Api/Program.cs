@@ -13,6 +13,7 @@ using MarqSpec.TradingCopilot.Api.Notifications;
 using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Recovery;
+using MarqSpec.TradingCopilot.Api.Relevance;
 using MarqSpec.TradingCopilot.Api.Risk;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Api.Venues;
@@ -99,6 +100,14 @@ builder.Services.AddHostedService<BarBackfillHost>();
 builder.Services.Configure<NewsIngestionOptions>(builder.Configuration.GetSection(NewsIngestionOptions.SectionName));
 builder.Services.AddScoped<NewsIngestionService>();
 builder.Services.AddHostedService<NewsIngestionHost>();
+
+// R-2's news relevance resolution (gh#359): materializes matched instruments/topics onto ingested news via the
+// deployment's GLOBAL ticker<->instrument maps + topics. Always on like the indicator projection; its work is
+// whatever news needs resolving (unresolved, or stale since a config change), so a config edit re-resolves the
+// affected news predictably. It maps; the per-user salience over these matches is a separate concern (gh#27).
+builder.Services.Configure<NewsRelevanceOptions>(builder.Configuration.GetSection(NewsRelevanceOptions.SectionName));
+builder.Services.AddScoped<NewsRelevanceService>();
+builder.Services.AddHostedService<NewsRelevanceHost>();
 
 // Indicator projections over that store (gh#310, R-1, ADR-0001: "indicators are projections… rebuild = replay").
 // ALWAYS runs and needs no symbol list of its own -- its work is whatever the bar store holds, so bars can never
@@ -285,6 +294,7 @@ app.MapConnectionEndpoints();
 app.MapAccountEndpoints();
 app.MapRiskEndpoints();
 app.MapTriggerEndpoints();
+app.MapRelevanceEndpoints();
 app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
 app.MapPositionEndpoints();
