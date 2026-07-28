@@ -652,3 +652,31 @@ take-a-suggestion path in S3, and the **consistency %** rule needs P&L-by-day hi
 - Confirm **ProjectX** native bracket / OCO / stop-type capabilities (Q-1); the synthetic layer covers gaps (R-17).
 - Stand up the **high-rigor test suites** for the risk gate, execution, staged stops, kill switch, and auto-flatten
   (engineering §9).
+
+## Update (2026-07-28) — resting orders are readable through the app (gh#381)
+
+`IOrderExecutor.GetWorkingOrdersAsync` was added for exactly one consumer: OCO-cancel-on-exit finding the
+protective legs still standing on a contract that has gone flat (gh#183). It now has a second — an HTTP read,
+`GET /accounts/{id}/orders` — and the venue-neutral view it returns gained a **size**.
+
+**Why the size was missing, and why that mattered.** `WorkingOrder` was deliberately narrow: *"what a caller needs
+to identify a leg and audit it, not the whole order model."* Cancelling a leg needs its handle, not its quantity,
+so size was left off — a correct scoping call for the only consumer that existed. But *how much of a position a
+protective leg actually covers* is not an ornament: **a bracket sized to less than the position leaves the
+remainder unprotected**, and nothing through the app could see that. This was never a venue limitation; the
+ProjectX gateway order has always carried `Size` and only the final projection dropped it.
+
+**Why it is a read in the `Recovery` family, not in the order command group.** `/accounts/{id}/orders` already
+exists as a **POST** command surface (journal-backed). This is a **GET** on venue truth, and it belongs beside
+`GET /accounts/{id}/positions` — the app's venue-truth read family (ADR-0013) — because that is what it is. The
+two registrations do not collide, and keeping them apart keeps the boundary honest: one records intent, the other
+reports what the exchange says is true.
+
+**Read-only, and the gate is untouched.** Nothing here is execution-shaped — no writes, no cancels, no
+re-validation. The risk / execution gate is unaffected by design; a read that could move an order would be a
+different and much larger change.
+
+**The bypass this removes.** The gh#269 / gh#293 pre-live bracket gates (PR #374) had to talk to the ProjectX
+gateway **directly**, around the app, to witness a resting protective leg and its size — because the app had no
+such read. Every future venue-truth gate would have repeated that, coupling test and observability code to the
+gateway instead of the app boundary. Those gates remain as they are; what changes is that the next one need not.

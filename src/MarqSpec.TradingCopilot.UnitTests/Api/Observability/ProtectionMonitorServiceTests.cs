@@ -81,7 +81,7 @@ public class ProtectionMonitorServiceTests
         new(VenueAccountId.Create(Venue, "9001"), VenueContractId.Create(Venue, key), net, new Price(5_000m));
 
     private static WorkingOrder Stop(string key) =>
-        new("ORD-1", VenueContractId.Create(Venue, key), new Price(4_990m), LimitPrice: null);
+        new("ORD-1", VenueContractId.Create(Venue, key), new Price(4_990m), LimitPrice: null, Size: 2);
 
     [Fact]
     public async Task ObserveAsync_ShouldReportAnUnprotectedPosition()

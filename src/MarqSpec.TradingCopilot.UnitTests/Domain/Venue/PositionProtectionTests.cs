@@ -24,10 +24,10 @@ public class PositionProtectionTests
         new(Account, Contract(key), net, new Price(5_000m));
 
     private static WorkingOrder Stop(string key) =>
-        new("ORD-1", Contract(key), new Price(4_990m), LimitPrice: null);
+        new("ORD-1", Contract(key), new Price(4_990m), LimitPrice: null, Size: 2);
 
     private static WorkingOrder TakeProfit(string key) =>
-        new("ORD-2", Contract(key), StopPrice: null, LimitPrice: new Price(5_050m));
+        new("ORD-2", Contract(key), StopPrice: null, LimitPrice: new Price(5_050m), Size: 2);
 
     [Fact]
     public void Census_ShouldCountAProtectedPosition_AsOpenButNotUnprotected()
