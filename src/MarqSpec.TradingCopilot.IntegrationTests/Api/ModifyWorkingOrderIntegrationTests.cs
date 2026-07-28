@@ -279,21 +279,25 @@ public class ModifyWorkingOrderIntegrationTests : IClassFixture<OcoExitTestPostg
         VenueFactory.ModifyOrderCalls.Should().BeEmpty("creating a hidden plan touches no venue");
     }
 
-    [Fact]
-    public async Task RestageWorkingStop_ShouldRefuse409_WhenPlanIsOrphaned()
+    [Theory]
+    [InlineData(StopStaging.Orphaned)]
+    [InlineData(StopStaging.Native)]
+    [InlineData(StopStaging.Retired)]
+    public async Task RestageWorkingStop_ShouldRefuse409_WhenPlanIsNotHidden(StopStaging staging)
     {
         HttpClient client = await FreshOperatorAsync();
         Guid accountId = await SetupAccountAsync(client);
         await DeclareRiskProfileAsync(client, accountId);
         Guid operatorId = await OperatorIdAsync();
         Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, VenueKey);
-        await SeedStopPlanAsync(orderId, operatorId, StopStaging.Orphaned);
+        await SeedStopPlanAsync(orderId, operatorId, staging);
 
         using HttpResponseMessage response = await client.PatchAsJsonAsync(
             $"/orders/{orderId}/price", new { workingStopPrice = 4_995m });
 
-        response.StatusCode.Should().Be(HttpStatusCode.Conflict, "an orphaned stop re-arms against venue truth, not a local re-stage");
-        (await StopPlanAsync(orderId))!.Value.Staging.Should().Be(StopStaging.Orphaned, "the orphaned plan is untouched");
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict,
+            "only a Hidden plan re-stages locally — a promoted/orphaned/retired plan is a distinct venue-truth state and is refused");
+        (await StopPlanAsync(orderId))!.Value.Staging.Should().Be(staging, "the non-Hidden plan is untouched");
         (await WorkingStopAsync(orderId)).Should().Be(Working, "the order is untouched");
         VenueFactory.ModifyOrderCalls.Should().BeEmpty();
     }
@@ -303,9 +307,16 @@ public class ModifyWorkingOrderIntegrationTests : IClassFixture<OcoExitTestPostg
     {
         HttpClient client = await FreshOperatorAsync();
         Guid accountId = await SetupAccountAsync(client);
-        // Under ActualStop the per-trade layer is measured at the WORKING stop, so a widen can breach it. A $50
-        // per-trade cap: widening to 4982 is (5000-4982) x $5 x 1 = $90 > $50 — the one case a working-stop move re-gates.
-        await DeclareRiskProfileAsync(client, accountId, maxDrawdownPerTrade: 50m, sizingBasis: SizingBasis.ActualStop);
+        // The refusal must come from the layer measured at the WORKING stop, not a constant safety-stop layer.
+        // MaxDrawdownPerTrade is set HIGH (1000: at the $100 safety-stop worst case that is 10 contracts — NOT the
+        // binding layer), so the only layer that can block a size-1 order here is PerTradeRisk under ActualStop, which
+        // measures at the working stop. Budget = PerTradeRiskFraction 0.0375 × $2000 headroom = $75. Widening to 4982
+        // makes the working-stop loss (5000-4982)×$5 = $90 > $75 → floor = 0 contracts → refused. A smaller widen to
+        // 4988 (loss $60 < $75) would re-stage — the decision tracks the working-stop distance, so this guard truly
+        // exercises the ActualStop per-trade layer (gh#387 review fix: the old $50 MaxDrawdownPerTrade blocked at the
+        // safety stop regardless, making the working-stop layer irrelevant).
+        await DeclareRiskProfileAsync(
+            client, accountId, maxDrawdownPerTrade: 1_000m, sizingBasis: SizingBasis.ActualStop, perTradeRiskFraction: 0.0375m);
         Guid operatorId = await OperatorIdAsync();
         Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, VenueKey);
         await SeedStopPlanAsync(orderId, operatorId, StopStaging.Hidden);
@@ -314,7 +325,7 @@ public class ModifyWorkingOrderIntegrationTests : IClassFixture<OcoExitTestPostg
             $"/orders/{orderId}/price", new { workingStopPrice = 4_982m });
 
         response.StatusCode.Should().Be(HttpStatusCode.UnprocessableEntity,
-            "a widen under ActualStop re-gates the per-trade layer — this one breaches it");
+            "a widen under ActualStop re-gates the per-trade layer at the working stop — this one breaches it");
         (await WorkingStopAsync(orderId)).Should().Be(Working, "the refused widen leaves the working stop unchanged");
         VenueFactory.ModifyOrderCalls.Should().BeEmpty("a re-gate refusal transmits nothing");
     }
@@ -358,12 +369,17 @@ public class ModifyWorkingOrderIntegrationTests : IClassFixture<OcoExitTestPostg
         Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, VenueKey);
         await SeedStopPlanAsync(orderId, operatorId, StopStaging.Hidden);
 
-        // The new working stop (4995) would sit ABOVE the new entry (4970) — the chain is broken. Refused BEFORE the
-        // venue call, so the entry never reprices against an about-to-fail plan write (the gh#259 desync hazard).
+        // BOTH stops stay below the new entry (5008), so the risk gate's own stop-protective check passes — but the
+        // new working stop (4975) drops BELOW the safety stop (4980), breaking safety < working < entry. That is the
+        // pre-venue ordering guard's UNIQUE responsibility: the gate enforces stops-below-entry, NOT safety-below-
+        // working (only CK_StopPlans does). Assert the "cross" message so the refusal is pinned to the ordering
+        // backstop, not a downstream gate block — the exact geometry that made this guard vacuous before gh#387 review.
         using HttpResponseMessage response = await client.PatchAsJsonAsync(
-            $"/orders/{orderId}/price", new { entryPrice = 4_970m, workingStopPrice = 4_995m, referencePrice = 4_970m });
+            $"/orders/{orderId}/price", new { entryPrice = 5_008m, workingStopPrice = 4_975m, referencePrice = 5_008m });
 
-        response.StatusCode.Should().Be(HttpStatusCode.UnprocessableEntity, "a crossing combined move is refused");
+        response.StatusCode.Should().Be(HttpStatusCode.UnprocessableEntity, "a combined move that crosses safety → working → entry is refused");
+        ErrorResponse? body = await response.Content.ReadFromJsonAsync<ErrorResponse>(_jsonOptions);
+        body!.Error.Should().Contain("cross", "the refusal is the pre-venue ordering backstop, not a downstream gate block");
         (await EntryPriceAsync(orderId)).Should().Be(Entry, "the entry is untouched");
         (await WorkingStopAsync(orderId)).Should().Be(Working, "the working stop is untouched");
         VenueFactory.ModifyOrderCalls.Should().BeEmpty("nothing reaches the venue when the geometry crosses");
@@ -450,7 +466,12 @@ public class ModifyWorkingOrderIntegrationTests : IClassFixture<OcoExitTestPostg
             $"/orders/{orderId}/price", new { size = 0 });
 
         response.StatusCode.Should().Be(HttpStatusCode.UnprocessableEntity, "size must be a positive contract count");
+        ErrorResponse? body = await response.Content.ReadFromJsonAsync<ErrorResponse>(_jsonOptions);
+        body!.Error.Should().Contain("positive", "the refusal is the input guard, not a downstream gate block");
         (await SizeAsync(orderId)).Should().Be(1, "the order's size is untouched");
+        // Distinguishes the input guard from a gate refusal (which would size to 0 and persist a decision): the input
+        // guard returns BEFORE the order is even loaded or the gate runs, so no GateDecisionRecord is written.
+        (await GateDecisionCountAsync(orderId)).Should().Be(0, "the input guard precedes the gate — no decision is recorded");
         VenueFactory.ModifyOrderCalls.Should().BeEmpty();
     }
 
@@ -537,6 +558,155 @@ public class ModifyWorkingOrderIntegrationTests : IClassFixture<OcoExitTestPostg
             "one atomic venue modify carries the new entry and the new size");
     }
 
+    [Fact]
+    public async Task CombinedMove_ShouldRefuseByGate_WhenWiderWorkingStopBreachesPerTrade()
+    {
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        // The combined venue path threads the NEW working stop into the gate (effWorking -> BuildRequestAsync), so a
+        // risk-increasing widen must be caught there. Same calibration as the local widen test: MaxDrawdownPerTrade
+        // high (safety layer non-binding), PerTradeRisk under ActualStop the sole discriminator (budget $75). Entry
+        // rises only slightly (5002) so the SAFETY worst case ($110) still fits size 1; the widened WORKING stop (4982)
+        // gives (5002-4982)x$5 = $100 > $75 -> 0 contracts -> Block. The OLD working stop (4990) would be $60 < $75 and
+        // pass, so a regression feeding the gate the resting stop instead of the new one would let this through.
+        await DeclareRiskProfileAsync(
+            client, accountId, maxDrawdownPerTrade: 1_000m, sizingBasis: SizingBasis.ActualStop, perTradeRiskFraction: 0.0375m);
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, VenueKey);
+        await SeedStopPlanAsync(orderId, operatorId, StopStaging.Hidden);
+
+        using HttpResponseMessage response = await client.PatchAsJsonAsync(
+            $"/orders/{orderId}/price", new { entryPrice = 5_002m, workingStopPrice = 4_982m, referencePrice = 5_002m });
+
+        response.StatusCode.Should().Be(HttpStatusCode.UnprocessableEntity, "R-12: the combined move re-gates the new working stop");
+        RefusalResponse? body = await response.Content.ReadFromJsonAsync<RefusalResponse>(_jsonOptions);
+        body!.Outcome.Should().Be(nameof(ExecutionOutcome.RefusedByRisk), "the widened working stop breached the per-trade layer");
+        (await EntryPriceAsync(orderId)).Should().Be(Entry, "a gate-refused combined move leaves the entry untouched");
+        (await WorkingStopAsync(orderId)).Should().Be(Working, "and the working stop untouched");
+        VenueFactory.ModifyOrderCalls.Should().BeEmpty("a gate refusal never reaches the venue");
+    }
+
+    [Fact]
+    public async Task Resize_ShouldDownsize_TransmittingTheSmallerSize()
+    {
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        await DeclareRiskProfileAsync(client, accountId);
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, VenueKey, size: 3);
+
+        // An operator-requested DOWNSIZE (3 -> 1) is strictly risk-reducing, so the gate approves it as-asked and the
+        // smaller size reaches the gateway. Distinct from a gate-clipped resize, which is an upsize the gate reduced.
+        using HttpResponseMessage response = await client.PatchAsJsonAsync(
+            $"/orders/{orderId}/price", new { size = 1 });
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK, "a downsize is accepted");
+        (await SizeAsync(orderId)).Should().Be(1, "the order shrank to the requested size");
+        VenueFactory.ModifyOrderCalls.Should().ContainSingle(call => call.VenueOrderKey == VenueKey && call.Size == 1,
+            "the smaller size is transmitted — a dispatch that only fired on upsizes would make a downsize a silent no-op");
+    }
+
+    [Fact]
+    public async Task Resize_ShouldRefuseByRisk_WhenGateBlocks()
+    {
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        // The safety worst case is (5000-4980)x$5 = $100/contract; a $50 per-trade cap leaves room for zero, so the
+        // gate BLOCKS (not merely resizes) even a 1-contract resize -> RefusedByRisk, no venue call.
+        await DeclareRiskProfileAsync(client, accountId, maxDrawdownPerTrade: 50m);
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, VenueKey);
+
+        using HttpResponseMessage response = await client.PatchAsJsonAsync(
+            $"/orders/{orderId}/price", new { size = 2 });
+
+        response.StatusCode.Should().Be(HttpStatusCode.UnprocessableEntity, "a resize the gate blocks is refused");
+        RefusalResponse? body = await response.Content.ReadFromJsonAsync<RefusalResponse>(_jsonOptions);
+        body!.Outcome.Should().Be(nameof(ExecutionOutcome.RefusedByRisk));
+        (await SizeAsync(orderId)).Should().Be(1, "a blocked resize leaves the order at its old size");
+        VenueFactory.ModifyOrderCalls.Should().BeEmpty("a gate block never reaches the venue — the naked-order backstop holds");
+    }
+
+    [Fact]
+    public async Task Resize_ShouldAudit_OldSizeToNewSize()
+    {
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        await DeclareRiskProfileAsync(client, accountId);
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, VenueKey);
+
+        using HttpResponseMessage response = await client.PatchAsJsonAsync(
+            $"/orders/{orderId}/price", new { size = 3 });
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        (AuditAction Action, string? Before, string? After) audit = await ModifyAuditAsync();
+        audit.Action.Should().Be(AuditAction.OrderModified, "the resize writes an immutable audit entry (R-20 accountability)");
+        decimal.Parse(audit.Before!, CultureInfo.InvariantCulture).Should().Be(1, "the audit captures the pre-resize size");
+        decimal.Parse(audit.After!, CultureInfo.InvariantCulture).Should().Be(3, "the audit captures the gate-approved post-resize size");
+    }
+
+    [Fact]
+    public async Task RestageWorkingStop_ShouldAudit_WhenReStagedLocally()
+    {
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        await DeclareRiskProfileAsync(client, accountId);
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, VenueKey);
+        await SeedStopPlanAsync(orderId, operatorId, StopStaging.Hidden);
+
+        using HttpResponseMessage response = await client.PatchAsJsonAsync(
+            $"/orders/{orderId}/price", new { workingStopPrice = 4_995m });
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        (AuditAction Action, string? Before, string? After) audit = await ModifyAuditAsync();
+        audit.Action.Should().Be(AuditAction.OrderModified, "the local re-stage is audited too (gh#267)");
+        decimal.Parse(audit.Before!, CultureInfo.InvariantCulture).Should().Be(Working, "the audit captures the pre-re-stage working stop");
+        decimal.Parse(audit.After!, CultureInfo.InvariantCulture).Should().Be(4_995m, "the audit captures the new working stop");
+    }
+
+    [Fact]
+    public async Task Resize_ShouldPersistGateDecision()
+    {
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        await DeclareRiskProfileAsync(client, accountId);
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, VenueKey);
+
+        using HttpResponseMessage response = await client.PatchAsJsonAsync(
+            $"/orders/{orderId}/price", new { size = 3 });
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // gh#278 review fix: a sized gate attempt always leaves a GateDecisionRecord, so the modify path's decision is
+        // reconstructable for audit — not only the pure-place path's.
+        (await GateDecisionCountAsync(orderId)).Should().Be(1, "the resize re-gate persists exactly one decision");
+        (int Approved, string Outcome) decision = await LatestGateDecisionAsync(orderId);
+        decision.Approved.Should().Be(3, "the persisted decision carries the gate-approved quantity");
+    }
+
+    [Fact]
+    public async Task RestageWorkingStop_ShouldRefuse422_WhenNewStopReachesTheEntry()
+    {
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        await DeclareRiskProfileAsync(client, accountId);
+        Guid operatorId = await OperatorIdAsync();
+        Guid orderId = await SeedWorkingOrderAsync(accountId, operatorId, VenueKey);
+        await SeedStopPlanAsync(orderId, operatorId, StopStaging.Hidden);
+
+        // The other half of the ordering guard: a working stop must sit strictly INSIDE the entry (below it for a Buy).
+        // A stop AT the entry (5000) leaves no protection distance and is refused.
+        using HttpResponseMessage response = await client.PatchAsJsonAsync(
+            $"/orders/{orderId}/price", new { workingStopPrice = 5_000m });
+
+        response.StatusCode.Should().Be(HttpStatusCode.UnprocessableEntity, "a working stop at the entry has no protection distance");
+        (await WorkingStopAsync(orderId)).Should().Be(Working, "the working stop is untouched");
+        (await StopPlanAsync(orderId))!.Value.ActualStop.Should().Be(Working, "the plan is untouched");
+        VenueFactory.ModifyOrderCalls.Should().BeEmpty();
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Helpers.
     // ---------------------------------------------------------------------------------------------------------
@@ -619,7 +789,8 @@ public class ModifyWorkingOrderIntegrationTests : IClassFixture<OcoExitTestPostg
         Guid accountId,
         decimal maxDrawdownPerTrade = 300m,
         SizingBasis sizingBasis = SizingBasis.SafetyStop,
-        int maxContractsPerOrder = 5)
+        int maxContractsPerOrder = 5,
+        decimal perTradeRiskFraction = 0.15m)
     {
         DeclareRiskProfileRequest declareReq = new(
             DailyLossLimit: 1_000m,
@@ -628,7 +799,7 @@ public class ModifyWorkingOrderIntegrationTests : IClassFixture<OcoExitTestPostg
             TrailingMode: TrailingMode.Intraday,
             TrailingAmount: 2_000m,
             LocksAt: 50_100m,
-            PerTradeRiskFraction: 0.15m,
+            PerTradeRiskFraction: perTradeRiskFraction,
             TargetRewardRatio: 1.5m,
             MaxDrawdownPerTrade: maxDrawdownPerTrade,
             DailyDrawdownGovernor: 600m,
@@ -714,6 +885,16 @@ public class ModifyWorkingOrderIntegrationTests : IClassFixture<OcoExitTestPostg
     {
         StopPlanRecord? plan = await db.StopPlans.IgnoreQueryFilters().Where(p => p.OrderId == orderId).SingleOrDefaultAsync();
         return plan is null ? ((StopStaging, decimal, decimal)?)null : (plan.Staging, plan.ActualStopPrice, plan.EntryPrice);
+    });
+
+    private Task<int> GateDecisionCountAsync(Guid orderId) => QueryDbAsync(db =>
+        db.GateDecisions.IgnoreQueryFilters().Where(d => d.OrderId == orderId).CountAsync());
+
+    private Task<(int Approved, string Outcome)> LatestGateDecisionAsync(Guid orderId) => QueryDbAsync(async db =>
+    {
+        GateDecisionRecord record = await db.GateDecisions.IgnoreQueryFilters()
+            .Where(d => d.OrderId == orderId).OrderByDescending(d => d.DecidedAt).FirstAsync();
+        return (record.ApprovedQuantity, record.Outcome.ToString());
     });
 
     private Task<Guid> OperatorIdAsync() =>
