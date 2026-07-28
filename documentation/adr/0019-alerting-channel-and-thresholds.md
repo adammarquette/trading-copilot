@@ -177,6 +177,15 @@ the rule, not noise to tolerate.
   failed push is not mistaken for one the operator received. The seam's contract shifts with it:
   `SendAsync` returning true now means **accepted for delivery**, not delivered — a caller on the safety path
   cannot wait for delivery without reintroducing the defect.
+  **Guarded by `gh#320` (2026-07-28).** Note what the fix did *not* do: it never bounded the flatten's own await.
+  `AutoFlattenService.NotifyAsync` still awaits `INotificationChannel.SendAsync` with the caller's token and
+  absorbs a channel that *throws*, not one that *hangs* — so the whole protection is a property of **what is bound
+  to that seam**, not of anything the flatten service does. Bind a transport there directly and the R-13 hot path
+  silently regains an unbounded await, with every existing test still green (the channel suite constructs the queue
+  itself; the service suite injects a fake). The binding is therefore extracted to
+  `NotificationRegistration.AddTradingCopilotNotifications` and asserted: the seam resolves to the **queue**, the
+  **pump is registered** (a queue nobody drains accepts every page and delivers none), and the chain is a
+  **singleton** (a scoped one forgets the open incident and re-pages every poll).
   **One refinement to this ADR:** dedup was specified "in the adapter"; it landed one layer out as
   `DedupingNotificationChannel`, so every future adapter (Discord `gh#100`, web push ADR-0010) inherits it rather
   than reimplementing it, and it is unit-testable without a transport. The requirement is unchanged — one push per
