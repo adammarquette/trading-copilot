@@ -46,6 +46,13 @@ public class DataLayerScopingTests
         // becomes embeddable (a private rulebook rule, R-7), the ownership question reopens and this allowlist
         // entry is the place it must be re-argued rather than silently inherited.
         typeof(EmbeddingRecord),
+
+        // The global relevance config (gh#359): the ticker↔instrument maps, topics, and the config-version marker
+        // are DEPLOYMENT config (SPY→ES is a market fact, not an operator preference), so global like the news they
+        // resolve. The per-user salience that reweights the resolved matches (gh#27) is the operator-owned part.
+        typeof(TickerInstrumentMap),
+        typeof(NewsTopic),
+        typeof(RelevanceConfigState),
     };
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;

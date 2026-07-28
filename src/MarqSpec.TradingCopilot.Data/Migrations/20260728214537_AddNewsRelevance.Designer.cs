@@ -4,18 +4,20 @@ using System.Collections.Generic;
 using MarqSpec.TradingCopilot.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
-using Pgvector;
 
 #nullable disable
 
 namespace MarqSpec.TradingCopilot.Data.Migrations
 {
     [DbContext(typeof(TradingCopilotDbContext))]
-    partial class TradingCopilotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260728214537_AddNewsRelevance")]
+    partial class AddNewsRelevance
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -307,41 +309,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .IsUnique();
 
                     b.ToTable("Connections");
-                });
-
-            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.EmbeddingRecord", b =>
-                {
-                    b.Property<int>("OwnerKind")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("OwnerId")
-                        .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
-
-                    b.Property<string>("Model")
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
-
-                    b.Property<string>("ContentHash")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<int>("Dimensions")
-                        .HasColumnType("integer");
-
-                    b.Property<Vector>("Embedding")
-                        .IsRequired()
-                        .HasColumnType("vector(1024)");
-
-                    b.Property<DateTimeOffset>("RecordedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("OwnerKind", "OwnerId", "Model");
-
-                    b.HasIndex("OwnerKind", "RecordedAt");
-
-                    b.ToTable("Embeddings");
                 });
 
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.Event", b =>
