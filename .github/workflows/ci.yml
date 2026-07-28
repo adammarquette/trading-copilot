@@ -129,3 +129,85 @@ jobs:
           # Reuse layers across builds on the same branch -- the SDK restore/publish is the slow part.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------------------------------------
+  # Pipeline steps 4-6 (gh#379): deploy the artifact CI just published, then prove the deployed instance serves.
+  # ---------------------------------------------------------------------------------------------------------
+
+  deploy:
+    name: deploy (Railway)
+    needs: publish-image
+    # Merges only, and NEVER main. Production deploy and rollback are human-approved, never automatic
+    # (Platform contract, non-negotiable) -- a merge-triggered production deploy would break that rule by
+    # construction, so `main` is excluded here rather than guarded by a setting someone can forget to apply.
+    # Promoting to production stays the runbook's manual procedure.
+    if: github.event_name == 'push' && (github.ref_name == 'develop' || github.ref_name == 'staging')
+    runs-on: ubuntu-latest
+    outputs:
+      deployed: ${{ steps.trigger.outputs.deployed }}
+    steps:
+      # Both hooks are read into the environment because a secret name cannot be built dynamically in an
+      # expression; the branch selects between them in the step below.
+      - name: Trigger the Railway deploy
+        id: trigger
+        env:
+          HOOK_DEV: ${{ secrets.RAILWAY_DEPLOY_HOOK_DEV }}
+          HOOK_STAGING: ${{ secrets.RAILWAY_DEPLOY_HOOK_STAGING }}
+        run: |
+          set -euo pipefail
+          case "${{ github.ref_name }}" in
+            develop) HOOK="${HOOK_DEV:-}";     TARGET="dev" ;;
+            staging) HOOK="${HOOK_STAGING:-}"; TARGET="staging" ;;
+            *)       echo "::error::Unreachable: the job guard already excluded this branch."; exit 1 ;;
+          esac
+
+          # Skip rather than fail when the hook is unset. The Railway environments and the image-sourced
+          # services are operator console actions CI cannot perform (runbook, ADR-0018), so until they exist
+          # this job must be inert -- the runbook deliberately refused to "half-wire a deploy trigger against a
+          # not-yet-image-sourced service", and a red pipeline on every merge would be exactly that.
+          if [ -z "$HOOK" ]; then
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No RAILWAY_DEPLOY_HOOK for '$TARGET' — skipping the deploy. Set the secret once the environment exists (runbook: Operator setup)."
+            exit 0
+          fi
+
+          echo "Deploying ghcr.io/${{ github.repository }}:${{ github.ref_name }} to '$TARGET'."
+          status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+                     --max-time 30 --request POST "$HOOK") || status="000"
+
+          if [ "$status" != "200" ] && [ "$status" != "204" ]; then
+            echo "::error::Railway deploy hook for '$TARGET' returned HTTP $status."
+            exit 1
+          fi
+
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+          echo "Deploy requested."
+
+  verify:
+    name: verify (deployed instance)
+    needs: deploy
+    if: needs.deploy.outputs.deployed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # /ready, not /health: /health answers from the process and returns 200 even when the database is
+      # unreachable, which is the failure a post-deploy check exists to catch. GET-only, read-only.
+      - name: Probe /ready
+        env:
+          BASE_DEV: ${{ secrets.DEPLOY_BASE_URL_DEV }}
+          BASE_STAGING: ${{ secrets.DEPLOY_BASE_URL_STAGING }}
+        run: |
+          set -euo pipefail
+          case "${{ github.ref_name }}" in
+            develop) BASE="${BASE_DEV:-}" ;;
+            staging) BASE="${BASE_STAGING:-}" ;;
+          esac
+
+          if [ -z "$BASE" ]; then
+            echo "::error::Deployed '${{ github.ref_name }}' but DEPLOY_BASE_URL is unset, so the release cannot be verified."
+            echo "::error::An unverified deploy is not a successful one — set the secret (runbook: Operator setup)."
+            exit 1
+          fi
+
+          scripts/verify-deploy.sh "$BASE"

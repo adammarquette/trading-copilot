@@ -5,8 +5,10 @@
 concrete **resources and procedures** for deploying and operating the platform.
 
 **Status:** living — the local stack and the CI → GHCR image pipeline are **real** (`src/` is the actual solution;
-pipeline steps 1–3 below run on every merge). The **Railway deploy hook is not wired yet** — steps 4–6 are the
-intended shape (see *Operator setup* and *Open items*), and the cloud environments still need creating.
+pipeline steps 1–3 below run on every merge). **Steps 4 and 6 — deploy and verify — are now wired in
+`ci.yml` (`gh#379`) but inert**: they skip until the operator creates the `dev` / `staging` Railway environments
+and sets the deploy-hook secrets (*Operator setup* steps 4–5). Step 5, the staging integration tier, is still
+unwired. The cloud environments still need creating, so nothing deploys today.
 
 ## Platform
 - **Cloud:** [Railway](https://railway.com) — project **`soothing-illumination`**
@@ -93,7 +95,8 @@ non-prod environment — non-prod is **practice-only** (real execution path, no 
 | `staging` | staging | **practice** | prod snapshot · integration tests run here | auto on merge |
 | `main` | production | **live** — real money, the *only* live env | authoritative | **human-approved** |
 
-*(A new Railway project starts with a single environment; the `dev` + `staging` environments still need creating.)*
+*(A new Railway project starts with a single environment; the `dev` + `staging` environments still need creating —
+see *Operator setup* steps 4–5. The pipeline half is wired and inert until they exist, `gh#379`.)*
 
 ## Secrets & config (per environment)
 Server-side only, from the Railway environment — **never in source** (Options pattern, validate-on-start; §8):
@@ -143,12 +146,24 @@ independently: ingestion (websocket) · poller · processor(s) · trigger engine
      `.env.example`. **Run it locally** before a PR that adds configuration; it needs only Docker.
 3. **Publish image to GHCR** — CI builds the `Dockerfile` **once** and pushes `ghcr.io/adammarquette/trading-copilot`
    tagged `:<branch>` + `:sha-<short>`. Merge-only (`if: github.event_name == 'push'`); a PR never publishes.
-4. **Railway deploys that image** (the pushed tag) to the branch's environment — the tested artifact, not a rebuild
-   *(not yet wired: console step 2 below is pending, so Railway does not deploy on merge today)*.
+4. **Railway deploys that image** (the pushed tag) to the branch's environment — the tested artifact, not a rebuild.
+   The `deploy` job is **wired** (`gh#379`) for `develop` → dev and `staging` → staging, and it **skips with a
+   notice** until the branch's `RAILWAY_DEPLOY_HOOK_*` secret is set — so the pipeline stays green while the
+   console steps below are outstanding, rather than going red on every merge. **`main` is deliberately excluded:**
+   production deploy and rollback are human-approved, never automatic, so a merge-triggered production deploy is
+   refused *by construction* rather than by a setting someone can forget. Promoting to production stays the
+   manual *Deploy procedure* below.
 5. **Integration tests** run against **staging** after a merge to `staging` *(not yet wired — this is the staging
    tier; the venue-independent **pre-merge tier already runs in CI**, step 2 / gh#121)*.
 6. On **production** deploy, a **smoke-test subset** runs; a failure **flags the release for rollback** — pin the
-   previous `:sha-<short>` tag to roll back to an exact prior build *(not yet wired, with step 5)*.
+   previous `:sha-<short>` tag to roll back to an exact prior build *(the smoke subset is not yet wired, with
+   step 5)*. The **`verify` job is wired** (`gh#379`) for the environments step 4 deploys: it probes
+   **`GET /ready`** on the deployed instance via `scripts/verify-deploy.sh`, retrying while the container starts
+   and applies migrations. `/ready` rather than `/health` on purpose — `/health` answers from the process and
+   returns 200 even when the database is unreachable, which is precisely the failure a post-deploy check exists
+   to catch. A deploy whose base URL secret is missing **fails**: an unverified deploy is not a successful one.
+   The script is runnable locally (`scripts/verify-deploy.sh http://localhost:8080`), so the local check and the
+   gate cannot disagree.
 
 ### Operator setup — console actions CI cannot do (ADR-0018)
 The build/push half is code (`.github/workflows/ci.yml`). These are one-time console steps, recorded here because
@@ -159,6 +174,26 @@ configuration that lives only in a provider console is otherwise invisible to an
    rather than building from the repo source. No pull credential is needed (public image).
 3. Until step 2 is done, Railway still builds from source; the GHCR image is used by local dev only. The pipeline
    is deliberately left this way rather than half-wiring a deploy trigger against a not-yet-image-sourced service.
+   The `deploy` job added by `gh#379` honours that: with no hook secret it **skips**, so it cannot fire against a
+   service that would rebuild from source instead of pulling the tested artifact.
+4. **Create the `dev` and `staging` environments** in the Railway project and map them per *Environments ↔
+   branches*. A new Railway project starts with a single environment, so both are missing today.
+5. **Set the per-environment secrets.** Two of them turn the pipeline on, and nothing else does:
+
+   | Secret (GitHub Actions) | Purpose |
+   |---|---|
+   | `RAILWAY_DEPLOY_HOOK_DEV` / `RAILWAY_DEPLOY_HOOK_STAGING` | Railway deploy-hook URL. **Absent ⇒ the deploy job skips.** |
+   | `DEPLOY_BASE_URL_DEV` / `DEPLOY_BASE_URL_STAGING` | Public base URL of the deployed instance, for the `/ready` probe. **Absent after a deploy ⇒ the verify job fails.** |
+
+   The application's own secrets (ProjectX credentials + endpoints, DB connection, OTLP) are **Railway
+   environment variables**, never GitHub secrets and never in source — CI triggers a deploy, it does not carry
+   the app's configuration.
+
+   > ⚠️ **The ProjectX credential mapping is the safety-critical step in this entire setup.** `dev` and `staging`
+   > are **practice-only**; a **live** account belongs to `production` and nowhere else (R-14). Nothing below this
+   > mapping can catch a mistake — the application cannot tell it was handed live credentials in staging, and the
+   > first symptom is a real order on real money. Verify the account for each non-prod environment **at the
+   > broker** after setting it, not from the value you believe you pasted.
 
 ### Automated code review — a ruleset, not a workflow
 **Copilot code review is not a GitHub Actions job** and cannot be invoked from `ci.yml`. It is a **branch
