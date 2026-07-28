@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Domain.Observability;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
@@ -82,7 +83,9 @@ public static class TelemetryRegistration
                     .AddHttpClientInstrumentation()
                     .AddRuntimeInstrumentation()
                     // The execution-specific SLIs (gh#232) -- this system's own signals, beside the generic RED.
-                    .AddMeter(ExecutionMetrics.MeterName);
+                    .AddMeter(ExecutionMetrics.MeterName)
+                    // AI spend: tokens / cost / latency per embed call (gh#403).
+                    .AddMeter(EmbeddingMetrics.MeterName);
 
                 if (options.ExportEnabled)
                 {

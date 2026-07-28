@@ -165,9 +165,18 @@ builder.Services.AddHostedService<VenueConnectionMonitorHost>();
 // and publishes how many live positions have no protective stop resting at the exchange. ADR-0019 makes that a
 // P1, and until now nothing measured it -- so the rule gh#245 wanted could not be written. Measurement only: it
 // reports on the protection the execution path is responsible for, and never places an order itself.
-// The embedding seam (gh#109, engineering §2). The KEYLESS default until the Cohere provider (gh#403) lands:
-// the substrate must be usable, and every test must run, without an API key or any spend.
-builder.Services.AddSingleton<IEmbeddingProvider, UnavailableEmbeddingProvider>();
+// The embedding seam (gh#109, engineering §2). Cohere when a key is configured (gh#403), the KEYLESS default
+// otherwise -- the substrate stays usable, and every test runs, without an API key or any spend.
+builder.Services.Configure<CohereOptions>(builder.Configuration.GetSection(CohereOptions.SectionName));
+builder.Services.AddHttpClient(CohereEmbeddingProvider.HttpClientName);
+builder.Services.AddSingleton<EmbeddingMetrics>();
+builder.Services.AddSingleton<IEmbeddingMetrics>(provider => provider.GetRequiredService<EmbeddingMetrics>());
+builder.Services.AddSingleton<UnavailableEmbeddingProvider>();
+builder.Services.AddSingleton<CohereEmbeddingProvider>();
+builder.Services.AddSingleton<IEmbeddingProvider>(provider =>
+    provider.GetRequiredService<IOptions<CohereOptions>>().Value.IsConfigured
+        ? provider.GetRequiredService<CohereEmbeddingProvider>()
+        : provider.GetRequiredService<UnavailableEmbeddingProvider>());
 
 builder.Services.AddScoped<ProtectionMonitorService>();
 builder.Services.AddHostedService<ProtectionMonitorHost>();
