@@ -34,6 +34,11 @@ public class DataLayerScopingTests
         // Indicator projections over those bars (gh#310). Derived market data, so global for the same R-20
         // reason: a tenant filter would hide the market from the operator trading it.
         typeof(IndicatorValueRecord),
+
+        // The deduped news / soft-signal store of record (gh#358). Global by the SAME R-20 rule the requirement
+        // names explicitly — "reference & market data ... raw news is shared / global". The per-user salience
+        // that reweights it (SoftSignalFeedback, gh#27) will be operator-owned; the news items themselves are not.
+        typeof(NewsRecord),
     };
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
