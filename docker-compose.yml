@@ -333,6 +333,9 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      # Dashboards as FILES (gh#366). Read-only, and the provider sets allowUiUpdates:false -- a dashboard
+      # clicked together in the UI cannot be reviewed in a PR and does not survive a `down -v`.
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
       - "3000:3000"
