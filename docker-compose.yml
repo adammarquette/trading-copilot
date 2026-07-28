@@ -134,6 +134,14 @@ services:
       Indicators__AtrPeriod:
       Indicators__BandResolutionMinutes:
       Indicators__PollIntervalSeconds:
+      # News / soft-signal ingestion (R-2, gh#358) -- the deduped store of record, the news analogue of the bar
+      # store above. Scalar options, so there is no indexed list to enumerate and cap here. OPT-IN via
+      # News__Enabled (off unless set); null pass-through leaves the app's defaults (cadence 300 s, lookback
+      # 60 min) alone. The concrete provider adapters (Finnhub, Tiingo) are follow-ons -- until one is wired, an
+      # enabled poller finds no source and stays idle.
+      News__Enabled:
+      News__PollIntervalSeconds:
+      News__LookbackMinutes:
       # The dead-man's switch (R-13, gh#244, ADR-0019) -- the only alerting tier that survives THIS process
       # dying, so a deployment without it is silently missing its most important safety net. Deliberately NOT
       # defaulted: these are capability URLs (whoever holds one can forge an all-clear), so there is no sane
