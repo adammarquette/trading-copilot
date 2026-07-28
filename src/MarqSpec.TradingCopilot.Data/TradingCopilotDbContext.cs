@@ -92,6 +92,12 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>The append-only audit trail (ADR-0007, gh#220) — safety-relevant transitions, immutable. Operator-owned.</summary>
     public DbSet<AuditRecord> AuditRecords => Set<AuditRecord>();
 
+    /// <summary>Operator-authored deterministic indicator triggers (gh#385, A1). Operator-owned; the periodic scan evaluates them.</summary>
+    public DbSet<Trigger> Triggers => Set<Trigger>();
+
+    /// <summary>The append-only journal of trigger firings (gh#385) — one row per crossing. Operator-owned.</summary>
+    public DbSet<TriggerFiringRecord> TriggerFirings => Set<TriggerFiringRecord>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -491,6 +497,51 @@ public class TradingCopilotDbContext : TenantDbContext
                 // never stored, so a row can never read as an audited event that did not happen.
                 table.HasCheckConstraint("CK_AuditRecords_Action_NotUnknown", "\"Action\" <> 0");
                 table.HasCheckConstraint("CK_AuditRecords_Placement_NotUnknown", "\"Placement\" <> 0");
+            });
+        });
+
+        modelBuilder.Entity<Trigger>(trigger =>
+        {
+            trigger.Property(t => t.Instrument).HasMaxLength(32);
+            trigger.Property(t => t.Indicator).HasMaxLength(32);
+            trigger.Property(t => t.Threshold).HasPrecision(18, 8);
+
+            // The scan reads one operator's enabled triggers at a time (per-owner, R-20).
+            trigger.HasIndex(t => new { t.UserId, t.Enabled });
+
+            trigger.ToTable(table =>
+            {
+                // Refusable zeros (the gh#60 / gh#176 pattern): a comparison or route can never be stored unset, so
+                // a trigger can never silently satisfy on a default, nor route nowhere. ArmState.Unseeded (0) IS a
+                // valid state, so it is deliberately not constrained. Period/resolution mirror the domain guard.
+                table.HasCheckConstraint("CK_Triggers_Comparison_NotUnknown", "\"Comparison\" <> 0");
+                table.HasCheckConstraint("CK_Triggers_Route_NotUnknown", "\"Route\" <> 0");
+                table.HasCheckConstraint("CK_Triggers_Period_Positive", "\"Period\" > 0");
+                table.HasCheckConstraint("CK_Triggers_Resolution_Positive", "\"ResolutionMinutes\" > 0");
+            });
+        });
+
+        modelBuilder.Entity<TriggerFiringRecord>(firing =>
+        {
+            firing.Property(f => f.Instrument).HasMaxLength(32);
+            firing.Property(f => f.Indicator).HasMaxLength(32);
+            firing.Property(f => f.Threshold).HasPrecision(18, 8);
+            firing.Property(f => f.Value).HasPrecision(18, 8);
+
+            // The journal reads chronologically per operator.
+            firing.HasIndex(f => new { f.UserId, f.FiredAt });
+
+            // The incident is unique per (trigger, cycle) -- the durable dedup ledger behind the scan's
+            // commit-then-notify: two committed firings for one crossing are impossible by construction, and the
+            // DB enforces it so a retry or a race can never journal (or alert) the same incident twice.
+            firing.HasIndex(f => new { f.TriggerId, f.ArmCycle }).IsUnique();
+
+            // TriggerId is a SOFT reference (no FK): the firing is append-only and must survive the trigger it
+            // records being edited or deleted -- the AuditRecord pattern.
+
+            firing.ToTable(table =>
+            {
+                table.HasCheckConstraint("CK_TriggerFirings_Comparison_NotUnknown", "\"Comparison\" <> 0");
             });
         });
     }
