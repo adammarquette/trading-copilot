@@ -102,7 +102,20 @@ public sealed class TimescaleEventLog : IEventLog
 
         return cursorStillInsideWindow
             ? EventPage.Of(events)
-            : new EventPage(events, new EventRetentionGap(afterSequence, oldestAvailable));
+            : new EventPage(
+                events,
+                // The oldest survivor's occurred-at rides along as the END of the blind window (gh#306): recovery
+                // reads a store keyed on time buckets, and this is the only place that boundary is known.
+                new EventRetentionGap(afterSequence, oldestAvailable, events[0].OccurredAt));
+    }
+
+    /// <inheritdoc />
+    public async Task<DateTimeOffset?> GetCursorCommittedAtAsync(string consumerGroup, CancellationToken cancellationToken)
+    {
+        EventCursor? cursor = await _database.EventCursors
+            .FirstOrDefaultAsync(candidate => candidate.ConsumerGroup == consumerGroup, cancellationToken);
+
+        return cursor?.CommittedAt;
     }
 
     /// <inheritdoc />

@@ -89,6 +89,8 @@ public sealed class ConditionalOrderHost : BackgroundService
                             ConsumerGroup,
                             page.Gap.RequestedAfterSequence,
                             page.Gap.OldestAvailableSequence);
+
+                        await ReportMissedTriggersAsync(scope, log, page.Gap, stoppingToken);
                     }
 
                     IReadOnlyList<EventEnvelope> batch = page.Events;
@@ -144,6 +146,66 @@ public sealed class ConditionalOrderHost : BackgroundService
                 _logger.LogWarning(error, "Conditional-order firing pass failed; retrying after {Delay}.", IdlePoll);
                 await Task.Delay(IdlePoll, stoppingToken);
             }
+        }
+    }
+
+    /// <summary>
+    /// Names the pending conditionals whose trigger the blind window crossed — <b>and fires none of them</b>
+    /// (gh#306, R-1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This consumer deliberately does not backfill, and this is that decision on the record</b> rather than an
+    /// omission. gh#306 asks each log consumer either to recover its blind window or to say why it does not. Stop
+    /// promotion recovers because promoting is protective, one-way, and re-gated against venue truth. Firing an
+    /// <i>entry</i> is none of those: a cross that happened minutes ago would open a position at a price that has
+    /// moved on — acting on stale grounds, which ADR-0013 forbids and R-12's validity tolerance exists to prevent.
+    /// The failure direction stays <i>"did not fire"</i>.
+    /// </para>
+    /// <para>
+    /// What it adds is specificity. The operator was already told that <i>something</i> was missed; being told
+    /// <b>which</b> conditionals were crossed while blind is what makes it actionable rather than merely alarming
+    /// — and the decision to re-arm is theirs, which is the human-in-the-loop premise this system is built on.
+    /// </para>
+    /// </remarks>
+    private async Task ReportMissedTriggersAsync(
+        AsyncServiceScope scope,
+        IEventLog log,
+        EventRetentionGap gap,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            DateTimeOffset? since = await log.GetCursorCommittedAtAsync(ConsumerGroup, cancellationToken);
+            if (since is null)
+            {
+                return; // no committed cursor -> the window's start is unknown; the gap itself is already reported
+            }
+
+            GapBackfillService backfill = scope.ServiceProvider.GetRequiredService<GapBackfillService>();
+            IReadOnlyList<MissedTrigger> missed =
+                await backfill.DetectMissedTriggersAsync(since.Value, gap.OldestAvailableOccurredAt, cancellationToken);
+
+            foreach (MissedTrigger trigger in missed)
+            {
+                _logger.LogError(
+                    "Conditional {ConditionalOrderId} on {Contract} would have fired while the log was blind: it "
+                    + "triggers {Direction} {TriggerPrice} and {From}–{To} reached {Reached}. It was NOT fired and "
+                    + "remains Pending — firing an entry on a cross this old would be acting on stale grounds. "
+                    + "Re-arm or cancel it deliberately.",
+                    trigger.ConditionalOrderId, trigger.ContractKey, trigger.Direction, trigger.TriggerPrice,
+                    since.Value, gap.OldestAvailableOccurredAt, trigger.ReachedPrice);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // Reporting is strictly additive to a gap signal that has already been logged at error. It must never
+            // escalate into an outage on the firing path.
+            _logger.LogError(error, "Missed-trigger detection on {ConsumerGroup} failed.", ConsumerGroup);
         }
     }
 }

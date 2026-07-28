@@ -86,14 +86,19 @@ public sealed class StopPromotionHost : BackgroundService
                         // confidently wrong, not merely stale. Say so LOUDLY and resume deliberately: the native
                         // safety stop is the physical floor throughout, and the next quote re-evaluates every
                         // hidden stop from scratch, so resuming at the head is recovery rather than a guess.
+                        // The signal stays exactly as loud as gh#227 made it. Backfill is IN ADDITION to telling
+                        // the operator, never instead of it -- a recovery that quietened the signal would trade a
+                        // known hole for an unknown one.
                         _logger.LogError(
                             "Event-log retention gap on {ConsumerGroup}: cursor {Cursor} fell behind the window; "
                             + "the oldest surviving sequence is {OldestAvailable}. Quotes in between were dropped "
-                            + "and are NOT recoverable from this log. Resuming at the head — hidden stops are "
-                            + "re-evaluated on the next quote, and the native safety stop held throughout.",
+                            + "and are NOT recoverable from this log. Backfilling the window from the "
+                            + "clean-historical store; the native safety stop held throughout.",
                             ConsumerGroup,
                             page.Gap.RequestedAfterSequence,
                             page.Gap.OldestAvailableSequence);
+
+                        await BackfillAsync(scope, log, page.Gap, venueFactory, stoppingToken);
                     }
 
                     IReadOnlyList<EventEnvelope> batch = page.Events;
@@ -153,6 +158,77 @@ public sealed class StopPromotionHost : BackgroundService
                 _logger.LogWarning(error, "Stop-promotion pass failed; retrying after {Delay}.", IdlePoll);
                 await Task.Delay(IdlePoll, stoppingToken);
             }
+        }
+    }
+
+    /// <summary>
+    /// Recovers what the blind window is still recoverable from — the clean-historical bar store (gh#306, R-1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Runs inside this consumer's own pass, so a consumer catching up <b>cannot stall the ones that are
+    /// current</b>: each rides its own <see cref="BackgroundService"/> loop with its own cursor.
+    /// </para>
+    /// <para>
+    /// <b>Never fatal.</b> A backfill that throws must not take down the watcher or block the live path — the
+    /// live path is the one holding the safety-critical duty, and the gap has already been reported at error.
+    /// So a failure here degrades recovery to the pre-gh#306 behaviour (resume at the head) rather than
+    /// escalating a recovery problem into an outage.
+    /// </para>
+    /// </remarks>
+    private async Task BackfillAsync(
+        AsyncServiceScope scope,
+        IEventLog log,
+        EventRetentionGap gap,
+        IProjectXVenueFactory venueFactory,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            DateTimeOffset? since = await log.GetCursorCommittedAtAsync(ConsumerGroup, cancellationToken);
+            if (since is null)
+            {
+                // No commit row means no known lower bound. Inventing one would be fabricating the window's size,
+                // so say what is true instead (engineering §9: never fabricate a number).
+                _logger.LogError(
+                    "Gap on {ConsumerGroup} cannot be backfilled: no committed cursor, so the start of the blind "
+                    + "window is unknown. Resuming at the head without recovery.", ConsumerGroup);
+                return;
+            }
+
+            GapBackfillService backfill = scope.ServiceProvider.GetRequiredService<GapBackfillService>();
+            ITradingVenue venue = venueFactory.Create(FirmConventions.None);
+
+            GapBackfillOutcome outcome = await backfill.ReplayForStopPromotionAsync(
+                since.Value, gap.OldestAvailableOccurredAt, venue.Id, venue, cancellationToken);
+
+            _logger.LogWarning(
+                "Gap backfill on {ConsumerGroup} re-evaluated hidden stops against {From}–{To} and promoted "
+                + "{Promoted}.",
+                ConsumerGroup, since.Value, gap.OldestAvailableOccurredAt, outcome.Promoted);
+
+            // The shortfall is reported SEPARATELY and at error, never folded into the line above. A backfill that
+            // covered part of a window and read as "recovered" would be worse than the silence gh#227 replaced.
+            foreach (InstrumentCoverage shortfall in outcome.Shortfalls)
+            {
+                _logger.LogError(
+                    "Gap backfill on {ConsumerGroup} did NOT fully cover {Contract}: {Shortfall} of {From}–{To} "
+                    + "has no bars in the store. Hidden stops on it may have crossed their promotion band "
+                    + "unobserved and are NOT recovered — the native safety stop remains the floor.",
+                    ConsumerGroup, shortfall.ContractKey, shortfall.Coverage.Shortfall,
+                    since.Value, gap.OldestAvailableOccurredAt);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error,
+                "Gap backfill on {ConsumerGroup} failed. The gap itself was already reported; resuming at the head "
+                + "without recovery, with the native safety stop as the floor.", ConsumerGroup);
         }
     }
 }
