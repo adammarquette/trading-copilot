@@ -77,6 +77,21 @@ public class TriggerRecord : IUserOwned
     /// </summary>
     public Guid? SourceRuleId { get; set; }
 
+    /// <summary>
+    /// The account a fired <see cref="TriggerRoute.AgentReview"/> suggestion is issued against (R-14) — a real FK,
+    /// set <b>only</b> on the agent-review route and NULL for a mechanical trigger (a DB check pairs it with
+    /// <see cref="Route"/>). The suggestion reads the account's <b>live</b> mode at issuance; nothing about mode is
+    /// stored here.
+    /// </summary>
+    public Guid? AccountId { get; set; }
+
+    /// <summary>
+    /// The contract size a fired <see cref="TriggerRoute.AgentReview"/> suggestion is issued at (R-16) — set
+    /// <b>only</b> on the agent-review route and always positive there, NULL for a mechanical trigger. Size is the
+    /// <b>operator's</b>, fixed on the trigger; the model never chooses it.
+    /// </summary>
+    public int? Size { get; set; }
+
     /// <summary>When the trigger was created.</summary>
     public required DateTimeOffset CreatedAt { get; set; }
 
