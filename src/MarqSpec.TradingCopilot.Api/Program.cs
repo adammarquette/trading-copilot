@@ -197,41 +197,11 @@ builder.Services.AddSingleton<FlattenScheduleReporter>();
 builder.Services.AddScoped<AutoFlattenWatchdogService>();
 builder.Services.AddHostedService<AutoFlattenWatchdogHost>();
 
-// The notification channel (gh#243, ADR-0019): LAYER 1 of alerting -- the push the app sends itself, because it
-// knows first. Routing a P1 through a metrics scrape and a rule evaluation would cost tens of seconds on a path
-// where CL and GC have ~15 minutes of margin in total. Pushover because an on-call-of-one needs a PAGER: its
-// Emergency priority is the only one that repeats until ACKNOWLEDGED and bypasses Do Not Disturb.
-//
-// Registered as a SINGLETON: the dedup decorator holds the open-incident set, and a scoped one would forget it
-// every pass -- turning "one page per incident" into one page per 15-second poll. Unconfigured falls back to a
-// channel that logs what it would have sent, so a fork or a fresh deployment still boots (loudly, never silently).
-builder.Services.Configure<PushoverOptions>(builder.Configuration.GetSection(PushoverOptions.SectionName));
-builder.Services.AddHttpClient<PushoverNotificationChannel>(
-    client => { client.Timeout = TimeSpan.FromSeconds(10); });
-// The chain, outermost first: QUEUE -> dedup -> transport.
-//
-// The queue is outermost because the caller is the auto-flatten, and gh#289 showed what awaiting a transport
-// there costs: a 5-second channel made a flatten pass take 5.15 s, on the R-13 path, at the exact moment a
-// position was already failing to close. Enqueue returns immediately; a background pump does the network work.
-//
-// Dedup sits BELOW the queue, not above it, and that ordering is load-bearing: the pump is single-threaded, so
-// the "already reported?" check and the record of reporting can no longer interleave and double-page, and dedup
-// sees the REAL delivery result rather than the queue's "accepted".
-builder.Services.AddSingleton<NullNotificationChannel>();
-builder.Services.AddSingleton<QueuedNotificationChannel>(provider =>
-{
-    PushoverOptions pushover = provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<PushoverOptions>>().Value;
-    INotificationChannel transport = pushover.IsConfigured
-        ? provider.GetRequiredService<PushoverNotificationChannel>()
-        : provider.GetRequiredService<NullNotificationChannel>();
-
-    DedupingNotificationChannel deduping = new(
-        transport, provider.GetRequiredService<ILogger<DedupingNotificationChannel>>());
-
-    return new QueuedNotificationChannel(deduping, provider.GetRequiredService<ILogger<QueuedNotificationChannel>>());
-});
-builder.Services.AddSingleton<INotificationChannel>(provider => provider.GetRequiredService<QueuedNotificationChannel>());
-builder.Services.AddHostedService<NotificationPumpHost>();
+// The operator-notification chain, queue -> dedup -> transport (gh#243, gh#289, ADR-0019). Extracted to
+// NotificationRegistration (gh#320) so the SHAPE of the binding is assertable: the auto-flatten calls
+// INotificationChannel on the R-13 hot path, and a regression that bound a blocking transport there would leave
+// every existing test green.
+builder.AddTradingCopilotNotifications();
 
 // The dead-man's switch (R-13, gh#244, ADR-0019): the THIRD tier, and the only one that lives OUTSIDE this
 // process. Both tiers above die with the host -- so if it dies before a deadline, the flatten never fires and
