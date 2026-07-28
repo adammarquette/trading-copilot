@@ -5,9 +5,11 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.MarketData;
 
@@ -34,6 +36,7 @@ public class GapBackfillServiceTests
     private readonly Guid _operator = Guid.NewGuid();
     private readonly string _database = Guid.NewGuid().ToString();
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
+    private readonly IIndicatorSource _indicators = A.Fake<IIndicatorSource>();
     private static VenueId Venue => VenueId.Parse("projectx");
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
@@ -50,9 +53,18 @@ public class GapBackfillServiceTests
         new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
             new FixedUser(Guid.Empty));
 
+    /// <remarks>
+    /// The indicator seam is a fake that is never consulted: every plan this suite seeds carries a <b>tick</b>
+    /// band, and gh#311 only queries an indicator for an ATR one. It is here to satisfy the constructor, not to
+    /// influence a decision — so a promotion in these tests still turns purely on the recovered bar extremes.
+    /// </remarks>
     private GapBackfillService Service(TradingCopilotDbContext context) =>
         new(context,
-            new StopPromotionService(context, NullLogger<StopPromotionService>.Instance),
+            new StopPromotionService(
+                context,
+                _indicators,
+                Options.Create(new IndicatorOptions()),
+                NullLogger<StopPromotionService>.Instance),
             NullLogger<GapBackfillService>.Instance);
 
     private TradingCopilotDbContext Seed() =>
