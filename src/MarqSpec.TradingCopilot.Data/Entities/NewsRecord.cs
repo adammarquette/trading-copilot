@@ -56,4 +56,19 @@ public sealed class NewsRecord
     /// stays answerable separately from "when it published" (mirrors <see cref="BarRecord.RecordedAt"/>).
     /// </summary>
     public required DateTimeOffset RecordedAt { get; set; }
+
+    /// <summary>
+    /// The traded instruments this story bears on (gh#359) — resolved from its <see cref="Tickers"/> via the global
+    /// ticker↔instrument maps, plus any instrument-scoped topic it matched. Empty until the relevance pass resolves it.
+    /// </summary>
+    public List<string> MatchedInstruments { get; set; } = [];
+
+    /// <summary>The topics this story matched (gh#359), by keyword over its title + summary. Empty until resolved.</summary>
+    public List<string> MatchedTopics { get; set; } = [];
+
+    /// <summary>
+    /// When relevance was last resolved for this story, or <see langword="null"/> if never. The pass resolves rows
+    /// that are null or older than the relevance config's last change (gh#359).
+    /// </summary>
+    public DateTimeOffset? RelevanceResolvedAt { get; set; }
 }

@@ -95,6 +95,15 @@ public class TradingCopilotDbContext : TenantDbContext
     /// </summary>
     public DbSet<EmbeddingRecord> Embeddings => Set<EmbeddingRecord>();
 
+    /// <summary>Global ticker↔instrument relevance maps (gh#359) — deployment config, not operator-owned.</summary>
+    public DbSet<TickerInstrumentMap> TickerInstrumentMaps => Set<TickerInstrumentMap>();
+
+    /// <summary>Global relevance topics (gh#359) — deployment config, not operator-owned.</summary>
+    public DbSet<NewsTopic> NewsTopics => Set<NewsTopic>();
+
+    /// <summary>The single-row relevance-config version marker (gh#359) — drives re-resolution. System plumbing.</summary>
+    public DbSet<RelevanceConfigState> RelevanceConfigStates => Set<RelevanceConfigState>();
+
     /// <summary>Per-consumer-group replay cursors over the event log (ADR-0001). System plumbing.</summary>
     public DbSet<EventCursor> EventCursors => Set<EventCursor>();
 
@@ -536,6 +545,37 @@ public class TradingCopilotDbContext : TenantDbContext
 
             // The read pattern relevance (gh#359) and the co-pilot will use: recent news by publication time.
             news.HasIndex(n => n.PublishedAt);
+
+            // The relevance pass reads rows needing resolution: never-resolved (null) or stale since a config change.
+            news.HasIndex(n => n.RelevanceResolvedAt);
+        });
+
+        modelBuilder.Entity<TickerInstrumentMap>(map =>
+        {
+            // The pair is the key -- a ticker maps to several instruments and several tickers to one.
+            map.HasKey(m => new { m.Ticker, m.Instrument });
+            map.Property(m => m.Ticker).HasMaxLength(32);
+            map.Property(m => m.Instrument).HasMaxLength(32);
+        });
+
+        modelBuilder.Entity<NewsTopic>(topic =>
+        {
+            topic.HasKey(t => t.Id);
+            topic.Property(t => t.Name).HasMaxLength(64);
+            topic.Property(t => t.Instrument).HasMaxLength(32);
+            topic.HasIndex(t => t.Name).IsUnique();
+
+            topic.ToTable(table =>
+            {
+                // Refusable zero: a topic can never be stored with an unset scope, so it can't silently attach
+                // news to an instrument.
+                table.HasCheckConstraint("CK_NewsTopics_Scope_NotUnknown", "\"Scope\" <> 0");
+            });
+        });
+
+        modelBuilder.Entity<RelevanceConfigState>(state =>
+        {
+            state.HasKey(s => s.Id);
         });
 
         modelBuilder.Entity<Event>(evt =>
