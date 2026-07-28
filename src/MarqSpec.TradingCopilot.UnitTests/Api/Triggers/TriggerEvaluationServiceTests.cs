@@ -52,6 +52,9 @@ public class TriggerEvaluationServiceTests
     private void ReviewerReturns(ReviewOutcome outcome) =>
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).Returns(outcome);
 
+    private void ReviewerThrows(Exception error) =>
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).Throws(error);
+
     private async Task<Guid> SeedAccountAsync(Guid? owner = null, TradingMode mode = TradingMode.Practice)
     {
         Guid ownerId = owner ?? _operator;
@@ -475,6 +478,52 @@ public class TriggerEvaluationServiceTests
         await Service().ScanAsync(Now, CancellationToken.None);
         (await Context().Suggestions.CountAsync()).Should().Be(1);
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // (i) A THROWING reviewer must still debounce: the seam admits a provider-backed reviewer that throws on a
+    // transient fault, and a throw must be treated fail-closed -- no suggestion, the arm still advances to Fired (so
+    // it is NOT re-reviewed every pass), the firing is journaled, and the operator is advised. A throw must never
+    // escape to abort the owner pass.
+    [Fact]
+    public async Task ScanAsync_ShouldDebounceAndAdvise_WhenTheReviewerThrows()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerThrows(new InvalidOperationException("provider 503"));
+
+        int fires = await Service().ScanAsync(Now, CancellationToken.None); // must NOT propagate
+
+        fires.Should().Be(1);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.AnyAsync()).Should().BeFalse();                          // fail-closed: no suggestion
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();  // a fire is a fire
+        TriggerRecord trigger = await reload.Triggers.SingleAsync(t => t.Id == id);
+        trigger.ArmState.Should().Be(TriggerArmState.Fired);                               // debounced -- not left Armed
+        trigger.LastFiredAt.Should().Be(Now);
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+
+        // The debounce holds across passes: a persistently-throwing reviewer is asked exactly once per arming edge.
+        await Service().ScanAsync(Now, CancellationToken.None);
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // (j) A reviewer throw must NOT starve a co-owner's mechanical alert -- the throw is contained, not propagated.
+    [Fact]
+    public async Task ScanAsync_ShouldStillFireMechanical_WhenACoOwnerAgentReviewReviewerThrows()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid mechanicalId = await AddTriggerAsync(route: TriggerRoute.Mechanical, armState: TriggerArmState.Armed);
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerThrows(new InvalidOperationException("provider down"));
+
+        int fires = await Service().ScanAsync(Now, CancellationToken.None);
+
+        fires.Should().Be(2); // the mechanical fire + the agent-review fire (fail-closed), neither lost to the throw
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.TriggerFirings.CountAsync()).Should().Be(2);
+        (await reload.Triggers.SingleAsync(t => t.Id == mechanicalId)).ArmState.Should().Be(TriggerArmState.Fired);
     }
 
     // (h) A mechanical trigger in the same scan still fires its alert unchanged, alongside the agent-review route.
