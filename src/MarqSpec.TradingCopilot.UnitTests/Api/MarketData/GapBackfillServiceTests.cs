@@ -5,9 +5,11 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.MarketData;
 
@@ -26,6 +28,11 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.MarketData;
 public class GapBackfillServiceTests
 {
     private const string ContractKey = "CON.F.US.MES.U26";
+
+    // An unasserted collaborator: these tests exercise gap detection and backfill, not promotion. gh#311 made the
+    // indicator source and its options required on StopPromotionService, so a default fake satisfies the ctor
+    // without adding behaviour -- the same shape StopPromotionServiceTests uses.
+    private readonly IIndicatorSource _indicators = A.Fake<IIndicatorSource>();
 
     private static DateTimeOffset From => new(2026, 7, 27, 14, 0, 0, TimeSpan.Zero);
 
@@ -52,7 +59,9 @@ public class GapBackfillServiceTests
 
     private GapBackfillService Service(TradingCopilotDbContext context) =>
         new(context,
-            new StopPromotionService(context, NullLogger<StopPromotionService>.Instance),
+            new StopPromotionService(
+                context, _indicators, Options.Create(new IndicatorOptions()),
+                NullLogger<StopPromotionService>.Instance),
             NullLogger<GapBackfillService>.Instance);
 
     private TradingCopilotDbContext Seed() =>
