@@ -13,6 +13,7 @@ using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Risk;
+using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Events;
@@ -109,6 +110,14 @@ builder.Services.AddSingleton<IReadOnlyList<IIndicator>>(sp =>
 builder.Services.AddScoped<IndicatorProjectionService>();
 builder.Services.AddScoped<IIndicatorSource, StoredIndicatorSource>();
 builder.Services.AddHostedService<IndicatorProjectionHost>();
+
+// The deterministic trigger layer (gh#385, R-4 / R-7, ADR-0008): a standing-alert scan over the projected
+// indicators above. Each pass evaluates every enabled MECHANICAL trigger and fires the crossing edges through the
+// notification channel -- no LLM in the loop (the agent-review route is deferred). Reads indicators globally
+// (derived market data), reads/writes triggers per-owner (R-20). Harmless with no triggers, so it always runs.
+builder.Services.Configure<TriggerOptions>(builder.Configuration.GetSection(TriggerOptions.SectionName));
+builder.Services.AddScoped<TriggerEvaluationService>();
+builder.Services.AddHostedService<TriggerScanHost>();
 
 // The event log's first consumer (ADR-0007, gh#153): the stop-promotion watcher reads market.quote events and
 // promotes hidden actual stops as price comes within their band. Harmless with no staged stops, so it always runs.
@@ -299,6 +308,7 @@ app.MapFirmEndpoints();
 app.MapConnectionEndpoints();
 app.MapAccountEndpoints();
 app.MapRiskEndpoints();
+app.MapTriggerEndpoints();
 app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
 app.MapPositionEndpoints();

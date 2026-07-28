@@ -92,6 +92,12 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>The append-only audit trail (ADR-0007, gh#220) — safety-relevant transitions, immutable. Operator-owned.</summary>
     public DbSet<AuditRecord> AuditRecords => Set<AuditRecord>();
 
+    /// <summary>Standing deterministic triggers (gh#385, R-4 / R-7, ADR-0008). Operator-owned.</summary>
+    public DbSet<TriggerRecord> Triggers => Set<TriggerRecord>();
+
+    /// <summary>The append-only journal of trigger firings (gh#385, ADR-0008). Operator-owned.</summary>
+    public DbSet<TriggerFiringRecord> TriggerFirings => Set<TriggerFiringRecord>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -409,6 +415,42 @@ public class TradingCopilotDbContext : TenantDbContext
 
             // The read the execution path makes: this series' latest value at or before a moment.
             value.HasIndex(v => new { v.Instrument, v.ResolutionMinutes, v.Indicator, v.Period, v.BucketStart });
+        });
+
+        modelBuilder.Entity<TriggerRecord>(trigger =>
+        {
+            trigger.Property(t => t.Symbol).HasMaxLength(32);
+            trigger.Property(t => t.Indicator).HasMaxLength(32);
+            trigger.Property(t => t.Threshold).HasPrecision(18, 8);
+            trigger.Property(t => t.Hysteresis).HasPrecision(18, 8);
+            trigger.Property(t => t.LastEvaluatedValue).HasPrecision(18, 8);
+
+            // The scan discovers ENABLED, MECHANICAL triggers first; this composite leads that read (gh#385).
+            trigger.HasIndex(t => new { t.Enabled, t.Route });
+
+            trigger.ToTable("Triggers", table =>
+            {
+                // The fail-closed zeros are refused outright (defense-in-depth below the endpoint validation and the
+                // domain's Unknown-never-satisfies rule): a defaulted or corrupt row can never read as a real trigger.
+                table.HasCheckConstraint("CK_Triggers_Comparison_NotUnknown", "\"Comparison\" <> 0");
+                table.HasCheckConstraint("CK_Triggers_ConditionKind_NotUnknown", "\"ConditionKind\" <> 0");
+                table.HasCheckConstraint("CK_Triggers_Route_NotUnknown", "\"Route\" <> 0");
+                table.HasCheckConstraint("CK_Triggers_Period_Positive", "\"Period\" > 0");
+                table.HasCheckConstraint("CK_Triggers_ResolutionMinutes_Positive", "\"ResolutionMinutes\" > 0");
+                table.HasCheckConstraint("CK_Triggers_Hysteresis_PositiveOrNull", "\"Hysteresis\" IS NULL OR \"Hysteresis\" > 0");
+            });
+        });
+
+        modelBuilder.Entity<TriggerFiringRecord>(firing =>
+        {
+            firing.Property(f => f.DedupKey).HasMaxLength(128);
+            firing.Property(f => f.ObservedValue).HasPrecision(18, 8);
+            firing.Property(f => f.Threshold).HasPrecision(18, 8);
+
+            // The journal reads per trigger.
+            firing.HasIndex(f => f.TriggerId);
+
+            firing.ToTable("TriggerFirings");
         });
 
         modelBuilder.Entity<BarRecord>(bar =>
