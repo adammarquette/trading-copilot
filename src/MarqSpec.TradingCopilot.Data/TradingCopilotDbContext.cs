@@ -104,6 +104,12 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>The single-row relevance-config version marker (gh#359) — drives re-resolution. System plumbing.</summary>
     public DbSet<RelevanceConfigState> RelevanceConfigStates => Set<RelevanceConfigState>();
 
+    /// <summary>
+    /// Notifications held durably until delivered (gh#400). An acknowledged global (R-20): an alert belongs to
+    /// the deployment, and the relay runs as background plumbing with no authenticated user.
+    /// </summary>
+    public DbSet<NotificationOutboxRecord> NotificationOutbox => Set<NotificationOutboxRecord>();
+
     /// <summary>Per-consumer-group replay cursors over the event log (ADR-0001). System plumbing.</summary>
     public DbSet<EventCursor> EventCursors => Set<EventCursor>();
 
@@ -530,6 +536,22 @@ public class TradingCopilotDbContext : TenantDbContext
         {
             modelBuilder.Ignore<EmbeddingRecord>();
         }
+
+        modelBuilder.Entity<NotificationOutboxRecord>(outbox =>
+        {
+            // The dedup key IS the primary key, so idempotence is enforced by the database rather than by the
+            // relay remembering to check. A redelivery after a crash collides instead of paging twice.
+            outbox.HasKey(o => o.DedupKey);
+            outbox.Property(o => o.DedupKey).HasMaxLength(256);
+            outbox.Property(o => o.Title).HasMaxLength(256);
+            outbox.Property(o => o.Body).HasMaxLength(4000);
+
+            // The relay reads exactly one shape: what is still owed, oldest first.
+            outbox.HasIndex(o => new { o.DeliveredAt, o.CreatedAt });
+
+            outbox.ToTable(table =>
+                table.HasCheckConstraint("CK_NotificationOutbox_Severity_NotUnknown", "\"Severity\" <> 0"));
+        });
 
         modelBuilder.Entity<NewsRecord>(news =>
         {

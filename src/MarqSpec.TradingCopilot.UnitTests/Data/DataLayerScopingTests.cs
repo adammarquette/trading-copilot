@@ -53,6 +53,12 @@ public class DataLayerScopingTests
         typeof(TickerInstrumentMap),
         typeof(NewsTopic),
         typeof(RelevanceConfigState),
+
+        // Notifications owed to the operator (gh#400). An alert belongs to the DEPLOYMENT: the relay that
+        // delivers it runs as background plumbing with no authenticated identity, so a tenant filter would hide
+        // undelivered pages from the very sweep whose job is to deliver them — silently, which is precisely the
+        // dropped-alert failure the outbox exists to close.
+        typeof(NotificationOutboxRecord),
     };
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;

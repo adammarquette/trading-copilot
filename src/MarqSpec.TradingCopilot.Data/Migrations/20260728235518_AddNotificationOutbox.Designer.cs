@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using MarqSpec.TradingCopilot.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -13,9 +14,11 @@ using Pgvector;
 namespace MarqSpec.TradingCopilot.Data.Migrations
 {
     [DbContext(typeof(TradingCopilotDbContext))]
-    partial class TradingCopilotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260728235518_AddNotificationOutbox")]
+    partial class AddNotificationOutbox
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -664,9 +667,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                     b.Property<DateTimeOffset?>("RelevanceResolvedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<long?>("RelevanceVersion")
-                        .HasColumnType("bigint");
-
                     b.PrimitiveCollection<List<string>>("SourceFeeds")
                         .IsRequired()
                         .HasColumnType("text[]");
@@ -698,7 +698,7 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
 
                     b.HasIndex("PublishedAt");
 
-                    b.HasIndex("RelevanceVersion");
+                    b.HasIndex("RelevanceResolvedAt");
 
                     b.ToTable("News");
                 });
@@ -878,9 +878,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
-
-                    b.Property<long>("Version")
-                        .HasColumnType("bigint");
 
                     b.HasKey("Id");
 
