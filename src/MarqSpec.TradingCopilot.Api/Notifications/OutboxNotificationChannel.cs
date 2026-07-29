@@ -41,7 +41,7 @@ public sealed class OutboxNotificationChannel : INotificationChannel
 {
     private readonly TradingCopilotDbContext _database;
     private readonly TimeProvider _clock;
-    private readonly INotificationChannel _delivery;
+    private readonly DedupingNotificationChannel _delivery;
     private readonly ILogger<OutboxNotificationChannel> _logger;
 
     /// <summary>Creates the channel over the scoped database.</summary>
@@ -56,7 +56,7 @@ public sealed class OutboxNotificationChannel : INotificationChannel
     public OutboxNotificationChannel(
         TradingCopilotDbContext database,
         TimeProvider clock,
-        INotificationChannel delivery,
+        DedupingNotificationChannel delivery,
         ILogger<OutboxNotificationChannel> logger)
     {
         _database = database;

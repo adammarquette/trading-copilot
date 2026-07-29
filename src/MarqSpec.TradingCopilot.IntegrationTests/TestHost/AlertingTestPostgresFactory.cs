@@ -22,11 +22,18 @@ public sealed class AlertingTestPostgresFactory : StubbedVenuePostgresFactory
     public RecordingNotificationChannel Notifications { get; } = new();
 
     /// <summary>
-    /// Delivers whatever the last pass enqueued. The hosted services are removed for determinism, so nothing
-    /// drains the notification queue on its own — a test that asserts on what was sent must pump first.
+    /// Delivers whatever the last pass recorded to the outbox. The hosted services are removed for determinism,
+    /// so nothing drains it on its own — a test that asserts on what was sent must drain first.
     /// </summary>
-    public Task DrainNotificationsAsync() =>
-        Services.GetRequiredService<QueuedNotificationChannel>().DrainPendingAsync(CancellationToken.None);
+    /// <remarks>
+    /// gh#400 replaced the in-process queue with a durable outbox, so this drives one <b>relay</b> pass rather
+    /// than pumping a queue. The affordance is unchanged: exactly one deliberate delivery pass, no timer to race.
+    /// </remarks>
+    public async Task DrainNotificationsAsync()
+    {
+        await using AsyncServiceScope scope = Services.CreateAsyncScope();
+        await Services.GetRequiredService<NotificationRelayHost>().DrainAsync(scope, CancellationToken.None);
+    }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -44,28 +51,21 @@ public sealed class AlertingTestPostgresFactory : StubbedVenuePostgresFactory
         base.ConfigureTestServices(services);
 
         // Substitute the recorder for the TRANSPORT ONLY, keeping the DedupingNotificationChannel decorator that
-        // production wraps around it. Replacing the whole INotificationChannel registration would delete dedup --
-        // the very behaviour "one page per incident" exists to prove -- and the suite would then pass against a
-        // system that pages 120 times. The double stands where Pushover stands, never where the logic stands.
-        foreach (ServiceDescriptor channel in services
-            .Where(descriptor => descriptor.ServiceType == typeof(INotificationChannel)).ToList())
+        // production wraps around it. Replacing the whole chain would delete dedup -- the very behaviour "one page
+        // per incident" exists to prove -- and the suite would then pass against a system that pages 120 times.
+        // The double stands where Pushover stands, never where the logic stands.
+        //
+        // gh#400: the seam itself (INotificationChannel -> OutboxNotificationChannel) is left PRODUCTION-BOUND.
+        // Substituting it would bypass the outbox, and the durability the suite is here to observe would never be
+        // exercised. Only the leaf changes.
+        foreach (ServiceDescriptor dedup in services
+            .Where(descriptor => descriptor.ServiceType == typeof(DedupingNotificationChannel)).ToList())
         {
-            services.Remove(channel);
+            services.Remove(dedup);
         }
 
-        // Mirror PRODUCTION's chain exactly, minus the transport: queue -> dedup -> recorder. The queue is what
-        // keeps the send off the flatten hot path (gh#289); leaving it out here would build a two-layer stack the
-        // suite could never observe that property in -- and would let a future regression back onto the hot path
-        // unnoticed, which is precisely what gh#246 caught the first time.
-        //
-        // Draining is EXPLICIT (see Drain), matching this factory's existing stance that the only flatten pass is
-        // the test's own: with the hosted services removed there is no pump, so the suite pumps.
-        services.AddSingleton(provider => new QueuedNotificationChannel(
-            new DedupingNotificationChannel(
-                Notifications, provider.GetRequiredService<ILogger<DedupingNotificationChannel>>()),
-            provider.GetRequiredService<ILogger<QueuedNotificationChannel>>()));
-        services.AddSingleton<INotificationChannel>(provider =>
-            provider.GetRequiredService<QueuedNotificationChannel>());
+        services.AddSingleton(provider => new DedupingNotificationChannel(
+            Notifications, provider.GetRequiredService<ILogger<DedupingNotificationChannel>>()));
 
         // Deterministic: the only flatten pass is the test's explicit RunPassAsync.
         foreach (ServiceDescriptor hosted in services
@@ -73,5 +73,10 @@ public sealed class AlertingTestPostgresFactory : StubbedVenuePostgresFactory
         {
             services.Remove(hosted);
         }
+
+        // The relay is removed above with the other hosted services, so nothing delivers on a timer. It is
+        // re-registered as a PLAIN singleton purely so the suite can drive exactly one pass (see
+        // DrainNotificationsAsync) -- the same explicit-drain stance this factory already took with the queue.
+        services.AddSingleton<NotificationRelayHost>();
     }
 }
