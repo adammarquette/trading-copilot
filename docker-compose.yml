@@ -179,6 +179,13 @@ services:
       Llm__TriageModel:
       Llm__DeepModel:
       Llm__TimeoutSeconds:
+      # The AI-spend governor (gh#448, ADR-0008). Null pass-through, both NON-secret. Governor__DailyBudgetUsd is
+      # UNDEFAULTED -- absent leaves the governor INERT (no cap, today's status quo), so a dev stack is never
+      # surprised by a paused co-pilot; set a positive USD number to activate the platform-wide daily cap.
+      # Governor__AlertThresholdFraction the app already defaults (0.8), so compose passes it through empty rather
+      # than restating it and becoming a second source of truth.
+      Governor__DailyBudgetUsd:
+      Governor__AlertThresholdFraction:
       CheckIn__HeartbeatUrl:
       CheckIn__HeartbeatIntervalSeconds:
       CheckIn__PollIntervalSeconds:
