@@ -772,8 +772,11 @@ public class TriggerEvaluationServiceTests
             .MustNotHaveHappened();
     }
 
-    // (d) EMPTY WINDOW -> 0 -> allow: with no usage rows at all, the platform SUM returns NULL, and the
-    // `(decimal?)... ?? 0m` projection reads it as 0 -- NOT a throw the fail-open catch would silently swallow.
+    // (d) EMPTY WINDOW -> 0 -> allow: with no usage rows, the read yields 0 and the pass fires normally. NOTE: this
+    // runs on the EF in-memory provider, where SUM over an empty set returns 0 REGARDLESS of the `(decimal?)` cast,
+    // so it does NOT witness the nullable-projection guard. On real Postgres an empty-window SUM returns NULL and the
+    // non-nullable overload would throw (then the fail-open catch would silently un-gate) -- that relational NULL
+    // path is QA integration-tier (flagged on gh#448). This unit only proves an empty ledger reads as 0 -> allow.
     [Fact]
     public async Task ScanAsync_ShouldReadAnEmptyLedgerAsZeroAndAllow_WhenNoUsageRowsExist()
     {
@@ -892,6 +895,26 @@ public class TriggerEvaluationServiceTests
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
         A.CallTo(() => _notifications.SendAsync(
                 A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Notify && n.DedupKey.StartsWith("ai-spend:threshold:")),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    // (j) THRESHOLD ALERT WORDING when ALREADY over budget: the daily heads-up must say "reached", not "nearing"
+    // (ThresholdReached is forced true on a Block, so gating on it alone would title an exhausted day "nearing").
+    [Fact]
+    public async Task ScanAsync_ShouldTitleTheThresholdAlertReached_WhenSpendIsOverBudget()
+    {
+        await SeedUsageAsync(_operator, 100m, Now); // 100 spent against a 10 budget -> over budget, the fire is blocked
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be"));
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n =>
+                    n.DedupKey.StartsWith("ai-spend:threshold:") && n.Title == "AI daily budget reached"),
                 A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
     }

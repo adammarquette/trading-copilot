@@ -222,12 +222,18 @@ public class TriggerEvaluationService
         try
         {
             int percent = (int)(decision.ConsumedFraction * 100m);
+            // ThresholdReached is forced true on a Block, so the daily heads-up must distinguish "nearing" from
+            // "already spent" -- otherwise an over-budget day (e.g. embed spend jumping past 100% in one interval, or
+            // a mid-day restart clearing the once-per-day dedup) would read "nearing ... 1000%", self-contradictory.
+            // The per-arming-edge BudgetExhausted advisory covers each paused setup; this is the deployment-wide note.
+            (string title, string body) = decision.IsBlocked
+                ? ("AI daily budget reached",
+                    FormattableString.Invariant(
+                        $"AI spend is {percent}% of the {decision.BudgetUsd} USD daily budget; the daily cap is reached until the trading day rolls over."))
+                : ("AI spend nearing the daily budget",
+                    FormattableString.Invariant($"AI spend is {percent}% of the {decision.BudgetUsd} USD daily budget."));
             await _notifications.SendAsync(
-                new Notification(
-                    NotificationSeverity.Notify,
-                    "AI spend nearing the daily budget",
-                    FormattableString.Invariant($"AI spend is {percent}% of the {decision.BudgetUsd} USD daily budget."),
-                    ThresholdDedupKey(now)),
+                new Notification(NotificationSeverity.Notify, title, body, ThresholdDedupKey(now)),
                 cancellationToken);
         }
         catch (Exception error) when (error is not OperationCanceledException)
