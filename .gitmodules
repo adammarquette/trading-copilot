@@ -4,3 +4,9 @@
 [submodule "external/MarqSpec.Client.Tradovate"]
 	path = external/MarqSpec.Client.Tradovate
 	url = https://github.com/adammarquette/MarqSpec.Client.Tradovate
+[submodule "external/MarqSpec.Client.Finnhub"]
+	path = external/MarqSpec.Client.Finnhub
+	url = https://github.com/adammarquette/MarqSpec.Client.Finnhub
+[submodule "external/MarqSpec.Client.Tiingo"]
+	path = external/MarqSpec.Client.Tiingo
+	url = https://github.com/adammarquette/MarqSpec.Client.Tiingo
