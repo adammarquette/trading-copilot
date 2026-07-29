@@ -1,10 +1,11 @@
+using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.Api.Notifications;
 
 /// <summary>
-/// Binds the operator-notification chain — <b>queue → dedup → transport</b> (gh#243, gh#289, ADR-0019).
+/// Binds the operator-notification chain — <b>outbox → queue → dedup → transport</b> (gh#243, gh#289, gh#437, ADR-0019).
 /// </summary>
 /// <remarks>
 /// Extracted from <c>Program.cs</c> (gh#320) so the binding can be <b>asserted</b> rather than only read. The
@@ -57,11 +58,36 @@ public static class NotificationRegistration
 
             return new QueuedNotificationChannel(deduping, provider.GetRequiredService<ILogger<QueuedNotificationChannel>>());
         });
-        builder.Services.AddSingleton<INotificationChannel>(provider => provider.GetRequiredService<QueuedNotificationChannel>());
+        // THE SEAM IS THE OUTBOX (gh#437). The chain is now: outbox -> queue -> dedup -> transport.
+        //
+        // The queue alone was fast but not durable: gh#289 moved delivery off the R-13 hot path, and a hard crash
+        // before the pump drained lost whatever it held. Persisting first closes that -- nothing counts as sent
+        // until the relay stamps DeliveredAt -- while keeping the hot path off the network, because the outbox
+        // writes one indexed row and returns rather than awaiting a transport.
+        //
+        // SCOPED, not singleton, because it writes through the scoped DbContext. That is a deliberate change from
+        // the singleton the queue was: every consumer of this seam (AutoFlattenService, AutoFlattenWatchdogService,
+        // TriggerEvaluationService) is itself scoped, so nothing holds it beyond a pass. The dedup memory that
+        // NEEDED a singleton still has one -- DedupingNotificationChannel, below the queue, unchanged.
+        //
+        // `delivery` resolves the CONCRETE QueuedNotificationChannel rather than INotificationChannel: asking for
+        // the interface here would resolve this same registration and stack-overflow on first use.
+        builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddScoped<INotificationChannel>(provider => new OutboxNotificationChannel(
+            provider.GetRequiredService<TradingCopilotDbContext>(),
+            provider.GetRequiredService<TimeProvider>(),
+            provider.GetRequiredService<QueuedNotificationChannel>(),
+            provider.GetRequiredService<ILogger<OutboxNotificationChannel>>()));
 
         // Enqueue-and-return is only safe because THIS drains the queue. Without the pump every page is accepted and
         // silently discarded -- the failure mode is invisible, because the caller still sees success.
         builder.Services.AddHostedService<NotificationPumpHost>();
+
+        // ...and the outbox is only safe because THIS drains it. Same property, one layer out: a durable row
+        // nobody reads is a page that was recorded and never sent, which is worse than not recording it, because
+        // the caller was told it succeeded.
+        builder.Services.AddScoped<NotificationOutboxRelay>();
+        builder.Services.AddHostedService<NotificationOutboxRelayHost>();
 
         return builder;
     }
