@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Venue;
 
 namespace MarqSpec.TradingCopilot.Domain.Triggers;
@@ -91,6 +92,20 @@ public abstract record ReviewOutcome
 }
 
 /// <summary>
+/// The result of one review (gh#431): the <see cref="ReviewOutcome"/> the route acts on, plus the
+/// <see cref="AiCallCost"/> of the LLM call it made — so the owner-scoped caller can ledger the spend (ADR-0008).
+/// </summary>
+/// <remarks>
+/// <see cref="Cost"/> is <see langword="null"/> when <b>no</b> call was made (the inert reviewer), and non-null for
+/// every real call — <b>including a failed one</b>, whose <see cref="AiCallCost.Outcome"/> is
+/// <see cref="AiUsageOutcome.Failed"/> with zero tokens, so the failure regime is not silently uncounted. The cost
+/// carries no owner: the owner is the caller's to stamp (it holds the tenancy authority, not the reviewer).
+/// </remarks>
+/// <param name="Outcome">What the route should do — suggest or suppress.</param>
+/// <param name="Cost">The cost of the LLM call, or <see langword="null"/> if none was made.</param>
+public sealed record AgentReview(ReviewOutcome Outcome, AiCallCost? Cost);
+
+/// <summary>
 /// Reviews a fired trigger and returns a proposal or a suppression (ADR-0008) — the agent-review route's judgment
 /// step, invoked <b>once per fire</b>. The agent only proposes; it never places, sizes, or authorizes an order.
 /// </summary>
@@ -99,6 +114,6 @@ public interface ITriggerReviewer
     /// <summary>Reviews one fired trigger.</summary>
     /// <param name="context">The fired setup's market facts.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>A <see cref="ReviewOutcome.Suggest"/> or <see cref="ReviewOutcome.Suppress"/>.</returns>
-    Task<ReviewOutcome> ReviewAsync(TriggerReviewContext context, CancellationToken cancellationToken);
+    /// <returns>The <see cref="ReviewOutcome"/> to act on, plus the cost of any LLM call made.</returns>
+    Task<AgentReview> ReviewAsync(TriggerReviewContext context, CancellationToken cancellationToken);
 }

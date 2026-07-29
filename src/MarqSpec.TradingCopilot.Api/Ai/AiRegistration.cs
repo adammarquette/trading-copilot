@@ -63,6 +63,10 @@ public static class AiRegistration
                 ? provider.GetRequiredService<LlmTriggerReviewer>()
                 : provider.GetRequiredService<NullTriggerReviewer>());
 
+        // The AIUsage spend ledger (gh#431): always the real one (stateless, safe unconfigured -- it is only reached
+        // when a reviewer produced a non-null Cost, and it fails open). Singleton -- it holds only the context options.
+        services.AddSingleton<IAiUsageLedger, AiUsageLedger>();
+
         return services;
     }
 }

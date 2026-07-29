@@ -128,6 +128,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Per-operator news importance feedback — stars and mutes (gh#27, ADR-0014). Operator-owned.</summary>
     public DbSet<SoftSignalFeedback> SoftSignalFeedbacks => Set<SoftSignalFeedback>();
 
+    /// <summary>The append-only per-call AI spend ledger (gh#431, ADR-0008 / ADR-0002). Operator-owned.</summary>
+    public DbSet<AiUsageRecord> AiUsage => Set<AiUsageRecord>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -503,6 +506,31 @@ public class TradingCopilotDbContext : TenantDbContext
             firing.HasIndex(f => f.TriggerId);
 
             firing.ToTable("TriggerFirings");
+        });
+
+        modelBuilder.Entity<AiUsageRecord>(usage =>
+        {
+            usage.Property(u => u.Model).HasMaxLength(128);
+            usage.Property(u => u.TraceId).HasMaxLength(64);
+            usage.Property(u => u.EstimatedCostUsd).HasPrecision(18, 8);
+
+            // The ledger reads chronologically per operator (the gh#62 spend meter + the governor's windowed sum).
+            usage.HasIndex(u => new { u.UserId, u.OccurredAt });
+
+            usage.ToTable("AiUsage", table =>
+            {
+                // Refusable-zero enums (gh#60): an unset feature or outcome is never stored, so a row can never read
+                // as a spend event whose kind is unknown. Tier is nullable (embeds carry none) but never a zero.
+                table.HasCheckConstraint("CK_AiUsage_Feature_NotUnknown", "\"Feature\" <> 0");
+                table.HasCheckConstraint("CK_AiUsage_Outcome_NotUnknown", "\"Outcome\" <> 0");
+                table.HasCheckConstraint("CK_AiUsage_Tier_NotUnknownOrNull", "\"Tier\" IS NULL OR \"Tier\" <> 0");
+
+                // Tokens, cost and latency are >= 0 -- a Failed row's zeros are a real datapoint, not an absence.
+                table.HasCheckConstraint("CK_AiUsage_InputTokens_NotNegative", "\"InputTokens\" >= 0");
+                table.HasCheckConstraint("CK_AiUsage_OutputTokens_NotNegative", "\"OutputTokens\" >= 0");
+                table.HasCheckConstraint("CK_AiUsage_EstimatedCostUsd_NotNegative", "\"EstimatedCostUsd\" >= 0");
+                table.HasCheckConstraint("CK_AiUsage_LatencyMs_NotNegative", "\"LatencyMs\" >= 0");
+            });
         });
 
         modelBuilder.Entity<BarRecord>(bar =>

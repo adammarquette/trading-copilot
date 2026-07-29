@@ -1,9 +1,11 @@
 using FakeItEasy;
+using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Triggers;
@@ -31,7 +33,14 @@ public class TriggerEvaluationServiceTests
     private readonly IIndicatorSource _indicators = A.Fake<IIndicatorSource>();
     private readonly INotificationChannel _notifications = A.Fake<INotificationChannel>();
     private readonly ITriggerReviewer _reviewer = A.Fake<ITriggerReviewer>();
+    private readonly IAiUsageLedger _ledger = A.Fake<IAiUsageLedger>();
     private static DateTimeOffset Now { get; } = DateTimeOffset.UnixEpoch.AddYears(56);
+
+    // The cost a real LLM call surfaces (gh#431). Any non-null Cost makes the scan record a usage row; the SPECIFIC
+    // values here don't matter to the pre-existing tests -- only that Cost is non-null so the recording path is exercised.
+    private static readonly AiCallCost _sampleCost = new(
+        AiUsageFeature.Triage, "claude-haiku-4-5", LlmModelTier.Triage, AiUsageOutcome.Succeeded,
+        42, 9, 0.0006m, TimeSpan.FromMilliseconds(1234));
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
@@ -46,11 +55,15 @@ public class TriggerEvaluationServiceTests
 
     private TradingCopilotDbContext Context(Guid? asUser = null) => new(Options, new FixedUser(asUser ?? _operator));
 
-    private TriggerEvaluationService Service() => new(
-        Context(), Options, _indicators, _notifications, _reviewer, NullLogger<TriggerEvaluationService>.Instance);
+    private TriggerEvaluationService Service(IAiUsageLedger? ledger = null) => new(
+        Context(), Options, _indicators, _notifications, _reviewer, ledger ?? _ledger,
+        NullLogger<TriggerEvaluationService>.Instance);
 
-    private void ReviewerReturns(ReviewOutcome outcome) =>
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).Returns(outcome);
+    // The reviewer now returns an AgentReview: the outcome the route acts on plus the LLM-call Cost the scan ledgers.
+    // Wrap the outcome with a non-null Cost so the recording path is exercised, matching a real (billed) reviewer call.
+    private void ReviewerReturns(ReviewOutcome outcome, AiCallCost? cost = null) =>
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
+            .Returns(new AgentReview(outcome, cost ?? _sampleCost));
 
     private void ReviewerThrows(Exception error) =>
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).Throws(error);
@@ -544,5 +557,134 @@ public class TriggerEvaluationServiceTests
 
         // Exactly one send: the mechanical alert (the agent-review suppressed silently).
         A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // =====================================================================================================
+    // AIUsage LEDGER (gh#431, ADR-0008 / ADR-0002): the scan is the SINGLE tenancy authority for the spend row. On an
+    // agent-review fire with a real (billed) reviewer call, it records ONE usage entry stamped with the FIRING owner;
+    // with a no-call (null-cost) review it records NOTHING; and a ledger fault must never roll back the fire (fail-open).
+    // =====================================================================================================
+
+    // The load-bearing tenancy assertion: the recorded owner is the owner of the trigger that fired, NOT the discovery
+    // context's user -- so a co-tenant is never billed for another operator's call (R-20).
+    [Fact]
+    public async Task ScanAsync_RecordsUsageStampedWithTheFiringOwner_OnAnAgentReviewFire()
+    {
+        // A firing owner DISTINCT from the discovery user (_operator, via Context()) makes "owner == firing owner" the
+        // load-bearing check: the ledger entry must be stamped from the per-owner scope, never the discovery context.
+        Guid firingOwner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner: firingOwner);
+        await AddTriggerAsync(
+            owner: firingOwner, route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"));
+
+        AiUsageEntry? captured = null;
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._))
+            .Invokes((AiUsageEntry entry, CancellationToken _) => captured = entry);
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        captured.Should().NotBeNull();
+        captured!.UserId.Should().Be(firingOwner); // <-- THE tenancy assertion: recorded owner == the fired trigger's owner
+        captured.Cost.Feature.Should().Be(AiUsageFeature.Triage);
+        captured.OccurredAt.Should().Be(Now);       // the caller-supplied clock, threaded through -- the ledger reads none
+    }
+
+    // A no-call (inert-reviewer) review carries Cost: null, and the scan must then record NOTHING. The Cost
+    // discriminator, not the outcome, gates the ledger write -- there is no spend to record for a call never made.
+    [Fact]
+    public async Task ScanAsync_RecordsNoUsage_WhenTheReviewerReturnsNullCost()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
+            .Returns(new AgentReview(
+                new ReviewOutcome.Suppress(SuppressReason.NoReviewerConfigured, "no LLM reviewer is configured"), Cost: null));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // FAIL-OPEN AT THE LEDGER BOUNDARY: the scan calls _ledger.RecordAsync UNGUARDED -- the fail-open lives inside the
+    // real AiUsageLedger, which swallows its own write fault. So a DB blip while recording spend must never roll back
+    // the fired setup's suggestion or its firing. This composes the PRODUCTION shape (the real fail-open ledger whose
+    // underlying write throws), NOT a contract-violating throwing fake, and asserts the fire still commits.
+    [Fact]
+    public async Task ScanAsync_StillFiresAndCommits_WhenTheLedgerWriteFaults()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 2, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"));
+
+        IAiUsageLedger failingLedger = new ThrowingWriteLedger(Options);
+        int fires = await Service(failingLedger).ScanAsync(Now, CancellationToken.None); // must NOT throw
+
+        fires.Should().Be(1);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.CountAsync()).Should().Be(1);                         // durable despite the ledger fault
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+        (await reload.AiUsage.AnyAsync()).Should().BeFalse(); // the spend row was lost -- the ledger is a floor, not a guarantee
+    }
+
+    // DEFENSE IN DEPTH at the scan boundary: even a ledger that VIOLATES its never-throw contract (throws straight out
+    // of RecordAsync, not from an inner write it swallows) must not roll back the fire. The scan guards the ledger call
+    // exactly as it guards the reviewer and advisory-notify seams -- an UN-guarded throw would unwind to the per-owner
+    // catch and discard the whole pass (losing the suggestion + firing here, AND a co-owner's already-sent mechanical
+    // alert -- a duplicate next pass). With the guard, the fire commits; only the spend row is lost.
+    [Fact]
+    public async Task ScanAsync_StillFiresAndCommits_WhenAContractViolatingLedgerThrowsFromRecord()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 2, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"));
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("a ledger that breaks its never-throw contract"));
+
+        int fires = await Service().ScanAsync(Now, CancellationToken.None); // the boundary guard swallows it -- pass NOT discarded
+
+        fires.Should().Be(1);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.CountAsync()).Should().Be(1);                          // committed, not rolled back
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+    }
+
+    // The scan-boundary ledger guard must NOT mask the caller's OWN cancellation -- a shutdown drain has to propagate,
+    // never be swallowed as a bookkeeping fault. A cancelled-token OCE from the ledger surfaces out of ScanAsync (via
+    // the per-owner cancellation guard), distinct from the swallow-and-continue of any other ledger fault above.
+    [Fact]
+    public async Task ScanAsync_Propagates_WhenTheLedgerObservesCallerCancellation()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        using CancellationTokenSource cts = new();
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._))
+            .Invokes(() => cts.Cancel())
+            .Throws(new OperationCanceledException(cts.Token));
+
+        Func<Task> scan = () => Service().ScanAsync(Now, cts.Token);
+
+        await scan.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    /// <summary>
+    /// The real fail-open <see cref="AiUsageLedger"/> with a forced write fault: its <c>WriteAsync</c> throws, so the
+    /// production <c>RecordAsync</c> catch swallows it (fail-open by contract). Composed into the scan to prove a ledger
+    /// fault never rolls back a fire -- the honest production shape, not a fake that violates the never-throw contract.
+    /// </summary>
+    private sealed class ThrowingWriteLedger(DbContextOptions<TradingCopilotDbContext> options)
+        : AiUsageLedger(options, NullLogger<AiUsageLedger>.Instance)
+    {
+        protected override Task WriteAsync(AiUsageEntry entry, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("simulated ledger DB fault");
     }
 }
