@@ -64,8 +64,13 @@ public static class AiRegistration
                 : provider.GetRequiredService<NullTriggerReviewer>());
 
         // The AIUsage spend ledger (gh#431): always the real one (stateless, safe unconfigured -- it is only reached
-        // when a reviewer produced a non-null Cost, and it fails open). Singleton -- it holds only the context options.
-        services.AddSingleton<IAiUsageLedger, AiUsageLedger>();
+        // when a reviewer produced a non-null Cost, and it fails open). SCOPED, not singleton: it injects the
+        // *scoped* DbContextOptions<TradingCopilotDbContext>, so a singleton would be a CAPTIVE DEPENDENCY that fails
+        // the host's ValidateScopes / ValidateOnBuild at startup (Development) -- the API and the safety-critical
+        // trigger scan would never boot. Matches every other DbContextOptions consumer (the trigger scan, OCO-exit,
+        // ...); its only consumer, the scoped TriggerEvaluationService, resolves it per host scope, and the ledger
+        // still builds a fresh owner-scoped context per write.
+        services.AddScoped<IAiUsageLedger, AiUsageLedger>();
 
         return services;
     }

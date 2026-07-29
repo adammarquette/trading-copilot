@@ -19,9 +19,10 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// (spend-blindness is a real fault, never silent) and swallowed; only the caller's own cancellation propagates.
 /// </para>
 /// <para>
-/// Stateless, so a singleton — it holds only the shared context options and constructs a fresh owner-scoped context
-/// per call, exactly as the trigger scan does. The owner is the entry's, so the R-20 filter guarantees the row is
-/// written under the scope it belongs to.
+/// Registered <b>scoped</b> — it injects the scoped <see cref="DbContextOptions{TContext}"/>, so a singleton would be
+/// a captive dependency that fails the host's scope validation at startup. It holds only the shared context options
+/// and constructs a fresh owner-scoped context per call, exactly as the trigger scan does. The owner is the entry's,
+/// so the R-20 filter guarantees the row is written under the scope it belongs to.
 /// </para>
 /// </remarks>
 public class AiUsageLedger : IAiUsageLedger
