@@ -1,7 +1,9 @@
 using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Api.Triggers;
+using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Triggers;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -50,6 +52,32 @@ public class AiRegistrationTests
 
         provider.GetRequiredService<ILlmProvider>().Should().BeOfType<AnthropicLlmProvider>(
             "a configured deployment wakes the real model through the same seam");
+    }
+
+    [Fact]
+    public void AddTradingCopilotAi_ShouldRegisterTheLedgerNoLongerLivedThanItsDbContextOptions()
+    {
+        // The ledger injects the scoped DbContextOptions<TradingCopilotDbContext>. If it out-lives those options
+        // (e.g. Singleton while the options are Scoped) it is a CAPTIVE DEPENDENCY: WebApplication.CreateBuilder
+        // turns ValidateScopes / ValidateOnBuild ON in Development, so builder.Build() throws and the API host --
+        // with the safety-critical trigger scan, auto-flatten, and kill switch it hosts -- never starts. The ledger
+        // must therefore share its options' lifetime, exactly as every other DbContextOptions consumer (the trigger
+        // scan, OCO-exit, ...) does. Asserted against the options' ACTUAL lifetime, so it stays correct even if that
+        // registration ever changes.
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddTradingCopilotData("Host=localhost;Database=x;Username=u;Password=p");
+        services.AddTradingCopilotAi(new ConfigurationBuilder().Build());
+
+        ServiceLifetime optionsLifetime = services
+            .Single(descriptor => descriptor.ServiceType == typeof(DbContextOptions<TradingCopilotDbContext>)).Lifetime;
+        ServiceLifetime ledgerLifetime = services
+            .Single(descriptor => descriptor.ServiceType == typeof(IAiUsageLedger)).Lifetime;
+
+        ledgerLifetime.Should().Be(
+            optionsLifetime,
+            "a ledger out-living the scoped DbContextOptions it injects is a captive dependency that fails the host's "
+            + "scope validation at startup");
     }
 
     private static ServiceProvider Build(string? apiKey)
