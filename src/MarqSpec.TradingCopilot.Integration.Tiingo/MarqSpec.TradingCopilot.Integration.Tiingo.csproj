@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Domain\MarqSpec.TradingCopilot.Domain.csproj" />
+    <!-- The Tiingo news client, pinned as a submodule under external/. It lives outside src/ so this solution's
+         Directory.Build.props (net10.0-only, warnings-as-errors) is not imposed on it — the venue-client pattern
+         (gh#383). -->
+    <ProjectReference Include="..\..\external\MarqSpec.Client.Tiingo\MarqSpec.Client.Tiingo\MarqSpec.Client.Tiingo.csproj" />
+  </ItemGroup>
+
+</Project>
