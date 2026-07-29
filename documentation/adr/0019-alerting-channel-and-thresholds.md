@@ -361,4 +361,4 @@ nags until acknowledged.
 *Still open:* the **`Enlist` adoption** on the safety-critical producers (auto-flatten, orphan/synthetic-risk).
 `Enlist` exists, is documented and is reachable; nothing calls it yet. Adopting it changes *when* a notification
 becomes durable relative to the flatten's own saves, on the R-13 path, so it is deliberately its own increment
-rather than a rider on this one.
+rather than a rider on this one — tracked as gh#455.
