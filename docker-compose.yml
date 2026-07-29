@@ -149,6 +149,13 @@ services:
       News__Enabled:
       News__PollIntervalSeconds:
       News__LookbackMinutes:
+      # Per-operator news salience (R-2/R-6, gh#27, ADR-0014) -- a star raises, a mute lowers, the salience of
+      # SIMILAR future news, decayed by recency. Computed on read by /api/news (no host); a SOFT weight, never a
+      # risk control. Null pass-through leaves the app's defaults (14d half-life, cap 5x, floor 0.25x); the
+      # per-dimension weights keep their defaults unless tuned in config.
+      Salience__HalfLifeDays:
+      Salience__MultiplierCap:
+      Salience__MultiplierFloor:
       # The dead-man's switch (R-13, gh#244, ADR-0019) -- the only alerting tier that survives THIS process
       # dying, so a deployment without it is silently missing its most important safety net. Deliberately NOT
       # defaulted: these are capability URLs (whoever holds one can forge an all-clear), so there is no sane
