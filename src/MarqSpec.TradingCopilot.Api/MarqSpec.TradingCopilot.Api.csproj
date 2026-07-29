@@ -17,6 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Data\MarqSpec.TradingCopilot.Data.csproj" />
     <!-- The composition root builds venue adapters (R-17); the ProjectX client arrives transitively. -->
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Finnhub\MarqSpec.TradingCopilot.Integration.Finnhub.csproj" />
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.ProjectX\MarqSpec.TradingCopilot.Integration.ProjectX.csproj" />
   </ItemGroup>
 

@@ -1,4 +1,5 @@
 using System.Text;
+using MarqSpec.Client.Finnhub;
 using MarqSpec.Client.ProjectX.DependencyInjection;
 using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Accounts;
@@ -28,6 +29,7 @@ using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Venue;
+using MarqSpec.TradingCopilot.Integration.Finnhub;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
@@ -95,12 +97,22 @@ builder.Services.AddHostedService<BarBackfillHost>();
 
 // R-2's news / soft-signal ingestion (gh#358): every registered INewsSource polled into the deduped NewsRecord
 // store of record -- the news analogue of the bar store above, collapsed across sources by the dedup key. News is
-// deliberately multi-source (Finnhub + Tiingo) where price data is single-source. Opt-in via News:Enabled. The
-// concrete provider adapters are follow-ons (their own MarqSpec.Client.* submodules), so no INewsSource is
-// registered yet -- an enabled poller resolves an empty source set and writes nothing until one lands.
+// deliberately multi-source (Finnhub + Tiingo) where price data is single-source. Opt-in via News:Enabled.
 builder.Services.Configure<NewsIngestionOptions>(builder.Configuration.GetSection(NewsIngestionOptions.SectionName));
 builder.Services.AddScoped<NewsIngestionService>();
 builder.Services.AddHostedService<NewsIngestionHost>();
+
+// The Finnhub news source (gh#439, of gh#383), registered ONLY when a key is configured -- the same
+// graceful-absence pattern as the Cohere provider. An enabled poller with no Finnhub key simply has no Finnhub
+// source and writes nothing from it (Tiingo, gh#440, registers the same way alongside it). The key is never in
+// source; it comes from Finnhub__ApiKey (config/env).
+FinnhubOptions finnhubOptions = builder.Configuration.GetSection("Finnhub").Get<FinnhubOptions>() ?? new FinnhubOptions();
+if (!string.IsNullOrWhiteSpace(finnhubOptions.ApiKey))
+{
+    builder.Services.AddSingleton(finnhubOptions);
+    builder.Services.AddHttpClient<IFinnhubNewsClient, FinnhubNewsClient>();
+    builder.Services.AddScoped<INewsSource, FinnhubNewsSource>();
+}
 
 // R-2's news relevance resolution (gh#359): materializes matched instruments/topics onto ingested news via the
 // deployment's GLOBAL ticker<->instrument maps + topics. Always on like the indicator projection; its work is
