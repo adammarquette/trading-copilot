@@ -547,8 +547,9 @@ public class TradingCopilotDbContext : TenantDbContext
             // The read pattern relevance (gh#359) and the co-pilot will use: recent news by publication time.
             news.HasIndex(n => n.PublishedAt);
 
-            // The relevance pass reads rows needing resolution: never-resolved (null) or stale since a config change.
-            news.HasIndex(n => n.RelevanceResolvedAt);
+            // The relevance pass reads rows needing resolution: never-resolved (null) or below the current config
+            // generation. Indexed on the version, which is what the predicate filters on (gh#418).
+            news.HasIndex(n => n.RelevanceVersion);
         });
 
         modelBuilder.Entity<TickerInstrumentMap>(map =>

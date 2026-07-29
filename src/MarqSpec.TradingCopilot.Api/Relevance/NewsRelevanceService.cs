@@ -40,9 +40,13 @@ public sealed class NewsRelevanceService
     /// <returns>How many news items were resolved.</returns>
     public async Task<int> ResolveAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
-        DateTimeOffset configChangedAt = await _database.RelevanceConfigStates
-            .Select(state => (DateTimeOffset?)state.UpdatedAt)
-            .FirstOrDefaultAsync(cancellationToken) ?? DateTimeOffset.MinValue;
+        // The monotonic config generation (gh#418). Read once, before the maps/topics below, so a config edit that
+        // commits mid-pass is stamped conservatively: we resolve against the config we read and stamp the version
+        // we read, so the next pass sees a lower version than the now-current config and re-resolves. No clocks,
+        // so nothing to skew.
+        long configVersion = await _database.RelevanceConfigStates
+            .Select(state => (long?)state.Version)
+            .FirstOrDefaultAsync(cancellationToken) ?? 0L;
 
         // Load the (small) global config once and map to the pure resolver's domain shape.
         List<TickerInstrumentMapping> maps = [.. (await _database.TickerInstrumentMaps.AsNoTracking().ToListAsync(cancellationToken))
@@ -57,7 +61,7 @@ public sealed class NewsRelevanceService
         while (true)
         {
             List<NewsRecord> batch = await _database.News
-                .Where(news => news.RelevanceResolvedAt == null || news.RelevanceResolvedAt < configChangedAt)
+                .Where(news => news.RelevanceVersion == null || news.RelevanceVersion < configVersion)
                 .OrderBy(news => news.PublishedAt)
                 .Take(BatchSize)
                 .ToListAsync(cancellationToken);
@@ -72,7 +76,8 @@ public sealed class NewsRelevanceService
                     news.Tickers, $"{news.Title} {news.Summary}", maps, topics);
                 news.MatchedInstruments = [.. match.Instruments];
                 news.MatchedTopics = [.. match.Topics];
-                news.RelevanceResolvedAt = now;
+                news.RelevanceVersion = configVersion; // the staleness authority (gh#418)
+                news.RelevanceResolvedAt = now;        // observability timestamp only
             }
 
             await _database.SaveChangesAsync(cancellationToken);

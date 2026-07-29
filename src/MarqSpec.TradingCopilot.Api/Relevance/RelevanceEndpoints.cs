@@ -235,12 +235,16 @@ public static class RelevanceEndpoints
             .FirstOrDefaultAsync(s => s.Id == RelevanceConfigState.SingletonId, cancellationToken);
         if (state is null)
         {
+            // First-ever edit: generation 1. Pre-existing news carries a null RelevanceVersion, so it re-resolves
+            // against this on the next pass regardless.
             database.RelevanceConfigStates.Add(
-                new RelevanceConfigState { Id = RelevanceConfigState.SingletonId, UpdatedAt = DateTimeOffset.UtcNow });
+                new RelevanceConfigState { Id = RelevanceConfigState.SingletonId, UpdatedAt = DateTimeOffset.UtcNow, Version = 1 });
         }
         else
         {
-            state.UpdatedAt = DateTimeOffset.UtcNow;
+            // Increment the monotonic generation (gh#418) — this, not the timestamp, is what the pass compares.
+            state.Version++;
+            state.UpdatedAt = DateTimeOffset.UtcNow; // observability only
         }
     }
 }

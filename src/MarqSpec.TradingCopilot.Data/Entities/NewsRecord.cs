@@ -67,8 +67,17 @@ public sealed class NewsRecord
     public List<string> MatchedTopics { get; set; } = [];
 
     /// <summary>
-    /// When relevance was last resolved for this story, or <see langword="null"/> if never. The pass resolves rows
-    /// that are null or older than the relevance config's last change (gh#359).
+    /// When relevance was last resolved for this story, or <see langword="null"/> if never. Observability only
+    /// (gh#418): the staleness <i>decision</i> now uses <see cref="RelevanceVersion"/>, not this timestamp.
     /// </summary>
     public DateTimeOffset? RelevanceResolvedAt { get; set; }
+
+    /// <summary>
+    /// The relevance-config generation this story was resolved against (gh#418), or <see langword="null"/> if
+    /// never resolved. The pass re-resolves rows whose version is null or below the config's current
+    /// <see cref="RelevanceConfigState.Version"/> — a monotonic counter, so the decision has <b>no dependency on
+    /// wall-clock time</b> and cannot be fooled by clock skew across instances or a config edit that commits
+    /// mid-pass (the old <c>RelevanceResolvedAt &lt; UpdatedAt</c> comparison could be, gh#359 review).
+    /// </summary>
+    public long? RelevanceVersion { get; set; }
 }

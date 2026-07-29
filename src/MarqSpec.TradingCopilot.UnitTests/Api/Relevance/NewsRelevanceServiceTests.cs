@@ -27,7 +27,7 @@ public class NewsRelevanceServiceTests
     private static NewsRelevanceService Service(TradingCopilotDbContext context) =>
         new(context, NullLogger<NewsRelevanceService>.Instance);
 
-    private static NewsRecord News(string dedupKey, DateTimeOffset? resolvedAt, params string[] tickers) => new()
+    private static NewsRecord News(string dedupKey, long? resolvedVersion, params string[] tickers) => new()
     {
         DedupKey = dedupKey,
         Type = "news",
@@ -38,16 +38,19 @@ public class NewsRelevanceServiceTests
         Tickers = [.. tickers],
         SourceFeeds = ["finnhub"],
         RecordedAt = Now,
-        RelevanceResolvedAt = resolvedAt,
+        RelevanceVersion = resolvedVersion,
     };
 
+    private static RelevanceConfigState ConfigAt(long version) =>
+        new() { Id = RelevanceConfigState.SingletonId, UpdatedAt = Now, Version = version };
+
     [Fact]
-    public async Task ResolveAsync_ShouldMaterializeMatchesOntoUnresolvedNews()
+    public async Task ResolveAsync_ShouldMaterializeMatchesOntoNeverResolvedNews()
     {
         await using (TradingCopilotDbContext seed = Context())
         {
             seed.TickerInstrumentMaps.Add(new TickerInstrumentMap { Ticker = "SPY", Instrument = "ES" });
-            seed.News.Add(News("a", resolvedAt: null, "SPY"));
+            seed.News.Add(News("a", resolvedVersion: null, "SPY")); // null version == never resolved
             await seed.SaveChangesAsync();
         }
 
@@ -57,40 +60,65 @@ public class NewsRelevanceServiceTests
         resolved.Should().Be(1);
         NewsRecord stored = await context.News.SingleAsync();
         stored.MatchedInstruments.Should().Contain("ES");
-        stored.RelevanceResolvedAt.Should().Be(Now);
+        stored.RelevanceVersion.Should().Be(0, "resolved against config generation 0 (no edits yet)");
+        stored.RelevanceResolvedAt.Should().Be(Now, "the observability timestamp is still stamped");
     }
 
     [Fact]
-    public async Task ResolveAsync_ShouldSkipAlreadyResolvedNews_WhenConfigUnchanged()
+    public async Task ResolveAsync_ShouldSkipNews_WhenItsVersionMatchesTheConfigGeneration()
     {
         await using (TradingCopilotDbContext seed = Context())
         {
-            seed.News.Add(News("a", resolvedAt: Now, "SPY"));
+            seed.News.Add(News("a", resolvedVersion: 3, "SPY"));
+            seed.RelevanceConfigStates.Add(ConfigAt(3));
             await seed.SaveChangesAsync();
         }
 
         await using TradingCopilotDbContext context = Context();
-        int resolved = await Service(context).ResolveAsync(Now.AddMinutes(1), CancellationToken.None);
+        int resolved = await Service(context).ResolveAsync(Now, CancellationToken.None);
 
-        resolved.Should().Be(0);
+        resolved.Should().Be(0, "the row is already resolved against the current generation");
     }
 
     [Fact]
-    public async Task ResolveAsync_ShouldReResolve_WhenTheConfigChangedAfterTheLastResolution()
+    public async Task ResolveAsync_ShouldReResolve_WhenTheConfigGenerationAdvanced()
     {
         await using (TradingCopilotDbContext seed = Context())
         {
             seed.TickerInstrumentMaps.Add(new TickerInstrumentMap { Ticker = "SPY", Instrument = "ES" });
-            seed.News.Add(News("a", resolvedAt: Now, "SPY")); // resolved earlier, but with empty matches
-            seed.RelevanceConfigStates.Add(new RelevanceConfigState { Id = Guid.NewGuid(), UpdatedAt = Now.AddMinutes(5) });
+            seed.News.Add(News("a", resolvedVersion: 4, "SPY")); // resolved against an older generation
+            seed.RelevanceConfigStates.Add(ConfigAt(5));
             await seed.SaveChangesAsync();
         }
 
         await using TradingCopilotDbContext context = Context();
-        int resolved = await Service(context).ResolveAsync(Now.AddMinutes(10), CancellationToken.None);
+        int resolved = await Service(context).ResolveAsync(Now, CancellationToken.None);
 
-        resolved.Should().Be(1); // stale: resolved before the config changed
-        (await context.News.SingleAsync()).MatchedInstruments.Should().Contain("ES");
+        resolved.Should().Be(1);
+        NewsRecord stored = await context.News.SingleAsync();
+        stored.MatchedInstruments.Should().Contain("ES");
+        stored.RelevanceVersion.Should().Be(5, "stamped with the generation it was resolved against");
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldNotDependOnWallClock_WhenTimeMovesBackwardsBetweenPasses()
+    {
+        // THE gh#418 GUARD. The old design compared timestamps, so a pass running with an EARLIER clock than a
+        // prior resolution (clock skew across instances) could misjudge staleness. Version comparison cannot:
+        // a config generation ahead of the row re-resolves regardless of what any clock says.
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            seed.TickerInstrumentMaps.Add(new TickerInstrumentMap { Ticker = "SPY", Instrument = "ES" });
+            seed.News.Add(News("a", resolvedVersion: 1, "SPY"));
+            seed.RelevanceConfigStates.Add(ConfigAt(2));
+            await seed.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext context = Context();
+        // A clock a full day BEFORE the row's stored resolution time — nonsensical under a wall-clock scheme.
+        int resolved = await Service(context).ResolveAsync(Now.AddDays(-1), CancellationToken.None);
+
+        resolved.Should().Be(1, "generation 1 < 2, so it re-resolves — the clock is irrelevant");
     }
 
     [Fact]
@@ -99,7 +127,7 @@ public class NewsRelevanceServiceTests
         await using (TradingCopilotDbContext seed = Context())
         {
             seed.TickerInstrumentMaps.Add(new TickerInstrumentMap { Ticker = "SPY", Instrument = "ES" });
-            seed.News.Add(News("a", resolvedAt: null, "SPY"));
+            seed.News.Add(News("a", resolvedVersion: null, "SPY"));
             await seed.SaveChangesAsync();
         }
 
@@ -108,6 +136,6 @@ public class NewsRelevanceServiceTests
         await service.ResolveAsync(Now, CancellationToken.None);
         int second = await service.ResolveAsync(Now.AddMinutes(1), CancellationToken.None);
 
-        second.Should().Be(0); // nothing left to resolve
+        second.Should().Be(0); // nothing left to resolve — the version now matches
     }
 }
