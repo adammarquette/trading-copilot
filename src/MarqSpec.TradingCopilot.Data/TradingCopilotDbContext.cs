@@ -119,6 +119,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>The append-only journal of trigger firings (gh#385, ADR-0008). Operator-owned.</summary>
     public DbSet<TriggerFiringRecord> TriggerFirings => Set<TriggerFiringRecord>();
 
+    /// <summary>Per-operator news importance feedback — stars and mutes (gh#27, ADR-0014). Operator-owned.</summary>
+    public DbSet<SoftSignalFeedback> SoftSignalFeedbacks => Set<SoftSignalFeedback>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -578,6 +581,27 @@ public class TradingCopilotDbContext : TenantDbContext
         modelBuilder.Entity<RelevanceConfigState>(state =>
         {
             state.HasKey(s => s.Id);
+        });
+
+        modelBuilder.Entity<SoftSignalFeedback>(feedback =>
+        {
+            feedback.HasKey(f => f.Id);
+
+            // Matches NewsRecord.DedupKey -- the item this feedback rates, referenced by key (no navigation) to keep
+            // the per-user table decoupled from the global news store.
+            feedback.Property(f => f.NewsDedupKey).HasMaxLength(512);
+
+            // One feedback per operator per item: re-rating replaces rather than stacks, and un-starring deletes the
+            // row. The index leads with UserId so it also serves the per-operator profile read (all of an owner's
+            // feedback); the R-20 default-deny filter (TenantDbContext) already scopes every read to the owner.
+            feedback.HasIndex(f => new { f.UserId, f.NewsDedupKey }).IsUnique();
+
+            feedback.ToTable(table =>
+            {
+                // Refusable zero (gh#60 pattern): a feedback row can never be stored with an unset kind -- it must be
+                // a star or a mute, never a no-op sitting in the store contributing neither.
+                table.HasCheckConstraint("CK_SoftSignalFeedback_Kind_NotUnknown", "\"Kind\" <> 0");
+            });
         });
 
         modelBuilder.Entity<Event>(evt =>
