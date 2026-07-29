@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using MarqSpec.TradingCopilot.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -13,9 +14,11 @@ using Pgvector;
 namespace MarqSpec.TradingCopilot.Data.Migrations
 {
     [DbContext(typeof(TradingCopilotDbContext))]
-    partial class TradingCopilotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260729021129_AddAiUsageLedger")]
+    partial class AddAiUsageLedger
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -801,44 +804,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         });
                 });
 
-            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.NotificationOutboxRecord", b =>
-                {
-                    b.Property<string>("DedupKey")
-                        .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
-
-                    b.Property<int>("Attempts")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Body")
-                        .IsRequired()
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTimeOffset?>("DeliveredAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("Severity")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
-
-                    b.HasKey("DedupKey");
-
-                    b.HasIndex("DeliveredAt", "CreatedAt");
-
-                    b.ToTable("NotificationOutbox", t =>
-                        {
-                            t.HasCheckConstraint("CK_NotificationOutbox_Severity_NotUnknown", "\"Severity\" <> 0");
-                        });
-                });
-
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.Order", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1040,37 +1005,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                             t.HasCheckConstraint("CK_RiskProfiles_TargetRewardRatio_Positive", "\"TargetRewardRatio\" > 0");
 
                             t.HasCheckConstraint("CK_RiskProfiles_TrailingAmount_Positive", "\"TrailingAmount\" > 0");
-                        });
-                });
-
-            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.SoftSignalFeedback", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("Kind")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("NewsDedupKey")
-                        .IsRequired()
-                        .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
-
-                    b.Property<Guid>("UserId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("UserId", "NewsDedupKey")
-                        .IsUnique();
-
-                    b.ToTable("SoftSignalFeedbacks", t =>
-                        {
-                            t.HasCheckConstraint("CK_SoftSignalFeedback_Kind_NotUnknown", "\"Kind\" <> 0");
                         });
                 });
 

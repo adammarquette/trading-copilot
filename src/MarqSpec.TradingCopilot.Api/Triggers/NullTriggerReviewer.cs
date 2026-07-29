@@ -16,7 +16,8 @@ namespace MarqSpec.TradingCopilot.Api.Triggers;
 public sealed class NullTriggerReviewer : ITriggerReviewer
 {
     /// <inheritdoc />
-    public Task<ReviewOutcome> ReviewAsync(TriggerReviewContext context, CancellationToken cancellationToken) =>
-        Task.FromResult<ReviewOutcome>(
-            new ReviewOutcome.Suppress(SuppressReason.NoReviewerConfigured, "no LLM reviewer is configured"));
+    public Task<AgentReview> ReviewAsync(TriggerReviewContext context, CancellationToken cancellationToken) =>
+        // No LLM call is made, so no spend to ledger -- Cost is null.
+        Task.FromResult(new AgentReview(
+            new ReviewOutcome.Suppress(SuppressReason.NoReviewerConfigured, "no LLM reviewer is configured"), Cost: null));
 }

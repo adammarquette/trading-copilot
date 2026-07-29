@@ -1,8 +1,11 @@
+using System.Diagnostics;
 using System.Text.Json;
+using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Triggers;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.Api.Triggers;
 
@@ -55,22 +58,28 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
     private static readonly JsonSerializerOptions _serializerOptions = new() { PropertyNameCaseInsensitive = true };
 
     private readonly ILlmProvider _llm;
+    private readonly LlmOptions _options;
     private readonly ILogger<LlmTriggerReviewer> _logger;
 
     /// <summary>Creates the reviewer.</summary>
     /// <param name="llm">The provider-neutral LLM seam the review call goes through.</param>
+    /// <param name="options">The LLM config — the triage model id and the cost rates the ledger row is priced at.</param>
     /// <param name="logger">The logger; a fail-closed suppression is logged, never swallowed.</param>
-    public LlmTriggerReviewer(ILlmProvider llm, ILogger<LlmTriggerReviewer> logger)
+    public LlmTriggerReviewer(ILlmProvider llm, IOptions<LlmOptions> options, ILogger<LlmTriggerReviewer> logger)
     {
+        ArgumentNullException.ThrowIfNull(options);
+
         _llm = llm;
+        _options = options.Value;
         _logger = logger;
     }
 
     /// <inheritdoc />
-    public async Task<ReviewOutcome> ReviewAsync(TriggerReviewContext context, CancellationToken cancellationToken)
+    public async Task<AgentReview> ReviewAsync(TriggerReviewContext context, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
 
+        string model = _options.ModelFor(LlmModelTier.Triage);
         LlmRequest request = new(
             LlmModelTier.Triage,
             SystemPrompt,
@@ -78,6 +87,7 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
             LlmResponseFormat.Json(ReviewSchema),
             MaxOutputTokens);
 
+        long startedTicks = Stopwatch.GetTimestamp();
         LlmCompletion completion;
         try
         {
@@ -85,18 +95,41 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // Our own shutdown -- not a review outcome. Let it propagate.
+            // Our own shutdown -- not a review outcome, and not spend to record. Let it propagate.
             throw;
         }
         catch (Exception error)
         {
             // A provider fault (a network error, a timeout, a 429, a 5xx) -- including a TaskCanceledException that is
-            // a request timeout rather than our cancellation. The reviewer's fail-closed contract is TOTAL: a throw is
-            // never a proposal and never escapes, it becomes a suppression like any other unusable outcome.
+            // a request timeout rather than our cancellation. The fail-closed contract is TOTAL: a throw is never a
+            // proposal. It IS billable latency the governor must see, so it records a zero-token Failed cost -- the
+            // exact failure regime a success-only ledger would silently miss.
             _logger.LogWarning(error, "Trigger {TriggerId} review provider call failed; suppressing.", context.TriggerId);
-            return new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the review provider call failed");
+            AiCallCost failedCost = new(
+                AiUsageFeature.Triage, model, LlmModelTier.Triage, AiUsageOutcome.Failed,
+                0, 0, 0m, Stopwatch.GetElapsedTime(startedTicks));
+            return new AgentReview(
+                new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the review provider call failed"),
+                failedCost);
         }
 
+        TimeSpan latency = Stopwatch.GetElapsedTime(startedTicks);
+
+        // The review outcome and the SPEND outcome are orthogonal: a Completed call the reviewer then suppresses
+        // (not-worth-surfacing, malformed JSON) still cost tokens. Cost is computed ONCE from the completion, so
+        // EVERY suppress/suggest path below carries it -- no return point can silently drop a real spend row.
+        ReviewOutcome outcome = MapCompletion(context, completion);
+        AiCallCost cost = new(
+            AiUsageFeature.Triage, model, LlmModelTier.Triage, OutcomeOf(completion.StopReason),
+            completion.Usage.InputTokens, completion.Usage.OutputTokens,
+            _options.EstimateCost(LlmModelTier.Triage, completion.Usage.InputTokens, completion.Usage.OutputTokens),
+            latency);
+        return new AgentReview(outcome, cost);
+    }
+
+    /// <summary>Maps a returned completion to a review outcome — the fail-closed mapping (unchanged; its usage is priced above).</summary>
+    private ReviewOutcome MapCompletion(TriggerReviewContext context, LlmCompletion completion)
+    {
         // FAIL-CLOSED on anything but a clean completion: a refusal or a truncation is not a proposal.
         if (completion.StopReason != LlmStopReason.Completed)
         {
@@ -134,6 +167,14 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
 
         return Map(context, dto);
     }
+
+    /// <summary>The SPEND outcome of a returned (billed) completion — orthogonal to whether the review was usable.</summary>
+    private static AiUsageOutcome OutcomeOf(LlmStopReason stopReason) => stopReason switch
+    {
+        LlmStopReason.Refusal => AiUsageOutcome.Refused,
+        LlmStopReason.MaxTokens => AiUsageOutcome.Truncated,
+        _ => AiUsageOutcome.Succeeded, // Completed, or an unknown-but-billed stop
+    };
 
     private ReviewOutcome Map(TriggerReviewContext context, ReviewDto dto)
     {

@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Triggers;
@@ -41,6 +43,7 @@ public sealed class TriggerEvaluationService
     private readonly IIndicatorSource _indicators;
     private readonly INotificationChannel _notifications;
     private readonly ITriggerReviewer _reviewer;
+    private readonly IAiUsageLedger _ledger;
     private readonly ILogger<TriggerEvaluationService> _logger;
 
     /// <summary>Creates the service.</summary>
@@ -52,6 +55,10 @@ public sealed class TriggerEvaluationService
     /// The agent-review judgment seam (ADR-0008): the agent-review route wakes it once per fire. It only <b>proposes</b>
     /// — it is not, and must not become, a path to execution (enforcement lives below the model).
     /// </param>
+    /// <param name="ledger">
+    /// The AIUsage spend ledger (gh#431): a required, fail-open dependency the scan stamps the owner onto — it records
+    /// the reviewer's LLM-call cost and can never fail or roll back a fire.
+    /// </param>
     /// <param name="logger">The logger.</param>
     public TriggerEvaluationService(
         TradingCopilotDbContext discovery,
@@ -59,6 +66,7 @@ public sealed class TriggerEvaluationService
         IIndicatorSource indicators,
         INotificationChannel notifications,
         ITriggerReviewer reviewer,
+        IAiUsageLedger ledger,
         ILogger<TriggerEvaluationService> logger)
     {
         _discovery = discovery;
@@ -66,6 +74,7 @@ public sealed class TriggerEvaluationService
         _indicators = indicators;
         _notifications = notifications;
         _reviewer = reviewer;
+        _ledger = ledger;
         _logger = logger;
     }
 
@@ -287,10 +296,10 @@ public sealed class TriggerEvaluationService
         // throw must debounce like every other outcome (one review attempt per arming edge, the arm still advancing to
         // Fired below), never escape to the per-owner guard: that would leave the arm Armed and re-review every pass
         // (unbounded LLM cost) AND roll back a co-owner's already-sent mechanical fire. Map it to ReviewerUnavailable.
-        ReviewOutcome outcome;
+        AgentReview review;
         try
         {
-            outcome = await _reviewer.ReviewAsync(context, cancellationToken);
+            review = await _reviewer.ReviewAsync(context, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -298,11 +307,38 @@ public sealed class TriggerEvaluationService
         }
         catch (Exception error)
         {
+            // A reviewer that itself threw (not the provider it wraps — LlmTriggerReviewer never throws) carries no
+            // cost to ledger; treat it as unavailable, same debounce as any other outcome.
             _logger.LogError(error, "Agent-review trigger {Id} reviewer threw; treating as unavailable.", trigger.Id);
-            outcome = new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the reviewer threw");
+            review = new AgentReview(new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the reviewer threw"), Cost: null);
         }
 
-        switch (outcome)
+        // Ledger the LLM-call spend, stamped with THIS owner (the scan is the single tenancy authority) + the trace.
+        // Cost is null only when no call was made (the inert reviewer). The real ledger is fail-open by its OWN
+        // contract, but the seam admits any IAiUsageLedger -- so guard it at the boundary too, exactly as the reviewer
+        // and advisory-notify seams above/below are. Un-guarded, a contract-violating throw would unwind to the
+        // per-owner catch and discard the whole pass: this fire AND any co-owner mechanical alert already SENT earlier
+        // this pass (re-sent next pass -- a duplicate). A spend-bookkeeping fault must never do that. Only the caller's
+        // own cancellation escapes.
+        if (review.Cost is not null)
+        {
+            try
+            {
+                await _ledger.RecordAsync(
+                    new AiUsageEntry(owner, review.Cost, Activity.Current?.TraceId.ToString(), now), cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                _logger.LogError(
+                    error, "AIUsage ledger record threw for owner {Owner}; the fire is committed regardless.", owner);
+            }
+        }
+
+        switch (review.Outcome)
         {
             case ReviewOutcome.Suggest suggest:
                 await StageSuggestionAsync(database, trigger, owner, suggest, now, dedupKey, advisories, cancellationToken);
@@ -448,7 +484,4 @@ public sealed class TriggerEvaluationService
         OrderSide.Sell => "short",
         _ => "unknown",
     };
-
-    /// <summary>The owning operator, so every per-owner read and every journaled firing stays R-20-scoped.</summary>
-    private sealed record OwnerUser(Guid UserId) : ICurrentUser;
 }

@@ -19,9 +19,13 @@ public class NullTriggerReviewerTests
             Guid.NewGuid(), InstrumentId.Parse("ES"), "rsi", 14, 1,
             IndicatorComparison.Below, 30m, 25m, DateTimeOffset.UnixEpoch);
 
-        ReviewOutcome outcome = await reviewer.ReviewAsync(context, CancellationToken.None);
+        AgentReview review = await reviewer.ReviewAsync(context, CancellationToken.None);
 
-        outcome.Should().BeOfType<ReviewOutcome.Suppress>()
+        review.Outcome.Should().BeOfType<ReviewOutcome.Suppress>()
             .Which.Reason.Should().Be(SuppressReason.NoReviewerConfigured);
+
+        // No LLM call was made, so there is NO spend to ledger -- the inert reviewer's Cost is null (gh#431). This is
+        // the discriminator the scan reads to decide whether to record a usage row at all.
+        review.Cost.Should().BeNull();
     }
 }

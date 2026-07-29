@@ -79,12 +79,9 @@ public sealed class AnthropicLlmProvider : ILlmProvider
         return Parse(payload);
     }
 
-    private string ModelFor(LlmModelTier tier) => tier switch
-    {
-        LlmModelTier.Triage => _options.TriageModel,
-        LlmModelTier.Deep => _options.DeepModel,
-        _ => _options.TriageModel, // an undeclared tier triages -- the cheap, safe default
-    };
+    // Delegates to LlmOptions so the model the provider POSTs and the model the reviewer ledgers (gh#431) are, by
+    // construction, the same string.
+    private string ModelFor(LlmModelTier tier) => _options.ModelFor(tier);
 
     private static string BuildRequestBody(LlmRequest request, string model)
     {
