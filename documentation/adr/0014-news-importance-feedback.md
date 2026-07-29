@@ -53,3 +53,12 @@ and scope (R-20).
 - Decide where the multiplier applies: **surfacing order**, **rerank score**, and/or the **context budget** the
   co-pilot spends on an item.
 - Surface the **"why weighted"** explanation in the news UI (R-2 panel).
+
+## Follow-up resolutions (gh#27)
+The open follow-ups above are settled by the gh#27 implementation:
+- **Aggregation.** A star/mute contributes to a weight per **(dimension, value)** along the three dimensions that exist today — **matched instrument, matched topic, source**. Each contribution is scaled by an **exponential recency decay** (half-life, default 14 days), so recent feedback dominates and old feedback fades. An item's multiplier is `1 + Σ(matched-dimension weights)`, **clamped** to a floor and cap. The **named-entity** and **semantic-embedding** dimensions (gh#377) **degrade off** — absent, they contribute nothing rather than failing.
+- **Where it applies.** **Surfacing order**, via a new personalized read `GET /api/news` (the sole consumer). Rerank-score and context-budget application arrive with those consumers (the retrieval path gh#103; the co-pilot R-6). The weight is **computed on read** from the operator's stored `SoftSignalFeedback` — no materialized per-user weight table, so it is always fresh; a cache is a later optimization. The feed re-ranks a **recency-bounded window** (the most recent N items), so salience reorders *within* recent news; surfacing a heavily-starred but older item **regardless of age** would require folding salience into the candidate selection (or unioning feedback-matched items in) — a later refinement, noted so it is a deliberate v1 bound, not an oversight.
+- **Salience floor.** A **multiplier floor > 0** (default 0.25×): a mute down-weights but can never drive an item to zero, and an unstarred item stays at its base — nothing is hard-filtered (no bubble).
+- **Base relevance (v1).** Deliberately coarse — a topic-map-matched item outranks an unmatched one, which still surfaces at a lower base. A richer base (match-count / recency blend) is a later refinement.
+- **Sentiment** stays **deferred** (R-2): the `SoftSignalKind` enum reserves room, but only **star + mute** ship now.
+- **Safety.** The weight is structurally unreachable from the risk gate (ADR-0007): a unit guard asserts no `Domain.Risk` type references `Domain.Signals`, and the paired QA suite (gh#362) asserts a maximally-starred/muted signal leaves a gate outcome **byte-identical** to baseline.
