@@ -1,4 +1,6 @@
 using MarqSpec.TradingCopilot.Api.Notifications;
+using MarqSpec.TradingCopilot.Data;
+using Microsoft.EntityFrameworkCore;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
@@ -32,7 +34,23 @@ public sealed class AlertingTestPostgresFactory : StubbedVenuePostgresFactory
     public async Task DrainNotificationsAsync()
     {
         await using AsyncServiceScope scope = Services.CreateAsyncScope();
+
         await Services.GetRequiredService<NotificationRelayHost>().DrainAsync(scope, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// How many notifications are recorded but not yet delivered — the outbox's own backlog.
+    /// </summary>
+    /// <remarks>
+    /// Added while diagnosing gh#400: it separates <i>never recorded</i> from <i>never delivered</i>, which no
+    /// assertion on the recorder can distinguish. Kept, because that ambiguity is inherent to a two-stage
+    /// delivery path and the next failure will pose the same question.
+    /// </remarks>
+    public async Task<int> OwedNotificationCountAsync()
+    {
+        await using AsyncServiceScope scope = Services.CreateAsyncScope();
+        return await scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>()
+            .NotificationOutbox.CountAsync(row => row.DeliveredAt == null);
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
