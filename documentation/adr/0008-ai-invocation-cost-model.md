@@ -43,13 +43,14 @@ discipline to **how and when the LLM is invoked at all**, so cost is bounded and
   a budget (`Q-10`); in the **multi-user** model (R-20) it is a **platform-level** cap the **operator** sets — one
   shared LLM + embeddings account funds every user, so usage & spend is reported in **Grafana, not surfaced to end
   users** *(revisit per-user if invitees later bring their own LLM accounts; gh#4)*. Every invocation is **traced** ([ADR-0002](0002-observability.md)) so cost and latency are
-  observable. **The first governor-input signal is emitting** (gh#403): every Cohere embed call records tokens,
-  estimated cost and latency on the `MarqSpec.TradingCopilot.Ai` meter, by model and outcome — the metrics the
-  governor reads to know spend-so-far, and a failover is counted so a degrade is visible. Cost is estimated from
-  a single pinned rate. The **persisted `AIUsage`** record — the in-app spend meter and the durable governor
-  ledger — **landed** (gh#431): the agent-review reviewer records one per-call token / cost / latency row under
-  the firing owner's scope. It is a **floor, not a complete accounting** (fail-open, lossy on host death), so the
-  governor reconciles it against the aggregate meter rather than hard-capping on it alone.
+  observable. Spend is **metered** (gh#403): every Cohere embed call records tokens, estimated cost and latency on
+  the `MarqSpec.TradingCopilot.Ai` meter, by model and outcome, and a failover is counted so a degrade is visible.
+  Cost is estimated from a single pinned rate. The **persisted `AIUsage`** record — the in-app spend meter and the
+  durable governor ledger — **landed** (gh#431): the agent-review reviewer records one per-call token / cost /
+  latency row under the firing owner's scope. It is a **floor, not a complete accounting** (fail-open, lossy on host
+  death). The **governor landed** (gh#448) and enforces on that ledger floor; the gh#448 follow-up records **why it
+  cannot reconcile against the meter in-process** (that meter is export-only — Prometheus, not app-readable — and
+  covers embeddings only today) and what that means for the effective cap.
 - **The strategy-agent → executor flow attaches here.** Strategy agents are the "review / enrich on fire"
   consumers; the executor synthesizes their outputs into a timely suggestion — invoked **on triggers, not
   continuously**. Their proposals still pass the deterministic risk / execution gate ([ADR-0007](0007-order-execution-model.md)):
@@ -133,9 +134,10 @@ owner-scoped context and a fault is logged + swallowed at **both** the ledger in
 (guarded exactly like the reviewer and advisory-notify seams), so a spend-bookkeeping blip can never roll back a
 committed fire or a co-owner's already-sent alert. A **provider fault is a real `Failed` zero-token row** (billable
 latency the governor must see), not an absence. **Crucial caveat — the ledger is a FLOOR, not a complete
-accounting:** nothing is recorded if the host dies between the call and the write, so the **spend governor must
-reconcile against the aggregate `MarqSpec.TradingCopilot.Ai` meter** (gh#403, ADR-0002), never hard-cap on this
-ledger alone. Still open (the last of "AI-spend"): the **platform-level spend governor** (cap / throttle vs.
+accounting:** nothing is recorded if the host dies between the call and the write, so the **spend governor treats it
+as a floor** (gh#403, ADR-0002) — *superseded by the gh#448 update below*, which found the aggregate meter to be
+export-only and settled that the governor enforces on the floor and reconciles operator-side in Grafana. Still open
+(the last of "AI-spend"): the **platform-level spend governor** (cap / throttle vs.
 budget) and the **triage→deep escalation policy**.
 
 **Update (2026-07-29, gh#436) — embed-path AIUsage owner settled; the live write awaits gh#377.** The question
@@ -155,6 +157,33 @@ fire-and-forget on the degrade-never-throw retrieval path. The mapping is pinned
 (Embedded → Succeeded, RateLimited → RateLimited, Failed → Failed), with `Feature = Embed`, `Tier = null`,
 `OutputTokens = 0`. **Embed attribution is now closed**; the live embed write rides gh#377. Still open: the
 **platform-level spend governor** and the **triage→deep escalation policy**.
+
+**Update (2026-07-29, gh#448) — the platform-level AI-spend governor landed.** A **pure, deterministic**
+`AiSpendGovernor` (Domain/Ai) mirrors the R-5 daily *risk* governor line-for-line — `budget − spent ≤ 0 ⇒ Block` —
+and the trigger scan consults it **before** waking the agent-review reviewer: on a spent budget it short-circuits to
+`Suppress(BudgetExhausted)` with **no LLM call and no `AIUsage` row** (it caps *whether* a call is made, not just
+records it), telling the operator one "review paused — budget reached" advisory per arming edge, plus a once-per-day
+threshold heads-up. The budget is **static, validated, opt-in `GovernorOptions`** ("Governor"; `DailyBudgetUsd`
+absent ⇒ inert, the no-cap status quo), not a per-account entity — a platform cap has no per-account home (contrast
+`RiskProfile`). The window is the **daily Central trading day** (via `MarketClock`, mirroring the risk governor +
+auto-flatten — a UTC reset would split a live CME session). **Honest amendment to the gh#431 note above ("reconcile
+against the aggregate meter, never hard-cap on the ledger alone"):** that is **impractical as written** — the
+`MarqSpec.TradingCopilot.Ai` meter is `System.Diagnostics.Metrics` → OTel → Prometheus, **export-only, not readable
+in-process**, and covers **embeddings only** today. So the governor enforces on the **`AIUsage` ledger floor** (a
+platform-wide `IgnoreQueryFilters` window-sum across every owner + the `SystemOwner` embed rows — the only
+app-queryable spend signal), and **reconciliation is operator-facing in Grafana**, not an in-app read; until an
+LLM-side meter lands, that Grafana view shows embeddings only, so LLM-spend is reconciled by reading the ledger
+directly. Because the floor can only *under*-count (a row is lost only if the host dies between the call and its
+own-context write), the **effective cap is the budget plus at most one in-flight call's un-recorded spend** — it
+fails toward *allow* (never a spurious block), so the operator sets `DailyBudgetUsd` with a little headroom.
+**Fail-closed on the cap** (the point); **fail-open on an unavailable spend signal** (a read fault logs and runs the
+pass un-gated) — the deliberate *inverse* of the fail-closed trade-safety gate, because this guards a soft-dollar
+budget, not capital-at-risk, and must never be conflated with it. **Hard-cap only** for now (ADR-0008's "cap *or*
+throttle" — throttle deferred). Still open: an **LLM-side meter** so Grafana shows true LLM spend (a gh#403 sibling;
+it would still not be in-process readable, so it does not change the governor's read), **Prometheus-based
+reconciliation**, **embed-call-site gating** (rides gh#377 — the window-sum already *counts* embed rows once written,
+only refusing an embed when exhausted defers), a **runtime-editable** budget, and the **triage→deep escalation
+policy** (gh#449).
 
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*
