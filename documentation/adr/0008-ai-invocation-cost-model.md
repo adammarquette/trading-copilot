@@ -138,6 +138,24 @@ reconcile against the aggregate `MarqSpec.TradingCopilot.Ai` meter** (gh#403, AD
 ledger alone. Still open (the last of "AI-spend"): the **platform-level spend governor** (cap / throttle vs.
 budget) and the **triage→deep escalation policy**.
 
+**Update (2026-07-29, gh#436) — embed-path AIUsage owner settled; the live write awaits gh#377.** The question
+gh#431 deferred ("who owns a *global* embed's spend row under R-20?") is resolved: **global** embedding spend —
+embedding deployment-global news / market snapshots (gh#377) — is **deployment infrastructure cost, not an operator
+trading decision**, so it is stamped to a **deployment sentinel owner** (`SystemOwner.Id`, a well-known **non-empty**
+Guid). Not the operator (that would inflate the per-decision spend meter, gh#62, and contradict "embeddings reported
+in Grafana, not surfaced to end users"); not `Guid.Empty` (the data layer's "no user ⇒ read nothing" deny sentinel —
+a real row there would be anonymously readable); not a nullable owner (that would weaken the single default-deny
+filter for the safety-relevant LLM rows too). `AIUsage` stays strictly `IUserOwned` and needs **no seeded `User`
+row** — an owned row's owner column is a query-filter scope, not a foreign key. The owner is stamped **by the
+consumer** (per gh#431): a *global* embed → the sentinel; an *owner-scoped* embed (e.g. an operator's own chat query)
+→ the operator. The **live write is deferred to the first embed consumer (gh#377)** — gh#431's "until an owner-scoped
+embed consumer exists" condition is still unmet (nothing calls `EmbedAsync`), the metric half already gives
+visibility (gh#403), and forcing a write now would be dead code plus a singleton→scoped captive dependency or a
+fire-and-forget on the degrade-never-throw retrieval path. The mapping is pinned: `EmbeddingOutcome` → `AiUsageOutcome`
+(Embedded → Succeeded, RateLimited → RateLimited, Failed → Failed), with `Feature = Embed`, `Tier = null`,
+`OutputTokens = 0`. **Embed attribution is now closed**; the live embed write rides gh#377. Still open: the
+**platform-level spend governor** and the **triage→deep escalation policy**.
+
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*
 - Spec the **deterministic trigger evaluator** as a processor / consumer over the event log (ADR-0001) — inputs
