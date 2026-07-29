@@ -40,12 +40,22 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 public sealed class OutboxNotificationChannel : INotificationChannel
 {
     private readonly TradingCopilotDbContext _database;
+    private readonly IServiceScopeFactory _scopes;
     private readonly TimeProvider _clock;
     private readonly INotificationChannel _delivery;
     private readonly ILogger<OutboxNotificationChannel> _logger;
 
     /// <summary>Creates the channel over the scoped database.</summary>
-    /// <param name="database">The scoped database.</param>
+    /// <param name="database">
+    /// The <b>caller's</b> scoped database — used only by <see cref="Enlist"/>, where sharing the caller's unit
+    /// of work is the entire point.
+    /// </param>
+    /// <param name="scopes">
+    /// Opens a <b>fresh</b> scope for <see cref="SendAsync"/>. That path must NOT touch the caller's context: it
+    /// would commit whatever else the producer had pending, and a failure anywhere in the producer's unit of work
+    /// would be swallowed by this channel's never-throw contract and silently eat a page (gh#400 — this is what
+    /// made four alerting tests report an empty inbox).
+    /// </param>
     /// <param name="clock">The clock, injected so the recorded time is testable.</param>
     /// <param name="delivery">
     /// The delivery chain (queue → dedup → transport). Used only by <see cref="ResolveAsync"/>, to cancel a page
@@ -55,11 +65,13 @@ public sealed class OutboxNotificationChannel : INotificationChannel
     /// <param name="logger">The logger.</param>
     public OutboxNotificationChannel(
         TradingCopilotDbContext database,
+        IServiceScopeFactory scopes,
         TimeProvider clock,
         INotificationChannel delivery,
         ILogger<OutboxNotificationChannel> logger)
     {
         _database = database;
+        _scopes = scopes;
         _clock = clock;
         _delivery = delivery;
         _logger = logger;
@@ -78,8 +90,14 @@ public sealed class OutboxNotificationChannel : INotificationChannel
 
         try
         {
-            Enlist(notification);
-            await _database.SaveChangesAsync(cancellationToken);
+            // A FRESH scope, deliberately: this path is independent of the caller's unit of work. Writing through
+            // the caller's context would commit their pending changes as a side effect, and — worse — let an
+            // unrelated failure in their unit of work be swallowed here and silently lose the page.
+            await using AsyncServiceScope scope = _scopes.CreateAsyncScope();
+            TradingCopilotDbContext own = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+
+            own.NotificationOutbox.Add(NewRow(notification));
+            await own.SaveChangesAsync(cancellationToken);
             return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -94,6 +112,7 @@ public sealed class OutboxNotificationChannel : INotificationChannel
             _logger.LogError(
                 error, "Could not record notification {DedupKey} to the outbox; it will NOT be delivered.",
                 notification.DedupKey);
+
             return false;
         }
     }
@@ -164,15 +183,18 @@ public sealed class OutboxNotificationChannel : INotificationChannel
             return;
         }
 
-        _database.NotificationOutbox.Add(new NotificationOutboxRecord
-        {
-            DedupKey = notification.DedupKey,
-            Severity = notification.Severity,
-            Title = notification.Title,
-            Body = notification.Body,
-            CreatedAt = _clock.GetUtcNow(),
-            DeliveredAt = null,
-            Attempts = 0,
-        });
+        _database.NotificationOutbox.Add(NewRow(notification));
     }
+
+    /// <summary>Builds an owed row — shared so both entry points record identically.</summary>
+    private NotificationOutboxRecord NewRow(Notification notification) => new()
+    {
+        DedupKey = notification.DedupKey,
+        Severity = notification.Severity,
+        Title = notification.Title,
+        Body = notification.Body,
+        CreatedAt = _clock.GetUtcNow(),
+        DeliveredAt = null,
+        Attempts = 0,
+    };
 }
