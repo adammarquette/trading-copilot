@@ -211,7 +211,7 @@ the rule, not noise to tolerate.
   drained lost the page outright — and the caller had already been told it succeeded. The chain is now
   **outbox → queue → dedup → transport**. `OutboxNotificationChannel` (gh#400) writes one indexed row and returns,
   so the R-13 hot path still never awaits a network, and `NotificationOutboxRelay` + its host (gh#437) deliver what
-  is owed and stamp `DeliveredAt`. Two ways in: `SendAsync` commits on its own (producers unchanged), while
+  is owed and stamp `DeliveredAt`. Two ways in, and they want opposite things: `SendAsync` commits **through its own scope** (producers unchanged; sharing the caller's context let an unrelated failure in the producer's unit of work be swallowed by the never-throw contract and silently eat a page — gh#452, live for a few hours after gh#437 bound this as the seam), while
   `Enlist` stages the row in the **caller's** `DbContext`, so intent and state change commit atomically and the
   commit→enqueue gap does not exist at all.
   **The guarantee is stated precisely, because the obvious phrasing overstates it.** It is **no dropped page**, not

@@ -73,8 +73,13 @@ public static class NotificationRegistration
         // `delivery` resolves the CONCRETE QueuedNotificationChannel rather than INotificationChannel: asking for
         // the interface here would resolve this same registration and stack-overflow on first use.
         builder.Services.AddSingleton(TimeProvider.System);
+        // Two database handles, and the difference is the point (gh#452). `Enlist` shares the CALLER's context so
+        // intent and state change commit atomically; `SendAsync` opens its OWN scope, so it commits nothing of the
+        // caller's and — critically — a failure in the caller's unit of work cannot be swallowed by this channel's
+        // never-throw contract and silently eat a page.
         builder.Services.AddScoped<INotificationChannel>(provider => new OutboxNotificationChannel(
             provider.GetRequiredService<TradingCopilotDbContext>(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
             provider.GetRequiredService<TimeProvider>(),
             provider.GetRequiredService<QueuedNotificationChannel>(),
             provider.GetRequiredService<ILogger<OutboxNotificationChannel>>()));
