@@ -72,6 +72,21 @@ public static class AiRegistration
         // still builds a fresh owner-scoped context per write.
         services.AddScoped<IAiUsageLedger, AiUsageLedger>();
 
+        // The platform-level AI-spend governor (gh#448, ADR-0008): a PURE gate the trigger scan consults before an
+        // agent-review LLM call, capping deployment-wide daily spend against the operator's budget -- the R-5 daily
+        // risk-governor mirror, one layer above the model (it caps WHETHER a call is made, not what it proposes).
+        // Singleton and safe: it is stateless (the caller hands it the windowed spend), so unlike the ledger it holds
+        // no scoped DbContextOptions and is no captive dependency. Validated on start (the FlattenOptions /
+        // SalienceOptions idiom); opt-in and INERT until a budget is configured (a fresh deploy keeps the no-cap
+        // status quo, never a surprise pause).
+        services.AddOptions<GovernorOptions>()
+            .Bind(config.GetSection(GovernorOptions.SectionName))
+            .Validate(
+                options => options.DailyBudgetUsd is null or > 0m && options.AlertThresholdFraction is > 0m and <= 1m,
+                "Governor: DailyBudgetUsd must be null or positive; AlertThresholdFraction must be in (0, 1].")
+            .ValidateOnStart();
+        services.AddSingleton<IAiSpendGovernor, AiSpendGovernor>();
+
         return services;
     }
 }

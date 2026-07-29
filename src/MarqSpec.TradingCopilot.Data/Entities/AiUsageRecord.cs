@@ -6,12 +6,15 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// <summary>
 /// One AI invocation's spend (gh#431, ADR-0008 / ADR-0002) — an append-only, per-owner ledger row: the feature it
 /// served, the model / tier, tokens in and out, an estimated dollar cost, latency, the trace id, and when. The
-/// durable read model behind the in-app spend meter and the input to the (future) platform spend governor.
+/// durable read model behind the in-app spend meter and the input to the platform spend governor (gh#448).
 /// </summary>
 /// <remarks>
 /// Operator-owned (R-20) and append-only — a usage row is never updated. It is a spend <b>floor</b>, not a complete
-/// accounting: the fail-open ledger records nothing if the host dies between the call and the write, so the governor
-/// must reconcile against the aggregate meter (ADR-0002) rather than hard-cap on this ledger alone. A
+/// accounting: the fail-open ledger records nothing if the host dies between the call and the write. The platform
+/// spend governor (gh#448) enforces on this floor because it is the only app-queryable spend signal — the aggregate
+/// <c>MarqSpec.TradingCopilot.Ai</c> meter (ADR-0002) is export-only (Prometheus), not readable in-process — so the
+/// effective cap is the budget plus at most one in-flight call's un-recorded spend; the operator reconciles the
+/// floor against Grafana and sets the budget with headroom (ADR-0008, amended by gh#448). A
 /// <see cref="AiUsageOutcome.Failed"/> row carries zero tokens — a real datapoint (the call cost latency and
 /// produced nothing), not an absence.
 /// </remarks>

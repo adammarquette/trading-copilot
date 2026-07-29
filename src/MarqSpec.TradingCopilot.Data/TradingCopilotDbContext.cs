@@ -514,7 +514,10 @@ public class TradingCopilotDbContext : TenantDbContext
             usage.Property(u => u.TraceId).HasMaxLength(64);
             usage.Property(u => u.EstimatedCostUsd).HasPrecision(18, 8);
 
-            // The ledger reads chronologically per operator (the gh#62 spend meter + the governor's windowed sum).
+            // Serves the per-operator chronological read (the gh#62 in-app spend meter). The gh#448 governor's
+            // platform-wide windowed sum filters OccurredAt with NO UserId predicate (it crosses R-20 with
+            // IgnoreQueryFilters), so it does not use this composite's leading key — a small scan at today's volume;
+            // a dedicated (OccurredAt) index is deferred until the ledger is large enough to warrant it.
             usage.HasIndex(u => new { u.UserId, u.OccurredAt });
 
             usage.ToTable("AiUsage", table =>
