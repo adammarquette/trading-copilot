@@ -4,6 +4,7 @@
   <Project Path="MarqSpec.TradingCopilot.Api/MarqSpec.TradingCopilot.Api.csproj" />
   <Project Path="MarqSpec.TradingCopilot.Integration.Finnhub/MarqSpec.TradingCopilot.Integration.Finnhub.csproj" />
   <Project Path="MarqSpec.TradingCopilot.Integration.ProjectX/MarqSpec.TradingCopilot.Integration.ProjectX.csproj" />
+  <Project Path="MarqSpec.TradingCopilot.Integration.Tiingo/MarqSpec.TradingCopilot.Integration.Tiingo.csproj" />
   <Project Path="MarqSpec.TradingCopilot.UnitTests/MarqSpec.TradingCopilot.UnitTests.csproj" />
   <Project Path="MarqSpec.TradingCopilot.IntegrationTests/MarqSpec.TradingCopilot.IntegrationTests.csproj" />
 </Solution>

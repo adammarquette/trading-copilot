@@ -1,6 +1,7 @@
 using System.Text;
 using MarqSpec.Client.Finnhub;
 using MarqSpec.Client.ProjectX.DependencyInjection;
+using MarqSpec.Client.Tiingo;
 using MarqSpec.TradingCopilot.Api;
 using MarqSpec.TradingCopilot.Api.Accounts;
 using MarqSpec.TradingCopilot.Api.Ai;
@@ -31,6 +32,7 @@ using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.Finnhub;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
+using MarqSpec.TradingCopilot.Integration.Tiingo;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -102,16 +104,24 @@ builder.Services.Configure<NewsIngestionOptions>(builder.Configuration.GetSectio
 builder.Services.AddScoped<NewsIngestionService>();
 builder.Services.AddHostedService<NewsIngestionHost>();
 
-// The Finnhub news source (gh#439, of gh#383), registered ONLY when a key is configured -- the same
-// graceful-absence pattern as the Cohere provider. An enabled poller with no Finnhub key simply has no Finnhub
-// source and writes nothing from it (Tiingo, gh#440, registers the same way alongside it). The key is never in
-// source; it comes from Finnhub__ApiKey (config/env).
+// The news sources (of gh#383), each registered ONLY when its key is configured -- the same graceful-absence
+// pattern as the Cohere provider. An enabled poller with no key for a source simply does not have it; with both
+// keys set it fans in Finnhub + Tiingo and dedups across them (R-2). Keys are never in source; they come from
+// Finnhub__ApiKey / Tiingo__ApiKey (config/env).
 FinnhubOptions finnhubOptions = builder.Configuration.GetSection("Finnhub").Get<FinnhubOptions>() ?? new FinnhubOptions();
 if (!string.IsNullOrWhiteSpace(finnhubOptions.ApiKey))
 {
     builder.Services.AddSingleton(finnhubOptions);
     builder.Services.AddHttpClient<IFinnhubNewsClient, FinnhubNewsClient>();
     builder.Services.AddScoped<INewsSource, FinnhubNewsSource>();
+}
+
+TiingoOptions tiingoOptions = builder.Configuration.GetSection("Tiingo").Get<TiingoOptions>() ?? new TiingoOptions();
+if (!string.IsNullOrWhiteSpace(tiingoOptions.ApiKey))
+{
+    builder.Services.AddSingleton(tiingoOptions);
+    builder.Services.AddHttpClient<ITiingoNewsClient, TiingoNewsClient>();
+    builder.Services.AddScoped<INewsSource, TiingoNewsSource>();
 }
 
 // R-2's news relevance resolution (gh#359): materializes matched instruments/topics onto ingested news via the
