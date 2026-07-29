@@ -86,6 +86,60 @@ if command -v gh >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------------------------------------
+# 0b. Is the PARENT claimed? (gh#453)
+# ---------------------------------------------------------------------------------------------------------
+# The branch check below matches on this issue's own id, which works right up until an issue is SPLIT: the child
+# gets a new id and the claim held on its parent becomes invisible. gh#437 was picked up that way -- a session had
+# been building the same work under gh#400 for 38 minutes, `claim.sh 437` grepped `/437_`, found nothing, and
+# correctly reported UNCLAIMED. Four commits were superseded.
+#
+# THE RESPONSE DEPENDS ON WHAT KIND OF PARENT IT IS, because the two cases mean opposite things:
+#
+#   * a NON-EPIC parent (gh#437's case: gh#400 was an ordinary issue that had been split) -- its claim almost
+#     certainly overlaps this child's scope. REFUSE.
+#   * an EPIC parent (gh#361 -> [D2] gh#14, gh#412 -> [X1] gh#26) -- epics are long-lived cards that stay In
+#     Progress for weeks while children land under them. A claim there says nothing about this child, and
+#     refusing would fire on most issues in the repo and train everyone to route around the check. WARN.
+#
+# That split is measured, not assumed: sampling recent issues, both shapes are common.
+if command -v gh >/dev/null 2>&1; then
+    PARENT="$(gh api "repos/{owner}/{repo}/issues/$ID" \
+        --jq '.parent_issue_url // "" | split("/") | last' 2>/dev/null || echo "")"
+
+    if [ -n "$PARENT" ] && [ "$PARENT" != "null" ]; then
+        PARENT_CLAIM="$(git ls-remote --heads origin 2>/dev/null | sed 's|.*refs/heads/||' \
+            | grep -E "^[a-z]+/${PARENT}_" || true)"
+
+        if [ -n "$PARENT_CLAIM" ]; then
+            IS_EPIC="$(gh api "repos/{owner}/{repo}/issues/$PARENT" \
+                --jq '[.labels[].name] | index("epic") // "" | tostring' 2>/dev/null || echo "")"
+
+            echo "The PARENT of #${ID} — #${PARENT} — is claimed:"
+            while IFS= read -r branch; do
+                [ -n "$branch" ] || continue
+                TIP="$(git log -1 --format='%ct' "origin/${branch}" 2>/dev/null || echo 0)"
+                AGE_H=$(( ($(date -u +%s) - TIP) / 3600 ))
+                BASE="$(git merge-base "origin/${branch}" origin/develop 2>/dev/null || echo '')"
+                AHEAD="$(git rev-list --count "${BASE}..origin/${branch}" 2>/dev/null || echo '?')"
+                echo "    ${branch}  (${AHEAD} commit(s), last activity ${AGE_H}h ago)"
+            done <<< "$PARENT_CLAIM"
+
+            if [ "$IS_EPIC" = "" ] || [ "$IS_EPIC" = "null" ]; then
+                echo ""
+                echo "REFUSED — #${PARENT} is not an epic, so that claim very likely covers this work too."
+                echo "This is the gh#437 shape: an issue was split and the child looked free because the claim"
+                echo "sits on the parent's id. Read that branch, and coordinate on the issue before proceeding."
+                exit 1
+            fi
+
+            echo ""
+            echo "note: #${PARENT} is an EPIC, so its claim does not imply this child is taken — proceeding." >&2
+            echo "      Still worth a glance at that branch if the scopes look close." >&2
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------------------------------------
 # 1. Is it already claimed?
 # ---------------------------------------------------------------------------------------------------------
 # The separator before the id is a SLASH, not an underscore -- `<type>/<id>_<title>`. Matching on `_<id>_`

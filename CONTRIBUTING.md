@@ -96,6 +96,30 @@ collision. If you abandon work yourself, **delete the remote branch** (`git push
 prune the worktree, rather than leaving a phantom claim; one sweep found 29 stale worktrees and 6 branches with
 no PR.
 
+### Before you split an issue, check whether it is claimed (gh#453)
+
+**This is the one the script cannot save you from.** Claims match on an issue's **id**, so the moment an issue is
+split, the child gets a new id and any claim on the parent becomes invisible to whoever picks the child up.
+
+That cost a session's work. A session had been building the outbox relay under gh#400 for 38 minutes; gh#400 was
+split into gh#400 + gh#437, gh#437 was carded as available, `scripts/claim.sh 437` grepped `/437_`, found nothing,
+and correctly reported **UNCLAIMED**. Four commits were superseded by a parallel implementation.
+
+So before decomposing an issue:
+
+```bash
+git ls-remote --heads origin | grep -E "/<id>_"     # is the issue you are about to split claimed?
+```
+
+If it is, **say so on the issue and coordinate** — do not card the children as available. The claimant is mid-work
+and cannot see what you are about to do to their scope.
+
+`claim.sh` now also checks the **parent** when you claim a child, and its response depends on the parent's kind: a
+claimed **non-epic** parent **refuses** (its scope very likely covers the child), while a claimed **epic** parent
+only warns, because epics stay claimed for weeks while children land under them and refusing there would fire on
+most issues in the repo. That is a backstop for the picker-up; the check above is what stops the orphaning at
+source.
+
 **Also delete it when your PR *merged* but the branch outlived it** (gh#424). Auto-delete-on-merge skips a branch
 that received a commit after the merge, so a late push leaves the branch alive — and because the staleness rule
 reads the branch *tip*, that push also refreshes it, so the branch looks **actively claimed indefinitely**. Worse,
