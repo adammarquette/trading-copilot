@@ -570,12 +570,19 @@ public class TradingCopilotDbContext : TenantDbContext
 
         modelBuilder.Entity<NotificationOutboxRecord>(outbox =>
         {
-            // The dedup key IS the primary key, so idempotence is enforced by the database rather than by the
-            // relay remembering to check. A redelivery after a crash collides instead of paging twice.
-            outbox.HasKey(o => o.DedupKey);
+            // A SURROGATE key, not the dedup key (gh#458). Idempotence still belongs in the database rather than
+            // in the relay remembering to check -- but its scope is the OPEN incident, not all history. The dedup
+            // key was the primary key, and since delivery is marked by stamping DeliveredAt and keeping the row, a
+            // delivered row held its key forever: the second occurrence of any incident could never be inserted,
+            // so a repeat auto-flatten failure went unreported BECAUSE the first one was reported.
+            outbox.HasKey(o => o.Id);
             outbox.Property(o => o.DedupKey).HasMaxLength(256);
             outbox.Property(o => o.Title).HasMaxLength(256);
             outbox.Property(o => o.Body).HasMaxLength(4000);
+
+            // The idempotence guard, scoped to what is still owed: re-raising an outstanding incident collides,
+            // re-raising a closed one does not. A partial index, so delivered history costs nothing to keep.
+            outbox.HasIndex(o => o.DedupKey).IsUnique().HasFilter("\"DeliveredAt\" IS NULL");
 
             // The relay reads exactly one shape: what is still owed, oldest first.
             outbox.HasIndex(o => new { o.DeliveredAt, o.CreatedAt });
