@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Domain.Notifications;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.Api.Notifications;
@@ -50,6 +51,12 @@ public static class NotificationRegistration
         builder.Services.AddHttpClient<PushoverNotificationChannel>(
             client => { client.Timeout = TimeSpan.FromSeconds(10); });
         builder.Services.AddSingleton<NullNotificationChannel>();
+
+        // The outbox and relay stamp times, so they need a clock. TryAdd, because TimeProvider is a general
+        // primitive another registration may legitimately own later -- and because the FIRST symptom of it being
+        // absent was four alerting integration tests reporting an empty inbox rather than a DI failure, which is
+        // exactly the kind of silent-looking break this chain must not have.
+        builder.Services.TryAddSingleton(TimeProvider.System);
 
         // Dedup sits directly above the transport and is a SINGLETON: it holds the open-incident set, so a scoped
         // one would forget it every pass and page once per poll instead of once per incident. It is driven by the
