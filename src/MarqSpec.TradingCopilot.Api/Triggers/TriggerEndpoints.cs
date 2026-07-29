@@ -14,11 +14,17 @@ using Microsoft.EntityFrameworkCore;
 namespace MarqSpec.TradingCopilot.Api.Triggers;
 
 /// <summary>
-/// The <c>/api/triggers</c> endpoints (gh#385, R-4 / R-7, ADR-0008) — the operator authors and manages standing
-/// deterministic triggers; the scan evaluates exactly what is persisted. Every write is validated at the boundary
-/// (a corrupt enum, a non-positive period, an unknown indicator, the not-yet-available agent-review route are all
-/// refused) so a malformed trigger never reaches the scan or the database check constraints.
+/// The <c>/api/triggers</c> endpoints (gh#385, gh#402, R-4 / R-7, ADR-0008) — the operator authors and manages
+/// standing deterministic triggers; the scan evaluates exactly what is persisted. Every write is validated at the
+/// boundary (a corrupt enum, a non-positive period, an unknown indicator are all refused) so a malformed trigger
+/// never reaches the scan or the database check constraints.
 /// </summary>
+/// <remarks>
+/// Both routes are authorable. The <b>route/account pairing</b> is validated here and mirrored by two DB checks: an
+/// <c>AgentReview</c> trigger <b>requires</b> an <c>AccountId</c> and a positive <c>Size</c> (and an account whose
+/// live mode is not <c>Undeclared</c>) — <c>CK_Triggers_AgentReview_RequiresAccountAndSize</c>; a <c>Mechanical</c>
+/// trigger carrying either is refused — <c>CK_Triggers_Mechanical_NoAccount</c>.
+/// </remarks>
 public static class TriggerEndpoints
 {
     // The R-22 indicator names a trigger may name (AtrIndicator / RsiIndicator). Case-insensitive in, canonical out,
