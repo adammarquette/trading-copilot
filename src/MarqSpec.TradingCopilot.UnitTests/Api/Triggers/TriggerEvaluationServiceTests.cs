@@ -11,7 +11,9 @@ using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Triggers;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Triggers;
 
@@ -55,8 +57,11 @@ public class TriggerEvaluationServiceTests
 
     private TradingCopilotDbContext Context(Guid? asUser = null) => new(Options, new FixedUser(asUser ?? _operator));
 
-    private TriggerEvaluationService Service(IAiUsageLedger? ledger = null) => new(
-        Context(), Options, _indicators, _notifications, _reviewer, ledger ?? _ledger,
+    // Every existing test defaults to an INERT governor (a bare GovernorOptions has DailyBudgetUsd null => no cap),
+    // so behaviour is byte-for-byte unchanged from before gh#448. The gh#448 cases pass a configured GovernorOptions.
+    private TriggerEvaluationService Service(IAiUsageLedger? ledger = null, GovernorOptions? governor = null) => new(
+        Context(), Options, _indicators, _notifications, _reviewer, ledger ?? _ledger, new AiSpendGovernor(),
+        Microsoft.Extensions.Options.Options.Create(governor ?? new GovernorOptions()),
         NullLogger<TriggerEvaluationService>.Instance);
 
     // The reviewer now returns an AgentReview: the outcome the route acts on plus the LLM-call Cost the scan ledgers.
@@ -130,6 +135,29 @@ public class TriggerEvaluationServiceTests
         });
         await context.SaveChangesAsync();
         return id;
+    }
+
+    // Seeds one AIUsage spend row (gh#431 shape) under the given owner. The governor's per-pass read is PLATFORM-WIDE
+    // (IgnoreQueryFilters), and the in-memory DB is shared across contexts by database name, so a row seeded under ANY
+    // owner -- an operator, a stranger, or the SystemOwner embed sentinel -- is summed into the gate's floor.
+    private async Task SeedUsageAsync(Guid owner, decimal costUsd, DateTimeOffset occurredAt)
+    {
+        await using TradingCopilotDbContext context = Context(owner);
+        context.AiUsage.Add(new AiUsageRecord
+        {
+            Id = Guid.NewGuid(),
+            UserId = owner,
+            Feature = AiUsageFeature.Triage,
+            Model = "claude-haiku-4-5",
+            Tier = LlmModelTier.Triage,
+            Outcome = AiUsageOutcome.Succeeded,
+            InputTokens = 0,
+            OutputTokens = 0,
+            EstimatedCostUsd = costUsd,
+            LatencyMs = 0,
+            OccurredAt = occurredAt,
+        });
+        await context.SaveChangesAsync();
     }
 
     // --- A crossing fires once, journals, and moves to Fired ---
@@ -674,6 +702,224 @@ public class TriggerEvaluationServiceTests
         Func<Task> scan = () => Service().ScanAsync(Now, cts.Token);
 
         await scan.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    // =====================================================================================================
+    // AI-SPEND GOVERNOR (gh#448, ADR-0008): a PURE budget gate the scan consults once per pass and before each
+    // agent-review LLM call. It caps WHETHER a call is made (cost), never what it proposes. It gates the AGENT-REVIEW
+    // route ONLY -- the mechanical route is untouched -- and is FAIL-OPEN (the deliberate inverse of the risk gate).
+    // Inert until a budget is configured, so every test above (default GovernorOptions) is behaviour-unchanged.
+    // =====================================================================================================
+
+    // (a) BUDGET EXHAUSTED: with spend over the cap, the reviewer is NOT called and NO spend row is written; the fire
+    // is still journaled + debounced and the operator gets one "review is paused" advisory per arming edge.
+    [Fact]
+    public async Task ScanAsync_ShouldBlockTheReviewAndAdvise_WhenTheBudgetIsExhausted()
+    {
+        await SeedUsageAsync(_operator, 100m, Now); // 100 spent against a 10 budget -> the governor blocks
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be")); // must never be reached
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustNotHaveHappened();
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.AiUsage.IgnoreQueryFilters().CountAsync()).Should().Be(1); // only the seeded row -- no call, no new spend
+        (await reload.Suggestions.AnyAsync()).Should().BeFalse();
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();       // a fire is still a fire
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Notify && n.Body.Contains("agent review is paused")),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    // (b) UNDER BUDGET: with room under the cap, the agent-review route runs exactly the normal suggest path.
+    [Fact]
+    public async Task ScanAsync_ShouldReviewNormally_WhenSpendIsUnderBudget()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"));
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.CountAsync()).Should().Be(1);
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+    }
+
+    // (c) INERT (unconfigured): a null budget leaves the governor off -- no spend read, no gating, and NO threshold alert.
+    [Fact]
+    public async Task ScanAsync_ShouldRunUnGatedWithNoThresholdAlert_WhenNoBudgetIsConfigured()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+
+        await Service().ScanAsync(Now, CancellationToken.None); // default GovernorOptions => DailyBudgetUsd null => inert
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n => n.DedupKey.StartsWith("ai-spend:threshold:")), A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    // (d) EMPTY WINDOW -> 0 -> allow: with no usage rows at all, the platform SUM returns NULL, and the
+    // `(decimal?)... ?? 0m` projection reads it as 0 -- NOT a throw the fail-open catch would silently swallow.
+    [Fact]
+    public async Task ScanAsync_ShouldReadAnEmptyLedgerAsZeroAndAllow_WhenNoUsageRowsExist()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+
+        int fires = await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        fires.Should().Be(1);
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // (e) FAIL-OPEN on read fault: a faulting spend read must let the pass run UN-GATED (the reviewer still wakes) and
+    // never abort the pass -- the deliberate INVERSE of the fail-closed risk gate.
+    [Fact]
+    public async Task ScanAsync_ShouldFailOpenAndStillReview_WhenTheSpendReadFaults()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+
+        TriggerEvaluationService service = new ThrowingReadService(
+            Context(), Options, _indicators, _notifications, _reviewer, _ledger, new AiSpendGovernor(),
+            Microsoft.Extensions.Options.Options.Create(new GovernorOptions { DailyBudgetUsd = 10m }),
+            NullLogger<TriggerEvaluationService>.Instance);
+
+        Func<Task> act = () => service.ScanAsync(Now, CancellationToken.None);
+
+        // INVERSE of the fail-closed risk gate: a spend-read blip must NOT pause agent review and must NOT abort the
+        // pass (which would also kill the co-located mechanical route). DO NOT "fix" this to fail-closed by analogy.
+        await act.Should().NotThrowAsync();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // (f) PLATFORM-WIDE SUM crosses R-20: three owners each spend 4 (sum 12 > budget 10) -- the operator, an unrelated
+    // stranger, and the SystemOwner embed sentinel. Only the operator has a trigger, but the IgnoreQueryFilters read
+    // must fold in ALL owners + the sentinel, so the operator's fire is blocked by spend that is not theirs alone.
+    [Fact]
+    public async Task ScanAsync_ShouldSumSpendAcrossAllOwnersAndTheSystemSentinel_WhenGating()
+    {
+        Guid stranger = Guid.NewGuid();
+        await SeedUsageAsync(_operator, 4m, Now);
+        await SeedUsageAsync(stranger, 4m, Now);
+        await SeedUsageAsync(SystemOwner.Id, 4m, Now);
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be")); // must never be reached
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
+        (await Context().Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+    }
+
+    // (g) WITHIN-PASS TALLY: budget == exactly one fire's cost, no seeded usage, TWO agent-review fires this pass.
+    // fire1 Evaluate(cost, 0) => Allow (accrues cost -> spent = cost); fire2 Evaluate(cost, cost) => Block. So the
+    // reviewer is asked ONCE and exactly ONE spend row lands -- later fires this pass see RISING spend (the per-fire
+    // mirror of the risk gate consuming the day's loss).
+    [Fact]
+    public async Task ScanAsync_ShouldBlockTheSecondFireThisPass_WhenTheFirstFireExhaustsTheBudgetViaTheTally()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x")); // Cost defaults to _sampleCost
+
+        // A REAL ledger so an authorized fire actually writes its spend row (the fake records nothing to count).
+        IAiUsageLedger realLedger = new AiUsageLedger(Options, NullLogger<AiUsageLedger>.Instance);
+        await Service(ledger: realLedger, governor: new GovernorOptions { DailyBudgetUsd = _sampleCost.EstimatedCostUsd })
+            .ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        (await Context().AiUsage.CountAsync()).Should().Be(1); // only the first (allowed) fire wrote a spend row
+    }
+
+    // (h) MECHANICAL UNAFFECTED: the governor gates the LLM route ONLY. With the budget exhausted, the mechanical
+    // alert must still send + journal exactly as before gh#448, while the co-located agent-review fire is blocked.
+    [Fact]
+    public async Task ScanAsync_ShouldStillFireMechanical_WhenTheBudgetBlocksTheAgentReviewRoute()
+    {
+        await SeedUsageAsync(_operator, 100m, Now);
+        Guid mechanicalId = await AddTriggerAsync(route: TriggerRoute.Mechanical, armState: TriggerArmState.Armed);
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be")); // must never be reached
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n => n.DedupKey == $"trigger:{mechanicalId}:0"), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        (await Context().TriggerFirings.AnyAsync(f => f.TriggerId == mechanicalId)).Should().BeTrue();
+    }
+
+    // (i) THRESHOLD ALERT: spend seeded AT the 80% threshold (8 of 10). The fire is still under budget (8 < 10) so the
+    // reviewer runs; the post-loop threshold pre-alert then fires exactly once, dedup-keyed by the Central trading date.
+    [Fact]
+    public async Task ScanAsync_ShouldSendOneThresholdAlert_WhenSpendReachesTheAlertFraction()
+    {
+        await SeedUsageAsync(_operator, 8m, Now);
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m, AlertThresholdFraction = 0.8m })
+            .ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Notify && n.DedupKey.StartsWith("ai-spend:threshold:")),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    /// <summary>
+    /// The scan with its platform-wide spend read forced to FAULT — proves the governor is FAIL-OPEN: a spend-read
+    /// blip lets the pass run un-gated (the reviewer still wakes), the deliberate INVERSE of the fail-closed risk gate.
+    /// Forwards all nine ctor args. DO NOT "fix" the production counterpart of this override to fail-closed by analogy
+    /// to RiskGate — that would pause all agent review (and abort the co-located mechanical route) on any DB hiccup.
+    /// </summary>
+    private sealed class ThrowingReadService : TriggerEvaluationService
+    {
+        public ThrowingReadService(
+            TradingCopilotDbContext discovery,
+            DbContextOptions<TradingCopilotDbContext> options,
+            IIndicatorSource indicators,
+            INotificationChannel notifications,
+            ITriggerReviewer reviewer,
+            IAiUsageLedger ledger,
+            IAiSpendGovernor governor,
+            IOptions<GovernorOptions> governorOptions,
+            ILogger<TriggerEvaluationService> logger)
+            : base(discovery, options, indicators, notifications, reviewer, ledger, governor, governorOptions, logger)
+        {
+        }
+
+        protected override Task<decimal> ReadWindowSpendAsync(DateTimeOffset windowStart, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("simulated spend-read fault");
     }
 
     /// <summary>

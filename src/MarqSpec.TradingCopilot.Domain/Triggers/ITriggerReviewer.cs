@@ -56,6 +56,15 @@ public enum SuppressReason
     /// and <see cref="NoReviewerConfigured"/> (there is no reviewer) — here a configured reviewer was tried and failed.
     /// </summary>
     ReviewerUnavailable = 5,
+
+    /// <summary>
+    /// The platform-level AI-spend budget is reached (gh#448) — the governor blocked the call <b>before</b> it was
+    /// made, so no LLM invocation and no spend. Fail-closed like the rest, but the operator <b>is</b> told a setup
+    /// fired that could not be reviewed because the daily AI budget is spent. Distinct from
+    /// <see cref="ReviewerUnavailable"/> (a reviewer was tried and failed) — here the reviewer was deliberately not
+    /// invoked to hold the budget.
+    /// </summary>
+    BudgetExhausted = 6,
 }
 
 /// <summary>

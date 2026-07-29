@@ -1,15 +1,18 @@
 using System.Diagnostics;
+using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Ai;
+using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Triggers;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.Api.Triggers;
 
@@ -35,8 +38,15 @@ namespace MarqSpec.TradingCopilot.Api.Triggers;
 /// <see cref="ConditionSatisfaction.Unmeasurable"/>, which <see cref="TriggerDebounce"/> holds — never a fire, never
 /// a re-arm — so a data gap cannot collapse a fired trigger and spuriously re-fire it.
 /// </para>
+/// <para>
+/// The AI-spend governor (gh#448, ADR-0008) gates the agent-review route only: once per pass the scan reads the
+/// deployment-wide daily AI spend (the <c>AIUsage</c> ledger floor) and, before waking the reviewer on a fire, a
+/// pure <see cref="IAiSpendGovernor"/> blocks the LLM call when the operator's budget is spent. The class is
+/// <b>unsealed</b> (not <c>sealed</c>) so a test can override <see cref="ReadWindowSpendAsync"/> to force the
+/// fail-open read fault — the same reason <c>AiUsageLedger</c> exposes a <c>protected virtual</c> write.
+/// </para>
 /// </remarks>
-public sealed class TriggerEvaluationService
+public class TriggerEvaluationService
 {
     private readonly TradingCopilotDbContext _discovery;
     private readonly DbContextOptions<TradingCopilotDbContext> _options;
@@ -44,10 +54,12 @@ public sealed class TriggerEvaluationService
     private readonly INotificationChannel _notifications;
     private readonly ITriggerReviewer _reviewer;
     private readonly IAiUsageLedger _ledger;
+    private readonly IAiSpendGovernor _governor;
+    private readonly AiSpendBudget? _budget;
     private readonly ILogger<TriggerEvaluationService> _logger;
 
     /// <summary>Creates the service.</summary>
-    /// <param name="discovery">The scoped context, used only to discover which owners have enabled triggers.</param>
+    /// <param name="discovery">The scoped context, used to discover owners and to read the platform-wide spend total.</param>
     /// <param name="options">The context options, used to build a per-owner (R-20-scoped) context for the work.</param>
     /// <param name="indicators">The global read seam for pre-computed indicator values (R-22).</param>
     /// <param name="notifications">The alerting seam (ADR-0019); both routes send through it.</param>
@@ -59,6 +71,11 @@ public sealed class TriggerEvaluationService
     /// The AIUsage spend ledger (gh#431): a required, fail-open dependency the scan stamps the owner onto — it records
     /// the reviewer's LLM-call cost and can never fail or roll back a fire.
     /// </param>
+    /// <param name="governor">
+    /// The platform-level AI-spend gate (gh#448): a pure, deterministic budget check consulted before each agent-review
+    /// LLM call. It gates <b>whether</b> a call is made (cost), never what it proposes (enforcement lives below the model).
+    /// </param>
+    /// <param name="governorOptions">The governor's budget config; absent (null budget) leaves the governor inert.</param>
     /// <param name="logger">The logger.</param>
     public TriggerEvaluationService(
         TradingCopilotDbContext discovery,
@@ -67,14 +84,20 @@ public sealed class TriggerEvaluationService
         INotificationChannel notifications,
         ITriggerReviewer reviewer,
         IAiUsageLedger ledger,
+        IAiSpendGovernor governor,
+        IOptions<GovernorOptions> governorOptions,
         ILogger<TriggerEvaluationService> logger)
     {
+        ArgumentNullException.ThrowIfNull(governorOptions);
+
         _discovery = discovery;
         _options = options;
         _indicators = indicators;
         _notifications = notifications;
         _reviewer = reviewer;
         _ledger = ledger;
+        _governor = governor;
+        _budget = governorOptions.Value.ToBudget(); // null == inert (no cap configured); computed once per pass
         _logger = logger;
     }
 
@@ -98,12 +121,17 @@ public sealed class TriggerEvaluationService
             return 0;
         }
 
+        // AI-SPEND GOVERNOR (gh#448): read the deployment-wide daily spend ONCE per pass and seed a mutable tally each
+        // fire accrues into, so later fires this pass evaluate against rising spend (the per-fire risk-gate mirror).
+        // Null == the governor is inert (no budget) OR the read faulted (fail-open) -- either way the pass runs un-gated.
+        GovernorPass? governorPass = await BuildGovernorPassAsync(now, cancellationToken);
+
         int fires = 0;
         foreach (Guid owner in owners)
         {
             try
             {
-                fires += await ProcessOwnerAsync(owner, now, cancellationToken);
+                fires += await ProcessOwnerAsync(owner, now, governorPass, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -118,6 +146,11 @@ public sealed class TriggerEvaluationService
             }
         }
 
+        // THRESHOLD PRE-ALERT (gh#448): after the owner loop, against the freshest accrued tally, a heads-up (Notify,
+        // not Page) when spend nears the budget -- the "make the constraint visible before it binds" posture. The
+        // Central-date-scoped dedup key emits it at most once per trading day. Best-effort: never throws into the pass.
+        await MaybeAlertThresholdAsync(governorPass, now, cancellationToken);
+
         if (fires > 0)
         {
             _logger.LogInformation("Trigger scan fired {Count} trigger(s).", fires);
@@ -126,8 +159,88 @@ public sealed class TriggerEvaluationService
         return fires;
     }
 
+    /// <summary>
+    /// Reads the platform-wide AI spend since <paramref name="windowStart"/> — the deployment's floor for the governor
+    /// (gh#448). Crosses the R-20 default-deny filter with <c>IgnoreQueryFilters</c> (ADR-0008: one shared account
+    /// funds every user), so it sums <b>every</b> owner's rows and the <see cref="SystemOwner"/> embed-sentinel rows.
+    /// The nullable projection is mandatory — <c>SUM</c> over an empty window returns <c>NULL</c>, which the
+    /// non-nullable overload would throw on. Virtual so a test can force a read fault to prove the fail-open posture.
+    /// </summary>
+    /// <param name="windowStart">The inclusive start of the spend window (UTC).</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The summed estimated cost in USD, or zero for an empty window.</returns>
+    protected virtual async Task<decimal> ReadWindowSpendAsync(DateTimeOffset windowStart, CancellationToken cancellationToken) =>
+        await _discovery.AiUsage
+            .IgnoreQueryFilters()
+            .Where(record => record.OccurredAt >= windowStart)
+            .Select(record => (decimal?)record.EstimatedCostUsd)
+            .SumAsync(cancellationToken) ?? 0m;
+
+    /// <summary>Builds the per-pass governor tally, or <see langword="null"/> when inert or the spend read faulted.</summary>
+    private async Task<GovernorPass?> BuildGovernorPassAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (_budget is null)
+        {
+            return null; // no cap configured -- the governor is inert, the pass runs exactly as before gh#448
+        }
+
+        try
+        {
+            decimal spent = await ReadWindowSpendAsync(CentralDayStartUtc(now), cancellationToken);
+            return new GovernorPass(_budget, spent);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // FAIL-OPEN -- the deliberate INVERSE of the fail-closed risk gate. This gate guards a soft-dollar BUDGET,
+            // not capital-at-risk: a spend-read blip must NOT pause agent review, and must NOT abort the pass (which
+            // would also kill the co-located MECHANICAL alert route). Log loudly (spend-blindness is a real fault),
+            // then run this pass un-gated; the next pass re-reads. DO NOT "fix" this to fail-closed by analogy to
+            // RiskGate -- that would silently pause all agent review on any DB hiccup, to protect pennies.
+            _logger.LogError(error, "AI-spend governor could not read spend this pass; agent review runs un-gated.");
+            return null;
+        }
+    }
+
+    /// <summary>Fires the once-per-day threshold heads-up if the accrued spend has reached the alert fraction.</summary>
+    private async Task MaybeAlertThresholdAsync(GovernorPass? governorPass, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (governorPass is null)
+        {
+            return;
+        }
+
+        AiSpendDecision decision = _governor.Evaluate(governorPass.Budget, governorPass.SpentUsd);
+        if (!decision.ThresholdReached)
+        {
+            return;
+        }
+
+        try
+        {
+            int percent = (int)(decision.ConsumedFraction * 100m);
+            await _notifications.SendAsync(
+                new Notification(
+                    NotificationSeverity.Notify,
+                    "AI spend nearing the daily budget",
+                    FormattableString.Invariant($"AI spend is {percent}% of the {decision.BudgetUsd} USD daily budget."),
+                    ThresholdDedupKey(now)),
+                cancellationToken);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            // INotificationChannel's contract is never-throws; a buggy channel must not take down the scan for a
+            // best-effort heads-up.
+            _logger.LogError(error, "AI-spend threshold alert failed to send; spend tracking is unaffected.");
+        }
+    }
+
     /// <summary>Evaluates one owner's enabled mechanical + agent-review triggers in a per-owner (R-20-scoped) context.</summary>
-    private async Task<int> ProcessOwnerAsync(Guid owner, DateTimeOffset now, CancellationToken cancellationToken)
+    private async Task<int> ProcessOwnerAsync(
+        Guid owner, DateTimeOffset now, GovernorPass? governorPass, CancellationToken cancellationToken)
     {
         // Per-owner context: the R-20 filter applies, so every trigger read and every firing / suggestion written is
         // this owner's alone -- one owner's SaveChanges can never persist another's rows.
@@ -171,8 +284,8 @@ public sealed class TriggerEvaluationService
 
             if (decision.ShouldFire && trigger.Route == TriggerRoute.Mechanical)
             {
-                // MECHANICAL: send-before-commit, UNCHANGED. The `!` is sound -- a fire needs a measured, satisfied
-                // reading, so the value is non-null here.
+                // MECHANICAL: send-before-commit, UNCHANGED -- the governor gates the LLM route only, never a
+                // deterministic alert. The `!` is sound -- a fire needs a measured, satisfied reading, so non-null here.
                 if (await FireMechanicalAsync(database, trigger, owner, value!.Value, now, cancellationToken))
                 {
                     fires++;
@@ -193,7 +306,7 @@ public sealed class TriggerEvaluationService
                 // A fire is a fire regardless of the outcome -- suppress advances the arm to Fired too, which is what
                 // debounces the review to ONE per arming edge (a persistently-true condition must not re-review every
                 // pass). COMMIT-THEN-NOTIFY: the advisory flushes after SaveChanges below.
-                await FireAgentReviewAsync(database, trigger, owner, value!.Value, now, advisories, cancellationToken);
+                await FireAgentReviewAsync(database, trigger, owner, value!.Value, now, advisories, governorPass, cancellationToken);
                 fires++;
             }
             else if (decision.ReArmed)
@@ -265,9 +378,9 @@ public sealed class TriggerEvaluationService
     }
 
     /// <summary>
-    /// The agent-review fire: wake the reviewer, stage a suggestion (or an advisory) per the outcome, and journal the
-    /// firing regardless. NOTHING here reaches execution — it persists a suggestion and at most queues an advisory
-    /// (enforcement lives below the model).
+    /// The agent-review fire: consult the spend governor, wake the reviewer (unless the budget is spent), stage a
+    /// suggestion (or an advisory) per the outcome, and journal the firing regardless. NOTHING here reaches execution
+    /// — it persists a suggestion and at most queues an advisory (enforcement lives below the model).
     /// </summary>
     private async Task FireAgentReviewAsync(
         TradingCopilotDbContext database,
@@ -276,6 +389,7 @@ public sealed class TriggerEvaluationService
         decimal observed,
         DateTimeOffset now,
         List<Notification> advisories,
+        GovernorPass? governorPass,
         CancellationToken cancellationToken)
     {
         string dedupKey = DedupKeyFor(trigger);
@@ -291,35 +405,47 @@ public sealed class TriggerEvaluationService
             observed,
             now);
 
-        // The reviewer seam is fail-closed BY CONTRACT (LlmTriggerReviewer maps every unusable output to a Suppress),
-        // but the seam admits any ITriggerReviewer -- a future provider-backed one can THROW on a transient fault. A
-        // throw must debounce like every other outcome (one review attempt per arming edge, the arm still advancing to
-        // Fired below), never escape to the per-owner guard: that would leave the arm Armed and re-review every pass
-        // (unbounded LLM cost) AND roll back a co-owner's already-sent mechanical fire. Map it to ReviewerUnavailable.
         AgentReview review;
-        try
+        if (governorPass is not null
+            && _governor.Evaluate(governorPass.Budget, governorPass.SpentUsd) is { IsBlocked: true } blocked)
         {
-            review = await _reviewer.ReviewAsync(context, cancellationToken);
+            // AI-SPEND GOVERNOR (gh#448) -- BUDGET EXHAUSTED: short-circuit BEFORE the reviewer. No LLM call is made
+            // (the point: cap WHETHER a call happens) and, with Cost null, no AIUsage row is written. A fire is still
+            // a fire (journaled + arm advanced below), so the operator gets one "review paused, budget spent" advisory
+            // per arming edge -- the honest-inert posture, exactly like NoReviewerConfigured / ReviewerUnavailable.
+            review = new AgentReview(new ReviewOutcome.Suppress(SuppressReason.BudgetExhausted, blocked.Reason), Cost: null);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        else
         {
-            throw;
-        }
-        catch (Exception error)
-        {
-            // A reviewer that itself threw (not the provider it wraps — LlmTriggerReviewer never throws) carries no
-            // cost to ledger; treat it as unavailable, same debounce as any other outcome.
-            _logger.LogError(error, "Agent-review trigger {Id} reviewer threw; treating as unavailable.", trigger.Id);
-            review = new AgentReview(new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the reviewer threw"), Cost: null);
+            // The reviewer seam is fail-closed BY CONTRACT (LlmTriggerReviewer maps every unusable output to a
+            // Suppress), but the seam admits any ITriggerReviewer -- a future provider-backed one can THROW on a
+            // transient fault. A throw must debounce like every other outcome (one review attempt per arming edge, the
+            // arm still advancing to Fired below), never escape to the per-owner guard: that would leave the arm Armed
+            // and re-review every pass (unbounded LLM cost) AND roll back a co-owner's already-sent mechanical fire.
+            try
+            {
+                review = await _reviewer.ReviewAsync(context, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                // A reviewer that itself threw (not the provider it wraps — LlmTriggerReviewer never throws) carries no
+                // cost to ledger; treat it as unavailable, same debounce as any other outcome.
+                _logger.LogError(error, "Agent-review trigger {Id} reviewer threw; treating as unavailable.", trigger.Id);
+                review = new AgentReview(new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the reviewer threw"), Cost: null);
+            }
         }
 
         // Ledger the LLM-call spend, stamped with THIS owner (the scan is the single tenancy authority) + the trace.
-        // Cost is null only when no call was made (the inert reviewer). The real ledger is fail-open by its OWN
-        // contract, but the seam admits any IAiUsageLedger -- so guard it at the boundary too, exactly as the reviewer
-        // and advisory-notify seams above/below are. Un-guarded, a contract-violating throw would unwind to the
-        // per-owner catch and discard the whole pass: this fire AND any co-owner mechanical alert already SENT earlier
-        // this pass (re-sent next pass -- a duplicate). A spend-bookkeeping fault must never do that. Only the caller's
-        // own cancellation escapes.
+        // Cost is null when no call was made (the inert reviewer, OR a budget-exhausted short-circuit above). The real
+        // ledger is fail-open by its OWN contract, but the seam admits any IAiUsageLedger -- so guard it at the
+        // boundary too, exactly as the reviewer and advisory-notify seams above/below are. Un-guarded, a
+        // contract-violating throw would unwind to the per-owner catch and discard the whole pass: this fire AND any
+        // co-owner mechanical alert already SENT earlier this pass (re-sent next pass -- a duplicate). A
+        // spend-bookkeeping fault must never do that. Only the caller's own cancellation escapes.
         if (review.Cost is not null)
         {
             try
@@ -336,6 +462,16 @@ public sealed class TriggerEvaluationService
                 _logger.LogError(
                     error, "AIUsage ledger record threw for owner {Owner}; the fire is committed regardless.", owner);
             }
+        }
+
+        // Accrue this fire's estimated cost to the pass tally so LATER agent-review fires this pass evaluate against
+        // RISING spend -- the per-fire mirror of the risk gate consuming DayLoss. Accrue the ESTIMATE even if the
+        // ledger write faulted: over-counting toward the cap is the safe direction for a budget, and the next pass
+        // re-reads the real floor fresh, so no double-count persists. A budget-exhausted short-circuit has Cost null,
+        // so it accrues nothing (correct -- no call, no spend).
+        if (governorPass is not null && review.Cost is not null)
+        {
+            governorPass.Accrue(review.Cost.EstimatedCostUsd);
         }
 
         switch (review.Outcome)
@@ -361,6 +497,17 @@ public sealed class TriggerEvaluationService
                     NotificationSeverity.Notify,
                     $"Setup needs review — {TitleFor(trigger)}",
                     "A setup fired that needs agent review; the reviewer was unavailable. Review it manually.",
+                    dedupKey));
+                break;
+
+            case ReviewOutcome.Suppress { Reason: SuppressReason.BudgetExhausted }:
+                // The budget governor paused review BEFORE any call (gh#448). Fail-closed but NOT silent: tell the
+                // operator a setup fired that could not be reviewed because the daily AI budget is spent. One advisory
+                // per arming edge (the arm still advances to Fired below), mirroring ReviewerUnavailable.
+                advisories.Add(new Notification(
+                    NotificationSeverity.Notify,
+                    $"Setup needs review — {TitleFor(trigger)}",
+                    "A setup fired but agent review is paused: the daily AI-spend budget is reached. Review it manually.",
                     dedupKey));
                 break;
 
@@ -461,6 +608,18 @@ public sealed class TriggerEvaluationService
             DedupKey = dedupKey,
         });
 
+    // The daily spend window resets at CENTRAL-trading-day midnight (mirroring the daily risk governor + auto-flatten,
+    // which use MarketClock precisely because a UTC date splits a live CME session), converted to UTC for the
+    // OccurredAt comparison. Midnight is never in the DST spring-forward gap, so no invalid-local-time guard is needed.
+    private static DateTimeOffset CentralDayStartUtc(DateTimeOffset now)
+    {
+        DateTime centralMidnight = DateTime.SpecifyKind(MarketClock.ToMarketTime(now).Date, DateTimeKind.Unspecified);
+        return new DateTimeOffset(centralMidnight, MarketClock.CentralTime.GetUtcOffset(centralMidnight)).ToUniversalTime();
+    }
+
+    private static string ThresholdDedupKey(DateTimeOffset now) =>
+        FormattableString.Invariant($"ai-spend:threshold:{MarketClock.ToMarketTime(now):yyyy-MM-dd}");
+
     private static string DedupKeyFor(TriggerRecord trigger) => $"trigger:{trigger.Id}:{trigger.ArmCycle}";
 
     private static string TitleFor(TriggerRecord trigger) =>
@@ -484,4 +643,22 @@ public sealed class TriggerEvaluationService
         OrderSide.Sell => "short",
         _ => "unknown",
     };
+
+    /// <summary>
+    /// The per-pass AI-spend tally (gh#448): seeded from the once-per-pass ledger read, then incremented by each
+    /// authorized agent-review fire's estimated cost, so later fires in the same pass evaluate against rising spend —
+    /// the per-fire mirror of the risk gate consuming the day's loss. Single-threaded within a pass, so no locking.
+    /// </summary>
+    private sealed class GovernorPass(AiSpendBudget budget, decimal spentAtStart)
+    {
+        /// <summary>The operator's daily budget for the pass.</summary>
+        public AiSpendBudget Budget { get; } = budget;
+
+        /// <summary>Spend so far this window — the ledger floor at pass start plus each fire accrued since.</summary>
+        public decimal SpentUsd { get; private set; } = spentAtStart;
+
+        /// <summary>Accrues one authorized call's estimated cost.</summary>
+        /// <param name="costUsd">The call's estimated USD cost.</param>
+        public void Accrue(decimal costUsd) => SpentUsd += costUsd;
+    }
 }
