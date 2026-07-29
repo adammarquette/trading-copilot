@@ -250,6 +250,15 @@ and would have deadlocked every merge if enabled — was deleted at the same tim
   long-lived branches and `publish image` runs only on `push`, so requiring either would leave a required check
   forever pending and **deadlock the merge**. This is the trap to remember before adding any required check:
   confirm it actually runs on that branch's PRs.
+- **`closing-keyword` is deliberately NOT required — it is advisory (gh#406).** It emits a `::warning::` when a
+  PR references issues but carries no closing keyword (`Closes/Fixes/Resolves #N` in the body or a commit), or
+  when it uses close-like prose GitHub ignores (`Settles #N`, the gh#369 trap). It always exits green. It is
+  **not** required on purpose: plenty of PRs legitimately close nothing — a change against an epic, a QA suite
+  that *pins* a defect rather than fixing it, a hotfix whose issue another PR closes — so a hard failure would
+  train authors to add a false `Closes`, and a **wrongly-closed** issue is harder to notice than an open one.
+  The nudge exists because gh#391 shipped a feature with `Related to #15` instead of `Closes #385`, left #385
+  open, and a parallel session rebuilt the whole thing. Whether to promote it to a required (blocking) check
+  should wait until its false-positive rate is observed in practice.
 - **Non-strict** (no forced up-to-date-before-merge), **0 required approvals** (single operator — the checks and
   the ladder are the gate), **no bypass list** (the rules bind even for the admin; that is the point of
   enforcement). An approval requirement can be added later — `trading-copilot-reviewer[bot]` (gh#141) can satisfy

@@ -8,7 +8,8 @@ name: Branch policy
 # check now BLOCKS the merge. `ladder` is required on staging/main (it is a no-op pass on develop);
 # `commit-hygiene` is required everywhere. `stale-base` is deliberately NOT a required check -- it
 # is skipped on the long-lived branches, and a required check that never runs would deadlock the
-# merge. The rulesets live in repo settings, recorded in the deployment runbook (not this file).
+# merge. `closing-keyword` (gh#406) is ADVISORY -- it warns, never fails, and is not required. The
+# rulesets live in repo settings, recorded in the deployment runbook (not this file).
 
 on:
   pull_request:
@@ -149,3 +150,53 @@ jobs:
             --jq '.[] | [.sha[0:7], (.parents | length | tostring), (.commit.message | split("\n")[0])] | @tsv')
           echo "$COUNT commit(s) checked."
           exit $FAIL
+
+  # gh#406: a PR can deliver an issue and leave it OPEN when the closing keyword is missing (or written as
+  # prose GitHub ignores, e.g. "Settles #N"). The board then advertises finished work as available and a
+  # parallel session rebuilds it -- gh#391 cost exactly that. This is WARN-ONLY and deliberately NOT a required
+  # check: plenty of PRs legitimately close nothing (a change against an epic, a QA suite that PINS a defect
+  # rather than fixing it, a hotfix whose issue another PR closes), so a hard failure would train people to add
+  # a false "Closes" -- and a wrongly-closed issue is harder to notice than an open one. It nudges; it never
+  # blocks. GitHub closes an issue from a keyword in the PR body OR any commit, so both are checked.
+  closing-keyword:
+    name: closing-keyword
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Warn when a PR references issues but closes none
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          BODY=$(gh api "repos/$REPO/pulls/$PR" --jq '.body // ""')
+          COMMITS=$(gh api "repos/$REPO/pulls/$PR/commits" --paginate --jq '.[].commit.message')
+          TEXT=$(printf '%s\n%s' "$BODY" "$COMMITS")
+
+          # Nothing references an issue? Nothing to nudge about.
+          if ! printf '%s' "$TEXT" | grep -qE '#[0-9]+'; then
+            echo "No issue references in the body or commits -- nothing to check."
+            exit 0
+          fi
+
+          # A real GitHub closing keyword bound to a number (close|closes|closed | fix|fixes|fixed |
+          # resolve|resolves|resolved), optionally 'Closes: #N'. Case-insensitive.
+          if printf '%s' "$TEXT" | grep -qiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]*#[0-9]+'; then
+            echo "OK -- a closing keyword is present, so the tracking issue auto-closes on merge."
+            exit 0
+          fi
+
+          REFS=$(printf '%s' "$TEXT" | grep -oiE '#[0-9]+' | sort -u | tr '\n' ' ')
+          echo "::warning::This PR references $REFS but carries no closing keyword (Closes/Fixes/Resolves #N), so no issue will auto-close on merge. If it DELIVERS one, add 'Closes #N'. If it only relates to an epic or pins a defect, this is expected -- the check only nudges (gh#406)."
+
+          # Close-like PROSE that GitHub does NOT treat as a keyword -- the gh#369 trap ("Settles #307"), the most
+          # dangerous case because the author believed they had linked it.
+          NEARMISS=$(printf '%s' "$TEXT" | grep -oiE '\b(settle[sd]?|deliver[sd]?|complete[sd]?|closes out)[[:space:]]*#?[0-9]+' | sort -u | tr '\n' ' ' || true)
+          if [ -n "$NEARMISS" ]; then
+            echo "::warning::Found close-like prose GitHub will NOT act on: ${NEARMISS}-- did you mean 'Closes #N'? (gh#406)"
+          fi
+
+          exit 0
