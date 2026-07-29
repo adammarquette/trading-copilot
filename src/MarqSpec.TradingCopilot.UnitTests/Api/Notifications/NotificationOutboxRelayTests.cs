@@ -140,6 +140,7 @@ public class NotificationOutboxRelayTests
         await using TradingCopilotDbContext database = Context();
         database.NotificationOutbox.Add(new NotificationOutboxRecord
         {
+            Id = Guid.CreateVersion7(),
             DedupKey = dedupKey,
             Severity = NotificationSeverity.Page,
             Title = $"Auto-flatten escalated — {dedupKey}",

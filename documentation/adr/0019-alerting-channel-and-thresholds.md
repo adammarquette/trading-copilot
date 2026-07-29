@@ -322,3 +322,36 @@ written (*when a page arrives*).
 *Still open:* routing the gh#306 backfill **shortfall**, which remains a high-severity log rather than a metric a
 rule can read. The **daily check-in** (gh#244) stays deliberately outside this stack — Layer 2 is external, and a
 dead-man's switch that ran here would die with the thing it watches.
+
+## Update (2026-07-29) — dedup suppression expires with the incident (gh#458)
+
+§4's noise budget is stated as *"once per incident"*, and the durable outbox (gh#400 / gh#437) enforced it in the
+database — correctly in kind, wrongly in **lifetime**. `NotificationOutboxRecord.DedupKey` was the **primary key**,
+while the relay marks delivery by stamping `DeliveredAt` and *keeping* the row. So a delivered row held its key
+forever: the second occurrence of any incident could never be inserted, `SendAsync` logged *"it will NOT be
+delivered"* and returned `false`, and nothing paged. **A repeat auto-flatten failure was unreportable precisely
+because the first one had been reported successfully** — an alert path silently consumed by its own history, and
+one that decays as the deployment ages rather than failing on day one.
+
+**The fix separates identity from suppression.** A surrogate `Id` (time-ordered `Guid.CreateVersion7`, so the
+relay's oldest-first read stays index-friendly) is the key; `DedupKey` carries a unique index **filtered to
+`"DeliveredAt" IS NULL`**. Idempotence stays where this ADR wanted it — in the database, not in the relay
+remembering to check — but scoped to the **open** incident:
+
+| | before | after |
+|---|---|---|
+| re-raise while a page is **owed** | suppressed (PK collision, reported as failure) | suppressed (filtered index), and reported as **success** — it *is* recorded |
+| re-raise after the page was **delivered** | **impossible to record — never paged** | recorded and delivered as the new incident it is |
+
+**"Once per incident" means once per *open* incident.** The version this replaces read it as once per incident key
+for the lifetime of the database, which is not a noise budget — a condition that recurs next week is a new
+incident, and §4's own justification (a muted pager is worse than no pager) argues only against *simultaneous*
+duplicates. `SendAsync` now also checks the store for an owed row before inserting, so the common cross-scope
+re-fire returns success without a failed round trip; the index remains the backstop, and `Enlist` keeps its
+synchronous `Local`-only check because it must not do I/O inside the caller's transaction.
+
+**Verified against real Postgres, both directions** — including the migration over pre-existing alert history,
+where each existing row is backfilled with a distinct id. The scaffolded migration would have defaulted every row
+to `Guid.Empty` and failed `AddPrimaryKey`: green on an empty dev database, broken on the one deployment with
+history. Its `Down` can legitimately fail once the outbox holds what the fix permits, and that is the intended
+behaviour — refusing to roll back beats deleting delivered pages to make room for the old key.

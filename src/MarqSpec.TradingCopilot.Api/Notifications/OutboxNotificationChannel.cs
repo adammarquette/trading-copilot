@@ -96,6 +96,16 @@ public sealed class OutboxNotificationChannel : INotificationChannel
             await using AsyncServiceScope scope = _scopes.CreateAsyncScope();
             TradingCopilotDbContext own = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
 
+            // Already owed? Then it is already recorded and the relay will deliver it -- success, not a collision
+            // to be logged as a failure (gh#458). Enlist can only check its own context's Local set; this is the
+            // cross-scope half, which is the production shape: the flatten and the watchdog each have their own
+            // scope. The filtered unique index stays the backstop; this keeps the common re-fire off it.
+            if (await own.NotificationOutbox
+                .AnyAsync(row => row.DedupKey == notification.DedupKey && row.DeliveredAt == null, cancellationToken))
+            {
+                return true;
+            }
+
             own.NotificationOutbox.Add(NewRow(notification));
             await own.SaveChangesAsync(cancellationToken);
             return true;
@@ -176,8 +186,10 @@ public sealed class OutboxNotificationChannel : INotificationChannel
     {
         ArgumentNullException.ThrowIfNull(notification);
 
-        // Attach-or-ignore on the dedup key: an incident already owed is not owed twice. The DB key enforces it
-        // regardless, but catching it here avoids a pointless failed round trip on the common re-fire.
+        // Attach-or-ignore on the dedup key: an incident already owed is not owed twice. The filtered unique index
+        // enforces it regardless, but catching it here avoids a pointless failed round trip on the common re-fire.
+        // Local only -- this is synchronous by contract (it must not do I/O inside the caller's transaction), so a
+        // row owed in ANOTHER scope is caught by the index, not here. SendAsync, which may await, checks the store.
         if (_database.NotificationOutbox.Local.Any(row => row.DedupKey == notification.DedupKey))
         {
             return;
@@ -189,6 +201,8 @@ public sealed class OutboxNotificationChannel : INotificationChannel
     /// <summary>Builds an owed row — shared so both entry points record identically.</summary>
     private NotificationOutboxRecord NewRow(Notification notification) => new()
     {
+        // Time-ordered, so rows land in insert order in the index the relay reads oldest-first (gh#458).
+        Id = Guid.CreateVersion7(),
         DedupKey = notification.DedupKey,
         Severity = notification.Severity,
         Title = notification.Title,

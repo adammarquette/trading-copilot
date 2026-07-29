@@ -13,10 +13,14 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// row is the fix for that half — nothing is considered sent until <see cref="DeliveredAt"/> is stamped.
 /// </para>
 /// <para>
-/// <b><see cref="DedupKey"/> is the primary key, and that is the idempotence guard.</b> A redelivery after a
-/// crash collides with the existing row rather than paging twice. Doubling a page is not a cosmetic fault: a
-/// pager that cries twice for one incident is one the operator learns to distrust, which is the same failure
-/// ADR-0019's noise budget exists to prevent.
+/// <b>Idempotence is enforced by the database, and it expires with the incident</b> (gh#458). A unique index on
+/// <see cref="DedupKey"/> <i>filtered to rows still owed</i> makes a re-raise while a page is outstanding collide
+/// rather than double up — a pager that cries twice for one incident is one the operator learns to distrust, which
+/// is the failure ADR-0019's noise budget exists to prevent. But the suppression must end when the incident does:
+/// <see cref="DedupKey"/> was originally the <i>primary</i> key, and because the relay marks delivery by stamping
+/// <see cref="DeliveredAt"/> and keeping the row, a delivered row held its key <b>forever</b> — the second
+/// occurrence of any incident could never be recorded, so a repeat auto-flatten failure was unreportable
+/// precisely <i>because</i> the first one was reported. Hence the surrogate <see cref="Id"/>.
 /// </para>
 /// <para>
 /// <b>Not <c>IUserOwned</c></b> — an alert belongs to the deployment, and the relay that delivers it runs as
@@ -25,7 +29,17 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// </remarks>
 public sealed class NotificationOutboxRecord
 {
-    /// <summary>The incident identity — the key, so a redelivery updates rather than duplicates.</summary>
+    /// <summary>
+    /// The row identity. A surrogate rather than <see cref="DedupKey"/>, so an incident's key is spent only while
+    /// that occurrence is owed (gh#458). Time-ordered (<c>Guid.CreateVersion7</c>) so the relay's oldest-first
+    /// read stays index-friendly.
+    /// </summary>
+    public required Guid Id { get; set; }
+
+    /// <summary>
+    /// The incident identity — unique among rows still owed, so one open incident is one page. Not unique across
+    /// delivered history: the same condition recurring next week is a new incident.
+    /// </summary>
     public required string DedupKey { get; set; }
 
     /// <summary>How loudly this should arrive (ADR-0019's P1 / P2 / P3).</summary>
