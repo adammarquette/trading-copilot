@@ -77,6 +77,42 @@ public class AiUsageLedgerTests
     }
 
     [Fact]
+    public async Task RecordAsync_ShouldPersistAnEmbedShapedRow_UnderTheSystemOwnerScope()
+    {
+        // READINESS (gh#436): the EXISTING scoped ledger already accepts the settled EMBED shape, so the embed
+        // consumer (gh#377) can reuse it verbatim -- Feature.Embed, Tier=null (embeddings have no model tier),
+        // OutputTokens=0 (an embed returns a vector, not completion tokens), and Outcome.RateLimited (the 429
+        // degrade-to-sparse maps here) -- stamped to the deployment SystemOwner sentinel, NOT an operator.
+        // (DB-CHECK enforcement of this shape -- Tier null, zero cost/latency vs the >=0 CHECKs -- is Postgres-only
+        // and belongs to the QA integration tier; the in-memory provider ignores CHECK constraints.)
+        AiUsageEntry embed = new(
+            SystemOwner.Id,
+            new AiCallCost(
+                AiUsageFeature.Embed, "embed-english-v3.0", Tier: null, AiUsageOutcome.RateLimited,
+                InputTokens: 0, OutputTokens: 0, EstimatedCostUsd: 0m, Latency: TimeSpan.Zero),
+            TraceId: "trace-embed",
+            Now);
+
+        await Ledger().RecordAsync(embed, CancellationToken.None);
+
+        // It round-trips every embed-shaped field under the SystemOwner scope...
+        await using TradingCopilotDbContext system = Context(SystemOwner.Id);
+        AiUsageRecord row = await system.AiUsage.SingleAsync();
+        row.UserId.Should().Be(SystemOwner.Id);
+        row.Feature.Should().Be(AiUsageFeature.Embed);
+        row.Model.Should().Be("embed-english-v3.0");
+        row.Tier.Should().BeNull();
+        row.Outcome.Should().Be(AiUsageOutcome.RateLimited);
+        row.InputTokens.Should().Be(0);
+        row.OutputTokens.Should().Be(0);
+
+        // ...and it is INVISIBLE to the operator's own scoped read -- deployment infra spend must not inflate the
+        // operator's per-decision meter (gh#62, ADR-0008 "embeddings reported in Grafana, not surfaced to end users").
+        await using TradingCopilotDbContext operatorContext = Context(_owner);
+        (await operatorContext.AiUsage.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task RecordAsync_ShouldNotThrowAndLogAnError_WhenTheWriteFails()
     {
         // FAIL-OPEN: the AI result is already delivered, so a write fault (a CHECK violation, a DB blip) is logged and
