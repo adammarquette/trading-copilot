@@ -206,6 +206,23 @@ the rule, not noise to tolerate.
   expire on its own. Unbounded retry was rejected because this pump is single-reader, so a permanently-rejected
   receipt would starve every delivery behind it — including a page for a *live* incident, which is far worse than
   a stale nag.
+  **Made durable by `gh#400` / `gh#437` (2026-07-29).** The queue solved latency and left a durability hole this
+  entry did not close: `SendAsync` returning true meant *accepted into memory*, so a hard crash before the pump
+  drained lost the page outright — and the caller had already been told it succeeded. The chain is now
+  **outbox → queue → dedup → transport**. `OutboxNotificationChannel` (gh#400) writes one indexed row and returns,
+  so the R-13 hot path still never awaits a network, and `NotificationOutboxRelay` + its host (gh#437) deliver what
+  is owed and stamp `DeliveredAt`. Two ways in: `SendAsync` commits on its own (producers unchanged), while
+  `Enlist` stages the row in the **caller's** `DbContext`, so intent and state change commit atomically and the
+  commit→enqueue gap does not exist at all.
+  **The guarantee is stated precisely, because the obvious phrasing overstates it.** It is **no dropped page**, not
+  exactly-once. Delivery is attempted first and the row stamped after, so a crash *between* the transport accepting
+  and the stamp landing re-delivers rather than loses. Stamping first would close that duplicate window and open a
+  worse one — a page marked sent that never went. The direction is chosen, not accidental: a repeated page is an
+  annoyance, a missed one is the failure R-13 exists to prevent, and the dedup layer below absorbs the repeat
+  within a process lifetime. Across passes it *is* idempotent, because the dedup key is the row's primary key.
+  The seam became **scoped** in the process (it writes through the scoped `DbContext`), which is why `gh#320`'s
+  composition guards were **updated rather than deleted** — the singleton assertion moved down to the dedup chain,
+  which is what actually holds the in-memory open-incident set.
 - **`gh#245`** Alertmanager rules and routing (Layer 2) · **`gh#246`** the QA suite.
 - **Thresholds are recorded but not yet enforced.** The P1/P2/P3 tables above describe what `gh#245` must build; only
   the dead-man's switch's own rules (check-in absent by deadline + 5 min, heartbeat missed ≥ 3 intervals) are live
