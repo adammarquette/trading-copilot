@@ -15,6 +15,7 @@ using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Relevance;
 using MarqSpec.TradingCopilot.Api.Risk;
+using MarqSpec.TradingCopilot.Api.Signals;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
@@ -108,6 +109,19 @@ builder.Services.AddHostedService<NewsIngestionHost>();
 builder.Services.Configure<NewsRelevanceOptions>(builder.Configuration.GetSection(NewsRelevanceOptions.SectionName));
 builder.Services.AddScoped<NewsRelevanceService>();
 builder.Services.AddHostedService<NewsRelevanceHost>();
+
+// R-2's per-operator salience over those matches (gh#27, ADR-0014): a star raises, a mute lowers, the salience of
+// SIMILAR future news, decayed by recency. Options only -- the personalized feed is computed on read by the
+// /api/news endpoints (no host). A soft weight that never reaches the risk gate or order sizing (ADR-0007).
+builder.Services.AddOptions<SalienceOptions>()
+    .Bind(builder.Configuration.GetSection(SalienceOptions.SectionName))
+    // Fail fast on a misconfiguration rather than throwing from Math.Clamp on every feed read. The floor must sit at
+    // or below the neutral 1.0 and the cap at or above it, so a cold-start item (raw 1.0) is never clamped off base.
+    .Validate(
+        options => options.MultiplierFloor > 0 && options.MultiplierFloor <= 1.0 && options.MultiplierCap >= 1.0
+            && options.MaxFeedLimit >= 1 && options.DefaultFeedLimit >= 1 && options.DefaultFeedLimit <= options.MaxFeedLimit,
+        "Salience: require 0 < MultiplierFloor <= 1 <= MultiplierCap, MaxFeedLimit >= 1, and DefaultFeedLimit in [1, MaxFeedLimit].")
+    .ValidateOnStart();
 
 // Indicator projections over that store (gh#310, R-1, ADR-0001: "indicators are projections… rebuild = replay").
 // ALWAYS runs and needs no symbol list of its own -- its work is whatever the bar store holds, so bars can never
@@ -311,6 +325,7 @@ app.MapAccountEndpoints();
 app.MapRiskEndpoints();
 app.MapTriggerEndpoints();
 app.MapRelevanceEndpoints();
+app.MapNewsEndpoints();
 app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
 app.MapPositionEndpoints();
