@@ -1,8 +1,8 @@
 using MarqSpec.TradingCopilot.Api.Notifications;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using Microsoft.AspNetCore.Builder;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Notifications;

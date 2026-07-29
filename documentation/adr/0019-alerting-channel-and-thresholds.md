@@ -305,3 +305,60 @@ written (*when a page arrives*).
 *Still open:* routing the gh#306 backfill **shortfall**, which remains a high-severity log rather than a metric a
 rule can read. The **daily check-in** (gh#244) stays deliberately outside this stack — Layer 2 is external, and a
 dead-man's switch that ran here would die with the thing it watches.
+
+## Update (2026-07-29) — Layer 1 is durable: the notification outbox (gh#400)
+
+gh#289 moved delivery off the R-13 hot path with an **in-process** queue. That fixed the latency problem — a
+5-second channel had made a flatten pass take 5.15 s — and left a durability one: a hard crash before the pump
+drained lost whatever it held. The queue is now replaced by a **durable outbox**, and a relay delivers from it.
+
+```
+producer → outbox (durable) → relay → dedup → transport
+```
+
+**The hot path is still never blocked, and is now better protected.** A producer writes a local row instead of
+awaiting a network, and unlike the queue, what it wrote survives the process dying.
+
+**The relay delivers synchronously, and that is the point.** The queue returned *"accepted"* the instant a
+notification was handed over — correct for a hot path, useless for a ledger, because a row must never be stamped
+delivered on the strength of "accepted". The relay is background work already, so it waits for the real answer;
+only a real success stamps `DeliveredAt`, and a failure leaves the row **owed** and retried rather than dropped.
+
+**The queue and its pump are gone, not kept alongside.** An in-memory buffer in front of a durable store would
+re-open the window the store exists to close. Their gh#289 guards were **re-expressed rather than deleted**: the
+"hot path never awaits a transport" property still holds — through a local write instead of an enqueue — and the
+*singleton* requirement **moved** from the seam to `DedupingNotificationChannel`, which is what actually holds the
+open-incident set. The seam is now necessarily **scoped**, because it writes through the scoped `DbContext`, and a
+test pins that deliberately: asserting the seam were a singleton would now assert the opposite of the design.
+
+**Two entry points, and the difference is the guarantee** (posture C, decided with the operator):
+
+| | Closes | Producers |
+|---|---|---|
+| `SendAsync` — the seam | a crash before delivery (the window measured in **seconds**) | unchanged |
+| `Enlist` — the caller's transaction | the gap between the producer's own commit and the record | reordered |
+
+The issue originally asked for both a same-transaction outbox *and* unchanged producers. Those are mutually
+exclusive here: the seam was a singleton, the `DbContext` is scoped, and producers **commit before they notify** —
+so nothing behind the seam can enlist in a transaction that has already closed. `SendAsync` therefore writes
+through **its own** scope (touching the caller's would commit their pending work as a side effect, and let an
+unrelated failure in their unit of work be swallowed by the never-throw contract and silently eat a page).
+`Enlist` deliberately uses the caller's context — that entanglement is its entire purpose.
+
+**A mistake worth recording, because the fix names a real distinction.** The outbox first used `DedupKey` as its
+**primary key**, which looked like free DB-enforced idempotence and actually asserted that *an incident happens
+once ever*. The second flatten failure of the day carries the same key, so it could not be recorded at all — the
+insert hit the key, the never-throw contract swallowed it, and the page vanished. Idempotence is now scoped to
+what is true: a unique index on `DedupKey` **filtered to rows still owed**. An incident already owed is not owed
+twice; an incident that recurs after delivery is free to be recorded. Suppressing repeat pages for a *live*
+incident is dedup's job, with re-arm semantics the outbox had no business duplicating.
+
+**`ResolveAsync` withdraws rather than delivers-then-cancels.** A condition that cleared before its page was sent
+should produce **no page at all** — waking someone for something already fixed is the fatigue this ADR's noise
+budget exists to prevent. The already-delivered case still reaches the transport, because a Pushover Emergency
+nags until acknowledged.
+
+*Still open:* the **`Enlist` adoption** on the safety-critical producers (auto-flatten, orphan/synthetic-risk).
+`Enlist` exists, is documented and is reachable; nothing calls it yet. Adopting it changes *when* a notification
+becomes durable relative to the flatten's own saves, on the R-13 path, so it is deliberately its own increment
+rather than a rider on this one.
