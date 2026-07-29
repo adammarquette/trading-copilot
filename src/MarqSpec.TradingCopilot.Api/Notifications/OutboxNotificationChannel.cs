@@ -176,8 +176,8 @@ public sealed class OutboxNotificationChannel : INotificationChannel
     {
         ArgumentNullException.ThrowIfNull(notification);
 
-        // Attach-or-ignore on the dedup key: an incident already owed is not owed twice. The DB key enforces it
-        // regardless, but catching it here avoids a pointless failed round trip on the common re-fire.
+        // Attach-or-ignore on the dedup key: an incident already owed is not owed twice. The filtered unique index
+        // enforces it regardless, but catching it here avoids a pointless failed round trip on the common re-fire.
         if (_database.NotificationOutbox.Local.Any(row => row.DedupKey == notification.DedupKey))
         {
             return;
@@ -189,6 +189,7 @@ public sealed class OutboxNotificationChannel : INotificationChannel
     /// <summary>Builds an owed row — shared so both entry points record identically.</summary>
     private NotificationOutboxRecord NewRow(Notification notification) => new()
     {
+        Id = Guid.CreateVersion7(),
         DedupKey = notification.DedupKey,
         Severity = notification.Severity,
         Title = notification.Title,

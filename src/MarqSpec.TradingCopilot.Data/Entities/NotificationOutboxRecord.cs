@@ -25,7 +25,22 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// </remarks>
 public sealed class NotificationOutboxRecord
 {
-    /// <summary>The incident identity — the key, so a redelivery updates rather than duplicates.</summary>
+    /// <summary>This row's own identity.</summary>
+    /// <remarks>
+    /// A <b>surrogate</b> key, not the dedup key — and that correction matters (gh#400). Keying on
+    /// <see cref="DedupKey"/> looked like free DB-enforced idempotence and actually asserted something much
+    /// stronger and wrong: that an incident happens <i>once ever</i>. The second flatten failure of the day
+    /// carries the same key, so it could never be recorded — the insert hit the primary key, the never-throw
+    /// contract swallowed it, and the page vanished. Exactly the silent loss this outbox exists to prevent.
+    /// </remarks>
+    public required Guid Id { get; set; }
+
+    /// <summary>
+    /// The incident identity. Unique only among rows that are <b>still owed</b> (a filtered index) — "an incident
+    /// already owed is not owed twice", without claiming it can only ever happen once. Suppressing <i>repeat</i>
+    /// pages for a live incident is <c>DedupingNotificationChannel</c>'s job, with re-arm semantics the outbox has
+    /// no business duplicating.
+    /// </summary>
     public required string DedupKey { get; set; }
 
     /// <summary>How loudly this should arrive (ADR-0019's P1 / P2 / P3).</summary>

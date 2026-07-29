@@ -539,10 +539,19 @@ public class TradingCopilotDbContext : TenantDbContext
 
         modelBuilder.Entity<NotificationOutboxRecord>(outbox =>
         {
-            // The dedup key IS the primary key, so idempotence is enforced by the database rather than by the
-            // relay remembering to check. A redelivery after a crash collides instead of paging twice.
-            outbox.HasKey(o => o.DedupKey);
+            // A SURROGATE key. Keying on the dedup key (as gh#400 part 1 did) asserted that an incident happens
+            // once ever: the second flatten failure of the day carries the same key, so it could not be recorded
+            // at all -- the insert hit the primary key, the never-throw contract swallowed it, and the page was
+            // silently lost. Exactly the failure this outbox exists to prevent.
+            outbox.HasKey(o => o.Id);
             outbox.Property(o => o.DedupKey).HasMaxLength(256);
+
+            // Idempotence, correctly scoped: unique among rows still OWED. A redelivery after a crash collides and
+            // is rejected; a genuine recurrence after delivery is free to be recorded. Filtered index because the
+            // constraint is conditional -- EF has no vocabulary for that beyond HasFilter.
+            outbox.HasIndex(o => o.DedupKey)
+                .IsUnique()
+                .HasFilter("\"DeliveredAt\" IS NULL");
             outbox.Property(o => o.Title).HasMaxLength(256);
             outbox.Property(o => o.Body).HasMaxLength(4000);
 
