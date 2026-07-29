@@ -47,8 +47,9 @@ discipline to **how and when the LLM is invoked at all**, so cost is bounded and
   estimated cost and latency on the `MarqSpec.TradingCopilot.Ai` meter, by model and outcome — the metrics the
   governor reads to know spend-so-far, and a failover is counted so a degrade is visible. Cost is estimated from
   a single pinned rate. The **persisted `AIUsage`** record — the in-app spend meter and the durable governor
-  ledger — is still deferred to A2 (gh#16), where the LLM half of the spend signal lands with the real
-  `ILlmProvider` adapter.
+  ledger — **landed** (gh#431): the agent-review reviewer records one per-call token / cost / latency row under
+  the firing owner's scope. It is a **floor, not a complete accounting** (fail-open, lossy on host death), so the
+  governor reconciles it against the aggregate meter rather than hard-capping on it alone.
 - **The strategy-agent → executor flow attaches here.** Strategy agents are the "review / enrich on fire"
   consumers; the executor synthesizes their outputs into a timely suggestion — invoked **on triggers, not
   continuously**. Their proposals still pass the deterministic risk / execution gate ([ADR-0007](0007-order-execution-model.md)):
@@ -122,6 +123,20 @@ reviewer maps to `Suppress(ReviewerUnavailable)`; a `refusal` maps to a non-comp
 the whole of "AI-spend"): the **`AIUsage`** per-call token+cost+latency record → Grafana, and the **platform-level
 spend governor** — plus **model-tiering escalation policy** (both tiers resolve to real models; *when* triage
 escalates to deep is a follow-up).
+
+**Update (2026-07-28, gh#431) — the persisted `AIUsage` ledger landed; the spend signal's LLM half is durable.**
+The agent-review reviewer now returns an `AgentReview` (its `ReviewOutcome` **plus** an `AiCallCost` — feature,
+model / tier, tokens in/out, an estimated USD cost at the pinned per-tier rate, an `AiUsageOutcome`, and latency),
+and the scan — **the single tenancy authority** — records one `AiUsageRecord` **stamped with the firing owner**
+(R-20), with the trace id (ADR-0002) and the caller's clock. **Fail-open in depth:** the write runs in its own
+owner-scoped context and a fault is logged + swallowed at **both** the ledger internals **and** the scan boundary
+(guarded exactly like the reviewer and advisory-notify seams), so a spend-bookkeeping blip can never roll back a
+committed fire or a co-owner's already-sent alert. A **provider fault is a real `Failed` zero-token row** (billable
+latency the governor must see), not an absence. **Crucial caveat — the ledger is a FLOOR, not a complete
+accounting:** nothing is recorded if the host dies between the call and the write, so the **spend governor must
+reconcile against the aggregate `MarqSpec.TradingCopilot.Ai` meter** (gh#403, ADR-0002), never hard-cap on this
+ledger alone. Still open (the last of "AI-spend"): the **platform-level spend governor** (cap / throttle vs.
+budget) and the **triage→deep escalation policy**.
 
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*
