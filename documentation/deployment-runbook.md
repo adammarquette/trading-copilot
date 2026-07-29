@@ -250,6 +250,16 @@ and would have deadlocked every merge if enabled — was deleted at the same tim
   long-lived branches and `publish image` runs only on `push`, so requiring either would leave a required check
   forever pending and **deadlock the merge**. This is the trap to remember before adding any required check:
   confirm it actually runs on that branch's PRs.
+- **`issue-link` is deliberately NOT required, and never fails** (gh#406). It warns when a PR references issues
+  but will close none of them — the shape that let `#385` stay open after PR #391 delivered it, costing a full
+  duplicate implementation (PR #401, closed unmergeable). It is advisory *by design*: a PR against an epic, or a
+  QA suite that **pins** a defect rather than fixing it, legitimately closes nothing, so a hard failure would
+  train authors to add `Closes` where it does not belong — and a wrongly-closed issue is harder to notice than
+  one left open. Promoting it to required would need the false-positive rate measured first.
+  It reads GitHub's own **`closingIssuesReferences`** rather than pattern-matching the body, because that is the
+  set that will actually close on merge; a keyword in the **title** binds nothing, which is a real recurring
+  mistake here (PRs #369, #376, #425 all carried one). It additionally names two near-misses it finds: a keyword
+  in the title, and prose like *"Settles #307"* that reads like a link and is not.
 - **Non-strict** (no forced up-to-date-before-merge), **0 required approvals** (single operator — the checks and
   the ladder are the gate), **no bypass list** (the rules bind even for the admin; that is the point of
   enforcement). An approval requirement can be added later — `trading-copilot-reviewer[bot]` (gh#141) can satisfy

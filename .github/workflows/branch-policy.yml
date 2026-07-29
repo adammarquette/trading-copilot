@@ -9,6 +9,11 @@ name: Branch policy
 # `commit-hygiene` is required everywhere. `stale-base` is deliberately NOT a required check -- it
 # is skipped on the long-lived branches, and a required check that never runs would deadlock the
 # merge. The rulesets live in repo settings, recorded in the deployment runbook (not this file).
+#
+# `issue-link` (gh#406) is ADVISORY and must stay that way: it never fails and is not a required
+# check. Plenty of PRs legitimately close nothing -- one against an epic, or a QA suite that PINS a
+# defect rather than fixing it -- so a hard failure would train authors to add `Closes` where it does
+# not belong, and a wrongly-closed issue is harder to notice than one left open.
 
 on:
   pull_request:
@@ -149,3 +154,85 @@ jobs:
             --jq '.[] | [.sha[0:7], (.parents | length | tostring), (.commit.message | split("\n")[0])] | @tsv')
           echo "$COUNT commit(s) checked."
           exit $FAIL
+
+  issue-link:
+    name: issue-link
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Warn when a PR references issues but closes none
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          NAME: ${{ github.event.repository.name }}
+          PR: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          # GROUND TRUTH IS GITHUB'S OWN RESOLVED LINKS, not a regex over the body (gh#406).
+          #
+          # A pattern match answers "does this text look linked?", which is the wrong question -- twice today a
+          # PR carried `Closes #N` in its TITLE, which reads correct to a human and to a naive grep, and GitHub
+          # silently ignores (keywords bind from the body and commit messages only). closingIssuesReferences is
+          # by definition the set that WILL close on merge, so anything absent from it will not, whatever the
+          # prose says.
+          CLOSES=$(gh api graphql -f query='
+            query($o:String!, $r:String!, $n:Int!) {
+              repository(owner:$o, name:$r) {
+                pullRequest(number:$n) { closingIssuesReferences(first:20) { nodes { number } } }
+              }
+            }' -f o="$OWNER" -f r="$NAME" -F n="$PR" \
+            --jq '[.data.repository.pullRequest.closingIssuesReferences.nodes[].number] | join(", #")')
+
+          if [ -n "$CLOSES" ]; then
+            echo "OK — this PR closes #$CLOSES on merge."
+            echo "This PR closes **#$CLOSES** on merge." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          REFERENCED=$(printf '%s' "${BODY:-}" | grep -oiE '#[0-9]+' | sort -u -V | paste -sd' ' - || true)
+          if [ -z "$REFERENCED" ]; then
+            echo "OK — this PR references no issues, so there is nothing it could have meant to close."
+            exit 0
+          fi
+
+          # It references issues and closes none. That is often correct -- a PR against an epic, a QA suite that
+          # PINS a defect rather than fixing it, a hotfix whose issue another PR closes. So this warns and never
+          # fails, and is deliberately NOT a required check: a hard failure would train authors to add `Closes`
+          # to PRs that should not have it, and a wrongly-closed issue is harder to notice than an open one.
+          echo "::warning title=No closing keyword::This PR references $REFERENCED but will close nothing on merge. If it finishes one of those, add 'Closes #N' to the PR BODY."
+          {
+            echo "### :link: No closing keyword"
+            echo
+            echo "This PR references **$REFERENCED** and will **close nothing** when merged."
+            echo
+            echo "That is fine if it genuinely finishes none of them — a PR against an epic, or a QA suite that"
+            echo "*pins* a defect rather than fixing it, correctly uses \`Related to #N\`."
+            echo
+            echo "If it does finish one, add \`Closes #N\` **to the body**. Leaving it off means the issue stays"
+            echo "open, the board keeps advertising finished work, and a parallel session picks it up (gh#406)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # The near misses -- where the author BELIEVED they had linked it, which is the dangerous shape.
+          KEYWORDS='clos(e|es|ed)|fix(es|ed)?|resolve(s|d)?'
+          if printf '%s' "$TITLE" | grep -qiE "(${KEYWORDS})[[:space:]]+[^[:alnum:]#]{0,3}#[0-9]+"; then
+            echo "::warning title=Closing keyword is in the title::GitHub honours closing keywords in the PR BODY and commit messages, never the title. Move it into the body."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> :warning: The **title** carries a closing keyword. GitHub honours those in the **body** and" >> "$GITHUB_STEP_SUMMARY"
+            echo "> commit messages only — never the title. Move it into the body." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          NEAR=$(printf '%s' "${BODY:-}" \
+            | grep -oiE '(settles|delivers|completes|implements|addresses|finishes)[[:space:]]+[^[:alnum:]#]{0,3}#[0-9]+' | head -3 || true)
+          if [ -n "$NEAR" ]; then
+            echo "::warning title=Not a closing keyword::'$(printf '%s' "$NEAR" | head -1)' reads like a link but is not one. GitHub only acts on close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> :warning: The body says \`$(printf '%s' "$NEAR" | head -1)\`, which **reads** like a link but is not" >> "$GITHUB_STEP_SUMMARY"
+            echo "> one. GitHub acts only on \`close/closes/closed\`, \`fix/fixes/fixed\`, \`resolve/resolves/resolved\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Advisory by design: never fail, so this can never deadlock a merge.
+          exit 0
