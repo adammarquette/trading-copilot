@@ -163,6 +163,15 @@ services:
       # nags. Switched from `${…:-60}` when gh#236 established the convention documented above.
       Pushover__PageRetrySeconds:
       Pushover__PageExpireSeconds:
+      # The agent-review LLM (gh#402 / gh#423, ADR-0008). Null pass-through: Llm__ApiKey is an UNDEFAULTED secret --
+      # absent, the agent-review route runs review-less (it still fires and still tells the operator a setup needs
+      # review) rather than waking a model, so a dev stack makes no paid calls unless the operator sets it. The model
+      # ids + timeout the app already defaults (a cheap triage model + a stronger deep one), so compose must not
+      # restate them and become a second source of truth.
+      Llm__ApiKey:
+      Llm__TriageModel:
+      Llm__DeepModel:
+      Llm__TimeoutSeconds:
       CheckIn__HeartbeatUrl:
       CheckIn__HeartbeatIntervalSeconds:
       CheckIn__PollIntervalSeconds:
