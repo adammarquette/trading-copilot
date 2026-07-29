@@ -2,6 +2,7 @@
   <Project Path="MarqSpec.TradingCopilot.Domain/MarqSpec.TradingCopilot.Domain.csproj" />
   <Project Path="MarqSpec.TradingCopilot.Data/MarqSpec.TradingCopilot.Data.csproj" />
   <Project Path="MarqSpec.TradingCopilot.Api/MarqSpec.TradingCopilot.Api.csproj" />
+  <Project Path="MarqSpec.TradingCopilot.Integration.Finnhub/MarqSpec.TradingCopilot.Integration.Finnhub.csproj" />
   <Project Path="MarqSpec.TradingCopilot.Integration.ProjectX/MarqSpec.TradingCopilot.Integration.ProjectX.csproj" />
   <Project Path="MarqSpec.TradingCopilot.UnitTests/MarqSpec.TradingCopilot.UnitTests.csproj" />
   <Project Path="MarqSpec.TradingCopilot.IntegrationTests/MarqSpec.TradingCopilot.IntegrationTests.csproj" />
