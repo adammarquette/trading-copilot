@@ -300,15 +300,14 @@ Cheaper-model triage, debounce / rate-limit, and an optional AI-spend governor k
 ### Analysis & management UI
 A **React SPA** — the operator's surface — consuming the BFF's **REST** endpoints and **SignalR** hubs
 (websockets); the Internet-exposed frontend, **authenticated by JWT** (R-18; see *Authentication* below). It ships
-as an **installable PWA** (manifest + service worker; Android primary, iOS best-effort) — a presentation client
-only, so safety-critical enforcement stays server-side regardless of client state (R-19, [ADR-0010](adr/0010-progressive-web-app.md)).
+as an **installable PWA** — a presentation client only (R-19, [ADR-0010](adr/0010-progressive-web-app.md), which
+owns the packaging and the platform caveats).
 **The chart is its central component:** a purpose-built candlestick chart (**Lightweight
 Charts**, ADR-0004 — with RSI/MACD indicator subcharts in panes) onto which everything **overlays** — indicators incl. custom (pre-computed by the processor), price levels, suggestion
 entry/stop/target zones, live positions / orders / fills, and the operator's own drawings (R-10). The order
 ticket, journal, rulebook, and chat panels sit around it (R-6, R-11). A separate **order-flow / Depth-of-Market**
-visual (Bookmap-style liquidity heatmap + trades) is a bespoke **canvas / WebGL** component — no candlestick
-library provides it — fed by the depth/trade streams (R-3, R-1, ADR-0004); d3/canvas covers lighter bespoke
-views (footprint, volume profile).
+visual sits beside it, fed by the depth/trade streams (R-3, R-1) — *why it is bespoke rather than a library, and
+what renders it, are [ADR-0004](adr/0004-charting.md)'s.*
 
 ## Cross-cutting
 - **Independent scaling.** A saturated ingestion socket, bursty pollers, and heavy processors each scale on their
