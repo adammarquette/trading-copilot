@@ -59,6 +59,14 @@ public class TriggerRecord : IUserOwned
     /// <summary>Whether the scan evaluates this trigger. A disabled trigger is neither read nor fired.</summary>
     public required bool Enabled { get; set; }
 
+    /// <summary>
+    /// Whether the operator has confirmed this trigger for live evaluation (gh#470). <c>required</c>; the fail-closed
+    /// zero (<see cref="TriggerConfirmation.Unconfirmed"/>) is inert regardless of <see cref="Enabled"/>, and a DB
+    /// check pins the column to the known value set. Distinct from <see cref="Enabled"/>: an unconfirmed trigger has
+    /// never been accepted into the firing set, where a disabled one was accepted and then paused.
+    /// </summary>
+    public required TriggerConfirmation Confirmation { get; set; }
+
     /// <summary>The debounce state. <c>required</c>; the fail-closed zero (<see cref="TriggerArmState.Unseeded"/>) re-seeds silently.</summary>
     public required TriggerArmState ArmState { get; set; }
 

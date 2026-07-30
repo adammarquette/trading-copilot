@@ -14,8 +14,9 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.Triggers;
 /// The <c>/api/triggers</c> handlers (gh#385, R-4 / R-7) — the operator authors and manages standing triggers. The
 /// safety-relevant behaviours: a create is validated whole at the boundary (bad enum, non-positive period /
 /// resolution, unknown indicator, the not-yet-available agent-review route are all refused, nothing partially
-/// stored); a create starts Enabled + Unseeded + cycle 0; an edit re-seeds the arm state without touching the
-/// incident cycle; and every read/write is R-20-scoped to the caller.
+/// stored); a create starts Enabled + <b>Unconfirmed</b> (gh#470) + Unseeded + cycle 0, so authorship arms nothing
+/// until a separate confirm; an edit re-seeds the arm state without touching the incident cycle; and every
+/// read/write is R-20-scoped to the caller.
 /// </summary>
 public class TriggerEndpointsTests
 {
@@ -42,7 +43,8 @@ public class TriggerEndpointsTests
     private async Task<Guid> SeedTriggerAsync(
         Guid owner,
         TriggerArmState armState = TriggerArmState.Armed,
-        int armCycle = 0)
+        int armCycle = 0,
+        TriggerConfirmation confirmation = TriggerConfirmation.Confirmed)
     {
         Guid id = Guid.NewGuid();
         await using TradingCopilotDbContext context = Context(owner);
@@ -60,6 +62,7 @@ public class TriggerEndpointsTests
             Route = TriggerRoute.Mechanical,
             Severity = NotificationSeverity.Notify,
             Enabled = true,
+            Confirmation = confirmation,
             ArmState = armState,
             ArmCycle = armCycle,
             CreatedAt = DateTimeOffset.UnixEpoch,
@@ -103,6 +106,9 @@ public class TriggerEndpointsTests
         TriggerRecord stored = await reload.Triggers.SingleAsync();
         stored.UserId.Should().Be(_operator);
         stored.Enabled.Should().BeTrue();
+        stored.Confirmation.Should().Be(
+            TriggerConfirmation.Unconfirmed,
+            "a newly authored trigger is inert until the operator confirms it, even though Enabled is true (gh#470)");
         stored.ArmState.Should().Be(TriggerArmState.Unseeded);
         stored.ArmCycle.Should().Be(0);
         stored.ConditionKind.Should().Be(TriggerConditionKind.IndicatorThreshold);
@@ -385,6 +391,53 @@ public class TriggerEndpointsTests
             theirs, new PatchTriggerRequest(Enabled: false), new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    // --- Confirm (gh#470) ---
+
+    [Fact]
+    public async Task Confirm_ShouldMarkTheTriggerConfirmed_SoTheScanCanEvaluateIt()
+    {
+        // A freshly authored trigger is Unconfirmed (inert). Confirming is the deliberate, separate act that accepts
+        // it into the firing set -- the operator's confirmation step between authorship and armed.
+        Guid id = await SeedTriggerAsync(_operator, confirmation: TriggerConfirmation.Unconfirmed);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.ConfirmTriggerAsync(id, new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        TriggerRecord stored = await Context().Triggers.SingleAsync(t => t.Id == id);
+        stored.Confirmation.Should().Be(TriggerConfirmation.Confirmed);
+    }
+
+    [Fact]
+    public async Task Confirm_ShouldBeIdempotent_WhenTheTriggerIsAlreadyConfirmed()
+    {
+        // A retried confirm request must be harmless: still 200, still Confirmed, nothing about the debounce disturbed.
+        Guid id = await SeedTriggerAsync(_operator, armState: TriggerArmState.Fired, armCycle: 3);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.ConfirmTriggerAsync(id, new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        TriggerRecord stored = await Context().Triggers.SingleAsync(t => t.Id == id);
+        stored.Confirmation.Should().Be(TriggerConfirmation.Confirmed);
+        stored.ArmState.Should().Be(TriggerArmState.Fired); // confirm leaves the debounce untouched
+        stored.ArmCycle.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task Confirm_ShouldReturnNotFound_ForAnotherOwnersTrigger()
+    {
+        // The R-20 filter hides another operator's trigger, so confirming one reads as 404 -- never a cross-owner write.
+        Guid theirs = await SeedTriggerAsync(Guid.NewGuid(), confirmation: TriggerConfirmation.Unconfirmed);
+        await using TradingCopilotDbContext context = Context(); // as _operator
+
+        IResult result = await TriggerEndpoints.ConfirmTriggerAsync(theirs, new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
+        (await Context(Guid.Empty).Triggers.IgnoreQueryFilters().SingleAsync(t => t.Id == theirs))
+            .Confirmation.Should().Be(TriggerConfirmation.Unconfirmed, "the other owner's trigger is untouched");
     }
 
     // --- Delete ---

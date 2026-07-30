@@ -46,6 +46,7 @@ public static class TriggerEndpoints
         group.MapGet("/", ListTriggersAsync);
         group.MapGet("/{id:guid}", GetTriggerAsync);
         group.MapPatch("/{id:guid}", PatchTriggerAsync);
+        group.MapPost("/{id:guid}/confirm", ConfirmTriggerAsync);
         group.MapDelete("/{id:guid}", DeleteTriggerAsync);
         return endpoints;
     }
@@ -160,6 +161,11 @@ public static class TriggerEndpoints
             Size = size,
             Severity = request.Severity,
             Enabled = true,
+            // FAIL-CLOSED (gh#470): a newly authored trigger is UNCONFIRMED, so it is inert until the operator
+            // confirms it -- even though Enabled is true. Authorship arms nothing; confirmation is the separate,
+            // deliberate act (POST /{id}/confirm) that accepts a trigger into the firing set. This is the whole point
+            // of the gate: an agent-proposed or hastily-created trigger cannot page or wake the reviewer on its own.
+            Confirmation = TriggerConfirmation.Unconfirmed,
             ArmState = TriggerArmState.Unseeded,
             ArmCycle = 0,
             CreatedAt = DateTimeOffset.UtcNow,
@@ -257,6 +263,32 @@ public static class TriggerEndpoints
         return Results.Ok(TriggerResponse.From(trigger));
     }
 
+    internal static async Task<IResult> ConfirmTriggerAsync(
+        Guid id,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        CancellationToken cancellationToken)
+    {
+        _ = currentUser; // ownership is enforced by the R-20 filter below; the parameter documents the intent.
+
+        TriggerRecord? trigger = await database.Triggers
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (trigger is null)
+        {
+            return Results.NotFound();
+        }
+
+        // Confirming is the deliberate act that accepts an authored trigger into the firing set (gh#470); it is
+        // separate from creation on purpose. Idempotent: confirming an already-confirmed trigger is a no-op that still
+        // reads 200, so a retried request is harmless. The debounce is left untouched -- a freshly authored trigger is
+        // already Unseeded, so its first scan after confirmation seeds silently (adopts current truth, no fire) and
+        // only an observed crossing fires, exactly as create-then-enable behaved before this gate existed.
+        trigger.Confirmation = TriggerConfirmation.Confirmed;
+        await database.SaveChangesAsync(cancellationToken);
+
+        return Results.Ok(TriggerResponse.From(trigger));
+    }
+
     internal static async Task<IResult> DeleteTriggerAsync(
         Guid id,
         ICurrentUser currentUser,
@@ -340,6 +372,7 @@ public sealed record PatchTriggerRequest(
 /// <param name="Size">The agent-review contract size a fire issues at, or null for a mechanical trigger.</param>
 /// <param name="Severity">The alert severity.</param>
 /// <param name="Enabled">Whether the scan evaluates it.</param>
+/// <param name="Confirmation">Whether the operator has confirmed it for live evaluation; unconfirmed is inert (gh#470).</param>
 /// <param name="ArmState">The debounce state.</param>
 /// <param name="ArmCycle">The incident counter.</param>
 /// <param name="LastEvaluatedValue">The last measured value, if any.</param>
@@ -359,6 +392,7 @@ public sealed record TriggerResponse(
     int? Size,
     NotificationSeverity Severity,
     bool Enabled,
+    TriggerConfirmation Confirmation,
     TriggerArmState ArmState,
     int ArmCycle,
     decimal? LastEvaluatedValue,
@@ -382,6 +416,7 @@ public sealed record TriggerResponse(
         record.Size,
         record.Severity,
         record.Enabled,
+        record.Confirmation,
         record.ArmState,
         record.ArmCycle,
         record.LastEvaluatedValue,

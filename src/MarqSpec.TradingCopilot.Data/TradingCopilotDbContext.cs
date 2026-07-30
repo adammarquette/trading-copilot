@@ -459,8 +459,10 @@ public class TradingCopilotDbContext : TenantDbContext
             trigger.Property(t => t.Hysteresis).HasPrecision(18, 8);
             trigger.Property(t => t.LastEvaluatedValue).HasPrecision(18, 8);
 
-            // The scan discovers ENABLED, MECHANICAL/AGENT-REVIEW triggers first; this composite leads that read (gh#385).
-            trigger.HasIndex(t => new { t.Enabled, t.Route });
+            // The scan discovers CONFIRMED, ENABLED, MECHANICAL/AGENT-REVIEW triggers first; this composite leads that
+            // read (gh#385, gh#470). Confirmation leads: an unconfirmed trigger is inert regardless of Enabled, so the
+            // most-selective fail-closed predicate is the cheapest to satisfy first.
+            trigger.HasIndex(t => new { t.Confirmation, t.Enabled, t.Route });
 
             // The AGENT-REVIEW route issues a sized suggestion against an account (R-14); a mechanical trigger has
             // neither. On account delete, CASCADE -- an agent-review trigger is meaningless without its account, and
@@ -482,6 +484,11 @@ public class TradingCopilotDbContext : TenantDbContext
                 table.HasCheckConstraint("CK_Triggers_Period_Positive", "\"Period\" > 0");
                 table.HasCheckConstraint("CK_Triggers_ResolutionMinutes_Positive", "\"ResolutionMinutes\" > 0");
                 table.HasCheckConstraint("CK_Triggers_Hysteresis_PositiveOrNull", "\"Hysteresis\" IS NULL OR \"Hysteresis\" > 0");
+
+                // Confirmation's zero (Unconfirmed) is a REAL fail-closed default, not a refused Unknown -- so this
+                // pins the column to the known value set rather than refusing zero (gh#470). Defense-in-depth: a
+                // corrupt write can never land a value the scan's Confirmed check would silently treat as not-confirmed.
+                table.HasCheckConstraint("CK_Triggers_Confirmation_Known", "\"Confirmation\" IN (0, 1)");
 
                 // The route pairs with account+size, below the endpoint validation (TriggerRoute.AgentReview = 2):
                 // an agent-review trigger MUST carry an account and a positive size (it issues a sized suggestion on

@@ -107,11 +107,13 @@ public class TriggerEvaluationService
     /// <returns>How many triggers fired this pass.</returns>
     public async Task<int> ScanAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
-        // Discover owners with enabled mechanical OR agent-review triggers -- background, so the R-20 filter is
-        // bypassed here.
+        // Discover owners with CONFIRMED, enabled mechanical OR agent-review triggers -- background, so the R-20 filter
+        // is bypassed here. An unconfirmed trigger is inert regardless of Enabled (gh#470): the operator has never
+        // accepted it into the firing set, so it is neither discovered nor evaluated.
         List<Guid> owners = await _discovery.Triggers
             .IgnoreQueryFilters()
-            .Where(trigger => trigger.Enabled
+            .Where(trigger => trigger.Confirmation == TriggerConfirmation.Confirmed
+                && trigger.Enabled
                 && (trigger.Route == TriggerRoute.Mechanical || trigger.Route == TriggerRoute.AgentReview))
             .Select(trigger => trigger.UserId)
             .Distinct()
@@ -253,7 +255,8 @@ public class TriggerEvaluationService
         await using TradingCopilotDbContext database = new(_options, new OwnerUser(owner));
 
         List<TriggerRecord> triggers = await database.Triggers
-            .Where(trigger => trigger.Enabled
+            .Where(trigger => trigger.Confirmation == TriggerConfirmation.Confirmed
+                && trigger.Enabled
                 && (trigger.Route == TriggerRoute.Mechanical || trigger.Route == TriggerRoute.AgentReview))
             .ToListAsync(cancellationToken);
 
