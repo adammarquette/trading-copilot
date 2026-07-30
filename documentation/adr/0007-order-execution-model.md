@@ -775,7 +775,7 @@ authoritative record — this list is kept only as a decision-provenance changel
 - ~~Define **connection-loss detection** (heartbeat / timeout thresholds), the **orphan → emergency** transition +
   operator alert, and the **recovery re-arm** path — each carrying a `synthetic_risk` audit flag.~~ **Landed** — the
   venue-connection monitor + orphan handling / re-arm (gh#191/#192/#209); consolidated in ADR-0013.
-- Decide **defaults** (per environment): sizing basis and proximity metric. *(The **default entry action** is settled and built — gh#218; see the update below.)*
+- Decide **defaults** (per environment): sizing basis and proximity metric. *(The **default entry action** is settled and built — gh#218; see the update above.)*
 - ~~Define the **risk-gate interface** — inputs (live account state, layers, safety stop), outputs (size, binding
   layer, block / resize / acknowledge) — R-5.~~ **Landed** — `RiskGate` with the layered decision (see the risk-gate
   update above).

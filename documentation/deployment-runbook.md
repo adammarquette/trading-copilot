@@ -346,13 +346,20 @@ committed file, and never left at the default.
 
 ### Dashboards (`gh#366`)
 
-Three dashboards provision from `./observability/grafana/dashboards`, in the **Trading Co-Pilot** folder:
+**Four** dashboards provision from `./observability/grafana/dashboards`, in the **Trading Co-Pilot** folder:
 
 | Dashboard | UID | What it answers |
 |---|---|---|
 | Auto-flatten reliability | `tc-auto-flatten` | Did R-13's obligation run, how fast, did the backstop save it |
 | Execution & risk gate | `tc-execution-gate` | Gate coverage, which limit binds, order-ack latency, kill switch, unprotected exposure |
 | Synthetic risk & pipeline health | `tc-synthetic-risk` | Platform-held protection, and whether the log's consumers keep up |
+| AI usage & spend (`gh#412`) | `tc-ai-spend` | What the AI is costing — 24h/30d spend, governor headroom, LLM-vs-embed split, spend by tier, outcomes, tokens, p95/p99 latency (`ai_llm_*` gh#477 + `ai_embed_*` gh#403) |
+
+> **The headroom panel reads the budget from the app, not from a constant (`gh#506`).** *"Governor headroom — % of
+> daily budget"* divides by the **`ai_governor_daily_budget_usd`** gauge, which the app publishes from its own
+> `Governor__DailyBudgetUsd` config. So changing the governor's budget is a **single** change — the panel follows it,
+> and cannot silently report against a stale denominator. (It briefly *was* a hand-synced Grafana `constant`; gh#506
+> replaced that precisely because the two could drift apart.)
 
 **They are read-only in the UI on purpose.** The provider sets `allowUiUpdates: false` and the mount is
 read-only, so a dashboard cannot drift into console state that no PR reviewed. **To change one, edit the JSON and

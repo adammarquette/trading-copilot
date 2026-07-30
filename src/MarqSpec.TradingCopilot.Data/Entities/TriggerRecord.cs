@@ -50,7 +50,10 @@ public class TriggerRecord : IUserOwned
     /// <summary>The optional hysteresis dead-band that widens the re-arm boundary. NULL (or non-positive) means inert.</summary>
     public decimal? Hysteresis { get; set; }
 
-    /// <summary>Where a fire routes. <c>required</c>; a DB check refuses unknown, and the evaluator refuses AgentReview.</summary>
+    /// <summary>
+    /// Where a fire routes. <c>required</c>; a DB check refuses unknown. Both routes are built — <b>mechanical</b>
+    /// (gh#385) and <b>agent-review</b> (gh#402) — and the evaluator scans for both.
+    /// </summary>
     public required TriggerRoute Route { get; set; }
 
     /// <summary>How loudly the mechanical alert arrives when it fires.</summary>

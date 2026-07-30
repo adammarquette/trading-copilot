@@ -211,6 +211,14 @@ ingest → process flow, which they deliberately sit outside of.
 | `VenueConnectionMonitorHost` | poll over `IVenueConnection` | orphans every hidden stop on a venue **drop**, re-arms on reconnect (gh#209) | a synthetic stop cannot promote without quotes; the native safety stop stays the floor |
 | `AutoFlattenHost` | timer · DST-aware `MarketClock` | the **primary** R-13 trigger — closes positions at each instrument's per-market deadline, verifies flat, journals `flatten.*` (gh#185) | the one autonomous action, and it only reduces exposure |
 | `AutoFlattenWatchdogHost` | **separate** timer, own loop | the **redundant second tier** — backstops the primary past a grace window, persists on a rejected close, escalates to critical rather than firing blind (gh#187) | ADR-0013's independence requirement: a bug in the primary must not disable the flatten |
+| `DeadMansSwitchHost` | timer · per-instrument check-in | the **third** R-13 tier — reports each flat market to an **external** monitor and *withholds* the check-in while exposure remains past the deadline (gh#244) | the worst R-13 failure is the host dying and taking its own alerting with it, so here **silence is the alarm** (ADR-0019) |
+| `AccountEventStreamHost` | supervised venue stream | ingests fills / order-state events — writes `Fill` rows, advances orders to `PartiallyFilled`/`Filled`, and drives OCO-cancel-on-exit (gh#219) | protection must retire off **venue truth**, not off what the app believes it sent |
+| `ProtectionMonitorHost` | timer · census | sweeps for a live position with **no** protective stop resting at the venue and pages P1 (gh#370) | the ADR-0019 unprotected-position census — the one state no other guard is watching *for* |
+| `TriggerScanHost` | timer · indicator cadence | evaluates confirmed, enabled triggers and fires the crossing edges — mechanical alert or agent review (gh#385, gh#402) | R-4's "continuous scanning", deterministic and with no LLM in the loop (ADR-0008) |
+
+*(Ingest and notification-delivery hosts — bar/gap backfill, indicator projection, news ingest/relevance/embedding,
+the notification pump and outbox relay — run unattended too but are not execution paths; they belong to the
+ingest → process flow above and to ADR-0019's delivery chain.)*
 
 Two more run once, at startup, in the same scope as migrate + bootstrap:
 
@@ -240,11 +248,13 @@ never re-fires, an already-`Native` stop is skipped, and a cursor commits per ba
 Connects via **websocket** and processes every event on the wire, then **publishes onto the event pipeline** for
 uniform downstream handling. (ProjectX exposes this as SignalR hubs — see the wiki's
 [ProjectX page](wiki/pages/projectx-gateway-api.md).) The same ingestion path serves **data-only providers**:
-**Finnhub** streams **equities / indices** (SPY, QQQ, …) over a websocket (~50 symbols, free tier) as **cross-asset
-context** for the traded futures (SPY ↔ ES, NASDAQ/QQQ ↔ NQ) — a market-data source with no account/execution
+**Finnhub** is *intended* to stream **equities / indices** (SPY, QQQ, …) over a websocket (~50 symbols, free tier) as
+**cross-asset context** for the traded futures (SPY ↔ ES, NASDAQ/QQQ ↔ NQ) — a market-data source with no account/execution
 (the decomposed R-17 abstraction; engineering §3). Finnhub's **alternative data** rides the R-2 non-market template.
 **Implemented:** `MarketDataIngestionHost` (+ `IngestionOptions`, the `Ingestion:Symbols` allowlist) publishes market
-data onto the event backbone.
+data onto the event backbone — today fed by **ProjectX**, the only `IMarketDataSource` that exists.
+**Not yet built:** the Finnhub market-data adapter. `Integration.Finnhub` currently holds the **news** source alone
+(gh#439); the equities/indices surface is tracked by gh#411 (client gh#495, adapter gh#496).
 
 ### Poller service(s) — durable data (R-1 historical, R-2 soft signals)
 Polls REST endpoints on a configurable interval (R-1: default 60s). **Thin by design** — pollers only **poll,
@@ -296,6 +306,14 @@ ways: a **mechanical** setup emits a **deterministic alert / suggestion** (no LL
 strategy agent** (the executor combines agents into a timely suggestion) — one LLM call per event, not per tick.
 Cheaper-model triage, debounce / rate-limit, and an optional AI-spend governor keep cost bounded. Rationale and the
 "LLM at the edges" model: [ADR-0008](adr/0008-ai-invocation-cost-model.md).
+**Implemented — and now the most-built subsystem here.** `TriggerScanHost` + `TriggerEvaluationService` run the scan;
+the **mechanical** route fires edge-debounced alerts with no LLM (gh#385) and the **agent-review** route wakes the
+reviewer behind `ILlmProvider` (gh#402), served by the real `AnthropicLlmProvider` once a key is present (gh#423).
+A cheap **triage** tier escalates genuinely-hard setups to a **deep** tier (gh#449), which receives bounded numeric
+market context (gh#476). Spend is ledgered per call (gh#431) and metered (gh#477). The **AI-spend governor is no
+longer optional** — `AiSpendGovernor` is registered unconditionally and gates the route pass-level (gh#448), with a
+**budget-aware escalation skip** so a deep call is only made when it still fits (gh#478). A trigger is inert until the
+operator **confirms** it (gh#470), and a dependency outage is visible rather than silent (`UnmeasurableSince`, gh#469).
 
 ### Analysis & management UI
 A **React SPA** — the operator's surface — consuming the BFF's **REST** endpoints and **SignalR** hubs

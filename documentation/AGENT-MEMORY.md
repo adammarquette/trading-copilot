@@ -31,7 +31,7 @@ Working practices Adam has asked agents to follow that have no formal-doc home.
 - **[2026-07-18] Apply, then review.** Make non-trivial changes directly in the files and let Adam review the
   diff (version control makes it safe), rather than proposing every change for approval first. Trivial factual
   corrections always go straight in.
-- **[2026-07-22] Always use `git worktree` for isolated work.** When working on features, tests, or fixes, use isolated `git worktree` directories (or `Workspace: "share"` subagents) to prevent stepping on or dirtying other active agents' working trees. **[2026-07-28] And *claim* it first** — a worktree is local, so it stops other sessions dirtying your tree but not from doing your work; push the branch empty before you start (`scripts/claim.sh`, gh#375).
+- **[2026-07-22] Always use `git worktree` for isolated work.** When working on features, tests, or fixes, use isolated `git worktree` directories (or `Workspace: "share"` subagents) to prevent stepping on or dirtying other active agents' working trees. (A worktree is *local*, so it does not claim the work — see the claim rule below.)
 
 ## Notes & communications
 
@@ -41,13 +41,10 @@ Cross-agent heads-ups and in-session decisions that don't have a formal home yet
   (issues #130/#131/#132/#142/#143) has **all shipped and closed**. The living inventory and per-issue status now
   live authoritatively in [`integration-test-audit.md`](integration-test-audit.md) (§2 inventory, §4 status table) —
   the tracker is the source of truth (gh#144), so the per-suite specs are not restated here.
-- **[2026-07-28 → formalized] Claim work by pushing the branch empty first (gh#375).** Now a formal rule in the root
-  [`AGENTS.md`](../AGENTS.md) and [`CONTRIBUTING.md` §*Claiming work*](../CONTRIBUTING.md): `scripts/claim.sh
-  <issue-id>` pushes the branch empty *before* you start, because a local worktree is invisible to other sessions.
-  The lesson that prompted it (kept as the *why*): on 2026-07-27/28 four items were built twice (gh#289, gh#295,
-  gh#330, plus a four-line compile break that spawned three duplicate fixes) — roughly a session wasted in an
-  evening. A claim whose tip has not moved for **4 hours** is fair game, but say so on the issue first; and delete an
-  abandoned remote branch, or it becomes a phantom claim.
+- **[2026-07-28 → formalized] Claim work by pushing the branch empty first (gh#375)** — now a formal rule in the root
+  [`AGENTS.md`](../AGENTS.md) and [`CONTRIBUTING.md` §*Claiming work*](../CONTRIBUTING.md), which carry the rule, the
+  4-hour staleness window, the phantom-claim trap, and the *why*. Pointer only, per this file's own promote-and-point
+  rule.
 
 ---
 

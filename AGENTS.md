@@ -19,7 +19,7 @@ auto-loading `AGENTS.md` files. **If you take one of those hats, open its contra
 A **self-hosted futures day-trading co-pilot** — a human-in-the-loop decision-support **and** execution system
 with a safety-critical **auto-flatten** before the CME close. C# / .NET, integrating with the broker via
 `MarqSpec.Client.ProjectX`. Solution: **`src/MarqSpec.TradingCopilot.slnx`** (base namespace
-`MarqSpec.TradingCopilot.*`) — `Domain`, `Data` (EF Core), `Api` (BFF) + test projects so far.
+`MarqSpec.TradingCopilot.*`) — `Domain`, `Data` (EF Core), `Api` (BFF), the venue/data adapters `Integration.ProjectX` / `Integration.Finnhub` / `Integration.Tiingo`, + `UnitTests` / `IntegrationTests`.
 Build with `dotnet build src/MarqSpec.TradingCopilot.slnx`; before a PR, `dotnet format --verify-no-changes` and
 unit tests green.
 

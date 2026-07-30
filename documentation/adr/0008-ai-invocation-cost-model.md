@@ -43,14 +43,16 @@ discipline to **how and when the LLM is invoked at all**, so cost is bounded and
   a budget (`Q-10`); in the **multi-user** model (R-20) it is a **platform-level** cap the **operator** sets — one
   shared LLM + embeddings account funds every user, so usage & spend is reported in **Grafana, not surfaced to end
   users** *(revisit per-user if invitees later bring their own LLM accounts; gh#4)*. Every invocation is **traced** ([ADR-0002](0002-observability.md)) so cost and latency are
-  observable. Spend is **metered** (gh#403): every Cohere embed call records tokens, estimated cost and latency on
+  observable. Spend is **metered** on both halves — LLM calls (gh#477) and embeds (gh#403): every Cohere embed call records tokens, estimated cost and latency on
   the `MarqSpec.TradingCopilot.Ai` meter, by model and outcome, and a failover is counted so a degrade is visible.
   Cost is estimated from a single pinned rate. The **persisted `AIUsage`** record — the in-app spend meter and the
   durable governor ledger — **landed** (gh#431): the agent-review reviewer records one per-call token / cost /
   latency row under the firing owner's scope. It is a **floor, not a complete accounting** (fail-open, lossy on host
   death). The **governor landed** (gh#448) and enforces on that ledger floor; the gh#448 follow-up records **why it
-  cannot reconcile against the meter in-process** (that meter is export-only — Prometheus, not app-readable — and
-  covers embeddings only today) and what that means for the effective cap.
+  cannot reconcile against the meter in-process** (that meter is export-only — Prometheus, not app-readable) and what
+  that means for the effective cap. *(The "embeddings only" half of that limitation is gone: **gh#477** added the
+  LLM-side meter, so Grafana now sees both halves — see the update below. Export-only, so the governor's in-app read
+  is unchanged.)*
 - **The strategy-agent → executor flow attaches here.** Strategy agents are the "review / enrich on fire"
   consumers; the executor synthesizes their outputs into a timely suggestion — invoked **on triggers, not
   continuously**. Their proposals still pass the deterministic risk / execution gate ([ADR-0007](0007-order-execution-model.md)):
@@ -300,8 +302,12 @@ spend read leaves `allowEscalate` true, so behaviour is byte-for-byte pre-gh#478
 silent**: the scan — which knows the reason is *budget*, since the reviewer only got a neutral bit — raises one
 operator advisory per arming edge (*"a quick review flagged it for deeper analysis, but the daily AI-spend budget could
 not afford the deeper look"*), the same honest-inert posture as `NoReviewerConfigured` / `ReviewerUnavailable` /
-`BudgetExhausted`. **This amends the gh#449 effective-cap note:** the cap is again **the budget**, not budget-plus-a-pair
-— an escalation is only made when the deep call's conservative estimate still fits. Still open from that list: an
+`BudgetExhausted`. **This amends the gh#449 effective-cap note** — precisely, and only that one: the **pair**
+widening is closed (an escalation is made only when the deep call's conservative estimate still fits), so the cap
+returns to gh#448's statement of it — *the budget plus at most one **in-flight call's** un-recorded spend*. That
+remaining widening is a different mechanism and still stands: it comes from the ledger being a **floor** (a host
+death between the call and the write records nothing), not from escalation. Both fail toward *allow*, which for a
+soft-dollar budget is the chosen direction. Still open from that list: an
 escalation-rate metric + when-to-escalate eval suite, `AiUsageFeature.Suggestion` for the deep row, a
 runtime-editable budget, throttle, and news/free-text enrichment. *(The LLM-side meter on that list landed separately as
 gh#477, below — with it, Grafana now sees the deep-call spend this gate withholds.)*
