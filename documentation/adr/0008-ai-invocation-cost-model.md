@@ -223,6 +223,24 @@ operability. Still open: per-call budget-aware escalation skip, an escalation-ra
 suite, activating `AiUsageFeature.Suggestion` for the deep row, an LLM-side meter, a runtime-editable budget, and
 throttle.
 
+**Update (2026-07-29, gh#470) — confirm-before-live: the LLM is out of the hot loop of the _rule_, not only the firing.**
+"The LLM is never in the continuous hot loop" was already true of *firing* (the deterministic scan fires; the reviewer
+only proposes). It was **not** true of *authorship*: a trigger — including one an agent-review proposal or a future R-7
+compiler writes — became armed the instant it was persisted with `Enabled = true`, so a machine-authored rule could
+begin paging the operator or waking the reviewer with **no human step between authorship and armed**. This adds that
+step. A new **`TriggerConfirmation`** {`Unconfirmed = 0` → `Confirmed = 1`} on `TriggerRecord` is **distinct from
+`Enabled`** (live/paused): an **unconfirmed trigger is inert regardless of `Enabled`**, and both scan query sites
+(owner discovery + per-owner load) evaluate only `Confirmed` triggers. `CreateTrigger` persists **`Unconfirmed`**;
+acceptance is the separate, deliberate **`POST /api/triggers/{id}/confirm`** (idempotent, R-20-scoped, leaves the
+debounce untouched so a confirmed trigger still seeds silently and fires only on an observed edge). The zero is
+`Unconfirmed` on purpose — a defaulted/corrupt row is inert (fail-closed), the same zero-is-the-safe-default posture as
+`TriggerArmState.Unseeded` and `DefaultEntryAction.ApproveAndArm`, and mirroring the execution path's arm → review →
+send (R-11, ADR-0007). Enforcement stays **below the model**: this is a DB column + a scan predicate + a `CHECK`
+(`"Confirmation" IN (0, 1)`), never prompt text. The migration backfills **existing** rows to `Confirmed` — a schema
+change must not silently disarm an alert already in service (the gh#380 lesson; here the safe value is *not* the zero,
+so it is an explicit `UPDATE`, not a `defaultValue`). This is the gate that makes gh#15's *"plain rules → **confirmed**
+deterministic triggers"* true of the rule.
+
 **Update (2026-07-30, gh#476) — deep-context enrichment landed; the deep tier now gets more than the model upgrade.**
 This closes the gh#449 scope caveat above ("escalation upgrades the *model*, not the *information*"). On escalation the
 deep call now carries a **numeric market-context payload** — a bounded window of recent **OHLCV bars** and recent

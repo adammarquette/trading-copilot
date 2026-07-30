@@ -2155,7 +2155,8 @@
 
   <section class="rb">
     <div class="cap"><h2>Rulebook &amp; triggers — plain rules compile to deterministic triggers</h2><span class="bp">R-7 · ADR-0008</span>
-      <span class="muted">state intent in words → the co-pilot compiles a structured trigger you confirm → it runs deterministically (no LLM in the hot loop)</span></div>
+      <span class="muted">state intent in words → the co-pilot compiles a structured trigger you confirm → it runs deterministically (no LLM in the hot loop)</span>
+      <span class="chip warn" style="margin-left:auto">1 awaiting confirmation</span></div>
     <div class="rb-grid">
       <div class="rulecard">
         <div class="rule-intent">“Warn me if <b>ES</b> breaks the <b>overnight low</b> on rising sell volume.”</div>
@@ -2172,8 +2173,15 @@
         <div class="dsl">WHEN strategy = opening-drive AND counter_trend AND since_open &lt; 5m THEN suppress</div>
         <div class="btns"><span class="btn fill">Confirm rule</span><span class="btn out">Edit</span><span class="btn text">Dismiss</span></div>
       </div>
+      <div class="rulecard proposed">
+        <div class="rule-intent">“Warn me if <b>NQ RSI(14)</b> on the <b>5m</b> drops <b>below 25</b>.” <span class="q2">— authored, not yet live</span></div>
+        <div class="dsl">WHEN instrument = NQ AND rsi(14, 5m) &lt; 25 THEN alert</div>
+        <div class="rule-meta"><span class="chip info">mechanical alert</span><span class="chip warn">awaiting confirmation</span><span class="tag">created Jul 18</span>
+          <span class="sw2 on" title="Enabled — but inert until confirmed"><i></i></span></div>
+        <div class="btns"><span class="btn fill">Confirm — go live</span><span class="btn out">Edit</span><span class="btn text">Delete</span></div>
+      </div>
     </div>
-    <div class="rej-why" style="margin-top:12px">Rules are <b>data the LLM proposes</b>; the compiled <b>trigger is deterministic</b> and runs on the event stream — the LLM is <b>never in the continuous loop</b> (ADR-0008). Each trigger routes to <b>mechanical-alert</b> (just tell me) or <b>agent-review</b> (spend a cheap-model look), with debounce / rate-limits. You <b>confirm</b> every rule before it goes live; the source conversation is kept (R-7).</div>
+    <div class="rej-why" style="margin-top:12px">Rules are <b>data the LLM proposes</b>; the compiled <b>trigger is deterministic</b> and runs on the event stream — the LLM is <b>never in the continuous loop</b> (ADR-0008). Each trigger routes to <b>mechanical-alert</b> (just tell me) or <b>agent-review</b> (spend a cheap-model look), with debounce / rate-limits. <b>Confirm-before-live (gh#470):</b> a trigger is armed only once you <b>confirm</b> it — a state <b>distinct from the enable/pause toggle</b>. A newly authored trigger, including one the co-pilot proposes, is <b>inert regardless of that toggle</b> until you accept it, so authorship arms nothing on its own; the count of triggers <b>awaiting confirmation</b> is shown rather than left silent. The source conversation is kept (R-7).</div>
   </section>
 
   <section class="ail">

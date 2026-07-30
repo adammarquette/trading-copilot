@@ -467,6 +467,10 @@ internal sealed class AgentReviewFixture(IServiceProvider services, Func<HttpCli
                 Route = route,
                 Severity = NotificationSeverity.Notify,
                 Enabled = true,
+                // gh#470 required-field propagation: these fixtures exist to fire, and pre-gate every trigger was
+                // effectively confirmed the moment it was created. Seeding Confirmed preserves that intent; the new
+                // confirmation gate's own end-to-end coverage is QA's to author (filed separately).
+                Confirmation = TriggerConfirmation.Confirmed,
                 ArmState = armState,
                 ArmCycle = 0,
                 AccountId = accountId,

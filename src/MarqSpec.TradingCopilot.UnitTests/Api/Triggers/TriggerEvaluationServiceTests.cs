@@ -112,7 +112,8 @@ public class TriggerEvaluationServiceTests
         bool enabled = true,
         decimal? hysteresis = null,
         Guid? accountId = null,
-        int? size = null)
+        int? size = null,
+        TriggerConfirmation confirmation = TriggerConfirmation.Confirmed)
     {
         Guid ownerId = owner ?? _operator;
         Guid id = Guid.NewGuid();
@@ -134,6 +135,7 @@ public class TriggerEvaluationServiceTests
             Size = size,
             Severity = severity,
             Enabled = enabled,
+            Confirmation = confirmation,
             ArmState = armState,
             ArmCycle = armCycle,
             CreatedAt = Now,
@@ -163,6 +165,29 @@ public class TriggerEvaluationServiceTests
             OccurredAt = occurredAt,
         });
         await context.SaveChangesAsync();
+    }
+
+    // --- The confirmation gate: an unconfirmed trigger is inert regardless of Enabled (gh#470) ---
+
+    [Fact]
+    public async Task ScanAsync_ShouldNotFire_WhenTheTriggerIsUnconfirmed_EvenEnabledAndSatisfied()
+    {
+        // The whole point of the gate: an authored-but-unconfirmed trigger never fires, whatever Enabled says. This
+        // one is Enabled, Armed, and its condition is satisfied -- the exact setup that fires a confirmed trigger --
+        // but it has never been accepted into the firing set, so the scan must neither discover nor evaluate it.
+        Guid id = await AddTriggerAsync(armState: TriggerArmState.Armed, confirmation: TriggerConfirmation.Unconfirmed);
+        IndicatorReturns(25m); // Below 30 -- satisfied
+
+        int fires = await Service().ScanAsync(Now, CancellationToken.None);
+
+        fires.Should().Be(0, "an unconfirmed trigger is inert regardless of Enabled (gh#470)");
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
+
+        await using TradingCopilotDbContext reload = Context();
+        TriggerRecord trigger = await reload.Triggers.SingleAsync(t => t.Id == id);
+        trigger.ArmState.Should().Be(TriggerArmState.Armed, "an unevaluated trigger's debounce is untouched");
+        trigger.LastEvaluatedValue.Should().BeNull("the scan never read it");
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeFalse();
     }
 
     // --- A crossing fires once, journals, and moves to Fired ---
