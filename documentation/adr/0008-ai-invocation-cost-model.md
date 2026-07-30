@@ -91,7 +91,7 @@ discipline to **how and when the LLM is invoked at all**, so cost is bounded and
 **Update (2026-07-28, gh#385) — the deterministic mechanical route landed.** A structured **indicator-threshold**
 condition (typed columns + a `ConditionKind` discriminator — *not* a DSL, since one kind serves no DSL yet), a pure
 **edge-debounce** state machine (`Unseeded → Armed → Fired`: fire once on the arming edge, re-arm on the opposite,
-seed pre-existing truth silently, and hold fail-closed on a null indicator), and a **periodic evaluator** that fires
+seed pre-existing truth silently, and hold fail-closed on a null indicator) — **and, since gh#469, say so**: the hold was right but silent, so `UnmeasurableSince` tracks how long a trigger has been unevaluable and the scan warns once past 30 minutes, naming the missing indicator. Duration is the only thing that separates a late bar from a dependency that stopped being produced; it never disables the trigger, because a pipeline hiccup must not silently disarm an alert, and a **periodic evaluator** that fires
 a **mechanical alert** through the notification channel — no LLM. Structural authoring via the API stands in for the
 compiler for now; a nullable `SourceRuleId` is the seam the compiler will fill. Still open below: the NL→condition
 compiler + the `Rule` entity, the **agent-review** route, order-flow / composite / cross-asset / time conditions,

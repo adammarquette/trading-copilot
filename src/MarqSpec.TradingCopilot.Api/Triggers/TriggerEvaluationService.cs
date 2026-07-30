@@ -288,6 +288,25 @@ public class TriggerEvaluationService
             trigger.ArmState = decision.NextState;
             changed = true;
 
+            // gh#469: holding on an unmeasurable reading was always right, but silent. A trigger whose dependency
+            // stopped being produced would simply never fire, and nothing distinguished that from a condition that
+            // never occurred. Duration is what separates a late bar from a broken trigger, so the outage start is
+            // persisted and reported once it outlasts the threshold -- never every pass, which would be a log line
+            // per trigger per poll.
+            TriggerStaleness staleness = TriggerStaleness.Track(trigger.UnmeasurableSince, satisfaction, now);
+            trigger.UnmeasurableSince = staleness.UnmeasurableSince;
+
+            if (staleness.ShouldReport)
+            {
+                _logger.LogWarning(
+                    "Trigger {TriggerId} has been unevaluable since {Since}: no {Indicator}({Period}) at "
+                    + "{Resolution}m for {Symbol}. It cannot fire until that indicator is produced again — check "
+                    + "Ingestion:Symbols, Backfill:ResolutionMinutes and the configured indicator set. The trigger "
+                    + "is NOT disabled.",
+                    trigger.Id, staleness.UnmeasurableSince, trigger.Indicator, trigger.Period,
+                    trigger.ResolutionMinutes, trigger.Symbol);
+            }
+
             if (decision.ShouldFire && trigger.Route == TriggerRoute.Mechanical)
             {
                 // MECHANICAL: send-before-commit, UNCHANGED -- the governor gates the LLM route only, never a
