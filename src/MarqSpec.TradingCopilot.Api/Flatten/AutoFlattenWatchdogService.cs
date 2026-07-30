@@ -59,6 +59,7 @@ public sealed class AutoFlattenWatchdogService
     private readonly ProjectXConnectionOptions _projectX;
     private readonly FlattenOptions _options;
     private readonly INotificationChannel _notifications;
+    private readonly INotificationEnlister _enlister;
     private readonly IExecutionMetrics _metrics;
     private readonly ILogger<AutoFlattenWatchdogService> _logger;
 
@@ -69,6 +70,7 @@ public sealed class AutoFlattenWatchdogService
     /// <param name="projectXOptions">Carries the credential key this process serves (ADR-0015).</param>
     /// <param name="flattenOptions">The per-instrument schedule and the watchdog grace window.</param>
     /// <param name="notifications">Reaches the operator away from the desk (gh#243, ADR-0019).</param>
+    /// <param name="enlister">Records a page inside this pass's own transaction (gh#455).</param>
     /// <param name="metrics">The execution SLIs (gh#232) — the watchdog tags its own tier.</param>
     /// <param name="logger">The logger.</param>
     public AutoFlattenWatchdogService(
@@ -78,6 +80,7 @@ public sealed class AutoFlattenWatchdogService
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<FlattenOptions> flattenOptions,
         INotificationChannel notifications,
+        INotificationEnlister enlister,
         IExecutionMetrics metrics,
         ILogger<AutoFlattenWatchdogService> logger)
     {
@@ -85,6 +88,7 @@ public sealed class AutoFlattenWatchdogService
         ArgumentNullException.ThrowIfNull(flattenOptions);
 
         _notifications = notifications;
+        _enlister = enlister;
         _metrics = metrics;
 
         _database = database;
@@ -214,18 +218,22 @@ public sealed class AutoFlattenWatchdogService
                 _logger.LogCritical(
                     "Auto-flatten watchdog CRITICAL for {Account} {Contract}: {Reason}",
                     account, position.Contract, decision.Reason);
-                await JournalAsync(CriticalEventType, account, position.Contract, decision.Reason, now, cancellationToken);
-                _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenMissed);
-
                 // P1. Shares the primary's incident key on purpose: the operator should be woken ONCE for one
                 // exposed position, not once per tier that noticed (gh#243, ADR-0019 §*The noise budget*).
-                await NotifyAsync(
+                //
+                // Enlisted before the journal (gh#455) so the page rides the same commit. This is the LAST tier --
+                // there is nothing behind it -- so "both tiers failed" being recorded with nobody told is the worst
+                // shape this system has.
+                await EnlistPageAsync(
                     NotificationSeverity.Page,
                     $"Auto-flatten watchdog CRITICAL — {schedule.Instrument}",
                     $"{schedule.Instrument} on {account.Key} is still exposed past its firing window and BOTH tiers "
                     + "have failed to close it. Manual intervention is required. " + decision.Reason,
                     AutoFlattenService.IncidentKey(account, schedule.Instrument),
                     cancellationToken);
+
+                await JournalAsync(CriticalEventType, account, position.Contract, decision.Reason, now, cancellationToken);
+                _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenMissed);
             }
         }
 
@@ -256,20 +264,25 @@ public sealed class AutoFlattenWatchdogService
                     "Auto-flatten watchdog closed {Account} {Contract} — the primary tier had left it open past its deadline.",
                     account, position.Contract);
                 _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenExecuted);
-                await JournalAsync(SavedEventType, account, position.Contract,
-                        $"Watchdog backstop closed the position — the primary did not. {decision.Reason}", now, cancellationToken);
 
-                // The position is flat, so any outstanding page is cancelled and the incident re-armed. But a tier
-                // is broken: the primary should have done this. P2 — worth the operator's attention before the
-                // next session, not worth waking them now (ADR-0019).
-                await ResolveAsync(AutoFlattenService.IncidentKey(account, schedule.Instrument), cancellationToken);
-                await NotifyAsync(
+                // A tier is broken: the primary should have done this. P2 — worth the operator's attention before
+                // the next session, not worth waking them now (ADR-0019). Enlisted before the journal (gh#455) so
+                // the "a tier is broken" record and the notice of it commit together.
+                await EnlistPageAsync(
                     NotificationSeverity.Notify,
                     $"Watchdog saved a flatten — {schedule.Instrument}",
                     $"The redundant watchdog closed {schedule.Instrument} on {account.Key} because the primary "
                     + "scheduler did not. The position is flat; the primary tier needs investigating before the next session.",
                     $"watchdog-saved:{account.Key}:{schedule.Instrument}",
                     cancellationToken);
+
+                await JournalAsync(SavedEventType, account, position.Contract,
+                        $"Watchdog backstop closed the position — the primary did not. {decision.Reason}", now, cancellationToken);
+
+                // The position is flat, so any outstanding page is cancelled and the incident re-armed. AFTER the
+                // save, and on a DIFFERENT key (the primary's) than the notice above -- a resolve commits on its
+                // own, so running it first would have carried the enlisted row out in someone else's transaction.
+                await ResolveAsync(AutoFlattenService.IncidentKey(account, schedule.Instrument), cancellationToken);
                 return true;
             }
 
@@ -299,32 +312,33 @@ public sealed class AutoFlattenWatchdogService
     }
 
     /// <summary>
-    /// Notifies the operator, absorbing any fault. Alerting is <b>secondary</b> to closing a position: this is
-    /// the last tier standing when the primary has already failed, so a notification channel that is down must
-    /// never stop it doing its job (ADR-0019).
+    /// Stages the operator's page <b>into this pass's own transaction</b> (gh#455), absorbing any fault. The row
+    /// is committed by the journal append that follows, so the page and the state it reports become atomic.
     /// </summary>
-    private async Task NotifyAsync(
-        NotificationSeverity severity,
-        string title,
-        string body,
-        string incidentKey,
-        CancellationToken cancellationToken)
+    /// <remarks>
+    /// <b>Call this immediately before the <see cref="JournalAsync"/> that records the same fact</b> — enlisting
+    /// stages without saving, so a call with no save behind it records nothing at all. Alerting stays
+    /// <b>secondary</b> to closing a position: this is the last tier standing when the primary has already
+    /// failed, so a notification fault must never stop it doing its job (ADR-0019).
+    /// </remarks>
+    private async Task EnlistPageAsync(
+        NotificationSeverity severity, string title, string body, string incidentKey, CancellationToken cancellationToken)
     {
         try
         {
-            await _notifications.SendAsync(new Notification(severity, title, body, incidentKey), cancellationToken);
+            await _enlister.EnlistAsync(new Notification(severity, title, body, incidentKey), cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw; // a real shutdown still stops the host
         }
         catch (Exception error)
         {
-            _logger.LogError(error, "Could not notify the operator about {Incident}; the watchdog is unaffected.", incidentKey);
+            _logger.LogError(error, "Could not record a page for {Incident}; the watchdog is unaffected.", incidentKey);
         }
     }
 
-    /// <summary>Closes an incident, absorbing any fault — same reasoning as <see cref="NotifyAsync"/>.</summary>
+    /// <summary>Closes an incident, absorbing any fault — same reasoning as <see cref="EnlistPageAsync"/>.</summary>
     private async Task ResolveAsync(string incidentKey, CancellationToken cancellationToken)
     {
         try

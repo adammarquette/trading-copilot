@@ -22,11 +22,23 @@ public sealed class AlertingTestPostgresFactory : StubbedVenuePostgresFactory
     public RecordingNotificationChannel Notifications { get; } = new();
 
     /// <summary>
-    /// Delivers whatever the last pass enqueued. The hosted services are removed for determinism, so nothing
-    /// drains the notification queue on its own — a test that asserts on what was sent must pump first.
+    /// Delivers whatever the last pass raised. The hosted services are removed for determinism, so nothing drains
+    /// on its own — a test that asserts on what was sent must pump first.
     /// </summary>
-    public Task DrainNotificationsAsync() =>
-        Services.GetRequiredService<QueuedNotificationChannel>().DrainPendingAsync(CancellationToken.None);
+    /// <remarks>
+    /// <b>Two stages since gh#455</b>, because there are now two ways a page is raised. The safety-critical
+    /// producers <c>Enlist</c> into their own transaction, so their page is a committed <b>outbox row</b> that only
+    /// the relay moves; everything else still goes through the queue. Draining the queue alone would leave the
+    /// auto-flatten's page sitting in the database and every alerting assertion looking at an empty recorder — so
+    /// the relay runs first, and its deliveries land in the queue the second stage then drains.
+    /// </remarks>
+    public async Task DrainNotificationsAsync()
+    {
+        await using AsyncServiceScope scope = Services.CreateAsyncScope();
+        await scope.ServiceProvider.GetRequiredService<NotificationOutboxRelay>().DrainAsync(CancellationToken.None);
+
+        await Services.GetRequiredService<QueuedNotificationChannel>().DrainPendingAsync(CancellationToken.None);
+    }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {

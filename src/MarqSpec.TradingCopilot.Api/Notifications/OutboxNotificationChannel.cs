@@ -27,7 +27,7 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// transaction has already closed.
 /// </item>
 /// <item>
-/// <see cref="Enlist"/> — for producers that need the stronger guarantee. Adds the row to the caller's
+/// <see cref="EnlistAsync"/> — for producers that need the stronger guarantee. Adds the row to the caller's
 /// <c>DbContext</c> <b>without saving</b>, so it commits atomically with their state change and the gap does not
 /// exist. Used by the safety-critical producers, where a dropped page has real consequence.
 /// </item>
@@ -37,7 +37,7 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// chain below the relay, which holds the open-incident set across passes.
 /// </para>
 /// </remarks>
-public sealed class OutboxNotificationChannel : INotificationChannel
+public sealed class OutboxNotificationChannel : INotificationChannel, INotificationEnlister
 {
     private readonly TradingCopilotDbContext _database;
     private readonly IServiceScopeFactory _scopes;
@@ -47,7 +47,7 @@ public sealed class OutboxNotificationChannel : INotificationChannel
 
     /// <summary>Creates the channel over the scoped database.</summary>
     /// <param name="database">
-    /// The <b>caller's</b> scoped database — used only by <see cref="Enlist"/>, where sharing the caller's unit
+    /// The <b>caller's</b> scoped database — used only by <see cref="EnlistAsync"/>, where sharing the caller's unit
     /// of work is the entire point.
     /// </param>
     /// <param name="scopes">
@@ -174,23 +174,34 @@ public sealed class OutboxNotificationChannel : INotificationChannel
 
     /// <summary>
     /// Adds the notification to the caller's <c>DbContext</c> <b>without saving</b>, so it commits in the
-    /// caller's transaction (gh#400's option B).
+    /// caller's transaction (gh#400's option B, seamed for producers by gh#455).
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The caller <b>must</b> call <c>SaveChangesAsync</c> afterwards — that is the point: intent and state
     /// commit together or neither does. A producer that enlists and then never saves has recorded nothing, which
     /// is why this is used deliberately by specific producers rather than being the default path.
+    /// </para>
+    /// <para>
+    /// <b>The owed check is not an optimisation here; it is the safety property.</b> Staging a row that violates
+    /// the filtered unique index would surface the violation on the <i>caller's</i> <c>SaveChanges</c> and take
+    /// their own write down with it — which is how gh#455 killed a <c>flatten.missed</c> journal entry: an
+    /// escalation on an earlier pass left the incident owed, this staged the same key, and the duplicate aborted
+    /// the pass. <c>Local</c> alone cannot see that row, because an earlier pass committed it in a scope that is
+    /// long gone; hence the query, and hence this being async.
+    /// </para>
     /// </remarks>
     /// <param name="notification">The notification to record.</param>
-    public void Enlist(Notification notification)
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    public async Task EnlistAsync(Notification notification, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(notification);
 
-        // Attach-or-ignore on the dedup key: an incident already owed is not owed twice. The filtered unique index
-        // enforces it regardless, but catching it here avoids a pointless failed round trip on the common re-fire.
-        // Local only -- this is synchronous by contract (it must not do I/O inside the caller's transaction), so a
-        // row owed in ANOTHER scope is caught by the index, not here. SendAsync, which may await, checks the store.
-        if (_database.NotificationOutbox.Local.Any(row => row.DedupKey == notification.DedupKey))
+        // Already owed, in this unit of work or in the database? Then the incident is recorded and the relay will
+        // deliver it -- staging a second row would both double the page and abort the caller's save.
+        if (_database.NotificationOutbox.Local.Any(row => row.DedupKey == notification.DedupKey)
+            || await _database.NotificationOutbox
+                .AnyAsync(row => row.DedupKey == notification.DedupKey && row.DeliveredAt == null, cancellationToken))
         {
             return;
         }
