@@ -177,7 +177,7 @@ the rule, not noise to tolerate.
   checks for an already-owed incident before staging, because a row that failed the constraint would fail the
   *producer's* save. Both auto-flatten tiers take the second path.
 
-  **Four invariants survive every rebuild**, and are what the composition guards exist to protect:
+  **Five invariants survive every rebuild**, and are what the composition guards exist to protect:
 
   - **`SendAsync` returning true means *accepted for delivery*, never *delivered*.** A caller on the R-13 path
     cannot wait for delivery without reintroducing the latency defect the queue was built to remove.
@@ -185,7 +185,10 @@ the rule, not noise to tolerate.
     after, so a crash between the transport accepting and the stamp landing **re-delivers** rather than loses.
     Stamping first would close that duplicate window and open a worse one — a page marked sent that never went.
     The direction is chosen, not accidental: a repeated page is an annoyance, a missed one is the failure R-13
-    exists to prevent. Across passes it *is* idempotent, because the dedup key is the row's primary key.
+    exists to prevent. Across passes a **still-owed** incident is idempotent — not because the dedup key is the
+    row's key (it is **not**; the key is a surrogate `Id`), but because the `DedupKey` unique index is **filtered to
+    `DeliveredAt IS NULL`**, so a re-raise while a page is outstanding collides and is refused. Once delivered the
+    row releases its slot and the same incident can be recorded again, which is the point of gh#458 below.
   - **Re-arm is unconditional; only the resolve is retried.** Re-arming is local state whose failure mode is a
     duplicate page (safe), where withholding it suppresses the *next* genuine incident as a stale duplicate
     (silent). A failed *send* is already re-driven by dedup declining to record an incident it could not report,
@@ -198,6 +201,13 @@ the rule, not noise to tolerate.
     `NotificationRegistration.AddTradingCopilotNotifications` and its assertions: the seam resolves to the outbox,
     the relay and pump are registered (a queue nobody drains accepts every page and delivers none), and the dedup
     chain is a **singleton** (a scoped one forgets the open incident and re-pages every poll).
+  - **The relay must drain into the chain *below* the outbox, never into the seam itself.** The fifth invariant, and
+    the one learned the hard way (`gh#459`, below): with the outbox the only `INotificationChannel` registration, a
+    plain `AddScoped<NotificationOutboxRelay>()` hands the relay *the thing it drains* — it then drains the outbox
+    into itself and stamps every page delivered having reached nothing. So `delivery` is bound to the **concrete**
+    `QueuedNotificationChannel`, and a composition guard
+    (`ShouldGiveTheRelayTheChainBelowTheOutbox_NotTheSeamItDrains`) asserts it — a relay built by hand in a unit test
+    cannot see this, because the defect is purely in the wiring.
 
   **One amendment to this ADR's own decision:** dedup was specified "in the adapter"; it landed one layer out as
   `DedupingNotificationChannel`, so every future adapter (Discord `gh#100`, web push ADR-0010) inherits it rather
@@ -213,6 +223,7 @@ the rule, not noise to tolerate.
   | `gh#320` | that fix bounded nothing on its own — the guarantee is a property of *what is bound to the seam*, so the binding was extracted and asserted |
   | `gh#300` | the receipt was surrendered *before* the cancel was confirmed, so a failed cancel kept nagging about an already-flat position and nothing could retry it |
   | `gh#400` / `gh#437` | *accepted into memory* was lost outright on a crash, after the caller had been told it succeeded → the **outbox** and its relay |
+  | `gh#459` | **P0** — and the sharpest illustration of why this list exists. gh#437's relay was registered with a plain `AddScoped<NotificationOutboxRelay>()`, so DI resolved its `INotificationChannel delivery` from the only such registration: **the outbox seam it drains**. The relay drained the outbox *into itself* — `Enlist` short-circuited on the row it had just loaded (same scope, same `DbContext`), returned `true`, and **every page was stamped `DeliveredAt` having reached nothing**, the R-13 auto-flatten escalation included. Silent from every side: no throw, no backlog, just a table filling with pages nobody received. Fixed by binding `delivery` to the concrete `QueuedNotificationChannel`, guarded at the composition root |
   | `gh#452` | `SendAsync` sharing the caller's `DbContext` let a producer's unrelated failure be swallowed and eat a page |
   | `gh#455` | the safety-critical producers **enlist** rather than send — Update below |
   | `gh#458` | the dedup key outlived its incident at the **outbox** — Update below |
