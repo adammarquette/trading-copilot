@@ -217,11 +217,47 @@ above:** the cap is now "budget plus at most one in-flight triage→deep **pair*
 one ($3/$15 vs. $1/$5 per 1M tokens) — size `DailyBudgetUsd` with headroom for at least one pair; still a bounded
 loosening that fails toward *allow*, never a spurious block. **Scope caveat:** escalation upgrades the **model**, not
 the **information** — the deep call reuses the same `TriggerReviewContext`, so **deep-context enrichment is a deferred
-follow-up** (it also widens the prompt-injection surface), and until it lands the deep tier may re-derive the triage
-answer at higher cost; the prompt says escalate *sparingly* and an escalation is logged for operability. Still open:
-per-call budget-aware escalation skip, deep-context enrichment, an escalation-rate metric + a when-to-escalate eval
+follow-up** *(landed gh#476, below)* (it also widens the prompt-injection surface), and until it lands the deep tier may
+re-derive the triage answer at higher cost; the prompt says escalate *sparingly* and an escalation is logged for
+operability. Still open: per-call budget-aware escalation skip, an escalation-rate metric + a when-to-escalate eval
 suite, activating `AiUsageFeature.Suggestion` for the deep row, an LLM-side meter, a runtime-editable budget, and
 throttle.
+
+**Update (2026-07-30, gh#476) — deep-context enrichment landed; the deep tier now gets more than the model upgrade.**
+This closes the gh#449 scope caveat above ("escalation upgrades the *model*, not the *information*"). On escalation the
+deep call now carries a **numeric market-context payload** — a bounded window of recent **OHLCV bars** and recent
+values of the **fired indicator's own series** — so the deep tier can reason about price and the setup's recent
+trajectory, which the base `TriggerReviewContext` (the fired reading + its threshold, **no price**) cannot supply. Key
+decisions, each keeping the ADR's principles intact:
+- **Assembled in the deterministic scan, not the reviewer.** A new **pure `IReviewEnrichmentSource`** seam
+  (`ReviewEnrichmentSource`, an EF read over the **global** `Bars` / `IndicatorValues` projections — R-20 shared-side
+  market data, read **venue-agnostically** over the covering index, mirroring `StoredIndicatorSource`) reads **as of
+  the fire** (`BucketStart <= FiredAt` — the same bar-close-aligned cutoff the fired reading itself came through, so
+  the enrichment is consistent with the decision; strictly no-look-ahead on a live fire, and on a replay the boundary
+  bucket reflects its completed bar exactly as the fired value does), oldest-first, and the scan attaches the result
+  to the context before waking the reviewer. Keeping it on the scan
+  **preserves reviewer purity** (enforcement-below-the-model): the reviewer never gains a data-access dependency. This
+  also **answers the gh#449 "purity is by design, not test-enforced" note** for this coupling — a new **constructor-
+  pinning test** now asserts the reviewer's ctor is exactly `{ILlmProvider, IOptions<LlmOptions>, ILogger}`, so wiring
+  the enricher (or a `DbContext`) into the reviewer fails the build.
+- **Deep-only, and additive by a trailing-optional field.** Enrichment rides a **trailing optional** `Enrichment` on
+  `TriggerReviewContext` (null for triage and the un-enriched path), so the **triage render stays byte-for-byte
+  unchanged** — only the escalated deep call sees the extra block, and the ~56 existing construction sites keep
+  compiling. It is rendered **deep-only** inside a `<market-context>` **DATA fence**, with a deep-system-prompt sentence
+  telling the model to treat the block as reference data, **never instructions**.
+- **Near-zero-injection invariant preserved.** The payload is **numeric only** (decimals, a volume `long`, timestamps —
+  no free text); **news remains deferred** as the free-text injection surface. The fence + system-prompt caveat are
+  **forward-hygiene** for when it lands.
+- **Bounded by a constant, not config** (20 bars / 20 indicator values) — a predictable deep-prompt input size and the
+  added spend **capped by construction**. Cost flows through the existing `AiCallCost` / governor path (deep input
+  tokens rise, bounded); no new spend regime.
+- **Fail-open assembly.** A read fault leaves the context **un-enriched** (the deep call, if it happens, uses the base
+  render) — enrichment adds context, it must **never cost a fire**; a **budget-blocked** fire skips enrichment entirely
+  (no wasted read before a call that will not happen).
+- **No schema / migration / `.env` / compose change** — it reads existing projections. Purely a read + render + wiring
+  change. Still open (unchanged from gh#449, minus this item): per-call budget-aware escalation skip, an escalation-rate
+  metric + when-to-escalate eval suite, `AiUsageFeature.Suggestion` for the deep row, an LLM-side meter, a
+  runtime-editable budget, throttle, and — the injection surface this defers — **news/free-text enrichment**.
 
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*

@@ -63,6 +63,12 @@ public static class AiRegistration
                 ? provider.GetRequiredService<LlmTriggerReviewer>()
                 : provider.GetRequiredService<NullTriggerReviewer>());
 
+        // The deep-tier enrichment source (gh#476): the scan-side seam that assembles the numeric market context the
+        // escalated deep call reads. SCOPED, not singleton -- it injects the *scoped* TradingCopilotDbContext, so a
+        // singleton would be a captive dependency failing ValidateScopes at startup (the AiUsageLedger lesson). Always
+        // bound: it is safe unconfigured (only the deep render reads its output, and it fails open on the scan side).
+        services.AddScoped<IReviewEnrichmentSource, ReviewEnrichmentSource>();
+
         // The AIUsage spend ledger (gh#431): always the real one (stateless, safe unconfigured -- it is only reached
         // when a reviewer produced a non-null Cost, and it fails open). SCOPED, not singleton: it injects the
         // *scoped* DbContextOptions<TradingCopilotDbContext>, so a singleton would be a CAPTIVE DEPENDENCY that fails

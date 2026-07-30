@@ -53,6 +53,7 @@ public class TriggerEvaluationService
     private readonly IIndicatorSource _indicators;
     private readonly INotificationChannel _notifications;
     private readonly ITriggerReviewer _reviewer;
+    private readonly IReviewEnrichmentSource _enrichmentSource;
     private readonly IAiUsageLedger _ledger;
     private readonly IAiSpendGovernor _governor;
     private readonly AiSpendBudget? _budget;
@@ -66,6 +67,11 @@ public class TriggerEvaluationService
     /// <param name="reviewer">
     /// The agent-review judgment seam (ADR-0008): the agent-review route wakes it once per fire. It only <b>proposes</b>
     /// — it is not, and must not become, a path to execution (enforcement lives below the model).
+    /// </param>
+    /// <param name="enrichmentSource">
+    /// The deep-tier enrichment seam (gh#476): the scan assembles the numeric market context here and attaches it to the
+    /// review context before waking the reviewer. Kept on the scan (not the reviewer) so the reviewer's dependency set
+    /// stays pure of data-access types; fail-open — a read fault leaves the context un-enriched, never blocks a fire.
     /// </param>
     /// <param name="ledger">
     /// The AIUsage spend ledger (gh#431): a required, fail-open dependency the scan stamps the owner onto — it records
@@ -83,6 +89,7 @@ public class TriggerEvaluationService
         IIndicatorSource indicators,
         INotificationChannel notifications,
         ITriggerReviewer reviewer,
+        IReviewEnrichmentSource enrichmentSource,
         IAiUsageLedger ledger,
         IAiSpendGovernor governor,
         IOptions<GovernorOptions> governorOptions,
@@ -95,6 +102,7 @@ public class TriggerEvaluationService
         _indicators = indicators;
         _notifications = notifications;
         _reviewer = reviewer;
+        _enrichmentSource = enrichmentSource;
         _ledger = ledger;
         _governor = governor;
         _budget = governorOptions.Value.ToBudget(); // null == inert (no cap configured); computed once per pass
@@ -442,6 +450,14 @@ public class TriggerEvaluationService
         }
         else
         {
+            // DEEP-TIER ENRICHMENT (gh#476): assemble the numeric market context the escalated deep call may use and
+            // attach it to the context BEFORE the reviewer wakes. Built eagerly here (we cannot know whether triage will
+            // escalate) rather than lazily inside the reviewer, so the reviewer stays a pure judgment seam that never
+            // depends on data access (gate-below-model, gh#402); only the deep render reads it, so a non-escalating fire
+            // pays one indexed read and nothing else. FAIL-OPEN: a read fault leaves the context un-enriched (the deep
+            // call, if it happens, uses the base render) -- enrichment adds context, it must never cost a fire.
+            context = context with { Enrichment = await BuildEnrichmentAsync(context, cancellationToken) };
+
             // The reviewer seam is fail-closed BY CONTRACT (LlmTriggerReviewer maps every unusable output to a
             // Suppress), but the seam admits any ITriggerReviewer -- a future provider-backed one can THROW on a
             // transient fault. A throw must debounce like every other outcome (one review attempt per arming edge, the
@@ -558,6 +574,29 @@ public class TriggerEvaluationService
         // A fire is a fire: journal it and keep the arm at Fired for EVERY agent-review outcome, suggest or suppress.
         JournalFiring(database, trigger, owner, observed, now, dedupKey);
         trigger.LastFiredAt = now;
+    }
+
+    /// <summary>
+    /// Builds the deep-tier enrichment for a fire, FAIL-OPEN (gh#476): a read fault (or a contract-violating throw from
+    /// the seam) logs and returns <see langword="null"/>, so the review runs on the un-enriched context rather than
+    /// aborting the fire. Only the caller's own cancellation escapes — that is our shutdown, not a review outcome.
+    /// </summary>
+    private async Task<ReviewEnrichment?> BuildEnrichmentAsync(TriggerReviewContext context, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _enrichmentSource.BuildAsync(context, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error, "Deep-tier enrichment could not be assembled for trigger {Id}; reviewing un-enriched.", context.TriggerId);
+            return null;
+        }
     }
 
     /// <summary>Validates the proposal's geometry, checks the account is tradable, and stages the suggestion + advisory.</summary>
