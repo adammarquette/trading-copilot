@@ -280,10 +280,16 @@ decisions, each keeping the ADR's principles intact:
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*
 - Spec the **deterministic trigger evaluator** as a processor / consumer over the event log (ADR-0001) — inputs
-  (indicators / order-flow / price / state), outputs (fire → alert or agent-review).
+  (indicators / order-flow / price / state), outputs (fire → alert or agent-review). *(Landed gh#385; `TriggerScanHost`
+  / `TriggerEvaluationService`, plus the confirm-before-live gate gh#470.)*
 - Design the **agent-review path** (strategy agents → executor) invoked on fire; define its contract and output
-  (suggestion + rationale, or suppress).
-- Define the **model-tiering + escalation** policy and the **debounce / rate-limit** parameters.
-- Decide the **AI-spend governor** (budget; throttle vs. cap) — mirror R-5's governor (`Q-10`).
+  (suggestion + rationale, or suppress). *(Landed gh#402; the reviewer wakes behind `ILlmProvider`, stages a `Suggestion`
+  or suppresses — see the dated update above.)*
+- Define the **model-tiering + escalation** policy and the **debounce / rate-limit** parameters. *(Landed: triage→deep
+  escalation gh#449, the real Anthropic provider gh#423; the arm-edge debounce is the `TriggerArmState` machine. A
+  wall-clock rate-limit is still open.)*
+- Decide the **AI-spend governor** (budget; throttle vs. cap) — mirror R-5's governor (`Q-10`). *(Landed gh#448 as a cap
+  on the `AIUsage` ledger floor — see the dated update above; a runtime-editable budget + throttle remain open.)*
 - **Observability + evals:** per-invocation cost / latency / token traces (ADR-0002); a **deterministic-eval** suite
-  for trigger correctness and triage quality (engineering §5).
+  for trigger correctness and triage quality (engineering §5). *(Traces + the `AIUsage` cost/latency ledger landed
+  gh#431; the deterministic-eval suite is **still open**.)*

@@ -214,7 +214,7 @@ the rule, not noise to tolerate.
   is owed and stamp `DeliveredAt`. Two ways in, and they want opposite things: `SendAsync` commits **through its own scope** (producers unchanged; sharing the caller's context let an unrelated failure in the producer's unit of work be swallowed by the never-throw contract and silently eat a page — gh#452, live for a few hours after gh#437 bound this as the seam), while
   `Enlist` stages the row in the **caller's** `DbContext`, so intent and state change commit atomically and the
   commit→enqueue gap does not exist at all. Since gh#455 both auto-flatten tiers take that path, through the
-  `INotificationEnlister` seam � and it checks for an already-owed incident before staging, because a row that
+  `INotificationEnlister` seam — and it checks for an already-owed incident before staging, because a row that
   fails the constraint would fail the PRODUCER's save.
   **The guarantee is stated precisely, because the obvious phrasing overstates it.** It is **no dropped page**, not
   exactly-once. Delivery is attempted first and the row stamped after, so a crash *between* the transport accepting

@@ -37,22 +37,17 @@ Working practices Adam has asked agents to follow that have no formal-doc home.
 
 Cross-agent heads-ups and in-session decisions that don't have a formal home yet.
 
-- **[2026-07-23] QA Integration & Smoke Test Backlog (Audit Doc: [`documentation/integration-test-audit.md`](integration-test-audit.md)):**
-  - **Issue #130 — `QA(task#11) - Staged send path & order execution integration test suite`** (Spec: [gh#130](https://github.com/adammarquette/trading-copilot/issues/130)): Integration suite for `POST /accounts/{id}/orders`, `POST /orders/arm`, `PUT /orders/{id}`, `POST /orders/{id}/take`, `DELETE /orders/{id}` testing fail-closed risk checks, credential process guard (ADR-0015), `WorkingStopPrice` DB persistence (`gh#134`), dual `Order` + `GateDecisionRecord` persistence, and R-14 mode x environment refusals against Testcontainers Postgres.
-  - **Issue #132 — `QA(task#128) - Multi-tenant workspace & resource isolation integration suite`** (Spec: [gh#132](https://github.com/adammarquette/trading-copilot/issues/132)): R-20 default-deny workspace isolation test suite verifying User A's resources (connections, accounts, risk profiles, staged orders, gate decisions) are completely invisible (`HTTP 404` / empty `[]`) to User B (ADR-0017).
-  - **Issue #131 — `QA(system) - Production-safe read-only smoke test suite`** (Spec: [gh#131](https://github.com/adammarquette/trading-copilot/issues/131)): Production deploy smoke suite tagged `Category=Smoke` covering read-only endpoints (`GET /auth/me`, `/firms`, `/connections`, `/connections/{id}/accounts`, `/accounts/{id}/risk`).
-  - **Issue #142 — `QA(task#7) - Connection credential lifecycle & account stage resolution integration suite`** (Spec: [gh#142](https://github.com/adammarquette/trading-copilot/issues/142)): Suite covering `POST /connections`, `GET /connections/{id}`, `PUT /connections/{id}/credentials`, `DELETE /connections/{id}`, and `PUT /accounts/{id}/stage` validating credential rotation, soft-delete cascading, and firm stage convention enforcement.
-  - **Issue #143 — `QA(task#10) - Risk profile dynamic trailing drawdown & floor tracking integration suite`
-- **[2026-07-28] HEADS-UP — claim work by pushing the branch first (gh#375).** A new rule landed in
-  [`CONTRIBUTING.md` §*Claiming work*](../CONTRIBUTING.md) and the root `AGENTS.md`: **create the branch and push
-  it empty *before* you start**, via `scripts/claim.sh <issue-id>`. Flagged here because **a session already in
-  flight will not re-read the contracts** — if that is you, claim your current branch now.
-  *Why:* on 2026-07-27/28 four items were built twice (gh#289, gh#295, gh#330, and one four-line compile break
-  that produced three issues and three fixes) — roughly a full session wasted in one evening, because a claim was
-  only ever a **local** worktree and the first globally visible artifact appeared when the work was already done.
-  *Also:* a claim whose tip has not moved for **4 hours** is fair game, but **say so on the issue** before taking
-  it over; and **delete your remote branch if you abandon work**, or it becomes a phantom claim that blocks
-  instead. Grep claims as `/<id>_` — anchoring on `_<id>_` matches nothing and reports every claimed issue free.** (Spec: [gh#143](https://github.com/adammarquette/trading-copilot/issues/143)): Suite validating dynamic risk profile updates under live trading conditions (`POST /accounts/{id}/risk`) and immediate risk limit enforcement on staged orders.
+- **[2026-07-23 → resolved] QA integration & smoke backlog — promoted out.** The original backlog of QA suites
+  (issues #130/#131/#132/#142/#143) has **all shipped and closed**. The living inventory and per-issue status now
+  live authoritatively in [`integration-test-audit.md`](integration-test-audit.md) (§2 inventory, §4 status table) —
+  the tracker is the source of truth (gh#144), so the per-suite specs are not restated here.
+- **[2026-07-28 → formalized] Claim work by pushing the branch empty first (gh#375).** Now a formal rule in the root
+  [`AGENTS.md`](../AGENTS.md) and [`CONTRIBUTING.md` §*Claiming work*](../CONTRIBUTING.md): `scripts/claim.sh
+  <issue-id>` pushes the branch empty *before* you start, because a local worktree is invisible to other sessions.
+  The lesson that prompted it (kept as the *why*): on 2026-07-27/28 four items were built twice (gh#289, gh#295,
+  gh#330, plus a four-line compile break that spawned three duplicate fixes) — roughly a session wasted in an
+  evening. A claim whose tip has not moved for **4 hours** is fair game, but say so on the issue first; and delete an
+  abandoned remote branch, or it becomes a phantom claim.
 
 ---
 
