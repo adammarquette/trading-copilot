@@ -1,3 +1,4 @@
+using System.Reflection;
 using MarqSpec.TradingCopilot.Api.Notifications;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Tenancy;
@@ -116,6 +117,32 @@ public class NotificationRegistrationTests
                 && descriptor.ImplementationType == typeof(NotificationOutboxRelayHost));
 
         relayRegistered.Should().BeTrue("an outbox nobody drains records every page and delivers none");
+    }
+
+    [Fact]
+    public void AddTradingCopilotNotifications_ShouldGiveTheRelayTheChainBelowTheOutbox_NotTheSeamItDrains()
+    {
+        // gh#459 (P0). The relay drains the outbox INTO the chain below it (queue -> dedup -> transport). Its
+        // `delivery` must therefore be the QUEUE, never the OutboxNotificationChannel seam -- resolving it to the
+        // seam makes the relay drain the outbox into itself: Enlist short-circuits on the row the relay just
+        // loaded (same scope, same DbContext, NotificationOutbox.Local), returns true, and every page is stamped
+        // delivered having reached nothing. Introduced by gh#437's plain `AddScoped<NotificationOutboxRelay>()`,
+        // which let DI resolve `delivery` to the only INotificationChannel registration -- the seam.
+        //
+        // Asserted at the COMPOSITION ROOT, not a hand-built relay: NotificationOutboxRelayTests constructs the
+        // relay directly, so the wiring is exactly the surface those tests cannot see (the gh#295 "new'd vs
+        // DI-resolved" lesson, polarity flipped).
+        using WebApplication app = Compose();
+        using IServiceScope scope = app.Services.CreateScope();
+        NotificationOutboxRelay relay = scope.ServiceProvider.GetRequiredService<NotificationOutboxRelay>();
+
+        INotificationChannel delivery = (INotificationChannel)typeof(NotificationOutboxRelay)
+            .GetField("_delivery", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(relay)!;
+
+        delivery.Should().BeOfType<QueuedNotificationChannel>(
+            "the relay must deliver into the chain below the outbox; the OutboxNotificationChannel seam would drain "
+            + "into itself and silently discard every page, incl. the R-13 auto-flatten escalation (gh#459)");
     }
 
     /// <summary>Builds a host with the <b>real</b> notification registration, plus the one dependency it now has.</summary>
