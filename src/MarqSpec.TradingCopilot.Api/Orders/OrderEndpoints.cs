@@ -355,6 +355,7 @@ public static class OrderEndpoints
         HostTradingEnvironment environment,
         IKillSwitch killSwitch,
         IExecutionMetrics metrics,
+        IStagedOrderClaim claim,
         CancellationToken cancellationToken)
     {
         Order? order = await database.Orders.FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
@@ -368,12 +369,31 @@ public static class OrderEndpoints
             return Results.Conflict(new { error = "Only a staged order can be taken — this one has left staging." });
         }
 
+        // CLAIM THE ROW BEFORE GOING ANYWHERE NEAR THE VENUE (gh#530). The check above is evaluated against THIS
+        // request's change tracker, which a concurrent take does not share -- so both racers passed it, both
+        // transmitted, and both then wrote this one row, leaving a live venue order on no Order row at all.
+        //
+        // Only the database can arbitrate, so the claim is a conditional UPDATE behind IStagedOrderClaim. A
+        // post-venue re-read is the wrong shape: by then the second order exists.
+        if (!await claim.TryClaimAsync(id, cancellationToken))
+        {
+            return Results.Conflict(new { error = "This order is already being taken." });
+        }
+
+        // Keep the tracked entity in step with the row (the claim writes past the change tracker), but do not let
+        // that assignment become an UPDATE of its own -- the outcome below decides the final status.
+        order.Status = OrderStatus.Taking;
+        database.Entry(order).Property(candidate => candidate.Status).IsModified = false;
+
         // R-12: EVERYTHING re-validates against fresh truth -- fresh roster, fresh flat check, fresh gate. The
         // arm-time decision is history, not authorization.
         (Composition? composed, IResult? refusal) = await ComposeAsync(
             order.AccountId, database, venueFactory, projectXOptions, executionOptions, environment, killSwitch, cancellationToken, metrics);
         if (composed is null)
         {
+            // Nothing was sent, so the ticket is exactly as takeable as it was -- release, or a refused take (a
+            // closed market, a tripped kill switch) strands it mid-take forever.
+            await claim.ReleaseAsync(id, cancellationToken);
             return refusal!;
         }
 
@@ -387,6 +407,7 @@ public static class OrderEndpoints
             order.ReferencePrice, order.TakeProfitPrice, order.Type, cancellationToken);
         if (executionRequest is null)
         {
+            await claim.ReleaseAsync(id, cancellationToken);
             return proposalRefusal!;
         }
 
@@ -399,6 +420,12 @@ public static class OrderEndpoints
             order.PlacedAt = result.Order.AcceptedAt;
             order.Size = result.Decision?.ApprovedQuantity ?? order.Size;
             AddStopPlan(database, currentUser, order, executionOptions.Value.StopPromotionTicks);
+        }
+        else
+        {
+            // Not placed. The ticket never left staging, so hand the claim back; the SaveChanges below persists it
+            // alongside the decision row.
+            order.Status = OrderStatus.Staged;
         }
 
         PersistDecision(database, currentUser, composed.Account.Id, order.Id, result.Decision);
@@ -427,6 +454,16 @@ public static class OrderEndpoints
         // What it does depends on where the order rests.
         switch (order.Status)
         {
+            case OrderStatus.Taking:
+                // A take is IN FLIGHT (gh#530). Before the claim, this row still read Staged -- so a cancel landing
+                // mid-take wrote Cancelled, and the take then overwrote it back to Working, leaving a live venue
+                // order resting on a ticket the operator had just cancelled. Refusing is the honest answer: the
+                // outcome is seconds away, and the working order is cancellable once it resolves.
+                return Results.Conflict(new
+                {
+                    error = "This order is being taken right now — wait for it to resolve, then cancel the working order.",
+                });
+
             case OrderStatus.Staged:
                 // A staged ticket is server-side only -- nothing at the venue, so discarding it is a plain delete.
                 order.Status = OrderStatus.Cancelled;

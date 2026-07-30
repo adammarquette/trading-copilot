@@ -244,7 +244,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
@@ -278,7 +278,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
 
         // R-12 working as designed: what passed at arm does not pass now -> refused, transmitted nothing,
         // still staged for another edit.
@@ -322,7 +322,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
 
         // Fixed: take rebuilds the working stop, sizes as arm did, and transmits. (Under the defect this is a
         // 422 -- PerTradeRisk sizes against the safety stop and leaves room for zero.)
@@ -355,7 +355,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         sent!.ProfitTarget.Should().Be(new Price(5310m)); // rebuilt from the row and transmitted, not dropped
@@ -416,7 +416,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
@@ -498,7 +498,7 @@ public class StagedOrderEndpointsTests
         {
             await OrderEndpoints.TakeStagedOrderAsync(
                 orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development,
-                A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
+                A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
         }
 
         await using TradingCopilotDbContext reload = Context();
@@ -524,11 +524,110 @@ public class StagedOrderEndpointsTests
         {
             await OrderEndpoints.TakeStagedOrderAsync(
                 orderId, new FixedUser(_operator), take, _factory, PxOptions(), ExecOptions(), Development,
-                A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
+                A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(take), CancellationToken.None);
         }
 
         // The deviation is carried all the way to the placed order -- a reader sees a modified take, not an armed one.
         await using TradingCopilotDbContext reload = Context();
         (await reload.Orders.SingleAsync()).EntryMethod.Should().Be(OrderEntryMethod.ModifiedTake);
+    }
+
+    // --- The concurrent-take claim (gh#530, P1) ---
+
+    [Fact]
+    public async Task Take_ShouldRefuseWithoutTouchingTheVenue_WhenAnotherTakeHoldsTheClaim()
+    {
+        // THE defect. Two takes both read Staged against their own change trackers, both passed the status check,
+        // and BOTH TRANSMITTED -- then both wrote this one row, so one live venue order ended up on no Order row:
+        // invisible to cancel, to the kill-switch sweep and to the orphan guard, which all resolve by row id.
+        //
+        // The loser must refuse BEFORE the venue. A post-venue re-read is too late by construction.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context())
+        {
+            orderId = (await read.Orders.SingleAsync()).Id;
+        }
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development,
+            A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, LostClaim(), CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task Take_ShouldHandTheClaimBack_WhenTheFreshGateRefuses()
+    {
+        // A refused take must leave the ticket exactly as takeable as it was. Without the release the claim would
+        // strand it mid-take forever -- trading one silent failure for another.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context())
+        {
+            orderId = (await read.Orders.SingleAsync()).Id;
+        }
+
+        IKillSwitch engaged = A.Fake<IKillSwitch>();
+        A.CallTo(() => engaged.IsEngaged).Returns(true);
+
+        await using TradingCopilotDbContext context = Context();
+        await OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development,
+            engaged, NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.SingleAsync()).Status.Should().Be(
+            OrderStatus.Staged, "a take that never reached the venue leaves the ticket takeable");
+    }
+
+    /// <summary>A claim that always loses — the second of two concurrent takes.</summary>
+    private static IStagedOrderClaim LostClaim()
+    {
+        IStagedOrderClaim claim = A.Fake<IStagedOrderClaim>();
+        A.CallTo(() => claim.TryClaimAsync(A<Guid>._, A<CancellationToken>._)).Returns(false);
+        return claim;
+    }
+
+    /// <summary>The gh#530 claim, faithful to production over the in-memory provider.</summary>
+    /// <remarks>
+    /// Production evaluates the claim as a conditional UPDATE in Postgres, which the in-memory provider cannot run
+    /// (that is exactly why the seam exists). This double reproduces its OBSERVABLE contract -- claim only from
+    /// Staged, release only from Taking, commit immediately -- so these guards see the same status transitions the
+    /// endpoint drives in production. What it cannot reproduce is ATOMICITY under real concurrency; that is proven
+    /// in the integration tier, against a real database, which is the only place it can be.
+    /// </remarks>
+    private static IStagedOrderClaim Claim(TradingCopilotDbContext database) => new InMemoryClaim(database);
+
+    private sealed class InMemoryClaim(TradingCopilotDbContext database) : IStagedOrderClaim
+    {
+        public async Task<bool> TryClaimAsync(Guid orderId, CancellationToken cancellationToken)
+        {
+            Order? order = await database.Orders
+                .FirstOrDefaultAsync(candidate => candidate.Id == orderId, cancellationToken);
+            if (order is null || order.Status != OrderStatus.Staged)
+            {
+                return false;
+            }
+
+            order.Status = OrderStatus.Taking;
+            await database.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+
+        public async Task ReleaseAsync(Guid orderId, CancellationToken cancellationToken)
+        {
+            Order? order = await database.Orders
+                .FirstOrDefaultAsync(candidate => candidate.Id == orderId, cancellationToken);
+            if (order is { Status: OrderStatus.Taking })
+            {
+                order.Status = OrderStatus.Staged;
+                await database.SaveChangesAsync(cancellationToken);
+            }
+        }
     }
 }

@@ -32,4 +32,30 @@ public enum OrderStatus
     /// Taking it re-validates everything against fresh truth (R-12) before it becomes <see cref="Working"/>.
     /// </summary>
     Staged = 6,
+
+    /// <summary>
+    /// A take is <b>in flight</b> for this staged ticket (gh#530) — claimed by one request, not yet resolved.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The claim exists because the take path spans four venue round-trips between reading the row and writing the
+    /// result. Two concurrent takes each read <see cref="Staged"/>, each passed the check against their own
+    /// snapshot, and <b>both transmitted</b> — then both wrote the same row, so one live venue order ended up
+    /// recorded on no <c>Order</c> row at all. Untracked exposure: invisible to cancel, to the kill-switch sweep
+    /// and to the orphan guard, all of which resolve by row id.
+    /// </para>
+    /// <para>
+    /// <b>Transient, never a resting state.</b> It exists only inside one request: the winner moves it to
+    /// <see cref="Working"/> on a placed order, or back to <see cref="Staged"/> on any other outcome, so a refused
+    /// take leaves the ticket exactly as takeable as it was. A row found sitting here means the process died
+    /// mid-take — the one case worth looking at, and loud rather than silent.
+    /// </para>
+    /// <para>
+    /// Every other status branch in the codebase is an explicit allow-list (<see cref="Working"/>,
+    /// <see cref="PartiallyFilled"/>, <see cref="Staged"/>), so this value is inert to them by construction — and
+    /// deliberately so for <b>cancel</b>, which now refuses a ticket whose take is mid-flight rather than writing
+    /// <see cref="Cancelled"/> over a row the take is about to overwrite back to <see cref="Working"/>.
+    /// </para>
+    /// </remarks>
+    Taking = 7,
 }
