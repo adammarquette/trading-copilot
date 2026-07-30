@@ -20,13 +20,16 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Observability;
 /// relay, the queue, the dedup decorator and the real Pushover adapter are all production objects.
 /// </para>
 /// <para>
-/// <b>Several cases are pinned to a live defect.</b> Fixing this harness put the outbox back in the chain and
-/// immediately exposed <b>gh#459</b>: <c>AddScoped&lt;NotificationOutboxRelay&gt;()</c> resolves its
-/// <c>INotificationChannel delivery</c> to the scoped <c>OutboxNotificationChannel</c> — the very thing it drains.
-/// The exact row bookkeeping has changed three times as adjacent fixes landed (gh#457, gh#458), so these cases
-/// pin the <b>invariant</b> rather than the symptom: <b>no page ever reaches the transport</b>. Per the QA contract
-/// they assert the observed behaviour with a <c>DEFECT gh#459</c> annotation, and flip into that issue's regression
-/// guard when the one-line registration fix lands.
+/// <b>These cases are gh#459's regression guard.</b> Putting the outbox back into the chain immediately exposed
+/// that <c>AddScoped&lt;NotificationOutboxRelay&gt;()</c> resolved its <c>INotificationChannel delivery</c> to the
+/// scoped <c>OutboxNotificationChannel</c> — the very thing it drains — so a page was marked handled having reached
+/// nothing, R-13 escalation included. They were pinned to that observed behaviour per the QA contract until the fix
+/// landed (gh#468), and now assert the real guarantee: <b>a page reaches the transport exactly once</b>.
+/// </para>
+/// <para>
+/// Note the two-step delivery. <c>RelayOutboxAsync</c> only moves a row into the <b>queue</b>; with the hosted
+/// services stripped nothing pumps it, so a wire assertion needs <c>DeliverOutboxAsync</c> (relay → queue → pump).
+/// A wire assertion after a bare relay pass is vacuous — it holds whatever the system does.
 /// </para>
 /// </remarks>
 public class NotificationDurabilityIntegrationTests : IClassFixture<NotificationDurabilityTestFactory>
@@ -109,22 +112,20 @@ public class NotificationDurabilityIntegrationTests : IClassFixture<Notification
             return 0;
         });
 
-        await _factory.RelayOutboxAsync();
+        // The FULL delivery path, not just the relay: the relay hands to the queue, and with the hosts stripped
+        // nothing pumps it. Relaying alone could never put anything on the wire, so a wire assertion after
+        // RelayOutboxAsync() passes whatever the system does — which is exactly how this guard was vacuous while it
+        // carried a gh#459 pin.
+        await _factory.DeliverOutboxAsync();
 
         // The row IS picked up — the host reads an owed row it never wrote, which is the durability claim itself.
         NotificationOutboxRecord afterRelay = await _factory.WithDatabaseAsync(db =>
             db.NotificationOutbox.AsNoTracking().SingleAsync());
         afterRelay.Attempts.Should().BeGreaterThan(0, "the relay found the orphaned row and tried to deliver it");
-
-        // DEFECT gh#459: the relay's `delivery` resolves to the OutboxNotificationChannel it drains, so the page is
-        // handed back to the outbox instead of onward to the transport.
-        //
-        // Pinned on the INVARIANT, not the bookkeeping. Three probes across three bases (pre-#457, post-#457,
-        // post-#458) produced three different row states — stamped-delivered, then never-stamped-and-retried, then
-        // stamped-delivered again — because each adjacent fix changed how the outbox answers a re-enlist. The one
-        // thing constant throughout is the part that matters: NOTHING REACHES THE OPERATOR. Asserting the row state
-        // here would just re-break this suite on the next neighbouring change.
-        _factory.Pushover.Sent.Should().BeEmpty("DEFECT gh#459 — a relayed page never reaches the transport");
+        afterRelay.DeliveredAt.Should().NotBeNull("and delivered it, stamping the durable record");
+        _factory.Pushover.Sent.Should().ContainSingle(
+            "a page left by a dead process reaches the transport once a later host relays it — the crash-survival "
+            + "claim, end to end (gh#459 regression guard)");
     }
 
     [Fact]
@@ -138,11 +139,13 @@ public class NotificationDurabilityIntegrationTests : IClassFixture<Notification
         NotificationOutboxRecord row = await _factory.WithDatabaseAsync(db =>
             db.NotificationOutbox.AsNoTracking().SingleAsync());
         row.Attempts.Should().BeGreaterThan(0, "the attempt is counted, so a wedged transport is visible");
+        row.DeliveredAt.Should().NotBeNull("the stamp is the durable record that the page was handed on");
 
-        // DEFECT gh#459 — the row is marked handled while the wire saw nothing. That combination is exactly what
-        // makes this invisible in production: the outbox table looks perfectly healthy. Flips to one Emergency page
-        // on the wire when gh#459's one-line registration fix lands, and becomes its regression guard.
-        _factory.Pushover.Pages.Should().BeEmpty("DEFECT gh#459 — the page never reaches Pushover");
+        // The gh#459 regression guard. Until that fix, the relay's `delivery` resolved to the OutboxNotificationChannel
+        // it was draining, so a page was marked handled having reached nothing — invisible, because the outbox table
+        // looked perfectly healthy. Delivering into the QUEUE is what puts it on the wire.
+        _factory.Pushover.Pages.Should().ContainSingle(
+            "the relay delivers into the queue, so an Emergency page reaches the transport exactly once (gh#459)");
     }
 
     private async Task ResetAsync()
