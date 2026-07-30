@@ -24,6 +24,7 @@ using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Events;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
@@ -145,6 +146,20 @@ builder.Services.AddOptions<SalienceOptions>()
             && options.MaxFeedLimit >= 1 && options.DefaultFeedLimit >= 1 && options.DefaultFeedLimit <= options.MaxFeedLimit,
         "Salience: require 0 < MultiplierFloor <= 1 <= MultiplierCap, MaxFeedLimit >= 1, and DefaultFeedLimit in [1, MaxFeedLimit].")
     .ValidateOnStart();
+
+// Per-instrument contract facts (gh#541, R-4/R-16, ADR-0007): tick size, point value and the catastrophic
+// safety-stop distance a SERVER-originated proposal needs to become an order ticket. A manual ticket carries these
+// on the request because a human authored it; a suggestion has no author to ask, and letting the browser supply them
+// would feed client-controlled numbers into the sizing ladder and the fat-finger band. Built-in defaults for the
+// products the flatten schedule governs, overridable per instrument; validated on start, because a zero tick size
+// would silently mis-size every risk calculation rather than fail.
+builder.Services.AddOptions<InstrumentSpecOptions>()
+    .Bind(builder.Configuration.GetSection(InstrumentSpecOptions.SectionName))
+    .Validate(
+        options => options.Validate(),
+        "InstrumentSpecs: every configured instrument needs a symbol and a positive TickSize, PointValue and SafetyStopTicks.")
+    .ValidateOnStart();
+builder.Services.AddSingleton<IInstrumentSpecSource, InstrumentSpecSource>();
 
 // The suggestion read model's limits (gh#540, R-4). A cap rather than an unbounded list: the suggestion table is an
 // append-only journal, so an uncapped page would let one call pull the whole history. Validated on start so a bad

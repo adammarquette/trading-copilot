@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Venue;
 
 namespace MarqSpec.TradingCopilot.Api.Suggestions;
@@ -33,6 +34,11 @@ namespace MarqSpec.TradingCopilot.Api.Suggestions;
 /// Reward divided by risk as a unit-free multiple (the wireframe's <c>2.2R</c>), or <see langword="null"/> when risk
 /// is zero — a row whose stop equals its entry cannot express a ratio, and the read model must not divide by zero.
 /// </param>
+/// <param name="RiskUsd">
+/// What the whole position loses at its stop, in dollars (gh#541) — <see langword="null"/> when the instrument has no
+/// configured contract spec, because a guessed tick size is worse than an absent figure.
+/// </param>
+/// <param name="RewardUsd">What the whole position makes at its target, in dollars; <see langword="null"/> likewise.</param>
 public sealed record SuggestionResponse(
     Guid Id,
     Guid AccountId,
@@ -45,12 +51,18 @@ public sealed record SuggestionResponse(
     TradingMode Mode,
     SuggestionState State,
     DateTimeOffset CreatedAt,
-    decimal? RewardRiskRatio)
+    decimal? RewardRiskRatio,
+    decimal? RiskUsd,
+    decimal? RewardUsd)
 {
     /// <summary>Projects a persisted suggestion into its API view.</summary>
     /// <param name="suggestion">The persisted row.</param>
+    /// <param name="spec">
+    /// The instrument's contract facts (gh#541) used to money-value the geometry, or <see langword="null"/> when the
+    /// instrument is not configured — in which case the dollar figures are omitted rather than guessed.
+    /// </param>
     /// <returns>The response.</returns>
-    public static SuggestionResponse From(Suggestion suggestion)
+    public static SuggestionResponse From(Suggestion suggestion, InstrumentContractSpec? spec = null)
     {
         ArgumentNullException.ThrowIfNull(suggestion);
 
@@ -66,8 +78,17 @@ public sealed record SuggestionResponse(
             suggestion.Mode,
             suggestion.State,
             suggestion.CreatedAt,
-            RatioOf(suggestion.EntryPrice, suggestion.StopPrice, suggestion.TargetPrice));
+            RatioOf(suggestion.EntryPrice, suggestion.StopPrice, suggestion.TargetPrice),
+            MoneyOf(spec, suggestion.EntryPrice, suggestion.StopPrice, suggestion.Size),
+            MoneyOf(spec, suggestion.EntryPrice, suggestion.TargetPrice, suggestion.Size));
     }
+
+    // The wireframe's dollar risk/reward, computed SERVER-side from the single shipped money-math seam
+    // (InstrumentSpec.LossPerContract) rather than in a browser. Null when the instrument has no configured spec:
+    // this is a DISPLAY figure, so omitting it degrades the card rather than failing the read -- the take path
+    // (gh#548) is where a missing spec must fail closed, because there a wrong number moves real size.
+    private static decimal? MoneyOf(InstrumentContractSpec? spec, decimal entry, decimal against, int size) =>
+        spec is null ? null : spec.Spec.LossPerContract(new Price(entry), new Price(against)) * size;
 
     // Magnitudes, so the arithmetic is identical for a long and a short -- the geometry is inverted between them but
     // the ratio is not. Geometry is validated at issuance (SuggestionGeometry), but this projects rows it did not

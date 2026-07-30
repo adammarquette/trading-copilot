@@ -252,6 +252,33 @@ services:
       Flatten__Instruments__3__Enabled:
       Flatten__Instruments__3__SessionClose:
       Flatten__Instruments__3__DeadlineOverride:
+      # Per-instrument contract facts (R-4/R-16, gh#541): tick size, point value and the catastrophic safety-stop
+      # distance a SERVER-originated proposal needs to become an order ticket. Null pass-through, because the app
+      # ships built-in specs for the same four markets that carry built-in flatten deadlines (ES, NQ, CL, GC) --
+      # an empty string would BIND and overwrite a good default with a zero, which is precisely the value that
+      # silently mis-sizes every risk calculation. CAPPED AT FOUR slots, like Flatten__Instruments__* above; a
+      # fifth market needs its four keys added here.
+      InstrumentSpecs__Instruments__0__Symbol:
+      InstrumentSpecs__Instruments__0__TickSize:
+      InstrumentSpecs__Instruments__0__PointValue:
+      InstrumentSpecs__Instruments__0__SafetyStopTicks:
+      InstrumentSpecs__Instruments__1__Symbol:
+      InstrumentSpecs__Instruments__1__TickSize:
+      InstrumentSpecs__Instruments__1__PointValue:
+      InstrumentSpecs__Instruments__1__SafetyStopTicks:
+      InstrumentSpecs__Instruments__2__Symbol:
+      InstrumentSpecs__Instruments__2__TickSize:
+      InstrumentSpecs__Instruments__2__PointValue:
+      InstrumentSpecs__Instruments__2__SafetyStopTicks:
+      InstrumentSpecs__Instruments__3__Symbol:
+      InstrumentSpecs__Instruments__3__TickSize:
+      InstrumentSpecs__Instruments__3__PointValue:
+      InstrumentSpecs__Instruments__3__SafetyStopTicks:
+      # The suggestion read model's page limits (R-4, gh#540). Forwarded here because gh#540 added the options
+      # without an allowlist entry, so they were unreachable by an operator -- the exact silent-drop this map exists
+      # to prevent. Null pass-through: the app's defaults stand unless deliberately set.
+      Suggestions__DefaultPageSize:
+      Suggestions__MaxPageSize:
       # Execution sanity caps (R-16, gh#11) -- the last-line fat-finger bounds, and the stop-promotion band.
       # Pass-through for the same reason: the app's conservative defaults must win unless deliberately set.
       Execution__MaxContractsPerOrder:

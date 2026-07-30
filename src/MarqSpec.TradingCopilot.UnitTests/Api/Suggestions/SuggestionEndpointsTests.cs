@@ -1,7 +1,9 @@
+using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
@@ -76,6 +78,11 @@ public class SuggestionEndpointsTests
         return id;
     }
 
+    // The real configuration-backed source, so the dollar figures are exercised against the shipped built-in specs
+    // (gh#541) rather than a fake that could agree with a wrong implementation.
+    private static readonly IInstrumentSpecSource _instrumentSpecs =
+        new InstrumentSpecSource(Options.Create(new InstrumentSpecOptions()));
+
     private async Task<IResult> ListAsync(
         Guid? accountId = null,
         SuggestionState? state = null,
@@ -85,13 +92,14 @@ public class SuggestionEndpointsTests
     {
         await using TradingCopilotDbContext context = Context(asUser);
         return await SuggestionEndpoints.ListAsync(
-            accountId ?? _account, state, limit, context, readOptions is null ? _options : Options.Create(readOptions), default);
+            accountId ?? _account, state, limit, context,
+            readOptions is null ? _options : Options.Create(readOptions), _instrumentSpecs, default);
     }
 
     private async Task<IResult> GetAsync(Guid id, Guid? asUser = null)
     {
         await using TradingCopilotDbContext context = Context(asUser);
-        return await SuggestionEndpoints.GetAsync(id, context, default);
+        return await SuggestionEndpoints.GetAsync(id, context, _instrumentSpecs, default);
     }
 
     // ---- list: default is the actionable set, newest first ----
@@ -250,6 +258,52 @@ public class SuggestionEndpointsTests
         Guid id = await SeedAsync(entry: 100m, stop: 100m, target: 103m);
 
         ItemOf(await GetAsync(id)).RewardRiskRatio.Should().BeNull();
+    }
+
+    // ---- dollar risk/reward from the instrument spec (gh#541) ----
+
+    [Fact]
+    public async Task GetAsync_ShouldMoneyValueTheGeometry_WhenTheInstrumentHasASpec()
+    {
+        // ES: $50 a point. Risk 1 point x 2 contracts = $100; reward 3 points x 2 = $300.
+        Guid id = await SeedAsync(entry: 100m, stop: 99m, target: 103m);
+
+        SuggestionResponse item = ItemOf(await GetAsync(id));
+
+        item.RiskUsd.Should().Be(100m);
+        item.RewardUsd.Should().Be(300m);
+    }
+
+    [Fact]
+    public async Task GetAsync_ShouldMoneyValueSymmetrically_ForAShort()
+    {
+        // The money math is direction-agnostic: an inverted short geometry values identically.
+        Guid id = await SeedAsync(side: OrderSide.Sell, entry: 100m, stop: 101m, target: 97m);
+
+        SuggestionResponse item = ItemOf(await GetAsync(id));
+
+        item.RiskUsd.Should().Be(100m);
+        item.RewardUsd.Should().Be(300m);
+    }
+
+    [Fact]
+    public async Task GetAsync_ShouldOmitTheDollarFigures_WhenTheInstrumentHasNoSpec()
+    {
+        // An unconfigured instrument yields no dollar figures rather than a guessed tick size. This is a DISPLAY
+        // concern, so the read degrades; the take path is where a missing spec must refuse outright (gh#548).
+        Guid id = await SeedAsync();
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            Suggestion row = await seed.Suggestions.SingleAsync(s => s.Id == id);
+            row.Instrument = "ZZ";
+            await seed.SaveChangesAsync();
+        }
+
+        SuggestionResponse item = ItemOf(await GetAsync(id));
+
+        item.RiskUsd.Should().BeNull();
+        item.RewardUsd.Should().BeNull();
+        item.RewardRiskRatio.Should().NotBeNull("the unit-free ratio needs no contract spec");
     }
 
     [Fact]
