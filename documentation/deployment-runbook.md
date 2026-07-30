@@ -83,6 +83,15 @@ distinct name so a later `docker compose pull` cannot clobber your build. Buildi
   forward an open-ended indexed list. Four covers every market with a built-in deadline (ES, NQ, CL, GC). A fifth
   needs its keys added to `docker-compose.yml`: a deliberate edit, not a silent limit. The slots are
   **independent, not positional** — the .NET binder collects whatever indices are present, so gaps are harmless.
+- **Per-instrument contract specs** (`InstrumentSpecs__Instruments__0__` … `__3__`, gh#541) follow the same capped,
+  independent-slot shape and the same absent-vs-empty rule. They supply the **tick size, point value and
+  catastrophic safety-stop distance** a *server-originated* suggestion needs to become an order ticket — a manual
+  ticket carries them on the request, a suggestion has no author to ask, and the browser is deliberately not allowed
+  to supply them. The app ships built-in specs for the same four markets (ES 0.25/$50, NQ 0.25/$20, CL 0.01/$1000,
+  GC 0.10/$100), so these settings only **override or add**. An entry replaces a default **wholesale** — set all four
+  fields together, because a new tick size against an old point value is a silently wrong contract. A non-positive
+  `TickSize`, `PointValue` or `SafetyStopTicks` **fails startup by design**: a zero here would not fail loudly, it
+  would silently mis-size every risk calculation downstream.
 - Schema changes apply via **`dotnet ef database update`** against the configured connection (as the data layer lands).
 
 ## Environments ↔ branches

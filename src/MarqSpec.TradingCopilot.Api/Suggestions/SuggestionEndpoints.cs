@@ -1,5 +1,6 @@
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -50,6 +51,7 @@ public static class SuggestionEndpoints
     /// <param name="limit">The page size; clamped to the configured maximum.</param>
     /// <param name="database">The scoped, R-20-filtered database.</param>
     /// <param name="options">The read-model limits.</param>
+    /// <param name="instrumentSpecs">The contract-spec source used to money-value each suggestion's geometry (gh#541).</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The page of suggestions.</returns>
     internal static async Task<IResult> ListAsync(
@@ -58,10 +60,12 @@ public static class SuggestionEndpoints
         int? limit,
         TradingCopilotDbContext database,
         IOptions<SuggestionReadOptions> options,
+        IInstrumentSpecSource instrumentSpecs,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(instrumentSpecs);
 
         SuggestionReadOptions config = options.Value;
         if (limit is <= 0)
@@ -85,7 +89,7 @@ public static class SuggestionEndpoints
             .Take(take)
             .ToListAsync(cancellationToken);
 
-        return Results.Ok(new SuggestionListResponse([.. rows.Select(SuggestionResponse.From)]));
+        return Results.Ok(new SuggestionListResponse([.. rows.Select(row => Project(row, instrumentSpecs))]));
     }
 
     /// <summary>
@@ -94,14 +98,17 @@ public static class SuggestionEndpoints
     /// </summary>
     /// <param name="id">The suggestion's id.</param>
     /// <param name="database">The scoped, R-20-filtered database.</param>
+    /// <param name="instrumentSpecs">The contract-spec source used to money-value the geometry (gh#541).</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The suggestion, or 404 when it does not exist or belongs to another operator.</returns>
     internal static async Task<IResult> GetAsync(
         Guid id,
         TradingCopilotDbContext database,
+        IInstrumentSpecSource instrumentSpecs,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(database);
+        ArgumentNullException.ThrowIfNull(instrumentSpecs);
 
         Suggestion? suggestion = await database.Suggestions
             .AsNoTracking()
@@ -109,6 +116,19 @@ public static class SuggestionEndpoints
 
         return suggestion is null
             ? Results.NotFound()
-            : Results.Ok(SuggestionResponse.From(suggestion));
+            : Results.Ok(Project(suggestion, instrumentSpecs));
+    }
+
+    // Money-values the geometry where the instrument has a configured spec (gh#541). An unparseable or unconfigured
+    // symbol simply omits the dollar figures -- a display concern degrades, it does not fail the read.
+    private static SuggestionResponse Project(Suggestion suggestion, IInstrumentSpecSource instrumentSpecs)
+    {
+        InstrumentContractSpec? spec = null;
+        if (InstrumentId.TryParse(suggestion.Instrument, out InstrumentId instrument))
+        {
+            instrumentSpecs.TryResolve(instrument, out spec);
+        }
+
+        return SuggestionResponse.From(suggestion, spec);
     }
 }
