@@ -18,8 +18,17 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// missed one is the failure R-13 exists to prevent.
 /// </para>
 /// <para>
-/// Across passes it <i>is</i> idempotent, which is what the dedup key buys. The row is the ledger and its
-/// <c>DedupKey</c> is the primary key, so one incident is one row, and a stamped row is never re-read.
+/// <b>Idempotence here is per-ROW, not per-incident</b> (gh#458). The row is the ledger and a stamped one is
+/// never re-read, so one <i>occurrence</i> yields one page however many passes run. But the dedup key is scoped
+/// to the <b>undelivered</b> rows, so a later occurrence of the same incident is a <i>new</i> row and pages
+/// again — it has to: the second auto-flatten failure is not less urgent than the first.
+/// </para>
+/// <para>
+/// This paragraph previously claimed the opposite — that <c>DedupKey</c> was the primary key, so one incident was
+/// one row for the lifetime of the database. That was the defect gh#458 fixed, written here as a guarantee: a
+/// delivered row held its key forever, so the second occurrence of any incident could never be recorded and never
+/// paged. Kept as a note rather than silently corrected, because the wrong version was the more plausible-sounding
+/// one and someone will reach for it again.
 /// </para>
 /// <para>
 /// <b>Every delivery is isolated.</b> One wedged incident must not strand the pages queued behind it — the
