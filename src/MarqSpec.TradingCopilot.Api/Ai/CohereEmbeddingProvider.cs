@@ -36,17 +36,20 @@ public sealed class CohereEmbeddingProvider : IEmbeddingProvider
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly CohereOptions _options;
+    private readonly VectorStore _vectorStore;
     private readonly IEmbeddingMetrics _metrics;
     private readonly ILogger<CohereEmbeddingProvider> _logger;
 
     /// <summary>Creates the provider.</summary>
     /// <param name="httpClientFactory">Factory for the named Cohere client.</param>
     /// <param name="options">Cohere configuration.</param>
+    /// <param name="vectorStore">Whether this deployment can actually store a vector (gh#474).</param>
     /// <param name="metrics">Spend metering — required, never optional (an unmetered call is invisible spend).</param>
     /// <param name="logger">The logger. The key is never written to it.</param>
     public CohereEmbeddingProvider(
         IHttpClientFactory httpClientFactory,
         IOptions<CohereOptions> options,
+        VectorStore vectorStore,
         IEmbeddingMetrics metrics,
         ILogger<CohereEmbeddingProvider> logger)
     {
@@ -54,6 +57,7 @@ public sealed class CohereEmbeddingProvider : IEmbeddingProvider
 
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
+        _vectorStore = vectorStore;
         _metrics = metrics;
         _logger = logger;
     }
@@ -65,7 +69,12 @@ public sealed class CohereEmbeddingProvider : IEmbeddingProvider
     public int Dimensions => TradingCopilotDbContext.EmbeddingDimensions;
 
     /// <inheritdoc />
-    public bool IsAvailable => _options.IsConfigured;
+    /// <remarks>
+    /// Both halves, deliberately (gh#474): a key to make the call, and somewhere to put what comes back. A
+    /// configured key over a Postgres without <c>pgvector</c> is spend with no product -- the embed succeeds and
+    /// the upsert faults, every poll, forever.
+    /// </remarks>
+    public bool IsAvailable => _options.IsConfigured && _vectorStore.IsPresent;
 
     /// <inheritdoc />
     public async Task<EmbeddingResult> EmbedAsync(string text, CancellationToken cancellationToken)

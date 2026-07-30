@@ -208,6 +208,11 @@ builder.Services.AddHttpClient(CohereEmbeddingProvider.HttpClientName);
 builder.Services.AddSingleton<EmbeddingMetrics>();
 builder.Services.AddSingleton<IEmbeddingMetrics>(provider => provider.GetRequiredService<EmbeddingMetrics>());
 builder.Services.AddSingleton<UnavailableEmbeddingProvider>();
+
+// Probed once at startup (gh#474). A key is only half of "available": the AddEmbeddingStore migration skips the
+// table entirely on a Postgres without pgvector, so a keyed deployment there embedded on every poll -- real spend
+// -- and faulted at the upsert every time. Defaults to NOT present, so a caller racing the probe declines.
+builder.Services.AddSingleton<VectorStore>();
 builder.Services.AddSingleton<CohereEmbeddingProvider>();
 builder.Services.AddSingleton<IEmbeddingProvider>(provider =>
     provider.GetRequiredService<IOptions<CohereOptions>>().Value.IsConfigured
