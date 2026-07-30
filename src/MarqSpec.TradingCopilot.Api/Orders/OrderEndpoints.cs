@@ -380,10 +380,11 @@ public static class OrderEndpoints
             return Results.Conflict(new { error = "This order is already being taken." });
         }
 
-        // Keep the tracked entity in step with the row (the claim writes past the change tracker), but do not let
-        // that assignment become an UPDATE of its own -- the outcome below decides the final status.
-        order.Status = OrderStatus.Taking;
-        database.Entry(order).Property(candidate => candidate.Status).IsModified = false;
+        // The tracked entity deliberately still reads Staged. Status now has TWO writers -- this change tracker and
+        // the claim's conditional UPDATE -- and they must never both own it: setting the tracked value here and
+        // clearing IsModified does not hold, because ComposeAsync runs its own SaveChanges and DetectChanges
+        // re-marks the property against the original snapshot. So the claim owns Staged<->Taking, the tracker owns
+        // only the terminal write, and every outcome below says which explicitly.
 
         // R-12: EVERYTHING re-validates against fresh truth -- fresh roster, fresh flat check, fresh gate. The
         // arm-time decision is history, not authorization.
@@ -423,9 +424,10 @@ public static class OrderEndpoints
         }
         else
         {
-            // Not placed. The ticket never left staging, so hand the claim back; the SaveChanges below persists it
-            // alongside the decision row.
-            order.Status = OrderStatus.Staged;
+            // Not placed -- refused, rejected, or the venue said no. Release through the CLAIM, not the tracked
+            // entity: the tracker still reads Staged, so assigning Staged here changes nothing and EF would emit no
+            // UPDATE at all, leaving the row stuck in Taking. The conditional UPDATE is the authoritative writer.
+            await claim.ReleaseAsync(id, cancellationToken);
         }
 
         PersistDecision(database, currentUser, composed.Account.Id, order.Id, result.Decision);
