@@ -253,16 +253,23 @@ cost-per-suggestion surface remains a separate Phase-4 client concern.
 mirroring `Governor__DailyBudgetUsd`, because Prometheus cannot read application config — gh#506 proposes
 emitting the cap as a gauge so the two cannot drift. *Per-feature* attribution is not yet possible: the meter
 tags model / tier / outcome but not feature, so the LLM-vs-embeddings split stands in as the feature axis
-(harmless today, since every LLM row is `Feature = Triage` per gh#449) — gh#507 adds the tag. Neither is
+(harmless while every LLM row is `Feature = Triage` per gh#449) — gh#507 added the tag, so the metric half can be split by feature the moment a second one emits. Neither is
 enforcement: a meter is export-only, so the governor still caps on the `AIUsage` ledger floor (gh#448).
 
-**The unit trap from the gh#366 note above recurred, and was caught the same way.** The cost instruments declare
-`unit: "USD"`, which the exporter appends **verbatim and case-sensitively** — and because the instrument name
-already ends in a lowercase `usd`, the duplicate-suffix check does not match. The real series are
-`ai_llm_cost_usd_USD_total` and `ai_embed_cost_usd_USD_total`; the intuitive `ai_llm_cost_usd_total` returns
-nothing. This was established by emitting the exact instrument set through the real collector → Prometheus path
-and reading back `/api/v1/label/__name__/values`, then running **every panel query** against it — a guessed name
-would have shown *"No data"* on a spend panel forever, which reads as *"nothing was spent"*. The stuttering name
-itself is filed as gh#505; the dashboard queries today's real names and must move in the same PR that fixes them.
+**The unit trap from the gh#366 note above recurred, was caught the same way, and is now fixed (gh#505).** The cost
+instruments declared `unit: "USD"`, which the exporter appends **verbatim and case-sensitively** — and because the
+instrument name already ends in a lowercase `usd`, the duplicate-suffix check did not match. The series that
+actually landed were `ai_llm_cost_usd_USD_total` and `ai_embed_cost_usd_USD_total`, while the intuitive
+`ai_llm_cost_usd_total` returned nothing. This was established by emitting the exact instrument set through the real
+collector → Prometheus path and reading back `/api/v1/label/__name__/values`, then running **every panel query**
+against it — a guessed name would have shown *"No data"* on a spend panel forever, which reads as *"nothing was
+spent"*.
+
+**gh#505 moved both instruments to the OTel annotation unit `{USD}`**, which the exporter does *not* append, so the
+series are now `ai_llm_cost_usd_total` and `ai_embed_cost_usd_total` — the form every other instrument here already
+used (`{call}`, `{token}`, `{position}`). The dashboard queries moved in the **same PR**, because a rename landing
+without them turns six cost panels into *"No data"*, which on a spend view reads as **zero spend** rather than a
+broken query. A dashboard restored from a pre-gh#505 revision against a newer app has exactly that failure, so the
+JSON keeps the old names in its description as a breadcrumb.
 
 *The rule this makes concrete, twice over: **never transcribe a metric name — emit, scrape, and read it back.***

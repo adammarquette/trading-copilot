@@ -50,7 +50,7 @@ public sealed class EmbeddingMetrics : IEmbeddingMetrics, IDisposable
         _tokens = _meter.CreateCounter<long>(
             EmbedTokens, unit: "{token}", description: "Input tokens billed, by model and outcome.");
         _cost = _meter.CreateCounter<double>(
-            EmbedCost, unit: "USD", description: "Estimated dollar cost, by model and outcome.");
+            EmbedCost, unit: "{USD}", description: "Estimated dollar cost, by model and outcome.");
         _latency = _meter.CreateHistogram<double>(
             EmbedLatency, unit: "ms", description: "Embed call latency, by model and outcome.");
     }
