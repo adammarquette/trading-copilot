@@ -188,7 +188,7 @@ public class NotificationDurabilityIntegrationTests : IClassFixture<Notification
         // flatten pass ever observes flat-with-a-position-due — the key stays armed and the next genuine
         // escalation is suppressed as a stale duplicate.
         //
-        // Pins OBSERVED behaviour per the QA contract. When #489 lands this flips to HaveCount(2) and becomes its
+        // Pins OBSERVED behaviour per the QA contract. When #497 lands this flips to HaveCount(2) and becomes its
         // regression guard. See Outbox_ShouldPageAgain_WhenTheIncidentResolvedBetweenOccurrences below, which
         // proves the suppressor IS the decorator: identical steps plus a resolve, and both pages land.
         _factory.Pushover.Pages.Should().ContainSingle(
