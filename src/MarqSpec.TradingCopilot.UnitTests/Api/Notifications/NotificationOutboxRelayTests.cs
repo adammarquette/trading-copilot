@@ -61,10 +61,15 @@ public class NotificationOutboxRelayTests
     }
 
     [Fact]
-    public async Task DrainAsync_ShouldNotResendADeliveredRow_SoAnOperatorIsPagedOncePerIncident()
+    public async Task DrainAsync_ShouldNotResendTheSameRowTwice_SoOneOccurrenceIsOnePage()
     {
-        // Idempotence across passes, which is what the dedup key buys: the row IS the ledger, so a second pass
-        // over the same incident sends nothing.
+        // Idempotence is per-ROW, not per-incident (gh#458). A stamped row is never re-read, so however many
+        // passes run, one occurrence yields one page. It does NOT mean an incident pages only once ever: the dedup
+        // key is scoped to the undelivered rows, so a later occurrence is a new row and pages again — covered by
+        // OutboxIncidentLifetimeTests, not here.
+        //
+        // This case was originally named "…SoAnOperatorIsPagedOncePerIncident", which asserted the gh#458 defect
+        // as intent. The assertion below was and is correct; only the claim around it was wrong.
         await SeedAsync("flatten:9001:ES");
         RecordingChannel delivery = new();
         NotificationOutboxRelay relay = Relay(delivery);
@@ -73,7 +78,7 @@ public class NotificationOutboxRelayTests
         int second = await relay.DrainAsync(CancellationToken.None);
 
         second.Should().Be(0);
-        delivery.Sent.Should().ContainSingle("the second pass must find nothing owed — one page per incident");
+        delivery.Sent.Should().ContainSingle("the second pass must find nothing owed — one page per occurrence");
     }
 
     [Fact]
