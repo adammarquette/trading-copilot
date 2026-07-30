@@ -7,6 +7,7 @@ using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Triggers;
 using MarqSpec.TradingCopilot.Domain.Venue;
@@ -121,6 +122,36 @@ public class AgentReviewRouteIntegrationTests : IClassFixture<AgentReviewTestPos
         (await _fixture.SuggestionCountAsync()).Should().Be(1, "later scans neither duplicate nor promote the proposal");
         VenueFactory.TotalPlacedOrderCount.Should().Be(0, "a resting suggestion never becomes an order on its own");
         (await _fixture.ExecutionRowCountsAsync())["orders"].Should().Be(0);
+    }
+
+    // =============================================================================================================
+    // The harness affordance itself (gh#559) -- proof that spend assertions built on it are not vacuous.
+    // =============================================================================================================
+
+    [Fact]
+    public async Task AgentReviewFire_ShouldLedgerANonZeroCost_WhenTheProviderReportsRealUsage()
+    {
+        // THE POINT OF gh#559. AdversarialLlmProvider defaulted to LlmUsage.None, so every fire priced at $0.00 and
+        // any assertion about cost, a budget bound, or a withheld escalation was satisfied by zero WHETHER OR NOT
+        // production worked -- a green suite guarding nothing, and invisibly so. This is the affordance working:
+        // real token counts in, a real price out, through the DI-composed ledger and a real numeric(18,8) column.
+        await ResetAsync();
+        (Guid userId, Guid accountId) = await _fixture.SetupOperatorAndAccountAsync();
+        await _fixture.SeedTriggerAsync(userId, accountId);
+        await _fixture.SeedIndicatorAsync(75m);
+        _factory.Llm.ReportsUsage(new LlmUsage(InputTokens: 1_200, OutputTokens: 300));
+        _factory.Llm.ReturnsSuggestion("long", entry: 5_000m, stop: 4_990m, target: 5_020m);
+
+        await _fixture.ScanAsync();
+
+        decimal cost = await _factory.WithDatabaseAsync(db => db.AiUsage
+            .IgnoreQueryFilters()
+            .Select(row => row.EstimatedCostUsd)
+            .SumAsync());
+        cost.Should().BeGreaterThan(
+            0m,
+            "a suite that asserts on spend must first be able to PRODUCE spend -- at LlmUsage.None every such "
+            + "assertion passes on zero regardless of whether the governor, the pricing or the ledger work");
     }
 
     // =============================================================================================================
