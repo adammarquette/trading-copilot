@@ -18,8 +18,10 @@ public sealed class AdversarialLlmProvider : ILlmProvider
 {
     private readonly List<LlmRequest> _requests = [];
     private readonly Lock _gate = new();
+    private readonly Dictionary<LlmModelTier, string> _textByTier = [];
     private string _text = """{"decision":"suppress","reason":"default"}""";
     private LlmStopReason _stopReason = LlmStopReason.Completed;
+    private LlmUsage _usage = LlmUsage.None;
     private bool _throws;
 
     /// <summary>Every request the system sent to the model, in call order.</summary>
@@ -63,6 +65,41 @@ public sealed class AdversarialLlmProvider : ILlmProvider
             {"decision":"suggest","direction":"{{direction}}","entry":{{entry}},"stop":{{stop}},"target":{{target}},"reason":"test"}
             """);
 
+    /// <summary>
+    /// Makes every completion report <paramref name="usage"/> (gh#559), so a fire prices at a <b>non-zero</b> cost
+    /// and the <c>AiUsage</c> ledger assertions built on it mean something.
+    /// </summary>
+    /// <remarks>
+    /// Default is <see cref="LlmUsage.None"/>, which prices every call at <b>$0.00</b> — so an unconfigured suite
+    /// asserting on cost, on a budget bound, or on an escalation being withheld is satisfied by zero <i>whether or
+    /// not production works</i>. That is a vacuous guard, and an invisible one: nothing about a passing spend suite
+    /// announces that every number in it was zero. Call this before asserting on spend.
+    /// </remarks>
+    /// <param name="usage">The token counts each completion reports.</param>
+    public void ReportsUsage(LlmUsage usage)
+    {
+        ArgumentNullException.ThrowIfNull(usage);
+        lock (_gate)
+        {
+            _usage = usage;
+        }
+    }
+
+    /// <summary>
+    /// Scripts a completion for one <b>tier</b> (gh#559), so a triage→deep escalation can return different text for
+    /// its two calls (gh#449) instead of the same body twice.
+    /// </summary>
+    /// <param name="tier">The tier this text answers.</param>
+    /// <param name="text">Raw model output for that tier.</param>
+    public void ReturnsForTier(LlmModelTier tier, string text)
+    {
+        lock (_gate)
+        {
+            _textByTier[tier] = text;
+            _throws = false;
+        }
+    }
+
     /// <summary>Makes the provider throw — the network / timeout / 429 / 5xx case the real client raises.</summary>
     public void MakeThrow()
     {
@@ -80,6 +117,8 @@ public sealed class AdversarialLlmProvider : ILlmProvider
             _requests.Clear();
             _text = """{"decision":"suppress","reason":"default"}""";
             _stopReason = LlmStopReason.Completed;
+            _textByTier.Clear();
+            _usage = LlmUsage.None;
             _throws = false;
         }
     }
@@ -97,7 +136,10 @@ public sealed class AdversarialLlmProvider : ILlmProvider
                 throw new InvalidOperationException("the review provider is unavailable (test)");
             }
 
-            return Task.FromResult(new LlmCompletion(_text, _stopReason, LlmUsage.None));
+            // A tier-scripted body wins over the flat one, so an escalation's two calls can differ (gh#449); the
+            // flat text remains the default, so every existing suite is untouched.
+            string body = _textByTier.TryGetValue(request.Tier, out string? scripted) ? scripted : _text;
+            return Task.FromResult(new LlmCompletion(body, _stopReason, _usage));
         }
     }
 }
