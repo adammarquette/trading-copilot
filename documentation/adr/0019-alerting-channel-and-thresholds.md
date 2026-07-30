@@ -429,3 +429,31 @@ invites the reader to assume the worst tier.
 **Silent on a healthy recovery**, by construction: the emission loop runs over `Shortfalls`, which is empty when
 coverage is complete. §4's rule — a rule that pages on a clean session is a defect in the rule — is satisfied by
 the metric never existing rather than by a threshold chosen to hide it.
+
+## Update (2026-07-30) — the dedup key is re-armed by the exposure ending, not by who ended it (gh#497)
+
+**P1, and the same lifetime bug as gh#458 one layer downstream.** gh#458 released the key at the **outbox**;
+`DedupingNotificationChannel` — an in-memory singleton with no TTL and no eviction — still held it. Its comment
+justified having no eviction policy on the grounds that `ResolveAsync` clears it, which is sound *if every incident
+eventually resolves*. They did not: `AutoFlattenService` called resolve on exactly one path,
+`case FlattenVerdict.Flat` — the path where **our own close succeeded**.
+
+An escalation is by construction the path where it did not. So the exposure ended by some other hand — the operator
+closing by hand after being paged, or a prop firm's forced flatten — and **nothing re-armed the key**. Every
+subsequent escalation for that `(account, instrument)` pair was suppressed as a stale duplicate: silently, and for
+the life of the process, which on a self-hosted daemon is weeks. *A repeat R-13 escalation was unreportable
+precisely because the first one had been reported successfully.*
+
+**The fix keys the release on exposure, not on authorship.** Each pass resolves the incident for every configured
+schedule with no open position. Resolving an already-clear key is a no-op, so it needs no "was this escalated?"
+flag to keep in sync, and the decorator's own documented failure mode applies in the safe direction: *a duplicate
+page, where holding the key back suppresses the next genuine incident.*
+
+**Per schedule, not per account.** An instrument that was escalated and is now flat never reaches the
+nothing-at-risk branch at all while the account still holds anything else — the case the issue flagged as an open
+question. Keying on "the account is empty" would have left exactly that hole open.
+
+**The noise budget is untouched.** An instrument *still open* is never resolved, so a continuing incident's
+re-emission still collapses to one page (§*Thresholds*, gh#243). That is deliberate: suppression while an incident
+is **live** is the point of the decorator, and this fix must not be paid for with it — which is also why the
+gh#481 pin does **not** flip here (see the note on gh#497).

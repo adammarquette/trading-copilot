@@ -142,6 +142,54 @@ public class AutoFlattenServiceTests
         A.CallTo(() => _notifications.ResolveAsync(A<string>._, A<CancellationToken>._)).MustHaveHappened();
     }
 
+    // --- The incident ends when the EXPOSURE ends, however it ended (gh#497, P1) ---
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldResolveTheIncident_WhenTheExposureEndedWithoutOurClose()
+    {
+        // THE P1. Resolve was reachable only from `case FlattenVerdict.Flat` -- the path where OUR close succeeded.
+        // An escalation is by construction the path where it did not, so the operator closes by hand (or the prop
+        // firm force-flattens), and nothing ever re-arms the key. DedupingNotificationChannel is a singleton with no
+        // TTL and no eviction, so the NEXT genuine escalation for that pair is suppressed as a stale duplicate --
+        // silently, and for the life of the process. A repeat R-13 escalation unreportable precisely because the
+        // first one was reported.
+        ITradingVenue venue = Venue([]); // the position is gone; we are not the reason
+
+        await Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+
+        A.CallTo(() => _notifications.ResolveAsync(
+                AutoFlattenService.IncidentKey(Account, InstrumentId.Parse("ES")), A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldResolveOnlyTheFlatInstrument_WhenTheAccountStillHoldsOthers()
+    {
+        // The half the issue flagged as an open question: an instrument that WAS escalated and is now flat never
+        // reaches the nothing-at-risk branch at all while the account holds anything else. Per-schedule exposure is
+        // the honest signal, not "the account is empty".
+        ITradingVenue venue = Venue([Pos(FrontMonth("GC"), 1)], onClose: c => Pos(c.Key, 1)); // GC still open
+
+        await Service().FlattenAccountAsync(
+            Account,
+            venue,
+            [Schedule("ES", new TimeOnly(14, 30)), Schedule("GC", new TimeOnly(14, 30))],
+            Utc(19, 45),
+            maxAttempts: 1,
+            CancellationToken.None);
+
+        A.CallTo(() => _notifications.ResolveAsync(
+                AutoFlattenService.IncidentKey(Account, InstrumentId.Parse("ES")), A<CancellationToken>._))
+            .MustHaveHappened();
+
+        // ...and emphatically NOT the one still at risk: re-arming a live incident would let its own ~15s
+        // re-emission page again, which is the gh#243 noise budget this must not buy its fix with.
+        A.CallTo(() => _notifications.ResolveAsync(
+                AutoFlattenService.IncidentKey(Account, InstrumentId.Parse("GC")), A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
     // --- Committing the page WITH the state it reports (gh#455, R-13) ---
 
     [Fact]

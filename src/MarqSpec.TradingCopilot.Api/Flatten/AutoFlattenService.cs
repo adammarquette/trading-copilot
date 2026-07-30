@@ -208,6 +208,13 @@ public sealed class AutoFlattenService
                 }
             }
 
+            // The exposure is over, and OUR close is not why (gh#497). Before this, resolve was reachable only from
+            // `case FlattenVerdict.Flat` -- the path where the flatten itself succeeded. An escalation is by
+            // construction the path where it did NOT, so the incident ends by some other hand (the operator, or a
+            // prop firm's forced flatten) and nothing re-armed the key. The dedup decorator is a singleton with no
+            // TTL and no eviction, so the NEXT genuine escalation for that pair was suppressed as a stale duplicate
+            // -- silently, for the life of the process. Nothing open IS the "it is over" signal.
+            await ResolveIdleIncidentsAsync(account, schedules, cancellationToken);
             return 0;
         }
 
@@ -219,6 +226,15 @@ public sealed class AutoFlattenService
             ResolvedContract resolved = await venue.ResolveContractAsync(schedule.Instrument, cancellationToken);
             byRoot[ProductRoot(resolved.Contract.Key)] = schedule;
         }
+
+        // The same re-arm, per schedule (gh#497). An instrument that WAS escalated and is now flat never reaches the
+        // nothing-at-risk branch above while the account still holds anything else, so keying the release on "the
+        // account is empty" would leave exactly that case broken. Per-schedule exposure is the honest signal.
+        HashSet<string> openRoots = new(open.Select(position => ProductRoot(position.Contract.Key)), StringComparer.Ordinal);
+        await ResolveIdleIncidentsAsync(
+            account,
+            byRoot.Where(pair => !openRoots.Contains(pair.Key)).Select(pair => pair.Value),
+            cancellationToken);
 
         int closed = 0;
         foreach (IGrouping<string, PositionSnapshot> group in open.GroupBy(position => ProductRoot(position.Contract.Key)))
@@ -423,6 +439,36 @@ public sealed class AutoFlattenService
     /// belt just as much: a resolve reaches the transport (a Pushover Emergency nags until cancelled), so unlike
     /// an enlist it really does touch a network.
     /// </summary>
+    /// <summary>
+    /// Re-arms the dedup key for every configured instrument with <b>no open exposure</b> (gh#497), so a later
+    /// escalation for that pair is reported as the new incident it is.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberately keyed on <b>exposure</b> rather than on who ended it. The bug was that resolve hung off the one
+    /// path where the flatten's own close succeeded, which is precisely the path an escalation is not on: after
+    /// escalating, the position is closed by the operator or by a prop firm's forced flatten, and the key stayed
+    /// armed forever. What matters is that the risk is gone, not whose hand removed it.
+    /// </para>
+    /// <para>
+    /// Resolving an already-clear key is a no-op, so this runs every pass without a "was it escalated?" flag to
+    /// keep in sync — and its failure mode is a <b>duplicate page</b>, the safe direction, where holding the key
+    /// back suppresses the next genuine incident. An instrument still open is never resolved here: re-arming a live
+    /// incident would let its own re-emission page again, and that noise budget (gh#243 / ADR-0019) is not what
+    /// this fix is paid for with.
+    /// </para>
+    /// </remarks>
+    private async Task ResolveIdleIncidentsAsync(
+        VenueAccountId account,
+        IEnumerable<FlattenSchedule> idle,
+        CancellationToken cancellationToken)
+    {
+        foreach (FlattenSchedule schedule in idle)
+        {
+            await ResolveAsync(IncidentKey(account, schedule.Instrument), cancellationToken);
+        }
+    }
+
     private async Task ResolveAsync(string incidentKey, CancellationToken cancellationToken)
     {
         try
