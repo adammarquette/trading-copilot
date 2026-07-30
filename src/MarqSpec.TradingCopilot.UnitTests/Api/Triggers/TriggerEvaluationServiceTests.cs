@@ -35,6 +35,7 @@ public class TriggerEvaluationServiceTests
     private readonly IIndicatorSource _indicators = A.Fake<IIndicatorSource>();
     private readonly INotificationChannel _notifications = A.Fake<INotificationChannel>();
     private readonly ITriggerReviewer _reviewer = A.Fake<ITriggerReviewer>();
+    private readonly IReviewEnrichmentSource _enrichment = A.Fake<IReviewEnrichmentSource>();
     private readonly IAiUsageLedger _ledger = A.Fake<IAiUsageLedger>();
     private static DateTimeOffset Now { get; } = DateTimeOffset.UnixEpoch.AddYears(56);
 
@@ -59,8 +60,10 @@ public class TriggerEvaluationServiceTests
 
     // Every existing test defaults to an INERT governor (a bare GovernorOptions has DailyBudgetUsd null => no cap),
     // so behaviour is byte-for-byte unchanged from before gh#448. The gh#448 cases pass a configured GovernorOptions.
-    private TriggerEvaluationService Service(IAiUsageLedger? ledger = null, GovernorOptions? governor = null) => new(
-        Context(), Options, _indicators, _notifications, _reviewer, ledger ?? _ledger, new AiSpendGovernor(),
+    private TriggerEvaluationService Service(
+        IAiUsageLedger? ledger = null, GovernorOptions? governor = null, IReviewEnrichmentSource? enrichment = null) => new(
+        Context(), Options, _indicators, _notifications, _reviewer, enrichment ?? _enrichment, ledger ?? _ledger,
+        new AiSpendGovernor(),
         Microsoft.Extensions.Options.Options.Create(governor ?? new GovernorOptions()),
         NullLogger<TriggerEvaluationService>.Instance);
 
@@ -833,7 +836,7 @@ public class TriggerEvaluationServiceTests
         ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
 
         TriggerEvaluationService service = new ThrowingReadService(
-            Context(), Options, _indicators, _notifications, _reviewer, _ledger, new AiSpendGovernor(),
+            Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, new AiSpendGovernor(),
             Microsoft.Extensions.Options.Options.Create(new GovernorOptions { DailyBudgetUsd = 10m }),
             NullLogger<TriggerEvaluationService>.Instance);
 
@@ -980,6 +983,81 @@ public class TriggerEvaluationServiceTests
             .MustHaveHappenedOnceExactly();
     }
 
+    // =====================================================================================================
+    // DEEP-TIER ENRICHMENT (gh#476): the scan assembles the numeric market context AS OF the fire and attaches it to
+    // the review context BEFORE waking the reviewer -- fail-open, and skipped entirely when the budget short-circuits.
+    // =====================================================================================================
+
+    // The scan builds enrichment for the fired trigger (as of the fire) and hands the reviewer the ENRICHED context.
+    [Fact]
+    public async Task ScanAsync_ShouldEnrichTheReviewContext_WhenAnAgentReviewFires()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+
+        ReviewEnrichment enrichment = new(
+            [new BarSnapshot(Now.AddMinutes(-1), 100m, 101m, 99m, 100.5m, 1234)],
+            [new IndicatorValueSnapshot(Now.AddMinutes(-1), 28m)]);
+        A.CallTo(() => _enrichment.BuildAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).Returns(enrichment);
+
+        TriggerReviewContext? captured = null;
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
+            .Invokes((TriggerReviewContext c, CancellationToken _) => captured = c)
+            .Returns(new AgentReview(new ReviewOutcome.Suppress(SuppressReason.NotWorthSurfacing, "x"), []));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        // The enricher was asked for THIS trigger's context, as of the fire -- and its result rode onto the context the
+        // reviewer then saw (the deep tier reads it; a triage-only reviewer simply ignores it).
+        A.CallTo(() => _enrichment.BuildAsync(
+                A<TriggerReviewContext>.That.Matches(c => c.TriggerId == id && c.FiredAt == Now), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        captured.Should().NotBeNull();
+        captured!.Enrichment.Should().BeSameAs(enrichment);
+    }
+
+    // FAIL-OPEN: an enrichment read fault must NOT abort the fire -- the reviewer still runs, on an UN-enriched context.
+    [Fact]
+    public async Task ScanAsync_ShouldReviewUnEnriched_WhenTheEnrichmentSourceThrows()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        A.CallTo(() => _enrichment.BuildAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("enrichment DB fault"));
+
+        TriggerReviewContext? captured = null;
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
+            .Invokes((TriggerReviewContext c, CancellationToken _) => captured = c)
+            .Returns(new AgentReview(new ReviewOutcome.Suppress(SuppressReason.NotWorthSurfacing, "x"), []));
+
+        Func<Task> act = () => Service().ScanAsync(Now, CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        captured.Should().NotBeNull();
+        captured!.Enrichment.Should().BeNull();                                                    // un-enriched, not a lost fire
+        (await Context().TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();        // a fire is still a fire
+    }
+
+    // The budget short-circuit is BEFORE enrichment: a blocked fire wakes neither the reviewer nor the enricher (no
+    // wasted read to assemble context for a call that will never happen).
+    [Fact]
+    public async Task ScanAsync_ShouldNotEnrich_WhenTheBudgetBlocksTheReview()
+    {
+        await SeedUsageAsync(_operator, 100m, Now); // 100 spent against a 10 budget -> blocked before the reviewer
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be")); // must never be reached
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _enrichment.BuildAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
     /// <summary>
     /// The scan with its platform-wide spend read forced to FAULT — proves the governor is FAIL-OPEN: a spend-read
     /// blip lets the pass run un-gated (the reviewer still wakes), the deliberate INVERSE of the fail-closed risk gate.
@@ -994,11 +1072,12 @@ public class TriggerEvaluationServiceTests
             IIndicatorSource indicators,
             INotificationChannel notifications,
             ITriggerReviewer reviewer,
+            IReviewEnrichmentSource enrichmentSource,
             IAiUsageLedger ledger,
             IAiSpendGovernor governor,
             IOptions<GovernorOptions> governorOptions,
             ILogger<TriggerEvaluationService> logger)
-            : base(discovery, options, indicators, notifications, reviewer, ledger, governor, governorOptions, logger)
+            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, governor, governorOptions, logger)
         {
         }
 

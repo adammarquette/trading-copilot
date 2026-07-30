@@ -80,6 +80,29 @@ public class AiRegistrationTests
             + "scope validation at startup");
     }
 
+    [Fact]
+    public void AddTradingCopilotAi_ShouldRegisterTheEnrichmentSourceNoLongerLivedThanItsDbContext()
+    {
+        // The deep-tier enrichment source injects the scoped TradingCopilotDbContext (gh#476). A Singleton capturing it
+        // would be a CAPTIVE DEPENDENCY failing ValidateScopes / ValidateOnBuild in Development -- the very trap the
+        // ledger registration hit (gh#431). It must share the context's lifetime; asserted against the context's ACTUAL
+        // lifetime so it stays correct even if that registration changes.
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddTradingCopilotData("Host=localhost;Database=x;Username=u;Password=p");
+        services.AddTradingCopilotAi(new ConfigurationBuilder().Build());
+
+        ServiceLifetime contextLifetime = services
+            .Single(descriptor => descriptor.ServiceType == typeof(TradingCopilotDbContext)).Lifetime;
+        ServiceLifetime enricherLifetime = services
+            .Single(descriptor => descriptor.ServiceType == typeof(IReviewEnrichmentSource)).Lifetime;
+
+        enricherLifetime.Should().Be(
+            contextLifetime,
+            "an enricher out-living the scoped DbContext it injects is a captive dependency that fails scope validation "
+            + "at startup");
+    }
+
     private static ServiceProvider Build(string? apiKey)
     {
         Dictionary<string, string?> settings = new();
