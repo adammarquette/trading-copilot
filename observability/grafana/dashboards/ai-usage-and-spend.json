@@ -1,0 +1,219 @@
+{
+  "uid": "tc-ai-spend",
+  "title": "AI usage & spend",
+  "description": "The operational running-cost view for AI (gh#412, ADR-0008, ADR-0002). Spend is the operator's own (ADR-0015) — this is the Grafana half; the in-app cost-per-suggestion surface is a separate Phase-4 client concern. Fed by the LLM meter (gh#477, ai_llm_*) and the embedding meter (gh#403, ai_embed_*), both on the MarqSpec.TradingCopilot.Ai meter. NOTE the cost series are named *_cost_usd_USD_total: the collector appends the instrument's 'USD' unit verbatim (verified against a live Prometheus, not assumed) — see gh#505.",
+  "tags": ["trading-copilot", "ai", "cost"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-24h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "budget",
+        "label": "Daily budget (USD)",
+        "type": "constant",
+        "hide": 0,
+        "query": "10",
+        "current": { "text": "10", "value": "10" },
+        "description": "The operator's Governor__DailyBudgetUsd, mirrored here so headroom can be drawn. Prometheus cannot see application config, so this is a manual mirror — keep it in step with the deployed value (gh#506 proposes emitting the cap as a gauge so it cannot drift)."
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total AI spend (24h)",
+      "description": "LLM + embeddings. The number the daily budget is set against (ADR-0008's governor caps deployment-wide daily spend).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(ai_llm_cost_usd_USD_total[24h])) + sum(increase(ai_embed_cost_usd_USD_total[24h]))",
+          "instant": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4, "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "gauge",
+      "title": "Governor headroom — % of daily budget",
+      "description": "Spend against the configured cap, so approaching the ceiling is visible BEFORE the governor pauses agent review. The governor itself enforces on the AIUsage ledger floor, not on this metric (a meter is export-only) — this is the operator's warning light, not the control.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * (sum(increase(ai_llm_cost_usd_USD_total[24h])) + sum(increase(ai_embed_cost_usd_USD_total[24h]))) / $budget",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "LLM calls (24h)",
+      "description": "Every billed call, whatever its outcome. An escalated agent review (gh#449) counts twice — triage plus deep.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "sum(increase(ai_llm_calls_total[24h]))", "instant": true }],
+      "fieldConfig": { "defaults": { "min": 0, "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Total AI spend (30d)",
+      "description": "The monthly rollup — the cadence a running cost is actually judged on.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(ai_llm_cost_usd_USD_total[30d])) + sum(increase(ai_embed_cost_usd_USD_total[30d]))",
+          "instant": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4, "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Spend by model tier — is tiering actually saving anything?",
+      "description": "ADR-0008 bets that cheap triage plus selective escalation costs far less than running the top model everywhere. This panel is that bet, measured: if the deep tier dominates, the escalation policy (gh#449) needs tuning.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tier) (increase(ai_llm_cost_usd_USD_total[1h]))",
+          "legendFormat": "{{tier}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "min": 0,
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Spend by source — LLM vs embeddings",
+      "description": "The two spend halves side by side. Until gh#507 adds a feature tag to the LLM meter, this llm/embed split IS the feature axis — every LLM row is currently Feature=Triage (gh#449), so a finer breakdown would be a constant.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(ai_llm_cost_usd_USD_total[1h]))", "legendFormat": "llm" },
+        { "refId": "B", "expr": "sum(increase(ai_embed_cost_usd_USD_total[1h]))", "legendFormat": "embeddings" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "min": 0,
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "barchart",
+      "title": "LLM calls by outcome (24h)",
+      "description": "Spend outcome is orthogonal to review outcome: a call the reviewer then suppressed still cost tokens. A Failed row is a real zero-token datapoint (billable latency), so a degrade shows up here rather than as an absence.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(ai_llm_calls_total[24h]))",
+          "legendFormat": "{{outcome}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Tokens — in vs out, by tier",
+      "description": "Input dominates on an enriched deep call (gh#476 attaches bars + indicator history); output is bounded by MaxOutputTokens. A sudden input climb is the enrichment window growing.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tier) (increase(ai_llm_input_tokens_total[1h]))",
+          "legendFormat": "in — {{tier}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (tier) (increase(ai_llm_output_tokens_total[1h]))",
+          "legendFormat": "out — {{tier}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Embedding spend by outcome",
+      "description": "A rate-limited or failed embed is metered at zero cost but still counts as a call (gh#403), so a degrade to sparse retrieval is visible here.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(ai_embed_calls_total[1h]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "LLM call latency — p95 / p99",
+      "description": "The agent-review route is off the execution hot path, but a slow deep call delays a suggestion. Exemplars pivot a spike to its trace (ADR-0002; the mechanism gh#338 fixed).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 22 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, tier) (rate(ai_llm_latency_milliseconds_bucket[5m])))",
+          "legendFormat": "p95 — {{tier}}",
+          "exemplar": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, tier) (rate(ai_llm_latency_milliseconds_bucket[5m])))",
+          "legendFormat": "p99 — {{tier}}",
+          "exemplar": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms", "min": 0 }, "overrides": [] }
+    }
+  ]
+}
