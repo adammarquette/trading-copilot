@@ -30,6 +30,7 @@ public class FailureTolerantExecutionMetricsTests
         metrics.SetOrphanedStops(3);
         metrics.RecordRetentionGap("stop-promotion");
         metrics.RecordPipelineLag("stop-promotion", TimeSpan.FromMilliseconds(20));
+        metrics.RecordBackfillShortfall("CON.F.US.MES.U26", TimeSpan.FromMinutes(40));
     }
 
     private void MakeInnerThrow()
@@ -58,7 +59,7 @@ public class FailureTolerantExecutionMetricsTests
 
         InvokeEveryMeasurement(Sut);
 
-        _logger.Entries.Should().HaveCount(8, "every absorbed measurement fault is surfaced");
+        _logger.Entries.Should().HaveCount(9, "every absorbed measurement fault is surfaced");
         _logger.Entries.Should().OnlyContain(entry => entry.Level == LogLevel.Error);
     }
 

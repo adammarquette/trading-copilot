@@ -6,6 +6,7 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.MarketData;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -62,7 +63,12 @@ public class GapBackfillServiceTests
             new StopPromotionService(
                 context, _indicators, Options.Create(new IndicatorOptions()),
                 NullLogger<StopPromotionService>.Instance),
+            _metrics,
             NullLogger<GapBackfillService>.Instance);
+
+    // gh#482: a shortfall has to reach a RULE, not just a log line. Faked so the emission is asserted rather than
+    // inferred -- the whole defect was that nobody could see this from outside the process.
+    private readonly IExecutionMetrics _metrics = A.Fake<IExecutionMetrics>();
 
     private TradingCopilotDbContext Seed() =>
         new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
@@ -277,6 +283,44 @@ public class GapBackfillServiceTests
         outcome.Shortfalls.Should().ContainSingle()
             .Which.Coverage.Shortfall.Should().Be(TimeSpan.FromMinutes(40));
     }
+
+    // --- The shortfall has to reach a rule, not a log (gh#482, ADR-0019) ---
+
+    [Fact]
+    public async Task ReplayForStopPromotionAsync_ShouldMeterTheUncoveredDuration_WhenTheStoreCannotCoverTheWindow()
+    {
+        // Until gh#482 the shortfall existed only as a log line, and the alert rule for the blind window told the
+        // operator to "check the logs for a reported shortfall" -- sending someone who has just been woken somewhere
+        // else to find out what actually happened. A metric is what a rule can evaluate.
+        await SeedHiddenStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        await SeedBarsAsync(high: 5_310m, low: 5_296m, minutes: 20); // 20 of the 60 minutes
+        await using TradingCopilotDbContext context = Context();
+
+        await Service(context).ReplayForStopPromotionAsync(From, To, Venue, _venue, CancellationToken.None);
+
+        A.CallTo(() => _metrics.RecordBackfillShortfall(ContractKey, TimeSpan.FromMinutes(40)))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ReplayForStopPromotionAsync_ShouldMeterNothing_WhenTheWindowIsFullyCovered()
+    {
+        // ADR-0019 §4: a rule that fires on a clean session is a defect in the rule. A complete recovery must emit
+        // nothing at all, or the alert becomes noise the operator learns to mute.
+        await SeedHiddenStopAsync(OrderSide.Buy, actualStop: 5_295m);
+        await SeedBarsAsync(high: 5_310m, low: 5_296m); // the whole window
+        await using TradingCopilotDbContext context = Context();
+
+        GapBackfillOutcome outcome = await Service(context)
+            .ReplayForStopPromotionAsync(From, To, Venue, _venue, CancellationToken.None);
+
+        outcome.IsComplete.Should().BeTrue("the premise of this test");
+        A.CallTo(() => _metrics.RecordBackfillShortfall(A<string>._, A<TimeSpan>._)).MustNotHaveHappened();
+    }
+
+    // Failure tolerance is NOT asserted here: it belongs to FailureTolerantExecutionMetrics, the decorator every
+    // production resolution goes through, and its suite covers this member. Wrapping the call site too would
+    // duplicate the guarantee and diverge from every other measurement in the codebase (gh#232).
 
     // --- Conditional firing: the consumer that deliberately does NOT recover ---
 

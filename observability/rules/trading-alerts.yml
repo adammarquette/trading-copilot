@@ -209,7 +209,27 @@ groups:
           summary: "Consumer {{ $labels.consumer_group }} fell behind the event-log retention window"
           description: >-
             Its cursor dropped off the back of the 24h window. gh#306 backfills the blind window from the
-            clean-historical store where it can; check the logs for a reported shortfall.
+            clean-historical store where it can. If any of it could NOT be covered, BackfillShortfall fires
+            alongside this with the contract and the uncovered duration — this alert alone does not mean data
+            was lost.
+
+      - alert: BackfillShortfall
+        # gh#482. The recovery in gh#306 is best-effort, and until now its FAILURE reached nobody: the shortfall
+        # was a log line, and the alert above told the operator to go and read it. The `_count` of the histogram
+        # is the "did it happen" signal; the distribution carries how bad. Emitted ONLY on a shortfall, so a clean
+        # recovery cannot fire this (ADR-0019 §4).
+        expr: increase(trading_stops_backfill_shortfall_milliseconds_count[15m]) > 0
+        labels:
+          priority: P2
+          component: execution
+        annotations:
+          summary: "Blind-window recovery could not cover {{ $labels.contract }} — hidden stops may be unprotected"
+          description: >-
+            The clean-historical store had no bars for part of the window the consumer was blind for, so hidden
+            stops on this contract may have crossed their promotion band unobserved and were NOT promoted. The
+            native safety stop is the only floor on them until the next quote re-evaluates. Check open positions
+            on this contract before the session close.
+          runbook: "documentation/deployment-runbook.md#backfill-shortfall"
 
       - alert: TimeToFlatSlow
         # ADR-0019's p95 > 60s. Not yet a failure — a warning that the margin is being eaten.
