@@ -46,6 +46,13 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
 {
     private const int MaxOutputTokens = 1024;
 
+    // A CONSERVATIVE (deliberately high) input-token count for the deep call's cost estimate (gh#478). The enriched
+    // deep prompt is bounded by construction -- the base render + the gh#476 market-context block (<=20 bars + <=20
+    // indicator values, all numeric) + the deep system prompt -- so a real deep input runs a few hundred tokens; 2048
+    // overestimates it. Overestimating is the safe direction for an affordability gate: it skips escalation slightly
+    // early rather than letting a deep call overrun the budget. Paired with MaxOutputTokens at the Deep rate.
+    private const int ConservativeDeepInputTokens = 2048;
+
     // The structured answer the TRIAGE model is asked for. `additionalProperties: false` keeps it within Anthropic's
     // structured-output contract (A2, gh#423) so the provider will accept it as an output_config format. The reviewer
     // -- not the schema -- remains the enforcer: the provider is not guaranteed to honour the constraint, so the
@@ -126,7 +133,12 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
     }
 
     /// <inheritdoc />
-    public async Task<AgentReview> ReviewAsync(TriggerReviewContext context, CancellationToken cancellationToken)
+    public decimal EstimatedDeepCallCostUsd =>
+        _options.EstimateCost(LlmModelTier.Deep, ConservativeDeepInputTokens, MaxOutputTokens);
+
+    /// <inheritdoc />
+    public async Task<AgentReview> ReviewAsync(
+        TriggerReviewContext context, CancellationToken cancellationToken, bool allowEscalate = true)
     {
         ArgumentNullException.ThrowIfNull(context);
 
@@ -147,6 +159,21 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
         {
             // Terminal at the triage tier: a suggest, a suppress, or a fail-closed suppress -- no deep call.
             return new AgentReview(mapping.Outcome!, costs);
+        }
+
+        if (!allowEscalate)
+        {
+            // BUDGET-AWARE SKIP (gh#478): the triage deferred, but the caller (the scan, which holds the budget) did not
+            // permit the expensive deep call -- the partial-budget case where triage fit but a triage->deep PAIR would
+            // not. Skip the deep call and suppress with the neutral EscalationDeclined reason; only the triage cost is
+            // recorded (the deep call never happened). The reviewer stays pure of the budget: it acted on a plain bit.
+            _logger.LogInformation(
+                "Trigger {TriggerId} triage escalated but escalation was not permitted; skipping the deep tier.",
+                context.TriggerId);
+            return new AgentReview(
+                new ReviewOutcome.Suppress(
+                    SuppressReason.EscalationDeclined, "triage deferred to the deep tier but escalation was not permitted"),
+                costs);
         }
 
         // ESCALATION (gh#449): the triage tier deferred a genuinely-hard setup. Make ONE deep-tier call for a final

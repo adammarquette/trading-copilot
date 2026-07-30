@@ -73,11 +73,11 @@ public class TriggerEvaluationServiceTests
     // (which passes only an outcome) is behaviour-unchanged -- still exactly one billed triage call. An escalated fire
     // is modelled by passing TWO costs (triage + deep).
     private void ReviewerReturns(ReviewOutcome outcome, params AiCallCost[] costs) =>
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._))
             .Returns(new AgentReview(outcome, costs.Length == 0 ? [_sampleCost] : costs));
 
     private void ReviewerThrows(Exception error) =>
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).Throws(error);
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).Throws(error);
 
     private async Task<Guid> SeedAccountAsync(Guid? owner = null, TradingMode mode = TradingMode.Practice)
     {
@@ -455,7 +455,7 @@ public class TriggerEvaluationServiceTests
         await Service().ScanAsync(Now, CancellationToken.None);
         await Service().ScanAsync(Now, CancellationToken.None);
 
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
         (await Context().Suggestions.CountAsync()).Should().Be(1); // no duplicate on the debounced passes
     }
 
@@ -549,7 +549,7 @@ public class TriggerEvaluationServiceTests
         // A second pass must NOT re-review or duplicate -- re-arming on a failed notify would do exactly that.
         await Service().ScanAsync(Now, CancellationToken.None);
         (await Context().Suggestions.CountAsync()).Should().Be(1);
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
     }
 
     // (i) A THROWING reviewer must still debounce: the seam admits a provider-backed reviewer that throws on a
@@ -577,7 +577,7 @@ public class TriggerEvaluationServiceTests
 
         // The debounce holds across passes: a persistently-throwing reviewer is asked exactly once per arming edge.
         await Service().ScanAsync(Now, CancellationToken.None);
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
     }
 
     // (j) A reviewer throw must NOT starve a co-owner's mechanical alert -- the throw is contained, not propagated.
@@ -660,7 +660,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._))
             .Returns(new AgentReview(
                 new ReviewOutcome.Suppress(SuppressReason.NoReviewerConfigured, "no LLM reviewer is configured"), Costs: []));
 
@@ -784,7 +784,7 @@ public class TriggerEvaluationServiceTests
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustNotHaveHappened();
         A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustNotHaveHappened();
 
         await using TradingCopilotDbContext reload = Context();
@@ -809,7 +809,7 @@ public class TriggerEvaluationServiceTests
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
         await using TradingCopilotDbContext reload = Context();
         (await reload.Suggestions.CountAsync()).Should().Be(1);
         (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
@@ -826,10 +826,94 @@ public class TriggerEvaluationServiceTests
 
         await Service().ScanAsync(Now, CancellationToken.None); // default GovernorOptions => DailyBudgetUsd null => inert
 
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
         A.CallTo(() => _notifications.SendAsync(
                 A<Notification>.That.Matches(n => n.DedupKey.StartsWith("ai-spend:threshold:")), A<CancellationToken>._))
             .MustNotHaveHappened();
+    }
+
+    // =====================================================================================================
+    // BUDGET-AWARE ESCALATION SKIP (gh#478): the pass-level governor caps WHETHER the review runs; this caps whether the
+    // cheap triage may escalate to the expensive DEEP tier. The scan holds the tally + the budget, so it decides
+    // affordability (spent + the reviewer's conservative deep-call estimate <= budget) and passes the reviewer a plain
+    // permission bit -- never the budget (the gh#449 purity constraint). These assert the scan computes + threads the bit.
+    // =====================================================================================================
+
+    // AFFORDABLE: spend leaves room for a full triage->deep pair, so escalation is permitted (allowEscalate == true).
+    [Fact]
+    public async Task ScanAsync_ShouldPermitEscalation_WhenADeepCallStillFitsTheBudget()
+    {
+        await SeedUsageAsync(_operator, 5m, Now); // 5 spent of a 10 budget -> not blocked, and 5 + 2 <= 10
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        A.CallTo(() => _reviewer.EstimatedDeepCallCostUsd).Returns(2m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, true))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    // UNAFFORDABLE: the cheap triage still fits (so the review runs), but a triage->deep PAIR would overrun -- the
+    // partial-budget case. Escalation is refused (allowEscalate == false), holding the pair-overrun ADR-0008 named.
+    [Fact]
+    public async Task ScanAsync_ShouldRefuseEscalation_WhenADeepCallWouldOverrunTheBudget()
+    {
+        await SeedUsageAsync(_operator, 9m, Now); // 9 spent of a 10 budget -> NOT blocked (triage fits), but 9 + 2 > 10
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        A.CallTo(() => _reviewer.EstimatedDeepCallCostUsd).Returns(2m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        // The reviewer WAS called (triage is affordable) -- but with escalation refused.
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, false))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, true))
+            .MustNotHaveHappened();
+    }
+
+    // INERT GOVERNOR: no budget configured -> un-gated, so escalation is permitted exactly as before gh#478.
+    [Fact]
+    public async Task ScanAsync_ShouldPermitEscalation_WhenNoBudgetIsConfigured()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        A.CallTo(() => _reviewer.EstimatedDeepCallCostUsd).Returns(999m); // irrelevant with no budget -> still allowed
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+
+        await Service().ScanAsync(Now, CancellationToken.None); // default GovernorOptions => inert
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, true))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    // The operator is TOLD when a hard setup couldn't get its deeper look: EscalationDeclined -> a budget-framed advisory.
+    [Fact]
+    public async Task ScanAsync_ShouldAdviseTheOperator_WhenTheReviewerReportsEscalationDeclined()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suppress(SuppressReason.EscalationDeclined, "escalation not permitted"));
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        // Fail-closed but not silent: a Notify advisory naming the budget, and the fire still journals + debounces.
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n =>
+                    n.Severity == NotificationSeverity.Notify && n.Body.Contains("deeper look")),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.AnyAsync()).Should().BeFalse();
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
     }
 
     // (d) EMPTY WINDOW -> 0 -> allow: with no usage rows, the read yields 0 and the pass fires normally. NOTE: this
@@ -848,7 +932,7 @@ public class TriggerEvaluationServiceTests
         int fires = await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
         fires.Should().Be(1);
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
     }
 
     // (e) FAIL-OPEN on read fault: a faulting spend read must let the pass run UN-GATED (the reviewer still wakes) and
@@ -871,7 +955,7 @@ public class TriggerEvaluationServiceTests
         // INVERSE of the fail-closed risk gate: a spend-read blip must NOT pause agent review and must NOT abort the
         // pass (which would also kill the co-located mechanical route). DO NOT "fix" this to fail-closed by analogy.
         await act.Should().NotThrowAsync();
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
     }
 
     // (f) PLATFORM-WIDE SUM crosses R-20: three owners each spend 4 (sum 12 > budget 10) -- the operator, an unrelated
@@ -891,7 +975,7 @@ public class TriggerEvaluationServiceTests
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustNotHaveHappened();
         (await Context().Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
     }
 
@@ -913,7 +997,7 @@ public class TriggerEvaluationServiceTests
         await Service(ledger: realLedger, governor: new GovernorOptions { DailyBudgetUsd = _sampleCost.EstimatedCostUsd })
             .ScanAsync(Now, CancellationToken.None);
 
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
         (await Context().AiUsage.CountAsync()).Should().Be(1); // only the first (allowed) fire wrote a spend row
     }
 
@@ -943,7 +1027,7 @@ public class TriggerEvaluationServiceTests
         await Service(ledger: realLedger, governor: new GovernorOptions { DailyBudgetUsd = budget })
             .ScanAsync(Now, CancellationToken.None);
 
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
         (await Context().AiUsage.CountAsync()).Should().Be(2); // both spend rows from the single authorized fire
     }
 
@@ -961,7 +1045,7 @@ public class TriggerEvaluationServiceTests
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustNotHaveHappened();
         A.CallTo(() => _notifications.SendAsync(
                 A<Notification>.That.Matches(n => n.DedupKey == $"trigger:{mechanicalId}:0"), A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
@@ -982,7 +1066,7 @@ public class TriggerEvaluationServiceTests
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m, AlertThresholdFraction = 0.8m })
             .ScanAsync(Now, CancellationToken.None);
 
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
         A.CallTo(() => _notifications.SendAsync(
                 A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Notify && n.DedupKey.StartsWith("ai-spend:threshold:")),
                 A<CancellationToken>._))
@@ -1028,8 +1112,8 @@ public class TriggerEvaluationServiceTests
         A.CallTo(() => _enrichment.BuildAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).Returns(enrichment);
 
         TriggerReviewContext? captured = null;
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
-            .Invokes((TriggerReviewContext c, CancellationToken _) => captured = c)
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._))
+            .Invokes((TriggerReviewContext c, CancellationToken _, bool _) => captured = c)
             .Returns(new AgentReview(new ReviewOutcome.Suppress(SuppressReason.NotWorthSurfacing, "x"), []));
 
         await Service().ScanAsync(Now, CancellationToken.None);
@@ -1054,14 +1138,14 @@ public class TriggerEvaluationServiceTests
             .Throws(new InvalidOperationException("enrichment DB fault"));
 
         TriggerReviewContext? captured = null;
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
-            .Invokes((TriggerReviewContext c, CancellationToken _) => captured = c)
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._))
+            .Invokes((TriggerReviewContext c, CancellationToken _, bool _) => captured = c)
             .Returns(new AgentReview(new ReviewOutcome.Suppress(SuppressReason.NotWorthSurfacing, "x"), []));
 
         Func<Task> act = () => Service().ScanAsync(Now, CancellationToken.None);
 
         await act.Should().NotThrowAsync();
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
         captured.Should().NotBeNull();
         captured!.Enrichment.Should().BeNull();                                                    // un-enriched, not a lost fire
         (await Context().TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();        // a fire is still a fire
@@ -1080,7 +1164,7 @@ public class TriggerEvaluationServiceTests
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
-        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustNotHaveHappened();
         A.CallTo(() => _enrichment.BuildAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 

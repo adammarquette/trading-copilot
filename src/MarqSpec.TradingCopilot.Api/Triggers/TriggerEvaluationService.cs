@@ -468,6 +468,16 @@ public class TriggerEvaluationService
             // call, if it happens, uses the base render) -- enrichment adds context, it must never cost a fire.
             context = context with { Enrichment = await BuildEnrichmentAsync(context, cancellationToken) };
 
+            // BUDGET-AWARE ESCALATION SKIP (gh#478): the pass-level governor above only caps WHETHER the review runs at
+            // all; this caps whether the cheap triage may escalate to the expensive DEEP tier. Cheap triage fits the
+            // remaining budget (we are past the IsBlocked check), but a full triage->deep PAIR might not -- the
+            // partial-budget overrun ADR-0008 named. So decide affordability HERE (the scan holds the tally + the
+            // budget) and pass the reviewer only a plain permission bit, keeping it pure of the governor (gh#449). The
+            // reviewer reports its own conservative deep-call cost; we never tell it the budget. Null governor (inert or
+            // a fail-open spend read) => un-gated, escalation allowed, exactly as before gh#478.
+            bool allowEscalate = governorPass is null
+                || governorPass.SpentUsd + _reviewer.EstimatedDeepCallCostUsd <= governorPass.Budget.DailyBudgetUsd;
+
             // The reviewer seam is fail-closed BY CONTRACT (LlmTriggerReviewer maps every unusable output to a
             // Suppress), but the seam admits any ITriggerReviewer -- a future provider-backed one can THROW on a
             // transient fault. A throw must debounce like every other outcome (one review attempt per arming edge, the
@@ -475,7 +485,7 @@ public class TriggerEvaluationService
             // and re-review every pass (unbounded LLM cost) AND roll back a co-owner's already-sent mechanical fire.
             try
             {
-                review = await _reviewer.ReviewAsync(context, cancellationToken);
+                review = await _reviewer.ReviewAsync(context, cancellationToken, allowEscalate);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -569,6 +579,20 @@ public class TriggerEvaluationService
                     NotificationSeverity.Notify,
                     $"Setup needs review — {TitleFor(trigger)}",
                     "A setup fired but agent review is paused: the daily AI-spend budget is reached. Review it manually.",
+                    dedupKey));
+                break;
+
+            case ReviewOutcome.Suppress { Reason: SuppressReason.EscalationDeclined }:
+                // BUDGET-AWARE ESCALATION SKIP (gh#478): triage reviewed the setup and judged it hard enough to want the
+                // deep tier, but the remaining budget could not afford the deeper look, so it was withheld. Fail-closed
+                // but NOT silent -- the operator is told a setup fired that a quick pass flagged for deeper analysis it
+                // could not get, and should review manually. The scan is the one that knows the reason is BUDGET (the
+                // reviewer only got a neutral bit), so the budget framing is set here. One advisory per arming edge.
+                advisories.Add(new Notification(
+                    NotificationSeverity.Notify,
+                    $"Setup needs review — {TitleFor(trigger)}",
+                    "A setup fired and a quick review flagged it for deeper analysis, but the daily AI-spend budget "
+                    + "could not afford the deeper look. Review it manually.",
                     dedupKey));
                 break;
 
