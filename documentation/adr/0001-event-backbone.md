@@ -211,6 +211,14 @@ unemitted metrics, gh#306's declared-unknown), so the absence is **declared**: t
 naming the consequence, and `IEmbeddingProvider.IsAvailable` reports false so retrieval **refuses** rather than
 returning an empty result set that reads as *"nothing is relevant"*.
 
+**The `IsAvailable` half was aspirational until gh#474** — this paragraph described it, and the provider did not do
+it. `CohereEmbeddingProvider.IsAvailable` returned true on a configured key alone, so a deployment with a key and
+no extension passed the gate: gh#377's pass embedded through Cohere on **every poll** (real spend on the operator's
+own key) and faulted at the upsert every time — logged, harmless to trading, and never self-healing. Availability
+now means the **whole round trip**: a key to make the call *and* somewhere to put what comes back, probed once at
+startup (`VectorStore`, recorded by `StartupTasks` after the migration that would have installed the extension) and
+defaulting to **absent**, so a caller racing the probe declines rather than spends.
+
 Verified against both: applied to `timescale/timescaledb-ha:pg17` (table + HNSW index created) and to plain
 `postgres:17` (table skipped, **the other 24 tables created normally**, migration succeeded).
 
