@@ -173,14 +173,14 @@ in-process**, and covers **embeddings only** today. So the governor enforces on 
 platform-wide `IgnoreQueryFilters` window-sum across every owner + the `SystemOwner` embed rows — the only
 app-queryable spend signal), and **reconciliation is operator-facing in Grafana**, not an in-app read; until an
 LLM-side meter lands, that Grafana view shows embeddings only, so LLM-spend is reconciled by reading the ledger
-directly. Because the floor can only *under*-count (a row is lost only if the host dies between the call and its
+directly *(the LLM-side meter **landed** in gh#477 below — that Grafana view now covers both halves)*. Because the floor can only *under*-count (a row is lost only if the host dies between the call and its
 own-context write), the **effective cap is the budget plus at most one in-flight call's un-recorded spend** — it
 fails toward *allow* (never a spurious block), so the operator sets `DailyBudgetUsd` with a little headroom.
 **Fail-closed on the cap** (the point); **fail-open on an unavailable spend signal** (a read fault logs and runs the
 pass un-gated) — the deliberate *inverse* of the fail-closed trade-safety gate, because this guards a soft-dollar
 budget, not capital-at-risk, and must never be conflated with it. **Hard-cap only** for now (ADR-0008's "cap *or*
-throttle" — throttle deferred). Still open: an **LLM-side meter** so Grafana shows true LLM spend (a gh#403 sibling;
-it would still not be in-process readable, so it does not change the governor's read), **Prometheus-based
+throttle" — throttle deferred). Still open: ~~an **LLM-side meter** so Grafana shows true LLM spend~~ *(landed, gh#477
+— and as predicted it did **not** change the governor's read, which is still the ledger floor)*, **Prometheus-based
 reconciliation** and a **runtime-editable** budget.
 
 **Update (2026-07-30, gh#377) — the live embed producer + call-site gating landed.** `NewsEmbeddingService` (the
@@ -220,8 +220,8 @@ the **information** — the deep call reuses the same `TriggerReviewContext`, so
 follow-up** *(landed gh#476, below)* (it also widens the prompt-injection surface), and until it lands the deep tier may
 re-derive the triage answer at higher cost; the prompt says escalate *sparingly* and an escalation is logged for
 operability. Still open: per-call budget-aware escalation skip, an escalation-rate metric + a when-to-escalate eval
-suite, activating `AiUsageFeature.Suggestion` for the deep row, an LLM-side meter, a runtime-editable budget, and
-throttle.
+suite, activating `AiUsageFeature.Suggestion` for the deep row, ~~an LLM-side meter~~ *(landed, gh#477)*, a
+runtime-editable budget, and throttle.
 
 **Update (2026-07-29, gh#470) — confirm-before-live: the LLM is out of the hot loop of the _rule_, not only the firing.**
 "The LLM is never in the continuous hot loop" was already true of *firing* (the deterministic scan fires; the reviewer
@@ -274,8 +274,22 @@ decisions, each keeping the ADR's principles intact:
   (no wasted read before a call that will not happen).
 - **No schema / migration / `.env` / compose change** — it reads existing projections. Purely a read + render + wiring
   change. Still open (unchanged from gh#449, minus this item): per-call budget-aware escalation skip, an escalation-rate
-  metric + when-to-escalate eval suite, `AiUsageFeature.Suggestion` for the deep row, an LLM-side meter, a
+  metric + when-to-escalate eval suite, `AiUsageFeature.Suggestion` for the deep row, a
   runtime-editable budget, throttle, and — the injection surface this defers — **news/free-text enrichment**.
+
+**Update (2026-07-30, gh#477) — the LLM-side meter landed; Grafana now sees true total AI spend.** The embed meter
+(gh#403) had no LLM counterpart, so Grafana showed embedding spend but **not** LLM spend — the gh#448 "reconcile in
+Grafana" note was partly vapor for the LLM path. Now a **`LlmMetrics`** (Api/Ai) emits `ai.llm.{calls, input_tokens,
+output_tokens, cost_usd, latency}` on the **same `MarqSpec.TradingCopilot.Ai` meter** as embeddings (so it exports with
+**no exporter change**), dimensioned by **model + tier + outcome** — all low-cardinality; the reviewed text is never a
+tag. It is fed the **same `AiCallCost`** the ledger gets, recorded in the scan's cost loop **alongside**
+`IAiUsageLedger.RecordAsync` (metered **first**, outside the ledger's fail-open try, since the two are independent
+sinks), so an **escalated fire meters two** calls (triage + deep) and a **`Failed` call is metered** at zero tokens (a
+degrade is visible, not an absence). A **required** dependency (the gh#403 posture — an unmetered call is invisible
+spend). **Crucially this is observability, not enforcement** (the gh#448 finding): a `System.Diagnostics.Metrics` meter
+is export-only / not app-readable, so the governor's read is **unchanged** — it still enforces on the persisted
+`AIUsage` ledger floor; this closes the **Grafana-visibility** gap only. Amends the gh#448/gh#449 "still open:
+LLM-side meter" notes above — **landed**.
 
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*
