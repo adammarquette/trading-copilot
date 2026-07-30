@@ -101,18 +101,19 @@ public abstract record ReviewOutcome
 }
 
 /// <summary>
-/// The result of one review (gh#431): the <see cref="ReviewOutcome"/> the route acts on, plus the
-/// <see cref="AiCallCost"/> of the LLM call it made — so the owner-scoped caller can ledger the spend (ADR-0008).
+/// The result of one review (gh#431, gh#449): the <see cref="ReviewOutcome"/> the route acts on, plus the
+/// <see cref="AiCallCost"/> of <b>each</b> LLM call it made — so the owner-scoped caller can ledger the spend (ADR-0008).
 /// </summary>
 /// <remarks>
-/// <see cref="Cost"/> is <see langword="null"/> when <b>no</b> call was made (the inert reviewer), and non-null for
-/// every real call — <b>including a failed one</b>, whose <see cref="AiCallCost.Outcome"/> is
-/// <see cref="AiUsageOutcome.Failed"/> with zero tokens, so the failure regime is not silently uncounted. The cost
-/// carries no owner: the owner is the caller's to stamp (it holds the tenancy authority, not the reviewer).
+/// <see cref="Costs"/> is <b>empty</b> when no call was made (the inert reviewer, a budget short-circuit, a reviewer
+/// that threw before calling); one entry for a single triage call; and <b>two</b> when the triage tier escalated to
+/// the deep tier (gh#449) — one row per billed call, in call order, <b>including a failed one</b> (zero tokens,
+/// <see cref="AiUsageOutcome.Failed"/>), so no spend regime is silently uncounted. The costs carry no owner: the owner
+/// is the caller's to stamp (it holds the tenancy authority, not the reviewer).
 /// </remarks>
 /// <param name="Outcome">What the route should do — suggest or suppress.</param>
-/// <param name="Cost">The cost of the LLM call, or <see langword="null"/> if none was made.</param>
-public sealed record AgentReview(ReviewOutcome Outcome, AiCallCost? Cost);
+/// <param name="Costs">The cost of each LLM call the review made, in call order; empty if none was made.</param>
+public sealed record AgentReview(ReviewOutcome Outcome, IReadOnlyList<AiCallCost> Costs);
 
 /// <summary>
 /// Reviews a fired trigger and returns a proposal or a suppression (ADR-0008) — the agent-review route's judgment

@@ -17,7 +17,7 @@ public sealed class NullTriggerReviewer : ITriggerReviewer
 {
     /// <inheritdoc />
     public Task<AgentReview> ReviewAsync(TriggerReviewContext context, CancellationToken cancellationToken) =>
-        // No LLM call is made, so no spend to ledger -- Cost is null.
+        // No LLM call is made, so no spend to ledger -- Costs is empty.
         Task.FromResult(new AgentReview(
-            new ReviewOutcome.Suppress(SuppressReason.NoReviewerConfigured, "no LLM reviewer is configured"), Cost: null));
+            new ReviewOutcome.Suppress(SuppressReason.NoReviewerConfigured, "no LLM reviewer is configured"), Costs: []));
 }

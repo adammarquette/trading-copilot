@@ -24,8 +24,8 @@ public class NullTriggerReviewerTests
         review.Outcome.Should().BeOfType<ReviewOutcome.Suppress>()
             .Which.Reason.Should().Be(SuppressReason.NoReviewerConfigured);
 
-        // No LLM call was made, so there is NO spend to ledger -- the inert reviewer's Cost is null (gh#431). This is
-        // the discriminator the scan reads to decide whether to record a usage row at all.
-        review.Cost.Should().BeNull();
+        // No LLM call was made, so there is NO spend to ledger -- the inert reviewer's Costs is EMPTY (gh#449). The
+        // scan records one usage row per cost, so an empty Costs is what makes it record nothing at all.
+        review.Costs.Should().BeEmpty();
     }
 }
