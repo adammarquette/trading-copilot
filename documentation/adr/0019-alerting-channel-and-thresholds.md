@@ -429,3 +429,34 @@ invites the reader to assume the worst tier.
 **Silent on a healthy recovery**, by construction: the emission loop runs over `Shortfalls`, which is empty when
 coverage is complete. §4's rule — a rule that pages on a clean session is a defect in the rule — is satisfied by
 the metric never existing rather than by a threshold chosen to hide it.
+
+## Update (2026-07-30) — an incident ends when the exposure does, whoever ended it (gh#497)
+
+The third and last instance of one bug: **suppression outliving the incident it describes.** gh#458 fixed it at the
+outbox (a delivered row held its dedup key forever); this fixes it at the layer below, and the shape is worth
+naming because it recurred twice.
+
+`DedupingNotificationChannel` re-arms a key only through `ResolveAsync`, and `AutoFlattenService` called that on
+exactly one path — `FlattenVerdict.Flat`, its **own** successful close. An escalation is by construction the path
+where the close did *not* succeed, so after any escalation the exposure gets ended by someone else: the operator by
+hand, or a prop firm's forced flatten. Neither re-armed anything. **Every subsequent escalation for that
+account+instrument was then suppressed as a stale duplicate** — silently, with no TTL and no eviction, for the life
+of the process. On a self-hosted daemon that is weeks, and whether tomorrow's page arrives depends on whether the
+host happened to restart.
+
+**The fix: being flat is the incident-over signal, whoever produced it.** A pass that observes an instrument with
+no open position resolves its incident key — both when the account is entirely flat, and when it still holds other
+positions but *this* instrument is clear (the partial case, which never reached the "nothing open" branch at all).
+No extra venue round trips: the flat path needs no contract resolution, and the partial path already has the
+product-root map.
+
+**Why the fix is at the producer and not in the channel.** Two occurrences of one key with no resolve between them
+are, at the channel, indistinguishable from a *continuing* incident — the flatten re-emits every ~15 s while
+exposure persists, and since gh#458 the outbox admits each of those, so the dedup channel is the only thing
+collapsing them. Releasing the key there on delivery would page ~120 times for one 30-minute exposure: §4's noise
+budget, destroyed. The channel's suppression is correct; what was missing was anyone telling it the incident had
+ended.
+
+The gh#481 QA suite found this, and its pinned assertion **stays pinned** — deliberately. It raises the same key
+twice with no resolve, which is the continuing-incident shape, so collapsing to one page is the intended answer
+there. Its annotation now says so rather than calling it a defect.
