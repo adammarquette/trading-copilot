@@ -490,6 +490,30 @@ exchange-held (ADR-0007's `synthetic_risk`). The native safety stop is still res
    Verify each position's protection at the broker directly.
 3. Persisting past a session: treat as unprotected and act as above.
 
+### Backfill shortfall
+
+**Alert:** `BackfillShortfall` (P2)
+
+A consumer fell off the back of the 24h event-log retention window, and the gh#306 recovery could **not** cover
+all of it from the clean-historical bar store. The label carries the contract; the histogram carries how much of
+the window has no bars.
+
+**What it means concretely:** hidden stop plans on that contract may have crossed their promotion band while the
+system was blind, and were **not** promoted to venue-held stops. The **native safety stop is still resting at the
+exchange** — this is a degraded floor, not an unprotected position, which is why it is a P2 rather than a page.
+
+1. **Identify the exposure.** Which open positions are on the labelled contract, and do they have a working stop
+   at the venue or only the safety stop? Check the broker directly — a local record is a belief, and this alert
+   exists because a belief was wrong.
+2. **The next quote self-heals it.** `StopPromotionService` re-evaluates hidden plans on every quote, so a
+   contract that is still trading will promote on its own once price revisits the band. No action is needed for a
+   position you are happy to leave on its safety stop until then.
+3. **Act before the session close** if the tighter stop matters — promote by hand at the broker, or flatten.
+   After hours there are no quotes, so nothing will self-heal.
+4. **Repeating shortfalls are a bar-coverage problem, not an alerting one.** Check that the instrument is in
+   `Backfill:Instruments` and that ingestion is actually storing bars for it; a contract that is traded but never
+   backfilled will shortfall on every gap.
+
 ### Telemetry pipeline
 
 **Alert:** `TelemetryPipelineSilent` (P1)

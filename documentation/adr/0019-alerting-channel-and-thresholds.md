@@ -214,7 +214,7 @@ the rule, not noise to tolerate.
   is owed and stamp `DeliveredAt`. Two ways in, and they want opposite things: `SendAsync` commits **through its own scope** (producers unchanged; sharing the caller's context let an unrelated failure in the producer's unit of work be swallowed by the never-throw contract and silently eat a page — gh#452, live for a few hours after gh#437 bound this as the seam), while
   `Enlist` stages the row in the **caller's** `DbContext`, so intent and state change commit atomically and the
   commit→enqueue gap does not exist at all. Since gh#455 both auto-flatten tiers take that path, through the
-  `INotificationEnlister` seam � and it checks for an already-owed incident before staging, because a row that
+  `INotificationEnlister` seam � and it checks for an already-owed incident before staging, because a row that
   fails the constraint would fail the PRODUCER's save.
   **The guarantee is stated precisely, because the obvious phrasing overstates it.** It is **no dropped page**, not
   exactly-once. Delivery is attempted first and the row stamped after, so a crash *between* the transport accepting
@@ -274,8 +274,8 @@ The receivers therefore use `token_file` / `user_key_file` / `url_file`, and com
 `.env` values through a `secrets:` block with an `environment:` source — one place for the operator to configure,
 nothing secret in the repo.
 
-*Still open:* the conditions listed above, once instrumented; and routing the gh#306 backfill **shortfall** —
-today a high-severity log, not yet a metric a rule can read.
+*Still open:* the conditions listed above, once instrumented. *(The gh#306 backfill **shortfall**, also listed here
+originally, landed in gh#482 — see the update below.)*
 
 ## Update (2026-07-28) — every named condition is now instrumented and ruled (gh#370)
 
@@ -321,9 +321,9 @@ noise budget above is real.
 not exist — a page linking nowhere is worse than one with no link. The four incident sections they name are
 written (*when a page arrives*).
 
-*Still open:* routing the gh#306 backfill **shortfall**, which remains a high-severity log rather than a metric a
-rule can read. The **daily check-in** (gh#244) stays deliberately outside this stack — Layer 2 is external, and a
-dead-man's switch that ran here would die with the thing it watches.
+*Still open:* nothing in Layer 1 — the gh#306 backfill **shortfall**, the last item named here, landed in gh#482
+(see the update below). The **daily check-in** (gh#244) stays deliberately outside this stack — Layer 2 is
+external, and a dead-man's switch that ran here would die with the thing it watches.
 
 ## Update (2026-07-29) — dedup suppression expires with the incident (gh#458)
 
@@ -400,3 +400,32 @@ ADR's §2 says so; the issue's assumption that it called the channel was simply 
 never been wrapped in the never-throw belt its sibling send got in gh#243, so a throwing resolve aborted a pass
 *after* the position had already closed. Found by repointing the existing "the channel throws" guard, which had
 been asserting against a call the flatten no longer makes.
+
+## Update (2026-07-30) — the backfill shortfall is a signal now, not a log line to go and find (gh#482)
+
+The last item this ADR listed as open. gh#306 recovers a consumer's blind window from the clean-historical bar
+store, and it is **best-effort by nature** — the store may simply not have bars for part of the window. That
+failure was reported only as a `LogError` in one host, so nothing could alert on it, and this file's own
+`EventLogRetentionGap` annotation ended with *"check the logs for a reported shortfall"*: an operator who has
+just been woken, sent somewhere else to find out what actually happened. That sentence is deleted.
+
+**`trading.stops.backfill_shortfall`** — a histogram, `ms`, labelled by contract. The `_count` is the "did it
+happen" signal a rule reads; the distribution is how much of the window was uncovered. Named under `stops.`
+rather than a data namespace deliberately: what the operator must act on is **stop protection**, and it belongs
+beside `trading.stops.orphaned` on the dashboard. `BackfillShortfall` fires on
+`increase(trading_stops_backfill_shortfall_milliseconds_count[15m]) > 0`.
+
+**Emitted from `GapBackfillService`, not from the host that logs it.** The service is where the shortfall is
+known, so every consumer of the backfill gets the signal rather than only the one host that remembered — and it
+is unit-testable, which the `BackgroundService` is not.
+
+**P2, argued rather than assumed.** A shortfall means hidden stops on that contract may have crossed their
+promotion band unobserved and were not promoted — but the **native safety stop is still resting at the exchange**,
+so this is a *degraded floor*, not an unprotected position. It is also discovered after the fact: no amount of
+speed changes what already happened. §*Thresholds* reserves P1 for exposure with nothing behind it, and this has
+something behind it. The runbook section says so explicitly, because "may be unprotected" in a summary line
+invites the reader to assume the worst tier.
+
+**Silent on a healthy recovery**, by construction: the emission loop runs over `Shortfalls`, which is empty when
+coverage is complete. §4's rule — a rule that pages on a clean session is a defect in the rule — is satisfied by
+the metric never existing rather than by a threshold chosen to hide it.

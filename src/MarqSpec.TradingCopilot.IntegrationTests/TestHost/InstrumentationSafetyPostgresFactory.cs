@@ -137,6 +137,11 @@ public sealed class FaultInjectingExecutionMetrics : IExecutionMetrics
     {
     }
 
+    /// <inheritdoc />
+    public void RecordBackfillShortfall(string contractKey, TimeSpan uncovered)
+    {
+    }
+
     private static void FailIf(bool armed)
     {
         if (armed)
