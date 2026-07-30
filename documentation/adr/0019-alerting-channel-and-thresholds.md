@@ -161,70 +161,62 @@ the rule, not noise to tolerate.
   `HttpDeadMansSwitch` pings the monitor and is failure-tolerant by construction — a transport fault returns false
   rather than throwing, because a report that did not arrive is exactly what should page. **No exchange calendar was
   needed** after all: a holiday has no exposure, so the market is trivially flat and checks in.
-- **`gh#243` — Layer 1 landed.** `Domain/Notifications/INotificationChannel` is the transport-free seam
-  (severity / title / body / incident key — no priority numbers, no thread semantics), with
-  `PushoverNotificationChannel` mapping **Page → Emergency (2)**, Notify → 0, Quiet → −1, and cancelling an
-  outstanding page via its receipt when the incident resolves. `NullNotificationChannel` keeps an unconfigured
-  deployment booting while logging a Page as an **error**, so unmonitored is never silent. The three P1 flatten
-  conditions (`flatten.escalated`, `flatten.missed`, `flatten.watchdog.critical`) push directly, and a successful
-  flatten or a watchdog save **resolves** the incident.
-  **Corrected by `gh#289` (2026-07-26).** The first cut awaited the send inline, so a slow channel put its full
-  latency on a flatten pass — on the R-13 path, and at the moment a position was already failing to close. The
-  gh#246 suite caught it (a 5-second channel made a pass take 5.15 s) and pinned it. The chain is now
-  **queue → dedup → transport**: `QueuedNotificationChannel` accepts and returns, a `NotificationPumpHost` drains
-  it. Two properties fall out of the pump being single-threaded that a bare fire-and-forget would not have given —
-  **dedup can no longer race itself** into a double-page, and it still sees the *real* delivery result, so a
-  failed push is not mistaken for one the operator received. The seam's contract shifts with it:
-  `SendAsync` returning true now means **accepted for delivery**, not delivered — a caller on the safety path
-  cannot wait for delivery without reintroducing the defect.
-  **Guarded by `gh#320` (2026-07-28).** Note what the fix did *not* do: it never bounded the flatten's own await.
-  `AutoFlattenService.NotifyAsync` still awaits `INotificationChannel.SendAsync` with the caller's token and
-  absorbs a channel that *throws*, not one that *hangs* — so the whole protection is a property of **what is bound
-  to that seam**, not of anything the flatten service does. Bind a transport there directly and the R-13 hot path
-  silently regains an unbounded await, with every existing test still green (the channel suite constructs the queue
-  itself; the service suite injects a fake). The binding is therefore extracted to
-  `NotificationRegistration.AddTradingCopilotNotifications` and asserted: the seam resolves to the **queue**, the
-  **pump is registered** (a queue nobody drains accepts every page and delivers none), and the chain is a
-  **singleton** (a scoped one forgets the open incident and re-pages every poll).
-  **One refinement to this ADR:** dedup was specified "in the adapter"; it landed one layer out as
+- **`gh#243` — Layer 1 landed, and has been rebuilt three times since.** The seam is
+  `Domain/Notifications/INotificationChannel` — transport-free (severity / title / body / incident key; no priority
+  numbers, no thread semantics) — with `PushoverNotificationChannel` mapping **Page → Emergency (2)**, Notify → 0,
+  Quiet → −1, and cancelling an outstanding page via its receipt when the incident resolves.
+  `NullNotificationChannel` keeps an unconfigured deployment booting while logging a Page as an **error**, so
+  unmonitored is never silent. The three P1 flatten conditions (`flatten.escalated`, `flatten.missed`,
+  `flatten.watchdog.critical`) raise; a successful flatten, a watchdog save, or any pass that observes the
+  instrument flat **resolves**.
+
+  **The chain today is `outbox → relay → queue → dedup → transport`**, with two ways in that want opposite
+  things. `SendAsync` commits through **its own scope**, so an unrelated failure in a producer's unit of work cannot be
+  swallowed by the never-throw contract and silently eat a page. `Enlist` stages the row in the **caller's**
+  `DbContext`, so intent and state change commit atomically and the commit→enqueue gap does not exist at all; it
+  checks for an already-owed incident before staging, because a row that failed the constraint would fail the
+  *producer's* save. Both auto-flatten tiers take the second path.
+
+  **Four invariants survive every rebuild**, and are what the composition guards exist to protect:
+
+  - **`SendAsync` returning true means *accepted for delivery*, never *delivered*.** A caller on the R-13 path
+    cannot wait for delivery without reintroducing the latency defect the queue was built to remove.
+  - **The guarantee is *no dropped page*, not exactly-once.** Delivery is attempted first and the row stamped
+    after, so a crash between the transport accepting and the stamp landing **re-delivers** rather than loses.
+    Stamping first would close that duplicate window and open a worse one — a page marked sent that never went.
+    The direction is chosen, not accidental: a repeated page is an annoyance, a missed one is the failure R-13
+    exists to prevent. Across passes it *is* idempotent, because the dedup key is the row's primary key.
+  - **Re-arm is unconditional; only the resolve is retried.** Re-arming is local state whose failure mode is a
+    duplicate page (safe), where withholding it suppresses the *next* genuine incident as a stale duplicate
+    (silent). A failed *send* is already re-driven by dedup declining to record an incident it could not report,
+    so retrying it here too would double-page. After `QueuedNotificationChannel.MaxResolveAttempts` (3) a cancel
+    is abandoned and the page left to expire — unbounded retry would starve a single-reader pump, including a
+    page for a *live* incident, which is far worse than a stale nag.
+  - **The protection lives in the binding, not in the producers.** `AutoFlattenService` absorbs a channel that
+    *throws*, not one that *hangs* — so binding a transport directly to the seam silently returns an unbounded
+    await to the R-13 hot path with every existing test still green. Hence
+    `NotificationRegistration.AddTradingCopilotNotifications` and its assertions: the seam resolves to the outbox,
+    the relay and pump are registered (a queue nobody drains accepts every page and delivers none), and the dedup
+    chain is a **singleton** (a scoped one forgets the open incident and re-pages every poll).
+
+  **One amendment to this ADR's own decision:** dedup was specified "in the adapter"; it landed one layer out as
   `DedupingNotificationChannel`, so every future adapter (Discord `gh#100`, web push ADR-0010) inherits it rather
   than reimplementing it, and it is unit-testable without a transport. The requirement is unchanged — one push per
   incident, re-armed on resolve.
-  **Completed by `gh#300` (2026-07-28).** Resolving had the mirror-image of the send problem: an Emergency page
-  nags *until acknowledged*, and `PushoverNotificationChannel` surrendered its receipt **before** the cancel POST
-  was awaited — so a cancel that faulted or was rejected discarded the only handle to the page, which then kept
-  waking the operator about a position that was already flat, until it self-expired. A failed cancel was also
-  indistinguishable from a successful one, so nothing could retry it. `ResolveAsync` therefore now **returns
-  whether the incident is definitively closed**, the receipt is surrendered only once the cancel is confirmed, and
-  the pump — already off the hot path — retries an unconfirmed cancel up to
-  `QueuedNotificationChannel.MaxResolveAttempts` (3) before logging that it is giving up.
-  Two deliberate asymmetries fall out. **Re-arm is unconditional** even when the cancel fails: it is local state
-  whose failure mode is a duplicate page (safe), whereas withholding it would suppress the *next* genuine incident
-  as a stale duplicate (silent). And **only the resolve is retried** — a failed *send* is already re-driven by
-  dedup declining to record an incident it could not report, so retrying it here too would double-page.
-  The residual is now bounded and stated rather than open-ended: after three failed cancels the page is left to
-  expire on its own. Unbounded retry was rejected because this pump is single-reader, so a permanently-rejected
-  receipt would starve every delivery behind it — including a page for a *live* incident, which is far worse than
-  a stale nag.
-  **Made durable by `gh#400` / `gh#437` (2026-07-29).** The queue solved latency and left a durability hole this
-  entry did not close: `SendAsync` returning true meant *accepted into memory*, so a hard crash before the pump
-  drained lost the page outright — and the caller had already been told it succeeded. The chain is now
-  **outbox → queue → dedup → transport**. `OutboxNotificationChannel` (gh#400) writes one indexed row and returns,
-  so the R-13 hot path still never awaits a network, and `NotificationOutboxRelay` + its host (gh#437) deliver what
-  is owed and stamp `DeliveredAt`. Two ways in, and they want opposite things: `SendAsync` commits **through its own scope** (producers unchanged; sharing the caller's context let an unrelated failure in the producer's unit of work be swallowed by the never-throw contract and silently eat a page — gh#452, live for a few hours after gh#437 bound this as the seam), while
-  `Enlist` stages the row in the **caller's** `DbContext`, so intent and state change commit atomically and the
-  commit→enqueue gap does not exist at all. Since gh#455 both auto-flatten tiers take that path, through the
-  `INotificationEnlister` seam — and it checks for an already-owed incident before staging, because a row that
-  fails the constraint would fail the PRODUCER's save.
-  **The guarantee is stated precisely, because the obvious phrasing overstates it.** It is **no dropped page**, not
-  exactly-once. Delivery is attempted first and the row stamped after, so a crash *between* the transport accepting
-  and the stamp landing re-delivers rather than loses. Stamping first would close that duplicate window and open a
-  worse one — a page marked sent that never went. The direction is chosen, not accidental: a repeated page is an
-  annoyance, a missed one is the failure R-13 exists to prevent, and the dedup layer below absorbs the repeat
-  within a process lifetime. Across passes it *is* idempotent, because the dedup key is the row's primary key.
-  The seam became **scoped** in the process (it writes through the scoped `DbContext`), which is why `gh#320`'s
-  composition guards were **updated rather than deleted** — the singleton assertion moved down to the dedup chain,
-  which is what actually holds the in-memory open-incident set.
+
+  **Changelog.** Every entry is a defect this design has already paid for; the detail lives in the issue, and in
+  the dated Update below where one exists.
+
+  | | |
+  |---|---|
+  | `gh#289` | an inline send put a slow channel's full latency on an R-13 flatten pass (5 s channel → 5.15 s pass) → **queue → dedup → transport** |
+  | `gh#320` | that fix bounded nothing on its own — the guarantee is a property of *what is bound to the seam*, so the binding was extracted and asserted |
+  | `gh#300` | the receipt was surrendered *before* the cancel was confirmed, so a failed cancel kept nagging about an already-flat position and nothing could retry it |
+  | `gh#400` / `gh#437` | *accepted into memory* was lost outright on a crash, after the caller had been told it succeeded → the **outbox** and its relay |
+  | `gh#452` | `SendAsync` sharing the caller's `DbContext` let a producer's unrelated failure be swallowed and eat a page |
+  | `gh#455` | the safety-critical producers **enlist** rather than send — Update below |
+  | `gh#458` | the dedup key outlived its incident at the **outbox** — Update below |
+  | `gh#497` | …and at the **decorator** too: resolve fired only on the flatten's own success, so an exposure ended by any other hand left the key armed forever — Update below |
 - **`gh#245`** Alertmanager rules and routing (Layer 2) · **`gh#246`** the QA suite.
 - **Thresholds are recorded but not yet enforced.** The P1/P2/P3 tables above describe what `gh#245` must build; only
   the dead-man's switch's own rules (check-in absent by deadline + 5 min, heartbeat missed ≥ 3 intervals) are live
