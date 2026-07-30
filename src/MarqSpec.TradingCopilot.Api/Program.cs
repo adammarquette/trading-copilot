@@ -214,6 +214,14 @@ builder.Services.AddSingleton<IEmbeddingProvider>(provider =>
         ? provider.GetRequiredService<CohereEmbeddingProvider>()
         : provider.GetRequiredService<UnavailableEmbeddingProvider>());
 
+// The news-embedding pass (gh#377, R-2): the first production consumer of the seam above, populating the pgvector
+// embedding behind each ingested NewsRecord. Always on, mirroring the relevance pass -- with no provider configured
+// (or no news needing it) the pass is a cheap no-op, so there is nothing to opt into. IAiUsageLedger / IAiSpendGovernor
+// / GovernorOptions are already bound by AddTradingCopilotAi above; this is their first embed-side consumer (gh#436).
+builder.Services.Configure<NewsEmbeddingOptions>(builder.Configuration.GetSection(NewsEmbeddingOptions.SectionName));
+builder.Services.AddScoped<NewsEmbeddingService>();
+builder.Services.AddHostedService<NewsEmbeddingHost>();
+
 builder.Services.AddScoped<ProtectionMonitorService>();
 builder.Services.AddHostedService<ProtectionMonitorHost>();
 
