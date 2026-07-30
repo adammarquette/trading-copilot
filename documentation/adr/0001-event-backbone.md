@@ -227,5 +227,6 @@ workaround — a vector column cannot exist without pgvector — and it means th
 the in-memory provider *pretend* to store embeddings while the similarity operators, the entire point, silently
 did not exist.
 
-*Still open:* the real provider (**gh#403**, Cohere with its sparse fallback and per-call cost metering) and the
-first consumer wiring (**gh#377**, news).
+*Landed:* the real provider (**gh#403**, Cohere with its sparse fallback and per-call cost metering) and the first
+consumer wiring (**gh#377**, `NewsEmbeddingService` populating `NewsItem`'s embedding). *Still open:* which other
+owner kinds (suggestion / rule / snapshot) embed, and when.

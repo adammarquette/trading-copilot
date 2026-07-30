@@ -141,6 +141,10 @@ services:
       # News relevance resolution (R-2, gh#359) materializes matched instruments/topics onto ingested news via the
       # global ticker<->instrument maps + topics. Always on; null pass-through leaves the app's 60s default.
       Relevance__PollIntervalSeconds:
+      # News embedding (R-2, gh#377) populates the pgvector embedding behind each ingested news item via the
+      # Cohere__ApiKey seam below. Always on -- harmless with no provider configured (or no news needing it);
+      # null pass-through leaves the app's 60s default.
+      Embedding__PollIntervalSeconds:
       # News / soft-signal ingestion (R-2, gh#358) -- the deduped store of record, the news analogue of the bar
       # store above. Scalar options, so there is no indexed list to enumerate and cap here. OPT-IN via
       # News__Enabled (off unless set); null pass-through leaves the app's defaults (cadence 300 s, lookback
