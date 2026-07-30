@@ -207,6 +207,7 @@ the choice was made for: three provisioned dashboards, proposed by QA on gh#332 
 | **Auto-flatten reliability** | Did the R-13 obligation run, how fast did it flatten, did the backstop have to save it |
 | **Execution & risk gate** | Is every order gated, which limit is binding, venue round-trip, kill switch, unprotected exposure |
 | **Synthetic risk & pipeline health** | Protection that is platform-held rather than exchange-held, and whether the log's two safety consumers are keeping up |
+| **AI usage & spend** *(gh#412)* | What the AI is costing — total and against the daily cap, split by model tier and by LLM-vs-embeddings, with call outcomes, tokens and latency |
 
 **Provisioned as files, and deliberately not editable in the UI.** The provider sets `allowUiUpdates: false` and
 the mount is read-only, so a dashboard cannot become console state that no PR reviewed and no `down -v` survives —
@@ -234,3 +235,34 @@ did not work. It landed, so the latency panels set `exemplar: true` and click th
 *Still open:* the two **alert candidates** gh#366 proposed alongside the panels (`absent_over_time` on the
 flatten family, and a sustained `trading_stops_orphaned > 0`) are close cousins of rules gh#245/gh#370 already
 ship — `TelemetryPipelineSilent` and `OrphanedStopsWithExposure` — and are deliberately not duplicated here.
+
+## Update (2026-07-30, gh#412) — the AI usage & spend dashboard, and the unit trap caught a second time
+
+The **AI usage & spend** board lands (table above), completing X1's task 3 and giving AI cost the single pane the
+LGTM choice was made for. It reads the LLM meter (gh#477, `ai_llm_*`) and the embedding meter (gh#403,
+`ai_embed_*`) — both on the `MarqSpec.TradingCopilot.Ai` meter — and answers: what is this costing in total and
+against the daily cap, is the ADR-0008 tiering bet actually paying (spend split by `tier`), where is it going
+(LLM vs embeddings), and are calls failing (outcome split, where a `Failed` call is a real zero-token datapoint
+rather than an absence).
+
+**The epic's "operator-only" framing is retired**, per ADR-0015: spend is simply the operator's own, so it lives
+in Grafana because it is a running-cost question, not because it is withheld from anyone. The **in-app**
+cost-per-suggestion surface remains a separate Phase-4 client concern.
+
+**Two honest limits, both filed rather than papered over.** *Headroom* is drawn against a Grafana constant
+mirroring `Governor__DailyBudgetUsd`, because Prometheus cannot read application config — gh#506 proposes
+emitting the cap as a gauge so the two cannot drift. *Per-feature* attribution is not yet possible: the meter
+tags model / tier / outcome but not feature, so the LLM-vs-embeddings split stands in as the feature axis
+(harmless today, since every LLM row is `Feature = Triage` per gh#449) — gh#507 adds the tag. Neither is
+enforcement: a meter is export-only, so the governor still caps on the `AIUsage` ledger floor (gh#448).
+
+**The unit trap from the gh#366 note above recurred, and was caught the same way.** The cost instruments declare
+`unit: "USD"`, which the exporter appends **verbatim and case-sensitively** — and because the instrument name
+already ends in a lowercase `usd`, the duplicate-suffix check does not match. The real series are
+`ai_llm_cost_usd_USD_total` and `ai_embed_cost_usd_USD_total`; the intuitive `ai_llm_cost_usd_total` returns
+nothing. This was established by emitting the exact instrument set through the real collector → Prometheus path
+and reading back `/api/v1/label/__name__/values`, then running **every panel query** against it — a guessed name
+would have shown *"No data"* on a spend panel forever, which reads as *"nothing was spent"*. The stuttering name
+itself is filed as gh#505; the dashboard queries today's real names and must move in the same PR that fixes them.
+
+*The rule this makes concrete, twice over: **never transcribe a metric name — emit, scrape, and read it back.***
