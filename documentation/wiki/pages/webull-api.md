@@ -93,7 +93,8 @@ path above.
 - **Historical Bars** — single-symbol and batch OHLCV candles at multiple granularities (`M1`, `M5`, `D`, …).
   **Daily-and-above bars are forward-adjusted; minute bars are unadjusted.**
 - **Footprint** — order-flow / volume-profile-style records at configurable time granularity — directly relevant
-  to this platform's footprint/delta methodology (see [trading-methodologies.md](trading-methodologies.md)).
+  to this platform's **order-flow analytics (R-3)** (tape / footprint / volume-profile), not the R-21 methodology
+  page.
 - **Rate limits are inconsistent across the pages fetched:** the general Market Data API overview states
   **300 requests/minute**; the futures-market-data and streaming-subscribe reference pages instead state
   **600 requests/minute**, with **Historical Bars capped at 1 call/second/App Key**. Unresolved — see Open

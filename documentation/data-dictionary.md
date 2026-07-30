@@ -1,4 +1,4 @@
-, **advisories**# Data Dictionary — Trading Co-Pilot
+# Data Dictionary — Trading Co-Pilot
 
 The authoritative catalog of the platform's **data entities, key fields, and storage**. Begun as a **design-time
 model** derived from the [PRD](trading-platform-prd.md) + [ADRs](adr/), it is now **partially implemented** — rows
@@ -6,7 +6,7 @@ carry an **Implemented** marker (with the issue) as their entity lands — and t
 with the `MarqSpec.TradingCopilot.Data` entities and `dotnet ef` migrations** (see *Maintenance* below). Companion to [engineering §2](trading-platform-engineering.md) (storage) and the
 [architecture](trading-platform-architecture.md).
 
-**Status:** living — implemented rows are marked per entity · **Date:** 2026-07-22, last reconciled 2026-07-25 (gh#233)
+**Status:** living — implemented rows are marked per entity · **Date:** 2026-07-22, last reconciled 2026-07-30 (gh#490)
 
 ## How to read this
 - **Storage** column: `REL` relational · `TS` TimescaleDB hypertable (time-series) · `VEC` pgvector.
@@ -224,11 +224,17 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
 - **Data isolation (R-20).** One operator per deployment (ADR-0017). **Reference & market data** — Instrument,
   TradingVenue, DataSource (§1), all market series (§2), and raw SoftSignal / news (§9) — is **shared / global**,
   as is the deployment-wide **KillSwitchState** (§4). The full set of **acknowledged globals** — entities
-  deliberately *not* `IUserOwned`, each with its reason — is pinned by name in the `DataLayerScopingTests` guard:
-  **User** (the tenant root — it owns rows, it is not owned), **Invitation** (resolved by token hash before a user
-  exists, R-18), **Event** + **EventCursor** (backbone plumbing, ADR-0001), and **KillSwitchState** (one row per
-  deployment, gh#189). A new entity that is neither owned nor on that list **fails the build**, so "not owned" is
-  always a recorded decision rather than an omission. A distinct wrinkle (gh#436): the deployment **`SystemOwner`**
+  deliberately *not* `IUserOwned`, each with its reason — is pinned **by name** in the `DataLayerScopingTests`
+  guard (**13** entries as of gh#490), in two groups. **Reference / market / derived data**, global by R-20's own
+  *"reference & market data is shared"* rule (a tenant filter there would hide the market from the operator trading
+  it): **BarRecord** (gh#302), **IndicatorValueRecord** (gh#310), **NewsRecord** (gh#358), **EmbeddingRecord**
+  (gh#109), and the relevance config **TickerInstrumentMap** / **NewsTopic** / **RelevanceConfigState** (gh#359).
+  **Deployment plumbing**, global by exception: **User** (the tenant root — it owns rows, it is not owned),
+  **Invitation** (resolved by token hash before a user exists, R-18), **Event** + **EventCursor** (backbone
+  plumbing, ADR-0001), **KillSwitchState** (one row per deployment, gh#189), and **NotificationOutboxRecord**
+  (owed to the deployment; the relay drains it with no authenticated identity, gh#400). A new entity that is
+  neither owned nor on that list **fails the build**, so "not owned" is always a recorded decision rather than an
+  omission. A distinct wrinkle (gh#436): the deployment **`SystemOwner`**
   is a **non-operator *owner*** of `IUserOwned` rows — currently global AI embed spend — a well-known **non-empty**
   Guid distinct from `Guid.Empty`, so those rows stay default-deny-scoped (invisible to the operator, readable only
   under the sentinel's own scope) rather than becoming an acknowledged *global*; **`AIUsage` is therefore *not*
@@ -256,9 +262,8 @@ Short retention on the event log (< 24h, likely < 1h); the clean-historical stor
   **`adapter_logic_version`** that produced them and historized
   in `AccountSnapshot`, so a past snapshot stays interpretable — and backtests / audits stay correct — after the
   derivation logic changes (ADR-0009, eng §9).
-- **Exclusion & soft-delete (R-15) are three orthogonal flags** — `training_excluded` (AI learning set),
-  `hidden_from_user` (journal / reporting visibility), `deleted` (soft-delete). A losing trade can stay visible to
-  the operator yet be excluded from training.
+- **Exclusion & soft-delete (R-15)** — the three orthogonal flags are defined once under *Conventions* above
+  (`training_excluded` / `hidden_from_user` / `deleted`); still deferred (no entity persists them yet).
 - **Synthetic orders carry orphan risk (ADR-0007).** A synthetic / in-app stop or bracket needs the connection live;
   on connection loss the affected orders move to **orphaned → emergency**, the `AuditRecord` flags the
   `synthetic_risk` (now written per transition, gh#220), and the operator is alerted (a high-severity log until the
