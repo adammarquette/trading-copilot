@@ -219,9 +219,9 @@ loosening that fails toward *allow*, never a spurious block. **Scope caveat:** e
 the **information** — the deep call reuses the same `TriggerReviewContext`, so **deep-context enrichment is a deferred
 follow-up** *(landed gh#476, below)* (it also widens the prompt-injection surface), and until it lands the deep tier may
 re-derive the triage answer at higher cost; the prompt says escalate *sparingly* and an escalation is logged for
-operability. Still open: per-call budget-aware escalation skip, an escalation-rate metric + a when-to-escalate eval
-suite, activating `AiUsageFeature.Suggestion` for the deep row, an LLM-side meter, a runtime-editable budget, and
-throttle.
+operability. Still open: *(per-call budget-aware escalation skip — **landed gh#478**, below)* an escalation-rate metric
++ a when-to-escalate eval suite, activating `AiUsageFeature.Suggestion` for the deep row, an LLM-side meter, a
+runtime-editable budget, and throttle.
 
 **Update (2026-07-29, gh#470) — confirm-before-live: the LLM is out of the hot loop of the _rule_, not only the firing.**
 "The LLM is never in the continuous hot loop" was already true of *firing* (the deterministic scan fires; the reviewer
@@ -273,9 +273,37 @@ decisions, each keeping the ADR's principles intact:
   render) — enrichment adds context, it must **never cost a fire**; a **budget-blocked** fire skips enrichment entirely
   (no wasted read before a call that will not happen).
 - **No schema / migration / `.env` / compose change** — it reads existing projections. Purely a read + render + wiring
-  change. Still open (unchanged from gh#449, minus this item): per-call budget-aware escalation skip, an escalation-rate
-  metric + when-to-escalate eval suite, `AiUsageFeature.Suggestion` for the deep row, an LLM-side meter, a
-  runtime-editable budget, throttle, and — the injection surface this defers — **news/free-text enrichment**.
+  change. Still open (unchanged from gh#449, minus this item): *(per-call budget-aware escalation skip — **landed
+  gh#478**, below)* an escalation-rate metric + when-to-escalate eval suite, `AiUsageFeature.Suggestion` for the deep
+  row, an LLM-side meter, a runtime-editable budget, throttle, and — the injection surface this defers —
+  **news/free-text enrichment**.
+
+**Update (2026-07-30, gh#478) — the per-call budget-aware escalation skip landed; the pair-overrun is closed.**
+The gh#448 governor caps **whether the review runs at all** (pass-level, before any call), and the gh#449 update
+amended the effective cap to *"budget plus at most one in-flight triage→deep **pair**"* — because a triage that fit the
+remaining budget could still escalate into a deep call that overran it. That **partial-budget** case is now handled: the
+**scan** — which already holds the `GovernorPass` tally and the budget — decides affordability
+(`spent + estimatedDeepCost <= budget`) and passes the reviewer a **plain `bool allowEscalate`**. When triage defers but
+the bit is false, the **deep call is skipped**: only the triage cost is billed, and the review returns the new
+`SuppressReason.EscalationDeclined`.
+
+**The reviewer stays pure of the governor** (the gh#449 constraint, which that update warned was *by design, not
+test-enforced*). It receives a **permission bit, never a budget**, and it references no governor or budget type at all —
+the affordability arithmetic lives entirely in the scan. What the reviewer *does* own is the **cost of its own deep
+call**: it exposes `EstimatedDeepCallCostUsd`, a deliberately **conservative** estimate (a high input-token count at the
+deep rate, paired with `MaxOutputTokens`), because the token shape and rates belong where the call is made.
+Overestimating is the **safe direction** for an affordability gate — it declines an escalation slightly early rather
+than letting one overrun.
+
+**Fail-open and honest-inert, consistent with the rest.** An **inert** governor (no budget configured) or a **fail-open**
+spend read leaves `allowEscalate` true, so behaviour is byte-for-byte pre-gh#478. A declined escalation is **not
+silent**: the scan — which knows the reason is *budget*, since the reviewer only got a neutral bit — raises one
+operator advisory per arming edge (*"a quick review flagged it for deeper analysis, but the daily AI-spend budget could
+not afford the deeper look"*), the same honest-inert posture as `NoReviewerConfigured` / `ReviewerUnavailable` /
+`BudgetExhausted`. **This amends the gh#449 effective-cap note:** the cap is again **the budget**, not budget-plus-a-pair
+— an escalation is only made when the deep call's conservative estimate still fits. Still open from that list: an
+escalation-rate metric + when-to-escalate eval suite, `AiUsageFeature.Suggestion` for the deep row, an LLM-side meter, a
+runtime-editable budget, throttle, and news/free-text enrichment.
 
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*

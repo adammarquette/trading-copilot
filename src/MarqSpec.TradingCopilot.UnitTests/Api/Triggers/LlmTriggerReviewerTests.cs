@@ -259,6 +259,58 @@ public class LlmTriggerReviewerTests
     }
 
     [Fact]
+    public async Task ReviewAsync_ShouldSkipTheDeepTier_WhenTriageEscalatesButEscalationIsNotAllowed()
+    {
+        // gh#478: the caller (the scan, which holds the budget) refuses the escalation. The triage still runs and is
+        // still billed, but the expensive deep call is withheld and the review suppresses with the neutral
+        // EscalationDeclined reason -- NOT a deep call whose spend would overrun the budget.
+        TriageReturns(TriageEscalate);
+        DeepReturns("{\"decision\":\"suggest\",\"direction\":\"short\",\"entry\":200,\"stop\":201,\"target\":197}");
+
+        AgentReview review = await Reviewer().ReviewAsync(Context(), CancellationToken.None, allowEscalate: false);
+
+        review.Outcome.Should().BeOfType<ReviewOutcome.Suppress>()
+            .Which.Reason.Should().Be(SuppressReason.EscalationDeclined);
+        review.Costs.Should().ContainSingle("only the triage call was made -- the deep call was skipped")
+            .Which.Tier.Should().Be(LlmModelTier.Triage);
+        A.CallTo(() => _llm.CompleteAsync(
+                A<LlmRequest>.That.Matches(r => r.Tier == LlmModelTier.Deep), A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ReviewAsync_ShouldStillMakeTheDeepCall_WhenTriageEscalatesAndEscalationIsAllowed()
+    {
+        // The affirmative half: allowEscalate: true is the permitted path and behaves exactly as gh#449 -- the deep
+        // call is made. (This is also the pre-gh#478 default, so the un-parameterised escalation tests above still hold.)
+        TriageReturns(TriageEscalate);
+        DeepReturns("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":100,\"stop\":99,\"target\":103}");
+
+        AgentReview review = await Reviewer().ReviewAsync(Context(), CancellationToken.None, allowEscalate: true);
+
+        review.Outcome.Should().BeOfType<ReviewOutcome.Suggest>();
+        review.Costs.Should().HaveCount(2, "triage escalated and the deep call was permitted");
+        A.CallTo(() => _llm.CompleteAsync(
+                A<LlmRequest>.That.Matches(r => r.Tier == LlmModelTier.Deep), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public void EstimatedDeepCallCostUsd_ShouldBeAPositiveDeepRatedEstimate()
+    {
+        // The scan's affordability check (spent + estimate <= budget) is only meaningful if the estimate is a real,
+        // non-zero deep-call cost. It must also price at the DEEP rate, not the cheaper triage one -- so the same token
+        // shape costs strictly more deep than triage.
+        LlmOptions options = new();
+        decimal estimate = Reviewer().EstimatedDeepCallCostUsd;
+
+        estimate.Should().BePositive();
+        estimate.Should().BeGreaterThan(
+            options.EstimateCost(LlmModelTier.Triage, 2048, 1024),
+            "the deep tier is the expensive one -- the estimate must reflect the deep rate");
+    }
+
+    [Fact]
     public async Task ReviewAsync_ShouldReturnTwoCosts_WhenTriageEscalates()
     {
         TriageReturns(TriageEscalate);

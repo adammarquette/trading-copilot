@@ -77,6 +77,16 @@ public enum SuppressReason
     /// invoked to hold the budget.
     /// </summary>
     BudgetExhausted = 6,
+
+    /// <summary>
+    /// The triage tier judged the setup too hard and deferred to the deep tier, but the caller <b>did not permit the
+    /// escalation</b> (gh#478) — so the <b>deep</b> call was skipped and the triage's own answer was a defer, leaving no
+    /// proposal. The triage call still happened and is still billed; only the expensive deep call was withheld. A
+    /// <b>neutral</b> reason on purpose: the reviewer is told a plain permission bit and knows nothing about
+    /// <i>why</i> escalation was declined — the caller (which holds the budget) frames the operator-facing message.
+    /// Distinct from <see cref="BudgetExhausted"/>, where no call is made at all.
+    /// </summary>
+    EscalationDeclined = 7,
 }
 
 /// <summary>
@@ -133,9 +143,28 @@ public sealed record AgentReview(ReviewOutcome Outcome, IReadOnlyList<AiCallCost
 /// </summary>
 public interface ITriggerReviewer
 {
+    /// <summary>
+    /// A <b>conservative upper estimate</b> of a single <b>deep</b>-tier call's cost in USD (gh#478) — what one
+    /// escalation would add on top of the triage spend. The caller (the scan, which holds the spend tally and the
+    /// budget) reads this to decide whether an escalation is affordable, then passes the verdict as
+    /// <c>allowEscalate</c> into <see cref="ReviewAsync"/>. Exposing the estimate keeps the token-shape + rate knowledge
+    /// where the deep call lives while keeping the <b>budget</b> out of the reviewer (the gh#449 purity constraint): the
+    /// reviewer reports what it would cost; it never learns what the budget is. Zero for a reviewer that never escalates.
+    /// </summary>
+    decimal EstimatedDeepCallCostUsd { get; }
+
     /// <summary>Reviews one fired trigger.</summary>
     /// <param name="context">The fired setup's market facts.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <param name="allowEscalate">
+    /// Whether the caller permits an escalation to the <b>deep</b> tier (gh#478). A plain permission bit — the reviewer
+    /// receives <b>only</b> this, never the budget it was derived from, keeping the reviewer pure of the governor
+    /// (gh#449). When the triage tier defers but this is <see langword="false"/>, the deep call is skipped and the review
+    /// suppresses with <see cref="SuppressReason.EscalationDeclined"/>. Trailing-optional defaulting to
+    /// <see langword="true"/> (the pre-gh#478 always-escalate behaviour), mirroring gh#476's trailing-optional so every
+    /// existing call site compiles unchanged; the scan always passes it explicitly.
+    /// </param>
     /// <returns>The <see cref="ReviewOutcome"/> to act on, plus the cost of any LLM call made.</returns>
-    Task<AgentReview> ReviewAsync(TriggerReviewContext context, CancellationToken cancellationToken);
+    Task<AgentReview> ReviewAsync(
+        TriggerReviewContext context, CancellationToken cancellationToken, bool allowEscalate = true);
 }

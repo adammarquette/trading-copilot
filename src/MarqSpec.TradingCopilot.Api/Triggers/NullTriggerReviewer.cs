@@ -16,8 +16,16 @@ namespace MarqSpec.TradingCopilot.Api.Triggers;
 public sealed class NullTriggerReviewer : ITriggerReviewer
 {
     /// <inheritdoc />
-    public Task<AgentReview> ReviewAsync(TriggerReviewContext context, CancellationToken cancellationToken) =>
+    public decimal EstimatedDeepCallCostUsd => 0m; // it never calls, so an escalation would cost nothing.
+
+    /// <inheritdoc />
+    public Task<AgentReview> ReviewAsync(
+        TriggerReviewContext context, CancellationToken cancellationToken, bool allowEscalate = true)
+    {
+        _ = allowEscalate; // there is no escalation to permit -- this reviewer makes no call at all.
+
         // No LLM call is made, so no spend to ledger -- Costs is empty.
-        Task.FromResult(new AgentReview(
+        return Task.FromResult(new AgentReview(
             new ReviewOutcome.Suppress(SuppressReason.NoReviewerConfigured, "no LLM reviewer is configured"), Costs: []));
+    }
 }
