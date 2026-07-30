@@ -104,7 +104,20 @@ public static class NotificationRegistration
         // ...and the outbox is only safe because THIS drains it. Same property, one layer out: a durable row
         // nobody reads is a page that was recorded and never sent, which is worse than not recording it, because
         // the caller was told it succeeded.
-        builder.Services.AddScoped<NotificationOutboxRelay>();
+        //
+        // `delivery` is bound EXPLICITLY to the concrete QueuedNotificationChannel -- the chain BELOW the outbox
+        // (queue -> dedup -> transport), never the INotificationChannel seam (gh#459, P0). A plain
+        // `AddScoped<NotificationOutboxRelay>()` let DI resolve `delivery` from the only INotificationChannel
+        // registration -- the OutboxNotificationChannel seam itself -- so the relay drained the outbox INTO the
+        // outbox: `Enlist` short-circuited on the row the relay had just loaded (same scope, same DbContext,
+        // NotificationOutbox.Local), returned true, and every page was stamped DeliveredAt having reached nothing,
+        // incl. the R-13 auto-flatten escalation. Same shape as the outbox seam above: bind the concrete type so
+        // the interface never resolves back to this graph.
+        builder.Services.AddScoped(provider => new NotificationOutboxRelay(
+            provider.GetRequiredService<TradingCopilotDbContext>(),
+            provider.GetRequiredService<QueuedNotificationChannel>(),
+            provider.GetRequiredService<TimeProvider>(),
+            provider.GetRequiredService<ILogger<NotificationOutboxRelay>>()));
         builder.Services.AddHostedService<NotificationOutboxRelayHost>();
 
         return builder;
