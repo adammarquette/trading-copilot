@@ -92,6 +92,18 @@ public class TriggerRecord : IUserOwned
     public DateTimeOffset? UnmeasurableSince { get; set; }
 
     /// <summary>
+    /// When the current outage was <b>reported</b>, or <see langword="null"/> if it has not been (gh#515).
+    /// </summary>
+    /// <remarks>
+    /// The bit that makes "report once" true. Without it, crossing the threshold left
+    /// <see cref="TriggerStaleness.ShouldReport"/> true on every subsequent pass — roughly 1,440 identical
+    /// warnings per trigger per day at the default poll. <b>Persisted rather than in-memory</b> so a restart
+    /// part-way through an outage does not start the noise again, and cleared alongside
+    /// <see cref="UnmeasurableSince"/> on recovery so a later outage still reports on its own merits.
+    /// </remarks>
+    public DateTimeOffset? StalenessReportedAt { get; set; }
+
+    /// <summary>
     /// The rulebook rule (R-7) that authored this trigger, when one did — a <b>soft</b> reference (no FK, no
     /// navigation), so the trigger outlives the rule and the trigger layer stays decoupled from the rulebook.
     /// </summary>
