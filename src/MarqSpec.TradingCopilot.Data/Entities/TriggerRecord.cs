@@ -80,6 +80,18 @@ public class TriggerRecord : IUserOwned
     public DateTimeOffset? LastFiredAt { get; set; }
 
     /// <summary>
+    /// When this trigger's current run of <b>unevaluable</b> readings began, or <see langword="null"/> when the
+    /// last reading was measurable (gh#469).
+    /// </summary>
+    /// <remarks>
+    /// The fail-closed hold on an unmeasurable indicator was always correct; what it could not do is tell the
+    /// difference between a late bar and a dependency that stopped being produced. This is that difference:
+    /// <see cref="TriggerStaleness"/> reads it to decide when an outage has lasted long enough to report. It is
+    /// state rather than a per-pass log because the distinguishing fact is <b>duration</b>.
+    /// </remarks>
+    public DateTimeOffset? UnmeasurableSince { get; set; }
+
+    /// <summary>
     /// The rulebook rule (R-7) that authored this trigger, when one did — a <b>soft</b> reference (no FK, no
     /// navigation), so the trigger outlives the rule and the trigger layer stays decoupled from the rulebook.
     /// </summary>

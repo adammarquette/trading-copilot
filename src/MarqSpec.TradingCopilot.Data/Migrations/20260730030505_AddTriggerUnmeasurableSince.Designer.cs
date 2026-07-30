@@ -14,8 +14,8 @@ using Pgvector;
 namespace MarqSpec.TradingCopilot.Data.Migrations
 {
     [DbContext(typeof(TradingCopilotDbContext))]
-    [Migration("20260730032230_AddTriggerConfirmation")]
-    partial class AddTriggerConfirmation
+    [Migration("20260730030505_AddTriggerUnmeasurableSince")]
+    partial class AddTriggerUnmeasurableSince
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -1320,9 +1320,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                     b.Property<int>("ConditionKind")
                         .HasColumnType("integer");
 
-                    b.Property<int>("Confirmation")
-                        .HasColumnType("integer");
-
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -1372,6 +1369,9 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .HasPrecision(18, 8)
                         .HasColumnType("numeric(18,8)");
 
+                    b.Property<DateTimeOffset?>("UnmeasurableSince")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<Guid>("UserId")
                         .HasColumnType("uuid");
 
@@ -1379,7 +1379,7 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
 
                     b.HasIndex("AccountId");
 
-                    b.HasIndex("Confirmation", "Enabled", "Route");
+                    b.HasIndex("Enabled", "Route");
 
                     b.ToTable("Triggers", null, t =>
                         {
@@ -1388,8 +1388,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                             t.HasCheckConstraint("CK_Triggers_Comparison_NotUnknown", "\"Comparison\" <> 0");
 
                             t.HasCheckConstraint("CK_Triggers_ConditionKind_NotUnknown", "\"ConditionKind\" <> 0");
-
-                            t.HasCheckConstraint("CK_Triggers_Confirmation_Known", "\"Confirmation\" IN (0, 1)");
 
                             t.HasCheckConstraint("CK_Triggers_Hysteresis_PositiveOrNull", "\"Hysteresis\" IS NULL OR \"Hysteresis\" > 0");
 
