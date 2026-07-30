@@ -13,7 +13,7 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// Deliberately reuses <see cref="EmbeddingMetrics.MeterName"/> (the meter the OTel exporter already subscribes to),
 /// so the LLM instruments export with no exporter change — LLM and embed instruments share the meter but carry
 /// distinct instrument names (<c>ai.llm.*</c> vs <c>ai.embed.*</c>). The dimension set is closed on purpose —
-/// <c>model</c>, <c>tier</c>, <c>outcome</c>, all low-cardinality — so the series count cannot explode; the reviewed
+/// <c>feature</c>, <c>model</c>, <c>tier</c>, <c>outcome</c>, all low-cardinality — so the series count cannot explode; the reviewed
 /// text is never a tag. Mirrors <see cref="EmbeddingMetrics"/> instrument-for-instrument.
 /// </remarks>
 public sealed class LlmMetrics : ILlmMetrics, IDisposable
@@ -57,7 +57,7 @@ public sealed class LlmMetrics : ILlmMetrics, IDisposable
         _outputTokens = _meter.CreateCounter<long>(
             LlmOutputTokens, unit: "{token}", description: "Output (completion) tokens billed, by model, tier and outcome.");
         _cost = _meter.CreateCounter<double>(
-            LlmCost, unit: "USD", description: "Estimated dollar cost, by model, tier and outcome.");
+            LlmCost, unit: "{USD}", description: "Estimated dollar cost, by feature, model, tier and outcome.");
         _latency = _meter.CreateHistogram<double>(
             LlmLatency, unit: "ms", description: "LLM call latency, by model, tier and outcome.");
     }
@@ -73,6 +73,12 @@ public sealed class LlmMetrics : ILlmMetrics, IDisposable
             // Tier is always set for an LLM call (Triage / Deep); "none" is a defensive fallback that never fires here.
             new("tier", cost.Tier?.ToString().ToLowerInvariant() ?? "none"),
             new("outcome", cost.Outcome.ToString().ToLowerInvariant()),
+
+            // gh#507: the ledger has recorded this since gh#431; without it here the metric half cannot answer
+
+            // "what is costing money". Closed and low-cardinality like the rest -- the reviewed text is never a tag.
+
+            new("feature", cost.Feature.ToString().ToLowerInvariant()),
         ];
 
         _calls.Add(1, tags);

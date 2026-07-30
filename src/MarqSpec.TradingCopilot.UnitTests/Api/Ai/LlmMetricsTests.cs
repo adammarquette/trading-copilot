@@ -102,6 +102,56 @@ public sealed class LlmMetricsTests : IDisposable
         return (match.Value, match.Tags);
     }
 
+    // --- The exported series name and its dimensions (gh#505 / gh#507) ---
+
+    [Fact]
+    public void Cost_ShouldDeclareAnAnnotationUnit_SoTheExporterDoesNotAppendItToTheName()
+    {
+        // gh#505, found against a LIVE Prometheus rather than reasoned about. The collector's prometheusremotewrite
+        // exporter appends the unit to the metric name; "USD" is not in its unit map, so it was appended verbatim
+        // and case-sensitively -- and because `ai.llm.cost_usd` already ends in a lowercase `usd`, the
+        // duplicate-suffix check did not match. The series that landed was `ai_llm_cost_usd_USD_total`, and the
+        // intuitive `ai_llm_cost_usd_total` returned NOTHING. A dashboard panel written against the obvious name is
+        // silently empty, which on a COST governor reads as "no spend" rather than "no data".
+        //
+        // OTel's annotation form -- braces -- is documented as not-a-unit, and the exporter leaves it off the name.
+        // It is also what every other instrument here already uses ({call}, {token}).
+        string? unit = UnitOf(LlmMetrics.LlmCost);
+
+        unit.Should().StartWith("{", "an annotation unit is not appended to the exported series name")
+            .And.EndWith("}");
+    }
+
+    [Fact]
+    public void RecordLlmCall_ShouldTagByFeature_SoSpendIsAttributableWhereTheLedgerAlreadyIs()
+    {
+        // gh#507. AiCallCost carries the feature and the AIUsage ledger persists it, but the METER dropped it, so
+        // the metric half could not answer "what is costing money" -- the question gh#412's dashboard exists for.
+        // Harmless only while every row is Triage; the moment Suggestion / FollowUp / Backtest emit, an unsplittable
+        // total is exactly the wrong answer. Low-cardinality and closed, like the other three tags.
+        _metrics.RecordLlmCall(Cost());
+
+        (double _, Dictionary<string, string?> tags) = Measurement(LlmMetrics.LlmCost);
+        tags.Should().ContainKey("feature");
+        tags["feature"].Should().Be("triage", "lower-cased like the other dimensions, so PromQL matches are stable");
+    }
+
+    /// <summary>The declared unit of an instrument on this test's meter — read from the published instrument.</summary>
+    private string? UnitOf(string instrumentName)
+    {
+        string? unit = null;
+        using MeterListener probe = new();
+        probe.InstrumentPublished = (instrument, _) =>
+        {
+            if (instrument.Meter.Name == _meterName && instrument.Name == instrumentName)
+            {
+                unit = instrument.Unit;
+            }
+        };
+        probe.Start();
+        return unit;
+    }
+
     private static Dictionary<string, string?> TagsOf(ReadOnlySpan<KeyValuePair<string, object?>> tags)
     {
         Dictionary<string, string?> map = new(StringComparer.Ordinal);
