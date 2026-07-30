@@ -64,7 +64,7 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
 
         await RunFlattenAsync(Utc(19, 45));
 
-        Notifications.Pages.Should().NotBeEmpty("an escalated flatten is the operator's problem now");
+        Pushover.Pages.Should().NotBeEmpty("an escalated flatten is the operator's problem now");
     }
 
     [Fact]
@@ -78,8 +78,13 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
 
         await RunFlattenAsync(Utc(19, 45));
 
-        Notifications.Sent.Should().NotBeEmpty();
-        Notifications.Sent.Should().Contain(notification => notification.Severity == NotificationSeverity.Page);
+        Pushover.Sent.Should().NotBeEmpty();
+        // Asserted on the WIRE now (gh#480): Pushover priority 2 is Emergency — the one priority that repeats until
+        // acknowledged. This is stronger than the old severity-enum check, because it proves the real adapter's
+        // severity→priority mapping ran, not just that a Page-shaped object was handed to a recorder.
+        Pushover.Sent.Should().Contain(post => post.Priority == "2");
+        Pushover.Pages.Should().OnlyContain(page => page.Retry != null && page.Expire != null,
+            "Pushover requires retry+expire with Emergency, and without them it silently downgrades to a normal push");
     }
 
     [Fact]
@@ -92,7 +97,14 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
 
         await RunFlattenAsync(Utc(19, 45));
 
-        Notifications.Pages.Should().OnlyContain(page => !string.IsNullOrWhiteSpace(page.DedupKey));
+        // The dedup key is not on the wire — Pushover's form carries token/user/title/message/priority/retry/expire
+        // and nothing else. Since gh#437 the key's home is the OUTBOX ROW, which is also where it is now enforced
+        // (a unique index on DedupKey filtered to undelivered rows, gh#458). So the property is asserted where it
+        // actually lives rather than where it used to be observable.
+        IReadOnlyList<string> keys = await _factory.WithDatabaseAsync(db => db.NotificationOutbox
+            .AsNoTracking().Select(row => row.DedupKey).ToListAsync());
+        keys.Should().NotBeEmpty("the page was recorded durably before it was sent");
+        keys.Should().OnlyContain(key => !string.IsNullOrWhiteSpace(key));
     }
 
     // -------------------------------------------------------------------------------------------------------
@@ -109,7 +121,7 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
 
         await RunFlattenAsync(Utc(19, 45)); // closes cleanly — the stub reports flat afterwards
 
-        Notifications.Sent.Should().BeEmpty("a flatten that worked is not news");
+        Pushover.Sent.Should().BeEmpty("a flatten that worked is not news");
     }
 
     [Fact]
@@ -120,7 +132,7 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
 
         await RunFlattenAsync(Utc(19, 45));
 
-        Notifications.Sent.Should().BeEmpty();
+        Pushover.Sent.Should().BeEmpty();
     }
 
     [Fact]
@@ -131,7 +143,7 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
 
         await RunFlattenAsync(Utc(19, 15)); // 14:15 CT — fifteen minutes early
 
-        Notifications.Pages.Should().BeEmpty("an open position before its deadline is ordinary trading");
+        Pushover.Pages.Should().BeEmpty("an open position before its deadline is ordinary trading");
     }
 
     [Fact]
@@ -148,9 +160,24 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
         await RunFlattenAsync(Utc(19, 46));
         await RunFlattenAsync(Utc(19, 47));
 
-        Notifications.Pages.Select(page => page.DedupKey).Distinct().Should().HaveCount(1,
+        // Observed one layer out (gh#480): the wire carries no dedup key, so incident identity is the POST itself.
+        // One page, and every page for this incident carrying the same title, is the same claim.
+        Pushover.Pages.Should().ContainSingle("the operator is paged once per incident, not once per pass");
+        Pushover.Pages.Select(page => page.Title).Distinct().Should().HaveCount(1,
             "three passes on the SAME incident are one incident");
-        Notifications.Pages.Should().ContainSingle("the channel must send once per incident, not once per pass");
+
+        // WHICH layer collapses them, verified rather than assumed — I first wrote this expecting the outbox to do
+        // it, and the test said otherwise. Each pass here delivers before the next one runs, and gh#458 scoped the
+        // unique index to UNDELIVERED rows, so a delivered row releases its key and the next pass inserts a fresh
+        // one: three rows. Only one reaches the wire, so it is **DedupingNotificationChannel** doing the work, and
+        // this assertion still witnesses the decorator exactly as it did pre-outbox.
+        //
+        // (In production the relay sweeps every 15s, so a repeat arriving before delivery would instead be collapsed
+        // at the outbox by that index. Both layers hold the line; which one acts depends on timing.)
+        int rows = await _factory.WithDatabaseAsync(db => db.NotificationOutbox.CountAsync());
+        rows.Should().Be(3,
+            "each pass's page was delivered before the next, releasing the dedup key — so the outbox did NOT "
+            + "collapse them, and the single page above proves the dedup decorator did");
     }
 
     // -------------------------------------------------------------------------------------------------------
@@ -164,7 +191,7 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
         // whole point, turning an observability outage into a trading one (engineering §9).
         string account = await FreshAccountAsync();
         VenueFactory.SeedPosition(account, "ESM25", netQuantity: 1);
-        Notifications.MakeSendThrow();
+        Pushover.MakeSendThrow();
 
         Func<Task> pass = () => RunFlattenAsync(Utc(19, 45));
 
@@ -185,7 +212,7 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
         string account = await FreshAccountAsync();
         VenueFactory.SeedPosition(account, "ESM25", netQuantity: 1);
         VenueFactory.MakeCloseIneffective("ESM25");
-        Notifications.MakeSendHang(TimeSpan.FromSeconds(5));
+        Pushover.MakeSendHang(TimeSpan.FromSeconds(5));
 
         Stopwatch clock = Stopwatch.StartNew();
         await using (AsyncServiceScope scope = _factory.Services.CreateAsyncScope())
@@ -202,8 +229,8 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
         // Clear the hang, then drain what this pass left queued. The queue is a singleton for the fixture's
         // lifetime, so a test that enqueues without draining leaks its notifications into the NEXT test -- which
         // is exactly how this one first broke Alert_ShouldProduceNoPush_WhenSessionIsClean.
-        Notifications.Reset();
-        await _factory.DrainNotificationsAsync();
+        Pushover.Reset();
+        await _factory.DeliverOutboxAsync();
     }
 
     // -------------------------------------------------------------------------------------------------------
@@ -213,7 +240,9 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
     /// <summary>The venue stub's fixed account keys — the dedup memory is keyed on these (see FreshAccountAsync).</summary>
     private static string[] StubAccountKeys { get; } = ["PRAC-50K-101", "50KTC-V2-202", "EXPRESS-50K-303", "UNKNOWN-NAME-999"];
 
-    private RecordingNotificationChannel Notifications => _factory.Notifications;
+    // The recorder now stands at the WIRE (gh#480): production composes outbox -> queue -> dedup -> Pushover, and
+    // only the socket beneath the real adapter is doubled.
+    private RecordingPushoverTransport Pushover => _factory.Pushover;
 
     private AdversarialTestProjectXVenueFactory VenueFactory =>
         _factory.Services.GetRequiredService<AdversarialTestProjectXVenueFactory>();
@@ -236,7 +265,7 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
             await service.RunPassAsync(now, CancellationToken.None);
         }
 
-        await _factory.DrainNotificationsAsync();
+        await _factory.DeliverOutboxAsync();
     }
 
     /// <summary>Resets the recorder and the venue, clears accounts, and stands up exactly one tradeable account.</summary>
@@ -245,8 +274,12 @@ public class AlertingIntegrationTests : IClassFixture<AlertingTestPostgresFactor
         // Drain BEFORE resetting: the notification queue is a singleton across the fixture, so anything a
         // previous test enqueued and did not deliver would otherwise arrive mid-test and be attributed here.
         // Draining into the old recorder state and then clearing it leaves this test a genuinely empty slate.
-        await _factory.DrainNotificationsAsync();
-        Notifications.Reset();
+        await _factory.DeliverOutboxAsync();
+        Pushover.Reset();
+        // Clear the OUTBOX too (gh#480): rows persist across tests in one fixture, and the flatten incident key is
+        // stable per account+instrument over the stub's fixed keys — so a leftover row would collapse the next
+        // test's page at the outbox before it ever reached the wire.
+        await _factory.ClearOutboxAsync();
         VenueFactory.ResetPositions();
         await ExecuteDbAsync(db => db.Accounts.IgnoreQueryFilters().ExecuteDeleteAsync());
 
