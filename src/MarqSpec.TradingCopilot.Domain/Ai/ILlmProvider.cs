@@ -21,13 +21,13 @@ public interface ILlmProvider
     Task<LlmCompletion> CompleteAsync(LlmRequest request, CancellationToken cancellationToken);
 }
 
-/// <summary>The model tier for a call (ADR-0008): cheap triage vs. deep synthesis. Only <see cref="Triage"/> is used today.</summary>
+/// <summary>The model tier for a call (ADR-0008): cheap triage vs. deep synthesis. Both tiers are live (gh#449).</summary>
 public enum LlmModelTier
 {
-    /// <summary>A cheaper model for "is this worth surfacing?" triage.</summary>
+    /// <summary>A cheaper model for "is this worth surfacing?" triage; it may escalate a genuinely hard setup to <see cref="Deep"/>.</summary>
     Triage = 1,
 
-    /// <summary>The top model for genuinely hard synthesis (escalation is a later increment).</summary>
+    /// <summary>The top model for genuinely hard synthesis — the tier a triage escalation calls for a final answer (gh#449).</summary>
     Deep = 2,
 }
 

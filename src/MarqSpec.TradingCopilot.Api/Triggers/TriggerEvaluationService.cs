@@ -416,10 +416,10 @@ public class TriggerEvaluationService
             && _governor.Evaluate(governorPass.Budget, governorPass.SpentUsd) is { IsBlocked: true } blocked)
         {
             // AI-SPEND GOVERNOR (gh#448) -- BUDGET EXHAUSTED: short-circuit BEFORE the reviewer. No LLM call is made
-            // (the point: cap WHETHER a call happens) and, with Cost null, no AIUsage row is written. A fire is still
+            // (the point: cap WHETHER a call happens) and, with no costs, no AIUsage row is written. A fire is still
             // a fire (journaled + arm advanced below), so the operator gets one "review paused, budget spent" advisory
             // per arming edge -- the honest-inert posture, exactly like NoReviewerConfigured / ReviewerUnavailable.
-            review = new AgentReview(new ReviewOutcome.Suppress(SuppressReason.BudgetExhausted, blocked.Reason), Cost: null);
+            review = new AgentReview(new ReviewOutcome.Suppress(SuppressReason.BudgetExhausted, blocked.Reason), Costs: []);
         }
         else
         {
@@ -441,23 +441,25 @@ public class TriggerEvaluationService
                 // A reviewer that itself threw (not the provider it wraps — LlmTriggerReviewer never throws) carries no
                 // cost to ledger; treat it as unavailable, same debounce as any other outcome.
                 _logger.LogError(error, "Agent-review trigger {Id} reviewer threw; treating as unavailable.", trigger.Id);
-                review = new AgentReview(new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the reviewer threw"), Cost: null);
+                review = new AgentReview(new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the reviewer threw"), Costs: []);
             }
         }
 
         // Ledger the LLM-call spend, stamped with THIS owner (the scan is the single tenancy authority) + the trace.
-        // Cost is null when no call was made (the inert reviewer, OR a budget-exhausted short-circuit above). The real
-        // ledger is fail-open by its OWN contract, but the seam admits any IAiUsageLedger -- so guard it at the
-        // boundary too, exactly as the reviewer and advisory-notify seams above/below are. Un-guarded, a
-        // contract-violating throw would unwind to the per-owner catch and discard the whole pass: this fire AND any
-        // co-owner mechanical alert already SENT earlier this pass (re-sent next pass -- a duplicate). A
-        // spend-bookkeeping fault must never do that. Only the caller's own cancellation escapes.
-        if (review.Cost is not null)
+        // ONE row per billed call: empty when no call was made (inert reviewer, or a budget-exhausted short-circuit),
+        // one for a single triage call, and TWO when the triage escalated to the deep tier (gh#449). The real ledger
+        // is fail-open by its OWN contract, but the seam admits any IAiUsageLedger -- so guard it at the boundary too,
+        // exactly as the reviewer and advisory-notify seams above/below are. Un-guarded, a contract-violating throw
+        // would unwind to the per-owner catch and discard the whole pass: this fire AND any co-owner mechanical alert
+        // already SENT earlier this pass (re-sent next pass -- a duplicate). A spend-bookkeeping fault must never do
+        // that. The try/catch is INSIDE the loop so a fault on one row still records the next. Only the caller's own
+        // cancellation escapes.
+        string? traceId = Activity.Current?.TraceId.ToString();
+        foreach (AiCallCost cost in review.Costs)
         {
             try
             {
-                await _ledger.RecordAsync(
-                    new AiUsageEntry(owner, review.Cost, Activity.Current?.TraceId.ToString(), now), cancellationToken);
+                await _ledger.RecordAsync(new AiUsageEntry(owner, cost, traceId, now), cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -470,14 +472,17 @@ public class TriggerEvaluationService
             }
         }
 
-        // Accrue this fire's estimated cost to the pass tally so LATER agent-review fires this pass evaluate against
-        // RISING spend -- the per-fire mirror of the risk gate consuming DayLoss. Accrue the ESTIMATE even if the
-        // ledger write faulted: over-counting toward the cap is the safe direction for a budget, and the next pass
-        // re-reads the real floor fresh, so no double-count persists. A budget-exhausted short-circuit has Cost null,
-        // so it accrues nothing (correct -- no call, no spend).
-        if (governorPass is not null && review.Cost is not null)
+        // Accrue EVERY call's estimated cost to the pass tally so LATER agent-review fires this pass evaluate against
+        // RISING spend -- the per-fire mirror of the risk gate consuming DayLoss. An escalated fire (gh#449) accrues
+        // BOTH the triage and the deep cost. Accrue the ESTIMATE even if the ledger write faulted: over-counting
+        // toward the cap is the safe direction for a budget, and the next pass re-reads the real floor fresh, so no
+        // double-count persists. Empty Costs (a budget-exhausted short-circuit or the inert reviewer) accrues nothing.
+        if (governorPass is not null)
         {
-            governorPass.Accrue(review.Cost.EstimatedCostUsd);
+            foreach (AiCallCost cost in review.Costs)
+            {
+                governorPass.Accrue(cost.EstimatedCostUsd);
+            }
         }
 
         switch (review.Outcome)
