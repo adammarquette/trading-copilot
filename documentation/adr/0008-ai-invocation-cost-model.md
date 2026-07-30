@@ -181,8 +181,16 @@ pass un-gated) — the deliberate *inverse* of the fail-closed trade-safety gate
 budget, not capital-at-risk, and must never be conflated with it. **Hard-cap only** for now (ADR-0008's "cap *or*
 throttle" — throttle deferred). Still open: an **LLM-side meter** so Grafana shows true LLM spend (a gh#403 sibling;
 it would still not be in-process readable, so it does not change the governor's read), **Prometheus-based
-reconciliation**, **embed-call-site gating** (rides gh#377 — the window-sum already *counts* embed rows once written,
-only refusing an embed when exhausted defers) and a **runtime-editable** budget.
+reconciliation** and a **runtime-editable** budget.
+
+**Update (2026-07-30, gh#377) — the live embed producer + call-site gating landed.** `NewsEmbeddingService` (the
+news-embedding backfill pass) is the first `EmbedAsync` consumer: it records the embed `AIUsage` rows the gh#436
+owner was readied for — one per attempted call, success or failure, stamped to `SystemOwner`, `Feature = Embed` — and
+**gates each embed on the same deployment-wide daily budget** the trigger scan reads, re-checked before every call so
+a long pass stops mid-page once exhausted. This closes the *embed-call-site gating* the list above left open. It
+**fails open** — a spend-read fault runs the pass un-gated — a soft-dollar budget, the deliberate inverse of the
+fail-closed trade gate. To ledger honestly, `IEmbeddingProvider.EmbedAsync` now rides the call's spend facts back on
+an `EmbeddingResult` (mirroring `LlmUsage` on a completion); gh#377 is its only consumer.
 
 **Update (2026-07-30, gh#449) — the triage→deep escalation policy landed.** The triage tier may now return a third
 `decision: "escalate"` — a **reviewer-private control signal**, never a public `ReviewOutcome` — when a fired setup
