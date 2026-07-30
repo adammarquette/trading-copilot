@@ -18,6 +18,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private readonly HashSet<string> _survivingContracts = new(StringComparer.Ordinal);
     private readonly HashSet<string> _throwingContracts = new(StringComparer.Ordinal);
     private readonly List<(string AccountKey, string ContractKey)> _closeCalls = [];
+    private readonly HashSet<string> _unreadableAccounts = new(StringComparer.Ordinal);
     private bool _venueUnreachable;
     private int _positionReads;
     private bool _bracketsUnsupported;
@@ -84,6 +85,14 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     public void MakeVenueUnreachable() => _venueUnreachable = true;
 
     /// <summary>
+    /// Makes venue TRUTH unreadable for one account (gh#533), so a pass that reads several accounts meets a
+    /// partial failure. <see cref="MakeVenueUnreachable"/> cannot express this: it is checked only inside
+    /// <c>GetAccountsAsync</c>, which the protection census never calls.
+    /// </summary>
+    /// <param name="accountKey">The account whose position and working-order reads must throw.</param>
+    public void MakeAccountUnreadable(string accountKey) => _unreadableAccounts.Add(accountKey);
+
+    /// <summary>
     /// Drops <see cref="VenueCapability.BracketOrders"/> from the advertised capabilities — a venue that cannot
     /// hold an exchange-side protective stop. The send path must then <b>refuse the entry</b> rather than send it
     /// naked: better no trade than an unprotected one (ADR-0007, gh#11 inc 3). Cleared by <see cref="ResetPositions"/>.
@@ -95,6 +104,8 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
 
     /// <summary>Whether the venue read path should throw (see <see cref="MakeVenueUnreachable"/>).</summary>
     internal bool VenueUnreachable => _venueUnreachable;
+
+    internal bool IsUnreadable(VenueAccountId account) => _unreadableAccounts.Contains(account.Key);
 
     /// <summary>Seeds a native working leg resting at the venue (a protective stop / target) for the OCO-exit path to
     /// find via <c>GetWorkingOrdersAsync</c> (gh#184).</summary>
@@ -166,6 +177,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     {
         _positions.Clear();
         _positionReads = 0;
+        _unreadableAccounts.Clear();
         _survivingContracts.Clear();
         _throwingContracts.Clear();
         _closeCalls.Clear();
@@ -357,7 +369,9 @@ internal class AdversarialTestTradingVenue : ITradingVenue
     }
 
     public Task<IReadOnlyList<PositionSnapshot>> GetPositionsAsync(VenueAccountId account, CancellationToken cancellationToken = default) =>
-        Task.FromResult(_factory.PositionsFor(account));
+        _factory.IsUnreadable(account)
+            ? throw new InvalidOperationException($"Venue truth unreadable for {account.Key} (test).")
+            : Task.FromResult(_factory.PositionsFor(account));
 
     public async Task<PlacedOrder> PlaceOrderAsync(OrderRequest request, CancellationToken cancellationToken = default)
     {
@@ -369,7 +383,9 @@ internal class AdversarialTestTradingVenue : ITradingVenue
     }
 
     public Task<IReadOnlyList<WorkingOrder>> GetWorkingOrdersAsync(VenueAccountId account, CancellationToken cancellationToken = default) =>
-        Task.FromResult(_factory.WorkingOrdersFor(account));
+        _factory.IsUnreadable(account)
+            ? throw new InvalidOperationException($"Venue truth unreadable for {account.Key} (test).")
+            : Task.FromResult(_factory.WorkingOrdersFor(account));
 
     public Task CancelOrderAsync(VenueAccountId account, string venueOrderId, CancellationToken cancellationToken = default)
     {
