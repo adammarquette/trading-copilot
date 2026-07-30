@@ -8,7 +8,11 @@ namespace MarqSpec.TradingCopilot.Domain.Triggers;
 /// When the current run of unmeasurable readings began, or <see langword="null"/> when the last reading was
 /// measurable.
 /// </param>
-/// <param name="ShouldReport">Whether this pass is the one that reports the outage.</param>
+/// <param name="ReportedAt">
+/// When this outage was reported, or <see langword="null"/> if it has not been. Cleared with
+/// <paramref name="UnmeasurableSince"/> on recovery, so a later outage is a new incident (gh#515).
+/// </param>
+/// <param name="ShouldReport">Whether this pass is the one that reports the outage — true at most once per outage.</param>
 /// <remarks>
 /// <para>
 /// <b>The fail-closed half already worked.</b> A null indicator reads <see cref="ConditionSatisfaction.Unmeasurable"/>
@@ -33,7 +37,10 @@ namespace MarqSpec.TradingCopilot.Domain.Triggers;
 /// hiccup into a silently disarmed alert, which is strictly worse than the problem being solved.
 /// </para>
 /// </remarks>
-public readonly record struct TriggerStaleness(DateTimeOffset? UnmeasurableSince, bool ShouldReport)
+public readonly record struct TriggerStaleness(
+    DateTimeOffset? UnmeasurableSince,
+    DateTimeOffset? ReportedAt,
+    bool ShouldReport)
 {
     /// <summary>
     /// How long a trigger must be continuously unevaluable before it is reported.
@@ -49,11 +56,16 @@ public readonly record struct TriggerStaleness(DateTimeOffset? UnmeasurableSince
 
     /// <summary>Advances the outage clock for one evaluation.</summary>
     /// <param name="unmeasurableSince">The trigger's stored outage start, or <see langword="null"/> if measurable.</param>
+    /// <param name="reportedAt">
+    /// The trigger's stored report instant, or <see langword="null"/> if this outage has not been reported yet —
+    /// the bit that keeps a crossed threshold from re-reporting every pass (gh#515).
+    /// </param>
     /// <param name="satisfaction">What this pass's reading evaluated to.</param>
     /// <param name="now">The instant of this pass.</param>
     /// <returns>The next outage state, and whether to report.</returns>
     public static TriggerStaleness Track(
         DateTimeOffset? unmeasurableSince,
+        DateTimeOffset? reportedAt,
         ConditionSatisfaction satisfaction,
         DateTimeOffset now)
     {
@@ -62,13 +74,21 @@ public readonly record struct TriggerStaleness(DateTimeOffset? UnmeasurableSince
         // position. Treating the two alike would report every hysteresis trigger as broken.
         if (satisfaction != ConditionSatisfaction.Unmeasurable)
         {
-            return new TriggerStaleness(null, ShouldReport: false);
+            // Both halves clear together. The report must not outlive its outage, or a trigger that broke,
+            // recovered, and broke again would never be reported the second time (gh#497's shape, in miniature).
+            return new TriggerStaleness(null, null, ShouldReport: false);
         }
 
         // The clock keeps its original start, so the outage duration grows. Restarting it each pass would mean the
         // threshold is never crossed and the trigger stays silently inert forever -- the defect itself.
         DateTimeOffset since = unmeasurableSince ?? now;
 
-        return new TriggerStaleness(since, ShouldReport: now - since >= ReportAfter);
+        // gh#515: the threshold alone is not the trigger to speak -- `now - since >= ReportAfter` stays true for
+        // every subsequent pass, which made this ~1,440 identical warnings per trigger per day at the 60s poll,
+        // the exact alert fatigue this type's own doc claims to avoid. Having-already-reported is the missing
+        // durable bit, and it is persisted rather than in-memory so a restart mid-outage does not re-report.
+        bool shouldReport = reportedAt is null && now - since >= ReportAfter;
+
+        return new TriggerStaleness(since, shouldReport ? now : reportedAt, shouldReport);
     }
 }

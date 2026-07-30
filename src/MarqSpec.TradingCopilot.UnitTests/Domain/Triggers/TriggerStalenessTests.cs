@@ -25,7 +25,7 @@ public class TriggerStalenessTests
     [Fact]
     public void Track_ShouldStartTheClock_WhenAMeasurableTriggerFirstGoesUnmeasurable()
     {
-        TriggerStaleness result = TriggerStaleness.Track(unmeasurableSince: null, ConditionSatisfaction.Unmeasurable, _now);
+        TriggerStaleness result = TriggerStaleness.Track(unmeasurableSince: null, reportedAt: null, ConditionSatisfaction.Unmeasurable, _now);
 
         result.UnmeasurableSince.Should().Be(_now, "the clock starts at the first miss, so duration is knowable");
         result.ShouldReport.Should().BeFalse("a single miss is a late bar, not a broken dependency");
@@ -37,7 +37,7 @@ public class TriggerStalenessTests
         // The clock must not restart every pass, or the duration never grows and the threshold is never crossed --
         // the trigger would stay silently inert forever, which is the whole defect.
         TriggerStaleness result = TriggerStaleness.Track(
-            unmeasurableSince: _now, ConditionSatisfaction.Unmeasurable, _now.AddMinutes(30));
+            unmeasurableSince: _now, reportedAt: null, ConditionSatisfaction.Unmeasurable, _now.AddMinutes(30));
 
         result.UnmeasurableSince.Should().Be(_now, "the clock measures the outage, so it keeps its start");
     }
@@ -46,7 +46,7 @@ public class TriggerStalenessTests
     public void Track_ShouldReport_OnceTheOutageOutlastsTheThreshold()
     {
         TriggerStaleness result = TriggerStaleness.Track(
-            unmeasurableSince: _now, ConditionSatisfaction.Unmeasurable, _now + TriggerStaleness.ReportAfter);
+            unmeasurableSince: _now, reportedAt: null, ConditionSatisfaction.Unmeasurable, _now + TriggerStaleness.ReportAfter);
 
         result.ShouldReport.Should().BeTrue("past the threshold this is a dependency that stopped being produced");
     }
@@ -55,7 +55,7 @@ public class TriggerStalenessTests
     public void Track_ShouldNotReport_WhileTheOutageIsStillWithinTheThreshold()
     {
         TriggerStaleness result = TriggerStaleness.Track(
-            unmeasurableSince: _now,
+            unmeasurableSince: _now, reportedAt: null,
             ConditionSatisfaction.Unmeasurable,
             _now + TriggerStaleness.ReportAfter - TimeSpan.FromSeconds(1));
 
@@ -70,7 +70,7 @@ public class TriggerStalenessTests
         // Recovery must be silent and complete. A trigger that healed is not broken, and leaving the clock set
         // would report it forever -- alert fatigue over a resolved condition (ADR-0019's noise budget).
         TriggerStaleness result = TriggerStaleness.Track(
-            unmeasurableSince: _now, measurable, _now + TriggerStaleness.ReportAfter * 10);
+            unmeasurableSince: _now, reportedAt: null, measurable, _now + TriggerStaleness.ReportAfter * 10);
 
         result.UnmeasurableSince.Should().BeNull("a measurable reading means the dependency is back");
         result.ShouldReport.Should().BeFalse();
@@ -82,8 +82,7 @@ public class TriggerStalenessTests
         // Indeterminate is a hysteresis dead-band: the indicator WAS measured, the level is just inside the band.
         // That is a working trigger holding position, not a missing dependency, and conflating them would report
         // every hysteresis trigger as broken.
-        TriggerStaleness result = TriggerStaleness.Track(
-            unmeasurableSince: null, ConditionSatisfaction.Indeterminate, _now);
+        TriggerStaleness result = TriggerStaleness.Track(unmeasurableSince: null, reportedAt: null, ConditionSatisfaction.Indeterminate, _now);
 
         result.UnmeasurableSince.Should().BeNull("a dead-band reading is measured — the dependency resolved fine");
         result.ShouldReport.Should().BeFalse();
@@ -94,10 +93,59 @@ public class TriggerStalenessTests
     {
         // Same reasoning in the recovery direction: reaching the dead band proves the indicator is being produced.
         TriggerStaleness result = TriggerStaleness.Track(
-            unmeasurableSince: _now, ConditionSatisfaction.Indeterminate, _now.AddDays(1));
+            unmeasurableSince: _now, reportedAt: null, ConditionSatisfaction.Indeterminate, _now.AddDays(1));
 
         result.UnmeasurableSince.Should().BeNull();
         result.ShouldReport.Should().BeFalse();
+    }
+
+    // --- Reporting ONCE, which is only observable across consecutive passes (gh#515) ---
+
+    [Fact]
+    public void Track_ShouldReportExactlyOnce_AcrossManyPassesOfOneOutage()
+    {
+        // THE gh#515 REGRESSION. ShouldReport was a bare `>=` on a growing duration, so it was true on the
+        // crossing pass AND every pass after it -- ~1,440 identical warnings per trigger per day at the 60s poll.
+        // No single-call test can see this: "reports once" versus "reports every time" only exists BETWEEN passes,
+        // which is why the original suite was green while the defect shipped.
+        DateTimeOffset since = _now;
+        DateTimeOffset? reportedAt = null;
+        int reports = 0;
+
+        // Twenty passes at one-minute intervals, spanning the threshold in the middle.
+        for (int minute = 1; minute <= 20; minute++)
+        {
+            TriggerStaleness result = TriggerStaleness.Track(
+                since, reportedAt, ConditionSatisfaction.Unmeasurable, _now + TriggerStaleness.ReportAfter
+                    - TimeSpan.FromMinutes(10) + TimeSpan.FromMinutes(minute));
+            reportedAt = result.ReportedAt;
+            if (result.ShouldReport)
+            {
+                reports++;
+            }
+        }
+
+        reports.Should().Be(1, "an outage is reported once, not once per poll — the type's own doc says so");
+        reportedAt.Should().NotBeNull("the report is remembered, or the next pass repeats it");
+    }
+
+    [Fact]
+    public void Track_ShouldReportAgain_WhenAFreshOutageFollowsARecovery()
+    {
+        // The memory must not outlive its outage, or the fix for gh#515 becomes the gh#497 bug in miniature: a
+        // trigger that broke, recovered, and broke again would never be reported the second time.
+        TriggerStaleness recovered = TriggerStaleness.Track(
+            _now, reportedAt: _now.AddHours(1), ConditionSatisfaction.Satisfied, _now.AddHours(2));
+
+        recovered.ReportedAt.Should().BeNull("recovery forgets the report along with the outage");
+
+        TriggerStaleness fresh = TriggerStaleness.Track(
+            recovered.UnmeasurableSince, recovered.ReportedAt, ConditionSatisfaction.Unmeasurable, _now.AddHours(3));
+        TriggerStaleness matured = TriggerStaleness.Track(
+            fresh.UnmeasurableSince, fresh.ReportedAt, ConditionSatisfaction.Unmeasurable,
+            _now.AddHours(3) + TriggerStaleness.ReportAfter);
+
+        matured.ShouldReport.Should().BeTrue("a new outage is a new incident and is reported on its own merits");
     }
 
     [Fact]

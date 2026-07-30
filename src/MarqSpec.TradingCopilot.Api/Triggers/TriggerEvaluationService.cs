@@ -311,8 +311,9 @@ public class TriggerEvaluationService
             // never occurred. Duration is what separates a late bar from a broken trigger, so the outage start is
             // persisted and reported once it outlasts the threshold -- never every pass, which would be a log line
             // per trigger per poll.
-            TriggerStaleness staleness = TriggerStaleness.Track(trigger.UnmeasurableSince, satisfaction, now);
+            TriggerStaleness staleness = TriggerStaleness.Track(trigger.UnmeasurableSince, trigger.StalenessReportedAt, satisfaction, now);
             trigger.UnmeasurableSince = staleness.UnmeasurableSince;
+            trigger.StalenessReportedAt = staleness.ReportedAt;
 
             if (staleness.ShouldReport)
             {
