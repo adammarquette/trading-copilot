@@ -2,10 +2,9 @@ namespace MarqSpec.TradingCopilot.Domain.Ai;
 
 /// <summary>What an AI invocation was <b>for</b> — the feature dimension on every AIUsage row (gh#431, ADR-0008).</summary>
 /// <remarks>
-/// The full data-dictionary domain. Only <see cref="Triage"/> has a producer today (the agent-review reviewer);
-/// the rest are reserved for their features as they land (a suggestion-enrich pass, follow-ups, backtests, and the
-/// embed path — its owner attribution is settled (gh#436), and its live producer lands with the embed consumer
-/// gh#377).
+/// The full data-dictionary domain. <see cref="Triage"/> (the agent-review reviewer) and <see cref="Embed"/> (the
+/// news-embedding pass) have producers today; the rest are reserved for their features as they land (a
+/// suggestion-enrich pass, follow-ups, backtests).
 /// </remarks>
 public enum AiUsageFeature
 {
@@ -26,8 +25,9 @@ public enum AiUsageFeature
 
     /// <summary>
     /// An embedding call (gh#403). Owner attribution is settled (gh#436): a <b>global</b> embed (deployment news /
-    /// snapshots) is stamped to the deployment sentinel <c>SystemOwner</c>, an owner-scoped embed stamps the operator;
-    /// the live producer lands with the embed consumer (gh#377).
+    /// snapshots) is stamped to the deployment sentinel <c>SystemOwner</c>, an owner-scoped embed stamps the operator.
+    /// The live producer is the news-embedding pass (gh#377), which ledgers every attempted call — success or
+    /// failure alike.
     /// </summary>
     Embed = 5,
 }
@@ -58,7 +58,7 @@ public enum AiUsageOutcome
     /// <summary>A provider fault (transport error, timeout, 4xx/5xx) — no usage; the governor's failure signal.</summary>
     Failed = 4,
 
-    /// <summary>Rate-limited — a 429 the embed path degrades to sparse for (gh#403 / gh#436); the live producer lands with gh#377.</summary>
+    /// <summary>Rate-limited — a 429 the embed path degrades to sparse for (gh#403); ledgered by the news-embedding pass (gh#377).</summary>
     RateLimited = 5,
 }
 
