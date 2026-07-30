@@ -88,6 +88,98 @@ Constraints:
 - **Fixed sizing / defaults.** Rejected — traders differ; sizing basis, proximity metric, and default entry action
   are configurable.
 
+## Consequences
+**Positive**
+- **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move
+  money.
+- **Hidden entries without unreliable stops** — the native safety stop + staged promotion give both.
+- **Deterministic max loss per trade** (safety stop = max-DD-per-trade) and **proactive** daily-risk throttling.
+- **Configurable to trader style**, and **venue-neutral** — the synthetic layer can *fill* a capability a venue
+  lacks (R-17 optional-capability pattern).
+- Clean separation from the ingest/analytics path — this is the **safety-critical path** (engineering §9).
+
+**Negative / costs**
+- The **conditional-order + staged-stop engine is real, safety-critical engineering** — it must be **highly
+  available**, handle **gaps/latency** (a fast gap can jump the promotion band → the **safety stop catches it, by
+  design**), and coordinate **OCO** cancellation. It carries the **high-rigor test suites** (engineering §5/§9).
+- **More states to verify** (arm/edit/send × now/on-trigger × native/synthetic × modified) — a deliberate but real
+  test burden.
+- **Synthetic orders depend on platform liveness** — mitigated, not eliminated, by the native safety stop,
+  auto-flatten, and **active connection-loss detection** (orphan → emergency + operator alert, `synthetic_risk` audit).
+- **Gate / re-validation latency is on the hot path** — must stay low for scalping.
+- A **config surface** (limits, defaults, proximity, governor) to design and validate-on-start.
+
+## Decision log
+
+This ADR's decision has been **extended by increment** rather than rewritten, so the dated updates below are the
+authoritative record of what the execution path does today — the *Decision* above is the original frame, and where a
+later update supersedes part of it that update says so inline. They run **oldest first**. Nothing here is deleted when
+it is superseded: an ADR is the reasoning trail, and knowing *why* a decision was replaced is the point.
+
+This index exists because the trail is long. Skim it to find the increment you need, then read that entry.
+
+*(Housekeeping, gh#492: the entries below were **reordered into date order** and this index added — previously
+`Consequences` sat in the middle of the trail and the earliest entry (2026-07-20) sat near the end, so a reader could
+not tell current from historical. **No entry was removed or reworded**; the only edits were to two "still deferred"
+lists whose items have since landed, which now say so and name the update that closed each.)*
+
+| Date | Update |
+|---|---|
+| 2026-07-20 | the risk-gate interface is defined (S2, gh#10) |
+| 2026-07-22 | per-trade risk basis confirmed; the send path composed |
+| 2026-07-24 | the staged-stop plan (increment 4) |
+| 2026-07-24 | the promotion watcher landed (gh#153) |
+| 2026-07-24 | the take-profit bracket (gh#170) |
+| 2026-07-25 | the take-profit wiring (gh#173) |
+| 2026-07-25 | the conditional order, model + persistence (gh#176) |
+| 2026-07-25 | the firing watcher landed (gh#198) |
+| 2026-07-25 | connection-loss orphan handling landed (gh#209) |
+| 2026-07-25 | per-position re-validation on re-arm landed (gh#191) |
+| 2026-07-25 | the kill switch landed (gh#189) |
+| 2026-07-25 | the account-event streaming seam (gh#219) |
+| 2026-07-25 | app-level OCO-cancel-on-exit (gh#183) |
+| 2026-07-25 | the AuditRecord landed (gh#220) |
+| 2026-07-25 | the send-as-is fast path (gh#181) |
+| 2026-07-25 | cancel a working order via the order API (gh#250) |
+| 2026-07-25 | modify a working order via the order API (gh#259) |
+| 2026-07-25 | the default entry action preference (gh#218) |
+| 2026-07-25 | the promotion race fenced (gh#183 follow-up) |
+| 2026-07-26 | reprice a working order's working stop (gh#267) |
+| 2026-07-26 | move the entry and working stop together (gh#278) |
+| 2026-07-26 | resize a working order (gh#292) |
+| 2026-07-26 | the promoted stop is sized to the live remaining (gh#277) |
+| 2026-07-27 | the ATR band is live, and the caller resolves it (gh#311) |
+| 2026-07-28 | resting orders are readable through the app (gh#381) |
+| 2026-07-28 | the consistency target binds, and its posture is per-account (gh#380) |
+
+## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
+
+The follow-up *"define the risk-gate interface — inputs, outputs"* below is closed. It lives in
+`MarqSpec.TradingCopilot.Domain/Risk/`:
+
+- **In:** `OrderProposal` (instrument spec, side, requested size, entry, working stop, **safety stop**, reference
+  price) plus `RiskContext` (live `AccountRiskState`, the account's `TrailingDrawdown`, its hard
+  `AccountRiskRules`, and the operator's `RiskProfile`, `ManualCaps`, `SanityCaps`).
+- **Out:** `GateDecision` — outcome (allowed / resized / **blocked**), the approved quantity, the **binding
+  `RiskLayer`**, and a reason string that is always populated.
+- **How:** each layer is sized independently and the **most restrictive wins**. The hard account limits (drawdown
+  floor, daily loss limit, governor) are all measured at the **safety stop**, so it is the catastrophic case —
+  not the expected one — that can never breach the account.
+
+Two decisions worth recording:
+
+- **Per-trade risk % is a fraction of _headroom to the floor_, not of account size.** R-5 is explicit that "the
+  risk budget is headroom to the (trailing) drawdown floor — not the account size," so the percentage is applied
+  there. This gives sizing a useful property — it tightens by itself as the floor is approached — but it also
+  means realistic values are **~10–25%**, not the ~1% of a traditional account-size rule. *Flagged for operator
+  confirmation.*
+- **The `acknowledge` outcome is deferred.** This ADR lists "block / resize / acknowledge" as gate outputs, but
+  acknowledgement is about *editing an armed order* relative to an already-approved baseline — state that belongs
+  to the execution flow (S3), not to a stateless evaluation. `GateOutcome` therefore ships with three values.
+
+Not in this slice: **R-12 re-validation** (validity window, price-drift tolerance) rides with the
+take-a-suggestion path in S3, and the **consistency %** rule needs P&L-by-day history from the journal (R-9).
+
 ## Update (2026-07-22) — per-trade risk basis confirmed; the send path composed
 The flagged **per-trade risk % basis** is confirmed by the operator (gh#10): `PerTradeRiskFraction` is a fraction
 of **headroom to the drawdown floor** — not account size — realistic values ~0.10–0.25. The gate sizes from it
@@ -105,10 +197,12 @@ every transmitted entry carries its safety stop as an **exchange-held stop-loss 
 → the ProjectX `stopLossBracket`), so the venue attaches a real protective stop **on fill** — a live position is
 never unprotected. It is **fail-closed**: if the venue cannot hold a native protective stop
 (`VenueCapability.BracketOrders`), the entry is **not sent** (`ExecutionOutcome.RefusedByUnprotectableStop`) —
-better no trade than an unprotected one. *Still deferred to later increments:* the **staged/synthetic actual
+better no trade than an unprotected one. *Deferred at the time to later increments:* the **staged/synthetic actual
 stop** and its **proximity promotion**, take-profit brackets, OCO-cancel-on-exit, and the connection-liveness
 orphan handling — increment 3 lands the catastrophic-insurance floor, not yet the hidden-then-promoted working
-stop.
+stop. *(**All four have since landed**, each with its own update below: the staged stop + promotion — increment 4
+and gh#153; take-profit brackets — gh#170 / gh#173; OCO-cancel-on-exit — gh#183; orphan handling — gh#209 / gh#191.
+Kept as written because the increment ordering is the reasoning trail.)*
 
 ## Update (2026-07-24) — the staged-stop plan (increment 4)
 The **hidden actual stop** now has its model and its persistence: `Domain/Execution/StopPlan` holds entry, the
@@ -177,8 +271,11 @@ operator immediate feedback, but the order rests **`Pending`**, unseen at the br
 mirror the domain (direction declared, cancel band on the stale side) — **proven rejecting against live
 Postgres**.
 
-*Still deferred:* the **firing watcher** (next); **connection-loss orphan handling** (a pending synthetic order
-→ orphaned → emergency; overlaps S4); and **named-signal triggers** (they need the derived-signal pipeline — order-flow (R-3) and/or the indicator pipeline (R-22) — price-cross only for now). This lands the model half of the "spec the synthetic/conditional engine" item below.
+*Deferred at the time:* the **firing watcher** (next) *(landed gh#198, immediately below)*; **connection-loss orphan
+handling** (a pending synthetic order → orphaned → emergency; overlaps S4) *(landed gh#209 / gh#191)*; and
+**named-signal triggers** (they need the derived-signal pipeline — order-flow (R-3) and/or the indicator pipeline
+(R-22) — price-cross only for now) — **still open**, the one item of the three that has not landed. This lands the
+model half of the "spec the synthetic/conditional engine" item below.
 
 ## Update (2026-07-25) — the firing watcher landed (gh#198)
 The conditional order is now **operational**. `ConditionalOrderHost` is the event log's **second consumer**
@@ -547,27 +644,6 @@ net is other entries' concern, not this plan's to double-protect). It mirrors `O
 partial-close reconciliation. The **safety-stop bracket** (placed on entry, exchange-managed OCO) and the
 **conditional-firing** path (which promotes through this same watcher) need no separate change.
 
-## Consequences
-**Positive**
-- **One auditable checkpoint** for all order flow — easier to reason about, test, and trust; the LLM can't move
-  money.
-- **Hidden entries without unreliable stops** — the native safety stop + staged promotion give both.
-- **Deterministic max loss per trade** (safety stop = max-DD-per-trade) and **proactive** daily-risk throttling.
-- **Configurable to trader style**, and **venue-neutral** — the synthetic layer can *fill* a capability a venue
-  lacks (R-17 optional-capability pattern).
-- Clean separation from the ingest/analytics path — this is the **safety-critical path** (engineering §9).
-
-**Negative / costs**
-- The **conditional-order + staged-stop engine is real, safety-critical engineering** — it must be **highly
-  available**, handle **gaps/latency** (a fast gap can jump the promotion band → the **safety stop catches it, by
-  design**), and coordinate **OCO** cancellation. It carries the **high-rigor test suites** (engineering §5/§9).
-- **More states to verify** (arm/edit/send × now/on-trigger × native/synthetic × modified) — a deliberate but real
-  test burden.
-- **Synthetic orders depend on platform liveness** — mitigated, not eliminated, by the native safety stop,
-  auto-flatten, and **active connection-loss detection** (orphan → emergency + operator alert, `synthetic_risk` audit).
-- **Gate / re-validation latency is on the hot path** — must stay low for scalping.
-- A **config surface** (limits, defaults, proximity, governor) to design and validate-on-start.
-
 ## Update (2026-07-27) — the ATR band is live, and the caller resolves it (gh#311)
 
 This ADR has named the promotion band as *"ticks / ATR / fraction of the entry→stop distance"* since it was
@@ -611,56 +687,6 @@ warning naming that setting.
 persisted fine; the domain rebuild was the only gate, and it is now open. The `StopPlanPersistenceIntegrationTests`
 pin reserved for this path was flipped into real round-trip coverage in the same PR.
 
-## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
-
-The follow-up *"define the risk-gate interface — inputs, outputs"* below is closed. It lives in
-`MarqSpec.TradingCopilot.Domain/Risk/`:
-
-- **In:** `OrderProposal` (instrument spec, side, requested size, entry, working stop, **safety stop**, reference
-  price) plus `RiskContext` (live `AccountRiskState`, the account's `TrailingDrawdown`, its hard
-  `AccountRiskRules`, and the operator's `RiskProfile`, `ManualCaps`, `SanityCaps`).
-- **Out:** `GateDecision` — outcome (allowed / resized / **blocked**), the approved quantity, the **binding
-  `RiskLayer`**, and a reason string that is always populated.
-- **How:** each layer is sized independently and the **most restrictive wins**. The hard account limits (drawdown
-  floor, daily loss limit, governor) are all measured at the **safety stop**, so it is the catastrophic case —
-  not the expected one — that can never breach the account.
-
-Two decisions worth recording:
-
-- **Per-trade risk % is a fraction of _headroom to the floor_, not of account size.** R-5 is explicit that "the
-  risk budget is headroom to the (trailing) drawdown floor — not the account size," so the percentage is applied
-  there. This gives sizing a useful property — it tightens by itself as the floor is approached — but it also
-  means realistic values are **~10–25%**, not the ~1% of a traditional account-size rule. *Flagged for operator
-  confirmation.*
-- **The `acknowledge` outcome is deferred.** This ADR lists "block / resize / acknowledge" as gate outputs, but
-  acknowledgement is about *editing an armed order* relative to an already-approved baseline — state that belongs
-  to the execution flow (S3), not to a stateless evaluation. `GateOutcome` therefore ships with three values.
-
-Not in this slice: **R-12 re-validation** (validity window, price-drift tolerance) rides with the
-take-a-suggestion path in S3, and the **consistency %** rule needs P&L-by-day history from the journal (R-9).
-
-## Follow-ups
-*Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the
-authoritative record — this list is kept only as a decision-provenance changelog.*
-- ~~Define the **order-state machine** + per-transition **journal / event records** (R-8/R-9, ADR-0001).~~ **Landed** —
-  the order lifecycle + `AuditRecord` / event-log journaling ship across the execution suites.
-- ~~Spec the **synthetic / conditional engine**: trigger types, promotion-band metric + **default**, OCO
-  coordination, gap/latency handling, and an availability target.~~ **Landed** — the conditional firing engine
-  (gh#180/#198) + OCO-cancel-on-exit (gh#183/#184) + stop promotion.
-- ~~Define **connection-loss detection** (heartbeat / timeout thresholds), the **orphan → emergency** transition +
-  operator alert, and the **recovery re-arm** path — each carrying a `synthetic_risk` audit flag.~~ **Landed** — the
-  venue-connection monitor + orphan handling / re-arm (gh#191/#192/#209); consolidated in ADR-0013.
-- Decide **defaults** (per environment): sizing basis and proximity metric. *(The **default entry action** is settled and built — gh#218; see the update below.)*
-- ~~Define the **risk-gate interface** — inputs (live account state, layers, safety stop), outputs (size, binding
-  layer, block / resize / acknowledge) — R-5.~~ **Landed** — `RiskGate` with the layered decision (see the risk-gate
-  update above).
-- Wire the **governor → R-4** throttle policy (thresholds, throttle modes). *(The **daily/consistency governor** landed
-  (gh#380); the R-4 suggestion-**throttle** modes are still open.)*
-- ~~Confirm **ProjectX** native bracket / OCO / stop-type capabilities (Q-1); the synthetic layer covers gaps (R-17).~~
-  **Confirmed / built** — native bracket preserve + resize (gh#259/#292), practice-gated on staging.
-- ~~Stand up the **high-rigor test suites** for the risk gate, execution, staged stops, kill switch, and auto-flatten
-  (engineering §9).~~ **Landed** — the QA integration suites (see `integration-test-audit.md`).
-
 ## Update (2026-07-28) — resting orders are readable through the app (gh#381)
 
 `IOrderExecutor.GetWorkingOrdersAsync` was added for exactly one consumer: OCO-cancel-on-exit finding the
@@ -688,6 +714,7 @@ different and much larger change.
 gateway **directly**, around the app, to witness a resting protective leg and its size — because the app had no
 such read. Every future venue-truth gate would have repeated that, coupling test and observability code to the
 gateway instead of the app boundary. Those gates remain as they are; what changes is that the next one need not.
+
 ## Update (2026-07-28) — the consistency target binds, and its posture is per-account (gh#380)
 
 The last unshipped S2 risk rule. `MaxBestDayFraction` had been persisted, range-checked and settable over the
@@ -736,3 +763,26 @@ fact. The column is **nullable with no default**: null means "no advisory", whic
 written before it existed means, so old and new rows read alike rather than the migration claiming historical
 decisions were known to carry none. A `Block`-posture refusal is unchanged — it already surfaced through
 `BindingLayer` and `Reason`.
+
+## Follow-ups
+*Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the
+authoritative record — this list is kept only as a decision-provenance changelog.*
+- ~~Define the **order-state machine** + per-transition **journal / event records** (R-8/R-9, ADR-0001).~~ **Landed** —
+  the order lifecycle + `AuditRecord` / event-log journaling ship across the execution suites.
+- ~~Spec the **synthetic / conditional engine**: trigger types, promotion-band metric + **default**, OCO
+  coordination, gap/latency handling, and an availability target.~~ **Landed** — the conditional firing engine
+  (gh#180/#198) + OCO-cancel-on-exit (gh#183/#184) + stop promotion.
+- ~~Define **connection-loss detection** (heartbeat / timeout thresholds), the **orphan → emergency** transition +
+  operator alert, and the **recovery re-arm** path — each carrying a `synthetic_risk` audit flag.~~ **Landed** — the
+  venue-connection monitor + orphan handling / re-arm (gh#191/#192/#209); consolidated in ADR-0013.
+- Decide **defaults** (per environment): sizing basis and proximity metric. *(The **default entry action** is settled and built — gh#218; see the update below.)*
+- ~~Define the **risk-gate interface** — inputs (live account state, layers, safety stop), outputs (size, binding
+  layer, block / resize / acknowledge) — R-5.~~ **Landed** — `RiskGate` with the layered decision (see the risk-gate
+  update above).
+- Wire the **governor → R-4** throttle policy (thresholds, throttle modes). *(The **daily/consistency governor** landed
+  (gh#380); the R-4 suggestion-**throttle** modes are still open.)*
+- ~~Confirm **ProjectX** native bracket / OCO / stop-type capabilities (Q-1); the synthetic layer covers gaps (R-17).~~
+  **Confirmed / built** — native bracket preserve + resize (gh#259/#292), practice-gated on staging.
+- ~~Stand up the **high-rigor test suites** for the risk gate, execution, staged stops, kill switch, and auto-flatten
+  (engineering §9).~~ **Landed** — the QA integration suites (see `integration-test-audit.md`).
+
