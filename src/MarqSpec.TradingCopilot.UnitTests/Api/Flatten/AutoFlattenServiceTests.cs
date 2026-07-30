@@ -142,6 +142,60 @@ public class AutoFlattenServiceTests
         A.CallTo(() => _notifications.ResolveAsync(A<string>._, A<CancellationToken>._)).MustHaveHappened();
     }
 
+    // --- Re-arming the incident when exposure ends by ANY means (gh#497, P1, R-13) ---
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldResolveTheIncident_WhenTheAccountIsFlatByAnyMeans()
+    {
+        // THE gh#497 defect. Resolve fired only on the flatten's OWN success (FlattenVerdict.Flat) -- and an
+        // escalation is by construction the path where the close did NOT succeed. So after any escalation the
+        // exposure gets ended by someone else (the operator by hand, a prop firm's forced flatten) and nothing
+        // ever re-armed the key: every later escalation for that account+instrument was suppressed as a duplicate,
+        // silently, for the life of the process.
+        //
+        // Being flat IS the incident-over signal, whoever produced it.
+        ITradingVenue venue = Venue([]); // nothing open at all
+
+        await Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+
+        A.CallTo(() => _notifications.ResolveAsync(
+                A<string>.That.Contains("ES"), A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldResolveOnlyTheClearInstrument_WhenAnotherIsStillExposed()
+    {
+        // The partial case the issue also names: the account still holds GC, so it never reaches the
+        // "nothing open" branch -- but ES is clear and its key must still be re-armed. Re-arming GC's here would
+        // be the opposite defect, releasing suppression on an incident that is still live and re-paging every pass.
+        ITradingVenue venue = Venue([Pos("CON.F.US.GC.Q26", 2)]);
+
+        await Service().FlattenAccountAsync(
+            Account, venue,
+            [Schedule("ES", new TimeOnly(14, 30)), Schedule("GC", new TimeOnly(12, 15))],
+            Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+
+        A.CallTo(() => _notifications.ResolveAsync(A<string>.That.Contains("ES"), A<CancellationToken>._))
+            .MustHaveHappened();
+        A.CallTo(() => _notifications.ResolveAsync(A<string>.That.Contains("GC"), A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldNotResolve_WhileTheIncidentIsStillLive()
+    {
+        // gh#243's noise budget must not regress. While the SAME exposure persists, the ~15 s re-emission has to
+        // keep collapsing to one page -- so an instrument that is still open is never re-armed.
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2)); // never goes flat
+
+        await Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+
+        A.CallTo(() => _notifications.ResolveAsync(A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
     // --- Committing the page WITH the state it reports (gh#455, R-13) ---
 
     [Fact]

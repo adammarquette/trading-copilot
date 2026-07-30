@@ -206,6 +206,16 @@ public sealed class AutoFlattenService
                 {
                     _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenNothingToDo);
                 }
+
+                // gh#497: being flat IS the incident-over signal, WHOEVER produced it. Resolve fired only on the
+                // flatten's own success -- and an escalation is by construction the path where the close did not
+                // succeed, so the exposure ends by other hands (the operator, a prop firm's forced flatten) and
+                // nothing re-armed the key. Every later escalation for that pair was then suppressed as a
+                // duplicate, silently, for the life of the process.
+                //
+                // Nothing is open here, so every configured instrument is clear -- no root matching needed, and
+                // no venue round trip added to the common flat pass.
+                await ResolveAsync(IncidentKey(account, idle.Instrument), cancellationToken);
             }
 
             return 0;
@@ -218,6 +228,19 @@ public sealed class AutoFlattenService
         {
             ResolvedContract resolved = await venue.ResolveContractAsync(schedule.Instrument, cancellationToken);
             byRoot[ProductRoot(resolved.Contract.Key)] = schedule;
+        }
+
+        // gh#497, the partial case: the account still holds something, so the "nothing open" branch above is never
+        // reached -- but an instrument that IS clear still needs its key re-armed, or a later escalation on it is
+        // suppressed as a duplicate. The root map is already built, so this costs no extra venue call.
+        HashSet<string> exposedRoots =
+            [.. open.Select(position => ProductRoot(position.Contract.Key))];
+        foreach ((string root, FlattenSchedule configured) in byRoot)
+        {
+            if (!exposedRoots.Contains(root))
+            {
+                await ResolveAsync(IncidentKey(account, configured.Instrument), cancellationToken);
+            }
         }
 
         int closed = 0;

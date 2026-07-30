@@ -181,19 +181,25 @@ public class NotificationDurabilityIntegrationTests : IClassFixture<Notification
         rows.Should().Be(2,
             "a delivered incident releases its key at the OUTBOX — the second occurrence is recordable (gh#458)");
 
-        // DEFECT gh#497: only the FIRST page reaches the wire. gh#458 released the key at the outbox, but
-        // DedupingNotificationChannel — a singleton one layer downstream — still holds it, and its `_reported` set
-        // is cleared ONLY by ResolveAsync (no TTL, no eviction: "cleared by ResolveAsync, so no eviction policy is
-        // needed"). So when an incident ends WITHOUT a resolve — the operator closes the position by hand, so no
-        // flatten pass ever observes flat-with-a-position-due — the key stays armed and the next genuine
-        // escalation is suppressed as a stale duplicate.
+        // NOT A DEFECT — this is the noise budget, and gh#497 resolved it at the producer instead. Reasoning, so
+        // nobody "fixes" this into a pager storm:
         //
-        // Pins OBSERVED behaviour per the QA contract. When #497 lands this flips to HaveCount(2) and becomes its
-        // regression guard. See Outbox_ShouldPageAgain_WhenTheIncidentResolvedBetweenOccurrences below, which
-        // proves the suppressor IS the decorator: identical steps plus a resolve, and both pages land.
+        // Two occurrences of one dedup key with NO resolve between them is indistinguishable, at this layer, from
+        // a CONTINUING incident. The flatten re-emits roughly every 15 s while exposure persists, and since gh#458
+        // the outbox admits each of those (the previous row is delivered, so the filtered unique index does not
+        // block it) — which makes DedupingNotificationChannel the only thing collapsing them. Release the key here
+        // on delivery and a 30-minute exposure pages ~120 times, which is precisely what ADR-0019 §4 exists to
+        // prevent and what teaches an operator to mute the pager.
+        //
+        // gh#497's real defect was that the incident never ENDED as far as the channel was concerned:
+        // AutoFlattenService resolved only on its own successful close, so an exposure ended by the operator's own
+        // hand (or a prop firm's forced flatten) left the key armed forever. The fix re-arms whenever a pass
+        // observes the instrument flat, by ANY means — see AutoFlattenServiceTests
+        // (ShouldResolveTheIncident_WhenTheAccountIsFlatByAnyMeans, ShouldResolveOnlyTheClearInstrument_...).
+        // Outbox_ShouldPageAgain_WhenTheIncidentResolvedBetweenOccurrences below is the end-to-end shape of it.
         _factory.Pushover.Pages.Should().ContainSingle(
-            "DEFECT gh#497 — the operator is NOT paged for the second failure, the exact silence gh#481 set out "
-            + "to remove: a repeat R-13 escalation unreportable precisely because the first one was reported");
+            "with no resolve between them these two are one continuing incident, and collapsing them is the "
+            + "noise budget (ADR-0019 §4); gh#497 fixed the missing resolve at the producer, not the collapse here");
     }
 
     [Fact]
