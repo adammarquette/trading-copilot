@@ -31,7 +31,7 @@ public class UnavailableEmbeddingProviderTests
     {
         // The whole point. A zero-filled vector would rank every candidate identically and look like a working
         // search returning poor results — indistinguishable from a corpus with nothing relevant in it.
-        (await Provider().EmbedAsync("anything", CancellationToken.None)).Should().BeNull();
+        (await Provider().EmbedAsync("anything", CancellationToken.None)).Vector.Should().BeNull();
     }
 
     [Fact]

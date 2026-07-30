@@ -55,10 +55,10 @@ public class CohereEmbeddingProviderTests
     {
         StubHandler handler = new() { Body = EmbedResponse() };
 
-        IReadOnlyList<float>? vector = await Provider(handler, new CohereOptions { ApiKey = " " })
+        EmbeddingResult result = await Provider(handler, new CohereOptions { ApiKey = " " })
             .EmbedAsync("text", CancellationToken.None);
 
-        vector.Should().BeNull();
+        result.Vector.Should().BeNull();
         handler.Requests.Should().BeEmpty("an unconfigured provider must not reach the network");
     }
 
@@ -69,10 +69,11 @@ public class CohereEmbeddingProviderTests
     {
         StubHandler handler = new() { Body = EmbedResponse() };
 
-        IReadOnlyList<float>? vector = await Provider(handler).EmbedAsync("Fed holds rates", CancellationToken.None);
+        EmbeddingResult result = await Provider(handler).EmbedAsync("Fed holds rates", CancellationToken.None);
 
-        vector.Should().NotBeNull();
-        vector!.Should().HaveCount(1024);
+        result.Vector.Should().NotBeNull();
+        result.Vector!.Should().HaveCount(1024);
+        result.Outcome.Should().Be(EmbeddingOutcome.Embedded);
     }
 
     [Fact]
@@ -93,9 +94,10 @@ public class CohereEmbeddingProviderTests
     {
         StubHandler handler = new() { Status = HttpStatusCode.TooManyRequests };
 
-        IReadOnlyList<float>? vector = await Provider(handler).EmbedAsync("text", CancellationToken.None);
+        EmbeddingResult result = await Provider(handler).EmbedAsync("text", CancellationToken.None);
 
-        vector.Should().BeNull("a 429 degrades retrieval to sparse — it must not throw into the caller");
+        result.Vector.Should().BeNull("a 429 degrades retrieval to sparse — it must not throw into the caller");
+        result.Outcome.Should().Be(EmbeddingOutcome.RateLimited);
     }
 
     [Fact]
@@ -103,7 +105,7 @@ public class CohereEmbeddingProviderTests
     {
         StubHandler handler = new() { Status = HttpStatusCode.InternalServerError };
 
-        (await Provider(handler).EmbedAsync("text", CancellationToken.None)).Should().BeNull();
+        (await Provider(handler).EmbedAsync("text", CancellationToken.None)).Vector.Should().BeNull();
     }
 
     [Fact]
@@ -111,7 +113,7 @@ public class CohereEmbeddingProviderTests
     {
         StubHandler handler = new() { Throw = new HttpRequestException("connection reset") };
 
-        (await Provider(handler).EmbedAsync("text", CancellationToken.None)).Should().BeNull();
+        (await Provider(handler).EmbedAsync("text", CancellationToken.None)).Vector.Should().BeNull();
     }
 
     [Fact]
@@ -119,7 +121,7 @@ public class CohereEmbeddingProviderTests
     {
         StubHandler handler = new() { Body = "not json" };
 
-        (await Provider(handler).EmbedAsync("text", CancellationToken.None)).Should().BeNull();
+        (await Provider(handler).EmbedAsync("text", CancellationToken.None)).Vector.Should().BeNull();
     }
 
     [Fact]
@@ -142,13 +144,19 @@ public class CohereEmbeddingProviderTests
     {
         StubHandler handler = new() { Body = EmbedResponse(inputTokens: 1_000_000) };
 
-        await Provider(handler).EmbedAsync("text", CancellationToken.None);
+        EmbeddingResult result = await Provider(handler).EmbedAsync("text", CancellationToken.None);
 
         RecordedEmbed embed = _metrics.Records.Should().ContainSingle().Subject;
         embed.Outcome.Should().Be(EmbeddingOutcome.Embedded);
         embed.BilledTokens.Should().Be(1_000_000);
         embed.EstimatedCostUsd.Should().Be(0.10m, "one million tokens at the pinned $0.10/M rate");
         embed.Model.Should().Be("embed-english-v3.0");
+
+        // The SAME facts also ride the return value (gh#377): the embed pass ledgers AIUsage from this, not from
+        // the metrics sink, so the outcome/tokens/cost the caller sees must match what was metered exactly.
+        result.Outcome.Should().Be(EmbeddingOutcome.Embedded);
+        result.BilledTokens.Should().Be(1_000_000);
+        result.EstimatedCostUsd.Should().Be(0.10m);
     }
 
     [Fact]
@@ -156,7 +164,7 @@ public class CohereEmbeddingProviderTests
     {
         StubHandler handler = new() { Status = HttpStatusCode.TooManyRequests };
 
-        await Provider(handler).EmbedAsync("text", CancellationToken.None);
+        EmbeddingResult result = await Provider(handler).EmbedAsync("text", CancellationToken.None);
 
         RecordedEmbed embed = _metrics.Records.Should().ContainSingle(
             "a call that failed over is still a call — leaving it unmetered would hide the degrade").Subject;
@@ -164,6 +172,10 @@ public class CohereEmbeddingProviderTests
         embed.BilledTokens.Should().Be(0);
         embed.EstimatedCostUsd.Should().Be(0m);
         embed.Latency.Should().BeGreaterThanOrEqualTo(TimeSpan.Zero);
+
+        result.Outcome.Should().Be(EmbeddingOutcome.RateLimited);
+        result.BilledTokens.Should().Be(0);
+        result.EstimatedCostUsd.Should().Be(0m);
     }
 
     [Fact]

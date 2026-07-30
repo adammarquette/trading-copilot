@@ -39,7 +39,7 @@ public sealed class UnavailableEmbeddingProvider : IEmbeddingProvider
     public bool IsAvailable => false;
 
     /// <inheritdoc />
-    public Task<IReadOnlyList<float>?> EmbedAsync(string text, CancellationToken cancellationToken)
+    public Task<EmbeddingResult> EmbedAsync(string text, CancellationToken cancellationToken)
     {
         // Once, not per call: a retrieval loop would otherwise turn a configuration state into a log flood, and
         // a flooding error is one that gets filtered out.
@@ -50,6 +50,6 @@ public sealed class UnavailableEmbeddingProvider : IEmbeddingProvider
                 + "provider (gh#403) to enable it. Nothing on the trading path depends on this.");
         }
 
-        return Task.FromResult<IReadOnlyList<float>?>(null);
+        return Task.FromResult(new EmbeddingResult(null, EmbeddingOutcome.Failed, 0, 0m));
     }
 }

@@ -68,16 +68,18 @@ public sealed class CohereEmbeddingProvider : IEmbeddingProvider
     public bool IsAvailable => _options.IsConfigured;
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<float>?> EmbedAsync(string text, CancellationToken cancellationToken)
+    public async Task<EmbeddingResult> EmbedAsync(string text, CancellationToken cancellationToken)
     {
         if (!_options.IsConfigured)
         {
-            return null; // the keyless default should be registered instead, but never reach the network regardless
+            // the keyless default should be registered instead, but never reach the network regardless
+            return new EmbeddingResult(null, EmbeddingOutcome.Failed, 0, 0m);
         }
 
         long startedTicks = Stopwatch.GetTimestamp();
         EmbeddingOutcome outcome = EmbeddingOutcome.Failed;
         int billedTokens = 0;
+        decimal estimatedCostUsd = 0m;
 
         try
         {
@@ -96,13 +98,13 @@ public sealed class CohereEmbeddingProvider : IEmbeddingProvider
             {
                 outcome = EmbeddingOutcome.RateLimited;
                 _logger.LogWarning("Cohere rate-limited the embed request — retrieval degrades to sparse for this call.");
-                return null;
+                return new EmbeddingResult(null, outcome, billedTokens, estimatedCostUsd);
             }
 
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("Cohere embed returned {Status} — retrieval degrades to sparse for this call.", (int)response.StatusCode);
-                return null;
+                return new EmbeddingResult(null, outcome, billedTokens, estimatedCostUsd);
             }
 
             CohereEmbedResponse? body = await response.Content.ReadFromJsonAsync<CohereEmbedResponse>(_jsonOptions, cancellationToken);
@@ -112,12 +114,13 @@ public sealed class CohereEmbeddingProvider : IEmbeddingProvider
             {
                 _logger.LogWarning(
                     "Cohere embed response carried no usable {Dimensions}-dim vector — retrieval degrades to sparse.", Dimensions);
-                return null;
+                return new EmbeddingResult(null, outcome, billedTokens, estimatedCostUsd);
             }
 
             billedTokens = body!.Meta?.BilledUnits?.InputTokens ?? 0;
+            estimatedCostUsd = _options.EstimateCost(billedTokens);
             outcome = EmbeddingOutcome.Embedded;
-            return vector;
+            return new EmbeddingResult(vector, outcome, billedTokens, estimatedCostUsd);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -127,12 +130,15 @@ public sealed class CohereEmbeddingProvider : IEmbeddingProvider
         {
             // Timeouts surface as an OperationCanceledException whose token is NOT the caller's, so they land here.
             _logger.LogWarning(error, "Cohere embed failed — retrieval degrades to sparse for this call.");
-            return null;
+            return new EmbeddingResult(null, outcome, billedTokens, estimatedCostUsd);
         }
         finally
         {
             TimeSpan latency = Stopwatch.GetElapsedTime(startedTicks);
-            _metrics.RecordEmbed(_options.Model, outcome, billedTokens, _options.EstimateCost(billedTokens), latency);
+            // The SAME billedTokens/estimatedCostUsd that ride the returned EmbeddingResult are what get metered
+            // here -- computed once above, so the two sinks (Prometheus and the caller's AIUsage row, gh#377) can
+            // never disagree.
+            _metrics.RecordEmbed(_options.Model, outcome, billedTokens, estimatedCostUsd, latency);
         }
     }
 
