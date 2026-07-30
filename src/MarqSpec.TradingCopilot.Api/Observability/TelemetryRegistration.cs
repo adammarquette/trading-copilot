@@ -84,7 +84,8 @@ public static class TelemetryRegistration
                     .AddRuntimeInstrumentation()
                     // The execution-specific SLIs (gh#232) -- this system's own signals, beside the generic RED.
                     .AddMeter(ExecutionMetrics.MeterName)
-                    // AI spend: tokens / cost / latency per embed call (gh#403).
+                    // AI spend: tokens / cost / latency per embed call (gh#403) AND per agent-review LLM call (gh#477) --
+                    // both ride this one meter name (LlmMetrics reuses EmbeddingMetrics.MeterName), so one AddMeter covers both.
                     .AddMeter(EmbeddingMetrics.MeterName);
 
                 if (options.ExportEnabled)

@@ -22,12 +22,30 @@ public class CohereEmbeddingProviderTests
 
     private static CohereOptions Configured() => new() { ApiKey = Key };
 
-    private CohereEmbeddingProvider Provider(StubHandler handler, CohereOptions? options = null) =>
+    private CohereEmbeddingProvider Provider(
+        StubHandler handler, CohereOptions? options = null, VectorStore? store = null) =>
         new(
             new StubHttpClientFactory(handler),
             Options.Create(options ?? Configured()),
+            store ?? Present(),
             _metrics,
             NullLogger<CohereEmbeddingProvider>.Instance);
+
+    /// <summary>A vector store that exists — the compose image bundles pgvector, so this is the ordinary case.</summary>
+    private static VectorStore Present()
+    {
+        VectorStore store = new();
+        store.Record(present: true);
+        return store;
+    }
+
+    /// <summary>A Postgres without the extension: the gh#474 case, where the migration skipped the table.</summary>
+    private static VectorStore Absent()
+    {
+        VectorStore store = new();
+        store.Record(present: false);
+        return store;
+    }
 
     private static string EmbedResponse(int dimensions = 1024, int inputTokens = 7)
     {
@@ -45,6 +63,29 @@ public class CohereEmbeddingProviderTests
     [Fact]
     public void IsAvailable_ShouldBeFalse_WhenNoKeyIsConfigured() =>
         Provider(new StubHandler(), new CohereOptions { ApiKey = null }).IsAvailable.Should().BeFalse();
+
+    [Fact]
+    public void IsAvailable_ShouldBeFalse_WhenThereIsNowhereToStoreTheVector()
+    {
+        // gh#474. A key alone was enough to report available, so a Postgres WITHOUT pgvector — where the
+        // AddEmbeddingStore migration deliberately skipped the table — passed this gate. The gh#377 pass then
+        // embedded through Cohere on every poll (real spend, the operator's own key) and faulted at the upsert
+        // every time: logged, harmless to trading, and never self-healing.
+        //
+        // "Available" has to mean the whole round trip is possible, not just the outbound half. The migration's
+        // own remarks already promised this behaviour -- it was the code that did not have it.
+        Provider(new StubHandler(), Configured(), Absent()).IsAvailable.Should().BeFalse(
+            "embedding a vector that cannot be stored is spend with no product");
+    }
+
+    [Fact]
+    public void IsAvailable_ShouldBeFalse_WhenTheStoreHasNotBeenProbedYet()
+    {
+        // Fail CLOSED before the startup probe runs. The alternative -- defaulting to available -- would spend on
+        // any call that raced startup, which is the same defect in a narrower window.
+        Provider(new StubHandler(), Configured(), new VectorStore()).IsAvailable.Should().BeFalse(
+            "an unprobed store is an unknown store, and unknown is not a licence to spend");
+    }
 
     [Fact]
     public void Dimensions_ShouldMatchThePgvectorColumnWidth() =>

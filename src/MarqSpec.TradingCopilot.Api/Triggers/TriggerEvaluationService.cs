@@ -55,6 +55,7 @@ public class TriggerEvaluationService
     private readonly ITriggerReviewer _reviewer;
     private readonly IReviewEnrichmentSource _enrichmentSource;
     private readonly IAiUsageLedger _ledger;
+    private readonly ILlmMetrics _llmMetrics;
     private readonly IAiSpendGovernor _governor;
     private readonly AiSpendBudget? _budget;
     private readonly ILogger<TriggerEvaluationService> _logger;
@@ -77,6 +78,10 @@ public class TriggerEvaluationService
     /// The AIUsage spend ledger (gh#431): a required, fail-open dependency the scan stamps the owner onto — it records
     /// the reviewer's LLM-call cost and can never fail or roll back a fire.
     /// </param>
+    /// <param name="metrics">
+    /// The LLM-spend meter (gh#477): a required, export-only observability seam fed the same per-call <c>AiCallCost</c>
+    /// as the ledger, so Grafana sees true LLM spend. Not enforcement — the governor still reads the ledger floor.
+    /// </param>
     /// <param name="governor">
     /// The platform-level AI-spend gate (gh#448): a pure, deterministic budget check consulted before each agent-review
     /// LLM call. It gates <b>whether</b> a call is made (cost), never what it proposes (enforcement lives below the model).
@@ -91,6 +96,7 @@ public class TriggerEvaluationService
         ITriggerReviewer reviewer,
         IReviewEnrichmentSource enrichmentSource,
         IAiUsageLedger ledger,
+        ILlmMetrics metrics,
         IAiSpendGovernor governor,
         IOptions<GovernorOptions> governorOptions,
         ILogger<TriggerEvaluationService> logger)
@@ -104,6 +110,7 @@ public class TriggerEvaluationService
         _reviewer = reviewer;
         _enrichmentSource = enrichmentSource;
         _ledger = ledger;
+        _llmMetrics = metrics;
         _governor = governor;
         _budget = governorOptions.Value.ToBudget(); // null == inert (no cap configured); computed once per pass
         _logger = logger;
@@ -505,6 +512,11 @@ public class TriggerEvaluationService
         string? traceId = Activity.Current?.TraceId.ToString();
         foreach (AiCallCost cost in review.Costs)
         {
+            // Meter FIRST, outside the ledger's try (gh#477): the meter and the ledger are independent spend sinks, so
+            // the export-only meter must record this call even if the durable ledger write then faults. A counter Add
+            // does not throw, so it needs no guard; an escalated fire meters both the triage and the deep row.
+            _llmMetrics.RecordLlmCall(cost);
+
             try
             {
                 await _ledger.RecordAsync(new AiUsageEntry(owner, cost, traceId, now), cancellationToken);

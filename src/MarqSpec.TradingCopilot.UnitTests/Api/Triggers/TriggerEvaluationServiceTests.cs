@@ -37,6 +37,7 @@ public class TriggerEvaluationServiceTests
     private readonly ITriggerReviewer _reviewer = A.Fake<ITriggerReviewer>();
     private readonly IReviewEnrichmentSource _enrichment = A.Fake<IReviewEnrichmentSource>();
     private readonly IAiUsageLedger _ledger = A.Fake<IAiUsageLedger>();
+    private readonly ILlmMetrics _llmMetrics = A.Fake<ILlmMetrics>();
     private static DateTimeOffset Now { get; } = DateTimeOffset.UnixEpoch.AddYears(56);
 
     // The cost a real LLM call surfaces (gh#431). Any non-null Cost makes the scan record a usage row; the SPECIFIC
@@ -63,7 +64,7 @@ public class TriggerEvaluationServiceTests
     private TriggerEvaluationService Service(
         IAiUsageLedger? ledger = null, GovernorOptions? governor = null, IReviewEnrichmentSource? enrichment = null) => new(
         Context(), Options, _indicators, _notifications, _reviewer, enrichment ?? _enrichment, ledger ?? _ledger,
-        new AiSpendGovernor(),
+        _llmMetrics, new AiSpendGovernor(),
         Microsoft.Extensions.Options.Options.Create(governor ?? new GovernorOptions()),
         NullLogger<TriggerEvaluationService>.Instance);
 
@@ -945,7 +946,7 @@ public class TriggerEvaluationServiceTests
         ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
 
         TriggerEvaluationService service = new ThrowingReadService(
-            Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, new AiSpendGovernor(),
+            Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, _llmMetrics, new AiSpendGovernor(),
             Microsoft.Extensions.Options.Options.Create(new GovernorOptions { DailyBudgetUsd = 10m }),
             NullLogger<TriggerEvaluationService>.Instance);
 
@@ -1167,10 +1168,85 @@ public class TriggerEvaluationServiceTests
         A.CallTo(() => _enrichment.BuildAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
+    // =====================================================================================================
+    // LLM-SPEND METER (gh#477): every billed LLM call is metered — one RecordLlmCall per AiCallCost (two on an
+    // escalation) — fed the same cost as the ledger, and metered even when the ledger write faults (independent sinks).
+    // =====================================================================================================
+
+    [Fact]
+    public async Task ScanAsync_ShouldMeterTheLlmCall_WhenAnAgentReviewFires()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x")); // one billed triage call (_sampleCost)
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        // Metered exactly once, with the same cost the ledger got.
+        A.CallTo(() => _llmMetrics.RecordLlmCall(_sampleCost)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldMeterBothCalls_WhenTheReviewEscalated()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+
+        AiCallCost triageCost = new(
+            AiUsageFeature.Triage, "claude-haiku-4-5", LlmModelTier.Triage, AiUsageOutcome.Succeeded,
+            40, 8, 0.0005m, TimeSpan.FromMilliseconds(120));
+        AiCallCost deepCost = new(
+            AiUsageFeature.Triage, "claude-sonnet-5", LlmModelTier.Deep, AiUsageOutcome.Succeeded,
+            900, 300, 0.0072m, TimeSpan.FromMilliseconds(800));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"), triageCost, deepCost);
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        // One meter per billed call, in the escalation pair -- the triage row AND the deep row.
+        A.CallTo(() => _llmMetrics.RecordLlmCall(triageCost)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _llmMetrics.RecordLlmCall(deepCost)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldStillMeterTheCall_WhenTheLedgerWriteThrows()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+
+        // The ledger write faults, but the meter is an INDEPENDENT sink recorded BEFORE the guarded ledger write -- so
+        // export-only spend visibility survives a durable-write fault.
+        IAiUsageLedger throwingLedger = A.Fake<IAiUsageLedger>();
+        A.CallTo(() => throwingLedger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("ledger DB fault"));
+
+        Func<Task> act = () => Service(ledger: throwingLedger).ScanAsync(Now, CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        A.CallTo(() => _llmMetrics.RecordLlmCall(_sampleCost)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldNotMeter_WhenNoLlmCallWasMade()
+    {
+        await SeedUsageAsync(_operator, 100m, Now); // over the 10 budget -> blocked, no call, empty Costs
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be")); // never reached
+
+        await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _llmMetrics.RecordLlmCall(A<AiCallCost>._)).MustNotHaveHappened();
+    }
+
     /// <summary>
     /// The scan with its platform-wide spend read forced to FAULT — proves the governor is FAIL-OPEN: a spend-read
     /// blip lets the pass run un-gated (the reviewer still wakes), the deliberate INVERSE of the fail-closed risk gate.
-    /// Forwards all nine ctor args. DO NOT "fix" the production counterpart of this override to fail-closed by analogy
+    /// Forwards all ten ctor args. DO NOT "fix" the production counterpart of this override to fail-closed by analogy
     /// to RiskGate — that would pause all agent review (and abort the co-located mechanical route) on any DB hiccup.
     /// </summary>
     private sealed class ThrowingReadService : TriggerEvaluationService
@@ -1183,10 +1259,11 @@ public class TriggerEvaluationServiceTests
             ITriggerReviewer reviewer,
             IReviewEnrichmentSource enrichmentSource,
             IAiUsageLedger ledger,
+            ILlmMetrics metrics,
             IAiSpendGovernor governor,
             IOptions<GovernorOptions> governorOptions,
             ILogger<TriggerEvaluationService> logger)
-            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, governor, governorOptions, logger)
+            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, governor, governorOptions, logger)
         {
         }
 

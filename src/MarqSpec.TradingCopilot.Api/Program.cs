@@ -207,7 +207,17 @@ builder.Services.Configure<CohereOptions>(builder.Configuration.GetSection(Coher
 builder.Services.AddHttpClient(CohereEmbeddingProvider.HttpClientName);
 builder.Services.AddSingleton<EmbeddingMetrics>();
 builder.Services.AddSingleton<IEmbeddingMetrics>(provider => provider.GetRequiredService<EmbeddingMetrics>());
+// The LLM-spend meter (gh#477) rides the SAME MarqSpec.TradingCopilot.Ai meter, so it exports with no exporter
+// change; singleton like the embed meter (a Meter is a long-lived process-wide object). Required, never optional --
+// an unmetered call is invisible spend (the gh#403 posture).
+builder.Services.AddSingleton<LlmMetrics>();
+builder.Services.AddSingleton<ILlmMetrics>(provider => provider.GetRequiredService<LlmMetrics>());
 builder.Services.AddSingleton<UnavailableEmbeddingProvider>();
+
+// Probed once at startup (gh#474). A key is only half of "available": the AddEmbeddingStore migration skips the
+// table entirely on a Postgres without pgvector, so a keyed deployment there embedded on every poll -- real spend
+// -- and faulted at the upsert every time. Defaults to NOT present, so a caller racing the probe declines.
+builder.Services.AddSingleton<VectorStore>();
 builder.Services.AddSingleton<CohereEmbeddingProvider>();
 builder.Services.AddSingleton<IEmbeddingProvider>(provider =>
     provider.GetRequiredService<IOptions<CohereOptions>>().Value.IsConfigured

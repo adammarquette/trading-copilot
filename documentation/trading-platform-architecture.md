@@ -2,8 +2,11 @@
 
 **Companion to:** [`trading-platform-prd.md`](trading-platform-prd.md) (product requirements — *what*) and
 [`trading-platform-engineering.md`](trading-platform-engineering.md) (engineering practices — *how we build*).
-**Status:** Living — the ingest/process tier is still a design sketch; the **execution & safety runtime is built**
-(see *The safety-critical runtime*) · **Date:** 2026-07-18, revised 2026-07-25 (gh#233)
+**Status:** Living — the **execution & safety runtime is built** (see *The safety-critical runtime*) and the
+**ingest/process tier has substantially landed**: market-data ingestion, bar/gap backfill, indicator projections,
+and the news → dedup → relevance → embedding pipeline are all shipped (the component sections below carry per-service
+*Implemented* markers). The idealized "Ingestion / Poller / Processor" split below is the intended shape; the shipped
+services realize it as concrete hosts · **Date:** 2026-07-18, revised 2026-07-30 (gh#490)
 
 The **runtime view** — the services and how data flows between them. Early and deliberately lightweight: it
 captures the intended shape and the open decisions, and deepens as design proceeds. Requirement IDs (`R-#`) link
@@ -240,6 +243,8 @@ uniform downstream handling. (ProjectX exposes this as SignalR hubs — see the 
 **Finnhub** streams **equities / indices** (SPY, QQQ, …) over a websocket (~50 symbols, free tier) as **cross-asset
 context** for the traded futures (SPY ↔ ES, NASDAQ/QQQ ↔ NQ) — a market-data source with no account/execution
 (the decomposed R-17 abstraction; engineering §3). Finnhub's **alternative data** rides the R-2 non-market template.
+**Implemented:** `MarketDataIngestionHost` (+ `IngestionOptions`, the `Ingestion:Symbols` allowlist) publishes market
+data onto the event backbone.
 
 ### Poller service(s) — durable data (R-1 historical, R-2 soft signals)
 Polls REST endpoints on a configurable interval (R-1: default 60s). **Thin by design** — pollers only **poll,
@@ -248,6 +253,8 @@ process it. One polling framework **fans out** across many sources, of the same 
 (`TopstepX`, `Tradovate`), data-only providers (`Finnhub` — equities/indices quotes + alternative data; note historical candles are a paid tier), and
 data kinds (market/trade data, news, social). This dovetails with the venue
 abstraction (R-17) and the soft-signal sources (R-2), and keeps all processing uniform and in one place.
+**Implemented:** `BarBackfillService`/`BarBackfillHost` and `GapBackfillService` durably fill the bar store; the
+news pollers land as `NewsIngestionService`/`NewsIngestionHost` (see *News & soft-signal ingestion* below).
 
 ### Processor service(s) — process, persist, pre-compute (R-3, R-4, R-8/R-9, R-22)
 Consumes a **data type** off the event pipeline, processes it, and writes to the data stores (Timescale /
@@ -255,6 +262,7 @@ pgvector / relational — engineering §2). Crucially, the processor **pre-compu
 are not recomputed on demand: the AI agents that generate suggestions and revise strategies (R-4) are weak at
 numeric indicator computation, so **pre-computed indicators are both faster and higher-quality** inputs. Feeds
 order-flow analytics (R-3) and the journal (R-8/R-9). Indicators (R-22) are **projections over the append-only event log** (ADR-0001): those that fit are TimescaleDB continuous aggregates, the rest are replay consumers — so **adding or rebuilding an indicator is a new consumer replaying the log**, no re-ingest.
+**Implemented:** `IndicatorProjectionService`/`IndicatorProjectionHost` over the `IndicatorSet` (ATR, RSI — gh#310/#372), read back through `StoredIndicatorSource : IIndicatorSource`.
 
 ### News & soft-signal ingestion (R-2)
 The **reference implementation** of the non-market template. Two REST sources (no free news websocket): **Tiingo**
@@ -266,7 +274,9 @@ URL → fuzzy fallback on title + published-time window + ticker overlap; **one 
 before embedding**; (2) applies the **configurable relevance model** — `ticker↔instrument` maps + **per-instrument
 & global topics**, AI-suggested and user-curated in a config panel (R-6/R-7); (3) **embeds** (Cohere → pgvector).
 Stores serve suggestion/chat retrieval, the **trigger engine** (news as a condition — ADR-0008), and **chart event
-markers** (R-10). **Deferred:** sentiment scoring — a subagent classifier and/or a user thumbs-up/down rating (R-9).
+markers** (R-10). **Implemented:** the Tiingo + Finnhub news adapters (gh#439/#440), `NewsIngestionService`, the
+cross-source dedup + relevance routing + Cohere embedding pipeline (gh#360/#361/#362), and the news-salience soft
+signal (gh#27's first slice). **Deferred:** sentiment scoring — a subagent classifier and/or a user thumbs-up/down rating (R-9).
 
 ```mermaid
 flowchart LR

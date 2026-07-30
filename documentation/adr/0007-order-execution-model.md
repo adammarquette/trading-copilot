@@ -640,18 +640,26 @@ Not in this slice: **R-12 re-validation** (validity window, price-drift toleranc
 take-a-suggestion path in S3, and the **consistency %** rule needs P&L-by-day history from the journal (R-9).
 
 ## Follow-ups
-- Define the **order-state machine** + per-transition **journal / event records** (R-8/R-9, ADR-0001).
-- Spec the **synthetic / conditional engine**: trigger types, promotion-band metric + **default**, OCO
-  coordination, gap/latency handling, and an availability target.
-- Define **connection-loss detection** (heartbeat / timeout thresholds), the **orphan → emergency** transition +
-  operator alert, and the **recovery re-arm** path — each carrying a `synthetic_risk` audit flag.
+*Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the
+authoritative record — this list is kept only as a decision-provenance changelog.*
+- ~~Define the **order-state machine** + per-transition **journal / event records** (R-8/R-9, ADR-0001).~~ **Landed** —
+  the order lifecycle + `AuditRecord` / event-log journaling ship across the execution suites.
+- ~~Spec the **synthetic / conditional engine**: trigger types, promotion-band metric + **default**, OCO
+  coordination, gap/latency handling, and an availability target.~~ **Landed** — the conditional firing engine
+  (gh#180/#198) + OCO-cancel-on-exit (gh#183/#184) + stop promotion.
+- ~~Define **connection-loss detection** (heartbeat / timeout thresholds), the **orphan → emergency** transition +
+  operator alert, and the **recovery re-arm** path — each carrying a `synthetic_risk` audit flag.~~ **Landed** — the
+  venue-connection monitor + orphan handling / re-arm (gh#191/#192/#209); consolidated in ADR-0013.
 - Decide **defaults** (per environment): sizing basis and proximity metric. *(The **default entry action** is settled and built — gh#218; see the update below.)*
-- Define the **risk-gate interface** — inputs (live account state, layers, safety stop), outputs (size, binding
-  layer, block / resize / acknowledge) — R-5.
-- Wire the **governor → R-4** throttle policy (thresholds, throttle modes).
-- Confirm **ProjectX** native bracket / OCO / stop-type capabilities (Q-1); the synthetic layer covers gaps (R-17).
-- Stand up the **high-rigor test suites** for the risk gate, execution, staged stops, kill switch, and auto-flatten
-  (engineering §9).
+- ~~Define the **risk-gate interface** — inputs (live account state, layers, safety stop), outputs (size, binding
+  layer, block / resize / acknowledge) — R-5.~~ **Landed** — `RiskGate` with the layered decision (see the risk-gate
+  update above).
+- Wire the **governor → R-4** throttle policy (thresholds, throttle modes). *(The **daily/consistency governor** landed
+  (gh#380); the R-4 suggestion-**throttle** modes are still open.)*
+- ~~Confirm **ProjectX** native bracket / OCO / stop-type capabilities (Q-1); the synthetic layer covers gaps (R-17).~~
+  **Confirmed / built** — native bracket preserve + resize (gh#259/#292), practice-gated on staging.
+- ~~Stand up the **high-rigor test suites** for the risk gate, execution, staged stops, kill switch, and auto-flatten
+  (engineering §9).~~ **Landed** — the QA integration suites (see `integration-test-audit.md`).
 
 ## Update (2026-07-28) — resting orders are readable through the app (gh#381)
 

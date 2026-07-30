@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Kill;
 using MarqSpec.TradingCopilot.Api.Recovery;
@@ -30,6 +31,17 @@ public static class StartupTasks
         {
             await database.Database.EnsureCreatedAsync();
         }
+
+        // Probe for pgvector (gh#474), AFTER the migration that would have installed it. AddEmbeddingStore is
+        // deliberately conditional -- on a Postgres without the extension it skips the table and starts anyway,
+        // because an unavailable retrieval feature must never keep the safety-critical auto-flatten from running
+        // (R-13). Its remarks promised the absence would be DECLARED; this is the half that was missing, so a
+        // keyed deployment there stops embedding through Cohere on every poll and faulting at the upsert.
+        //
+        // Non-relational (the InMemory test hosts) reports absent, which is the honest answer: EmbeddingRecord is
+        // Ignore()d in that model, so there is genuinely nowhere to store a vector.
+        app.Services.GetRequiredService<VectorStore>()
+            .Record(database.Database.IsRelational() && await HasPgVectorAsync(database));
 
         // Rehydrate the kill switch (gh#189): if it was engaged when the process last stopped, come up engaged --
         // the operator's lock persists across a restart, so a crash or redeploy never silently re-enables trading
@@ -111,5 +123,28 @@ public static class StartupTasks
             IsPrimaryOperator = true,
         });
         await database.SaveChangesAsync();
+    }
+
+    /// <summary>Whether the <c>pgvector</c> extension is installed on this database (gh#474).</summary>
+    /// <remarks>
+    /// Reads <c>pg_extension</c> — installed, not merely <i>installable</i>. <c>AddEmbeddingStore</c> gates on
+    /// <c>pg_available_extensions</c> and then runs <c>CREATE EXTENSION</c>, so post-migration the two agree; but
+    /// available-and-not-installed is exactly the state where the table was skipped, and that must read as absent.
+    /// <b>Fails closed:</b> a probe that cannot answer reports absent rather than assuming the happy case.
+    /// </remarks>
+    private static async Task<bool> HasPgVectorAsync(TradingCopilotDbContext database)
+    {
+        try
+        {
+            return await database.Database
+                .SqlQuery<int>($"SELECT 1 AS \"Value\" FROM pg_extension WHERE extname = 'vector'")
+                .AnyAsync();
+        }
+        catch (Exception)
+        {
+            // A provider that cannot answer does not have the extension for our purposes. The caller only ever
+            // SPENDS on a true, so the safe direction is unambiguous.
+            return false;
+        }
     }
 }

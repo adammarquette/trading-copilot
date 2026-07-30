@@ -103,9 +103,13 @@ Server-side only, from the Railway environment — **never in source** (Options 
 - **Broker (ProjectX):** account id + credentials + endpoints, **per environment** (practice vs. live).
 - **Auth:** JWT signing key (ADR-0003).
 - **Embeddings:** Cohere API key.
+- **LLM (agent review):** `Llm__ApiKey` — the Anthropic key the reviewer wakes a live model with (gh#402/#423); a
+  **real secret** like the Cohere key. Absent, the stub reviewer stands in, so production never fabricates geometry.
 - **Data providers:** Finnhub + Tiingo API tokens (free tier).
 - **Database:** connection string (Railway-managed).
-- **Ingestion:** poll intervals; news relevance config (or DB-stored).
+- **Ingestion:** poll intervals; the `Ingestion:Symbols` allowlist; news relevance config (or DB-stored).
+- **AI-spend governor (gh#448, ADR-0008):** `Governor__DailyBudgetUsd` + `Governor__AlertThresholdFraction` — the
+  platform-wide daily AI budget and pre-alert fraction (not secrets; unset leaves the governor inert).
 - **Telemetry (gh#230, ADR-0002):** `Telemetry__OtlpEndpoint` — the OTLP collector endpoint (e.g.
   `http://otel-collector:4317`). **Leave it unset to disable export**: the SDK stays wired and the app runs
   normally, it simply ships nothing. `Telemetry__ServiceName` overrides the service name stamped on every signal
@@ -330,10 +334,11 @@ docker compose --profile observability up -d      # ...plus the stack
 **The app exports to the collector and knows no backend.** Swapping a backend, adding a second destination, or
 sampling is a change to `./observability/otel-collector-config.yaml`, not to application configuration.
 
-**Footprint** (measured 2026-07-26, idle, all five running): **~263 MB RAM** — Tempo 102, Grafana 63, Loki 40,
-collector 33, Prometheus 25. Limits are set well above that (`mem_limit` 300–512 MB each) so a busy stack has
-headroom without being able to exhaust the host. Images total ~1.7 GB on first pull. Retention is **7 days** on
-all three backends.
+**Footprint** (measured 2026-07-26, idle): the five backends running then totalled **~263 MB RAM** — Tempo 102,
+Grafana 63, Loki 40, collector 33, Prometheus 25. **Alertmanager** was added afterward (2026-07-27, `gh#245`) and is
+**not** in that figure — it is capped at `mem_limit` 256m, so budget a little more for the **six-service** stack.
+Limits are set well above measured usage (`mem_limit` **256–512 MB** each) so a busy stack has headroom without
+being able to exhaust the host. Images total ~1.7 GB on first pull. Retention is **7 days** on all three backends.
 
 **Grafana credentials** default to `admin`/`admin` for local development only, from `GF_SECURITY_ADMIN_USER` /
 `GF_SECURITY_ADMIN_PASSWORD`. A deployed Grafana takes them from that environment's secret store — never from a
@@ -511,7 +516,7 @@ exchange** — this is a degraded floor, not an unprotected position, which is w
 3. **Act before the session close** if the tighter stop matters — promote by hand at the broker, or flatten.
    After hours there are no quotes, so nothing will self-heal.
 4. **Repeating shortfalls are a bar-coverage problem, not an alerting one.** Check that the instrument is in
-   `Backfill:Instruments` and that ingestion is actually storing bars for it; a contract that is traded but never
+   `Backfill__Instruments` and that ingestion is actually storing bars for it; a contract that is traded but never
    backfilled will shortfall on every gap.
 
 ### Telemetry pipeline
@@ -591,7 +596,7 @@ Monthly Railway spend ceiling is **Q-10** (open) — watch always-on ingestion +
 
 ## Open items
 - Postgres / Timescale / pgvector on Railway: managed plugin vs. self-hosted service.
-  **What a Postgres without pgvector actually costs (gh#109, settled):** the app **still starts and still trades** — the `Embeddings` table is simply not created and semantic retrieval is off. That is deliberate: refusing to start would let a retrieval feature take down the safety-critical auto-flatten (R-13), and nothing on the trading path depends on embeddings. It is **not silent** — the migration raises a `WARNING` naming the consequence, and the embedding provider reports itself unavailable so retrieval refuses rather than returning empty results that read as "nothing is relevant". Verified both ways: `timescale/timescaledb-ha:pg17` creates the table and its HNSW index; plain `postgres:17` skips it and creates the other 24 tables normally. **Timescale is the harder constraint** — its degrade loses compression and retention on the data path; pgvector's loses an optional feature.
+  **What a Postgres without pgvector actually costs (gh#109, settled):** the app **still starts and still trades** — the `Embeddings` table is simply not created and semantic retrieval is off. That is deliberate: refusing to start would let a retrieval feature take down the safety-critical auto-flatten (R-13), and nothing on the trading path depends on embeddings. It is **not silent** — the migration raises a `WARNING` naming the consequence, and the embedding provider reports itself unavailable so retrieval refuses rather than returning empty results that read as "nothing is relevant". **The provider half landed in gh#474** — before it, a key set on a Postgres without the extension embedded on every poll (real spend) and faulted at the upsert; availability is now probed at startup and means the whole round trip. Verified both ways: `timescale/timescaledb-ha:pg17` creates the table and its HNSW index; plain `postgres:17` skips it and creates the other 24 tables normally. **Timescale is the harder constraint** — its degrade loses compression and retention on the data path; pgvector's loses an optional feature.
 - The Railway deploy integration (CLI / MCP / GitHub trigger) — the GitHub Actions workflows themselves exist
   (`ci.yml` + `branch-policy.yml`; §CI/CD above).
 - Create the `dev` + `staging` Railway environments and map branch → environment.
