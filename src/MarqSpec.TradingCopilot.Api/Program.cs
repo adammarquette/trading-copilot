@@ -298,6 +298,7 @@ builder.Services.AddScoped<WorkingOrderReconciliationService>();
 // fails fast rather than mid-session, the same fail-fast stance as the Jwt signing key above.
 builder.Services.Configure<FlattenOptions>(builder.Configuration.GetSection(FlattenOptions.SectionName));
 _ = (builder.Configuration.GetSection(FlattenOptions.SectionName).Get<FlattenOptions>() ?? new FlattenOptions()).ToSchedules();
+builder.Services.AddScoped<IStagedOrderClaim, StagedOrderClaim>();
 builder.Services.AddScoped<AutoFlattenService>();
 builder.Services.AddHostedService<AutoFlattenHost>();
 

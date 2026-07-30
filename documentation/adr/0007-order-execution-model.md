@@ -786,3 +786,37 @@ authoritative record — this list is kept only as a decision-provenance changel
 - ~~Stand up the **high-rigor test suites** for the risk gate, execution, staged stops, kill switch, and auto-flatten
   (engineering §9).~~ **Landed** — the QA integration suites (see `integration-test-audit.md`).
 
+
+## Update (2026-07-30) — the take path is claimed before it reaches the venue (gh#530)
+
+`POST /orders/{id}/take` read the staged row, checked `Status == Staged`, and then spent **four venue round-trips**
+composing and sending. Two concurrent takes each passed that check against their own change tracker — two requests
+share none — so **both transmitted**, and both then wrote the same row. One live venue order ended up recorded on
+**no `Order` row**: invisible to cancel, to the kill-switch sweep and to the orphan guard, every one of which
+resolves by row id. A double-click, or two ADR-0006 pop-out windows on one ticket, is enough.
+
+**The fix is a claim, not a re-read.** A new `OrderStatus.Taking` is taken by a database-evaluated conditional
+UPDATE before anything touches the venue, so the loser refuses immediately. A post-venue re-read would be too late
+by construction: by then the second order exists. The claim is handed back on every path that does not reach the
+venue, so a refused take leaves the ticket exactly as takeable as it was.
+
+**Why it is behind a seam** (`IStagedOrderClaim`). Only the database can arbitrate between two requests, which
+means `ExecuteUpdate` or raw SQL — and neither is supported by the EF in-memory provider. Written inline it made
+the take endpoint unrunnable at the unit tier and took six existing take guards with it. The seam keeps those
+guards running against a faithful double and puts the real compare-and-swap where it can be *proven*: the
+container-backed Postgres tier. The double reproduces the observable contract (claim only from `Staged`, release
+only from `Taking`); what it cannot reproduce is atomicity under real concurrency, and that is stated where it
+lives rather than implied.
+
+**This does not reopen the rejected concurrency token.** That decision was about a table-wide token on `Order`,
+which is symmetric — it would fault the seam's, the cancel's and the take's own writes. This is a single
+conditional UPDATE on one column, taken deliberately by one path.
+
+**A second race closes with it.** A cancel landing mid-take used to write `Cancelled` over a row the take then
+overwrote back to `Working` — a live order resting on a ticket the operator had just cancelled. `Taking` makes
+that state visible, and cancel now refuses it: the outcome is seconds away, and the resulting working order is
+cancellable once it resolves.
+
+Still open, filed separately: **gh#531** — two concurrent *sends* do not orphan anything (each mints its own row)
+but do evaluate the risk gate against one snapshot, admitting up to 2× the approved risk. Different path, different
+blast radius, and the same claim mechanism may or may not be the right answer there.
