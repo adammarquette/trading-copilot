@@ -182,8 +182,38 @@ budget, not capital-at-risk, and must never be conflated with it. **Hard-cap onl
 throttle" — throttle deferred). Still open: an **LLM-side meter** so Grafana shows true LLM spend (a gh#403 sibling;
 it would still not be in-process readable, so it does not change the governor's read), **Prometheus-based
 reconciliation**, **embed-call-site gating** (rides gh#377 — the window-sum already *counts* embed rows once written,
-only refusing an embed when exhausted defers), a **runtime-editable** budget, and the **triage→deep escalation
-policy** (gh#449).
+only refusing an embed when exhausted defers) and a **runtime-editable** budget.
+
+**Update (2026-07-30, gh#449) — the triage→deep escalation policy landed.** The triage tier may now return a third
+`decision: "escalate"` — a **reviewer-private control signal**, never a public `ReviewOutcome` — when a fired setup
+is genuinely too hard for a quick judgment. On escalate the reviewer makes ONE **second, deep-tier** call
+(`claude-sonnet-5`) whose schema offers only `suggest`/`suppress` and whose prompt demands a **final** answer, and it
+uses that outcome. It **cannot loop** (triple-defended: the deep schema omits `escalate`; the deep result is mapped by
+the terminal path where a stray `escalate` reads as an unknown decision → suppress; and escalate is honoured only on
+the triage path) — a review makes **at most two calls**. **Both calls ledger and both accrue to the governor tally:**
+`AgentReview` now carries `IReadOnlyList<AiCallCost> Costs` (was a single nullable `Cost`), and an escalated fire
+records **two `AIUsage` rows** — a Triage-tier row and a Deep-tier row, **both `Feature = Triage`** (the whole
+two-call flow is one agent-review of one fired trigger; `Tier` is the dimension that separates triage spend from deep
+spend), each priced at its own per-tier rate. The **escalated triage call is billed `Succeeded`** (it completed and
+was billed even though it deferred); a deep throw / refusal / malformed output / second-escalate all fail closed to
+`Suppress` but **both costs are still recorded** (a Failed deep row included) — no spend regime is uncounted. A
+**missing or unknown decision never escalates** (fail-closed by construction). **Escalation is driven by the triage
+signal alone;** the reviewer stays **pure of the governor** — cost-awareness is the *pass-level* gh#448 gate (a spent
+budget short-circuits the whole review to `BudgetExhausted` before any call; and because both costs accrue to the
+within-pass tally, a later fire this pass can be blocked). **Note — this purity is by design, not test-enforced:**
+`AgentReviewGateBelowModelTests` forbids only *execution* types and explicitly *allows* `AiSpendGovernor`, so a future
+"thread the budget into the reviewer" refactor would keep that gate test green while breaking the reviewer's purity;
+reject it on principle (if a per-call budget-aware skip is ever wanted, the *scan* — which holds the tally — passes a
+plain `bool allowEscalate`, keeping the budget out of the reviewer). This **amends the gh#448 effective-cap note
+above:** the cap is now "budget plus at most one in-flight triage→deep **pair**," and the deep call is the expensive
+one ($3/$15 vs. $1/$5 per 1M tokens) — size `DailyBudgetUsd` with headroom for at least one pair; still a bounded
+loosening that fails toward *allow*, never a spurious block. **Scope caveat:** escalation upgrades the **model**, not
+the **information** — the deep call reuses the same `TriggerReviewContext`, so **deep-context enrichment is a deferred
+follow-up** (it also widens the prompt-injection surface), and until it lands the deep tier may re-derive the triage
+answer at higher cost; the prompt says escalate *sparingly* and an escalation is logged for operability. Still open:
+per-call budget-aware escalation skip, deep-context enrichment, an escalation-rate metric + a when-to-escalate eval
+suite, activating `AiUsageFeature.Suggestion` for the deep row, an LLM-side meter, a runtime-editable budget, and
+throttle.
 
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*
