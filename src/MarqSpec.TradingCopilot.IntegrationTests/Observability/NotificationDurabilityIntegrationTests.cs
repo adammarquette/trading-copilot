@@ -182,16 +182,31 @@ public sealed class NotificationDurabilityTestFactory : NotificationHarnessPostg
 /// throw inside somebody's fixture.
 /// </summary>
 public class NotificationHarnessFidelityTests
-    : IClassFixture<NotificationDurabilityTestFactory>, IClassFixture<AgentReviewTestPostgresFactory>
+    : IClassFixture<NotificationDurabilityTestFactory>,
+      IClassFixture<AgentReviewTestPostgresFactory>,
+      IClassFixture<AlertingTestPostgresFactory>
 {
     private readonly NotificationDurabilityTestFactory _durability;
     private readonly AgentReviewTestPostgresFactory _agentReview;
+    private readonly AlertingTestPostgresFactory _alerting;
 
     public NotificationHarnessFidelityTests(
-        NotificationDurabilityTestFactory durability, AgentReviewTestPostgresFactory agentReview)
+        NotificationDurabilityTestFactory durability,
+        AgentReviewTestPostgresFactory agentReview,
+        AlertingTestPostgresFactory alerting)
     {
         _durability = durability;
         _agentReview = agentReview;
+        _alerting = alerting;
+    }
+
+    [Fact]
+    public void AlertingHarness_ShouldComposeProductionsNotificationChain()
+    {
+        // The last host to migrate (gh#480). It was the original gh#442 offender and stayed on the rebuilt chain
+        // while gh#459 was open; with all three covered here, no notification harness is outside the guard.
+        Action assert = _alerting.AssertProductionChainIntact;
+        assert.Should().NotThrow("every notification harness must boot production's chain, not a rebuild");
     }
 
     [Fact]
