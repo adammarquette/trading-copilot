@@ -53,6 +53,12 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <summary>Append → consume delay, per consumer group.</summary>
     public const string PipelineLag = "trading.eventlog.pipeline_lag";
 
+    /// <summary>
+    /// How much of a blind window the bar store could not cover on recovery (gh#482). A histogram: its `_count`
+    /// answers "did it happen" for the rule, its distribution answers "how bad" for the operator.
+    /// </summary>
+    public const string BackfillShortfall = "trading.stops.backfill_shortfall";
+
     /// <summary>Positions the venue reports open — the "…with exposure" qualifier ADR-0019 conditions need.</summary>
     public const string OpenPositions = "trading.positions.open";
 
@@ -107,6 +113,7 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     private readonly Histogram<double> _orderAck;
     private readonly Counter<long> _retentionGaps;
     private readonly Histogram<double> _pipelineLag;
+    private readonly Histogram<double> _backfillShortfall;
 
     private int _killSwitchEngaged;
     private int _orphanedStops;
@@ -143,6 +150,10 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
 
         _pipelineLag = _meter.CreateHistogram<double>(
             PipelineLag, unit: "ms", description: "Event append to consume delay, by consumer group.");
+
+        _backfillShortfall = _meter.CreateHistogram<double>(
+            BackfillShortfall, unit: "ms",
+            description: "Blind-window duration the bar store could not cover on recovery, by contract.");
 
         // Observable: state, not events. A gauge read on scrape reports what is true NOW, which is what a
         // dashboard needs for "are we currently killed / currently degraded".
@@ -223,6 +234,13 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <param name="lag">The delay.</param>
     public void RecordPipelineLag(string consumerGroup, TimeSpan lag) =>
         _pipelineLag.Record(lag.TotalMilliseconds, new KeyValuePair<string, object?>("consumer_group", consumerGroup));
+
+    /// <summary>Records an uncovered blind-window duration for one contract (gh#482).</summary>
+    /// <param name="contractKey">The venue contract whose window was not fully covered.</param>
+    /// <param name="uncovered">How much of the window has no bars in the store.</param>
+    public void RecordBackfillShortfall(string contractKey, TimeSpan uncovered) =>
+        _backfillShortfall.Record(
+            uncovered.TotalMilliseconds, new KeyValuePair<string, object?>("contract", contractKey));
 
     /// <inheritdoc />
     public void Dispose() => _meter.Dispose();

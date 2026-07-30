@@ -3,6 +3,7 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.MarketData;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -43,19 +44,23 @@ public sealed class GapBackfillService
 {
     private readonly TradingCopilotDbContext _database;
     private readonly StopPromotionService _promotion;
+    private readonly IExecutionMetrics _metrics;
     private readonly ILogger<GapBackfillService> _logger;
 
     /// <summary>Creates the service over the scoped database.</summary>
     /// <param name="database">The scoped database.</param>
     /// <param name="promotion">The promotion decision the recovered extremes are fed through.</param>
+    /// <param name="metrics">Raises a shortfall as a signal a rule can read, not only a log line (gh#482).</param>
     /// <param name="logger">The logger.</param>
     public GapBackfillService(
         TradingCopilotDbContext database,
         StopPromotionService promotion,
+        IExecutionMetrics metrics,
         ILogger<GapBackfillService> logger)
     {
         _database = database;
         _promotion = promotion;
+        _metrics = metrics;
         _logger = logger;
     }
 
@@ -120,7 +125,17 @@ public sealed class GapBackfillService
                 venueId, instrument.ContractKey, extremes.Low, extremes.High, venue, cancellationToken);
         }
 
-        return new GapBackfillOutcome(promoted, coverage);
+        GapBackfillOutcome outcome = new(promoted, coverage);
+
+        // Metered HERE rather than at the caller (gh#482): this is where the shortfall is known, so every consumer
+        // of the backfill gets the signal rather than only the one host that remembered to log it. Emitted only on
+        // a shortfall -- a complete recovery is silent, so the rule cannot fire on a healthy session (ADR-0019 §4).
+        foreach (InstrumentCoverage shortfall in outcome.Shortfalls)
+        {
+            _metrics.RecordBackfillShortfall(shortfall.ContractKey, shortfall.Coverage.Shortfall);
+        }
+
+        return outcome;
     }
 
     /// <summary>

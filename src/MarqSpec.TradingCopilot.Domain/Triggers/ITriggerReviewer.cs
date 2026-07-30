@@ -4,15 +4,25 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 namespace MarqSpec.TradingCopilot.Domain.Triggers;
 
 /// <summary>
-/// The judgment inputs handed to the agent when a trigger fires (R-4 / ADR-0008) — <b>only</b> the market facts of
-/// the fired setup, so the prompt-injection surface is near zero (all decimals, constrained enums, and a known
-/// indicator name; no free text).
+/// The judgment inputs handed to the agent when a trigger fires (R-4 / ADR-0008) — the market facts of the fired
+/// setup, so the prompt-injection surface is near zero (all decimals, constrained enums, and a known indicator name;
+/// no free text).
 /// </summary>
 /// <remarks>
+/// <para>
 /// Account, size and mode are deliberately <b>not</b> here: they are deterministic issuance facts stamped by the
 /// system, never chosen by or sent to the model — enforcement-below-the-model extended to identity and sizing.
 /// <see cref="ObservedValue"/> is the measured, satisfied reading that fired the trigger (never null — a fire
 /// needs a value).
+/// </para>
+/// <para>
+/// <see cref="Enrichment"/> (gh#476) is the one <b>optional</b> field: extra <b>numeric</b> market context (recent
+/// bars + recent values of the fired indicator's series) the scan attaches for the <b>deep</b> tier only. It is
+/// <see langword="null"/> for every triage call and for the un-enriched path, so the triage render is unchanged.
+/// It preserves the near-zero-injection invariant — still all decimals and timestamps, no free text — because the
+/// only free-text source (news) is deferred. It is trailing and optional on purpose: a signature that keeps every
+/// existing construction site compiling.
+/// </para>
 /// </remarks>
 /// <param name="TriggerId">The trigger that fired.</param>
 /// <param name="Instrument">The instrument the indicator was read for.</param>
@@ -23,6 +33,7 @@ namespace MarqSpec.TradingCopilot.Domain.Triggers;
 /// <param name="Threshold">The threshold.</param>
 /// <param name="ObservedValue">The measured indicator value at the fire.</param>
 /// <param name="FiredAt">When the fire was observed.</param>
+/// <param name="Enrichment">Deep-tier numeric enrichment (gh#476), attached by the scan; <see langword="null"/> for triage and the un-enriched path.</param>
 public sealed record TriggerReviewContext(
     Guid TriggerId,
     InstrumentId Instrument,
@@ -32,7 +43,8 @@ public sealed record TriggerReviewContext(
     IndicatorComparison Comparison,
     decimal Threshold,
     decimal ObservedValue,
-    DateTimeOffset FiredAt);
+    DateTimeOffset FiredAt,
+    ReviewEnrichment? Enrichment = null);
 
 /// <summary>Why an agent review produced no suggestion.</summary>
 public enum SuppressReason

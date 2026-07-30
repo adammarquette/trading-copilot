@@ -88,6 +88,20 @@ public interface IExecutionMetrics
     /// <param name="consumerGroup">The consumer group.</param>
     /// <param name="lag">The delay.</param>
     void RecordPipelineLag(string consumerGroup, TimeSpan lag);
+
+    /// <summary>
+    /// Records how much of a blind window the bar store could <b>not</b> cover when recovering from a retention
+    /// gap (gh#482, gh#306).
+    /// </summary>
+    /// <remarks>
+    /// The consequence, and why this is not a data-quality nicety: hidden stops on that contract may have crossed
+    /// their promotion band <b>unobserved</b> and were not recovered, leaving the native safety stop as the only
+    /// floor. Emitted only when there is a shortfall — a complete recovery is silent, so a rule reading this can
+    /// never fire on a healthy session (ADR-0019 §4).
+    /// </remarks>
+    /// <param name="contractKey">The venue contract whose window was not fully covered.</param>
+    /// <param name="uncovered">How much of the window has no bars in the store.</param>
+    void RecordBackfillShortfall(string contractKey, TimeSpan uncovered);
 }
 
 /// <summary>
@@ -149,6 +163,11 @@ public sealed class NullExecutionMetrics : IExecutionMetrics
 
     /// <inheritdoc />
     public void RecordPipelineLag(string consumerGroup, TimeSpan lag)
+    {
+    }
+
+    /// <inheritdoc />
+    public void RecordBackfillShortfall(string contractKey, TimeSpan uncovered)
     {
     }
 }

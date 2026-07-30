@@ -36,6 +36,7 @@ public class AgentReviewGateBelowModelTests
     [InlineData(typeof(AnthropicLlmProvider))] // the real provider the reviewer calls (A2, gh#423) -- still no execution reach
     [InlineData(typeof(StubLlmProvider))]      // the inert provider bound when unconfigured
     [InlineData(typeof(AiSpendGovernor))]      // the pure spend gate (gh#448) -- defensive: a cost cap injects no execution type
+    [InlineData(typeof(ReviewEnrichmentSource))] // the deep-tier enrichment reader (gh#476) -- reads market data, reaches no execution
     public void ConstructorDependencies_ShouldNotReachExecution(Type type)
     {
         List<string> dependencyTypeNames = type.GetConstructors()
@@ -54,5 +55,27 @@ public class AgentReviewGateBelowModelTests
                     forbidden);
             }
         }
+    }
+
+    /// <summary>
+    /// REVIEWER PURITY (gh#476): the reviewer only <b>proposes</b> from what the scan hands it, so it must stay a pure
+    /// judgment seam — dependent on the provider, its options, and a logger, and <b>nothing else</b>. In particular it
+    /// must never gain a data-access dependency (a <c>DbContext</c>) or the enrichment source itself: enrichment is
+    /// assembled in the scan and arrives on the context, keeping the reviewer decoupled from the store. The execution-
+    /// fragment theory above cannot catch this — a <c>DbContext</c> or an <see cref="IReviewEnrichmentSource"/> is not
+    /// an "execution" type — so this pins the constructor shape directly. Wiring the enricher into the reviewer (the
+    /// tempting "just read it here" shortcut) fails here, by design.
+    /// </summary>
+    [Fact]
+    public void LlmTriggerReviewerConstructor_ShouldDependOnlyOnTheProviderOptionsAndLogger()
+    {
+        List<string> parameterTypeNames = typeof(LlmTriggerReviewer).GetConstructors()
+            .Single()
+            .GetParameters()
+            .Select(parameter => parameter.ParameterType.Name)
+            .ToList();
+
+        // IOptions<LlmOptions> and ILogger<LlmTriggerReviewer> reflect as the open-generic simple names.
+        parameterTypeNames.Should().BeEquivalentTo("ILlmProvider", "IOptions`1", "ILogger`1");
     }
 }
