@@ -8,19 +8,7 @@
   "version": 1,
   "refresh": "1m",
   "time": { "from": "now-24h", "to": "now" },
-  "templating": {
-    "list": [
-      {
-        "name": "budget",
-        "label": "Daily budget (USD)",
-        "type": "constant",
-        "hide": 0,
-        "query": "10",
-        "current": { "text": "10", "value": "10" },
-        "description": "The operator's Governor__DailyBudgetUsd, mirrored here so headroom can be drawn. Prometheus cannot see application config, so this is a manual mirror — keep it in step with the deployed value (gh#506 proposes emitting the cap as a gauge so it cannot drift)."
-      }
-    ]
-  },
+  "templating": { "list": [] },
   "panels": [
     {
       "id": 1,
@@ -42,13 +30,14 @@
       "id": 2,
       "type": "gauge",
       "title": "Governor headroom — % of daily budget",
+      "description": "Spend against the governor's CONFIGURED ceiling, read from ai_governor_daily_budget_usd (gh#506) rather than a mirrored Grafana constant, so it cannot drift from the deployed Governor__DailyBudgetUsd. With NO cap configured the gauge emits no series at all and this panel is empty -- that is 'no ceiling set', not 'no spend'.",
       "description": "Spend against the configured cap, so approaching the ceiling is visible BEFORE the governor pauses agent review. The governor itself enforces on the AIUsage ledger floor, not on this metric (a meter is export-only) — this is the operator's warning light, not the control.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * (sum(increase(ai_llm_cost_usd_total[24h])) + sum(increase(ai_embed_cost_usd_total[24h]))) / $budget",
+          "expr": "100 * (sum(increase(ai_llm_cost_usd_total[24h])) + sum(increase(ai_embed_cost_usd_total[24h]))) / ai_governor_daily_budget_usd",
           "instant": true
         }
       ],

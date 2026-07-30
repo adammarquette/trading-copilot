@@ -212,6 +212,12 @@ builder.Services.AddSingleton<IEmbeddingMetrics>(provider => provider.GetRequire
 // an unmetered call is invisible spend (the gh#403 posture).
 builder.Services.AddSingleton<LlmMetrics>();
 builder.Services.AddSingleton<ILlmMetrics>(provider => provider.GetRequiredService<LlmMetrics>());
+// The governor's configured ceiling, published as a gauge (gh#506) so the dashboard computes headroom from
+// Prometheus alone rather than a hand-copied Grafana constant that drifts the moment Governor__DailyBudgetUsd
+// changes. Resolved eagerly below so the observable callback is live even before anything else touches it.
+// Observability only -- enforcement stays on the AIUsage ledger floor, a meter being export-only (gh#448).
+builder.Services.AddSingleton<GovernorMetrics>();
+
 builder.Services.AddSingleton<UnavailableEmbeddingProvider>();
 
 // Probed once at startup (gh#474). A key is only half of "available": the AddEmbeddingStore migration skips the
@@ -349,6 +355,12 @@ builder.Services
 builder.Services.AddAuthorization();
 
 WebApplication app = builder.Build();
+
+// Resolve the governor gauge EAGERLY (gh#506). An ObservableGauge only exists once its owner is constructed,
+// and this singleton has no injected consumer -- lazily registered it would never be built, the callback would
+// never be attached, and the series would simply never appear. Nothing would fail; the panel would read empty,
+// which on a cost view is indistinguishable from "no spend". Touching it here is what makes it real.
+_ = app.Services.GetRequiredService<GovernorMetrics>();
 
 // Report the armed flatten schedule FIRST (gh#255, R-13) -- before migration, so the operator still sees which
 // deadlines are configured even on a start that later fails to reach the database.

@@ -265,6 +265,8 @@ collector → Prometheus path and reading back `/api/v1/label/__name__/values`, 
 against it — a guessed name would have shown *"No data"* on a spend panel forever, which reads as *"nothing was
 spent"*.
 
+**gh#506 publishes the governor's configured ceiling** as `ai_governor_daily_budget_usd`, so the dashboard computes headroom from Prometheus alone and the mirrored `$budget` Grafana constant is deleted -- a hand-copied cap silently reports against the old number the moment `Governor__DailyBudgetUsd` changes, and a wrong headroom reading on a cost governor is the same class of failure as a wrong cap. An **unset** budget emits no series rather than 0, so "no cap configured" stays distinguishable from "a cap of zero"; the headroom panel divides by it, and dividing by absence yields an empty panel, which the panel description names explicitly. It is observability only -- enforcement stays on the `AIUsage` ledger floor, a meter being export-only (gh#448).
+
 **gh#505 moved both instruments to the OTel annotation unit `{USD}`**, which the exporter does *not* append, so the
 series are now `ai_llm_cost_usd_total` and `ai_embed_cost_usd_total` — the form every other instrument here already
 used (`{call}`, `{token}`, `{position}`). The dashboard queries moved in the **same PR**, because a rename landing
