@@ -95,6 +95,13 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 
 ## 6. Requirements
 
+> **Reading the checkboxes.** A `- [ ]` here means **"this bullet is not yet fully delivered"**, not "nothing of it exists".
+> Delivery is recorded **inline, in bold prose** on the bullet itself, naming the issue that shipped it
+> (*"**Delivered — the agent-review route** (gh#402)…"*). A bullet stays unticked while **any** part of it is
+> outstanding, so several are unticked with most of their substance already shipped — R-4 is the clearest case. Read the
+> prose, not the box; the box is a coarse "is this requirement closed", and the `gh#N` citations are the real status
+> (gh#539).
+
 ### Must-Have (P0)
 
 **R-1: Market data ingestion (ProjectX).** Always-on cloud service ingesting the configurable watchlist via `MarqSpec.Client.ProjectX` on two distinct paths: a **live real-time stream** (ProjectX websockets — ticks/quotes/trades sufficient to reconstruct tape, footprint/delta, and volume profile) and **clean historical data** (periodic REST backfill of OHLCV bars, multiple resolutions). The live stream is **not conflated with** the authoritative historical series — they are stored and treated separately. Persist to time-series storage.
@@ -128,7 +135,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 - [ ] **Lifecycle & invalidation:** a suggestion runs `active → stale → expired/void`. It invalidates on **time** (validity window / session deadline), **drift** (price beyond a configurable tolerance of the entry — surfaced **stale** *before* execution, not only re-checked at take-time per R-12), or **thesis break** (its premise fails — a later refinement). A scratched setup is **not chased**: if it re-forms, the engine issues a **new superseding suggestion**
 - [ ] **Recovery is fail-safe (a suggestion carries no risk).** Suggestions are **server-side state**, so a client crash / disconnect loses nothing — the client re-syncs on reconnect (SignalR outbox + idempotent-resume, engineering §2). On a **backend restart or venue-connection loss**, suggestions **rehydrate from their store** and the normal lifecycle applies: any past its **validity window**, or whose drift / thesis broke during the gap, goes **stale → expired/void**; a survivor still must pass **R-12** before it can be taken; **nothing is auto-taken or silently resumed**. A re-formed setup is a **new superseding suggestion**, not a resurrected one. (Live positions are protected separately — native safety stops at the exchange + the connection-loss orphan handling, [ADR-0007](adr/0007-order-execution-model.md); the whole model is consolidated in [ADR-0013](adr/0013-failure-recovery-model.md).)
 - [ ] Each suggestion is attributed to a named **strategy / setup** (e.g. VWAP-reclaim, opening-drive) so outcomes aggregate per strategy (R-9)
-- [ ] The operator's **disposition** is captured — **taken, modified, passed, or expired** (a *pass* is a **neutral decline**, not a rejection of the co-pilot); a pass may attach an **optional reason** (a structured set spanning neutral → critical — e.g. already positioned, news risk, wrong time, weak R:R, against a rule, low conviction — plus a note), feeding the learning loop (R-9) and per-strategy analytics
+- [ ] The operator's **disposition** is captured — **taken, modified, or passed** (a *pass* is a **neutral decline**, not a rejection of the co-pilot); a pass may attach an **optional reason** and a note, feeding the learning loop (R-9) and per-strategy analytics. The reason set is **canonically eight** (gh#539): *already positioned · news risk · wrong time · waiting / better level · weak R:R · sizing · against a rule · low conviction* — the operator-validated pass sheet in the wireframes; the earlier *"e.g."* list here was illustrative, and this fixes it. **`expired` is deliberately not a disposition**: a disposition records an **operator act**, whereas expiry is the clock acting, so it lives on `SuggestionState` and *"expired without action"* is **derived** (`ExpiredVoid` + no disposition) rather than written by a background sweep — see the data dictionary's `Suggestion` / `SuggestionDisposition` rows
 
 **R-5: Layered risk model (enforcing).** Position size derives from three stacked constraint layers — Topstep prop rules (daily loss limit, trailing drawdown headroom), fixed %-risk per trade, and manual limits (max contracts, per-instrument caps) — most restrictive wins. This model **gates real orders**, not just suggestions.
 - [ ] Each suggestion and each order shows computed size and which layer was binding
@@ -162,7 +169,7 @@ It is also deliberately a **learning vehicle for agentic AI development**: persi
 - [ ] Trader can annotate entries (notes, emotional state — optional)
 - [ ] The journal presents a **trade blotter** and lets the operator **drill into a day's trades** — the **current day is the default view** — each trade linked to its originating suggestion, with entry/exit, P&L / R, strategy, and its feedback
 - [ ] **Post-close feedback is optional and asynchronous:** the operator can add comments / structured feedback **at close when present**, but because trades may **arm and run unattended**, a closed trade without feedback is flagged **"awaiting review"** and feedback can be added **anytime** — it is **never required** to close or record a trade
-- [ ] The suggestion record includes the operator's **disposition** (taken / modified / passed / expired) and, on a pass, the **optional reason** (structured set + note) — the signal the R-9 feedback loop and per-strategy breakdown consume
+- [ ] The suggestion record includes the operator's **disposition** (taken / modified / passed) and, on a pass, the **optional reason** (the canonical eight + a note) — the signal the R-9 feedback loop and per-strategy breakdown consume. An **expired** suggestion carries no disposition at all: R-9 reads it as `SuggestionState = ExpiredVoid` with no disposition row, so a timeout is never mistaken for a decision the operator made (gh#539)
 
 **R-9: Outcome resolution & feedback loop.** Journal entries resolve to actual results and the aggregate feeds future suggestions.
 - [ ] Trades executed through the system resolve from native fills (no matching heuristics)
