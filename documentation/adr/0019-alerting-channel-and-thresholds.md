@@ -213,7 +213,9 @@ the rule, not noise to tolerate.
   so the R-13 hot path still never awaits a network, and `NotificationOutboxRelay` + its host (gh#437) deliver what
   is owed and stamp `DeliveredAt`. Two ways in, and they want opposite things: `SendAsync` commits **through its own scope** (producers unchanged; sharing the caller's context let an unrelated failure in the producer's unit of work be swallowed by the never-throw contract and silently eat a page — gh#452, live for a few hours after gh#437 bound this as the seam), while
   `Enlist` stages the row in the **caller's** `DbContext`, so intent and state change commit atomically and the
-  commit→enqueue gap does not exist at all.
+  commit→enqueue gap does not exist at all. Since gh#455 both auto-flatten tiers take that path, through the
+  `INotificationEnlister` seam � and it checks for an already-owed incident before staging, because a row that
+  fails the constraint would fail the PRODUCER's save.
   **The guarantee is stated precisely, because the obvious phrasing overstates it.** It is **no dropped page**, not
   exactly-once. Delivery is attempted first and the row stamped after, so a crash *between* the transport accepting
   and the stamp landing re-delivers rather than loses. Stamping first would close that duplicate window and open a
@@ -355,3 +357,46 @@ where each existing row is backfilled with a distinct id. The scaffolded migrati
 to `Guid.Empty` and failed `AddPrimaryKey`: green on an empty dev database, broken on the one deployment with
 history. Its `Down` can legitimately fail once the outbox holds what the fix permits, and that is the intended
 behaviour — refusing to roll back beats deleting delivered pages to make room for the old key.
+
+## Update (2026-07-29) — the safety-critical producers commit their page with the state it reports (gh#455)
+
+`Enlist` had existed since gh#400 and **nothing called it**. Both auto-flatten tiers still went through
+`SendAsync`, which commits through a scope of its own — so the page was durable within *seconds* of the
+escalation, but not *with* it. A crash in that window left `flatten.escalated` on the journal and the operator
+never told, which is the one outcome the R-13 alert exists to prevent. Both tiers now enlist: the page joins the
+pass's own unit of work and the journal append's `SaveChangesAsync` commits **both or neither**.
+
+**A domain seam, not the concrete channel.** `Domain/Notifications/INotificationEnlister` carries the one method;
+`OutboxNotificationChannel` implements it alongside `INotificationChannel`. The composition root registers the
+concrete type **once** and aliases both interfaces onto it, which is load-bearing rather than tidy: `Enlist`
+stages into the `DbContext` of whichever instance it is called on, so a second registration would stage the page
+into a context nobody saves — and every test would still pass.
+
+### What this cost to get right, and what it teaches about shared transactions
+
+Sharing a transaction cuts both ways, and the first cut drew blood. Staged rows are the producer's problem at
+commit time: an escalation on one pass left the incident owed, the next pass staged the same dedup key, and
+gh#458's filtered unique index rejected it — **on the auto-flatten's journal write**, aborting the pass and losing
+the `flatten.missed` entry entirely. The alert had become capable of destroying the record it was reporting on.
+The existing flatten integration suite caught it; no new test was needed to find it.
+
+So the rule this ADR now states: **nothing an enlister stages may be able to fail the caller's save.** The seam
+checks for an already-owed incident before staging rather than leaving the index to catch it. That check is a
+*read*, and the caller's change tracker cannot answer it — an earlier pass committed that row in a scope long gone
+— so the seam is asynchronous. "Enlist does no I/O" was the wrong invariant; **"enlist never writes and never
+commits"** is the right one.
+
+The corollary is that the index's role differs by path. For `SendAsync` it is a sound backstop: the channel
+catches its own failure and returns. For `Enlist` it is catastrophic, because the exception surfaces somewhere
+else entirely. A constraint is only a safe backstop for whoever owns the transaction it fails in.
+
+**Scope.** The two auto-flatten tiers, which are the R-13 path. `TriggerEvaluationService` deliberately keeps
+`SendAsync` — its advisories are not safety-critical, and `SendAsync` remains the default for everything else.
+The **orphan / synthetic-risk guard named in gh#455 was not converted, because it raises no notification at all**:
+it publishes `trading.stops.orphaned` and the Layer 1 rules page on the metric. That is a sound design and this
+ADR's §2 says so; the issue's assumption that it called the channel was simply wrong.
+
+**One unrelated gap closed while here.** The flatten's `ResolveAsync` — the success path's incident cancel — had
+never been wrapped in the never-throw belt its sibling send got in gh#243, so a throwing resolve aborted a pass
+*after* the position had already closed. Found by repointing the existing "the channel throws" guard, which had
+been asserting against a call the flatten no longer makes.

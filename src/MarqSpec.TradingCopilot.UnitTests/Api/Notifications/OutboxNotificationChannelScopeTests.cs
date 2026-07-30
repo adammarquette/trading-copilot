@@ -99,7 +99,7 @@ public class OutboxNotificationChannelScopeTests
         (ServiceProvider provider, TradingCopilotDbContext callers) = Compose();
         await using ServiceProvider _ = provider;
 
-        Channel(provider, callers).Enlist(Page());
+        await Channel(provider, callers).EnlistAsync(Page(), CancellationToken.None);
 
         (await CountOutboxAsync()).Should().Be(0, "Enlist stages only — nothing is committed until the caller saves");
 

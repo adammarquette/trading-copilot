@@ -64,6 +64,7 @@ public sealed class AutoFlattenService
     private readonly ProjectXConnectionOptions _projectX;
     private readonly FlattenOptions _options;
     private readonly INotificationChannel _notifications;
+    private readonly INotificationEnlister _enlister;
     private readonly IExecutionMetrics _metrics;
     private readonly ILogger<AutoFlattenService> _logger;
 
@@ -74,6 +75,7 @@ public sealed class AutoFlattenService
     /// <param name="projectXOptions">Carries the credential key this process serves (ADR-0015).</param>
     /// <param name="flattenOptions">The per-instrument schedule and attempt cap.</param>
     /// <param name="notifications">Reaches the operator away from the desk (gh#243, ADR-0019).</param>
+    /// <param name="enlister">Records a page inside this pass's own transaction (gh#455).</param>
     /// <param name="metrics">The execution SLIs (gh#232).</param>
     /// <param name="logger">The logger.</param>
     public AutoFlattenService(
@@ -83,6 +85,7 @@ public sealed class AutoFlattenService
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<FlattenOptions> flattenOptions,
         INotificationChannel notifications,
+        INotificationEnlister enlister,
         IExecutionMetrics metrics,
         ILogger<AutoFlattenService> logger)
     {
@@ -95,6 +98,7 @@ public sealed class AutoFlattenService
         _projectX = projectXOptions.Value;
         _options = flattenOptions.Value;
         _notifications = notifications;
+        _enlister = enlister;
         _metrics = metrics;
         _logger = logger;
     }
@@ -266,18 +270,22 @@ public sealed class AutoFlattenService
 
                 case FlattenAction.Missed:
                     _logger.LogError("Auto-flatten MISSED for {Account} {Instrument}: {Reason}", account, schedule.Instrument, decision.Reason);
-                    await JournalAsync(MissedEventType, account, contract, decision.Reason, now, cancellationToken);
-                    _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenMissed);
 
                     // Also P1. Usually the same incident as the escalation above, so dedup collapses the two --
                     // but a process that only came up AFTER the deadline reaches this without ever escalating, and
                     // that operator still needs waking.
-                    await NotifyAsync(
+                    //
+                    // Enlisted BEFORE the journal (gh#455): the row joins this pass's unit of work and the append's
+                    // save commits both, so "MISSED is journalled and nobody was told" cannot happen.
+                    await EnlistPageAsync(
                         NotificationSeverity.Page,
                         $"Auto-flatten MISSED — {schedule.Instrument}",
                         decision.Reason,
                         IncidentKey(account, schedule.Instrument),
                         cancellationToken);
+
+                    await JournalAsync(MissedEventType, account, contract, decision.Reason, now, cancellationToken);
+                    _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenMissed);
                     break;
 
                 case FlattenAction.Disabled:
@@ -333,8 +341,11 @@ public sealed class AutoFlattenService
 
                     // The incident is over. Cancels any page still nagging from an earlier pass and re-arms the
                     // key, so a LATER failure today is reported as the new incident it is (gh#243).
-                    await _notifications.ResolveAsync(
-                        IncidentKey(account, schedule.Instrument), cancellationToken);
+                    //
+                    // Fault-absorbed since gh#455: this was the one channel call on the flatten's path with no
+                    // belt, so a throwing resolve aborted the pass -- on the SUCCESS path, after the position was
+                    // already closed. The send beside it had been wrapped since gh#243; this had been missed.
+                    await ResolveAsync(IncidentKey(account, schedule.Instrument), cancellationToken);
                     return true;
 
                 case FlattenVerdict.Retry:
@@ -346,42 +357,56 @@ public sealed class AutoFlattenService
                     _logger.LogError(
                         "Auto-flatten could not confirm {Account} {Instrument} flat after {Attempts} attempt(s).",
                         account, schedule.Instrument, attempts);
-                    await JournalAsync(EscalatedEventType, account, group[0].Contract,
-                        $"ESCALATE: {schedule.Instrument} still exposed after {attempts} close attempt(s) — {decision.Reason}",
-                        now, cancellationToken);
 
                     // P1 — page now, not at the firing window (ADR-0019). `flatten.missed` lands 60 min past the
                     // deadline, AFTER a prop venue's own forced flatten would have closed the position, and a live
                     // brokerage has no backstop at all. This is the moment the operator can still act.
-                    await NotifyAsync(
+                    //
+                    // Enlisted BEFORE the journal (gh#455), which is the whole mechanism: the page becomes part of
+                    // the same transaction the escalation is written in, so the two commit together or neither
+                    // does. Sent afterwards, as it was, a crash in between left the escalation on record with the
+                    // operator never told -- the one failure this alert exists to prevent.
+                    await EnlistPageAsync(
                         NotificationSeverity.Page,
                         $"Auto-flatten escalated — {schedule.Instrument}",
                         $"{schedule.Instrument} on {account.Key} is STILL EXPOSED after {attempts} close attempt(s). "
                         + "The position did not close at its deadline and needs manual intervention now.",
                         IncidentKey(account, schedule.Instrument),
                         cancellationToken);
+
+                    await JournalAsync(EscalatedEventType, account, group[0].Contract,
+                        $"ESCALATE: {schedule.Instrument} still exposed after {attempts} close attempt(s) — {decision.Reason}",
+                        now, cancellationToken);
                     return false;
             }
         }
     }
 
     /// <summary>
-    /// Notifies the operator, absorbing any fault. Alerting is a <b>secondary</b> concern to closing a position:
-    /// a channel that is down, slow, or misconfigured must never fail or abort a flatten — that would be the
-    /// self-inflicted wound ADR-0019 rules out, where the thing meant to report trouble becomes the trouble.
-    /// The adapters are already failure-tolerant; this is the belt to that braces, since a flatten is the one
-    /// action the system takes without confirmation.
+    /// Stages the operator's page <b>into this pass's own transaction</b> (gh#455), absorbing any fault. The row
+    /// is committed by the journal append that follows, so the page and the state it reports become atomic.
     /// </summary>
-    private async Task NotifyAsync(
-        NotificationSeverity severity,
-        string title,
-        string body,
-        string incidentKey,
-        CancellationToken cancellationToken)
+    /// <remarks>
+    /// <para>
+    /// <b>Call this immediately before the <see cref="JournalAsync"/> that records the same fact.</b> Enlisting
+    /// stages without saving, so a call with no save behind it records nothing at all — no exception, no page.
+    /// That is the cost of joining someone else's transaction (<c>INotificationEnlister</c>).
+    /// </para>
+    /// <para>
+    /// Alerting is a <b>secondary</b> concern to closing a position: a channel that is down, slow, or
+    /// misconfigured must never fail or abort a flatten — that would be the self-inflicted wound ADR-0019 rules
+    /// out, where the thing meant to report trouble becomes the trouble. The adapters are already
+    /// failure-tolerant; this is the belt to that braces, since a flatten is the one action the system takes
+    /// without confirmation. It matters more now than it did behind a send: this runs <i>inside</i> the flatten's
+    /// flow rather than after it.
+    /// </para>
+    /// </remarks>
+    private async Task EnlistPageAsync(
+        NotificationSeverity severity, string title, string body, string incidentKey, CancellationToken cancellationToken)
     {
         try
         {
-            await _notifications.SendAsync(new Notification(severity, title, body, incidentKey), cancellationToken);
+            await _enlister.EnlistAsync(new Notification(severity, title, body, incidentKey), cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -389,7 +414,28 @@ public sealed class AutoFlattenService
         }
         catch (Exception error)
         {
-            _logger.LogError(error, "Could not notify the operator about {Incident}; the flatten is unaffected.", incidentKey);
+            _logger.LogError(error, "Could not record a page for {Incident}; the flatten is unaffected.", incidentKey);
+        }
+    }
+
+    /// <summary>
+    /// Closes an incident, absorbing any fault — same reasoning as <see cref="EnlistPageAsync"/>, and it needs the
+    /// belt just as much: a resolve reaches the transport (a Pushover Emergency nags until cancelled), so unlike
+    /// an enlist it really does touch a network.
+    /// </summary>
+    private async Task ResolveAsync(string incidentKey, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _notifications.ResolveAsync(incidentKey, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw; // a real shutdown still stops the host
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(error, "Could not resolve {Incident}; the flatten is unaffected.", incidentKey);
         }
     }
 

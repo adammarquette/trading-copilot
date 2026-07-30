@@ -77,12 +77,25 @@ public static class NotificationRegistration
         // intent and state change commit atomically; `SendAsync` opens its OWN scope, so it commits nothing of the
         // caller's and — critically — a failure in the caller's unit of work cannot be swallowed by this channel's
         // never-throw contract and silently eat a page.
-        builder.Services.AddScoped<INotificationChannel>(provider => new OutboxNotificationChannel(
+        //
+        // ONE instance, TWO seams onto it (gh#455). The concrete type is registered once and both interfaces alias
+        // it, because `Enlist` stages into the DbContext of whichever instance it is called on: a second factory
+        // registration would build a second channel over a second context, the producer would save through its own,
+        // and the enlisted page would be staged into a context nobody saves -- with every test still green.
+        builder.Services.AddScoped(provider => new OutboxNotificationChannel(
             provider.GetRequiredService<TradingCopilotDbContext>(),
             provider.GetRequiredService<IServiceScopeFactory>(),
             provider.GetRequiredService<TimeProvider>(),
             provider.GetRequiredService<QueuedNotificationChannel>(),
             provider.GetRequiredService<ILogger<OutboxNotificationChannel>>()));
+
+        builder.Services.AddScoped<INotificationChannel>(
+            provider => provider.GetRequiredService<OutboxNotificationChannel>());
+
+        // The strong path, for the safety-critical producers: auto-flatten and its watchdog stage their page into
+        // the transaction that records the escalation, so the two commit together or neither does.
+        builder.Services.AddScoped<INotificationEnlister>(
+            provider => provider.GetRequiredService<OutboxNotificationChannel>());
 
         // Enqueue-and-return is only safe because THIS drains the queue. Without the pump every page is accepted and
         // silently discarded -- the failure mode is invisible, because the caller still sees success.

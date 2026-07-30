@@ -59,10 +59,14 @@ public class AutoFlattenServiceTests
             Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
             Options.Create(options ?? new FlattenOptions()),
             _notifications,
+            _enlister,
             _metrics,
             NullLogger<AutoFlattenService>.Instance);
 
     private readonly INotificationChannel _notifications = A.Fake<INotificationChannel>();
+
+    // The strong path (gh#455): pages ride the flatten's own transaction rather than a send of their own.
+    private readonly INotificationEnlister _enlister = A.Fake<INotificationEnlister>();
 
     // Real instance, not a fake: it is a sealed metrics sink with no behaviour to stub, and recording must be
     // exercised rather than skipped -- a metrics fault must never fail the flatten it measures (gh#232).
@@ -118,7 +122,9 @@ public class AutoFlattenServiceTests
         await Service().FlattenAccountAsync(
             Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
 
-        A.CallTo(() => _notifications.SendAsync(
+        // gh#455 changed HOW this reaches the operator, not whether: the page is enlisted into the flatten's own
+        // transaction instead of sent through a commit of its own. The guarantee is strictly stronger.
+        A.CallTo(() => _enlister.EnlistAsync(
                 A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Page), A<CancellationToken>._))
             .MustHaveHappened();
     }
@@ -134,6 +140,77 @@ public class AutoFlattenServiceTests
             Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
 
         A.CallTo(() => _notifications.ResolveAsync(A<string>._, A<CancellationToken>._)).MustHaveHappened();
+    }
+
+    // --- Committing the page WITH the state it reports (gh#455, R-13) ---
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldEnlistThePageBeforeJournalling_WhenTheFlattenEscalates()
+    {
+        // THE atomicity guarantee. The page joins the flatten's own unit of work and is committed by the journal's
+        // save, so "the escalation is journalled and the operator was never told" becomes a state that cannot
+        // exist. Order is the whole mechanism: enlisting AFTER the append leaves the row riding some later save --
+        // or none at all -- which is exactly the gap this replaced.
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2)); // never goes flat
+
+        await Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+
+        A.CallTo(() => _enlister.EnlistAsync(
+                A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Page), A<CancellationToken>._))
+            .MustHaveHappened()
+            .Then(A.CallTo(() => _log.AppendAsync(
+                    A<EventDraft>.That.Matches(d => d.Type == AutoFlattenService.EscalatedEventType),
+                    A<CancellationToken>._))
+                .MustHaveHappened());
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldNotSendOutOfBand_WhenTheFlattenEscalates()
+    {
+        // The other half: having enlisted it, the flatten must NOT also send it. A send commits through the
+        // channel's own scope, which would put the page outside the transaction the enlist just put it inside --
+        // and, because dedup only suppresses while a page is owed, risks two rows for one incident.
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2));
+
+        await Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldEnlistThePageBeforeJournalling_WhenTheDeadlineWasMissed()
+    {
+        // The second P1 site, reached by a process that only came up AFTER the deadline — it never escalates, so
+        // it is a distinct path to the same page and needs the same atomicity.
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2));
+
+        await Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(21, 0), maxAttempts: 1, CancellationToken.None);
+
+        A.CallTo(() => _enlister.EnlistAsync(A<Notification>._, A<CancellationToken>._))
+            .MustHaveHappened()
+            .Then(A.CallTo(() => _log.AppendAsync(
+                    A<EventDraft>.That.Matches(d => d.Type == AutoFlattenService.MissedEventType),
+                    A<CancellationToken>._))
+                .MustHaveHappened());
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldStillFlatten_WhenEnlistingThePageThrows()
+    {
+        // The never-throw belt has to survive the move. Enlisting runs INSIDE the flatten's flow now, so a fault
+        // here would abort the one action the system takes without confirmation — the self-inflicted wound
+        // ADR-0019 rules out, where the reporter becomes the outage.
+        A.CallTo(() => _enlister.EnlistAsync(A<Notification>._, A<CancellationToken>._)).Throws(new InvalidOperationException("enlist exploded"));
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2));
+
+        Func<Task> act = () => Service().FlattenAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        AssertAppended(AutoFlattenService.EscalatedEventType);
     }
 
     [Fact]
@@ -153,9 +230,13 @@ public class AutoFlattenServiceTests
     {
         // Alerting is SECONDARY to closing a position. A channel that is down must never abort the one action the
         // system takes without confirmation -- that would make the reporter the outage.
-        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._))
+        //
+        // Points at RESOLVE rather than send since gh#455: the escalation path enlists now, so a stubbed SendAsync
+        // is a call the flatten no longer makes and this would pass without witnessing anything. Resolve is the
+        // channel call that remains -- and it runs on the SUCCESS path, so it covers the other direction too.
+        A.CallTo(() => _notifications.ResolveAsync(A<string>._, A<CancellationToken>._))
             .Throws(new InvalidOperationException("channel exploded"));
-        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2));
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]); // closes cleanly, so the flatten resolves
 
         Func<Task> act = () => Service().FlattenAccountAsync(
             Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);

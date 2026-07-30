@@ -60,10 +60,14 @@ public class AutoFlattenWatchdogServiceTests
             Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
             Options.Create(options ?? new FlattenOptions()),
             _notifications,
+            _enlister,
             _metrics,
             NullLogger<AutoFlattenWatchdogService>.Instance);
 
     private readonly INotificationChannel _notifications = A.Fake<INotificationChannel>();
+
+    // The strong path (gh#455): the watchdog's pages ride its own transaction, like the primary tier's.
+    private readonly INotificationEnlister _enlister = A.Fake<INotificationEnlister>();
 
     // Real sink: no behaviour to stub, and recording must be exercised (gh#232).
     private readonly ExecutionMetrics _metrics = new();
@@ -214,6 +218,28 @@ public class AutoFlattenWatchdogServiceTests
     }
 
     // --- Past the firing window: escalate critically, never fire blind ---
+
+    [Fact]
+    public async Task BackstopAccountAsync_ShouldEnlistThePageBeforeJournalling_WhenBothTiersHaveFailed()
+    {
+        // The watchdog is the LAST tier — if its page is the one that goes missing there is nothing behind it. Same
+        // atomicity as the primary (gh#455): the page joins this pass's transaction and the journal's save commits
+        // both, so a crash cannot leave "both tiers failed" recorded with nobody told.
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
+
+        await Service().BackstopAccountAsync(
+            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(20, 35), Grace, CancellationToken.None);
+
+        A.CallTo(() => _enlister.EnlistAsync(
+                A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Page), A<CancellationToken>._))
+            .MustHaveHappened()
+            .Then(A.CallTo(() => _log.AppendAsync(
+                    A<EventDraft>.That.Matches(d => d.Type == AutoFlattenWatchdogService.CriticalEventType),
+                    A<CancellationToken>._))
+                .MustHaveHappened());
+
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
 
     [Fact]
     public async Task BackstopAccountAsync_ShouldRaiseCritical_PastTheFiringWindowWithExposure()
