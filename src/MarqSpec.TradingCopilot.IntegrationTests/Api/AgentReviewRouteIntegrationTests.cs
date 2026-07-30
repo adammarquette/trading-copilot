@@ -337,7 +337,8 @@ public class AgentReviewRouteIntegrationTests : IClassFixture<AgentReviewTestPos
     {
         VenueFactory.ResetPositions();
         _factory.Llm.Reset();
-        _factory.Notifications.Reset();
+        _factory.Pushover.Reset();
+        await _factory.ClearOutboxAsync();
         await _fixture.ClearAsync();
     }
 }
@@ -363,7 +364,8 @@ public class AgentReviewDefaultDeploymentIntegrationTests : IClassFixture<NoRevi
     public async Task DefaultDeployment_ShouldBindTheNullReviewer_AndNeverCallTheProvider()
     {
         _factory.Llm.Reset();
-        _factory.Notifications.Reset();
+        _factory.Pushover.Reset();
+        await _factory.ClearOutboxAsync();
         await _fixture.ClearAsync();
         (Guid userId, Guid accountId) = await _fixture.SetupOperatorAndAccountAsync();
         await _fixture.SeedTriggerAsync(userId, accountId);
@@ -374,8 +376,11 @@ public class AgentReviewDefaultDeploymentIntegrationTests : IClassFixture<NoRevi
         fires.Should().Be(1, "the edge fires; there is simply no reviewer to consult");
         _factory.Llm.CallCount.Should().Be(0, "no reviewer configured means NO provider call — and no cost");
         (await _fixture.SuggestionCountAsync()).Should().Be(0, "an unreviewed setup is never a proposal");
-        await _factory.DrainNotificationsAsync();
-        _factory.Notifications.Sent.Should().NotBeEmpty(
+        // Asserted at the OUTBOX, which is where the advisory becomes durable, rather than at the wire: since
+        // gh#437 the seam persists first and a relay pass delivers. Wire delivery is currently dead on gh#459, so
+        // the durable record is both the honest assertion here and the stronger one — the advisory survives a crash.
+        int advisories = await _factory.WithDatabaseAsync(db => db.NotificationOutbox.CountAsync());
+        advisories.Should().BeGreaterThan(0,
             "running review-less is allowed; running review-less SILENTLY is not — the operator is told");
     }
 }

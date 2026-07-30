@@ -64,11 +64,13 @@ public class TriggerEvaluationServiceTests
         Microsoft.Extensions.Options.Options.Create(governor ?? new GovernorOptions()),
         NullLogger<TriggerEvaluationService>.Instance);
 
-    // The reviewer now returns an AgentReview: the outcome the route acts on plus the LLM-call Cost the scan ledgers.
-    // Wrap the outcome with a non-null Cost so the recording path is exercised, matching a real (billed) reviewer call.
-    private void ReviewerReturns(ReviewOutcome outcome, AiCallCost? cost = null) =>
+    // The reviewer returns an AgentReview: the outcome the route acts on plus the LLM-call cost(s) the scan ledgers,
+    // one row per billed call (gh#449). Passing no costs defaults to a single _sampleCost, so every EXISTING caller
+    // (which passes only an outcome) is behaviour-unchanged -- still exactly one billed triage call. An escalated fire
+    // is modelled by passing TWO costs (triage + deep).
+    private void ReviewerReturns(ReviewOutcome outcome, params AiCallCost[] costs) =>
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
-            .Returns(new AgentReview(outcome, cost ?? _sampleCost));
+            .Returns(new AgentReview(outcome, costs.Length == 0 ? [_sampleCost] : costs));
 
     private void ReviewerThrows(Exception error) =>
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).Throws(error);
@@ -620,21 +622,50 @@ public class TriggerEvaluationServiceTests
         captured.OccurredAt.Should().Be(Now);       // the caller-supplied clock, threaded through -- the ledger reads none
     }
 
-    // A no-call (inert-reviewer) review carries Cost: null, and the scan must then record NOTHING. The Cost
-    // discriminator, not the outcome, gates the ledger write -- there is no spend to record for a call never made.
+    // A no-call (inert-reviewer) review carries EMPTY Costs, and the scan must then record NOTHING. The scan records
+    // one row per cost (foreach over Costs), so an empty Costs writes zero rows -- there is no spend to record for a
+    // call never made (gh#449).
     [Fact]
-    public async Task ScanAsync_RecordsNoUsage_WhenTheReviewerReturnsNullCost()
+    public async Task ScanAsync_RecordsNoUsage_WhenTheReviewerReturnsNoCosts()
     {
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._))
             .Returns(new AgentReview(
-                new ReviewOutcome.Suppress(SuppressReason.NoReviewerConfigured, "no LLM reviewer is configured"), Cost: null));
+                new ReviewOutcome.Suppress(SuppressReason.NoReviewerConfigured, "no LLM reviewer is configured"), Costs: []));
 
         await Service().ScanAsync(Now, CancellationToken.None);
 
         A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // ONE ROW PER COST (gh#449): an escalated review made TWO billed calls (triage + deep), so the scan writes TWO
+    // AIUsage rows -- one per AiCallCost, in call order -- both stamped with the FIRING owner. A real AiUsageLedger
+    // (not the fake) actually persists, so the count is the load-bearing proof both rows landed.
+    [Fact]
+    public async Task ScanAsync_ShouldRecordOneRowPerCost_WhenTheReviewMadeTwoCalls()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+
+        AiCallCost triageCost = new(
+            AiUsageFeature.Triage, "claude-haiku-4-5", LlmModelTier.Triage, AiUsageOutcome.Succeeded,
+            40, 8, 0.0005m, TimeSpan.FromMilliseconds(120));
+        AiCallCost deepCost = new(
+            AiUsageFeature.Triage, "claude-sonnet-5", LlmModelTier.Deep, AiUsageOutcome.Succeeded,
+            900, 300, 0.0072m, TimeSpan.FromMilliseconds(800));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"), triageCost, deepCost);
+
+        // A REAL ledger so both spend rows are actually persisted (the fake records nothing to count).
+        IAiUsageLedger realLedger = new AiUsageLedger(Options, NullLogger<AiUsageLedger>.Instance);
+        await Service(ledger: realLedger).ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        List<AiUsageRecord> rows = await reload.AiUsage.ToListAsync();
+        rows.Should().HaveCount(2);                                   // one row per billed call
+        rows.Should().OnlyContain(row => row.UserId == _operator);    // both stamped with the firing owner (R-20)
     }
 
     // FAIL-OPEN AT THE LEDGER BOUNDARY: the scan calls _ledger.RecordAsync UNGUARDED -- the fail-open lives inside the
@@ -855,6 +886,36 @@ public class TriggerEvaluationServiceTests
 
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
         (await Context().AiUsage.CountAsync()).Should().Be(1); // only the first (allowed) fire wrote a spend row
+    }
+
+    // (g2) ESCALATION ACCRUES BOTH COSTS (gh#449): the within-pass tally must fold in EVERY billed call, not just the
+    // first. Budget == the SUM of the escalated fire's two costs; two agent-review triggers fire this pass. fire1
+    // accrues BOTH the triage and deep cost -> spent == budget, so fire2 sees spent == budget and is blocked. Had only
+    // one of the two costs accrued, spent would stay under budget and fire2 would wrongly proceed.
+    [Fact]
+    public async Task ScanAsync_ShouldAccrueEveryCost_WhenTheReviewEscalated()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+
+        AiCallCost triageCost = new(
+            AiUsageFeature.Triage, "claude-haiku-4-5", LlmModelTier.Triage, AiUsageOutcome.Succeeded,
+            40, 8, 0.0005m, TimeSpan.FromMilliseconds(120));
+        AiCallCost deepCost = new(
+            AiUsageFeature.Triage, "claude-sonnet-5", LlmModelTier.Deep, AiUsageOutcome.Succeeded,
+            900, 300, 0.0072m, TimeSpan.FromMilliseconds(800));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"), triageCost, deepCost);
+
+        // Budget is EXACTLY the two costs' sum, so accruing both (and only both) exhausts it after the first fire.
+        decimal budget = triageCost.EstimatedCostUsd + deepCost.EstimatedCostUsd;
+        IAiUsageLedger realLedger = new AiUsageLedger(Options, NullLogger<AiUsageLedger>.Instance);
+        await Service(ledger: realLedger, governor: new GovernorOptions { DailyBudgetUsd = budget })
+            .ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        (await Context().AiUsage.CountAsync()).Should().Be(2); // both spend rows from the single authorized fire
     }
 
     // (h) MECHANICAL UNAFFECTED: the governor gates the LLM route ONLY. With the budget exhausted, the mechanical

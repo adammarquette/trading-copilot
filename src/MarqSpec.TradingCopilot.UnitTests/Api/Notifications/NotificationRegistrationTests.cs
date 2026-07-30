@@ -53,6 +53,44 @@ public class NotificationRegistrationTests
     }
 
     [Fact]
+    public void AddTradingCopilotNotifications_ShouldBindTheEnlisterToTheSameInstanceAsTheSeam_SoTheRowRidesTheCallersSave()
+    {
+        // gh#455's load-bearing binding, and the one way this can fail silently. Enlist stages a row into the
+        // DbContext of the instance it is called on; the producer then saves through ITS context. If the enlister
+        // resolved to a DIFFERENT instance — a second registration, or a transient — the row would be staged into a
+        // context nobody saves, every unit test would still pass, and the flatten's page would simply never exist.
+        //
+        // Identity is asserted, not just the type: two OutboxNotificationChannel instances would satisfy a type
+        // check and still lose the page.
+        using WebApplication app = Compose();
+
+        using IServiceScope scope = app.Services.CreateScope();
+
+        INotificationEnlister enlister = scope.ServiceProvider.GetRequiredService<INotificationEnlister>();
+        INotificationChannel channel = scope.ServiceProvider.GetRequiredService<INotificationChannel>();
+
+        enlister.Should().BeSameAs(channel,
+            "Enlist stages into the context of whichever instance it is called on — a second instance stages into "
+            + "a context nobody saves, and the page vanishes with every test still green");
+    }
+
+    [Fact]
+    public void AddTradingCopilotNotifications_ShouldScopeTheEnlister_SoItSharesTheProducersUnitOfWork()
+    {
+        // Scoped, necessarily: the whole guarantee is that the row joins the producer's transaction, and a
+        // singleton would capture one context for the process — the captive-dependency shape that also throws
+        // under ValidateScopes at startup.
+        using WebApplication app = Compose();
+
+        using IServiceScope first = app.Services.CreateScope();
+        using IServiceScope second = app.Services.CreateScope();
+
+        first.ServiceProvider.GetRequiredService<INotificationEnlister>()
+            .Should().NotBeSameAs(second.ServiceProvider.GetRequiredService<INotificationEnlister>(),
+                "each producer pass has its own unit of work, so it must have its own enlister");
+    }
+
+    [Fact]
     public void AddTradingCopilotNotifications_ShouldKeepTheQueueBeneathTheOutbox_SoDeliveryStillNeverBlocks()
     {
         // The other half of the same property. The outbox is durable but it does not deliver; the relay does, and

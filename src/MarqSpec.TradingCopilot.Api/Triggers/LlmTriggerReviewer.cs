@@ -10,10 +10,13 @@ using Microsoft.Extensions.Options;
 namespace MarqSpec.TradingCopilot.Api.Triggers;
 
 /// <summary>
-/// The LLM-backed <see cref="ITriggerReviewer"/> (R-4 / ADR-0008): it assembles the fired setup's market facts into
-/// one triage-tier completion, parses the model's structured answer, and maps it to a <see cref="ReviewOutcome"/>.
+/// The LLM-backed <see cref="ITriggerReviewer"/> (R-4 / ADR-0008): it assembles the fired setup's market facts into a
+/// <b>triage-tier</b> completion, parses the model's structured answer, and maps it to a <see cref="ReviewOutcome"/>.
+/// When the triage model judges the setup genuinely too hard and returns <c>decision: "escalate"</c> (gh#449), it
+/// makes a <b>second, deep-tier</b> call for a final synthesis and uses that answer instead.
 /// </summary>
 /// <remarks>
+/// <para>
 /// <b>Fail-closed is the whole design.</b> This is the first of three layers guarding against a malformed or hostile
 /// model output (the pure <see cref="SuggestionGeometry"/> sanity check and the take-time risk gate are below it).
 /// Anything other than a well-formed <i>suggest</i> — a non-<see cref="LlmStopReason.Completed"/> stop (a refusal or a
@@ -21,16 +24,44 @@ namespace MarqSpec.TradingCopilot.Api.Triggers;
 /// <see cref="ReviewOutcome.Suppress"/>, <b>never</b> a suggestion. Two things it deliberately does not do: it does
 /// not read size from the model (size is the operator's trigger's), and it runs <b>no numeric geometry check</b> —
 /// that is <see cref="SuggestionGeometry"/>'s job at issuance, below the model.
+/// </para>
+/// <para>
+/// <b>Escalation is bounded and cannot loop.</b> Only the triage tier is offered <c>escalate</c> (its schema alone
+/// carries the value); the deep tier is asked for a final <i>suggest</i>/<i>suppress</i> and its output is mapped by
+/// the terminal path, where a stray <c>escalate</c> reads as an unknown decision → suppress. So a review makes at most
+/// two calls. <b>Every billed call is priced once and surfaced</b> on <see cref="AgentReview.Costs"/> (a failed call
+/// included), so an escalated fire records both the triage and the deep spend rows and no return point drops one.
+/// </para>
 /// </remarks>
 public sealed class LlmTriggerReviewer : ITriggerReviewer
 {
     private const int MaxOutputTokens = 1024;
 
-    // The structured answer the model is asked for. `additionalProperties: false` keeps it within Anthropic's
+    // The structured answer the TRIAGE model is asked for. `additionalProperties: false` keeps it within Anthropic's
     // structured-output contract (A2, gh#423) so the provider will accept it as an output_config format. The reviewer
     // -- not the schema -- remains the enforcer: the provider is not guaranteed to honour the constraint, so the
-    // mapping below still fails closed on anything unusable.
-    private const string ReviewSchema = """
+    // mapping below still fails closed on anything unusable. The triage schema alone offers "escalate" (gh#449).
+    private const string TriageReviewSchema = """
+        {
+          "type": "object",
+          "properties": {
+            "decision": { "type": "string", "enum": ["suggest", "suppress", "escalate"] },
+            "direction": { "type": "string", "enum": ["long", "short"] },
+            "entry": { "type": "number" },
+            "stop": { "type": "number" },
+            "target": { "type": "number" },
+            "rationale": { "type": "string" },
+            "reason": { "type": "string" }
+          },
+          "required": ["decision"],
+          "additionalProperties": false
+        }
+        """;
+
+    // The DEEP model's schema is the original two-value contract: it must reach a FINAL decision and is NOT offered
+    // "escalate", so a compliant deep model cannot defer again (defense in depth: a non-compliant one still fails
+    // closed on the unknown-decision path). This is the only difference from the triage schema.
+    private const string DeepReviewSchema = """
         {
           "type": "object",
           "properties": {
@@ -47,12 +78,21 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
         }
         """;
 
-    private const string SystemPrompt =
+    private const string TriageSystemPrompt =
         "You review a single fired futures trigger and decide whether it is worth surfacing to the operator as a "
         + "trade setup. Respond ONLY as JSON matching the given schema. Either propose a setup (decision \"suggest\" "
         + "with direction long|short and numeric entry, stop and target prices) or decline (decision \"suppress\" with "
-        + "a short reason). You never choose size and you never place an order — you only propose; a deterministic "
+        + "a short reason). Or, ONLY when the setup is genuinely too hard for a quick judgment and warrants a stronger "
+        + "model's synthesis, defer with decision \"escalate\" and a short reason — prefer suggest or suppress, and "
+        + "escalate sparingly. You never choose size and you never place an order — you only propose; a deterministic "
         + "risk gate sizes and validates everything below you.";
+
+    private const string DeepSystemPrompt =
+        "You are the deep-tier reviewer. A cheaper triage pass judged this fired futures trigger too hard and deferred "
+        + "it to you for a FINAL decision. Respond ONLY as JSON matching the given schema. You MUST answer either "
+        + "\"suggest\" (with direction long|short and numeric entry, stop and target prices) or \"suppress\" (with a "
+        + "short reason). You may NOT defer again. You never choose size and you never place an order — you only "
+        + "propose; a deterministic risk gate sizes and validates everything below you.";
 
     // Property-name-insensitive so "Decision"/"decision" map the same. Immutable + reused per call.
     private static readonly JsonSerializerOptions _serializerOptions = new() { PropertyNameCaseInsensitive = true };
@@ -62,8 +102,8 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
     private readonly ILogger<LlmTriggerReviewer> _logger;
 
     /// <summary>Creates the reviewer.</summary>
-    /// <param name="llm">The provider-neutral LLM seam the review call goes through.</param>
-    /// <param name="options">The LLM config — the triage model id and the cost rates the ledger row is priced at.</param>
+    /// <param name="llm">The provider-neutral LLM seam both tier calls go through (it picks the model from the tier).</param>
+    /// <param name="options">The LLM config — the per-tier model ids and the cost rates each ledger row is priced at.</param>
     /// <param name="logger">The logger; a fail-closed suppression is logged, never swallowed.</param>
     public LlmTriggerReviewer(ILlmProvider llm, IOptions<LlmOptions> options, ILogger<LlmTriggerReviewer> logger)
     {
@@ -79,12 +119,55 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        string model = _options.ModelFor(LlmModelTier.Triage);
+        // Every billed call is appended to `costs` the instant it returns, so no early return can drop a spend row.
+        List<AiCallCost> costs = new(2);
+
+        TierCall triage = await CallAsync(LlmModelTier.Triage, TriageSystemPrompt, TriageReviewSchema, context, cancellationToken);
+        costs.Add(triage.Cost);
+        if (triage.Completion is null)
+        {
+            // The triage provider call itself failed -- fail-closed, one Failed cost recorded.
+            return new AgentReview(
+                new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the review provider call failed"), costs);
+        }
+
+        TriageMapping mapping = MapTriage(context, triage.Completion);
+        if (!mapping.Escalate)
+        {
+            // Terminal at the triage tier: a suggest, a suppress, or a fail-closed suppress -- no deep call.
+            return new AgentReview(mapping.Outcome!, costs);
+        }
+
+        // ESCALATION (gh#449): the triage tier deferred a genuinely-hard setup. Make ONE deep-tier call for a final
+        // answer; the deep row rides the same `costs` list, so the escalated fire ledgers both tiers' spend.
+        _logger.LogInformation("Trigger {TriggerId} triage escalated to the deep tier.", context.TriggerId);
+        TierCall deep = await CallAsync(LlmModelTier.Deep, DeepSystemPrompt, DeepReviewSchema, context, cancellationToken);
+        costs.Add(deep.Cost);
+        if (deep.Completion is null)
+        {
+            return new AgentReview(
+                new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the deep review provider call failed"), costs);
+        }
+
+        // The deep result is mapped by the TERMINAL path: a stray "escalate" here reads as an unknown decision ->
+        // suppress (Map is unchanged), so a second escalate can never trigger a third call.
+        return new AgentReview(MapCompletion(context, deep.Completion), costs);
+    }
+
+    /// <summary>
+    /// One tier's call: builds the request, times it, and prices the result <b>exactly once</b>. A provider throw
+    /// returns a <see cref="AiUsageOutcome.Failed"/> zero-token cost and a null completion (billable latency the
+    /// governor must see); a genuine caller cancellation propagates (not a review outcome, not spend to record).
+    /// </summary>
+    private async Task<TierCall> CallAsync(
+        LlmModelTier tier, string systemPrompt, string schema, TriggerReviewContext context, CancellationToken cancellationToken)
+    {
+        string model = _options.ModelFor(tier);
         LlmRequest request = new(
-            LlmModelTier.Triage,
-            SystemPrompt,
+            tier,
+            systemPrompt,
             [new LlmMessage(LlmRole.User, Render(context))],
-            LlmResponseFormat.Json(ReviewSchema),
+            LlmResponseFormat.Json(schema),
             MaxOutputTokens);
 
         long startedTicks = Stopwatch.GetTimestamp();
@@ -101,35 +184,64 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
         catch (Exception error)
         {
             // A provider fault (a network error, a timeout, a 429, a 5xx) -- including a TaskCanceledException that is
-            // a request timeout rather than our cancellation. The fail-closed contract is TOTAL: a throw is never a
-            // proposal. It IS billable latency the governor must see, so it records a zero-token Failed cost -- the
-            // exact failure regime a success-only ledger would silently miss.
-            _logger.LogWarning(error, "Trigger {TriggerId} review provider call failed; suppressing.", context.TriggerId);
+            // a request timeout rather than our cancellation. It IS billable latency the governor must see, so it
+            // records a zero-token Failed cost -- the exact failure regime a success-only ledger would silently miss.
+            _logger.LogWarning(error, "Trigger {TriggerId} {Tier} review provider call failed; suppressing.", context.TriggerId, tier);
             AiCallCost failedCost = new(
-                AiUsageFeature.Triage, model, LlmModelTier.Triage, AiUsageOutcome.Failed,
-                0, 0, 0m, Stopwatch.GetElapsedTime(startedTicks));
-            return new AgentReview(
-                new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the review provider call failed"),
-                failedCost);
+                AiUsageFeature.Triage, model, tier, AiUsageOutcome.Failed, 0, 0, 0m, Stopwatch.GetElapsedTime(startedTicks));
+            return new TierCall(failedCost, Completion: null);
         }
 
         TimeSpan latency = Stopwatch.GetElapsedTime(startedTicks);
 
-        // The review outcome and the SPEND outcome are orthogonal: a Completed call the reviewer then suppresses
-        // (not-worth-surfacing, malformed JSON) still cost tokens. Cost is computed ONCE from the completion, so
-        // EVERY suppress/suggest path below carries it -- no return point can silently drop a real spend row.
-        ReviewOutcome outcome = MapCompletion(context, completion);
+        // The review outcome and the SPEND outcome are orthogonal: a Completed call the reviewer then suppresses (or
+        // that merely escalates) still cost tokens. Cost is computed ONCE here, so every path below carries a real
+        // spend row. Feature stays Triage on both tiers -- the whole two-call flow is one agent-review of one fired
+        // trigger; Tier is the dimension that distinguishes triage spend from deep spend.
         AiCallCost cost = new(
-            AiUsageFeature.Triage, model, LlmModelTier.Triage, OutcomeOf(completion.StopReason),
+            AiUsageFeature.Triage, model, tier, OutcomeOf(completion.StopReason),
             completion.Usage.InputTokens, completion.Usage.OutputTokens,
-            _options.EstimateCost(LlmModelTier.Triage, completion.Usage.InputTokens, completion.Usage.OutputTokens),
+            _options.EstimateCost(tier, completion.Usage.InputTokens, completion.Usage.OutputTokens),
             latency);
-        return new AgentReview(outcome, cost);
+        return new TierCall(cost, completion);
     }
 
-    /// <summary>Maps a returned completion to a review outcome — the fail-closed mapping (unchanged; its usage is priced above).</summary>
+    /// <summary>Maps a returned completion to a review outcome — the TERMINAL path (parse guards + <see cref="Map"/>).</summary>
     private ReviewOutcome MapCompletion(TriggerReviewContext context, LlmCompletion completion)
     {
+        ReviewOutcome? failClosed = TryParse(context, completion, out ReviewDto? dto);
+        return failClosed ?? Map(context, dto!);
+    }
+
+    /// <summary>
+    /// Maps a TRIAGE completion, surfacing the escalate control signal. Escalate is honoured ONLY here (never on the
+    /// deep/terminal path), which — with the deep schema not offering it — is what makes the two-tier flow non-looping.
+    /// </summary>
+    private TriageMapping MapTriage(TriggerReviewContext context, LlmCompletion completion)
+    {
+        ReviewOutcome? failClosed = TryParse(context, completion, out ReviewDto? dto);
+        if (failClosed is not null)
+        {
+            return TriageMapping.Terminal(failClosed);
+        }
+
+        if (string.Equals(dto!.Decision?.Trim(), "escalate", StringComparison.OrdinalIgnoreCase))
+        {
+            return TriageMapping.Escalated;
+        }
+
+        return TriageMapping.Terminal(Map(context, dto));
+    }
+
+    /// <summary>
+    /// The fail-closed parse guards shared by both tiers: a non-Completed stop, empty text, invalid JSON, or a null
+    /// document each returns a <see cref="ReviewOutcome.Suppress"/>; otherwise returns <see langword="null"/> with the
+    /// parsed <paramref name="dto"/> set.
+    /// </summary>
+    private ReviewOutcome? TryParse(TriggerReviewContext context, LlmCompletion completion, out ReviewDto? dto)
+    {
+        dto = null;
+
         // FAIL-CLOSED on anything but a clean completion: a refusal or a truncation is not a proposal.
         if (completion.StopReason != LlmStopReason.Completed)
         {
@@ -149,7 +261,6 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
             return new ReviewOutcome.Suppress(SuppressReason.MalformedOutput, "the model output was empty");
         }
 
-        ReviewDto? dto;
         try
         {
             dto = JsonSerializer.Deserialize<ReviewDto>(completion.Text, _serializerOptions);
@@ -165,7 +276,7 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
             return new ReviewOutcome.Suppress(SuppressReason.MalformedOutput, "the model output was empty");
         }
 
-        return Map(context, dto);
+        return null;
     }
 
     /// <summary>The SPEND outcome of a returned (billed) completion — orthogonal to whether the review was usable.</summary>
@@ -239,6 +350,21 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
         IndicatorComparison.Above => "at or above",
         _ => "compared to",
     };
+
+    /// <summary>One tier call's outcome: the priced <see cref="AiCallCost"/> (always present, Failed on a throw) and
+    /// the <see cref="LlmCompletion"/>, or <see langword="null"/> when the provider call threw.</summary>
+    private readonly record struct TierCall(AiCallCost Cost, LlmCompletion? Completion);
+
+    /// <summary>A triage completion's mapping: either a <see cref="Terminal"/> outcome, or a signal to
+    /// <see cref="Escalate"/> to the deep tier.</summary>
+    private readonly record struct TriageMapping(ReviewOutcome? Outcome, bool Escalate)
+    {
+        /// <summary>The triage reached a terminal outcome (suggest / suppress / fail-closed) — no deep call.</summary>
+        public static TriageMapping Terminal(ReviewOutcome outcome) => new(outcome, Escalate: false);
+
+        /// <summary>The triage deferred — make the deep-tier call.</summary>
+        public static TriageMapping Escalated { get; } = new(Outcome: null, Escalate: true);
+    }
 
     /// <summary>
     /// The structured answer the model returns. Every field is nullable so a missing one reads as <i>absent</i> and

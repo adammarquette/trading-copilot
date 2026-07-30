@@ -134,6 +134,34 @@ public class OutboxIncidentLifetimeTests
     }
 
     [Fact]
+    public async Task EnlistAsync_ShouldStageNothing_WhenAnEarlierPassLeftTheIncidentOwed()
+    {
+        // gh#455's defect, caught by the existing flatten integration suite. Sharing a transaction cuts both ways:
+        // a staged row that violates the filtered unique index surfaces on the PRODUCER's SaveChanges and takes
+        // their write down with it. It really happened — pass 1 escalated and left the incident owed, pass 2 staged
+        // the same key, and the duplicate aborted the flatten.missed journal entry.
+        //
+        // Local cannot see the earlier row: a different scope committed it and that context is long gone. So the
+        // enlister must ASK the database, which is why the seam is async.
+        await using ServiceProvider provider = Compose();
+
+        await using (TradingCopilotDbContext earlierPass = Context())
+        {
+            await Channel(provider, earlierPass).EnlistAsync(Incident("first pass"), CancellationToken.None);
+            await earlierPass.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext laterPass = Context();
+        await Channel(provider, laterPass).EnlistAsync(Incident("second pass"), CancellationToken.None);
+
+        laterPass.ChangeTracker.Entries<NotificationOutboxRecord>().Should().BeEmpty(
+            "staging a duplicate would abort the producer's own save — the page must not endanger the state it reports");
+
+        Func<Task> save = () => laterPass.SaveChangesAsync();
+        await save.Should().NotThrowAsync();
+    }
+
+    [Fact]
     public async Task SendAsync_ShouldRecordSeparately_WhenTwoDifferentIncidentsAreOwedAtOnce()
     {
         await using ServiceProvider provider = Compose();
