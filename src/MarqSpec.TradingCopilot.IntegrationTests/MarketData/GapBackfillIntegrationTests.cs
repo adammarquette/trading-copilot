@@ -206,9 +206,99 @@ public class GapBackfillIntegrationTests : IClassFixture<GapBackfillTestPostgres
             + "is exactly what the host's replay-without-advancing-the-cursor behaviour could produce");
     }
 
+    [Fact]
+    public async Task Detect_ShouldReportTheConditionalsTheBlindWindowCrossed_WithoutFiringAny()
+    {
+        // Recovery REPORTS a missed conditional; it never fires one. That is a deliberate decision, not an
+        // omission: a conditional fires an ENTRY, and firing one on a cross that happened minutes ago would open a
+        // position at a price that has moved on — acting on stale grounds. So the failure direction stays "did not
+        // fire", and the conditional re-decides on the next quote against fresh truth. What changes is that the
+        // operator is told WHICH conditionals were crossed while blind.
+        //
+        // The positive detection has to carry the weight here. DetectMissedTriggersAsync takes no ITradingVenue and
+        // performs no save, so it is STRUCTURALLY incapable of firing or of moving a status — "still Pending, zero
+        // orders placed" is equally true when the read returns nothing, when the bars are mis-keyed, and when EF
+        // throws. Those assertions are kept because they pin the decision, but they are not the guard.
+        Guid operatorId = await OperatorIdAsync();
+        Guid accountId = await SeedAccountAsync(operatorId);
+
+        // The window's extremes are high 5310 / low 5296.
+        await SeedMinuteBarsAsync(Symbol, count: 60, high: 5_310m, low: 5_296m);
+
+        Guid crossedUp = await SeedPendingConditionalAsync(
+            operatorId, accountId, triggerPrice: 5_305m, ConditionalCrossDirection.RisesTo);
+        Guid crossedDown = await SeedPendingConditionalAsync(
+            operatorId, accountId, triggerPrice: 5_296m, ConditionalCrossDirection.FallsTo);
+        // The control: above the window's high, so it was NOT crossed. Without it, a detector that returned every
+        // pending conditional would satisfy the two assertions above perfectly.
+        Guid uncrossed = await SeedPendingConditionalAsync(
+            operatorId, accountId, triggerPrice: 5_320m, ConditionalCrossDirection.RisesTo);
+
+        int placedBefore = VenueFactory.TotalPlacedOrderCount;
+        IReadOnlyList<MissedTrigger> missed = await DetectAsync();
+
+        missed.Select(trigger => trigger.ConditionalOrderId).Should().BeEquivalentTo([crossedUp, crossedDown],
+            "a rise-to is judged against the window's HIGH and a fall-to against its LOW; the one above the high "
+            + "was never crossed and must not be reported");
+        missed.Should().OnlyContain(trigger => trigger.ContractKey == ContractKey,
+            "a missed trigger carries the CONTRACT KEY the operator acts on, not the bar store's symbol");
+
+        // The deliberate non-recovery, pinned: every conditional — crossed or not — is still Pending afterwards.
+        int stillPending = await QueryDbAsync(db => db.ConditionalOrders
+            .IgnoreQueryFilters()
+            .CountAsync(order => order.Status == ConditionalStatus.Pending));
+        stillPending.Should().Be(3, "a crossed conditional is REPORTED, never fired — and never advanced");
+        VenueFactory.TotalPlacedOrderCount.Should().Be(placedBefore,
+            "detection must never transmit — recovery reports a missed conditional, it does not act on one");
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------------------------------------
+
+    private async Task<IReadOnlyList<MissedTrigger>> DetectAsync()
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        GapBackfillService backfill = scope.ServiceProvider.GetRequiredService<GapBackfillService>();
+        return await backfill.DetectMissedTriggersAsync(From, To, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// A pending conditional on the account. <c>AccountId</c> carries a real foreign key here, so the unit tier's
+    /// habit of handing it a fresh <see cref="Guid"/> would violate it against Postgres.
+    /// </summary>
+    private async Task<Guid> SeedPendingConditionalAsync(
+        Guid operatorId, Guid accountId, decimal triggerPrice, ConditionalCrossDirection direction)
+    {
+        Guid conditionalId = Guid.NewGuid();
+        await ExecuteDbAsync(async db =>
+        {
+            db.ConditionalOrders.Add(new ConditionalOrderRecord
+            {
+                Id = conditionalId,
+                UserId = operatorId,
+                AccountId = accountId,
+                Instrument = ContractKey,
+                Symbol = Symbol,
+                Side = OrderSide.Buy,
+                Size = 1,
+                Type = OrderType.Market,
+                EntryPrice = 5_300m,
+                WorkingStopPrice = 5_295m,
+                SafetyStopPrice = 5_290m,
+                ReferencePrice = 5_300m,
+                TickSize = 0.25m,
+                PointValue = 5m,
+                TriggerPrice = triggerPrice,
+                TriggerDirection = direction,
+                Status = ConditionalStatus.Pending,
+                Mode = TradingMode.Practice,
+                CreatedAt = From,
+            });
+            await db.SaveChangesAsync();
+        });
+        return conditionalId;
+    }
 
     private Task SeedBarAsync(string symbol, int resolutionMinutes, DateTimeOffset bucketStart, decimal high, decimal low) =>
         ExecuteDbAsync(async db =>
@@ -277,6 +367,7 @@ public class GapBackfillIntegrationTests : IClassFixture<GapBackfillTestPostgres
             await db.Accounts.IgnoreQueryFilters().ExecuteDeleteAsync();
             await db.Connections.IgnoreQueryFilters().ExecuteDeleteAsync();
             await db.Firms.IgnoreQueryFilters().ExecuteDeleteAsync();
+            await db.ConditionalOrders.IgnoreQueryFilters().ExecuteDeleteAsync();
             await db.Bars.ExecuteDeleteAsync();
 
             db.Firms.Add(new Firm { Id = firmId, UserId = operatorId, Name = "Topstep", Type = FirmType.PropFirm });
