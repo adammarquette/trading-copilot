@@ -18,6 +18,7 @@ using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Relevance;
 using MarqSpec.TradingCopilot.Api.Risk;
 using MarqSpec.TradingCopilot.Api.Signals;
+using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
@@ -143,6 +144,16 @@ builder.Services.AddOptions<SalienceOptions>()
         options => options.MultiplierFloor > 0 && options.MultiplierFloor <= 1.0 && options.MultiplierCap >= 1.0
             && options.MaxFeedLimit >= 1 && options.DefaultFeedLimit >= 1 && options.DefaultFeedLimit <= options.MaxFeedLimit,
         "Salience: require 0 < MultiplierFloor <= 1 <= MultiplierCap, MaxFeedLimit >= 1, and DefaultFeedLimit in [1, MaxFeedLimit].")
+    .ValidateOnStart();
+
+// The suggestion read model's limits (gh#540, R-4). A cap rather than an unbounded list: the suggestion table is an
+// append-only journal, so an uncapped page would let one call pull the whole history. Validated on start so a bad
+// configuration fails the host once rather than throwing from Math.Clamp on every read (the SalienceOptions idiom).
+builder.Services.AddOptions<SuggestionReadOptions>()
+    .Bind(builder.Configuration.GetSection(SuggestionReadOptions.SectionName))
+    .Validate(
+        options => options.MaxPageSize >= 1 && options.DefaultPageSize >= 1 && options.DefaultPageSize <= options.MaxPageSize,
+        "Suggestions: require MaxPageSize >= 1 and DefaultPageSize in [1, MaxPageSize].")
     .ValidateOnStart();
 
 // Indicator projections over that store (gh#310, R-1, ADR-0001: "indicators are projections… rebuild = replay").
@@ -366,6 +377,7 @@ app.MapRiskEndpoints();
 app.MapTriggerEndpoints();
 app.MapRelevanceEndpoints();
 app.MapNewsEndpoints();
+app.MapSuggestionEndpoints();
 app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
 app.MapPositionEndpoints();

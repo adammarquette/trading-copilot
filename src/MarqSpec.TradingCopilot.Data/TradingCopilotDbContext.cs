@@ -217,6 +217,12 @@ public class TradingCopilotDbContext : TenantDbContext
                 .HasForeignKey(s => s.AccountId)
                 .OnDelete(DeleteBehavior.Cascade);
 
+            // The read model's query shape (gh#540): the R-20 filter pins UserId, the list filters on State and
+            // orders by CreatedAt. Owned by this card so the index does not end up owned by nobody once the
+            // suggestion table starts growing -- it is an append-only journal.
+            suggestion.HasIndex(s => new { s.UserId, s.State, s.CreatedAt })
+                .HasDatabaseName("IX_Suggestions_UserId_State_CreatedAt");
+
             // The R-14 persistence guard, half one: Undeclared (0) and an unset state are refused outright --
             // nothing is ever suggested on an undeclared account. Half two (mode must equal the account's
             // persisted mode) is a cross-table rule a single-row CHECK cannot express; it lives in the
