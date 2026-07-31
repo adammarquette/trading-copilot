@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
@@ -56,6 +57,8 @@ public class TriggerEvaluationService
     private readonly IReviewEnrichmentSource _enrichmentSource;
     private readonly IAiUsageLedger _ledger;
     private readonly ILlmMetrics _llmMetrics;
+    private readonly ISessionDeadlineSource _deadlines;
+    private readonly TimeSpan _suggestionValidity;
     private readonly IAiSpendGovernor _governor;
     private readonly AiSpendBudget? _budget;
     private readonly ILogger<TriggerEvaluationService> _logger;
@@ -82,6 +85,13 @@ public class TriggerEvaluationService
     /// The LLM-spend meter (gh#477): a required, export-only observability seam fed the same per-call <c>AiCallCost</c>
     /// as the ledger, so Grafana sees true LLM spend. Not enforcement — the governor still reads the ledger floor.
     /// </param>
+    /// <param name="deadlines">
+    /// The session-deadline read seam (gh#544): supplies the market's Central wall-clock deadline so an issued
+    /// suggestion's validity window can be clamped to it. Deliberately <b>not</b> the flatten options — the
+    /// agent-review path must be able to respect the deadline without depending on the machinery that acts on it,
+    /// which the gh#402 constructor-graph guard enforces.
+    /// </param>
+    /// <param name="suggestionOptions">The suggestion config; supplies the default validity window (gh#544).</param>
     /// <param name="governor">
     /// The platform-level AI-spend gate (gh#448): a pure, deterministic budget check consulted before each agent-review
     /// LLM call. It gates <b>whether</b> a call is made (cost), never what it proposes (enforcement lives below the model).
@@ -97,11 +107,14 @@ public class TriggerEvaluationService
         IReviewEnrichmentSource enrichmentSource,
         IAiUsageLedger ledger,
         ILlmMetrics metrics,
+        ISessionDeadlineSource deadlines,
+        IOptions<SuggestionOptions> suggestionOptions,
         IAiSpendGovernor governor,
         IOptions<GovernorOptions> governorOptions,
         ILogger<TriggerEvaluationService> logger)
     {
         ArgumentNullException.ThrowIfNull(governorOptions);
+        ArgumentNullException.ThrowIfNull(suggestionOptions);
 
         _discovery = discovery;
         _options = options;
@@ -111,6 +124,8 @@ public class TriggerEvaluationService
         _enrichmentSource = enrichmentSource;
         _ledger = ledger;
         _llmMetrics = metrics;
+        _deadlines = deadlines;
+        _suggestionValidity = suggestionOptions.Value.Validity;
         _governor = governor;
         _budget = governorOptions.Value.ToBudget(); // null == inert (no cap configured); computed once per pass
         _logger = logger;
@@ -416,7 +431,7 @@ public class TriggerEvaluationService
             return false;
         }
 
-        JournalFiring(database, trigger, owner, observed, now, dedupKey);
+        JournalFiring(database, trigger, owner, observed, now, dedupKey, Guid.NewGuid());
         trigger.LastFiredAt = now;
         return true;
     }
@@ -437,6 +452,10 @@ public class TriggerEvaluationService
         CancellationToken cancellationToken)
     {
         string dedupKey = DedupKeyFor(trigger);
+
+        // Minted up front (gh#542) so a staged suggestion can cite the firing it came from: the firing row is
+        // journaled at the end of this method, but both land in the same SaveChanges, so the id is a valid link.
+        Guid firingId = Guid.NewGuid();
 
         TriggerReviewContext context = new(
             trigger.Id,
@@ -549,7 +568,8 @@ public class TriggerEvaluationService
         switch (review.Outcome)
         {
             case ReviewOutcome.Suggest suggest:
-                await StageSuggestionAsync(database, trigger, owner, suggest, now, dedupKey, advisories, cancellationToken);
+                await StageSuggestionAsync(
+                    database, trigger, owner, suggest, now, dedupKey, firingId, advisories, cancellationToken);
                 break;
 
             case ReviewOutcome.Suppress { Reason: SuppressReason.NoReviewerConfigured }:
@@ -612,7 +632,7 @@ public class TriggerEvaluationService
         }
 
         // A fire is a fire: journal it and keep the arm at Fired for EVERY agent-review outcome, suggest or suppress.
-        JournalFiring(database, trigger, owner, observed, now, dedupKey);
+        JournalFiring(database, trigger, owner, observed, now, dedupKey, firingId);
         trigger.LastFiredAt = now;
     }
 
@@ -647,9 +667,16 @@ public class TriggerEvaluationService
         ReviewOutcome.Suggest suggest,
         DateTimeOffset now,
         string dedupKey,
+        Guid firingId,
         List<Notification> advisories,
         CancellationToken cancellationToken)
     {
+        // The validity window (gh#544): the operator's configured span, clamped so the suggestion cannot outlive this
+        // market's auto-flatten deadline -- a live suggestion past the deadline invites a position the flatten is
+        // about to close. The system's value, never the model's, exactly like Size and Mode below.
+        DateTimeOffset expiresAt = SuggestionValidity.ExpiresAt(
+            now, _suggestionValidity, _deadlines.DeadlineFor(InstrumentId.Parse(trigger.Symbol)));
+
         // Layer two below the reviewer: pure geometry sanity. A malformed / hostile proposal that got past the
         // reviewer is rejected HERE before it can be persisted -- treated as Suppress(InvalidGeometry): log, no
         // suggestion. (The risk gate is the true backstop below this, at take-time.)
@@ -692,22 +719,49 @@ public class TriggerEvaluationService
             Mode = account.Mode,
             State = SuggestionState.Active,
             CreatedAt = now,
+
+            // The model's prose, now durable (gh#542) -- it was previously generated, billed and discarded. Capped and
+            // validated at the reviewer's parse boundary, so anything unusable never reached here.
+            Rationale = suggest.Rationale,
+
+            // The cited signal (gh#542): a soft link to the firing, plus the indicator identity COPIED, because
+            // indicator/period/resolution live on the mutable, deletable TriggerRecord and R-4 needs the citation to
+            // stay readable after the trigger is edited or deleted.
+            TriggerFiringId = firingId,
+            CitedIndicator = trigger.Indicator,
+            CitedPeriod = trigger.Period,
+            CitedResolutionMinutes = trigger.ResolutionMinutes,
+
+            // Display only (gh#543) -- it changes nothing about size, geometry or whether this row is written.
+            Confidence = suggest.Confidence,
+
+            // The system's window (gh#544), clamped so it cannot outlive this market's auto-flatten deadline.
+            ExpiresAt = expiresAt,
         });
 
-        // Queue the advisory for the post-commit flush; the suggestion is the durable artifact behind it.
+        // Queue the advisory for the post-commit flush; the suggestion is the durable artifact behind it. The expiry
+        // rides along in market wall-clock (gh#544), so the operator learns the window on the channel that already
+        // reaches them rather than only in the app.
         advisories.Add(new Notification(
             NotificationSeverity.Notify,
             $"Reviewed setup available — {TitleFor(trigger)}",
             $"The agent reviewed a fired setup on {trigger.Symbol} and proposed a {SideWord(suggest.Side)} entry at "
-            + $"{suggest.EntryPrice} (stop {suggest.StopPrice}, target {suggest.TargetPrice}).",
+            + $"{suggest.EntryPrice} (stop {suggest.StopPrice}, target {suggest.TargetPrice}). "
+            + FormattableString.Invariant($"Valid until {MarketClock.ToMarketTime(expiresAt):HH:mm} CT."),
             dedupKey));
     }
 
     private static void JournalFiring(
-        TradingCopilotDbContext database, TriggerRecord trigger, Guid owner, decimal observed, DateTimeOffset now, string dedupKey) =>
+        TradingCopilotDbContext database,
+        TriggerRecord trigger,
+        Guid owner,
+        decimal observed,
+        DateTimeOffset now,
+        string dedupKey,
+        Guid firingId) =>
         database.TriggerFirings.Add(new TriggerFiringRecord
         {
-            Id = Guid.NewGuid(),
+            Id = firingId,
             UserId = owner,
             TriggerId = trigger.Id,
             FiredAt = now,

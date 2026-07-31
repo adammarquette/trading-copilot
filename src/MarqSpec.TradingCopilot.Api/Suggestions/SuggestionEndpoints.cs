@@ -59,7 +59,7 @@ public static class SuggestionEndpoints
         SuggestionState? state,
         int? limit,
         TradingCopilotDbContext database,
-        IOptions<SuggestionReadOptions> options,
+        IOptions<SuggestionOptions> options,
         IInstrumentSpecSource instrumentSpecs,
         CancellationToken cancellationToken)
     {
@@ -67,7 +67,7 @@ public static class SuggestionEndpoints
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(instrumentSpecs);
 
-        SuggestionReadOptions config = options.Value;
+        SuggestionOptions config = options.Value;
         if (limit is <= 0)
         {
             return Results.BadRequest(new { error = "Limit must be positive." });

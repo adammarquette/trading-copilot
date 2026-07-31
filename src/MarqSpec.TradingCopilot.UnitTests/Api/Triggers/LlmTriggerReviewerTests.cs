@@ -63,7 +63,7 @@ public class LlmTriggerReviewerTests
     public async Task ReviewAsync_ShouldSuggestWithMappedSideAndPrices_WhenTheModelProposesALong()
     {
         ProviderReturns(
-            "{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":100.5,\"stop\":99,\"target\":103,\"rationale\":\"oversold bounce\"}");
+            "{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":100.5,\"stop\":99,\"target\":103,\"rationale\":\"oversold bounce\",\"confidence\":72}");
 
         ReviewOutcome.Suggest suggest = (await Reviewer().ReviewAsync(Context(), CancellationToken.None)).Outcome
             .Should().BeOfType<ReviewOutcome.Suggest>().Subject;
@@ -77,7 +77,7 @@ public class LlmTriggerReviewerTests
     [Fact]
     public async Task ReviewAsync_ShouldMapShortToSell()
     {
-        ProviderReturns("{\"decision\":\"suggest\",\"direction\":\"short\",\"entry\":100,\"stop\":101,\"target\":97}");
+        ProviderReturns("{\"decision\":\"suggest\",\"direction\":\"short\",\"entry\":100,\"stop\":101,\"target\":97,\"confidence\":72}");
 
         (await Reviewer().ReviewAsync(Context(), CancellationToken.None)).Outcome
             .Should().BeOfType<ReviewOutcome.Suggest>().Which.Side.Should().Be(OrderSide.Sell);
@@ -99,7 +99,7 @@ public class LlmTriggerReviewerTests
     {
         // A syntactically-perfect suggest that arrived under a Refusal stop is NOT a proposal -- fail closed.
         ProviderReturns(
-            "{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2}",
+            "{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2,\"confidence\":72}",
             LlmStopReason.Refusal);
 
         (await Reviewer().ReviewAsync(Context(), CancellationToken.None)).Outcome
@@ -110,8 +110,8 @@ public class LlmTriggerReviewerTests
     [InlineData("")]                                                                            // empty
     [InlineData("this is not json")]                                                            // unparseable
     [InlineData("{\"decision\":\"ponder\"}")]                                                   // unknown decision
-    [InlineData("{\"decision\":\"suggest\",\"direction\":\"sideways\",\"entry\":1,\"stop\":0.5,\"target\":2}")] // unknown direction
-    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"stop\":0.5,\"target\":2}")] // missing entry
+    [InlineData("{\"decision\":\"suggest\",\"direction\":\"sideways\",\"entry\":1,\"stop\":0.5,\"target\":2,\"confidence\":72}")] // unknown direction
+    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"stop\":0.5,\"target\":2,\"confidence\":72}")] // missing entry
     public async Task ReviewAsync_ShouldSuppressMalformed_ForUnusableOutput(string body)
     {
         ProviderReturns(body);
@@ -170,8 +170,8 @@ public class LlmTriggerReviewerTests
     // The SPEND outcome is orthogonal to the REVIEW outcome: a Completed call the reviewer then suppresses (a decline,
     // malformed JSON) still Succeeded (it was billed), a refusal is Refused, a truncation Truncated (gh#431).
     [InlineData("{\"decision\":\"suppress\",\"reason\":\"chop\"}", LlmStopReason.Completed, AiUsageOutcome.Succeeded)]
-    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2}", LlmStopReason.Refusal, AiUsageOutcome.Refused)]
-    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2}", LlmStopReason.MaxTokens, AiUsageOutcome.Truncated)]
+    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2,\"confidence\":72}", LlmStopReason.Refusal, AiUsageOutcome.Refused)]
+    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2,\"confidence\":72}", LlmStopReason.MaxTokens, AiUsageOutcome.Truncated)]
     public async Task ReviewAsync_ShouldMapTheSpendOutcome_FromTheStopReason(
         string body, LlmStopReason stop, AiUsageOutcome expected)
     {
@@ -243,7 +243,7 @@ public class LlmTriggerReviewerTests
     {
         // Triage defers; the deep tier answers with a concrete suggest whose prices identify it as the winning answer.
         TriageReturns(TriageEscalate);
-        DeepReturns("{\"decision\":\"suggest\",\"direction\":\"short\",\"entry\":200,\"stop\":201,\"target\":197}");
+        DeepReturns("{\"decision\":\"suggest\",\"direction\":\"short\",\"entry\":200,\"stop\":201,\"target\":197,\"confidence\":72}");
 
         ReviewOutcome.Suggest suggest = (await Reviewer().ReviewAsync(Context(), CancellationToken.None)).Outcome
             .Should().BeOfType<ReviewOutcome.Suggest>().Subject;
@@ -265,7 +265,7 @@ public class LlmTriggerReviewerTests
         // still billed, but the expensive deep call is withheld and the review suppresses with the neutral
         // EscalationDeclined reason -- NOT a deep call whose spend would overrun the budget.
         TriageReturns(TriageEscalate);
-        DeepReturns("{\"decision\":\"suggest\",\"direction\":\"short\",\"entry\":200,\"stop\":201,\"target\":197}");
+        DeepReturns("{\"decision\":\"suggest\",\"direction\":\"short\",\"entry\":200,\"stop\":201,\"target\":197,\"confidence\":72}");
 
         AgentReview review = await Reviewer().ReviewAsync(Context(), CancellationToken.None, allowEscalate: false);
 
@@ -284,7 +284,7 @@ public class LlmTriggerReviewerTests
         // The affirmative half: allowEscalate: true is the permitted path and behaves exactly as gh#449 -- the deep
         // call is made. (This is also the pre-gh#478 default, so the un-parameterised escalation tests above still hold.)
         TriageReturns(TriageEscalate);
-        DeepReturns("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":100,\"stop\":99,\"target\":103}");
+        DeepReturns("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":100,\"stop\":99,\"target\":103,\"confidence\":72}");
 
         AgentReview review = await Reviewer().ReviewAsync(Context(), CancellationToken.None, allowEscalate: true);
 
@@ -314,7 +314,7 @@ public class LlmTriggerReviewerTests
     public async Task ReviewAsync_ShouldReturnTwoCosts_WhenTriageEscalates()
     {
         TriageReturns(TriageEscalate);
-        DeepReturns("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":100,\"stop\":99,\"target\":103}");
+        DeepReturns("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":100,\"stop\":99,\"target\":103,\"confidence\":72}");
 
         IReadOnlyList<AiCallCost> costs = (await Reviewer().ReviewAsync(Context(), CancellationToken.None)).Costs;
 
@@ -390,7 +390,7 @@ public class LlmTriggerReviewerTests
     [InlineData("{}")]                                                                          // missing decision
     [InlineData("{\"decision\":\"ponder\"}")]                                                   // unknown decision
     [InlineData("{\"decision\":\"suppress\",\"reason\":\"chop\"}")]                              // a normal decline
-    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2}")] // a normal suggest
+    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2,\"confidence\":72}")] // a normal suggest
     public async Task ReviewAsync_ShouldNotCallTheDeepTier_WhenTriageDoesNotEscalate(string triageBody)
     {
         TriageReturns(triageBody);
@@ -505,5 +505,94 @@ public class LlmTriggerReviewerTests
         // Graceful degradation: the deep render is exactly the base render -- no empty fence, a scan-side gap costs
         // only richness, never the deep call itself.
         deepRequest!.Messages.Single().Content.Should().NotContain("<market-context>");
+    }
+
+    // =====================================================================================================
+    // RATIONALE (gh#542) and CONFIDENCE (gh#543): both are asked for in the schema and both are validated here,
+    // fail-closed, because the provider is not guaranteed to honour a schema constraint.
+    // =====================================================================================================
+
+    [Fact]
+    public async Task ReviewAsync_ShouldAskForAConfidenceOnBothTiers()
+    {
+        LlmRequest? triage = null;
+        LlmRequest? deep = null;
+        A.CallTo(() => _llm.CompleteAsync(A<LlmRequest>.That.Matches(r => r.Tier == LlmModelTier.Triage), A<CancellationToken>._))
+            .Invokes((LlmRequest r, CancellationToken _) => triage = r)
+            .Returns(new LlmCompletion(TriageEscalate, LlmStopReason.Completed, LlmUsage.None));
+        A.CallTo(() => _llm.CompleteAsync(A<LlmRequest>.That.Matches(r => r.Tier == LlmModelTier.Deep), A<CancellationToken>._))
+            .Invokes((LlmRequest r, CancellationToken _) => deep = r)
+            .Returns(new LlmCompletion("{\"decision\":\"suppress\"}", LlmStopReason.Completed, LlmUsage.None));
+
+        await Reviewer().ReviewAsync(Context(), CancellationToken.None);
+
+        // A field the model is never asked for cannot be validated into existence.
+        triage!.ResponseFormat.JsonSchema.Should().Contain("confidence");
+        deep!.ResponseFormat.JsonSchema.Should().Contain("confidence");
+    }
+
+    [Fact]
+    public async Task ReviewAsync_ShouldCarryTheRationaleAndConfidence_OntoTheSuggestion()
+    {
+        ProviderReturns(
+            "{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":100,\"stop\":99,\"target\":103,"
+            + "\"rationale\":\"oversold bounce off the band\",\"confidence\":81}");
+
+        ReviewOutcome.Suggest suggest = (await Reviewer().ReviewAsync(Context(), CancellationToken.None)).Outcome
+            .Should().BeOfType<ReviewOutcome.Suggest>().Subject;
+
+        suggest.Rationale.Should().Be("oversold bounce off the band");
+        suggest.Confidence.Should().Be(81);
+    }
+
+    [Theory]
+    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2}")]                        // missing
+    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2,\"confidence\":101}")]      // above range
+    [InlineData("{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2,\"confidence\":-1}")]       // below range
+    public async Task ReviewAsync_ShouldSuppressMalformed_WhenTheConfidenceIsMissingOrOutOfRange(string body)
+    {
+        ProviderReturns(body);
+
+        (await Reviewer().ReviewAsync(Context(), CancellationToken.None)).Outcome
+            .Should().BeOfType<ReviewOutcome.Suppress>().Which.Reason.Should().Be(SuppressReason.MalformedOutput);
+    }
+
+    [Fact]
+    public async Task ReviewAsync_ShouldStillSuggest_WhenTheConfidenceIsZero()
+    {
+        // The invariant that keeps confidence display-only: the model does not get to self-censor by returning a low
+        // number. A zero-confidence proposal is still surfaced, and the operator decides.
+        ProviderReturns(
+            "{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2,\"confidence\":0}");
+
+        (await Reviewer().ReviewAsync(Context(), CancellationToken.None)).Outcome
+            .Should().BeOfType<ReviewOutcome.Suggest>().Which.Confidence.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task ReviewAsync_ShouldSuppressMalformed_WhenTheRationaleExceedsTheCap()
+    {
+        // Capped at the parse boundary rather than truncated at the column: storing half the model's reasoning would
+        // make the journal misleading about what it actually argued.
+        string tooLong = new('x', LlmTriggerReviewer.MaxRationaleLength + 1);
+        ProviderReturns(
+            "{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2,"
+            + $"\"rationale\":\"{tooLong}\",\"confidence\":50}}");
+
+        (await Reviewer().ReviewAsync(Context(), CancellationToken.None)).Outcome
+            .Should().BeOfType<ReviewOutcome.Suppress>().Which.Reason.Should().Be(SuppressReason.MalformedOutput);
+    }
+
+    [Fact]
+    public async Task ReviewAsync_ShouldAcceptARationaleExactlyAtTheCap()
+    {
+        string atCap = new('x', LlmTriggerReviewer.MaxRationaleLength);
+        ProviderReturns(
+            "{\"decision\":\"suggest\",\"direction\":\"long\",\"entry\":1,\"stop\":0.5,\"target\":2,"
+            + $"\"rationale\":\"{atCap}\",\"confidence\":50}}");
+
+        (await Reviewer().ReviewAsync(Context(), CancellationToken.None)).Outcome
+            .Should().BeOfType<ReviewOutcome.Suggest>().Which.Rationale.Length
+            .Should().Be(LlmTriggerReviewer.MaxRationaleLength);
     }
 }

@@ -9,9 +9,9 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Deferred deliberately: confidence, validity window, strategy linkage, rationale + retrieval references
-/// (VEC — lands with pgvector), version / supersedes, and dispositions — they arrive with the suggestion
-/// pipeline (R-4/R-8).
+/// The spine gained the <b>rationale + cited signal</b> (gh#542), a <b>confidence</b> (gh#543) and a
+/// <b>validity window</b> (gh#544). Still deferred: strategy linkage (A5 owns the <c>Strategy</c> entity),
+/// retrieval references (VEC — lands with its retrieval consumer), version / supersedes, and dispositions.
 /// </para>
 /// <para>
 /// <see cref="Mode"/> is <b>mode-guarded</b> (R-14): a DB constraint trigger refuses a suggestion whose mode
@@ -60,4 +60,53 @@ public class Suggestion : IUserOwned
 
     /// <summary>When the suggestion was issued.</summary>
     public required DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>
+    /// The model's plain-language rationale (gh#542, R-4). Length-capped, and validated at the reviewer's parse
+    /// boundary — an over-long rationale fails closed to <c>MalformedOutput</c> rather than being truncated here.
+    /// </summary>
+    /// <remarks>
+    /// <b>Untrusted display data.</b> It is model-authored prose: never re-injected into a later prompt as
+    /// instruction (in particular it must never enter the deep-review enrichment, gh#476) and never rendered as
+    /// markup. Empty string, never null, so a reader needs no null check.
+    /// </remarks>
+    public required string Rationale { get; set; }
+
+    /// <summary>
+    /// The firing that produced this suggestion (gh#542) — a soft link; the journal outlives the trigger, so the
+    /// citation below is <b>copied</b> rather than resolved through it.
+    /// </summary>
+    public Guid? TriggerFiringId { get; set; }
+
+    /// <summary>
+    /// The R-22 indicator that fired, <b>copied at issuance</b> (gh#542). Copied rather than joined because
+    /// indicator / period / resolution live on the mutable, deletable <c>TriggerRecord</c> while R-4 requires the
+    /// cited signal to stay readable forever — the same reason <c>TriggerFiringRecord</c> copies threshold and
+    /// comparison.
+    /// </summary>
+    public required string CitedIndicator { get; set; }
+
+    /// <summary>The fired indicator's period, copied at issuance (gh#542).</summary>
+    public required int CitedPeriod { get; set; }
+
+    /// <summary>The bar size the fired indicator was computed over, copied at issuance (gh#542).</summary>
+    public required int CitedResolutionMinutes { get; set; }
+
+    /// <summary>
+    /// The model's confidence, 0–100 (gh#543, R-4). A DB check pins the range; the reviewer fails closed on a
+    /// missing or out-of-range value.
+    /// </summary>
+    /// <remarks>
+    /// <b>Display only.</b> It never influences size (which is the operator's trigger's), geometry validation, the
+    /// risk gate, or whether the row is written at all — a low-confidence proposal still persists, because the
+    /// operator decides and the model does not get to self-censor by number.
+    /// </remarks>
+    public required int Confidence { get; set; }
+
+    /// <summary>
+    /// When the suggestion stops being actionable (gh#544, R-4) — the system's value, never the model's, computed by
+    /// <c>SuggestionValidity</c> and clamped so it can never outlive the session's auto-flatten deadline (R-13).
+    /// A DB check pins it strictly after <see cref="CreatedAt"/>.
+    /// </summary>
+    public required DateTimeOffset ExpiresAt { get; set; }
 }

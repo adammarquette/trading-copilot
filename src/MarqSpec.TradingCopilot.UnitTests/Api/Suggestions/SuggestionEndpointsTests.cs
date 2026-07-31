@@ -29,7 +29,7 @@ public class SuggestionEndpointsTests
     private readonly Guid _other = Guid.NewGuid();
     private readonly Guid _account = Guid.NewGuid();
     private readonly string _database = Guid.NewGuid().ToString();
-    private static readonly IOptions<SuggestionReadOptions> _options = Options.Create(new SuggestionReadOptions());
+    private static readonly IOptions<SuggestionOptions> _options = Options.Create(new SuggestionOptions());
     private static readonly DateTimeOffset _t = new(2026, 7, 30, 14, 0, 0, TimeSpan.Zero);
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
@@ -73,6 +73,12 @@ public class SuggestionEndpointsTests
             Mode = TradingMode.Practice,
             State = state,
             CreatedAt = createdAt ?? _t,
+            Rationale = "oversold bounce",
+            CitedIndicator = "rsi",
+            CitedPeriod = 14,
+            CitedResolutionMinutes = 1,
+            Confidence = 72,
+            ExpiresAt = (createdAt ?? _t).AddMinutes(60),
         });
         await context.SaveChangesAsync();
         return id;
@@ -88,7 +94,7 @@ public class SuggestionEndpointsTests
         SuggestionState? state = null,
         int? limit = null,
         Guid? asUser = null,
-        SuggestionReadOptions? readOptions = null)
+        SuggestionOptions? readOptions = null)
     {
         await using TradingCopilotDbContext context = Context(asUser);
         return await SuggestionEndpoints.ListAsync(
@@ -156,7 +162,7 @@ public class SuggestionEndpointsTests
     {
         // Seed MORE than the cap, so the assertion can only pass if the clamp actually binds. Asserting
         // "count <= cap" against fewer rows than the cap would hold whether or not the clamp exists.
-        SuggestionReadOptions tight = new() { DefaultPageSize = 2, MaxPageSize = 3 };
+        SuggestionOptions tight = new() { DefaultPageSize = 2, MaxPageSize = 3 };
         for (int i = 0; i < 5; i++)
         {
             await SeedAsync(createdAt: _t.AddMinutes(-i));
@@ -171,7 +177,7 @@ public class SuggestionEndpointsTests
     [Fact]
     public async Task ListAsync_ShouldUseTheConfiguredDefault_WhenNoLimitIsGiven()
     {
-        SuggestionReadOptions tight = new() { DefaultPageSize = 2, MaxPageSize = 3 };
+        SuggestionOptions tight = new() { DefaultPageSize = 2, MaxPageSize = 3 };
         for (int i = 0; i < 5; i++)
         {
             await SeedAsync(createdAt: _t.AddMinutes(-i));

@@ -108,13 +108,25 @@ public abstract record ReviewOutcome
     /// <param name="EntryPrice">The proposed entry.</param>
     /// <param name="StopPrice">The proposed stop.</param>
     /// <param name="TargetPrice">The proposed target.</param>
-    /// <param name="Rationale">The model's plain-language rationale (surfaced + traced; not persisted in this increment).</param>
+    /// <param name="Rationale">
+    /// The model's plain-language rationale, <b>persisted</b> on the suggestion since gh#542 (it was previously
+    /// generated, billed and discarded — and the older claim that it was "surfaced + traced" was never true: nothing
+    /// logged it, traced it or showed it). Length-capped and validated at the reviewer's parse boundary. It is
+    /// <b>untrusted display data</b> — never re-injected into a later prompt as instruction, and in particular never
+    /// carried into the deep-review enrichment (gh#476).
+    /// </param>
+    /// <param name="Confidence">
+    /// The model's confidence, 0–100 (gh#543). <b>Display only</b>: it never influences size (the operator's
+    /// trigger's), geometry validation, the risk gate, or whether the suggestion is issued — a zero-confidence
+    /// proposal still becomes a row, because the operator decides and the model does not self-censor by number.
+    /// </param>
     public sealed record Suggest(
         OrderSide Side,
         decimal EntryPrice,
         decimal StopPrice,
         decimal TargetPrice,
-        string Rationale) : ReviewOutcome;
+        string Rationale,
+        int Confidence) : ReviewOutcome;
 
     /// <summary>The review produced no suggestion, for the given reason.</summary>
     /// <param name="Reason">Why.</param>
