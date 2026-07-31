@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using FluentAssertions.Specialized;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Orders;
@@ -15,6 +16,7 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 
@@ -152,9 +154,210 @@ public class TakeProfitBracketIntegrationTests : IClassFixture<OcoExitTestPostgr
         VenueFactory.AllPlacedOrderRequests[^1].ProfitTarget.Should().BeNull("no target was asked for, so no profit leg is transmitted");
     }
 
+    // =========================================================================================================
+    // The take-profit leg across the MODIFY family (gh#535 ⇒ gh#173, gh#259/gh#292)
+    //
+    // No order carried a TakeProfitPrice through any modify path at either tier before this. The modify request
+    // has no target dimension — it cannot set one — but ModifyAtVenueAsync threads the STORED target through the
+    // proposal it rebuilds, so moving the entry re-validates the leg that is already resting. That is the whole
+    // hazard: the operator moves the entry, and a target that was on the winning side no longer is.
+    // =========================================================================================================
+
+    /// <summary>A long repriced ABOVE its target, and a short repriced BELOW its own — the crossing, per side.</summary>
+    public static TheoryData<bool, decimal> CrossingReprices => new() { { true, 5_015m }, { false, 4_985m } };
+
+    [Theory]
+    [MemberData(nameof(CrossingReprices))]
+    public async Task Modify_ShouldRefuseARepriceThatCrossesTheRestingTarget_BeforeTheVenue(bool isLong, decimal newEntry)
+    {
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        await DeclareRiskProfileAsync(client, accountId);
+
+        // A real Working row carrying a winning-side target: long 5010 above entry 5000, short 4990 below it.
+        decimal target = isLong ? 5_010m : 4_990m;
+        using HttpResponseMessage sent = await client.PostAsJsonAsync(
+            $"/accounts/{accountId}/orders", isLong ? LongProposal(target) : ShortProposal(target));
+        sent.StatusCode.Should().Be(HttpStatusCode.OK, "the positive control — a winning-side target sends");
+        SendOrderResponse? placed = await sent.Content.ReadFromJsonAsync<SendOrderResponse>(_jsonOptions);
+        ArgumentNullException.ThrowIfNull(placed);
+        Guid orderId = placed.OrderId!.Value;
+
+        int gateBefore = await GateDecisionCountAsync();
+        int modifyBefore = VenueFactory.ModifyOrderCalls.Count;
+
+        // Move the entry ACROSS the resting target. The stop geometry stays valid, so this reaches the target
+        // guard rather than being turned away earlier for an unrelated reason.
+        using HttpResponseMessage response = await client.PatchAsJsonAsync(
+            $"/orders/{orderId}/price", new { entryPrice = newEntry, referencePrice = newEntry });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        SendOrderResponse? body = await response.Content.ReadFromJsonAsync<SendOrderResponse>(_jsonOptions);
+        ArgumentNullException.ThrowIfNull(body);
+        body.Outcome.Should().Be(nameof(ExecutionOutcome.RefusedByInvalidTarget));
+
+        // The modify path maps the result against the EXISTING order, so the id is populated on a refusal here —
+        // unlike the send path, which has no row yet and returns null.
+        body.OrderId.Should().Be(orderId);
+        body.VenueOrderKey.Should().BeNull();
+
+        (await EntryPriceAsync(orderId)).Should().Be(Entry, "the refusal precedes the price write");
+        (await TakeProfitAsync(orderId)).Should().Be(target, "and the resting target is left exactly as it was");
+        VenueFactory.ModifyOrderCalls.Should().HaveCount(modifyBefore,
+            "the venue must never see a modify that would strand the entry on the wrong side of its own target");
+        (await GateDecisionCountAsync()).Should().Be(gateBefore,
+            "this refusal precedes the gate, so it writes no decision — asserted as UNCHANGED rather than zero, "
+            + "because the send that set this order up already wrote one");
+    }
+
+    [Fact]
+    public async Task Modify_ShouldLeaveTheTakeProfitUntouched_WhenTheRepriceStaysOnItsWinningSide()
+    {
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        await DeclareRiskProfileAsync(client, accountId);
+
+        using HttpResponseMessage sent = await client.PostAsJsonAsync(
+            $"/accounts/{accountId}/orders", LongProposal(target: 5_010m));
+        sent.StatusCode.Should().Be(HttpStatusCode.OK);
+        SendOrderResponse? placed = await sent.Content.ReadFromJsonAsync<SendOrderResponse>(_jsonOptions);
+        ArgumentNullException.ThrowIfNull(placed);
+        Guid orderId = placed.OrderId!.Value;
+
+        int gateBefore = await GateDecisionCountAsync();
+
+        // Reprice TOWARD the target — 5010 is still above 5005, so the leg stays winning-side. The bogus
+        // takeProfitPrice member is deliberate: the modify contract has no such dimension, and this asserts the
+        // wire cannot smuggle one in. It is wrong-side for this long, so if a future change ever bound it the
+        // order would be refused or the row would fail its CHECK — either way this goes red.
+        using HttpResponseMessage response = await client.PatchAsJsonAsync(
+            $"/orders/{orderId}/price",
+            new { entryPrice = 5_005m, referencePrice = 5_005m, takeProfitPrice = 4_000m });
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await EntryPriceAsync(orderId)).Should().Be(5_005m,
+            "the modify really moved the entry — without this the assertion below would hold vacuously");
+        (await TakeProfitAsync(orderId)).Should().Be(5_010m,
+            "no modify path writes TakeProfitPrice; the stored target rides along untouched");
+        (await GateDecisionCountAsync()).Should().Be(gateBefore + 1,
+            "an accepted modify re-gates and journals its own decision");
+    }
+
+    /// <summary>Losing-side and EXACTLY-at-entry targets, both sides. The equality rows are the boundary.</summary>
+    public static TheoryData<OrderSide, decimal> RejectedTargets => new()
+    {
+        { OrderSide.Buy, 4_995m }, { OrderSide.Buy, 5_000m }, { OrderSide.Sell, 5_005m }, { OrderSide.Sell, 5_000m },
+    };
+
+    [Theory]
+    [MemberData(nameof(RejectedTargets))]
+    public async Task Constraint_ShouldRejectAWrongSideOrEqualTarget_AtTheDatabase(OrderSide side, decimal takeProfit)
+    {
+        // The database half. The domain guard is byte-equivalent and runs first, so the CHECK is unreachable over
+        // HTTP — only a direct write gets to it, and only a direct write can show the schema is what the
+        // data dictionary says it is.
+        //
+        // The EQUALITY rows are the point: the predicate uses strict > / <, so a target exactly at entry is
+        // refused. A `>=` slip would be invisible to every other test in the repository.
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        Guid userId = await OperatorIdAsync();
+        TradingMode mode = await AccountModeAsync(accountId);
+
+        await AssertOrderInsertViolatesAsync(
+            RawOrder(accountId, userId, mode, side, Entry, takeProfit), TakeProfitConstraint);
+    }
+
+    /// <summary>Winning-side targets both sides, plus an absent one — which passes regardless of side.</summary>
+    public static TheoryData<OrderSide, decimal?> AcceptedTargets => new()
+    {
+        { OrderSide.Buy, 5_010m }, { OrderSide.Sell, 4_990m }, { OrderSide.Buy, null },
+    };
+
+    [Theory]
+    [MemberData(nameof(AcceptedTargets))]
+    public async Task Constraint_ShouldAcceptAWinningSideOrAbsentTarget_AtTheDatabase(OrderSide side, decimal? takeProfit)
+    {
+        // The positive control, and not optional: the four rejections above are all satisfied by a constraint that
+        // rejects everything. A null target passes unconditionally, side-independent.
+        HttpClient client = await FreshOperatorAsync();
+        Guid accountId = await SetupAccountAsync(client);
+        Guid userId = await OperatorIdAsync();
+        TradingMode mode = await AccountModeAsync(accountId);
+
+        Order row = RawOrder(accountId, userId, mode, side, Entry, takeProfit);
+        Func<Task> insert = () => InsertOrderAsync(row);
+
+        await insert.Should().NotThrowAsync();
+        (await TakeProfitAsync(row.Id)).Should().Be(takeProfit);
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Helpers.
     // ---------------------------------------------------------------------------------------------------------
+
+    private const string TakeProfitConstraint = "CK_Orders_TakeProfit_WinningSide";
+
+    private Task<decimal?> TakeProfitAsync(Guid orderId) => QueryDbAsync(db => db.Orders
+        .IgnoreQueryFilters().Where(order => order.Id == orderId).Select(order => order.TakeProfitPrice).SingleAsync());
+
+    private Task<decimal> EntryPriceAsync(Guid orderId) => QueryDbAsync(db => db.Orders
+        .IgnoreQueryFilters().Where(order => order.Id == orderId).Select(order => order.EntryPrice).SingleAsync());
+
+    private Task<Guid> OperatorIdAsync() => QueryDbAsync(async db =>
+        (await db.Users.FirstAsync(user => user.Email == PostgresApiFactory.OperatorEmail)).Id);
+
+    private Task<TradingMode> AccountModeAsync(Guid accountId) => QueryDbAsync(db => db.Accounts
+        .IgnoreQueryFilters().Where(account => account.Id == accountId).Select(account => account.Mode).SingleAsync());
+
+    /// <summary>
+    /// A row satisfying every <i>sibling</i> constraint — mode matching the account, a non-sentinel status, a
+    /// positive size — so the only thing it can fail on is the constraint under test.
+    /// </summary>
+    private static Order RawOrder(
+        Guid accountId, Guid userId, TradingMode mode, OrderSide side, decimal entry, decimal? takeProfit) => new()
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            AccountId = accountId,
+            Instrument = "CON.F.US.MES.U26",
+            Symbol = "ES",
+            Side = side,
+            Size = 1,
+            Type = OrderType.Limit,
+            EntryPrice = entry,
+            LimitPrice = entry,
+            ReferencePrice = entry,
+            WorkingStopPrice = side == OrderSide.Buy ? entry - 10m : entry + 10m,
+            SafetyStopPrice = side == OrderSide.Buy ? entry - 20m : entry + 20m,
+            TickSize = 0.25m,
+            PointValue = 5m,
+            TakeProfitPrice = takeProfit,
+            Status = OrderStatus.Working,
+            Mode = mode,
+            PlacedAt = DateTimeOffset.UtcNow,
+        };
+
+    /// <summary>A fresh scope per insert: a rejected save leaves the entity tracked and would poison the next one.</summary>
+    private Task InsertOrderAsync(Order row) => ExecuteDbAsync(async db =>
+    {
+        db.Orders.Add(row);
+        await db.SaveChangesAsync();
+    });
+
+    private async Task AssertOrderInsertViolatesAsync(Order row, string expectedConstraint)
+    {
+        Func<Task> insert = () => InsertOrderAsync(row);
+
+        ExceptionAssertions<DbUpdateException> thrown = await insert.Should().ThrowAsync<DbUpdateException>(
+            "the DATABASE must reject it, not only the app layer");
+        PostgresException? postgres = thrown.Which.InnerException as PostgresException;
+        postgres.Should().NotBeNull("the rejection must come from PostgreSQL, not from EF validation");
+        postgres!.SqlState.Should().Be(PostgresErrorCodes.CheckViolation,
+            "a CHECK violation is 23514 — a foreign key or NOT NULL would be the wrong reason to pass");
+        postgres.ConstraintName.Should().Be(expectedConstraint,
+            "the row must fail on the constraint under test rather than on a sibling");
+    }
 
     private AdversarialTestProjectXVenueFactory VenueFactory =>
         _factory.Services.GetRequiredService<AdversarialTestProjectXVenueFactory>();
