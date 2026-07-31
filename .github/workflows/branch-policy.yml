@@ -15,11 +15,14 @@ name: Branch policy
 # defect rather than fixing it -- so a hard failure would train authors to add `Closes` where it does
 # not belong, and a wrongly-closed issue is harder to notice than one left open.
 #
-# COMBINING PRS IS THE MERGE QUEUE'S JOB, NOT `stale-base`'S (gh#357). `stale-base` guards a STACKED
-# PR whose base branch already merged (gh#72); it has nothing to say about two PRs that are each green
-# against `develop` and break only once both land -- that gap is what the merge queue closes, by
-# testing each queued PR stacked on everything ahead of it. The two are different guards; neither
-# replaces the other, and `stale-base` is unchanged here. See the deployment runbook, *Merge queue*.
+# COMBINING PRS IS NOT `stale-base`'S JOB (gh#357). `stale-base` guards a STACKED PR whose base branch
+# already merged (gh#72); it has nothing to say about two PRs that are each green against `develop` and
+# break only once both land. That gap is closed by **`strict`** on the protect-develop ruleset (gh#575)
+# -- a PR must be up to date with `develop` before it can merge, so CI always compiles the combination.
+# A merge queue would be the better tool but needs an ORG-owned repo; this one is personal-account, so
+# the rule is rejected. The `merge_group:` trigger below stays anyway: it is inert without a queue and
+# makes enabling one a single checkbox if that ever changes. `stale-base` is unchanged and is a
+# different guard. See the deployment runbook, *Combining-PR protection on `develop`*.
 
 on:
   pull_request:
