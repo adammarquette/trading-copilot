@@ -259,7 +259,7 @@ and would have deadlocked every merge if enabled — was deleted at the same tim
 
 | Ruleset | Target | Required status checks | Other rules |
 | --- | --- | --- | --- |
-| `protect-develop` (**active**) | `refs/heads/develop` | `build & unit tests` · `commit-hygiene` · `integration tests (pre-merge)` | PR required (0 approvals) · block force-push · block deletion |
+| `protect-develop` (**active**) | `refs/heads/develop` | `build & unit tests` · `commit-hygiene` · `integration tests (pre-merge)` | PR required (0 approvals) · **`strict` ON** — must be up to date with `develop` (gh#575) · block force-push · block deletion |
 | `protect-staging` (**active**) | `refs/heads/staging` | the develop set **+ `ladder`** | PR required (0 approvals) · block force-push · block deletion |
 | `protect-main` (**active**) | `refs/heads/main` | the develop set **+ `ladder`** | PR required (0 approvals) · block force-push · block deletion |
 
@@ -270,7 +270,30 @@ and would have deadlocked every merge if enabled — was deleted at the same tim
   long-lived branches and `publish image` runs only on `push`, so requiring either would leave a required check
   forever pending and **deadlock the merge**. This is the trap to remember before adding any required check:
   confirm it actually runs on that branch's PRs.
-### Merge queue on `develop` (gh#357)
+### Combining-PR protection on `develop` — `strict`, because the merge queue is unavailable (gh#357, gh#575)
+
+> **The merge queue cannot be enabled on this repository.** Adding the `merge_queue` rule to `protect-develop`
+> fails with `422 — Invalid rule 'merge_queue'`, and retrying with **no parameters at all** gives the identical
+> error, so it is the rule *type* being rejected rather than a bad payload. **Cause:** the repo is
+> `owner.type = User` — merge queue requires an **organization-owned** repository, and public visibility alone is
+> not enough. That is why the checkbox is absent from the ruleset UI. (gh#357 assessed availability on visibility
+> and missed ownership.) Moving the repo under an organisation would unlock it — a real option, and its own decision.
+>
+> **In force instead: `strict_required_status_checks_policy = true`** on `protect-develop`, applied 2026-07-30 via
+> `PUT /repos/adammarquette/trading-copilot/rulesets/19715669`. A PR must be **up to date with `develop`** before it
+> can merge, so CI always compiles the combination that will actually land. Same gap closed, by **serialising**
+> rather than batching — at the cost gh#357 documented: each merge invalidates every other open PR, which then needs
+> a rebase and a full (~4 min) CI re-run. With many parallel sessions that is a real tax; it is accepted because a
+> broken `develop` blocks every downstream PR, and some guard beats none.
+>
+> **The `merge_group:` triggers in `ci.yml` / `branch-policy.yml` stay** (gh#357). They are **inert** with no queue
+> — the event never fires — and cost nothing. Keeping them means enabling the queue is a one-checkbox change if this
+> repo ever moves under an organisation. **Do not delete them as dead config.**
+
+The rest of this section describes the gap being closed and why a queue was preferred; it stands regardless of which
+mechanism enforces it.
+
+### Merge queue on `develop` — the design, if it ever becomes available (gh#357)
 
 **The gap it closes.** Required checks prove each PR green **against its own base**. Two PRs that are each green
 can still break `develop` once both land — different files, so no git conflict, and no CI run ever compiled the
@@ -281,18 +304,18 @@ combination. That is exactly what happened on 2026-07-28 (`gh#351`): two PRs mer
 `stale-base` is **not** the guard for this and is unchanged — it catches a *stacked* PR whose base already merged
 (`gh#72`), a different failure. The `gh#351` write-up misattributed it; `gh#357` corrected that.
 
-**Why a queue rather than "require branches to be up to date" (`strict`).** `strict` works, but every merge to
+**Why a queue *would be* preferred over "require branches to be up to date" (`strict`) — the trade being paid for now.** `strict` works, but every merge to
 `develop` invalidates every other open PR, each then needing a rebase and a full ~4-minute CI re-run. This repo runs
 many parallel agent sessions, so that serialises merges and produces near-constant rebasing. A queue batches instead
 of serialising. (`strict` remains the interim fallback if the queue proves awkward.)
 
-**Settings to apply — the order matters.** The workflow half ships first, in the same PR as this note; enabling the
-queue **before** those triggers exist leaves every queued PR waiting on checks that never run:
+**Settings that *would* apply — recorded for the org-owned future, not currently actionable.** The order matters:
+enabling a queue **before** the workflow triggers exist leaves every queued PR waiting on checks that never run.
 
-1. **Land the workflow triggers first** — `ci.yml` and `branch-policy.yml` both gained `merge_group:` (`gh#357`).
-   A required check that does not run on `merge_group` deadlocks the queue, the same trap recorded above for
-   `stale-base` and `publish image`.
-2. **Then** enable it on `protect-develop` → *Require merge queue*, with:
+1. **The workflow triggers are already landed** — `ci.yml` and `branch-policy.yml` both carry `merge_group:`
+   (`gh#357`). A required check that does not run on `merge_group` deadlocks the queue, the same trap recorded
+   above for `stale-base` and `publish image`.
+2. **Then** it would be enabled on `protect-develop` → *Require merge queue*, with:
    - **Merge method: `Rebase`** — **set this explicitly.** The default is a merge commit, which would break
      `gh#104` ("PRs land by rebase-merge; every branch commit becomes permanent history") and put merge commits on
      `develop`, where they are reserved for `develop → staging → main` promotions.
@@ -305,7 +328,7 @@ before a PR can be queued, so it should not interact with the queue at all. That
 fact — **confirm it on the first queued PR**, because this rule has already been observed to block merges silently
 with every check green and nothing in the checks tab (see *Automated code review* above).
 
-**What to expect once it is on.** Merging becomes *Merge when ready*: the PR joins the queue, GitHub creates a
+**What it would look like.** Merging would become *Merge when ready*: the PR joins the queue, GitHub creates a
 temporary `gh-readonly-queue/develop/...` ref, CI runs against it, and the PR merges only if that run is green — so
 a PR can now be rejected by the queue after passing its own checks. That is the mechanism working, not a fault: it
 means the combination broke, and the fix is to rebase onto the new `develop` and resolve it.
