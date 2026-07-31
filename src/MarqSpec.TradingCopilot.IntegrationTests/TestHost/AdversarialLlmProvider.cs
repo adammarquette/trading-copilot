@@ -59,10 +59,15 @@ public sealed class AdversarialLlmProvider : ILlmProvider
         }
     }
 
-    /// <summary>A well-formed proposal. The prices are the model's; size, mode and account are deliberately absent.</summary>
+    /// <summary>
+    /// A well-formed proposal. The prices are the model's; size, mode and account are deliberately absent.
+    /// Carries a <c>confidence</c> because gh#543 made it required — a suggest without one now fails closed to
+    /// <c>MalformedOutput</c>, so omitting it here would silently turn every "a suggestion is staged" assertion into
+    /// a test of the suppression path instead.
+    /// </summary>
     public void ReturnsSuggestion(string direction, decimal entry, decimal stop, decimal target) =>
         Returns($$"""
-            {"decision":"suggest","direction":"{{direction}}","entry":{{entry}},"stop":{{stop}},"target":{{target}},"reason":"test"}
+            {"decision":"suggest","direction":"{{direction}}","entry":{{entry}},"stop":{{stop}},"target":{{target}},"confidence":72,"reason":"test"}
             """);
 
     /// <summary>
