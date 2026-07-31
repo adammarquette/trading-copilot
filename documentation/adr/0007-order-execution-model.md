@@ -820,3 +820,35 @@ cancellable once it resolves.
 Still open, filed separately: **gh#531** — two concurrent *sends* do not orphan anything (each mints its own row)
 but do evaluate the risk gate against one snapshot, admitting up to 2× the approved risk. Different path, different
 blast radius, and the same claim mechanism may or may not be the right answer there.
+
+## Update (2026-07-30) — the kill switch survives a venue that says no (gh#529)
+
+Three faults on the engage path, all on the control an operator reaches for **when something has already gone
+wrong**. The primary safety property was never at risk — outbound is blocked and the durable `KillSwitchState` row
+is committed in its own `SaveChanges` *before* the account loop — which is why this was P1 and not P0.
+
+**1. A venue refusal abandoned every remaining account.** `ProjectXVenue.ClosePositionAsync` throws on an ordinary
+refusal — a refusal is an exception on this path, not a return value — and nothing above caught it. One account's
+refusal unwound both loops: its remaining contracts, every other account, and every other connection were never
+touched. The operator got a 500 naming no account. Now isolated per account *and* per contract: a contract that
+refuses stays outstanding and is retried, an account that cannot be reached is named and the sweep presses on. This
+is the invariant `CancelWorkingOrdersAsync` already stated one call away — *"a single cancel failing must not abort
+the kill — log it and press on with the rest."*
+
+**2. The cancelled statuses and the engagement event went with it.** The same unwind skipped `SaveChangesAsync`, so
+tracked `Cancelled` rows were discarded with the request scope, and skipped the `killswitch.engaged` append — which
+this ADR states unconditionally is journaled. Both are now reachable on the fault path, and the entry names the
+accounts that could not be completed, because those are precisely the ones the operator must now handle by hand.
+
+**3. `FlattenedPositions` was provably wrong on two paths.** The escalate branch returned
+`outstanding.Count(p => p.IsFlat)` — structurally **always 0**, since `outstanding` is only ever assigned from
+`.Where(p => !p.IsFlat)` — and the success path returned the *last attempt's* count, so three positions closed
+across two attempts reported one. Only the single-attempt case was right, and it was the only case any test
+covered. Positions are now counted **as they close**.
+
+**A new `killswitch.escalated` event.** Previously a venue that kept reporting a position open produced `200 OK`
+with `FlattenedPositions: 0` — byte-identical to halt-only and to *nothing was open*, with a `LogError` as the only
+trace. Its auto-flatten twin has journalled, paged and metered that same verdict since gh#455; the kill switch
+could do none of it. The journal entry lands here; **paging and metering do not**, because `KillSwitchService` takes
+neither `IExecutionMetrics` nor a notification seam, and threading them in is a wider change than this fix — filed
+rather than smuggled.

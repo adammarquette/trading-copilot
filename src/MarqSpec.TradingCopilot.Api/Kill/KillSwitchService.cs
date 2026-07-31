@@ -36,6 +36,9 @@ public sealed class KillSwitchService
     /// <summary>The kill switch was disengaged — outbound orders re-enabled.</summary>
     public const string DisengagedEventType = "killswitch.disengaged";
 
+    /// <summary>The kill switch could not confirm an account flat — positions remain open (gh#529).</summary>
+    public const string EscalatedEventType = "killswitch.escalated";
+
     private const int MaxFlattenAttempts = 3;
 
     private readonly TradingCopilotDbContext _database;
@@ -89,6 +92,7 @@ public sealed class KillSwitchService
 
         int cancelled = 0;
         int flattened = 0;
+        List<string> failedAccounts = [];
 
         List<Account> accounts = await _database.Accounts.ToListAsync(cancellationToken);
         List<Guid> connectionIds = [.. accounts.Select(account => account.ConnectionId).Distinct()];
@@ -116,24 +120,60 @@ public sealed class KillSwitchService
                     continue;
                 }
 
-                cancelled += await CancelWorkingOrdersAsync(account, venueAccount.Id, venue, cancellationToken);
-
-                // Halt-only leaves open positions on their native safety stops (ADR-0007); only flatten-all closes them.
-                if (mode == KillSwitchMode.FlattenAll)
+                // PER-ACCOUNT FAULT ISOLATION (gh#529). ProjectXVenue.ClosePositionAsync THROWS on an ordinary
+                // venue refusal -- a refusal is an exception here, not a return value -- and there is no exception
+                // handler anywhere above this. Unisolated, one account's refusal unwound both loops: the remaining
+                // contracts on it, every other account, and every other connection were never touched, the tracked
+                // Cancelled statuses were discarded with the scope, and the engagement was never journalled. The
+                // operator got a 500 naming no account, from the control they reach for when something has already
+                // gone wrong.
+                //
+                // This is the invariant CancelWorkingOrdersAsync already states one call away: "a single cancel
+                // failing must not abort the kill -- log it and press on with the rest."
+                try
                 {
-                    flattened += await FlattenAllAsync(venueAccount.Id, venue, cancellationToken);
+                    cancelled += await CancelWorkingOrdersAsync(account, venueAccount.Id, venue, cancellationToken);
+
+                    // Halt-only leaves open positions on their native safety stops (ADR-0007); only flatten-all closes them.
+                    if (mode == KillSwitchMode.FlattenAll)
+                    {
+                        flattened += await FlattenAllAsync(venueAccount.Id, venue, cancellationToken);
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw; // a real shutdown still stops the host
+                }
+                catch (Exception error)
+                {
+                    // Named, counted and pressed past. The account is reported as failed rather than silently
+                    // dropped: an operator who engaged the kill switch must be told which accounts it could not
+                    // reach, because those are the ones they now have to handle by hand.
+                    failedAccounts.Add(account.VenueAccountKey);
+                    _logger.LogError(
+                        error,
+                        "Kill switch could not complete {Account} — continuing with the remaining accounts.",
+                        account.VenueAccountKey);
                 }
             }
         }
 
+        // Both of these are now REACHABLE on the fault path (gh#529). They used to sit past an unguarded loop, so
+        // a single venue refusal discarded the tracked Cancelled statuses and skipped the killswitch.engaged
+        // append entirely -- ADR-0007 says every transition is journaled, and this one was not.
         await _database.SaveChangesAsync(cancellationToken);
 
+        string failureNote = failedAccounts.Count == 0
+            ? string.Empty
+            : $" INCOMPLETE — could not reach: {string.Join(", ", failedAccounts)}.";
+
         _logger.LogWarning(
-            "Kill switch ENGAGED ({Mode}): {Cancelled} working order(s) cancelled, {Flattened} position(s) flattened.",
-            mode, cancelled, flattened);
+            "Kill switch ENGAGED ({Mode}): {Cancelled} working order(s) cancelled, {Flattened} position(s) flattened.{Failures}",
+            mode, cancelled, flattened, failureNote);
         await JournalAsync(
             EngagedEventType,
             $"Kill switch engaged ({mode}): {cancelled} working order(s) cancelled, {flattened} position(s) flattened."
+            + failureNote
             + (reason is null ? string.Empty : $" Reason: {reason}"),
             now, cancellationToken);
 
@@ -198,6 +238,15 @@ public sealed class KillSwitchService
         }
 
         int attempts = 0;
+
+        // Counted AS THEY CLOSE (gh#529). Both previous returns derived the count from `outstanding`, which is
+        // rebound each attempt to only what is still open -- so the success path reported the LAST attempt's count
+        // (three positions closed across two attempts reported 1), and the escalate path returned
+        // `outstanding.Count(p => p.IsFlat)`, which is structurally ALWAYS 0 because `outstanding` is only ever
+        // assigned from `.Where(p => !p.IsFlat)`. Only the single-attempt case was right -- the only case any test
+        // covered.
+        int closed = 0;
+
         while (true)
         {
             attempts++;
@@ -205,22 +254,53 @@ public sealed class KillSwitchService
             List<PositionSnapshot> postClose = [];
             foreach (PositionSnapshot position in outstanding)
             {
-                PositionSnapshot after = await venue.ClosePositionAsync(account, position.Contract, cancellationToken);
-                postClose.Add(after);
+                try
+                {
+                    postClose.Add(await venue.ClosePositionAsync(account, position.Contract, cancellationToken));
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception error)
+                {
+                    // A venue refusal is an EXCEPTION on this path, not a return value. One contract refusing must
+                    // not abandon the others on this account: keep it outstanding so the retry loop takes another
+                    // run at it, and let the escalate branch report it if it never closes.
+                    _logger.LogError(
+                        error, "Kill switch could not close {Account} {Contract} — will retry within this pass.",
+                        account, position.Contract);
+                    postClose.Add(position);
+                }
             }
+
+            closed += postClose.Count(position => position.IsFlat);
 
             FlattenVerdict verdict = FlattenVerification.Verify(postClose, attempts, MaxFlattenAttempts);
             if (verdict == FlattenVerdict.Flat)
             {
-                return outstanding.Count;
+                return closed;
             }
 
             if (verdict == FlattenVerdict.Escalate)
             {
+                int remaining = postClose.Count(position => !position.IsFlat);
+
+                // JOURNALLED, not merely logged. Before this the only trace was a LogError, so the response was
+                // 200 OK with FlattenedPositions: 0 -- byte-identical to halt-only and to "nothing was open". An
+                // operator could not tell "the kill switch flattened nothing because there was nothing" from "the
+                // venue refused and positions are still open".
+                await JournalAsync(
+                    EscalatedEventType,
+                    $"Kill switch could not confirm {account.Key} flat after {attempts} attempt(s) — "
+                    + $"{remaining} position(s) remain open and need manual intervention.",
+                    DateTimeOffset.UtcNow,
+                    cancellationToken);
+
                 _logger.LogError(
                     "Kill switch could not confirm {Account} flat after {Attempts} attempt(s) — {Remaining} position(s) remain.",
-                    account, attempts, postClose.Count(position => !position.IsFlat));
-                return outstanding.Count(position => position.IsFlat);
+                    account, attempts, remaining);
+                return closed;
             }
 
             outstanding = [.. postClose.Where(position => !position.IsFlat)];

@@ -110,6 +110,72 @@ public class KillSwitchServiceTests
         A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).Returns<IReadOnlyList<PositionSnapshot>>(
             [new PositionSnapshot(Account, VenueContractId.Create(Projectx, "CON.F.US.MES.U26"), 2, new Price(5_000m))]);
 
+    // --- Faults on the flatten path (gh#529, P1) ---
+
+    [Fact]
+    public async Task EngageAsync_ShouldStillJournalTheEngagement_WhenTheVenueRefusesToClose()
+    {
+        // ProjectXVenue.ClosePositionAsync THROWS on an ordinary venue refusal, and nothing above this caught it.
+        // The throw unwound both loops, so SaveChangesAsync and the killswitch.engaged append were never reached --
+        // ADR-0007 says every transition is journaled, and the one transition that matters most was not.
+        await SeedAsync(withWorkingOrder: true);
+        OpenPosition();
+        A.CallTo(() => _venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("venue refused the close"));
+
+        Func<Task> engage = () => Service(Db()).EngageAsync(KillSwitchMode.FlattenAll, null, Now, CancellationToken.None);
+
+        await engage.Should().NotThrowAsync("the operator reached for this BECAUSE something is already wrong");
+        A.CallTo(() => _log.AppendAsync(
+                A<EventDraft>.That.Matches(draft => draft.Type == KillSwitchService.EngagedEventType),
+                A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task EngageAsync_ShouldNameTheAccountItCouldNotReach_WhenTheVenueRefuses()
+    {
+        // Reported, not silently dropped: the accounts the kill switch could NOT complete are exactly the ones the
+        // operator now has to handle by hand, so they belong in the journal entry rather than only in a log line.
+        //
+        // The fault is on the POSITIONS READ, deliberately — a close refusal is now absorbed by the retry loop and
+        // escalates instead (see the escalation guard below), so it never reaches the per-account handler. An
+        // unreachable venue does, and that is the shape this isolation exists for.
+        await SeedAsync();
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("venue unreachable"));
+
+        await Service(Db()).EngageAsync(KillSwitchMode.FlattenAll, null, Now, CancellationToken.None);
+
+        A.CallTo(() => _log.AppendAsync(
+                A<EventDraft>.That.Matches(draft =>
+                    draft.Type == KillSwitchService.EngagedEventType && draft.Payload.Contains("INCOMPLETE")),
+                A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task EngageAsync_ShouldJournalEscalation_WhenThePositionWillNotClose()
+    {
+        // The verdict that used to be invisible. A venue that keeps reporting the position open produced 200 OK with
+        // FlattenedPositions: 0 -- byte-identical to halt-only and to "nothing was open" -- with a LogError as the
+        // only trace. An operator could not tell those apart.
+        await SeedAsync();
+        OpenPosition();
+        A.CallTo(() => _venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
+            .ReturnsLazily((VenueAccountId a, VenueContractId c, CancellationToken _) =>
+                Task.FromResult(new PositionSnapshot(a, c, 2, new Price(5_000m)))); // never goes flat
+
+        KillSwitchReport report = await Service(Db()).EngageAsync(
+            KillSwitchMode.FlattenAll, null, Now, CancellationToken.None);
+
+        report.FlattenedPositions.Should().Be(0, "nothing actually closed");
+        A.CallTo(() => _log.AppendAsync(
+                A<EventDraft>.That.Matches(draft => draft.Type == KillSwitchService.EscalatedEventType),
+                A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
     [Fact]
     public async Task EngageAsync_ShouldEngageTheRuntimeFlag_SoOutboundIsBlockedImmediately()
     {
