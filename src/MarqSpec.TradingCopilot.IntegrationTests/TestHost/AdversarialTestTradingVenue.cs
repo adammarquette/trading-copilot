@@ -107,15 +107,35 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
 
     internal bool IsUnreadable(VenueAccountId account) => _unreadableAccounts.Contains(account.Key);
 
-    /// <summary>Seeds a native working leg resting at the venue (a protective stop / target) for the OCO-exit path to
-    /// find via <c>GetWorkingOrdersAsync</c> (gh#184).</summary>
-    public void SeedWorkingOrder(string accountKey, string venueOrderKey, string contractKey, decimal? stopPrice = 4_980m) =>
+    /// <summary>
+    /// Seeds a native working leg resting at the venue (a protective stop / target) for the OCO-exit path and the
+    /// venue-truth read to find via <c>GetWorkingOrdersAsync</c> (gh#184, gh#534).
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="limitPrice"/> and <paramref name="size"/> exist so the read's <b>size</b> and its
+    /// <b>protective / not-protective</b> classification can be driven from the venue side. The stub feeds those
+    /// inputs and never the computed answer — whether a leg counts as protection is production's rule, so there is
+    /// deliberately no <c>isProtective</c> parameter here.
+    /// </remarks>
+    /// <param name="accountKey">The venue account the leg rests on.</param>
+    /// <param name="venueOrderKey">The venue's own order handle.</param>
+    /// <param name="contractKey">The contract the leg rests on.</param>
+    /// <param name="stopPrice">The stop trigger, or <see langword="null"/> for a limit-only leg.</param>
+    /// <param name="limitPrice">The limit price, or <see langword="null"/>.</param>
+    /// <param name="size">How much the leg covers.</param>
+    public void SeedWorkingOrder(
+        string accountKey,
+        string venueOrderKey,
+        string contractKey,
+        decimal? stopPrice = 4_980m,
+        decimal? limitPrice = null,
+        int size = 1) =>
         _workingOrders.Add((accountKey, new WorkingOrder(
             venueOrderKey,
             VenueContractId.Create(VenueId.Parse("projectx"), contractKey),
             stopPrice is null ? null : new Price(stopPrice.Value),
-            LimitPrice: null,
-            Size: 1)));
+            limitPrice is null ? null : new Price(limitPrice.Value),
+            size)));
 
     /// <summary>Makes <c>CancelOrderAsync</c> THROW for a venue order key — the "already gone" rejection the OCO-exit
     /// path must swallow without corrupting the record or retry-storming (gh#184).</summary>
