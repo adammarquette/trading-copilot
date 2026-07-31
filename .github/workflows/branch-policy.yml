@@ -14,6 +14,12 @@ name: Branch policy
 # check. Plenty of PRs legitimately close nothing -- one against an epic, or a QA suite that PINS a
 # defect rather than fixing it -- so a hard failure would train authors to add `Closes` where it does
 # not belong, and a wrongly-closed issue is harder to notice than one left open.
+#
+# COMBINING PRS IS THE MERGE QUEUE'S JOB, NOT `stale-base`'S (gh#357). `stale-base` guards a STACKED
+# PR whose base branch already merged (gh#72); it has nothing to say about two PRs that are each green
+# against `develop` and break only once both land -- that gap is what the merge queue closes, by
+# testing each queued PR stacked on everything ahead of it. The two are different guards; neither
+# replaces the other, and `stale-base` is unchanged here. See the deployment runbook, *Merge queue*.
 
 on:
   pull_request:
@@ -21,14 +27,21 @@ on:
     # must see every other base (gh#72), so the workflow runs on all PR bases.
     # `labeled` / `unlabeled` so adding the exception label re-runs the check.
     types: [opened, reopened, synchronize, edited, labeled, unlabeled]
+  # `commit-hygiene` is a REQUIRED check, so it must also report on the queue's ref or every queued PR
+  # waits forever (gh#357). Only that job runs here -- the other three are PR-scoped and are guarded
+  # off below, because a `merge_group` event carries no pull_request context to evaluate them against.
+  merge_group:
 
 concurrency:
   group: branch-policy-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a queue run: the merge queue is waiting on this check to report, and a cancelled run
+  # reports nothing. Superseded PR runs are still cancelled, which is what this was for.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   ladder:
     name: ladder
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
       - name: Validate the base/head pair
@@ -88,8 +101,10 @@ jobs:
   stale-base:
     name: stale-base
     runs-on: ubuntu-latest
-    # Only stacked PRs need this; develop/staging/main are governed by the ladder.
-    if: ${{ !contains(fromJSON('["develop", "staging", "main"]'), github.base_ref) }}
+    # Only stacked PRs need this; develop/staging/main are governed by the ladder. The event guard is
+    # not redundant: on a `merge_group` event `github.base_ref` is EMPTY, which the branch test alone
+    # would read as "not a long-lived branch" and run the job against a PR that isn't there (gh#357).
+    if: ${{ github.event_name == 'pull_request' && !contains(fromJSON('["develop", "staging", "main"]'), github.base_ref) }}
     permissions:
       pull-requests: read
     steps:
@@ -125,11 +140,23 @@ jobs:
     permissions:
       pull-requests: read
     steps:
+      # On `merge_group` there is no PR to ask, so the commit list comes from the queue ref instead --
+      # `base_sha..head_sha` is exactly the set being merged, so this stays a real check rather than a
+      # vacuous pass (gh#357). Full history is needed for that range to resolve.
+      - name: Check out the queued commits
+        if: ${{ github.event_name == 'merge_group' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.merge_group.head_sha }}
+          fetch-depth: 0
       - name: Check every commit is a curated unit of work
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          EVENT: ${{ github.event_name }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
           TYPES='build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
@@ -150,13 +177,29 @@ jobs:
             else
               echo "OK    $sha: $subject"
             fi
-          done < <(gh api "repos/$REPO/pulls/$PR/commits" --paginate \
-            --jq '.[] | [.sha[0:7], (.parents | length | tostring), (.commit.message | split("\n")[0])] | @tsv')
+          done < <(
+            if [ "$EVENT" = "merge_group" ]; then
+              # The queue ref holds the queued PR stacked on the base plus everything ahead of it;
+              # base_sha..head_sha is precisely the commits this merge would add.
+              git log --format='%h%x09%p%x09%s' "$MG_BASE..$MG_HEAD" \
+                | awk -F'\t' '{n=split($2,p," "); print $1 "\t" n "\t" $3}'
+            else
+              gh api "repos/$REPO/pulls/$PR/commits" --paginate \
+                --jq '.[] | [.sha[0:7], (.parents | length | tostring), (.commit.message | split("\n")[0])] | @tsv'
+            fi
+          )
           echo "$COUNT commit(s) checked."
+          # A queue run with zero commits means the range resolved to nothing -- treat it as a fault
+          # rather than a pass, because "checked nothing" must never read the same as "all clean".
+          if [ "$EVENT" = "merge_group" ] && [ "$COUNT" -eq 0 ]; then
+            echo "::error::No commits found in $MG_BASE..$MG_HEAD. The queue ref did not resolve, so nothing was actually checked (gh#357)."
+            exit 1
+          fi
           exit $FAIL
 
   issue-link:
     name: issue-link
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
