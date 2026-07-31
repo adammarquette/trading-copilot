@@ -5,6 +5,14 @@ on:
     branches: [develop, staging, main]
   push:
     branches: [develop, staging, main]
+  # THE MERGE QUEUE'S CHECKS RUN HERE (gh#357). A queued PR is tested on a temporary
+  # `gh-readonly-queue/...` ref holding it stacked on the base plus everything ahead of it -- which is
+  # the whole point: two PRs that pass alone but break combined are caught BEFORE either lands (gh#351).
+  # This trigger is load-bearing: a required check that never runs on `merge_group` leaves every queued
+  # PR waiting forever, the same deadlock the platform contract warns about for `stale-base`. The
+  # publish / deploy / verify jobs below are guarded on `github.event_name == 'push'`, so a queue run
+  # builds and tests only -- it never publishes an image or deploys.
+  merge_group:
 
 concurrency:
   group: ci-${{ github.ref }}
