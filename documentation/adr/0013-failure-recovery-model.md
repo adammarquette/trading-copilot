@@ -124,8 +124,11 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
 - **State rehydration (gh#221, 2026-07-25):** the explicit startup pass is **implemented** —
   `DecisionStateRehydrator` brings the decision surface back inertly, preserves ownership (R-20), and fails safe to
   no-new-orders (kill switch, HaltOnly) + loud on any impossible cross-entity combination, never repairing. *Still
-  open:* the **suggestion validity-window recompute** rides on the R-4 validity field when it lands (today the
-  persisted state returns and the **take** re-gates, R-12); **restart-triggered venue reconcile** pairs with the
+  open:* the **suggestion validity-window recompute** — its blocker is **cleared**: the R-4 validity field landed as
+  `Suggestion.ExpiresAt` (gh#544), stamped by a pure policy and clamped to the market's auto-flatten deadline so a
+  suggestion can never outlive the flatten. The **recompute itself** (the sweep that acts on it, on both the steady
+  state and the startup path, so recovery and normal operation cannot diverge) is **gh#545**, which closes this item;
+  until it lands the persisted state still returns and the **take** re-gates (R-12); **restart-triggered venue reconcile** pairs with the
   settlement pass (gh#193) and the connection monitor (gh#209); **fill**-level reconcile needs the account-event
   seam (gh#219); and the **cross-user-isolation-through-restart** proof (suggestions / orders / positions /
   templates keep their owner) is the QA suite's.

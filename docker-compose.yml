@@ -279,6 +279,7 @@ services:
       # to prevent. Null pass-through: the app's defaults stand unless deliberately set.
       Suggestions__DefaultPageSize:
       Suggestions__MaxPageSize:
+      Suggestions__ValidityMinutes:
       # Execution sanity caps (R-16, gh#11) -- the last-line fat-finger bounds, and the stop-promotion band.
       # Pass-through for the same reason: the app's conservative defaults must win unless deliberately set.
       Execution__MaxContractsPerOrder:

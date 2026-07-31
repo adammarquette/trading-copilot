@@ -92,7 +92,14 @@ distinct name so a later `docker compose pull` cannot clobber your build. Buildi
   fields together, because a new tick size against an old point value is a silently wrong contract. A non-positive
   `TickSize`, `PointValue` or `SafetyStopTicks` **fails startup by design**: a zero here would not fail loudly, it
   would silently mis-size every risk calculation downstream.
+- **`Suggestions__ValidityMinutes`** (gh#544) is how long a newly issued suggestion stays actionable *before* the
+  auto-flatten clamp: the system stamps `min(this window, time to the market's flatten deadline)`, so a suggestion can
+  never outlive the flatten about to close the position. It **must be positive** — a non-positive value fails startup
+  by design, because it would emit a row the `CK_Suggestions_ExpiresAfterCreated` constraint refuses.
 - Schema changes apply via **`dotnet ef database update`** against the configured connection (as the data layer lands).
+  **`AddSuggestionIssuanceFields` (gh#542/#543/#544) backfills**: existing suggestions get
+  `ExpiresAt = CreatedAt + 1 second` — already expired, the fail-safe direction, and strictly greater so the new CHECK
+  applies cleanly. Backfilling to `CreatedAt` exactly would violate the strict inequality and abort the migration.
 
 ## Environments ↔ branches
 Each long-lived branch deploys to its own Railway environment (engineering §10). Never wire a **live** account into a
