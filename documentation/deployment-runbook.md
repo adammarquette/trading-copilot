@@ -270,6 +270,46 @@ and would have deadlocked every merge if enabled — was deleted at the same tim
   long-lived branches and `publish image` runs only on `push`, so requiring either would leave a required check
   forever pending and **deadlock the merge**. This is the trap to remember before adding any required check:
   confirm it actually runs on that branch's PRs.
+### Merge queue on `develop` (gh#357)
+
+**The gap it closes.** Required checks prove each PR green **against its own base**. Two PRs that are each green
+can still break `develop` once both land — different files, so no git conflict, and no CI run ever compiled the
+combination. That is exactly what happened on 2026-07-28 (`gh#351`): two PRs merged 23 seconds apart, one adding a
+4-arg constructor and the other a test constructing it with 2. The merge queue closes it by testing each queued PR
+**stacked on the base plus everything ahead of it in the queue**, and merging only what is green.
+
+`stale-base` is **not** the guard for this and is unchanged — it catches a *stacked* PR whose base already merged
+(`gh#72`), a different failure. The `gh#351` write-up misattributed it; `gh#357` corrected that.
+
+**Why a queue rather than "require branches to be up to date" (`strict`).** `strict` works, but every merge to
+`develop` invalidates every other open PR, each then needing a rebase and a full ~4-minute CI re-run. This repo runs
+many parallel agent sessions, so that serialises merges and produces near-constant rebasing. A queue batches instead
+of serialising. (`strict` remains the interim fallback if the queue proves awkward.)
+
+**Settings to apply — the order matters.** The workflow half ships first, in the same PR as this note; enabling the
+queue **before** those triggers exist leaves every queued PR waiting on checks that never run:
+
+1. **Land the workflow triggers first** — `ci.yml` and `branch-policy.yml` both gained `merge_group:` (`gh#357`).
+   A required check that does not run on `merge_group` deadlocks the queue, the same trap recorded above for
+   `stale-base` and `publish image`.
+2. **Then** enable it on `protect-develop` → *Require merge queue*, with:
+   - **Merge method: `Rebase`** — **set this explicitly.** The default is a merge commit, which would break
+     `gh#104` ("PRs land by rebase-merge; every branch commit becomes permanent history") and put merge commits on
+     `develop`, where they are reserved for `develop → staging → main` promotions.
+   - Build concurrency and batch size left at the defaults until there is evidence to tune them.
+3. `protect-staging` / `protect-main` are **deliberately not queued**: each takes exactly one curated source
+   (`develop`, then `staging`), so there is no combination to test and a queue would only add latency.
+
+**Interaction with `copilot-review-develop`.** The Copilot-review rule is a **pull-request** requirement, satisfied
+before a PR can be queued, so it should not interact with the queue at all. That is the expectation, not a verified
+fact — **confirm it on the first queued PR**, because this rule has already been observed to block merges silently
+with every check green and nothing in the checks tab (see *Automated code review* above).
+
+**What to expect once it is on.** Merging becomes *Merge when ready*: the PR joins the queue, GitHub creates a
+temporary `gh-readonly-queue/develop/...` ref, CI runs against it, and the PR merges only if that run is green — so
+a PR can now be rejected by the queue after passing its own checks. That is the mechanism working, not a fault: it
+means the combination broke, and the fix is to rebase onto the new `develop` and resolve it.
+
 - **`issue-link` is deliberately NOT required, and never fails** (gh#406). It warns when a PR references issues
   but will close none of them — the shape that let `#385` stay open after PR #391 delivered it, costing a full
   duplicate implementation (PR #401, closed unmergeable). It is advisory *by design*: a PR against an epic, or a
