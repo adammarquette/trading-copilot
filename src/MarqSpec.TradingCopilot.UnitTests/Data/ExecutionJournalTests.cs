@@ -81,6 +81,15 @@ public class ExecutionJournalTests
                 Mode = TradingMode.Practice,
                 State = SuggestionState.Active,
                 CreatedAt = new DateTimeOffset(2026, 7, 22, 14, 30, 0, TimeSpan.Zero),
+
+                // Required since gh#542/#543/#544. This suite round-trips the journal spine and its links, which
+                // these fields do not affect; ExpiresAt sits after CreatedAt so the CHECK is satisfied.
+                Rationale = "seeded",
+                CitedIndicator = "rsi",
+                CitedPeriod = 14,
+                CitedResolutionMinutes = 1,
+                Confidence = 60,
+                ExpiresAt = new DateTimeOffset(2026, 7, 22, 15, 30, 0, TimeSpan.Zero),
             });
             context.Orders.Add(new Order
             {

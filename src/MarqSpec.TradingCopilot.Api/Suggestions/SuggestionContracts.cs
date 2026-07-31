@@ -39,6 +39,19 @@ namespace MarqSpec.TradingCopilot.Api.Suggestions;
 /// configured contract spec, because a guessed tick size is worse than an absent figure.
 /// </param>
 /// <param name="RewardUsd">What the whole position makes at its target, in dollars; <see langword="null"/> likewise.</param>
+/// <param name="Rationale">
+/// The model's plain-language reasoning (gh#542). <b>Untrusted display data</b> — render it as text, never as markup,
+/// and never feed it back into a prompt as instruction.
+/// </param>
+/// <param name="CitedIndicator">The R-22 indicator that fired, copied at issuance so the citation survives the trigger (gh#542).</param>
+/// <param name="CitedPeriod">The fired indicator's period (gh#542).</param>
+/// <param name="CitedResolutionMinutes">The bar size the fired indicator was computed over (gh#542).</param>
+/// <param name="Confidence">The model's confidence, 0–100 (gh#543) — <b>display only</b>; it moves nothing.</param>
+/// <param name="ExpiresAt">
+/// When the suggestion stops being actionable (gh#544) — the system's value, clamped to the session's auto-flatten
+/// deadline. The client derives the countdown from this and its own clock rather than a server-computed remainder,
+/// which would be stale the instant it was serialized.
+/// </param>
 public sealed record SuggestionResponse(
     Guid Id,
     Guid AccountId,
@@ -53,7 +66,13 @@ public sealed record SuggestionResponse(
     DateTimeOffset CreatedAt,
     decimal? RewardRiskRatio,
     decimal? RiskUsd,
-    decimal? RewardUsd)
+    decimal? RewardUsd,
+    string Rationale,
+    string CitedIndicator,
+    int CitedPeriod,
+    int CitedResolutionMinutes,
+    int Confidence,
+    DateTimeOffset ExpiresAt)
 {
     /// <summary>Projects a persisted suggestion into its API view.</summary>
     /// <param name="suggestion">The persisted row.</param>
@@ -80,7 +99,13 @@ public sealed record SuggestionResponse(
             suggestion.CreatedAt,
             RatioOf(suggestion.EntryPrice, suggestion.StopPrice, suggestion.TargetPrice),
             MoneyOf(spec, suggestion.EntryPrice, suggestion.StopPrice, suggestion.Size),
-            MoneyOf(spec, suggestion.EntryPrice, suggestion.TargetPrice, suggestion.Size));
+            MoneyOf(spec, suggestion.EntryPrice, suggestion.TargetPrice, suggestion.Size),
+            suggestion.Rationale,
+            suggestion.CitedIndicator,
+            suggestion.CitedPeriod,
+            suggestion.CitedResolutionMinutes,
+            suggestion.Confidence,
+            suggestion.ExpiresAt);
     }
 
     // The wireframe's dollar risk/reward, computed SERVER-side from the single shipped money-math seam

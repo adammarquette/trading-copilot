@@ -46,6 +46,12 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
 {
     private const int MaxOutputTokens = 1024;
 
+    /// <summary>
+    /// The rationale cap (gh#542), matching the <c>Suggestion.Rationale</c> column. Enforced here at the parse
+    /// boundary — an over-long rationale fails closed rather than being truncated into a misleading journal entry.
+    /// </summary>
+    internal const int MaxRationaleLength = 2000;
+
     // A CONSERVATIVE (deliberately high) input-token count for the deep call's cost estimate (gh#478). The enriched
     // deep prompt is bounded by construction -- the base render + the gh#476 market-context block (<=20 bars + <=20
     // indicator values, all numeric) + the deep system prompt -- so a real deep input runs a few hundred tokens; 2048
@@ -67,6 +73,7 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
             "stop": { "type": "number" },
             "target": { "type": "number" },
             "rationale": { "type": "string" },
+            "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
             "reason": { "type": "string" }
           },
           "required": ["decision"],
@@ -87,6 +94,7 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
             "stop": { "type": "number" },
             "target": { "type": "number" },
             "rationale": { "type": "string" },
+            "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
             "reason": { "type": "string" }
           },
           "required": ["decision"],
@@ -369,7 +377,36 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
                 SuppressReason.MalformedOutput, "a suggest must carry entry, stop and target");
         }
 
-        return new ReviewOutcome.Suggest(side.Value, entry, stop, target, dto.Rationale ?? string.Empty);
+        // CONFIDENCE (gh#543) is required and bounded. The schema constrains it, but the provider is not guaranteed
+        // to honour the constraint -- so it is validated here like every other field, and a missing or out-of-range
+        // number fails CLOSED. Note a confidence of ZERO is valid and still yields a suggestion: the operator
+        // decides, and the model does not get to self-censor by returning a low number.
+        if (dto.Confidence is not { } confidence || confidence is < 0 or > 100)
+        {
+            _logger.LogWarning(
+                "Trigger {TriggerId} review returned a missing or out-of-range confidence '{Confidence}'; suppressing.",
+                context.TriggerId,
+                dto.Confidence);
+            return new ReviewOutcome.Suppress(
+                SuppressReason.MalformedOutput, "a suggest must carry a confidence between 0 and 100");
+        }
+
+        // RATIONALE (gh#542) is capped at the parse boundary rather than truncated at the column: a rationale that
+        // overruns the cap is a malformed answer, and silently storing half of the model's reasoning would make the
+        // journal misleading about what it actually argued.
+        string rationale = dto.Rationale ?? string.Empty;
+        if (rationale.Length > MaxRationaleLength)
+        {
+            _logger.LogWarning(
+                "Trigger {TriggerId} review returned a rationale of {Length} characters (max {Max}); suppressing.",
+                context.TriggerId,
+                rationale.Length,
+                MaxRationaleLength);
+            return new ReviewOutcome.Suppress(
+                SuppressReason.MalformedOutput, $"the rationale exceeded {MaxRationaleLength} characters");
+        }
+
+        return new ReviewOutcome.Suggest(side.Value, entry, stop, target, rationale, confidence);
     }
 
     private static OrderSide? DirectionToSide(string? direction) => direction?.Trim().ToLowerInvariant() switch
@@ -466,5 +503,6 @@ public sealed class LlmTriggerReviewer : ITriggerReviewer
         decimal? Stop,
         decimal? Target,
         string? Rationale,
+        int? Confidence,
         string? Reason);
 }

@@ -413,6 +413,16 @@ public class StateRehydrationIntegrationTests : IClassFixture<RehydrationTestPos
                 Mode = TradingMode.Practice,
                 State = state,
                 CreatedAt = DateTimeOffset.UtcNow,
+
+                // Required since gh#542/#543/#544. Mechanical fill-in only — this suite asserts rehydration and
+                // suggestion inertness, neither of which these fields affect. ExpiresAt must clear the
+                // CK_Suggestions_ExpiresAfterCreated CHECK, so it sits strictly after CreatedAt.
+                Rationale = "seeded",
+                CitedIndicator = "rsi",
+                CitedPeriod = 14,
+                CitedResolutionMinutes = 1,
+                Confidence = 50,
+                ExpiresAt = DateTimeOffset.UtcNow.AddHours(1),
             });
             await db.SaveChangesAsync();
         });

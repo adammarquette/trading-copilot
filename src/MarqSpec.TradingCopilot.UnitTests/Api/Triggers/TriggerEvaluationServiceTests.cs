@@ -1,5 +1,6 @@
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -38,6 +39,7 @@ public class TriggerEvaluationServiceTests
     private readonly IReviewEnrichmentSource _enrichment = A.Fake<IReviewEnrichmentSource>();
     private readonly IAiUsageLedger _ledger = A.Fake<IAiUsageLedger>();
     private readonly ILlmMetrics _llmMetrics = A.Fake<ILlmMetrics>();
+    private readonly ISessionDeadlineSource _deadlines = A.Fake<ISessionDeadlineSource>();
     private static DateTimeOffset Now { get; } = DateTimeOffset.UnixEpoch.AddYears(56);
 
     // The cost a real LLM call surfaces (gh#431). Any non-null Cost makes the scan record a usage row; the SPECIFIC
@@ -64,7 +66,7 @@ public class TriggerEvaluationServiceTests
     private TriggerEvaluationService Service(
         IAiUsageLedger? ledger = null, GovernorOptions? governor = null, IReviewEnrichmentSource? enrichment = null) => new(
         Context(), Options, _indicators, _notifications, _reviewer, enrichment ?? _enrichment, ledger ?? _ledger,
-        _llmMetrics, new AiSpendGovernor(),
+        _llmMetrics, _deadlines, Microsoft.Extensions.Options.Options.Create(new SuggestionOptions()), new AiSpendGovernor(),
         Microsoft.Extensions.Options.Options.Create(governor ?? new GovernorOptions()),
         NullLogger<TriggerEvaluationService>.Instance);
 
@@ -416,7 +418,7 @@ public class TriggerEvaluationServiceTests
         Guid id = await AddTriggerAsync(
             route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
 
         await Service().ScanAsync(Now, CancellationToken.None);
 
@@ -449,7 +451,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
 
         await Service().ScanAsync(Now, CancellationToken.None);
         await Service().ScanAsync(Now, CancellationToken.None);
@@ -502,7 +504,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 105m, 110m, "broken"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 105m, 110m, "broken", 72));
 
         await Service().ScanAsync(Now, CancellationToken.None);
 
@@ -520,7 +522,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync(mode: TradingMode.Undeclared);
         Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
 
         await Service().ScanAsync(Now, CancellationToken.None);
 
@@ -536,7 +538,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 2, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
         A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).Returns(false);
 
         await Service().ScanAsync(Now, CancellationToken.None);
@@ -636,7 +638,7 @@ public class TriggerEvaluationServiceTests
         await AddTriggerAsync(
             owner: firingOwner, route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
 
         AiUsageEntry? captured = null;
         A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._))
@@ -685,7 +687,7 @@ public class TriggerEvaluationServiceTests
         AiCallCost deepCost = new(
             AiUsageFeature.Triage, "claude-sonnet-5", LlmModelTier.Deep, AiUsageOutcome.Succeeded,
             900, 300, 0.0072m, TimeSpan.FromMilliseconds(800));
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"), triageCost, deepCost);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72), triageCost, deepCost);
 
         // A REAL ledger so both spend rows are actually persisted (the fake records nothing to count).
         IAiUsageLedger realLedger = new AiUsageLedger(Options, NullLogger<AiUsageLedger>.Instance);
@@ -707,7 +709,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 2, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
 
         IAiUsageLedger failingLedger = new ThrowingWriteLedger(Options);
         int fires = await Service(failingLedger).ScanAsync(Now, CancellationToken.None); // must NOT throw
@@ -731,7 +733,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 2, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
         A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._))
             .Throws(new InvalidOperationException("a ledger that breaks its never-throw contract"));
 
@@ -753,7 +755,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
         using CancellationTokenSource cts = new();
         A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._))
             .Invokes(() => cts.Cancel())
@@ -780,7 +782,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be")); // must never be reached
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be", 72)); // must never be reached
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
@@ -805,7 +807,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
@@ -822,7 +824,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
 
         await Service().ScanAsync(Now, CancellationToken.None); // default GovernorOptions => DailyBudgetUsd null => inert
 
@@ -848,7 +850,7 @@ public class TriggerEvaluationServiceTests
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
         A.CallTo(() => _reviewer.EstimatedDeepCallCostUsd).Returns(2m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
@@ -866,7 +868,7 @@ public class TriggerEvaluationServiceTests
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
         A.CallTo(() => _reviewer.EstimatedDeepCallCostUsd).Returns(2m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
@@ -885,7 +887,7 @@ public class TriggerEvaluationServiceTests
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
         A.CallTo(() => _reviewer.EstimatedDeepCallCostUsd).Returns(999m); // irrelevant with no budget -> still allowed
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
 
         await Service().ScanAsync(Now, CancellationToken.None); // default GovernorOptions => inert
 
@@ -927,7 +929,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
 
         int fires = await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
@@ -943,10 +945,10 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
 
         TriggerEvaluationService service = new ThrowingReadService(
-            Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, _llmMetrics, new AiSpendGovernor(),
+            Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, _llmMetrics, _deadlines, Microsoft.Extensions.Options.Options.Create(new SuggestionOptions()), new AiSpendGovernor(),
             Microsoft.Extensions.Options.Options.Create(new GovernorOptions { DailyBudgetUsd = 10m }),
             NullLogger<TriggerEvaluationService>.Instance);
 
@@ -971,7 +973,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be")); // must never be reached
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be", 72)); // must never be reached
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
@@ -990,7 +992,7 @@ public class TriggerEvaluationServiceTests
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x")); // Cost defaults to _sampleCost
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72)); // Cost defaults to _sampleCost
 
         // A REAL ledger so an authorized fire actually writes its spend row (the fake records nothing to count).
         IAiUsageLedger realLedger = new AiUsageLedger(Options, NullLogger<AiUsageLedger>.Instance);
@@ -1019,7 +1021,7 @@ public class TriggerEvaluationServiceTests
         AiCallCost deepCost = new(
             AiUsageFeature.Triage, "claude-sonnet-5", LlmModelTier.Deep, AiUsageOutcome.Succeeded,
             900, 300, 0.0072m, TimeSpan.FromMilliseconds(800));
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"), triageCost, deepCost);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72), triageCost, deepCost);
 
         // Budget is EXACTLY the two costs' sum, so accruing both (and only both) exhausts it after the first fire.
         decimal budget = triageCost.EstimatedCostUsd + deepCost.EstimatedCostUsd;
@@ -1041,7 +1043,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be")); // must never be reached
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be", 72)); // must never be reached
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
@@ -1061,7 +1063,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m, AlertThresholdFraction = 0.8m })
             .ScanAsync(Now, CancellationToken.None);
@@ -1082,7 +1084,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be", 72));
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
@@ -1160,12 +1162,101 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be")); // must never be reached
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be", 72)); // must never be reached
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustNotHaveHappened();
         A.CallTo(() => _enrichment.BuildAsync(A<TriggerReviewContext>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // =====================================================================================================
+    // ISSUANCE FIELDS: the rationale + cited signal (gh#542), the confidence (gh#543) and the validity window
+    // (gh#544) are stamped at staging. Size, mode and expiry are the SYSTEM's; only the prose and the number
+    // come from the model.
+    // =====================================================================================================
+
+    private async Task<Suggestion> StageAndReadAsync(int confidence = 72, string rationale = "oversold bounce")
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, rationale, confidence));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        return await reload.Suggestions.SingleAsync();
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldPersistTheRationaleAndCopyTheCitedSignal()
+    {
+        Suggestion staged = await StageAndReadAsync(rationale: "reclaimed the band on rising delta");
+
+        staged.Rationale.Should().Be("reclaimed the band on rising delta");
+
+        // COPIED, not joined: indicator/period/resolution live on the mutable, deletable TriggerRecord, so the
+        // citation is snapshotted here to stay readable after the trigger is edited or deleted.
+        staged.CitedIndicator.Should().Be(Indicator);
+        staged.CitedPeriod.Should().Be(Period);
+        staged.CitedResolutionMinutes.Should().Be(Resolution);
+        staged.TriggerFiringId.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldLinkTheSuggestionToTheFiringItCameFrom()
+    {
+        Suggestion staged = await StageAndReadAsync();
+
+        await using TradingCopilotDbContext reload = Context();
+        TriggerFiringRecord firing = await reload.TriggerFirings.SingleAsync();
+        staged.TriggerFiringId.Should().Be(firing.Id);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldPersistTheConfidence()
+    {
+        (await StageAndReadAsync(confidence: 81)).Confidence.Should().Be(81);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldStillStageAndKeepTheOperatorsSize_WhenConfidenceIsZero()
+    {
+        // The display-only invariant, at the issuance boundary: a low number changes NOTHING. The row is still
+        // written, and Size still comes from the operator's trigger rather than being scaled by the model's opinion.
+        Suggestion staged = await StageAndReadAsync(confidence: 0);
+
+        staged.Confidence.Should().Be(0);
+        staged.Size.Should().Be(3, "size is the operator's trigger's, never the model's");
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldStampAValidityWindow_ClampedByTheSessionDeadline()
+    {
+        // The scan's fake deadline source returns null by default, so the configured window stands unclamped and the
+        // expiry is simply CreatedAt + validity. The clamp itself is proven against SuggestionValidity's own suite.
+        Suggestion staged = await StageAndReadAsync();
+
+        staged.ExpiresAt.Should().Be(staged.CreatedAt.Add(new SuggestionOptions().Validity));
+        staged.ExpiresAt.Should().BeAfter(staged.CreatedAt, "the DB CHECK requires it");
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldTellTheOperatorWhenTheSuggestionExpires()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        // The window reaches the operator on the channel that already reaches them, not only in the app.
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n => n.Body.Contains("Valid until") && n.Body.Contains("CT")),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
     }
 
     // =====================================================================================================
@@ -1179,7 +1270,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x")); // one billed triage call (_sampleCost)
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72)); // one billed triage call (_sampleCost)
 
         await Service().ScanAsync(Now, CancellationToken.None);
 
@@ -1200,7 +1291,7 @@ public class TriggerEvaluationServiceTests
         AiCallCost deepCost = new(
             AiUsageFeature.Triage, "claude-sonnet-5", LlmModelTier.Deep, AiUsageOutcome.Succeeded,
             900, 300, 0.0072m, TimeSpan.FromMilliseconds(800));
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"), triageCost, deepCost);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72), triageCost, deepCost);
 
         await Service().ScanAsync(Now, CancellationToken.None);
 
@@ -1215,7 +1306,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x"));
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
 
         // The ledger write faults, but the meter is an INDEPENDENT sink recorded BEFORE the guarded ledger write -- so
         // export-only spend visibility survives a durable-write fault.
@@ -1236,7 +1327,7 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
-        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be")); // never reached
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "would-be", 72)); // never reached
 
         await Service(governor: new GovernorOptions { DailyBudgetUsd = 10m }).ScanAsync(Now, CancellationToken.None);
 
@@ -1260,10 +1351,12 @@ public class TriggerEvaluationServiceTests
             IReviewEnrichmentSource enrichmentSource,
             IAiUsageLedger ledger,
             ILlmMetrics metrics,
+            ISessionDeadlineSource deadlines,
+            IOptions<SuggestionOptions> suggestionOptions,
             IAiSpendGovernor governor,
             IOptions<GovernorOptions> governorOptions,
             ILogger<TriggerEvaluationService> logger)
-            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, governor, governorOptions, logger)
+            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, logger)
         {
         }
 

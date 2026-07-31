@@ -31,6 +31,7 @@ using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Notifications;
+using MarqSpec.TradingCopilot.Domain.Triggers;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.Finnhub;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
@@ -160,15 +161,21 @@ builder.Services.AddOptions<InstrumentSpecOptions>()
         "InstrumentSpecs: every configured instrument needs a symbol and a positive TickSize, PointValue and SafetyStopTicks.")
     .ValidateOnStart();
 builder.Services.AddSingleton<IInstrumentSpecSource, InstrumentSpecSource>();
+// The session-deadline read seam (gh#544): one source of truth for a market's deadline, so the agent-review path
+// can RESPECT it without depending on the flatten machinery that ACTS on it (the gh#402 constructor-graph guard).
+builder.Services.AddSingleton<ISessionDeadlineSource, SessionDeadlineSource>();
 
 // The suggestion read model's limits (gh#540, R-4). A cap rather than an unbounded list: the suggestion table is an
 // append-only journal, so an uncapped page would let one call pull the whole history. Validated on start so a bad
 // configuration fails the host once rather than throwing from Math.Clamp on every read (the SalienceOptions idiom).
-builder.Services.AddOptions<SuggestionReadOptions>()
-    .Bind(builder.Configuration.GetSection(SuggestionReadOptions.SectionName))
+builder.Services.AddOptions<SuggestionOptions>()
+    .Bind(builder.Configuration.GetSection(SuggestionOptions.SectionName))
     .Validate(
-        options => options.MaxPageSize >= 1 && options.DefaultPageSize >= 1 && options.DefaultPageSize <= options.MaxPageSize,
-        "Suggestions: require MaxPageSize >= 1 and DefaultPageSize in [1, MaxPageSize].")
+        options => options.MaxPageSize >= 1 && options.DefaultPageSize >= 1 && options.DefaultPageSize <= options.MaxPageSize
+            // A non-positive validity would emit a suggestion the CK_Suggestions_ExpiresAfterCreated CHECK refuses,
+            // so it is caught once at startup rather than on every fire (gh#544).
+            && options.ValidityMinutes >= 1,
+        "Suggestions: require MaxPageSize >= 1, DefaultPageSize in [1, MaxPageSize], and ValidityMinutes >= 1.")
     .ValidateOnStart();
 
 // Indicator projections over that store (gh#310, R-1, ADR-0001: "indicators are projections… rebuild = replay").

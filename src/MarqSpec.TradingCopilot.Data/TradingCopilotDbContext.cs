@@ -227,11 +227,22 @@ public class TradingCopilotDbContext : TenantDbContext
             // nothing is ever suggested on an undeclared account. Half two (mode must equal the account's
             // persisted mode) is a cross-table rule a single-row CHECK cannot express; it lives in the
             // enforce_mode_matches_account constraint trigger added by the AddExecutionJournal migration.
+            suggestion.Property(s => s.Rationale).HasMaxLength(2000);
+            suggestion.Property(s => s.CitedIndicator).HasMaxLength(32);
+
             suggestion.ToTable(table =>
             {
                 table.HasCheckConstraint("CK_Suggestions_Mode_NotUndeclared", "\"Mode\" <> 0");
                 table.HasCheckConstraint("CK_Suggestions_State_NotUnknown", "\"State\" <> 0");
                 table.HasCheckConstraint("CK_Suggestions_Size_Positive", "\"Size\" > 0");
+
+                // The model's confidence is display-only (gh#543), but an out-of-range number is still a malformed
+                // row -- the reviewer fails closed on one, and this refuses a direct write that bypassed it.
+                table.HasCheckConstraint("CK_Suggestions_Confidence_Range", "\"Confidence\" BETWEEN 0 AND 100");
+
+                // The validity window is the system's (gh#544). Strictly after issuance: a row that expires at or
+                // before the moment it was issued is never actionable, so it is a defect rather than a fast expiry.
+                table.HasCheckConstraint("CK_Suggestions_ExpiresAfterCreated", "\"ExpiresAt\" > \"CreatedAt\"");
             });
         });
 
