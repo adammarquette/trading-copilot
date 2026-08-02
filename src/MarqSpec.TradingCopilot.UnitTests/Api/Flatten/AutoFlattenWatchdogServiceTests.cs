@@ -108,6 +108,13 @@ public class AutoFlattenWatchdogServiceTests
                     Task.FromResult(onClose?.Invoke(c) ?? new PositionSnapshot(a, c, 0, new Price(0m))));
         }
 
+        // The roster the RunPassAsync enumeration matches each DB account against (gh#522). Left unstubbed it
+        // returns FakeItEasy's dummy — an EMPTY roster — and every account then takes the "venue no longer reports
+        // this account" continue BEFORE the ADR-0015 credential comparison is ever the reason it is skipped. That
+        // made the credential-set guard test vacuous: delete the production filter and it still passed. Seed the one
+        // account these tests use so the pass reaches, and the guard actually witnesses, the credential check.
+        A.CallTo(() => venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
+            [new VenueAccount(Account, "PRAC-50K", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Practice)]);
         return venue;
     }
 
@@ -310,9 +317,8 @@ public class AutoFlattenWatchdogServiceTests
         string name = Guid.NewGuid().ToString();
         await SeedAccountAsync(name, op, credentialKey: "topstep-main");
 
+        // The roster now comes from the Venue(...) helper (gh#522), which seeds this same account.
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
-        A.CallTo(() => venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
-            [new VenueAccount(Account, "PRAC-50K", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Practice)]);
         IProjectXVenueFactory factory = A.Fake<IProjectXVenueFactory>();
         A.CallTo(() => factory.Create(A<FirmConventions>._)).Returns(venue);
 
