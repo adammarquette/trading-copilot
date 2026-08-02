@@ -329,6 +329,19 @@ public class SuggestionEndpointsTests
         item.Mode.Should().Be(TradingMode.Practice);
         item.State.Should().Be(SuggestionState.Active);
         item.CreatedAt.Should().Be(_t);
+        item.TimeframeMinutes.Should().Be(1, "the seed cites a 1-minute indicator");
+    }
+
+    [Fact]
+    public async Task GetAsync_ShouldSurfaceTheTimeframe_AsTheCitedResolution()
+    {
+        // gh#592: a suggestion's headline timeframe IS its cited indicator's resolution in the single-signal model
+        // that exists today — a first-class attribute, not indicator provenance, with no duplicate source of truth.
+        Guid id = await SeedAsync();
+
+        SuggestionResponse item = ItemOf(await GetAsync(id));
+
+        item.TimeframeMinutes.Should().Be(item.CitedResolutionMinutes);
     }
 
     // ---- pass: record a neutral operator disposition (gh#547) ----

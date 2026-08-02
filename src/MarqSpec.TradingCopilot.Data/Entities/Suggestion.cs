@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations.Schema;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Venue;
 
@@ -109,4 +110,15 @@ public class Suggestion : IUserOwned
     /// A DB check pins it strictly after <see cref="CreatedAt"/>.
     /// </summary>
     public required DateTimeOffset ExpiresAt { get; set; }
+
+    /// <summary>
+    /// The suggestion's <b>headline timeframe</b> in minutes (R-4, gh#592) — the bar size it is framed on, so a
+    /// reader can tell a scalp from a swing. In the single-cited-signal model that exists today it <b>is</b> the
+    /// cited indicator's resolution (Adam, 2026-08-02), so this is a computed accessor over
+    /// <see cref="CitedResolutionMinutes"/> — <b>never a second stored column</b>, no duplicate source of truth.
+    /// <c>[NotMapped]</c>, so it adds no schema. The "smallest of several aligning timeframes, larger as supporting
+    /// confluence" case needs a multi-signal model that does not exist yet — that is gh#593.
+    /// </summary>
+    [NotMapped]
+    public int TimeframeMinutes => CitedResolutionMinutes;
 }
