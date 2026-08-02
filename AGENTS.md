@@ -91,7 +91,9 @@ and cross-agent heads-ups with no formal home. **Check it before starting work**
 - **Claim work before you start it — `scripts/claim.sh <issue-id>`** (gh#375). Sessions run in parallel and a
   local worktree is invisible to them, so **the pushed branch is the claim**: create it and push it *empty*
   first. Skipping this duplicated roughly a full session's work in one evening. A claim whose branch tip has not
-  moved for **4 hours** is fair game — but say so on the issue before taking it over.
+  moved for **4 hours** is fair game — but say so on the issue before taking it over. **A venue/client-submodule
+  (two-repo) card can hide its claim in the *other* repo** — check the submodule's open PRs and branches, not just
+  its `main`, or in-review work reads as free (gh#571; detail in [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 *This file is a lightweight, evolving scaffold — it deepens as the plan and `src/` do. Keep it small: every line
 here is paid by every agent in every session, so anything role- or subtree-specific belongs in its contract.*
