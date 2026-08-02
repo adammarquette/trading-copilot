@@ -72,4 +72,42 @@ public class ProjectXWorkingOrderMappingTests
 
         ProjectXMapping.ToWorkingOrder(order, Venue).Size.Should().Be(3);
     }
+
+    [Fact]
+    public void ToWorkingOrder_ShouldCarryTheCustomTag_SoAReplayCanMatchItsOwnOrder()
+    {
+        // gh#577 — the correlation handle the placing request stamped, echoed back by the gateway on the
+        // resting-orders read. It is how a replay recognises its OWN already-placed order (a conditional left live by
+        // a transmit→journal fault matches on its firing conditional's id) rather than transmitting a duplicate.
+        ClientModels.Order order = new()
+        {
+            Id = 55_004,
+            AccountId = 9001,
+            ContractId = "CON.F.US.MES.U26",
+            Status = ClientModels.OrderStatus.Open,
+            Type = ClientModels.OrderType.Stop,
+            StopPrice = 5_280m,
+            CustomTag = "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        };
+
+        ProjectXMapping.ToWorkingOrder(order, Venue).CustomTag.Should().Be("3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+    }
+
+    [Fact]
+    public void ToWorkingOrder_ShouldCarryANullCustomTag_ForALegTheVenueSpawned()
+    {
+        // A protective bracket leg the gateway spawned itself carries no client tag — null, so the OCO-exit
+        // "journaled vs unjournaled" distinction (gh#183) stays clean rather than matching an empty string.
+        ClientModels.Order order = new()
+        {
+            Id = 55_005,
+            AccountId = 9001,
+            ContractId = "CON.F.US.MES.U26",
+            Status = ClientModels.OrderStatus.Open,
+            Type = ClientModels.OrderType.Stop,
+            StopPrice = 5_280m,
+        };
+
+        ProjectXMapping.ToWorkingOrder(order, Venue).CustomTag.Should().BeNull();
+    }
 }

@@ -45,6 +45,10 @@ public static class ConditionalOrderMapping
             ConditionalStatus.Expired => order.Expire(),
             ConditionalStatus.Pending => order,
 
+            // Mid-fire (gh#577): a durable pre-transmit intent restored inert — ShouldFire / ShouldCancel are both
+            // false in this state, so rebuilding a Firing record never re-fires it from a stale quote.
+            ConditionalStatus.Firing => order.BeginFiring(),
+
             // Whitelist: an unrecognized status is refused, never silently treated as pending.
             _ => throw new InvalidOperationException(
                 $"Conditional order {record.Id} carries an unrecognized status '{record.Status}'."),

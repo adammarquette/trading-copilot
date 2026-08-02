@@ -26,4 +26,14 @@ public sealed record WorkingOrder(
     VenueContractId Contract,
     Price? StopPrice,
     Price? LimitPrice,
-    int Size);
+    int Size)
+{
+    /// <summary>
+    /// The <b>client-supplied correlation handle</b> the placing request stamped (gh#577), echoed back by the venue
+    /// — the one field admitted to this otherwise-narrow view precisely because it is an <i>identity</i> handle, not
+    /// an execution-decision field: it lets a replay recognise <i>its own</i> already-placed order (a conditional
+    /// left live by a transmit→journal fault matches on its firing conditional's id) rather than transmitting a
+    /// duplicate. <c>null</c> for a leg the venue spawned itself (a protective bracket carries no client tag).
+    /// </summary>
+    public string? CustomTag { get; init; }
+}

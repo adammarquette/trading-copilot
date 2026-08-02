@@ -199,6 +199,9 @@ public sealed class ProjectXVenue : ITradingVenue
             Size = request.Quantity,
             LimitPrice = request.LimitPrice?.Value,
             StopPrice = request.StopPrice?.Value,
+            // The client-supplied correlation handle (gh#577): the gateway echoes it on the order and on the
+            // resting-orders read, so a replay can recognise its own already-placed order. Null unless the source set one.
+            CustomTag = request.CustomTag,
             // The always-native safety stop (ADR-0007, gh#11 inc 3): a stop-loss bracket the gateway holds and
             // attaches on fill, so the position is never unprotected. A stop-type bracket at the safety price.
             StopLossBracket = request.ProtectiveStop is { } protectiveStop
@@ -237,7 +240,12 @@ public sealed class ProjectXVenue : ITradingVenue
         return new PlacedOrder(
             request.Account,
             orderId.ToString(CultureInfo.InvariantCulture),
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow)
+        {
+            // The correlation handle this order carries (gh#577) — the value we sent; the gateway's place-response
+            // does not re-report it, and echoing our own key keeps the acknowledgement self-describing.
+            CustomTag = request.CustomTag,
+        };
     }
 
     /// <inheritdoc />

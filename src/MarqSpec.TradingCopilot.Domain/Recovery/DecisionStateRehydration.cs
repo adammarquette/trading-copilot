@@ -51,6 +51,18 @@ public static class DecisionStateRehydration
 
         foreach (RehydratedConditional conditional in conditionals)
         {
+            // Firing is a durable pre-transmit intent (gh#577) that is transient at runtime -- the firing pass moves
+            // it on to Fired or Pending within one fire. Caught PERSISTING across a restart, its order may be live at
+            // the venue with no journal behind it: an impossible combination to leave at rest. Flag it (fail safe +
+            // loud, reconciled against venue truth by the order's customTag); never re-fired, never silently repaired.
+            if (conditional.Status == ConditionalStatus.Firing)
+            {
+                issues.Add(new DecisionInconsistency(
+                    DecisionInconsistencyKind.ConditionalMidFiring, conditional.Owner, conditional.Id,
+                    "A conditional order is stranded mid-fire (Firing); the venue may hold a live order it never journaled."));
+                continue;
+            }
+
             bool fired = conditional.Status == ConditionalStatus.Fired;
             switch (fired, conditional.FiredOrderId)
             {

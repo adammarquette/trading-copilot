@@ -355,7 +355,12 @@ public static class ProjectXMapping
             // The gateway has always carried this; the projection dropped it (gh#381). Without it, a protective
             // leg sized to LESS than the position it guards is invisible -- and a partially-covered position is
             // not a protected one.
-            order.Size);
+            order.Size)
+        {
+            // The client correlation handle the placing request stamped (gh#577), echoed back by the gateway — how a
+            // replay matches its own already-placed order (a conditional left live by a transmit→journal fault).
+            CustomTag = order.CustomTag,
+        };
     }
 
     /// <summary>Expresses a bar duration as the gateway's unit plus a count.</summary>
