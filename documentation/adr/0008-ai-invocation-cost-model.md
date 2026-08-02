@@ -100,8 +100,9 @@ This index exists because the trail is long. Skim it to find the increment you n
 
 *(Housekeeping, gh#524: the twelve dated updates below were **promoted from bold paragraphs to `##` headings, lifted
 out from under `Follow-ups`, and reordered into date order** — the gh#470 entry was dated 2026-07-29 but sat between
-two 2026-07-30 entries — and this index was added, generated from the headings so it cannot drift. It is the same
-treatment gh#492 gave [ADR-0007](0007-order-execution-model.md). **No entry was removed or reworded** — only the
+two 2026-07-30 entries — and this index was added. The index is maintained by hand, its rows mirroring the
+`## Update` headings, so it must be kept in step when an entry is appended (ADR-0007's index drifted for want of
+that, gh#580). It is the same treatment gh#492 gave [ADR-0007](0007-order-execution-model.md). **No entry was removed or reworded** — only the
 heading level and the order changed; the load-bearing rationale (the governor's fail-open posture, the triage→deep
 escalation policy, the enrichment injection-surface argument) is untouched.)*
 
