@@ -166,9 +166,23 @@ public sealed class ConditionalFiringService
 
             return record.Status != ConditionalStatus.Pending || record.FiredOrderId is not null ? 1 : 0;
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException error) when (cancellationToken.IsCancellationRequested)
         {
-            throw; // a clean host shutdown -- let it stop the pass, not be swallowed as a per-record fault
+            // A clean host shutdown -- let it stop the pass rather than swallow it as a per-record fault. But if the
+            // cancellation landed AFTER the venue accepted the order and before its journal committed, that is the
+            // same dangerous transmit->journal window as below (gh#577), just triggered by shutdown -- surface it
+            // loudly before honoring the stop, because the order may be live at the venue and unrecorded.
+            if (transmitted)
+            {
+                _logger.LogError(
+                    error,
+                    "Conditional order {Id} on {Contract} transmitted an order the venue accepted, but the host shut "
+                    + "down before journaling it. The order may be live at the venue and unrecorded, and the "
+                    + "conditional is still pending (gh#577).",
+                    conditionalId, contractKey);
+            }
+
+            throw;
         }
         catch (Exception error) when (transmitted)
         {
