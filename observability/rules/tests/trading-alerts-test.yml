@@ -77,6 +77,14 @@ tests:
       - eval_time: 12m
         alertname: VenueDisconnectedWithExposure
         exp_alerts: []
+      # The two P2s that shipped without a test (gh#537): a healthy day records no backfill shortfall, and no
+      # time-to-flat histogram is being fed, so neither can fire. Their firing paths are asserted below.
+      - eval_time: 12m
+        alertname: BackfillShortfall
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: TimeToFlatSlow
+        exp_alerts: []
 
   # ---------------------------------------------------------------------------------------------------------
   # P1 conditions actually fire — and only after the direct push has had its chance.
@@ -200,9 +208,13 @@ tests:
               consumer_group: stop-promotion
             exp_annotations:
               summary: "Consumer stop-promotion fell behind the event-log retention window"
+              # Kept in step with the rule: gh#482 rewrote this description when BackfillShortfall landed, but the
+              # test was never updated (promtool does not gate CI — gh#537 note). The two had drifted.
               description: >-
                 Its cursor dropped off the back of the 24h window. gh#306 backfills the blind window from the
-                clean-historical store where it can; check the logs for a reported shortfall.
+                clean-historical store where it can. If any of it could NOT be covered, BackfillShortfall fires
+                alongside this with the contract and the uncovered duration — this alert alone does not mean data
+                was lost.
 
   # ---------------------------------------------------------------------------------------------------------
   # The heartbeat must always fire. Its absence is the alarm, so a broken heartbeat breaks the alarm.
@@ -356,3 +368,94 @@ tests:
             exp_annotations:
               summary: "Auto-flatten deadline approaching with a position still open"
               description: "The flatten will run shortly. Close on your own terms first if you would rather."
+
+  # ---------------------------------------------------------------------------------------------------------
+  # The three rules that shipped without a promtool assertion (gh#537). Two of them — FlattenExecuted and
+  # TimeToFlatSlow — are on the R-13 flatten path, so they are the least appropriate three to have gone untested.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "a normal primary flatten sends its P3 confirmation"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="executed"}'
+        values: "0+0x4 1+0x60"
+    alert_rule_test:
+      # No `for:` — the confirmation lands as soon as an executed flatten is seen. It is a P3 quiet push, not a
+      # page, so it is the one flatten alert that firing on a healthy day is correct.
+      - eval_time: 3m
+        alertname: FlattenExecuted
+        exp_alerts:
+          - exp_labels:
+              priority: P3
+              component: flatten
+              tier: primary
+              outcome: executed
+            exp_annotations:
+              summary: "Auto-flatten completed normally"
+              description: "The primary tier closed exposure at the deadline. Nothing to do."
+
+  - interval: 15s
+    name: "a blind-window shortfall notifies with the contract it could not cover"
+    input_series:
+      # The histogram's _count is the "did it happen" signal; it is emitted ONLY on a shortfall, so any increase
+      # means a real one. The contract label rides through to the summary.
+      - series: 'trading_stops_backfill_shortfall_milliseconds_count{contract="CON.F.US.EP.U26"}'
+        values: "0+0x4 1+0x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BackfillShortfall
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: execution
+              contract: "CON.F.US.EP.U26"
+            exp_annotations:
+              summary: "Blind-window recovery could not cover CON.F.US.EP.U26 — hidden stops may be unprotected"
+              description: >-
+                The clean-historical store had no bars for part of the window the consumer was blind for, so hidden
+                stops on this contract may have crossed their promotion band unobserved and were NOT promoted. The
+                native safety stop is the only floor on them until the next quote re-evaluates. Check open positions
+                on this contract before the session close.
+              runbook: "documentation/deployment-runbook.md#backfill-shortfall"
+
+  - interval: 15s
+    name: "time-to-flat p95 over 60s warns — but only after for: 5m"
+    input_series:
+      # Every flatten lands in the 60-120s band (le=60000 stays flat, the mass accrues in le=120000), so the p95
+      # sits above the 60s threshold the whole time.
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="60000",tier="primary"}'
+        values: "0+0x120"
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="120000",tier="primary"}'
+        values: "0+1x120"
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="+Inf",tier="primary"}'
+        values: "0+1x120"
+    alert_rule_test:
+      # The p95 is over threshold early, but `for: 5m` holds the warning back until it has persisted.
+      - eval_time: 4m
+        alertname: TimeToFlatSlow
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: TimeToFlatSlow
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: flatten
+              tier: primary
+            exp_annotations:
+              summary: "Time-to-flat p95 above 60s on primary"
+              description: >-
+                Flattens are completing, but slowly enough that the margin before the close is being consumed.
+
+  - interval: 15s
+    name: "a fast flatten does not trip the slow-flatten warning"
+    input_series:
+      # Everything completes under 30s, so the p95 is nowhere near the 60s threshold — the healthy-day case.
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="30000",tier="primary"}'
+        values: "0+1x120"
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="60000",tier="primary"}'
+        values: "0+1x120"
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="+Inf",tier="primary"}'
+        values: "0+1x120"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: TimeToFlatSlow
+        exp_alerts: []
