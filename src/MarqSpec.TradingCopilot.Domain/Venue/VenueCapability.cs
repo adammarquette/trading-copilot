@@ -40,4 +40,16 @@ public enum VenueCapability
     /// grants this and little else.
     /// </summary>
     News = 1 << 8,
+
+    /// <summary>
+    /// Streaming <b>last-trade prints</b> for cross-asset <b>context</b> (R-1, gh#496) — SPY ↔ ES, QQQ ↔ NQ.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately <b>not</b> <see cref="Quotes"/>. A context feed publishes the price a trade printed at, with no
+    /// book behind it: Finnhub's free tier carries neither side of the top of book, so a source granting this could
+    /// only satisfy <see cref="Quotes"/> by inventing a zero spread — a fabricated number in the one stream the
+    /// execution watchers act on. Keeping the capability distinct is what lets an executable-price consumer refuse
+    /// a context source at the seam instead of discovering the difference at execution time.
+    /// </remarks>
+    ContextTrades = 1 << 9,
 }
