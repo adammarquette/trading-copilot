@@ -2,6 +2,7 @@ using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Api.Auth;
 using MarqSpec.TradingCopilot.Api.Kill;
 using MarqSpec.TradingCopilot.Api.Recovery;
+using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -60,13 +61,27 @@ public static class StartupTasks
             app.Configuration["Bootstrap:Password"],
             resetPassword: bool.TryParse(app.Configuration["Bootstrap:ResetPassword"], out bool reset) && reset);
 
+        // Recovery expiry (gh#545, ADR-0013): run the SAME expire transition the steady-state sweep runs, BEFORE the
+        // rehydrator counts -- so a suggestion whose validity window passed while the process was down is voided, not
+        // reported as active. The first pass after any restart IS the recovery catch-up; there is no separate
+        // resurrection code (ADR-0013's "expire + re-validate, never auto-resume"). No at-risk state is touched, and
+        // an expired suggestion never trips the consistency fail-safe (a suggestion carries no risk).
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        // ExpireDueAsync is a guarded ExecuteUpdate, which only a RELATIONAL provider runs -- the same IsRelational
+        // split the migrate / create branch above already makes. On a non-relational host (an in-memory test) there
+        // is nothing to sweep, so the recovery count is simply zero; the rehydration below still runs (its reads are
+        // provider-agnostic). This keeps the ExecuteUpdate off any in-memory path structurally, not by assumption.
+        int expiredOnRecovery = database.Database.IsRelational()
+            ? await scope.ServiceProvider.GetRequiredService<ISuggestionExpiry>().ExpireDueAsync(now, CancellationToken.None)
+            : 0;
+
         // Rehydrate the wider decision surface (gh#221): bring it back visibly and INERTLY -- observe what returned
         // (staged orders, pending conditionals, hidden stops, active suggestions) without resuming any of it, and if
         // a crash left an IMPOSSIBLE combination, fail safe to no-new-orders (the kill switch, HaltOnly) and loud,
         // never silently repairing (ADR-0013). Runs after the kill-switch rehydration above, so an operator lock
-        // already in force is seen and preserved rather than overwritten.
+        // already in force is seen and preserved rather than overwritten; the recovery-expire count is carried in.
         await scope.ServiceProvider.GetRequiredService<DecisionStateRehydrator>()
-            .RehydrateAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+            .RehydrateAsync(now, expiredOnRecovery, CancellationToken.None);
     }
 
     /// <summary>

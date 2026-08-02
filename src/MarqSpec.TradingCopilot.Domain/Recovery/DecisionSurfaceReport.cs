@@ -27,4 +27,12 @@ public sealed record DecisionSurfaceReport(
 {
     /// <summary>Whether the surface is coherent — no impossible combination survived the restart.</summary>
     public bool IsConsistent => Inconsistencies.Count == 0;
+
+    /// <summary>
+    /// How many suggestions the <b>recovery expire pass</b> voided just before this snapshot (gh#545) — those whose
+    /// validity window passed while the process was down, so the <see cref="ActiveSuggestions"/> count above is
+    /// truthful rather than reporting a dead suggestion as active. A <b>no-risk maintenance</b> count: it is never an
+    /// inconsistency and cannot trip <see cref="IsConsistent"/> (a suggestion carries no risk, ADR-0013).
+    /// </summary>
+    public int ExpiredOnRecovery { get; init; }
 }

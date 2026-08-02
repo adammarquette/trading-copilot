@@ -58,6 +58,11 @@ namespace MarqSpec.TradingCopilot.Api.Suggestions;
 /// deadline. The client derives the countdown from this and its own clock rather than a server-computed remainder,
 /// which would be stale the instant it was serialized.
 /// </param>
+/// <param name="StateChangedAt">
+/// When <see cref="State"/> last changed (gh#545) — <see langword="null"/> while the suggestion is still in the
+/// <see cref="SuggestionState.Active"/> state it was issued in, so the card can show <i>when</i> a suggestion went
+/// stale or void, not merely that it did.
+/// </param>
 public sealed record SuggestionResponse(
     Guid Id,
     Guid AccountId,
@@ -79,7 +84,8 @@ public sealed record SuggestionResponse(
     int CitedPeriod,
     int CitedResolutionMinutes,
     int Confidence,
-    DateTimeOffset ExpiresAt)
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset? StateChangedAt)
 {
     /// <summary>Projects a persisted suggestion into its API view.</summary>
     /// <param name="suggestion">The persisted row.</param>
@@ -113,7 +119,8 @@ public sealed record SuggestionResponse(
             suggestion.CitedPeriod,
             suggestion.CitedResolutionMinutes,
             suggestion.Confidence,
-            suggestion.ExpiresAt);
+            suggestion.ExpiresAt,
+            suggestion.StateChangedAt);
     }
 
     // The wireframe's dollar risk/reward, computed SERVER-side from the single shipped money-math seam
