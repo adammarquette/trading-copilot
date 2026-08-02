@@ -3,6 +3,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Recovery;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
