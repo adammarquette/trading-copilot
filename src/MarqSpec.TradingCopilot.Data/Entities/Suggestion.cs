@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations.Schema;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
 
 namespace MarqSpec.TradingCopilot.Data.Entities;
