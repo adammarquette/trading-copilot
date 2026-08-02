@@ -86,6 +86,9 @@ public static class SuggestionEndpoints
         int take = Math.Clamp(limit ?? config.DefaultPageSize, 1, config.MaxPageSize);
         SuggestionState wanted = state ?? SuggestionState.Active;
 
+        // Head of the supersede chain, by default (gh#550): a superseded incumbent is voided to ExpiredVoid, so the
+        // Active default already excludes it and surfaces only the actionable head. Superseded rows stay reachable by
+        // id and by an explicit ExpiredVoid filter — the journal keeps the whole chain.
         IQueryable<Suggestion> query = database.Suggestions
             .AsNoTracking()
             .Where(suggestion => suggestion.AccountId == accountId && suggestion.State == wanted);
