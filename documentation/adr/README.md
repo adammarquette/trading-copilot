@@ -1,8 +1,11 @@
 # Architecture Decision Records (ADRs)
 
-Short, numbered, **immutable** records of significant architecture decisions — the *why* behind the design.
-Nygard-style (Context · Decision · Consequences), named `NNNN-slug.md`. Once **Accepted**, an ADR isn't
-rewritten — a later ADR **supersedes** it. Referenced from the
+Short, numbered records of significant architecture decisions — the *why* behind the design. Nygard-style
+(Context · Decision · Consequences), named `NNNN-slug.md`. Once **Accepted**, the **decision** is immutable — it is
+not rewritten or reversed in place; a later ADR **supersedes** it. The *record*, though, is a living trail: it is
+**extended by increment** with dated `## Update` entries under a `## Decision log`, and structural housekeeping that
+**preserves every word** (the gh#492 / gh#524 decision-log treatment — re-heading and re-ordering the trail, never
+touching the reasoning) is allowed. What must never change is the reasoning itself. Referenced from the
 [architecture doc](../trading-platform-architecture.md).
 
 | ADR | Title | Status |
