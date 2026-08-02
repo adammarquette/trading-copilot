@@ -10,6 +10,7 @@ using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -57,7 +58,7 @@ public class ConditionalFiringServiceTests
 
     private TradingCopilotDbContext Context() => new(Options, new FixedUser(_operator));
 
-    private ConditionalFiringService Service() => new(
+    private ConditionalFiringService Service(ILogger<ConditionalFiringService>? logger = null) => new(
         Context(),
         Options,
         _factory,
@@ -65,7 +66,7 @@ public class ConditionalFiringServiceTests
         Microsoft.Extensions.Options.Options.Create(new ExecutionOptions()),
         new HostTradingEnvironment(DeploymentEnvironment.Development),
         A.Fake<IKillSwitch>(),
-        NullLogger<ConditionalFiringService>.Instance);
+        logger ?? NullLogger<ConditionalFiringService>.Instance);
 
     private async Task<Guid> SeedAccountAsync()
     {
@@ -420,6 +421,44 @@ public class ConditionalFiringServiceTests
         await using TradingCopilotDbContext reload = Context();
         (await reload.ConditionalOrders.SingleAsync(c => c.Id == conditionalId)).Status.Should().Be(ConditionalStatus.Firing);
         (await reload.Orders.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ProcessQuote_ShouldSurfaceLoudly_WhenAShutdownInterruptsTheSendBeforeTheFireIsJournaled()
+    {
+        // gh#577 review: the most dangerous window — a host shutdown landing WHILE the send is in flight, before the
+        // venue's accept is observed — must not be silent. Unlike the accepted-then-journal-failed case, the send here
+        // throws before returning Placed, so the old `transmitted` flag was never set and the operator got NO signal
+        // until the next full restart. The loud log is now keyed off the durable Firing intent (committed before the
+        // send), so this window is surfaced: the record is left Firing AND a LogError is emitted.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await AddConditionalAsync(accountId); // RisesTo 5310
+
+        using CancellationTokenSource cancelDuringSend = new();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes(() => cancelDuringSend.Cancel())                                // the shutdown lands mid-send…
+            .Throws(() => new OperationCanceledException(cancelDuringSend.Token));    // …and the send is interrupted, outcome unknown
+
+        ILogger<ConditionalFiringService> logger = A.Fake<ILogger<ConditionalFiringService>>();
+        try
+        {
+            await Service(logger).ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, cancelDuringSend.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // The interruption propagates to stop the pass (as at host shutdown); the loud log fires before it does.
+        }
+
+        // Left Firing so it can never blind-re-fire, and nothing journaled (the send never reached the accept)…
+        await using TradingCopilotDbContext afterFault = Context();
+        (await afterFault.ConditionalOrders.SingleAsync(c => c.Id == conditionalId)).Status.Should().Be(
+            ConditionalStatus.Firing, "a send interrupted after the intent committed is left mid-firing, never back at Pending");
+        (await afterFault.Orders.AnyAsync()).Should().BeFalse();
+
+        // …and, the point of this fix: the operator got a loud signal, not silence, even though `transmitted` was never set.
+        A.CallTo(logger)
+            .Where(call => call.Method.Name == "Log" && call.GetArgument<LogLevel>(0) == LogLevel.Error)
+            .MustHaveHappened();
     }
 
     [Fact]
