@@ -28,6 +28,7 @@ public class OrderEndpointsTests
     private readonly string _database = Guid.NewGuid().ToString();
     private readonly IProjectXVenueFactory _factory = A.Fake<IProjectXVenueFactory>();
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
+    private readonly IAccountEntryGuard _entryGuard = A.Fake<IAccountEntryGuard>();
     private readonly VenueAccountId _venueAccount = VenueAccountId.Create(VenueId.Parse("projectx"), "9001");
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
@@ -53,6 +54,12 @@ public class OrderEndpointsTests
                 new ResolvedContract(VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26"), instrument)));
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
             .Returns(new PlacedOrder(_venueAccount, "889001", DateTimeOffset.UnixEpoch));
+
+        // The account-entry guard (gh#531) just runs the callback here: the in-memory provider is single-threaded
+        // and cannot run the real advisory lock (that is why it is a seam). The deterministic no-stacking check
+        // INSIDE the callback is what the unit tier proves; the real serialization is proven on Postgres by QA.
+        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .ReturnsLazily((Guid _, Func<Task<IResult>> transmit, CancellationToken _) => transmit());
     }
 
     private TradingCopilotDbContext Context(Guid? asUser = null)
@@ -163,7 +170,29 @@ public class OrderEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
         return await OrderEndpoints.SendOrderAsync(
-            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(configuredKey), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
+            accountId, request, new FixedUser(_operator), context, _factory, PxOptions(configuredKey), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, _entryGuard, CancellationToken.None);
+    }
+
+    /// <summary>Seeds one existing order on the account in the given lifecycle status (gh#531 no-stacking fixtures).</summary>
+    private async Task<Guid> SeedOutstandingOrderAsync(Guid accountId, OrderStatus status)
+    {
+        Guid orderId = Guid.NewGuid();
+        await using TradingCopilotDbContext context = Context();
+        context.Orders.Add(new Order
+        {
+            Id = orderId,
+            UserId = _operator,
+            AccountId = accountId,
+            Instrument = "CON.F.US.MES.U26",
+            Side = OrderSide.Buy,
+            Size = 1,
+            Type = OrderType.Market,
+            Status = status,
+            Mode = TradingMode.Practice,
+            PlacedAt = DateTimeOffset.UnixEpoch,
+        });
+        await context.SaveChangesAsync();
+        return orderId;
     }
 
     [Fact]
@@ -252,6 +281,126 @@ public class OrderEndpointsTests
         // day. Flat is the only state where UnrealizedPnL = 0 is a fact rather than a guess.
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // --- No stacking a new entry on an outstanding one (gh#531): the deterministic half of the direct-send race fix.
+    //     Two concurrent sends each compose a FLAT snapshot (ComposeAsync reserves nothing for a working order), both
+    //     pass the gate, both transmit -> up to 2x approved risk. The check below refuses a send when the account is
+    //     already committed to an entry; the per-account guard holds it + the place under one lock. ---
+
+    [Fact]
+    public async Task SendOrder_ShouldRefuse_WhenTheAccountHasAnOutstandingWorkingOrder()
+    {
+        // ComposeAsync sizes off a flat account and reserves nothing for a working order (it moves neither positions
+        // nor balance until it fills). A second send would therefore size against the same flat snapshot and add a
+        // second entry -- so an outstanding working entry means the account is no longer clearly flat, and a new send
+        // is refused (409) before the venue is touched, with no new order row journaled.
+        Guid accountId = await SeedAsync();
+        await SeedOutstandingOrderAsync(accountId, OrderStatus.Working);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.CountAsync()).Should().Be(1); // no NEW row -- only the outstanding order remains
+    }
+
+    [Fact]
+    public async Task SendOrder_ShouldRefuse_WhenTheAccountHasAPartiallyFilledOrder()
+    {
+        // A partial fill is live exposure PLUS a still-working remainder -- doubly non-flat, so the same refusal.
+        Guid accountId = await SeedAsync();
+        await SeedOutstandingOrderAsync(accountId, OrderStatus.PartiallyFilled);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task SendOrder_ShouldNotBeBlockedByATakingRow_BecauseSendVsTakeIsGh589()
+    {
+        // gh#531 is send-vs-send ONLY, and Taking is DELIBERATELY excluded from the no-stacking set: the take path
+        // does not take this guard (so counting Taking would not close send-vs-take anyway), and a take stranded in
+        // Taking -- a venue timeout or a client disconnect mid-take, with no in-app recovery today -- would otherwise
+        // dead-lock the WHOLE account's send path (a gh#531 adversarial-review finding). So a Taking row does NOT
+        // block a direct send here. Serializing send-vs-take and recovering a stranded Taking are gh#589; this test
+        // pins the scope so that re-including Taking is a deliberate, test-breaking change.
+        Guid accountId = await SeedAsync();
+        await SeedOutstandingOrderAsync(accountId, OrderStatus.Taking);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task SendOrder_ShouldPlace_WhenAStagedOrderExists()
+    {
+        // A Staged ticket is server-side only -- unsent, no venue exposure -- so it never makes the account non-flat
+        // and never blocks a direct send (the gh#531 carve-out). Single-send behaviour is unchanged.
+        Guid accountId = await SeedAsync();
+        await SeedOutstandingOrderAsync(accountId, OrderStatus.Staged);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task SendOrder_ShouldDoNothing_WhenTheGuardDoesNotRunTheCallback()
+    {
+        // The whole correctness of gh#531 rests on the transmit tail -- the no-stacking check AND the place -- living
+        // INSIDE the guard's callback, so that under the real advisory lock the check runs while the lock is held.
+        // This pins that: a guard that declines to run the callback produces NO venue place and NO order row. A
+        // refactor that moved the check or the place OUTSIDE RunExclusiveAsync (reopening the TOCTOU race) fails here.
+        Guid accountId = await SeedAsync();
+        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .Returns(Results.Conflict(new { error = "guard declined" }));
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task SendOrder_ShouldPlace_WhenAPriorOrderIsTerminal()
+    {
+        // The check counts only OUTSTANDING entries. A Filled order is already realized into the venue balance
+        // ComposeAsync reads, and a Cancelled/Rejected one never rests as exposure -- none is risk a new send must
+        // reserve around. Staged is unsent and server-side only. So a send whose only prior order is terminal
+        // proceeds exactly as a first send does: single-request behaviour is unchanged.
+        Guid accountId = await SeedAsync();
+        await SeedOutstandingOrderAsync(accountId, OrderStatus.Filled);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.CountAsync()).Should().Be(2); // the terminal one plus the newly placed entry
+    }
+
+    [Fact]
+    public async Task SendOrder_ShouldRunUnderTheAccountEntryGuard()
+    {
+        // The per-account lock (gh#531) that serializes the no-stacking check + the place must actually wrap the
+        // transmit tail, so two racers cannot both pass the check before either journals. Here we assert the send
+        // runs through the guard for THIS account; the real advisory-lock serialization is proven on Postgres by QA.
+        Guid accountId = await SeedAsync();
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _entryGuard.RunExclusiveAsync(accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
     }
 
     [Fact]
@@ -445,7 +594,7 @@ public class OrderEndpointsTests
         await using TradingCopilotDbContext context = Context();
         return await OrderEndpoints.SendAsIsOrderAsync(
             accountId, request, new FixedUser(_operator), context, _factory, PxOptions(configuredKey), ExecOptions(),
-            Development, killSwitch ?? A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
+            Development, killSwitch ?? A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, _entryGuard, CancellationToken.None);
     }
 
     [Fact]
@@ -536,6 +685,22 @@ public class OrderEndpointsTests
 
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict); // an open position makes the risk state a guess
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task SendAsIs_ShouldRefuse_WhenTheAccountHasAnOutstandingWorkingOrder()
+    {
+        // The send-as-is fast path shares TransmitAsync, so it inherits the same no-stacking refusal (gh#531): an
+        // outstanding working entry blocks a second send on this path just as it does on the manual send path.
+        Guid accountId = await SeedAsync();
+        await SeedOutstandingOrderAsync(accountId, OrderStatus.Working);
+
+        IResult result = await SendAsIsAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.CountAsync()).Should().Be(1); // no NEW row -- only the outstanding order remains
     }
 
     [Fact]

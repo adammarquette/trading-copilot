@@ -151,6 +151,10 @@ lists whose items have since landed, which now say so and name the update that c
 | 2026-07-27 | the ATR band is live, and the caller resolves it (gh#311) |
 | 2026-07-28 | resting orders are readable through the app (gh#381) |
 | 2026-07-28 | the consistency target binds, and its posture is per-account (gh#380) |
+| 2026-07-30 | the take path is claimed before it reaches the venue (gh#530) |
+| 2026-07-30 | the kill switch survives a venue that says no (gh#529) |
+| 2026-08-02 | conditional firing commits per record (gh#532) |
+| 2026-08-02 | the direct-send path serializes per account against send-vs-send stacking (gh#531) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 
@@ -889,3 +893,67 @@ a shape the firing suite's per-test-instrument isolation excludes today — is *
 composes without `IExecutionMetrics`, so the fire-time gate decisions and order-acks land in `NullExecutionMetrics`
 and the SLIs do not yet witness a firing-path anomaly — a known observability gap, noted rather than smuggled into a
 safety fix.
+## Update (2026-08-02) — the direct-send path serializes per account against send-vs-send stacking (gh#531)
+
+The gh#530 note above left this open: two concurrent **sends** (`POST /accounts/{id}/orders` and its `send-as-is`
+twin) do not orphan anything — each mints its own `Order` row — but both evaluate the R-5 gate against **one flat-account
+snapshot** and both transmit, admitting up to **2× the approved risk**. `ComposeAsync` sizes off `venueAccount.Balance`
+with `UnrealizedPnL = 0` and reserves **nothing** for an outstanding working order (a resting entry changes neither the
+venue's positions nor its balance until it fills), so the second request re-reads the same headroom the first did. A
+gate that can be raced admits more than the operator authorised — the one thing the enforcing layer must never do
+(R-5 / R-11 / R-16, and the "enforcement below the model" frame above).
+
+**Serialization alone is not enough — the second send must also *see* the first's order.** The fix is two parts, and
+needs both:
+
+- **A no-stacking precondition.** Before it transmits, a send refuses (409) when the account already holds an
+  outstanding **entry** with real venue exposure — an `Order` in `Working` or `PartiallyFilled`. This is the honest
+  extension of the increment-1 flat-account rule: a resting entry *will* fill, and the flat-account gate cannot size
+  against exposure it is assuming away. It does **not** count `Staged` (server-side only, unsent), terminal orders
+  (`Filled` is already in the balance `ComposeAsync` reads; `Cancelled` / `Rejected` never rested), or **`Taking`** — a
+  take in flight. **Taking is deliberately excluded:** gh#531 is send-vs-**send** only (the take path does not take this
+  guard, so counting `Taking` would not close send-vs-take anyway), and a take that **strands** in `Taking` — a venue
+  timeout or a client disconnect mid-take, for which there is no in-app recovery today — would otherwise dead-lock the
+  *whole account's* send path, not just that ticket (a defect this increment must not introduce; the adversarial review
+  caught it). So single-send behaviour on a genuinely clear account is unchanged.
+- **A per-account lock.** The check and the place are made atomic per account by a Postgres **session advisory lock**,
+  held on a pinned connection across the whole transmit behind a new `IAccountEntryGuard` seam
+  (`RunExclusiveAsync(accountId, transmit)`). A second concurrent send for the same account blocks until the first
+  commits its `Working` row, then the check (which runs *inside* the lock) sees it and refuses — **without ever
+  reaching the venue**. Different accounts hash (`hashtext`) to different keys and never block each other.
+
+**Not the gh#530 per-order claim, and not a concurrency token.** The take race contends two requests over **one shared
+staged row**, which a conditional `Status` CAS arbitrates; a direct send creates a **distinct new row** each time, so
+there is no shared row to CAS — the contention is on the *account*, hence a per-account lock. The table-wide
+concurrency token this ADR rejected twice (symmetric across every writer) is still the wrong tool for the same reason;
+the advisory lock touches only the send path. A **session** lock (not `pg_advisory_xact_lock`) opens no enclosing
+transaction, so the journal keeps its single-`SaveChanges` auto-commit, and a dropped connection auto-releases the lock.
+
+**Two costs of holding the lock across the venue call, both accepted for a single-operator tool.** The lock is a
+*session* lock, which requires the connection stay **pinned** for the callback — including across the venue
+round-trip. (1) **Liveness:** `pg_advisory_lock` blocks with no timeout, so a slow/hanging venue holds the connection
+and the lock for the whole round-trip (bounded by the ProjectX client's HTTP timeout), and a concurrent *same-account*
+send waits that long; different accounts are unaffected and one operator bounds the blast radius. (2) **An enlarged
+place-then-journal window:** pre-fix, the journaling `SaveChanges` drew a fresh, pool-validated connection *after* the
+venue call; now the pinned connection sits idle across that call, so a mid-call backend drop (an idle-timeout, a
+PgBouncer/managed-PG cap, a NAT reset — Npgsql keepalives are off by default) would fail the journaling write and leave
+a placed order un-journaled. This is the pre-existing place-then-journal orphan window at **higher probability**, not a
+new failure class; it is low on a default self-hosted Postgres (`idle_session_timeout = 0`), the operator sees the
+error (a 500, not a silent loss), and the account-event stream is the venue-truth reconciler — though note it currently
+**logs-and-ignores** an order with no journal row rather than recovering it, so the durable mitigations are enabling
+Npgsql keepalives and QA asserting exactly-one-journaled under an induced mid-callback connection drop. *(An earlier
+draft of this note wrongly claimed "no new orphan window"; the adversarial review corrected it.)*
+
+**Behind a seam for the same reason gh#530 is** (`IStagedOrderClaim`): the EF in-memory provider runs no advisory lock
+or raw SQL, so the unit tier fakes the guard and drives the deterministic no-stacking check (a unit test also pins that
+the check + place run *inside* the callback), and the *real* serialization is proven where it can be — the
+container-backed Postgres tier (QA). Enforcement stays below the model: this is a DB lock + a status predicate, never
+prompt text.
+
+**Scope — send-vs-send only.** This closes two concurrent *sends*. The sibling account-level race the same flat
+snapshot allows across the *other* transmit paths — two **takes** of different staged orders, a send racing a **take**,
+or a send racing a **conditional fire** (`ConditionalFiringService` places via `SendAsync` with no guard) — is real but
+out of this increment's blast radius (it touches the just-stabilised take path), as is recovering a stranded `Taking`
+row. All are filed as **gh#589**, which reuses this `IAccountEntryGuard` seam (with a self-excluding check, so `Taking`
+can safely re-enter the counted set once the dead-lock hazard is removed). OCO-exit is *not* affected: it places exits
+after a fill, when the account is non-flat, so `ComposeAsync`'s flat check already refuses a racing send.

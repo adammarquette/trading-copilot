@@ -69,6 +69,7 @@ public static class OrderEndpoints
         HostTradingEnvironment environment,
         IKillSwitch killSwitch,
         IExecutionMetrics metrics,
+        IAccountEntryGuard entryGuard,
         CancellationToken cancellationToken)
     {
         (Composition? composed, IResult? refusal) = await ComposeAsync(
@@ -80,7 +81,7 @@ public static class OrderEndpoints
 
         // A manual ticket the operator authored and sent directly (R-11) — one action, the full gate.
         return await TransmitAsync(
-            composed, request, OrderEntryMethod.Manual, currentUser, database, executionOptions, cancellationToken);
+            composed, request, OrderEntryMethod.Manual, currentUser, database, executionOptions, entryGuard, cancellationToken);
     }
 
     internal static async Task<IResult> SendAsIsOrderAsync(
@@ -94,6 +95,7 @@ public static class OrderEndpoints
         HostTradingEnvironment environment,
         IKillSwitch killSwitch,
         IExecutionMetrics metrics,
+        IAccountEntryGuard entryGuard,
         CancellationToken cancellationToken)
     {
         // The opt-in fast path (R-11, gh#181): the Approve split-button's "Send as-is" — an operator who has
@@ -109,7 +111,7 @@ public static class OrderEndpoints
         }
 
         return await TransmitAsync(
-            composed, request, OrderEntryMethod.SendAsIs, currentUser, database, executionOptions, cancellationToken);
+            composed, request, OrderEntryMethod.SendAsIs, currentUser, database, executionOptions, entryGuard, cancellationToken);
     }
 
     /// <summary>
@@ -126,34 +128,69 @@ public static class OrderEndpoints
         ICurrentUser currentUser,
         TradingCopilotDbContext database,
         IOptions<ExecutionOptions> executionOptions,
+        IAccountEntryGuard entryGuard,
         CancellationToken cancellationToken)
     {
-        (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
-            composed, request.Symbol, request.TickSize, request.PointValue, request.Side, request.Quantity,
-            request.Entry, request.Stop, request.SafetyStop, request.ReferencePrice, request.Target, request.Type, cancellationToken);
-        if (executionRequest is null)
+        // Serialize entry-transmits per account (gh#531). Two concurrent direct sends each compose a fresh
+        // flat-account snapshot — ComposeAsync reserves nothing for an outstanding working order — so both pass the
+        // gate at full size and both transmit, up to twice the approved risk. The guard holds a per-account lock
+        // across the whole tail below, so the no-stacking check and the place cannot interleave between two racers.
+        // The check runs INSIDE this callback deliberately: under the real guard it is therefore inside the lock.
+        return await entryGuard.RunExclusiveAsync(composed.Account.Id, async () =>
         {
-            return proposalRefusal!;
-        }
+            // The no-stacking rule (gh#531). Together with the per-account lock above, this stops two concurrent
+            // sends from each sizing against the same flat snapshot and both transmitting: the first to reach the
+            // venue journals a Working entry, and the second -- serialized behind it by the guard -- sees that entry
+            // here and refuses. ComposeAsync sizes AS IF flat (it reserves nothing for a working order, which moves
+            // neither positions nor balance until it fills), so an outstanding entry means the account is no longer
+            // honestly flat. Counts only entries carrying real venue exposure -- Working and PartiallyFilled. It does
+            // NOT count:
+            //   * Staged (server-side only, unsent -- no exposure), so a staged ticket never blocks a direct send;
+            //   * terminal (Filled is already in the balance ComposeAsync reads; Cancelled/Rejected never rested), so
+            //     a send after a fully-resolved prior order behaves exactly as a first send;
+            //   * Taking (a take in flight). Taking is DELIBERATELY excluded. gh#531 is send-vs-send only; the take
+            //     path does not take this guard, so counting Taking would not close send-vs-take anyway -- but it
+            //     WOULD dead-lock the whole account's send path if a take stranded in Taking (a venue timeout or a
+            //     client disconnect mid-take, for which there is no in-app recovery today), refusing every send, not
+            //     just that ticket (a gh#531 adversarial-review finding). Serializing send-vs-take / -vs-conditional
+            //     and recovering a stranded Taking are gh#589.
+            bool hasOutstandingEntry = await database.Orders.AnyAsync(
+                candidate => candidate.AccountId == composed.Account.Id
+                    && (candidate.Status == OrderStatus.Working
+                        || candidate.Status == OrderStatus.PartiallyFilled),
+                cancellationToken);
+            if (hasOutstandingEntry)
+            {
+                return Results.Conflict(new { error = "This account already has an outstanding order (a resting or partially-filled entry). A new send requires a clear account: the flat-account gate would size the new order as if that exposure were not there (gh#531)." });
+            }
 
-        ExecutionResult result = await composed.Execution.SendAsync(executionRequest, cancellationToken);
+            (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
+                composed, request.Symbol, request.TickSize, request.PointValue, request.Side, request.Quantity,
+                request.Entry, request.Stop, request.SafetyStop, request.ReferencePrice, request.Target, request.Type, cancellationToken);
+            if (executionRequest is null)
+            {
+                return proposalRefusal!;
+            }
 
-        Order? journaled = null;
-        if (result.Outcome == ExecutionOutcome.Placed && result.Order is not null)
-        {
-            journaled = NewOrderRow(
-                currentUser, composed.Account, request, executionRequest.Contract.Contract.Key,
-                OrderStatus.Working, result.Decision?.ApprovedQuantity ?? request.Quantity, entryMethod);
-            journaled.VenueOrderKey = result.Order.VenueOrderId;
-            journaled.PlacedAt = result.Order.AcceptedAt;
-            database.Orders.Add(journaled);
-            AddStopPlan(database, currentUser, journaled, executionOptions.Value.StopPromotionTicks);
-        }
+            ExecutionResult result = await composed.Execution.SendAsync(executionRequest, cancellationToken);
 
-        PersistDecision(database, currentUser, composed.Account.Id, journaled?.Id, result.Decision);
-        await database.SaveChangesAsync(cancellationToken);
+            Order? journaled = null;
+            if (result.Outcome == ExecutionOutcome.Placed && result.Order is not null)
+            {
+                journaled = NewOrderRow(
+                    currentUser, composed.Account, request, executionRequest.Contract.Contract.Key,
+                    OrderStatus.Working, result.Decision?.ApprovedQuantity ?? request.Quantity, entryMethod);
+                journaled.VenueOrderKey = result.Order.VenueOrderId;
+                journaled.PlacedAt = result.Order.AcceptedAt;
+                database.Orders.Add(journaled);
+                AddStopPlan(database, currentUser, journaled, executionOptions.Value.StopPromotionTicks);
+            }
 
-        return MapSendResult(result, journaled?.Id);
+            PersistDecision(database, currentUser, composed.Account.Id, journaled?.Id, result.Decision);
+            await database.SaveChangesAsync(cancellationToken);
+
+            return MapSendResult(result, journaled?.Id);
+        }, cancellationToken);
     }
 
     internal static async Task<IResult> ArmOrderAsync(
