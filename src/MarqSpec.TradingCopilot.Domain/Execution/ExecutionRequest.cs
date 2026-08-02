@@ -28,4 +28,13 @@ public sealed record ExecutionRequest(
     ResolvedContract Contract,
     VenueAccount Account,
     RiskContext Risk,
-    OrderType Type = OrderType.Market);
+    OrderType Type = OrderType.Market)
+{
+    /// <summary>
+    /// An optional <b>client-supplied correlation handle</b> (gh#577) carried through to the venue's
+    /// <see cref="Venue.OrderRequest.CustomTag"/> — a stable per-source key the venue echoes back, so a replay can
+    /// recognise its own already-placed order. The conditional-firing path sets the firing conditional's id;
+    /// operator paths leave it <c>null</c> (a human is in the loop).
+    /// </summary>
+    public string? CorrelationTag { get; init; }
+}

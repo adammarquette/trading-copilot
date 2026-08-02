@@ -160,6 +160,18 @@ public sealed record ConditionalOrder
         return Transition(ConditionalStatus.Expired);
     }
 
+    /// <summary>
+    /// Marks the order <b>mid-fire</b> — the durable pre-transmit intent (gh#577), recorded before the venue is
+    /// touched. One-way from pending; a no-op once resolved. <see cref="ShouldFire"/> and <see cref="ShouldCancel"/>
+    /// are both false in this state, so a mid-fire order is inert to the firing pass — it can only be moved on by the
+    /// firing service that owns the transmit→journal handoff, never re-decided from a quote.
+    /// </summary>
+    /// <returns>The order in its firing state.</returns>
+    public ConditionalOrder BeginFiring()
+    {
+        return Transition(ConditionalStatus.Firing);
+    }
+
     private ConditionalOrder Transition(ConditionalStatus to)
     {
         // One-way from Pending: a resolved order never silently changes state, and re-applying a transition is a

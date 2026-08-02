@@ -148,6 +148,24 @@ public class DecisionStateRehydrationTests
     }
 
     [Fact]
+    public void Analyze_ShouldFlagConditionalMidFiring_WhenAFiringConditionalSurvivesARestart()
+    {
+        // gh#577 — a durable pre-transmit intent caught mid-flight by a crash. Firing is transient at runtime (the
+        // firing pass moves it on within one fire); found PERSISTING at rest, its order may be live at the venue with
+        // no journal behind it — an impossible combination the rehydration must fail safe + loud on, never re-fire.
+        Guid conditional = Guid.NewGuid();
+
+        DecisionSurfaceReport report = Analyze(
+            conditionals: [Conditional(conditional, _owner, ConditionalStatus.Firing)]);
+
+        DecisionInconsistency issue = report.Inconsistencies.Should().ContainSingle().Which;
+        issue.Kind.Should().Be(DecisionInconsistencyKind.ConditionalMidFiring);
+        issue.Owner.Should().Be(_owner);
+        issue.EntityId.Should().Be(conditional);
+        report.IsConsistent.Should().BeFalse();
+    }
+
+    [Fact]
     public void Analyze_ShouldFlagStopPlanWithoutOrder_WhenTheParentOrderIsAbsent()
     {
         Guid plan = Guid.NewGuid();

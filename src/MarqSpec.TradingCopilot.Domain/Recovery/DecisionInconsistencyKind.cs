@@ -31,4 +31,14 @@ public enum DecisionInconsistencyKind
 
     /// <summary>A stop plan's owner differs from its order's owner — ownership drifted across the two rows (R-20).</summary>
     StopPlanOwnerMismatch = 7,
+
+    /// <summary>
+    /// A <see cref="Execution.ConditionalStatus.Firing"/> conditional persists at rest — a durable pre-transmit
+    /// intent (gh#577) that a crash caught mid-flight. Firing is transient: the firing pass moves it on to
+    /// <see cref="Execution.ConditionalStatus.Fired"/> or back to <see cref="Execution.ConditionalStatus.Pending"/>
+    /// within one fire. Found surviving a restart, its order <b>may be live at the venue</b> while the journal never
+    /// recorded it — reconcile against venue truth (by the order's <c>customTag</c>) before any resumption; never
+    /// silently repaired.
+    /// </summary>
+    ConditionalMidFiring = 8,
 }

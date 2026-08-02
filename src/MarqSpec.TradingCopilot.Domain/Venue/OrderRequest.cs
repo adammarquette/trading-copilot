@@ -37,4 +37,14 @@ public sealed record OrderRequest(
     /// <c>null</c> where the entry rests with its protective stop alone — the two-leg bracket.
     /// </summary>
     public Price? ProfitTarget { get; init; }
+
+    /// <summary>
+    /// An optional <b>client-supplied correlation handle</b> (gh#577) the venue echoes back on the placed order and
+    /// on the resting-orders read — a stable per-source key that lets a replay recognise <i>its own</i> already-placed
+    /// order rather than transmitting a duplicate. The conditional-firing path stamps the firing conditional's id, so
+    /// an order left live by a transmit→journal fault can be matched to the conditional that placed it. <c>null</c>
+    /// where the source carries no correlation key (a manual send has the operator in the loop). It is a
+    /// <i>correlation</i> handle, not a venue idempotency key — the venue does not dedup on it.
+    /// </summary>
+    public string? CustomTag { get; init; }
 }

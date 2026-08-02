@@ -7,4 +7,12 @@ namespace MarqSpec.TradingCopilot.Domain.Venue;
 public sealed record PlacedOrder(
     VenueAccountId Account,
     string VenueOrderId,
-    DateTimeOffset AcceptedAt);
+    DateTimeOffset AcceptedAt)
+{
+    /// <summary>
+    /// The <b>client-supplied correlation handle</b> (gh#577) this order carries, if the request set one — the same
+    /// key the venue echoes on the resting-orders read, so a caller can tie the acknowledgement back to the source
+    /// that placed it. <c>null</c> when the request carried no tag.
+    /// </summary>
+    public string? CustomTag { get; init; }
+}

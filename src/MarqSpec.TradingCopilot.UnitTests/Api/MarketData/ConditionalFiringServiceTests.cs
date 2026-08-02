@@ -352,4 +352,90 @@ public class ConditionalFiringServiceTests
         (await reload.ConditionalOrders.CountAsync(c => c.Status == ConditionalStatus.Pending)).Should().Be(
             1, "only the conditional whose transmit threw is left pending");
     }
+
+    [Fact]
+    public async Task ProcessQuote_ShouldTagTheVenueOrderWithTheConditionalId_SoAReplayCanRecogniseItsOwnOrder()
+    {
+        // gh#577 — the correlation handle. A fired conditional stamps its own id as the venue order's customTag, so an
+        // order the venue accepted but a transmit→journal fault never journaled can be matched back to the conditional
+        // that placed it, rather than transmitting a blind duplicate. (Manual paths carry no tag — a human is in the loop.)
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await AddConditionalAsync(accountId); // RisesTo 5310
+
+        OrderRequest? sent = null;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes((OrderRequest order, CancellationToken _) => sent = order)
+            .Returns(new PlacedOrder(_venueAccount, "889001", DateTimeOffset.UnixEpoch));
+
+        await Service().ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, CancellationToken.None);
+
+        sent.Should().NotBeNull();
+        sent!.CustomTag.Should().Be(
+            conditionalId.ToString(), "the venue order carries the firing conditional's id as its correlation handle (gh#577)");
+    }
+
+    [Fact]
+    public async Task ProcessQuote_ShouldNotRefire_WhenAnEarlierFireWasAcceptedButItsJournalDidNotCommit()
+    {
+        // gh#577 — the P1 residual #532 left open. A fired conditional transmits the entry (the venue ACCEPTS it) and
+        // then journals its order + stop plan on a commit that here FAILS (a DB fault / a shutdown cancellation landing
+        // between the accept and the commit). Before this fix the conditional was left Pending with a live venue order
+        // on no Order row, so the next crossing quote re-fired it — a duplicate live order. The durable pre-transmit
+        // intent leaves it Firing instead, and discovery is Pending-only, so it can never blind-re-fire.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await AddConditionalAsync(accountId); // RisesTo 5310
+
+        // The venue accepts, but the caller's token is cancelled at the moment of acceptance, so the journal SaveChanges
+        // that follows the accept throws — reproducing the accepted-but-not-journaled window without an in-memory DB fault.
+        using CancellationTokenSource cancelAtAccept = new();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .ReturnsLazily(() =>
+            {
+                cancelAtAccept.Cancel();
+                return new PlacedOrder(_venueAccount, "889001", DateTimeOffset.UnixEpoch);
+            });
+
+        try
+        {
+            await Service().ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, cancelAtAccept.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // The transmit→journal window surfaced as a cancellation (the order may be live and unrecorded, gh#577) —
+            // tolerated here; the durable state and the absence of a re-fire below carry the property under test.
+        }
+
+        await using (TradingCopilotDbContext afterFault = Context())
+        {
+            (await afterFault.ConditionalOrders.SingleAsync(c => c.Id == conditionalId)).Status.Should().Be(
+                ConditionalStatus.Firing, "an accepted-but-unjournaled fire is left mid-firing, never back at Pending");
+            (await afterFault.Orders.AnyAsync()).Should().BeFalse("the journal commit did not land");
+        }
+
+        // Second quote on the SAME cross: the mid-firing conditional must NOT re-fire — discovery is Pending-only.
+        int acted = await Service().ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, CancellationToken.None);
+
+        acted.Should().Be(0, "a mid-firing conditional is never re-decided from a quote");
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.SingleAsync(c => c.Id == conditionalId)).Status.Should().Be(ConditionalStatus.Firing);
+        (await reload.Orders.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ProcessQuote_ShouldNotFireAMidFiringConditional_SoADiscardedJournalNeverReplaysAsADuplicate()
+    {
+        // gh#577 — the guard behind the fix. A conditional durably marked Firing (a fire whose journal did not commit)
+        // is inert to the firing pass: like a resolved one it is never picked up by a crossing quote (discovery is
+        // Pending-only), so a live-but-unjournaled order is reconciled / surfaced, never re-fired.
+        Guid accountId = await SeedAccountAsync();
+        await AddConditionalAsync(accountId, status: ConditionalStatus.Firing);
+
+        int acted = await Service().ProcessQuoteAsync(Contract, bid: 5320m, ask: 5321m, Now, CancellationToken.None);
+
+        acted.Should().Be(0);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.SingleAsync()).Status.Should().Be(ConditionalStatus.Firing);
+    }
 }

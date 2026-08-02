@@ -191,6 +191,38 @@ public class ProjectXVenueTests
     }
 
     [Fact]
+    public async Task PlaceOrderAsync_ShouldForwardTheCustomTag_AndEchoItOnThePlacedOrder()
+    {
+        // gh#577 — the correlation handle. The client tag the source stamped rides the wire request, and the
+        // acknowledgement carries it back, so a caller (a replay reconciling the transmit→journal window) can tie a
+        // placed order to the source that placed it.
+        ClientModels.PlaceOrderRequest? sent = null;
+        A.CallTo(() => _api.PlaceOrderAsync(A<ClientModels.PlaceOrderRequest>._, A<CancellationToken>._))
+            .Invokes((ClientModels.PlaceOrderRequest p, CancellationToken _) => sent = p)
+            .Returns(new ClientModels.PlaceOrderResponse { Success = true, OrderId = 555 });
+
+        PlacedOrder placed = await _venue.PlaceOrderAsync(
+            MarketBuy() with { CustomTag = "3f2504e0-4f89-41d3-9a0c-0305e82c3301" }, CancellationToken.None);
+
+        sent!.CustomTag.Should().Be("3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+        placed.CustomTag.Should().Be("3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+    }
+
+    [Fact]
+    public async Task PlaceOrderAsync_ShouldSendNoCustomTag_WhenTheRequestCarriesNone()
+    {
+        ClientModels.PlaceOrderRequest? sent = null;
+        A.CallTo(() => _api.PlaceOrderAsync(A<ClientModels.PlaceOrderRequest>._, A<CancellationToken>._))
+            .Invokes((ClientModels.PlaceOrderRequest p, CancellationToken _) => sent = p)
+            .Returns(new ClientModels.PlaceOrderResponse { Success = true, OrderId = 555 });
+
+        PlacedOrder placed = await _venue.PlaceOrderAsync(MarketBuy(), CancellationToken.None); // operator path — no tag
+
+        sent!.CustomTag.Should().BeNull();
+        placed.CustomTag.Should().BeNull();
+    }
+
+    [Fact]
     public async Task PlaceOrderAsync_ShouldAttachATakeProfitBracket_FromTheProfitTarget()
     {
         // The take-profit leg (gh#170): the target rides the entry as a limit-type take-profit bracket, so the

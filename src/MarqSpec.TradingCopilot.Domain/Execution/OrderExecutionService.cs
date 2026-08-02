@@ -175,6 +175,9 @@ public sealed class OrderExecutionService : IOrderExecutionService
         {
             ProtectiveStop = request.Proposal.SafetyStop,
             ProfitTarget = request.Proposal.Target,
+            // The correlation handle (gh#577), when the source set one: the venue echoes it so a replay can
+            // recognise its own already-placed order. Threaded, not derived here — the caller owns the key.
+            CustomTag = request.CorrelationTag,
         };
 
         // Transmit -> acknowledgement, the only place it can be measured: this is the sole path to an executor.

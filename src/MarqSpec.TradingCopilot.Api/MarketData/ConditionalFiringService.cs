@@ -33,6 +33,15 @@ namespace MarqSpec.TradingCopilot.Api.MarketData;
 /// watcher protects it) and records <see cref="ConditionalStatus.Fired"/>. Firing is idempotent — a resolved
 /// order never re-fires (<see cref="ConditionalOrder.ShouldFire"/> is Pending-only).
 /// </para>
+/// <para>
+/// A fire commits a <b>durable pre-transmit intent</b> (<see cref="ConditionalStatus.Firing"/>, gh#577) before the
+/// venue is touched, so a fault in the transmit→journal window — a DB fault, or a shutdown after the venue accepted
+/// but before the order journaled — leaves the conditional <b>Firing</b>, not Pending; discovery is Pending-only, so
+/// it can never blind-re-fire a live-but-unjournaled order (it is reconciled / surfaced against venue truth on
+/// replay, ADR-0013). A venue rejection <i>before</i> acceptance reverts the intent to Pending (the gh#532
+/// containment). Each fire's venue order carries the conditional's id as a <c>customTag</c>, so a replay can
+/// recognise its own already-placed order rather than transmit a duplicate.
+/// </para>
 /// </remarks>
 public sealed class ConditionalFiringService
 {
@@ -181,8 +190,8 @@ public sealed class ConditionalFiringService
                 _logger.LogError(
                     error,
                     "Conditional order {Id} on {Contract} transmitted an order the venue accepted, but the host shut "
-                    + "down before journaling it. The order may be live at the venue and unrecorded, and the "
-                    + "conditional is still pending (gh#577).",
+                    + "down before journaling it. The order may be live at the venue and unrecorded; the conditional "
+                    + "is left Firing so it cannot re-fire, and is reconciled against venue truth on replay (gh#577).",
                     conditionalId, contractKey);
             }
 
@@ -191,12 +200,14 @@ public sealed class ConditionalFiringService
         catch (Exception error) when (transmitted)
         {
             // The dangerous window: the venue ACCEPTED the order but its journal did not commit. The order may be
-            // live and unrecorded, and the conditional is still Pending, so a later quote can re-fire it -- the
-            // durable-intent / idempotency follow-up (gh#577). Surface it loudly; the pass still presses on.
+            // live and unrecorded. The durable pre-transmit intent (gh#577) has left the conditional Firing -- not
+            // Pending -- so a later quote CANNOT blind-re-fire it; it is reconciled / surfaced against venue truth
+            // instead. Surface it loudly; the pass still presses on.
             _logger.LogError(
                 error,
                 "Conditional order {Id} on {Contract} transmitted an order the venue accepted, but journaling it "
-                + "FAILED. The order may be live at the venue and unrecorded, and the conditional is still pending (gh#577).",
+                + "FAILED. The order may be live at the venue and unrecorded; the conditional is left Firing so it "
+                + "cannot re-fire, and is reconciled against venue truth on replay (gh#577).",
                 conditionalId, contractKey);
             return 0;
         }
@@ -265,14 +276,51 @@ public sealed class ConditionalFiringService
             return FiringOutcome.Unchanged;
         }
 
-        ExecutionResult result = await composed.Execution.SendAsync(request, cancellationToken);
+        // The correlation handle (gh#577): stamp the conditional's own id so the venue order this fire places can be
+        // matched back to THIS conditional on a replay -- the durable intent's venue-side counterpart. Threaded here
+        // (operator paths leave it null; a human is in the loop) rather than through the shared BuildRequestAsync.
+        request = request with { CorrelationTag = record.Id.ToString() };
+
+        // Durable pre-transmit intent (gh#577): commit Firing BEFORE the venue is touched. A fault anywhere from here
+        // to the journal commit then leaves the conditional Firing -- and discovery / ShouldFire are Pending-only, so
+        // it can never blind-re-fire; it is reconciled / surfaced instead (ADR-0013's "never auto-act on rehydrated
+        // state -- re-validate first"). This is one extra row-flip on the fire path (per fire, not per quote).
+        record.Status = ConditionalStatus.Firing;
+        await database.SaveChangesAsync(cancellationToken);
+
         OwnerUser owner = new(record.UserId);
+        ExecutionResult result;
+        try
+        {
+            result = await composed.Execution.SendAsync(request, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // A shutdown landed mid-send: the venue MAY have accepted the order (the send was interrupted, its
+            // outcome unknown). Leave the intent Firing -- reverting could strand a live order and then re-fire it --
+            // and let the caller's handler surface it (gh#577). Uncertainty resolves to the safe state (ADR-0013, §9).
+            throw;
+        }
+        catch (Exception)
+        {
+            // The venue REJECTED the send before accepting it (a routine rejection -- ProjectXVenue throws on
+            // !Success), so nothing is resting: revert the durable intent to Pending and re-decide on the next quote
+            // -- the gh#532 containment, preserved. Rethrow so the per-record handler logs it and the pass presses on.
+            //
+            // Residual (gh#577): a *transport* fault that in fact landed also surfaces as a throw here and is reverted
+            // -- telling a definitive rejection from a maybe-landed transport fault needs a venue-seam signal (a
+            // refusal OUTCOME, not a throw), deferred; the customTag handle then lets a reconcile recognise such a
+            // duplicate, and the real-Postgres proof of this window is gh#578.
+            record.Status = ConditionalStatus.Pending;
+            await database.SaveChangesAsync(cancellationToken);
+            throw;
+        }
 
         if (result.Outcome == ExecutionOutcome.Placed && result.Order is not null)
         {
             // The venue has ACCEPTED the order. Record the transmit NOW -- before the journaling below -- so that if
-            // any of it throws, the fault is classified as the dangerous "accepted but not journaled" window (gh#577),
-            // never a benign pre-transmit retry that would leave the conditional Pending to re-fire a duplicate.
+            // any of it throws, the fault is the dangerous "accepted but not journaled" window (gh#577). The
+            // conditional is already durably Firing, so the journal commit that follows can fail and it stays Firing.
             onTransmitted();
 
             SendOrderRequest proposal = new(
@@ -296,12 +344,15 @@ public sealed class ConditionalFiringService
             return FiringOutcome.Transmitted;
         }
 
-        // Refused by the fire-time gate: audit the decision, leave it pending, and re-decide on the next quote.
+        // A clean gate refusal -- the venue was never touched (every SendAsync refusal returns before PlaceOrderAsync).
+        // Revert the durable intent to Pending, audit the decision, and re-decide on the next quote. Resolved (never
+        // Unchanged) so the outer save commits the revert.
+        record.Status = ConditionalStatus.Pending;
         OrderEndpoints.PersistDecision(database, owner, record.AccountId, orderId: null, result.Decision);
         _logger.LogWarning(
-            "Conditional order {Id} triggered but the fire-time gate refused ({Reason}); still pending.",
+            "Conditional order {Id} triggered but the fire-time gate refused ({Reason}); reverted to pending.",
             record.Id, result.Reason);
-        return result.Decision is not null ? FiringOutcome.Resolved : FiringOutcome.Unchanged;
+        return FiringOutcome.Resolved;
     }
 
     /// <summary>What processing one conditional against a quote resolved to — it drives whether to persist, and
