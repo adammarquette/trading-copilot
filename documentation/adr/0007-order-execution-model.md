@@ -123,6 +123,12 @@ This index exists because the trail is long. Skim it to find the increment you n
 not tell current from historical. **No entry was removed or reworded**; the only edits were to two "still deferred"
 lists whose items have since landed, which now say so and name the update that closed each.)*
 
+*(Housekeeping, gh#580: the trail re-drifted — five later updates (gh#530 / #529 / #532 / #531 / #577) had
+accumulated **after** `## Follow-ups`, so a reader again met a "final" list that was not. `## Follow-ups` is moved
+back to the end and the dated trail is contiguous once more. **No entry was changed** — a pure re-ordering; the
+index above already listed all thirty-one entries in date order, and still does. That it recurred is the argument
+for validating heading-order/index against the trail in CI rather than by hand — filed as gh#600.)*
+
 | Date | Update |
 |---|---|
 | 2026-07-20 | the risk-gate interface is defined (S2, gh#10) |
@@ -769,29 +775,6 @@ written before it existed means, so old and new rows read alike rather than the 
 decisions were known to carry none. A `Block`-posture refusal is unchanged — it already surfaced through
 `BindingLayer` and `Reason`.
 
-## Follow-ups
-*Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the
-authoritative record — this list is kept only as a decision-provenance changelog.*
-- ~~Define the **order-state machine** + per-transition **journal / event records** (R-8/R-9, ADR-0001).~~ **Landed** —
-  the order lifecycle + `AuditRecord` / event-log journaling ship across the execution suites.
-- ~~Spec the **synthetic / conditional engine**: trigger types, promotion-band metric + **default**, OCO
-  coordination, gap/latency handling, and an availability target.~~ **Landed** — the conditional firing engine
-  (gh#180/#198) + OCO-cancel-on-exit (gh#183/#184) + stop promotion.
-- ~~Define **connection-loss detection** (heartbeat / timeout thresholds), the **orphan → emergency** transition +
-  operator alert, and the **recovery re-arm** path — each carrying a `synthetic_risk` audit flag.~~ **Landed** — the
-  venue-connection monitor + orphan handling / re-arm (gh#191/#192/#209); consolidated in ADR-0013.
-- Decide **defaults** (per environment): sizing basis and proximity metric. *(The **default entry action** is settled and built — gh#218; see the update above.)*
-- ~~Define the **risk-gate interface** — inputs (live account state, layers, safety stop), outputs (size, binding
-  layer, block / resize / acknowledge) — R-5.~~ **Landed** — `RiskGate` with the layered decision (see the risk-gate
-  update above).
-- Wire the **governor → R-4** throttle policy (thresholds, throttle modes). *(The **daily/consistency governor** landed
-  (gh#380); the R-4 suggestion-**throttle** modes are still open.)*
-- ~~Confirm **ProjectX** native bracket / OCO / stop-type capabilities (Q-1); the synthetic layer covers gaps (R-17).~~
-  **Confirmed / built** — native bracket preserve + resize (gh#259/#292), practice-gated on staging.
-- ~~Stand up the **high-rigor test suites** for the risk gate, execution, staged stops, kill switch, and auto-flatten
-  (engineering §9).~~ **Landed** — the QA integration suites (see `integration-test-audit.md`).
-
-
 ## Update (2026-07-30) — the take path is claimed before it reaches the venue (gh#530)
 
 `POST /orders/{id}/take` read the staged row, checked `Status == Staged`, and then spent **four venue round-trips**
@@ -998,3 +981,25 @@ surfacing to the operator, and the resting-orders read must carry side/type befo
 The one residual the intent does not cover — a **transport fault that in fact landed** (indistinguishable from a
 definitive rejection without a venue-seam refusal *outcome*, so reverted to `Pending`) — and the independent
 real-Postgres proof of the whole window are **gh#578**.
+
+## Follow-ups
+*Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the
+authoritative record — this list is kept only as a decision-provenance changelog.*
+- ~~Define the **order-state machine** + per-transition **journal / event records** (R-8/R-9, ADR-0001).~~ **Landed** —
+  the order lifecycle + `AuditRecord` / event-log journaling ship across the execution suites.
+- ~~Spec the **synthetic / conditional engine**: trigger types, promotion-band metric + **default**, OCO
+  coordination, gap/latency handling, and an availability target.~~ **Landed** — the conditional firing engine
+  (gh#180/#198) + OCO-cancel-on-exit (gh#183/#184) + stop promotion.
+- ~~Define **connection-loss detection** (heartbeat / timeout thresholds), the **orphan → emergency** transition +
+  operator alert, and the **recovery re-arm** path — each carrying a `synthetic_risk` audit flag.~~ **Landed** — the
+  venue-connection monitor + orphan handling / re-arm (gh#191/#192/#209); consolidated in ADR-0013.
+- Decide **defaults** (per environment): sizing basis and proximity metric. *(The **default entry action** is settled and built — gh#218; see the update above.)*
+- ~~Define the **risk-gate interface** — inputs (live account state, layers, safety stop), outputs (size, binding
+  layer, block / resize / acknowledge) — R-5.~~ **Landed** — `RiskGate` with the layered decision (see the risk-gate
+  update above).
+- Wire the **governor → R-4** throttle policy (thresholds, throttle modes). *(The **daily/consistency governor** landed
+  (gh#380); the R-4 suggestion-**throttle** modes are still open.)*
+- ~~Confirm **ProjectX** native bracket / OCO / stop-type capabilities (Q-1); the synthetic layer covers gaps (R-17).~~
+  **Confirmed / built** — native bracket preserve + resize (gh#259/#292), practice-gated on staging.
+- ~~Stand up the **high-rigor test suites** for the risk gate, execution, staged stops, kill switch, and auto-flatten
+  (engineering §9).~~ **Landed** — the QA integration suites (see `integration-test-audit.md`).
