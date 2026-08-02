@@ -314,6 +314,11 @@ market context (gh#476). Spend is ledgered per call (gh#431) and metered (gh#477
 longer optional** — `AiSpendGovernor` is registered unconditionally and gates the route pass-level (gh#448), with a
 **budget-aware escalation skip** so a deep call is only made when it still fits (gh#478). A trigger is inert until the
 operator **confirms** it (gh#470), and a dependency outage is visible rather than silent (`UnmeasurableSince`, gh#469).
+**The operator can now act on what it proposes** (gh#547): `POST /suggestions/{id}/pass` records a **neutral pass** —
+the first `SuggestionDisposition`, and the input the R-9 learning loop reads — so a suggestion's life no longer ends
+at issuance. A passed setup drops off the default actionable surface while staying in the journal by id; disposition
+kind is an **operator act** (`taken` / `modified` / `passed`), kept separate from the clock-driven lifecycle state
+(gh#539). `taken` / `modified` follow with the take path (gh#549).
 
 ### Analysis & management UI
 A **React SPA** — the operator's surface — consuming the BFF's **REST** endpoints and **SignalR** hubs

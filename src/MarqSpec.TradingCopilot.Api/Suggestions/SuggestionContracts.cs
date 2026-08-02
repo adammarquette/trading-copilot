@@ -128,3 +128,44 @@ public sealed record SuggestionResponse(
 /// <summary>A page of suggestions (gh#540).</summary>
 /// <param name="Items">The suggestions, newest first.</param>
 public sealed record SuggestionListResponse(IReadOnlyList<SuggestionResponse> Items);
+
+/// <summary>
+/// The body of a pass (gh#547, R-4). <b>Both fields are optional</b>: a pass is a <b>neutral decline</b>, not a
+/// rejection, so the operator need give no reason at all.
+/// </summary>
+/// <param name="Reasons">
+/// The pass reasons, a <c>[Flags]</c> multi-select. <see cref="SuggestionPassReason.None"/> (the default) is a valid,
+/// neutral pass.
+/// </param>
+/// <param name="Note">An optional free-text note, capped at <see cref="SuggestionDisposition.NoteMaxLength"/>.</param>
+public sealed record SuggestionPassRequest(
+    SuggestionPassReason Reasons = SuggestionPassReason.None,
+    string? Note = null);
+
+/// <summary>A recorded disposition (gh#547) — the operator's neutral pass, as written to the journal.</summary>
+/// <param name="SuggestionId">The suggestion that was disposed.</param>
+/// <param name="Kind">The operator act — <see cref="SuggestionDispositionKind.Passed"/> on this route.</param>
+/// <param name="Reasons">The pass reasons (may be <see cref="SuggestionPassReason.None"/>).</param>
+/// <param name="Note">The operator's note, or <see langword="null"/>.</param>
+/// <param name="CreatedAt">When the disposition was recorded.</param>
+public sealed record SuggestionDispositionResponse(
+    Guid SuggestionId,
+    SuggestionDispositionKind Kind,
+    SuggestionPassReason Reasons,
+    string? Note,
+    DateTimeOffset CreatedAt)
+{
+    /// <summary>Projects a persisted disposition into its API view.</summary>
+    /// <param name="disposition">The persisted row.</param>
+    /// <returns>The response.</returns>
+    public static SuggestionDispositionResponse From(SuggestionDisposition disposition)
+    {
+        ArgumentNullException.ThrowIfNull(disposition);
+        return new SuggestionDispositionResponse(
+            disposition.SuggestionId,
+            disposition.Kind,
+            disposition.Reasons,
+            disposition.Note,
+            disposition.CreatedAt);
+    }
+}
