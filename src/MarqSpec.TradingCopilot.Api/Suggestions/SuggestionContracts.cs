@@ -22,6 +22,11 @@ namespace MarqSpec.TradingCopilot.Api.Suggestions;
 /// <param name="Id">The suggestion's id.</param>
 /// <param name="AccountId">The account it targets.</param>
 /// <param name="Instrument">The venue-neutral instrument symbol.</param>
+/// <param name="TimeframeMinutes">
+/// The suggestion's <b>headline timeframe</b> (gh#592, R-4) — the bar size it is framed on, so the card can tell a
+/// scalp from a swing. In today's single-signal model it is the cited indicator's resolution (see
+/// <paramref name="CitedResolutionMinutes"/>), surfaced here as a first-class attribute rather than provenance.
+/// </param>
 /// <param name="Side">The proposed direction.</param>
 /// <param name="Size">The proposed size in contracts — the operator's trigger's, never the model's.</param>
 /// <param name="EntryPrice">The proposed entry.</param>
@@ -56,6 +61,7 @@ public sealed record SuggestionResponse(
     Guid Id,
     Guid AccountId,
     string Instrument,
+    int TimeframeMinutes,
     OrderSide Side,
     int Size,
     decimal EntryPrice,
@@ -89,6 +95,7 @@ public sealed record SuggestionResponse(
             suggestion.Id,
             suggestion.AccountId,
             suggestion.Instrument,
+            suggestion.TimeframeMinutes,
             suggestion.Side,
             suggestion.Size,
             suggestion.EntryPrice,
