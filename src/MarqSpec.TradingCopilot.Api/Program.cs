@@ -191,6 +191,10 @@ builder.Services.AddScoped<IndicatorProjectionService>();
 builder.Services.AddScoped<IIndicatorSource, StoredIndicatorSource>();
 builder.Services.AddHostedService<IndicatorProjectionHost>();
 
+// The read seam over persisted key-level zones (gh#596) that confluence (gh#593) and any chart overlay consult;
+// the detector that writes them is gh#597.
+builder.Services.AddScoped<IPriceLevelSource, StoredPriceLevelSource>();
+
 // The AI seam for the agent-review route (gh#402, R-4, ADR-0008): the provider-neutral ILlmProvider (a no-I/O stub
 // this increment) and the ALWAYS-bound ITriggerReviewer -- the real LlmTriggerReviewer when an Llm:ApiKey is
 // configured, else the honest inert NullTriggerReviewer. Enforcement lives below the model: nothing bound here can

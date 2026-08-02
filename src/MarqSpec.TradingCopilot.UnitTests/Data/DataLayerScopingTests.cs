@@ -35,6 +35,11 @@ public class DataLayerScopingTests
         // reason: a tenant filter would hide the market from the operator trading it.
         typeof(IndicatorValueRecord),
 
+        // Persisted key-level zones (gh#596). Derived market data, global for the same R-20 reason as the bars
+        // and indicators it comes from: a tenant filter would hide the market from the operator trading it. The
+        // detector that writes it (gh#597) is background plumbing with no per-user identity.
+        typeof(PriceLevel),
+
         // The deduped news / soft-signal store of record (gh#358). Global by the SAME R-20 rule the requirement
         // names explicitly — "reference & market data ... raw news is shared / global". The per-user salience
         // that reweights it (SoftSignalFeedback, gh#27) will be operator-owned; the news items themselves are not.
