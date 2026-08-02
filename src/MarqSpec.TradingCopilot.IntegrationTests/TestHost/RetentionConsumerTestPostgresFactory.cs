@@ -11,6 +11,12 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 /// high-severity gap log can be asserted, and inherits the adversarial venue stub (a promotion pass builds a
 /// venue) from <see cref="StubbedVenuePostgresFactory"/>.
 /// </summary>
+/// <remarks>
+/// Also the fixture for the <b>gap-recovery</b> host cases (gh#557): which window the host hands the backfill,
+/// whether it runs it at all, and whether the consumer survives it throwing are all live-host questions, and the
+/// only surface they report through is this log stream. Each test class gets its own instance (and so its own
+/// container), so the two suites share the shape without sharing state.
+/// </remarks>
 public sealed class RetentionConsumerTestPostgresFactory : StubbedVenuePostgresFactory
 {
     /// <summary>The captured log stream — asserted for the consumers' high-severity retention-gap log.</summary>
