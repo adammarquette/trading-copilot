@@ -90,6 +90,15 @@ builder.Services.AddScoped<QuoteIngestionService>();
 builder.Services.Configure<IngestionOptions>(builder.Configuration.GetSection(IngestionOptions.SectionName));
 builder.Services.AddHostedService<MarketDataIngestionHost>();
 
+// Cross-asset CONTEXT prices (gh#496, of gh#411, R-1): equities/indices last-trade prints for correlation --
+// SPY against ES, QQQ against NQ. Deliberately its OWN event type and its OWN host: a context source publishes no
+// book, so it must never reach `market.quote` (the stream the stop-promotion and conditional-firing watchers act
+// on), and an outage on this optional feed must never disturb tradeable ingestion. Opt-in via ContextIngestion:Symbols.
+builder.Services.Configure<ContextIngestionOptions>(
+    builder.Configuration.GetSection(ContextIngestionOptions.SectionName));
+builder.Services.AddScoped<ContextTradeIngestionService>();
+builder.Services.AddHostedService<ContextIngestionHost>();
+
 // R-1's SECOND market-data path (gh#302): the clean-historical bar store, filled by periodic REST backfill.
 // Kept deliberately apart from the live stream above -- R-1 says they are "stored and treated separately", and
 // the historical series, not the live feed, is "the system of record for bars used in journaling and replay".
@@ -117,6 +126,13 @@ if (!string.IsNullOrWhiteSpace(finnhubOptions.ApiKey))
     builder.Services.AddSingleton(finnhubOptions);
     builder.Services.AddHttpClient<IFinnhubNewsClient, FinnhubNewsClient>();
     builder.Services.AddScoped<INewsSource, FinnhubNewsSource>();
+
+    // The cross-asset CONTEXT price surface (gh#496, of gh#411) — the same key, a different feed. One multiplexed
+    // websocket carries every subscribed symbol and holds the free-tier cap, so the stream is registered once and
+    // the adapter subscribes each configured symbol on it.
+    builder.Services.AddScoped<IFinnhubQuoteStream>(_ =>
+        new FinnhubQuoteStream(() => new ClientWebSocketTransport(), finnhubOptions));
+    builder.Services.AddScoped<IContextMarketDataSource, FinnhubMarketDataSource>();
 }
 
 TiingoOptions tiingoOptions = builder.Configuration.GetSection("Tiingo").Get<TiingoOptions>() ?? new TiingoOptions();
