@@ -80,6 +80,12 @@ public class TradingCopilotDbContext : TenantDbContext
     public DbSet<IndicatorValueRecord> IndicatorValues => Set<IndicatorValueRecord>();
 
     /// <summary>
+    /// Persisted key-level zones (gh#596, R-10) — support / resistance bands per timeframe. Derived market data,
+    /// so global (R-20); the detector that populates it is gh#597.
+    /// </summary>
+    public DbSet<PriceLevel> PriceLevels => Set<PriceLevel>();
+
+    /// <summary>
     /// The raw news / soft-signal store of record (gh#358, R-2) — deduped across sources, the reference template
     /// for non-market feeds. Shared / global reference data (R-20) like the bars; the per-user salience that
     /// reweights it (gh#27) is a separate operator-owned entity, not this row.
@@ -494,6 +500,31 @@ public class TradingCopilotDbContext : TenantDbContext
 
             // The read the execution path makes: this series' latest value at or before a moment.
             value.HasIndex(v => new { v.Instrument, v.ResolutionMinutes, v.Indicator, v.Period, v.BucketStart });
+        });
+
+        modelBuilder.Entity<PriceLevel>(level =>
+        {
+            level.Property(l => l.Venue).HasMaxLength(64);
+            level.Property(l => l.Instrument).HasMaxLength(32);
+            level.Property(l => l.Top).HasPrecision(18, 8);
+            level.Property(l => l.Bottom).HasPrecision(18, 8);
+            level.Property(l => l.Significance).HasPrecision(18, 8);
+
+            // The read gh#593's confluence and any chart overlay make: active levels for an instrument across a set
+            // of timeframes. Active leads because the default read wants only live zones.
+            level.HasIndex(l => new { l.Venue, l.Instrument, l.TimeframeMinutes, l.Active });
+
+            level.ToTable(table =>
+            {
+                // A zone is an ordered band, so Top must sit strictly above Bottom, and prices are positive -- with
+                // the ordering, Bottom > 0 makes Top > 0 too.
+                table.HasCheckConstraint("CK_PriceLevels_ZoneOrdered", "\"Top\" > \"Bottom\"");
+                table.HasCheckConstraint("CK_PriceLevels_Bottom_Positive", "\"Bottom\" > 0");
+
+                // A level always has a side (the refusable-zero pattern) and belongs to a real timeframe.
+                table.HasCheckConstraint("CK_PriceLevels_Kind_NotUnknown", "\"Kind\" <> 0");
+                table.HasCheckConstraint("CK_PriceLevels_Timeframe_Positive", "\"TimeframeMinutes\" > 0");
+            });
         });
 
         modelBuilder.Entity<TriggerRecord>(trigger =>
