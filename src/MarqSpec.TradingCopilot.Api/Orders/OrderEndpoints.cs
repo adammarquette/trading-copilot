@@ -143,25 +143,30 @@ public static class OrderEndpoints
             // venue journals a Working entry, and the second -- serialized behind it by the guard -- sees that entry
             // here and refuses. ComposeAsync sizes AS IF flat (it reserves nothing for a working order, which moves
             // neither positions nor balance until it fills), so an outstanding entry means the account is no longer
-            // honestly flat. Counts only entries carrying real venue exposure -- Working and PartiallyFilled. It does
-            // NOT count:
-            //   * Staged (server-side only, unsent -- no exposure), so a staged ticket never blocks a direct send;
-            //   * terminal (Filled is already in the balance ComposeAsync reads; Cancelled/Rejected never rested), so
-            //     a send after a fully-resolved prior order behaves exactly as a first send;
-            //   * Taking (a take in flight). Taking is DELIBERATELY excluded. gh#531 is send-vs-send only; the take
-            //     path does not take this guard, so counting Taking would not close send-vs-take anyway -- but it
-            //     WOULD dead-lock the whole account's send path if a take stranded in Taking (a venue timeout or a
-            //     client disconnect mid-take, for which there is no in-app recovery today), refusing every send, not
-            //     just that ticket (a gh#531 adversarial-review finding). Serializing send-vs-take / -vs-conditional
-            //     and recovering a stranded Taking are gh#589.
+            // honestly flat. This is an ALLOW-LIST, fail-CLOSED: it enumerates the states that are safe to ignore and
+            // blocks EVERYTHING ELSE, rather than naming the "bad" states and letting the rest fall through to
+            // "proceed" (the blacklist trap `.github/copilot-instructions.md` calls out -- a future OrderStatus, or a
+            // corrupt/Unknown row, must fail closed, not silently reopen the 2x race; the cancel endpoint's
+            // exhaustive status switch below is the same fail-closed shape). Safe to ignore:
+            //   * Staged -- server-side only, unsent, no exposure, so a staged ticket never blocks a direct send;
+            //   * Filled -- already realised into the balance ComposeAsync reads -- and Cancelled / Rejected -- never
+            //     rested -- so a send after a fully-resolved prior order behaves exactly as a first send;
+            //   * Taking -- excluded NOT because it is safe (a take in flight is imminent exposure) but because
+            //     counting it would dead-lock the whole account's send path if a take stranded in Taking (a venue
+            //     timeout or a client disconnect mid-take, no in-app recovery today); gh#531 is send-vs-send only,
+            //     and serializing send-vs-take / -vs-conditional + recovering a stranded Taking are gh#589.
+            // Everything else -- Working, PartiallyFilled, Unknown, and any status added later -- blocks.
             bool hasOutstandingEntry = await database.Orders.AnyAsync(
                 candidate => candidate.AccountId == composed.Account.Id
-                    && (candidate.Status == OrderStatus.Working
-                        || candidate.Status == OrderStatus.PartiallyFilled),
+                    && candidate.Status != OrderStatus.Staged
+                    && candidate.Status != OrderStatus.Filled
+                    && candidate.Status != OrderStatus.Cancelled
+                    && candidate.Status != OrderStatus.Rejected
+                    && candidate.Status != OrderStatus.Taking,
                 cancellationToken);
             if (hasOutstandingEntry)
             {
-                return Results.Conflict(new { error = "This account already has an outstanding order (a resting or partially-filled entry). A new send requires a clear account: the flat-account gate would size the new order as if that exposure were not there (gh#531)." });
+                return Results.Conflict(new { error = "This account already has an outstanding order. A new send requires a clear account: the flat-account gate would size the new order as if that exposure were not there (gh#531)." });
             }
 
             (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(

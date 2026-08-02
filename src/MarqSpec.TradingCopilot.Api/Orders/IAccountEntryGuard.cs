@@ -42,11 +42,13 @@ namespace MarqSpec.TradingCopilot.Api.Orders;
 /// <b>Why a session advisory lock over a pinned connection, and not an explicit transaction.</b> The lock is
 /// taken with <c>pg_advisory_lock</c> (session scope) on a connection pinned for the callback's duration, then
 /// released with <c>pg_advisory_unlock</c> and the connection closed. A session lock — not a transaction
-/// (<c>pg_advisory_xact_lock</c>) — means the journal's <c>SaveChanges</c> auto-commits <b>exactly as it does
-/// today</b>: no enclosing transaction is opened, so no new window is introduced in which a placed venue order
-/// could be left un-journaled (no new orphan window versus the pre-fix path). If the process or connection dies
-/// mid-callback, Postgres releases a session lock automatically when the backend connection drops, so a crash
-/// cannot strand the account locked forever.
+/// (<c>pg_advisory_xact_lock</c>) — means the journal's <c>SaveChanges</c> keeps its single-statement auto-commit,
+/// opening <b>no enclosing DB transaction</b>. It does <b>not</b> follow that there is no new orphan window: the
+/// connection is held <i>pinned and idle across the venue round-trip</i>, so a mid-call backend drop would fail the
+/// journaling write and leave a placed order un-journaled — the pre-existing place-then-journal window at higher
+/// probability, an <b>accepted cost</b> documented with its mitigations in ADR-0007's 2026-08-02 update, not a
+/// property this lock removes. If the process or connection dies mid-callback, Postgres releases a session lock
+/// automatically when the backend connection drops, so a crash cannot strand the account locked forever.
 /// </para>
 /// <para>
 /// <b>On <c>hashtext</c> collisions.</b> The account id is mapped to the lock's <c>bigint</c> key via

@@ -352,6 +352,24 @@ public class OrderEndpointsTests
     }
 
     [Fact]
+    public async Task SendOrder_ShouldRefuse_WhenTheAccountHasAnEntryInAnUnrecognizedStatus()
+    {
+        // Fail-closed (gh#531 review): the no-stacking check is an allow-list of safe-to-ignore states and blocks
+        // EVERYTHING else -- including a status it does not recognise. A future OrderStatus (or a corrupt/Unknown
+        // row) that carries exposure must not fall through to "proceed" and silently reopen the 2x race. A cast
+        // out-of-range value stands in for "a status added later that nobody classified in the check."
+        Guid accountId = await SeedAsync();
+        await SeedOutstandingOrderAsync(accountId, (OrderStatus)99);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.CountAsync()).Should().Be(1); // no NEW row -- only the unrecognized-status order remains
+    }
+
+    [Fact]
     public async Task SendOrder_ShouldDoNothing_WhenTheGuardDoesNotRunTheCallback()
     {
         // The whole correctness of gh#531 rests on the transmit tail -- the no-stacking check AND the place -- living
