@@ -127,6 +127,32 @@ the late commit is orphaned: it is on no PR and will never reach `develop`. Afte
 `git ls-remote --heads origin | grep "/<id>_"` — anything still there is either a phantom claim, unmerged work, or
 both. That is exactly how gh#375's own fix went missing.
 
+### For a two-repo (venue/client-submodule) card, check the *other* repo too (gh#571)
+
+gh#375's rule — *"the pushed branch is the claim"* — assumes the claim and the work live in the **same** repo. A
+**venue/client-submodule card** breaks that assumption: the code lands in the `MarqSpec.Client.<Venue>` submodule
+repo and **this** repo only moves the pin, so the outer claim branch and the real work sit in different places.
+Delete (or never push) the outer claim branch and the in-flight work goes invisible to every check above.
+
+gh#571 nearly rebuilt gh#495 from scratch this way. The work was **complete and in review** — 801 insertions, an
+open PR on the submodule — yet every prescribed check reported the card **free**: the outer claim branch had been
+deleted (`git ls-remote` in this repo → none), the card sat in *Current ToDo*, and the submodule's `origin/main`
+was clean. That last one is the trap: **a clean submodule `main` is not "nobody started"** — work in review is on
+a **branch**, not `main`, so a clean `main` reads as free precisely when someone has *finished*. (The venue-client
+card *Notes* that prescribe only the `main` check give false comfort for the same reason — correct them to this.)
+
+So for any `MarqSpec.Client.<Venue>` (or otherwise two-repo) card, add the submodule to the pre-flight — list its
+**branches and open PRs**, not just `main`:
+
+```bash
+gh pr list --repo adammarquette/MarqSpec.Client.<Venue> --state open           # in-review work lives here…
+git ls-remote --heads https://github.com/adammarquette/MarqSpec.Client.<Venue>   # …on a branch, not on main
+```
+
+And **claim in both repos** — push the empty claim branch in the submodule repo as well — or, at the very least,
+**do not delete the outer claim branch while the inner PR is open**. A card whose submodule work is in review
+belongs in **Review**, not *Current ToDo* ([board workflow](documentation/project-board-workflow.md)).
+
 ### What this does not do
 
 It does not make claiming atomic — two sessions can check in the same second and both proceed. It narrows the
