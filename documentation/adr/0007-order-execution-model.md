@@ -155,6 +155,7 @@ lists whose items have since landed, which now say so and name the update that c
 | 2026-07-30 | the kill switch survives a venue that says no (gh#529) |
 | 2026-08-02 | conditional firing commits per record (gh#532) |
 | 2026-08-02 | the direct-send path serializes per account against send-vs-send stacking (gh#531) |
+| 2026-08-02 | the transmit→journal window closes with a durable pre-transmit intent (gh#577) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 
@@ -957,3 +958,43 @@ out of this increment's blast radius (it touches the just-stabilised take path),
 row. All are filed as **gh#589**, which reuses this `IAccountEntryGuard` seam (with a self-excluding check, so `Taking`
 can safely re-enter the counted set once the dead-lock hazard is removed). OCO-exit is *not* affected: it places exits
 after a fill, when the account is non-flat, so `ComposeAsync`'s flat check already refuses a racing send.
+
+## Update (2026-08-02) — the transmit→journal window closes with a durable pre-transmit intent (gh#577)
+
+The window the gh#532 fix named above — an order **accepted at the venue** whose journal commit then fails (a DB
+fault, or cancellation at host shutdown), leaving a live order on a `Pending` conditional the next quote re-fires — is
+now closed on the DB side. `ConditionalFiringService` commits a **durable pre-transmit intent** — a new
+`ConditionalStatus.Firing` — **before** it touches the venue. A fault anywhere from there to the journal commit
+therefore leaves the conditional **Firing**, not `Pending`; discovery and `ShouldFire` are Pending-only, so it can
+**never blind-re-fire** a live-but-unjournaled order. It is reconciled / surfaced against venue truth on replay — the
+ADR-0013 discipline (*"never auto-act on rehydrated state; re-validate first"*) — rather than acted on blindly.
+
+- **A venue rejection *before* acceptance reverts the intent to `Pending`** and re-decides on the next quote — the
+  gh#532 containment, preserved (a routine rejection is not stranded). The intent is committed *before* the send, so
+  **any** fault before the fire resolves (to `Fired`, or back to `Pending`) leaves it `Firing`. The dangerous ones —
+  an **accepted-then-unjournaled** fire, or a **shutdown mid-send** whose outcome is unknown — may have a live order
+  behind them; a fault on a **pre-transmit** path (a crash between the intent commit and a gate-refusal revert, a
+  compose fault) leaves a *harmless* `Firing` the reconcile clears on finding no venue order. Either way it fails
+  safe: `Firing` never re-fires, and uncertainty resolves to the safe state (§9).
+- **A `Firing` conditional found persisting across a restart is an impossible combination.**
+  `DecisionStateRehydration.Analyze` now flags it (`ConditionalMidFiring`), so the rehydration pass (gh#221) fails
+  **safe and loud** — the kill switch (HaltOnly) + a `synthetic_risk` alert — exactly as it does for a fired
+  conditional linked to no order. Firing is transient at runtime; at rest it is a contradiction, never silently repaired.
+- **The venue-side counterpart is a `customTag` correlation handle.** Each fire stamps the conditional's own id as the
+  order's `customTag` — the field `PlaceOrderRequest` has always exposed and the adapter never set — threaded through
+  the neutral `OrderRequest` onto the wire payload, carried on the acknowledgement (`PlacedOrder`, the value we sent —
+  the place-response does not re-report it) and **echoed back by the venue on the resting-orders read** (`WorkingOrder`,
+  the surface a reconcile reads). So a replay can recognise its **own** already-placed order (matching on the
+  conditional's id) rather than transmit a blind duplicate. The venue does **not** dedup on it: it is a *correlation*
+  handle, not a venue idempotency key.
+
+**No migration.** `Firing` is admitted by the existing `"Status" <> 0` check (the gh#209 precedent for adding a
+lifecycle value), and the tag is a transient request field, not a stored column.
+
+**Scope — of the two seams gh#577 left open.** This lands the durable intent **and** the correlation handle. The
+**automated venue-truth reconcile** — a pass that reads the venue and recovers a `Firing` record without the operator
+— is **deliberately deferred**: it would *auto-act on rehydrated state*, which this subsystem resists in favour of
+surfacing to the operator, and the resting-orders read must carry side/type before its match is more than heuristic.
+The one residual the intent does not cover — a **transport fault that in fact landed** (indistinguishable from a
+definitive rejection without a venue-seam refusal *outcome*, so reverted to `Pending`) — and the independent
+real-Postgres proof of the whole window are **gh#578**.

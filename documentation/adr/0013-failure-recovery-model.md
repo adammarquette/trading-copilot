@@ -156,3 +156,18 @@ vocabulary, and deliberately so; a second enum would be a second thing to keep s
 **Why declared-unknown matters more here than anywhere.** The question this read answers is *"is protection
 standing?"* — and for that question, **"we could not ask" and "nothing is there" are opposite answers**. Returning
 an empty list for an unreachable venue would be the single most dangerous shape this endpoint could take.
+
+## Update (2026-08-02) — the rehydration gains a mid-firing-conditional inconsistency (gh#577)
+
+The impossible-combination list this ADR's rehydration pass (gh#221) checks — a staged order at the venue, a fired
+conditional linked to no order, a native stop with no live order, an owner-drifted stop plan — gains one: **a
+conditional stranded `Firing`**. `ConditionalStatus.Firing` (gh#577, [ADR-0007](0007-order-execution-model.md)) is a
+**durable pre-transmit intent** the firing service commits *before* it touches the venue, so a fault in the
+transmit→journal window leaves the conditional there rather than back at `Pending`, where a pure level test would
+blind-re-fire it. It is transient at runtime — the firing pass moves it on to `Fired` or `Pending` within one fire —
+so one found **persisting across a restart** means a crash caught it mid-flight, with an order that **may be live at
+the venue** and no journal behind it. `DecisionStateRehydration.Analyze` now flags it
+(`DecisionInconsistencyKind.ConditionalMidFiring`), so the pass fails **safe and loud** — kill switch (HaltOnly) + a
+`synthetic_risk` alert, never a silent repair — the very principle this ADR states: *never auto-act on rehydrated
+state; re-validate against venue truth first* (the order's `customTag` carries the conditional's id so that reconcile
+can match it). The **automated** reconcile that would then recover the order without the operator is deferred (gh#578).
