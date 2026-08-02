@@ -265,4 +265,91 @@ public class ConditionalFiringServiceTests
         (await reload.Orders.AnyAsync()).Should().BeFalse();            // nothing transmitted or journaled
         (await reload.GateDecisions.CountAsync()).Should().Be(1);       // the blocking decision is audited
     }
+
+    [Fact]
+    public async Task ProcessQuote_ShouldJournalAnEarlierFire_WhenALaterConditionalOnTheSameContractThrows()
+    {
+        // gh#532 — the P1. Two pending conditionals on ONE contract cross on the same quote. The first fires and is
+        // transmitted to the venue; transmitting the second then throws (an ordinary venue rejection). Under a
+        // per-QUOTE unit of work (one SaveChanges after the whole batch) the second's escape discards the first's
+        // already-transmitted order journal AND its Fired transition — leaving a live venue order recorded on no
+        // Order row, which the next quote then re-fires. Each conditional must commit its own work before the next
+        // is touched, so a peer's fault can never unwind an order the venue has already accepted.
+        Guid accountId = await SeedAccountAsync();
+        await AddConditionalAsync(accountId); // RisesTo 5310
+        await AddConditionalAsync(accountId); // same contract, same crossing quote
+
+        // The venue accepts the first placement and rejects the second. A faulted Task (not a synchronous throw) is
+        // exactly how the send path surfaces it: `await venue.PlaceOrderAsync(...)` observes the fault.
+        int placements = 0;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .ReturnsLazily(() =>
+            {
+                placements++;
+                return placements == 2
+                    ? Task.FromException<PlacedOrder>(new InvalidOperationException("venue rejected the second order (test)"))
+                    : Task.FromResult(new PlacedOrder(_venueAccount, $"88900{placements}", DateTimeOffset.UnixEpoch));
+            });
+
+        // The pass may surface the second record's fault (the batched-save shape throws it out; the per-record fix
+        // contains it) — either way the FIRST fire must be durably journaled, which is the property under test.
+        try
+        {
+            await Service().ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, CancellationToken.None);
+        }
+        catch (InvalidOperationException)
+        {
+            // The later conditional's venue rejection escaping the pass — tolerated; the DB state is asserted below.
+        }
+
+        await using TradingCopilotDbContext reload = Context();
+        // The safety property: an order the venue accepted is never discarded because a peer later threw. The first
+        // placement succeeded, so exactly one Order row must exist, linked to a Fired conditional, protected by a stop.
+        (await reload.Orders.CountAsync()).Should().Be(
+            1, "the first fire's transmitted order must be journaled even though a later conditional threw");
+        ConditionalOrderRecord fired = await reload.ConditionalOrders.SingleAsync(c => c.Status == ConditionalStatus.Fired);
+        fired.FiredOrderId.Should().Be((await reload.Orders.SingleAsync()).Id);
+        (await reload.StopPlans.CountAsync()).Should().Be(1, "the fired position's stop plan is journaled with it");
+        // The conditional whose transmit threw is untouched — still Pending, so it re-decides on the next quote.
+        (await reload.ConditionalOrders.CountAsync(c => c.Status == ConditionalStatus.Pending)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task ProcessQuote_ShouldStillFireTheOtherConditionals_WhenOneOnTheSameContractThrows()
+    {
+        // gh#532 — containment. Three conditionals cross on one quote; the middle transmit throws. A per-quote batch
+        // that lets the fault escape processes none of the survivors (and the host then re-reads the same event and
+        // retry-storms the poison record). Per-record isolation fires the two good ones and leaves only the failed
+        // one Pending, to re-decide on the next quote (ADR-0013's safe "did not fire" direction).
+        Guid accountId = await SeedAccountAsync();
+        await AddConditionalAsync(accountId);
+        await AddConditionalAsync(accountId);
+        await AddConditionalAsync(accountId);
+
+        int placements = 0;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .ReturnsLazily(() =>
+            {
+                placements++;
+                return placements == 2
+                    ? Task.FromException<PlacedOrder>(new InvalidOperationException("venue rejected the second order (test)"))
+                    : Task.FromResult(new PlacedOrder(_venueAccount, $"88900{placements}", DateTimeOffset.UnixEpoch));
+            });
+
+        try
+        {
+            await Service().ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, CancellationToken.None);
+        }
+        catch (InvalidOperationException)
+        {
+            // Tolerated — the assertion is on how many survived, not on whether the fault escaped.
+        }
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.CountAsync()).Should().Be(
+            2, "the two conditionals whose transmit succeeded are both fired and journaled, despite the middle one throwing");
+        (await reload.ConditionalOrders.CountAsync(c => c.Status == ConditionalStatus.Fired)).Should().Be(2);
+        (await reload.ConditionalOrders.CountAsync(c => c.Status == ConditionalStatus.Pending)).Should().Be(
+            1, "only the conditional whose transmit threw is left pending");
+    }
 }
