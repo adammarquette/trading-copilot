@@ -40,6 +40,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>AI trade suggestions — the journal spine (gh#7). Operator-owned; mode-guarded (R-14).</summary>
     public DbSet<Suggestion> Suggestions => Set<Suggestion>();
 
+    /// <summary>Operator dispositions of a suggestion (gh#547, R-4/R-8/R-9). Operator-owned; append-only, one per suggestion.</summary>
+    public DbSet<SuggestionDisposition> SuggestionDispositions => Set<SuggestionDisposition>();
+
     /// <summary>Journaled orders — the journal spine (gh#7). Operator-owned; mode-guarded (R-14).</summary>
     public DbSet<Order> Orders => Set<Order>();
 
@@ -244,6 +247,31 @@ public class TradingCopilotDbContext : TenantDbContext
                 // before the moment it was issued is never actionable, so it is a defect rather than a fast expiry.
                 table.HasCheckConstraint("CK_Suggestions_ExpiresAfterCreated", "\"ExpiresAt\" > \"CreatedAt\"");
             });
+        });
+
+        modelBuilder.Entity<SuggestionDisposition>(disposition =>
+        {
+            // Subordinate to its suggestion: the suggestion is append-only journal in production, but if a row ever
+            // is deleted the disposition goes with it rather than dangling.
+            disposition.HasOne<Suggestion>()
+                .WithMany()
+                .HasForeignKey(d => d.SuggestionId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // One disposition per suggestion (data dictionary §6, gh#539): append-only journal evidence, so a second
+            // disposition CONFLICTS rather than overwriting. The endpoint pre-checks for a clean 409; this is the DB
+            // backstop against a race.
+            disposition.HasIndex(d => d.SuggestionId)
+                .IsUnique()
+                .HasDatabaseName("IX_SuggestionDispositions_SuggestionId");
+
+            disposition.Property(d => d.Note).HasMaxLength(SuggestionDisposition.NoteMaxLength);
+
+            disposition.ToTable(table =>
+                // Kind records an operator ACT, so the refusable zero is refused (the CK_Suggestions_State_NotUnknown
+                // pattern). Reasons deliberately carries NO such check: a pass is a neutral decline and its reason is
+                // optional (R-4), so 0 (none) is a legitimate answer, not a sentinel.
+                table.HasCheckConstraint("CK_SuggestionDispositions_Kind_NotUnknown", "\"Kind\" <> 0"));
         });
 
         modelBuilder.Entity<Order>(order =>

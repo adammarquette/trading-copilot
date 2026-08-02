@@ -330,4 +330,190 @@ public class SuggestionEndpointsTests
         item.State.Should().Be(SuggestionState.Active);
         item.CreatedAt.Should().Be(_t);
     }
+
+    // ---- pass: record a neutral operator disposition (gh#547) ----
+
+    private async Task<IResult> PassAsync(Guid id, SuggestionPassRequest? request = null, Guid? asUser = null)
+    {
+        await using TradingCopilotDbContext context = Context(asUser);
+        return await SuggestionEndpoints.PassAsync(id, request, context, default);
+    }
+
+    private static SuggestionDispositionResponse DispositionOf(IResult result) =>
+        (SuggestionDispositionResponse)((IValueHttpResult)result).Value!;
+
+    private async Task<int> DispositionCountAsync(Guid suggestionId, Guid? asUser = null)
+    {
+        await using TradingCopilotDbContext context = Context(asUser);
+        return await context.SuggestionDispositions.CountAsync(disposition => disposition.SuggestionId == suggestionId);
+    }
+
+    [Fact]
+    public async Task PassAsync_ShouldRecordANeutralPass_WhenNoReasonIsGiven()
+    {
+        Guid id = await SeedAsync();
+
+        IResult result = await PassAsync(id);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        SuggestionDispositionResponse disposition = DispositionOf(result);
+        disposition.Kind.Should().Be(SuggestionDispositionKind.Passed);
+        disposition.Reasons.Should().Be(SuggestionPassReason.None, "a pass is a neutral decline; a reason is optional");
+        disposition.Note.Should().BeNull();
+        (await DispositionCountAsync(id)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task PassAsync_ShouldRecordTheReasonsAndNote_WhenGiven()
+    {
+        Guid id = await SeedAsync();
+        SuggestionPassReason reasons = SuggestionPassReason.NewsRisk | SuggestionPassReason.WrongTime;
+
+        SuggestionDispositionResponse disposition =
+            DispositionOf(await PassAsync(id, new SuggestionPassRequest(reasons, "  waiting for the number  ")));
+
+        disposition.Reasons.Should().Be(reasons);
+        disposition.Note.Should().Be("waiting for the number", "the note is trimmed");
+    }
+
+    [Fact]
+    public async Task PassAsync_ShouldConflict_OnASecondPass()
+    {
+        Guid id = await SeedAsync();
+        await PassAsync(id);
+
+        // Append-only journal evidence: a second disposition conflicts rather than overwriting.
+        StatusOf(await PassAsync(id, new SuggestionPassRequest(SuggestionPassReason.Sizing)))
+            .Should().Be(StatusCodes.Status409Conflict);
+        (await DispositionCountAsync(id)).Should().Be(1, "the second pass must not add or overwrite a row");
+    }
+
+    [Theory]
+    [InlineData(SuggestionState.Stale)]
+    [InlineData(SuggestionState.ExpiredVoid)]
+    public async Task PassAsync_ShouldBeAccepted_OnAStaleOrExpiredSuggestion(SuggestionState state)
+    {
+        // The operator's note is worth keeping even past the window; lifecycle is the clock's, not the pass's (gh#539).
+        Guid id = await SeedAsync(state);
+
+        StatusOf(await PassAsync(id)).Should().Be(StatusCodes.Status200OK);
+    }
+
+    [Fact]
+    public async Task PassAsync_ShouldReturnNotFound_ForAnotherOperatorsSuggestion()
+    {
+        Guid mine = await SeedAsync(owner: _operator);
+
+        // 404, not 403: a stranger is never told the row exists, and cannot write to it.
+        StatusOf(await PassAsync(mine, asUser: _other)).Should().Be(StatusCodes.Status404NotFound);
+        (await DispositionCountAsync(mine)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task PassAsync_ShouldReturnNotFound_ForAnUnknownId()
+    {
+        StatusOf(await PassAsync(Guid.NewGuid())).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
+    public async Task PassAsync_ShouldRejectUnrecognisedReasonBits()
+    {
+        Guid id = await SeedAsync();
+        // A bit outside the canonical eight is garbage, not a reason -- fail closed.
+        SuggestionPassReason bogus = (SuggestionPassReason)(1 << 20);
+
+        StatusOf(await PassAsync(id, new SuggestionPassRequest(bogus))).Should().Be(StatusCodes.Status400BadRequest);
+        (await DispositionCountAsync(id)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task PassAsync_ShouldRejectAnOverlongNote()
+    {
+        Guid id = await SeedAsync();
+        string tooLong = new('x', SuggestionDisposition.NoteMaxLength + 1);
+
+        StatusOf(await PassAsync(id, new SuggestionPassRequest(Note: tooLong))).Should().Be(StatusCodes.Status400BadRequest);
+        (await DispositionCountAsync(id)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task PassAsync_ShouldTreatAWhitespaceNoteAsNone()
+    {
+        Guid id = await SeedAsync();
+
+        DispositionOf(await PassAsync(id, new SuggestionPassRequest(Note: "   "))).Note.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task PassAsync_ShouldNotMutateTheSuggestionsTradeParameters()
+    {
+        Guid id = await SeedAsync(side: OrderSide.Buy, entry: 100m, stop: 99m, target: 103m);
+
+        await PassAsync(id, new SuggestionPassRequest(SuggestionPassReason.WeakRewardRisk, "note"));
+
+        await using TradingCopilotDbContext context = Context();
+        Suggestion after = await context.Suggestions.SingleAsync(suggestion => suggestion.Id == id);
+        after.EntryPrice.Should().Be(100m);
+        after.StopPrice.Should().Be(99m);
+        after.TargetPrice.Should().Be(103m);
+        after.Size.Should().Be(2);
+        after.State.Should().Be(SuggestionState.Active, "a disposition never moves lifecycle state");
+    }
+
+    [Fact]
+    public async Task PassAsync_DispositionShouldSurvive_WhenTheSuggestionLaterExpires()
+    {
+        // The expiry sweep (gh#545) advances State on a SEPARATE table; it can never overwrite or erase a disposition.
+        Guid id = await SeedAsync();
+        await PassAsync(id, new SuggestionPassRequest(SuggestionPassReason.LowConviction, "keep me"));
+
+        await using (TradingCopilotDbContext sweep = Context())
+        {
+            Suggestion row = await sweep.Suggestions.SingleAsync(suggestion => suggestion.Id == id);
+            row.State = SuggestionState.ExpiredVoid;
+            await sweep.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext check = Context();
+        SuggestionDisposition disposition = await check.SuggestionDispositions.SingleAsync(d => d.SuggestionId == id);
+        disposition.Kind.Should().Be(SuggestionDispositionKind.Passed);
+        disposition.Reasons.Should().Be(SuggestionPassReason.LowConviction);
+        disposition.Note.Should().Be("keep me");
+    }
+
+    // ---- the disposition's effect on the read model ----
+
+    [Fact]
+    public async Task ListAsync_ShouldExcludeADispositionedSuggestion_FromTheDefaultActionableList()
+    {
+        Guid passed = await SeedAsync();
+        Guid live = await SeedAsync(createdAt: _t.AddMinutes(-5));
+        await PassAsync(passed);
+
+        SuggestionListResponse list = ListOf(await ListAsync());
+
+        // The decision surface hides what has been acted on; the still-live one remains.
+        list.Items.Select(item => item.Id).Should().Equal(live);
+    }
+
+    [Fact]
+    public async Task GetAsync_ShouldStillReturnADispositionedSuggestion_ById()
+    {
+        Guid id = await SeedAsync();
+        await PassAsync(id);
+
+        // The journal stays readable by id even after the operator has passed.
+        ItemOf(await GetAsync(id)).Id.Should().Be(id);
+    }
+
+    [Fact]
+    public async Task ListAsync_ShouldStillReturnADispositionedSuggestion_UnderAnExplicitStateFilter()
+    {
+        Guid id = await SeedAsync(SuggestionState.Active);
+        await PassAsync(id);
+
+        // An explicit state query is a literal/historical view, not the default actionable surface.
+        SuggestionListResponse list = ListOf(await ListAsync(state: SuggestionState.Active));
+        list.Items.Select(item => item.Id).Should().Contain(id);
+    }
 }
