@@ -27,7 +27,7 @@ public class ContextIngestionHostTests
 
     private static ContextIngestionHost Host(IServiceProvider services, params string[] symbols) =>
         new(services,
-            Options.Create(new ContextIngestionOptions { Symbols = symbols, ReconnectDelay = TimeSpan.Zero }),
+            Options.Create(new ContextIngestionOptions { Symbols = symbols, ReconnectDelaySeconds = 0 }),
             NullLogger<ContextIngestionHost>.Instance);
 
     [Fact]

@@ -18,8 +18,11 @@ public sealed class ContextIngestionOptions
     /// The context symbols to subscribe (for example <c>SPY</c>, <c>QQQ</c>). Empty means context ingestion is
     /// <b>disabled</b> — it is opt-in, and a deployment with no Finnhub token simply leaves it unset.
     /// </summary>
-    public string[] Symbols { get; set; } = [];
+    public string[] Symbols { get; init; } = [];
 
-    /// <summary>How long to wait after a dropped subscription before re-subscribing.</summary>
-    public TimeSpan ReconnectDelay { get; set; } = TimeSpan.FromSeconds(5);
+    /// <summary>How long to wait after a dropped subscription before re-subscribing, in seconds.</summary>
+    public int ReconnectDelaySeconds { get; init; } = 5;
+
+    /// <summary>The reconnect backoff.</summary>
+    public TimeSpan ReconnectDelay => TimeSpan.FromSeconds(ReconnectDelaySeconds);
 }
