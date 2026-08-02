@@ -852,3 +852,40 @@ trace. Its auto-flatten twin has journalled, paged and metered that same verdict
 could do none of it. The journal entry lands here; **paging and metering do not**, because `KillSwitchService` takes
 neither `IExecutionMetrics` nor a notification seam, and threading them in is a wider change than this fix — filed
 rather than smuggled.
+
+## Update (2026-08-02) — conditional firing commits per record (gh#532)
+
+`ConditionalFiringService.ProcessQuoteAsync` fired every pending conditional a quote crossed inside a per-record
+loop but performed **one** `SaveChangesAsync` for the whole quote's batch. So a fault on a *later* record — a
+routine venue rejection on the compose/send path, made *more* likely because an earlier fire just consumed margin —
+discarded an *earlier* record's already-transmitted order: its `Order` row, `StopPlan`, `GateDecision` and `Fired`
+transition were tracked in memory only, and the escaping exception disposed the owner context before the single
+save ran. One live venue order recorded on **no `Order` row** — invisible to cancel, the kill-switch sweep and the
+orphan guard, every one of which resolves by row id — and, because `ShouldFire` is a pure level test with no
+crossing memory, **re-fired on the next quote** (a duplicate for a resting Limit/Stop entry; an orphaned position
+for a Market entry that fills first).
+
+This is the **same shape as the kill switch's second fault (gh#529)** — an unwind that "skipped `SaveChangesAsync`,
+so tracked rows were discarded with the scope" — and it diverges silently from the discipline this ADR already
+states for the sibling watcher: stop promotion reconciles **each plan independently, its own reload + save, so one
+plan's lost race never affects another's** (asserted by `StopPromotionConcurrencyIntegrationTests`). The conditional
+watcher batched instead.
+
+**The fix is a unit of work per record.** Each pending conditional is now processed in its **own owner-scoped
+`DbContext`** that commits on its **own `SaveChangesAsync`, before any sibling is touched** — so a peer's fault can
+never unwind an order the venue has already accepted. A fault on one record is **contained**: logged, the
+conditional left `Pending`, the pass pressing on to the rest — so one poison record neither discards a committed
+peer nor starves the others, and it re-decides on the next quote (ADR-0013's safe "did not fire" direction) rather
+than retry-storming the same event once a second. This is the invariant the kill-switch fix and the stop-promotion
+watcher already hold; the conditional path now holds it too.
+
+**Still open, filed separately.** The per-record commit narrows the window but does not close it: an order
+**accepted at the venue** whose journal commit then fails — a DB fault, or cancellation at host shutdown — still
+leaves a live order on a `Pending` conditional a later quote can re-fire. That is **gh#577**, which wants a durable
+pre-transmit intent or the `customTag` idempotency handle `PlaceOrderRequest` exposes and the adapter never sets —
+the theme it shares with the take-claim (gh#530) and the concurrent-send (gh#531). The independent real-Postgres
+proof — two conditionals on one contract with a later transmit thrown via `AdversarialTestTradingVenue.OnPlaceOrder`,
+a shape the firing suite's per-test-instrument isolation excludes today — is **gh#578**. And this path still
+composes without `IExecutionMetrics`, so the fire-time gate decisions and order-acks land in `NullExecutionMetrics`
+and the SLIs do not yet witness a firing-path anomaly — a known observability gap, noted rather than smuggled into a
+safety fix.

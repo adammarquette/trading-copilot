@@ -103,40 +103,125 @@ public sealed class ConditionalFiringService
         int acted = 0;
         foreach (Guid owner in owners)
         {
-            // Per-owner context: the reused ComposeAsync ladder is R-20-scoped, so it sees this owner's account,
-            // risk profile, connection, and conventions -- exactly as the operator's own request would.
-            await using TradingCopilotDbContext database = new(_options, new OwnerUser(owner));
-
-            List<ConditionalOrderRecord> pending = await database.ConditionalOrders
-                .Where(order => order.Status == ConditionalStatus.Pending && order.Instrument == contractKey)
+            // List this owner's pending conditionals on the contract (a read, so the R-20 filter is bypassed as in
+            // the owner discovery above), then process EACH in its own unit of work below. A fired conditional
+            // stages its order journal, stop plan, decision, and its Fired transition together and commits them on
+            // that record's own SaveChanges -- before any sibling is touched -- so a later record's venue fault can
+            // never discard an earlier record's already-transmitted order, and one failing record cannot starve the
+            // rest (gh#532). This is the per-record independence the stop-promotion watcher already holds; the single
+            // batched save this replaces did not.
+            List<Guid> pendingIds = await _discovery.ConditionalOrders
+                .IgnoreQueryFilters()
+                .Where(order => order.UserId == owner && order.Status == ConditionalStatus.Pending && order.Instrument == contractKey)
+                .Select(order => order.Id)
                 .ToListAsync(cancellationToken);
 
-            bool changed = false;
-            foreach (ConditionalOrderRecord record in pending)
+            foreach (Guid conditionalId in pendingIds)
             {
-                changed |= await ProcessOneAsync(database, record, contractKey, bid, ask, now, cancellationToken);
-                if (record.Status != ConditionalStatus.Pending || record.FiredOrderId is not null)
-                {
-                    acted++;
-                }
-            }
-
-            if (changed)
-            {
-                await database.SaveChangesAsync(cancellationToken);
+                acted += await ProcessRecordAsync(owner, conditionalId, contractKey, bid, ask, now, cancellationToken);
             }
         }
 
         return acted;
     }
 
-    private async Task<bool> ProcessOneAsync(
+    /// <summary>
+    /// Processes one pending conditional in its <b>own owner-scoped unit of work</b> (gh#532), committing its work
+    /// before any sibling is touched so a peer's fault can never discard an order the venue has already accepted. A
+    /// fault is <b>contained</b>: the conditional stays <see cref="ConditionalStatus.Pending"/> and re-decides on the
+    /// next quote (ADR-0013's safe "did not fire"), so one poison record neither rolls back a committed peer nor
+    /// starves the rest.
+    /// </summary>
+    /// <returns>1 if the conditional was acted on (fired, cancelled, or expired), otherwise 0.</returns>
+    private async Task<int> ProcessRecordAsync(
+        Guid owner,
+        Guid conditionalId,
+        string contractKey,
+        decimal bid,
+        decimal ask,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        bool transmitted = false;
+        try
+        {
+            // Per-owner context: the reused ComposeAsync ladder is R-20-scoped, so it sees this owner's account,
+            // risk profile, connection, and conventions -- exactly as the operator's own request would.
+            await using TradingCopilotDbContext database = new(_options, new OwnerUser(owner));
+
+            ConditionalOrderRecord? record = await database.ConditionalOrders.FirstOrDefaultAsync(
+                order => order.Id == conditionalId && order.Status == ConditionalStatus.Pending, cancellationToken);
+            if (record is null)
+            {
+                return 0; // resolved by an earlier pass between discovery and now -- nothing to do
+            }
+
+            // Mark the transmit at the MOMENT the venue accepts the order (inside ProcessOneAsync), not from its
+            // return value: the journaling runs after the accept but before the method returns, so a throw there must
+            // still classify as the dangerous "accepted but not journaled" window below -- never as a benign
+            // pre-transmit retry that would leave the conditional Pending to re-fire a duplicate (gh#532 review).
+            FiringOutcome outcome = await ProcessOneAsync(
+                database, record, contractKey, bid, ask, now, () => transmitted = true, cancellationToken);
+
+            if (outcome != FiringOutcome.Unchanged)
+            {
+                await database.SaveChangesAsync(cancellationToken);
+            }
+
+            return record.Status != ConditionalStatus.Pending || record.FiredOrderId is not null ? 1 : 0;
+        }
+        catch (OperationCanceledException error) when (cancellationToken.IsCancellationRequested)
+        {
+            // A clean host shutdown -- let it stop the pass rather than swallow it as a per-record fault. But if the
+            // cancellation landed AFTER the venue accepted the order and before its journal committed, that is the
+            // same dangerous transmit->journal window as below (gh#577), just triggered by shutdown -- surface it
+            // loudly before honoring the stop, because the order may be live at the venue and unrecorded.
+            if (transmitted)
+            {
+                _logger.LogError(
+                    error,
+                    "Conditional order {Id} on {Contract} transmitted an order the venue accepted, but the host shut "
+                    + "down before journaling it. The order may be live at the venue and unrecorded, and the "
+                    + "conditional is still pending (gh#577).",
+                    conditionalId, contractKey);
+            }
+
+            throw;
+        }
+        catch (Exception error) when (transmitted)
+        {
+            // The dangerous window: the venue ACCEPTED the order but its journal did not commit. The order may be
+            // live and unrecorded, and the conditional is still Pending, so a later quote can re-fire it -- the
+            // durable-intent / idempotency follow-up (gh#577). Surface it loudly; the pass still presses on.
+            _logger.LogError(
+                error,
+                "Conditional order {Id} on {Contract} transmitted an order the venue accepted, but journaling it "
+                + "FAILED. The order may be live at the venue and unrecorded, and the conditional is still pending (gh#577).",
+                conditionalId, contractKey);
+            return 0;
+        }
+        catch (Exception error)
+        {
+            // Contain a fault BEFORE anything was transmitted (a venue read / compose / gate fault): the conditional
+            // stays Pending and re-decides on the next quote, and the pass presses on so one poison record cannot
+            // discard a committed peer or starve the rest (gh#532).
+            _logger.LogWarning(
+                error,
+                "Conditional order {Id} on {Contract} could not be processed this quote; it stays pending and "
+                + "re-decides on the next quote.",
+                conditionalId, contractKey);
+            return 0;
+        }
+    }
+
+    private async Task<FiringOutcome> ProcessOneAsync(
         TradingCopilotDbContext database,
         ConditionalOrderRecord record,
         string contractKey,
         decimal bid,
         decimal ask,
         DateTimeOffset now,
+        Action onTransmitted,
         CancellationToken cancellationToken)
     {
         ConditionalOrder conditional = record.ToConditionalOrder();
@@ -152,12 +237,12 @@ public sealed class ConditionalFiringService
                 : ConditionalStatus.Cancelled;
             _logger.LogInformation(
                 "Conditional order {Id} on {Contract} moved to {Status}.", record.Id, contractKey, record.Status);
-            return true;
+            return FiringOutcome.Resolved;
         }
 
         if (!conditional.ShouldFire(price))
         {
-            return false;
+            return FiringOutcome.Unchanged;
         }
 
         // Fire: the authoritative fire-time re-gate (R-12 / R-5 / R-16), the same ladder the operator's take runs.
@@ -168,7 +253,7 @@ public sealed class ConditionalFiringService
             // A precondition failed (e.g. the account is not flat) -- leave it pending and re-decide next quote.
             _logger.LogInformation(
                 "Conditional order {Id} triggered but could not be composed yet; still pending.", record.Id);
-            return false;
+            return FiringOutcome.Unchanged;
         }
 
         (ExecutionRequest? request, _) = await OrderEndpoints.BuildRequestAsync(
@@ -177,7 +262,7 @@ public sealed class ConditionalFiringService
             record.TakeProfitPrice, record.Type, cancellationToken);
         if (request is null)
         {
-            return false;
+            return FiringOutcome.Unchanged;
         }
 
         ExecutionResult result = await composed.Execution.SendAsync(request, cancellationToken);
@@ -185,6 +270,11 @@ public sealed class ConditionalFiringService
 
         if (result.Outcome == ExecutionOutcome.Placed && result.Order is not null)
         {
+            // The venue has ACCEPTED the order. Record the transmit NOW -- before the journaling below -- so that if
+            // any of it throws, the fault is classified as the dangerous "accepted but not journaled" window (gh#577),
+            // never a benign pre-transmit retry that would leave the conditional Pending to re-fire a duplicate.
+            onTransmitted();
+
             SendOrderRequest proposal = new(
                 record.Symbol ?? record.Instrument, record.TickSize, record.PointValue, record.Side, record.Size,
                 record.EntryPrice, record.WorkingStopPrice, record.SafetyStopPrice, record.ReferencePrice,
@@ -203,7 +293,7 @@ public sealed class ConditionalFiringService
             record.FiredOrderId = journaled.Id;
             _logger.LogInformation(
                 "Fired conditional order {Id} as order {OrderId} on {Contract}.", record.Id, journaled.Id, contractKey);
-            return true;
+            return FiringOutcome.Transmitted;
         }
 
         // Refused by the fire-time gate: audit the decision, leave it pending, and re-decide on the next quote.
@@ -211,7 +301,22 @@ public sealed class ConditionalFiringService
         _logger.LogWarning(
             "Conditional order {Id} triggered but the fire-time gate refused ({Reason}); still pending.",
             record.Id, result.Reason);
-        return result.Decision is not null;
+        return result.Decision is not null ? FiringOutcome.Resolved : FiringOutcome.Unchanged;
+    }
+
+    /// <summary>What processing one conditional against a quote resolved to — it drives whether to persist, and
+    /// whether an order was transmitted (so a journaling failure AFTER a transmit is surfaced as the dangerous case
+    /// it is, not swallowed as an ordinary skip).</summary>
+    private enum FiringOutcome
+    {
+        /// <summary>Nothing to persist — not triggered, not yet composable, or a gate refusal with no decision.</summary>
+        Unchanged,
+
+        /// <summary>Resolved without transmitting — cancelled, expired, or a gate refusal whose decision is audited.</summary>
+        Resolved,
+
+        /// <summary>Fired — the entry was transmitted to the venue and its order + stop plan + decision are staged.</summary>
+        Transmitted,
     }
 
     /// <summary>The owning operator, so the reused ladder is R-20-scoped and every journaled row keeps its owner.</summary>
