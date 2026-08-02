@@ -89,8 +89,40 @@ discipline to **how and when the LLM is invoked at all**, so cost is bounded and
 - **Debounce / rate-limit + the spend governor** are new controls to design and validate-on-start.
 - **Coverage-vs-cost tradeoff** — cheap-model triage may under-surface; needs evaluation and is tunable.
 
-## Follow-ups
-**Update (2026-07-28, gh#385) — the deterministic mechanical route landed.** A structured **indicator-threshold**
+## Decision log
+
+This ADR's decision has been **extended by increment** rather than rewritten, so the dated updates below are the
+authoritative record of how and when the LLM is invoked today — the *Decision* above is the original frame, and where
+a later update supersedes part of it that update says so inline. They run **oldest first**. Nothing here is deleted
+when it is superseded: an ADR is the reasoning trail, and knowing *why* a decision was replaced is the point.
+
+This index exists because the trail is long. Skim it to find the increment you need, then read that entry.
+
+*(Housekeeping, gh#524: the twelve dated updates below were **promoted from bold paragraphs to `##` headings, lifted
+out from under `Follow-ups`, and reordered into date order** — the gh#470 entry was dated 2026-07-29 but sat between
+two 2026-07-30 entries — and this index was added, generated from the headings so it cannot drift. It is the same
+treatment gh#492 gave [ADR-0007](0007-order-execution-model.md). **No entry was removed or reworded** — only the
+heading level and the order changed; the load-bearing rationale (the governor's fail-open posture, the triage→deep
+escalation policy, the enrichment injection-surface argument) is untouched.)*
+
+| Date | Update |
+|---|---|
+| 2026-07-28 | the deterministic mechanical route landed (gh#385) |
+| 2026-07-28 | the agent-review route landed, seam-first (gh#402) |
+| 2026-07-28 | the real Anthropic adapter landed; the seam is now live (gh#423) |
+| 2026-07-28 | the persisted `AIUsage` ledger landed; the spend signal's LLM half is durable (gh#431) |
+| 2026-07-29 | embed-path AIUsage owner settled; the live write awaits gh#377 (gh#436) |
+| 2026-07-29 | the platform-level AI-spend governor landed (gh#448) |
+| 2026-07-29 | confirm-before-live: the LLM is out of the hot loop of the _rule_, not only the firing (gh#470) |
+| 2026-07-30 | the live embed producer + call-site gating landed (gh#377) |
+| 2026-07-30 | the triage→deep escalation policy landed (gh#449) |
+| 2026-07-30 | deep-context enrichment landed; the deep tier now gets more than the model upgrade (gh#476) |
+| 2026-07-30 | the per-call budget-aware escalation skip landed; the pair-overrun is closed (gh#478) |
+| 2026-07-30 | the LLM-side meter landed; Grafana now sees true total AI spend (gh#477) |
+
+## Update (2026-07-28) — the deterministic mechanical route landed (gh#385)
+
+A structured **indicator-threshold**
 condition (typed columns + a `ConditionKind` discriminator — *not* a DSL, since one kind serves no DSL yet), a pure
 **edge-debounce** state machine (`Unseeded → Armed → Fired`: fire once on the arming edge, re-arm on the opposite,
 seed pre-existing truth silently, and hold fail-closed on a null indicator) — **and, since gh#469, say so**: the hold was right but silent, so `UnmeasurableSince` tracks how long a trigger has been unevaluable and the scan warns once past 30 minutes, naming the missing indicator -- "once" being a claim the first cut did not actually hold (gh#515), since a crossed threshold stays crossed; `StalenessReportedAt` is the durable bit that makes it true. Duration is the only thing that separates a late bar from a dependency that stopped being produced; it never disables the trigger, because a pipeline hiccup must not silently disarm an alert, and a **periodic evaluator** that fires
@@ -99,7 +131,9 @@ compiler for now; a nullable `SourceRuleId` is the seam the compiler will fill. 
 compiler + the `Rule` entity, the **agent-review** route, order-flow / composite / cross-asset / time conditions,
 the wall-clock **rate-limit** (a `LastFiredAt` seam shipped), and the **AI-spend governor**.
 
-**Update (2026-07-28, gh#402) — the agent-review route landed, seam-first.** A trigger routing to **agent-review**
+## Update (2026-07-28) — the agent-review route landed, seam-first (gh#402)
+
+A trigger routing to **agent-review**
 now, on a fire, wakes a reviewer (**one LLM call per fire**) behind a provider-neutral **`ILlmProvider`** seam that
 **proposes a `Suggestion` or suppresses** — the first place an LLM enters the system, at the edges. **Enforcement
 stays below the model, proven structurally**: the review path reaches no order / venue / gate type (a
@@ -112,7 +146,9 @@ never fabricates geometry, and an honest inert reviewer *tells* the operator a s
 open: the NL→condition compiler + `Rule` entity, order-flow / composite conditions, model-tiering escalation, and
 the AI-spend governor.
 
-**Update (2026-07-28, gh#423) — the real Anthropic adapter landed; the seam is now live.** `ILlmProvider` binds a
+## Update (2026-07-28) — the real Anthropic adapter landed; the seam is now live (gh#423)
+
+`ILlmProvider` binds a
 real **`AnthropicLlmProvider`** when a key is present (the *same* switch that picks the reviewer), and the **stub**
 now stands in **only when unconfigured** — so a configured deployment wakes a live model and an unconfigured one
 still cannot fabricate a suggestion. It is a **raw `HttpClient` adapter, not an SDK** (dependency-minimal +
@@ -127,7 +163,8 @@ the whole of "AI-spend"): the **`AIUsage`** per-call token+cost+latency record �
 spend governor** — plus **model-tiering escalation policy** (both tiers resolve to real models; *when* triage
 escalates to deep is a follow-up).
 
-**Update (2026-07-28, gh#431) — the persisted `AIUsage` ledger landed; the spend signal's LLM half is durable.**
+## Update (2026-07-28) — the persisted `AIUsage` ledger landed; the spend signal's LLM half is durable (gh#431)
+
 The agent-review reviewer now returns an `AgentReview` (its `ReviewOutcome` **plus** an `AiCallCost` — feature,
 model / tier, tokens in/out, an estimated USD cost at the pinned per-tier rate, an `AiUsageOutcome`, and latency),
 and the scan — **the single tenancy authority** — records one `AiUsageRecord` **stamped with the firing owner**
@@ -142,7 +179,9 @@ export-only and settled that the governor enforces on the floor and reconciles o
 (the last of "AI-spend"): the **platform-level spend governor** (cap / throttle vs.
 budget) and the **triage→deep escalation policy**.
 
-**Update (2026-07-29, gh#436) — embed-path AIUsage owner settled; the live write awaits gh#377.** The question
+## Update (2026-07-29) — embed-path AIUsage owner settled; the live write awaits gh#377 (gh#436)
+
+The question
 gh#431 deferred ("who owns a *global* embed's spend row under R-20?") is resolved: **global** embedding spend —
 embedding deployment-global news / market snapshots (gh#377) — is **deployment infrastructure cost, not an operator
 trading decision**, so it is stamped to a **deployment sentinel owner** (`SystemOwner.Id`, a well-known **non-empty**
@@ -160,7 +199,9 @@ fire-and-forget on the degrade-never-throw retrieval path. The mapping is pinned
 `OutputTokens = 0`. **Embed attribution is now closed**; the live embed write rides gh#377. Still open: the
 **platform-level spend governor** and the **triage→deep escalation policy**.
 
-**Update (2026-07-29, gh#448) — the platform-level AI-spend governor landed.** A **pure, deterministic**
+## Update (2026-07-29) — the platform-level AI-spend governor landed (gh#448)
+
+A **pure, deterministic**
 `AiSpendGovernor` (Domain/Ai) mirrors the R-5 daily *risk* governor line-for-line — `budget − spent ≤ 0 ⇒ Block` —
 and the trigger scan consults it **before** waking the agent-review reviewer: on a spent budget it short-circuits to
 `Suppress(BudgetExhausted)` with **no LLM call and no `AIUsage` row** (it caps *whether* a call is made, not just
@@ -185,7 +226,28 @@ throttle" — throttle deferred). Still open: ~~an **LLM-side meter** so Grafana
 — and as predicted it did **not** change the governor's read, which is still the ledger floor)*, **Prometheus-based
 reconciliation** and a **runtime-editable** budget.
 
-**Update (2026-07-30, gh#377) — the live embed producer + call-site gating landed.** `NewsEmbeddingService` (the
+## Update (2026-07-29) — confirm-before-live: the LLM is out of the hot loop of the _rule_, not only the firing (gh#470)
+
+"The LLM is never in the continuous hot loop" was already true of *firing* (the deterministic scan fires; the reviewer
+only proposes). It was **not** true of *authorship*: a trigger — including one an agent-review proposal or a future R-7
+compiler writes — became armed the instant it was persisted with `Enabled = true`, so a machine-authored rule could
+begin paging the operator or waking the reviewer with **no human step between authorship and armed**. This adds that
+step. A new **`TriggerConfirmation`** {`Unconfirmed = 0` → `Confirmed = 1`} on `TriggerRecord` is **distinct from
+`Enabled`** (live/paused): an **unconfirmed trigger is inert regardless of `Enabled`**, and both scan query sites
+(owner discovery + per-owner load) evaluate only `Confirmed` triggers. `CreateTrigger` persists **`Unconfirmed`**;
+acceptance is the separate, deliberate **`POST /api/triggers/{id}/confirm`** (idempotent, R-20-scoped, leaves the
+debounce untouched so a confirmed trigger still seeds silently and fires only on an observed edge). The zero is
+`Unconfirmed` on purpose — a defaulted/corrupt row is inert (fail-closed), the same zero-is-the-safe-default posture as
+`TriggerArmState.Unseeded` and `DefaultEntryAction.ApproveAndArm`, and mirroring the execution path's arm → review →
+send (R-11, ADR-0007). Enforcement stays **below the model**: this is a DB column + a scan predicate + a `CHECK`
+(`"Confirmation" IN (0, 1)`), never prompt text. The migration backfills **existing** rows to `Confirmed` — a schema
+change must not silently disarm an alert already in service (the gh#380 lesson; here the safe value is *not* the zero,
+so it is an explicit `UPDATE`, not a `defaultValue`). This is the gate that makes gh#15's *"plain rules → **confirmed**
+deterministic triggers"* true of the rule.
+
+## Update (2026-07-30) — the live embed producer + call-site gating landed (gh#377)
+
+`NewsEmbeddingService` (the
 news-embedding backfill pass) is the first `EmbedAsync` consumer: it records the embed `AIUsage` rows the gh#436
 owner was readied for — one per attempted call, success or failure, stamped to `SystemOwner`, `Feature = Embed` — and
 **gates each embed on the same deployment-wide daily budget** the trigger scan reads, re-checked before every call so
@@ -194,7 +256,9 @@ a long pass stops mid-page once exhausted. This closes the *embed-call-site gati
 fail-closed trade gate. To ledger honestly, `IEmbeddingProvider.EmbedAsync` now rides the call's spend facts back on
 an `EmbeddingResult` (mirroring `LlmUsage` on a completion); gh#377 is its only consumer.
 
-**Update (2026-07-30, gh#449) — the triage→deep escalation policy landed.** The triage tier may now return a third
+## Update (2026-07-30) — the triage→deep escalation policy landed (gh#449)
+
+The triage tier may now return a third
 `decision: "escalate"` — a **reviewer-private control signal**, never a public `ReviewOutcome` — when a fired setup
 is genuinely too hard for a quick judgment. On escalate the reviewer makes ONE **second, deep-tier** call
 (`claude-sonnet-5`) whose schema offers only `suggest`/`suppress` and whose prompt demands a **final** answer, and it
@@ -226,25 +290,8 @@ operability. Still open: ~~per-call budget-aware escalation skip~~ *(landed, gh#
 *(landed, gh#477)*, a
 runtime-editable budget, and throttle.
 
-**Update (2026-07-29, gh#470) — confirm-before-live: the LLM is out of the hot loop of the _rule_, not only the firing.**
-"The LLM is never in the continuous hot loop" was already true of *firing* (the deterministic scan fires; the reviewer
-only proposes). It was **not** true of *authorship*: a trigger — including one an agent-review proposal or a future R-7
-compiler writes — became armed the instant it was persisted with `Enabled = true`, so a machine-authored rule could
-begin paging the operator or waking the reviewer with **no human step between authorship and armed**. This adds that
-step. A new **`TriggerConfirmation`** {`Unconfirmed = 0` → `Confirmed = 1`} on `TriggerRecord` is **distinct from
-`Enabled`** (live/paused): an **unconfirmed trigger is inert regardless of `Enabled`**, and both scan query sites
-(owner discovery + per-owner load) evaluate only `Confirmed` triggers. `CreateTrigger` persists **`Unconfirmed`**;
-acceptance is the separate, deliberate **`POST /api/triggers/{id}/confirm`** (idempotent, R-20-scoped, leaves the
-debounce untouched so a confirmed trigger still seeds silently and fires only on an observed edge). The zero is
-`Unconfirmed` on purpose — a defaulted/corrupt row is inert (fail-closed), the same zero-is-the-safe-default posture as
-`TriggerArmState.Unseeded` and `DefaultEntryAction.ApproveAndArm`, and mirroring the execution path's arm → review →
-send (R-11, ADR-0007). Enforcement stays **below the model**: this is a DB column + a scan predicate + a `CHECK`
-(`"Confirmation" IN (0, 1)`), never prompt text. The migration backfills **existing** rows to `Confirmed` — a schema
-change must not silently disarm an alert already in service (the gh#380 lesson; here the safe value is *not* the zero,
-so it is an explicit `UPDATE`, not a `defaultValue`). This is the gate that makes gh#15's *"plain rules → **confirmed**
-deterministic triggers"* true of the rule.
+## Update (2026-07-30) — deep-context enrichment landed; the deep tier now gets more than the model upgrade (gh#476)
 
-**Update (2026-07-30, gh#476) — deep-context enrichment landed; the deep tier now gets more than the model upgrade.**
 This closes the gh#449 scope caveat above ("escalation upgrades the *model*, not the *information*"). On escalation the
 deep call now carries a **numeric market-context payload** — a bounded window of recent **OHLCV bars** and recent
 values of the **fired indicator's own series** — so the deep tier can reason about price and the setup's recent
@@ -280,7 +327,8 @@ decisions, each keeping the ADR's principles intact:
   gh#478 — below)*, an escalation-rate metric + when-to-escalate eval suite, `AiUsageFeature.Suggestion` for the deep
   row, a runtime-editable budget, throttle, and — the injection surface this defers — **news/free-text enrichment**.
 
-**Update (2026-07-30, gh#478) — the per-call budget-aware escalation skip landed; the pair-overrun is closed.**
+## Update (2026-07-30) — the per-call budget-aware escalation skip landed; the pair-overrun is closed (gh#478)
+
 The gh#448 governor caps **whether the review runs at all** (pass-level, before any call), and the gh#449 update
 amended the effective cap to *"budget plus at most one in-flight triage→deep **pair**"* — because a triage that fit the
 remaining budget could still escalate into a deep call that overran it. That **partial-budget** case is now handled: the
@@ -312,7 +360,9 @@ escalation-rate metric + when-to-escalate eval suite, `AiUsageFeature.Suggestion
 runtime-editable budget, throttle, and news/free-text enrichment. *(The LLM-side meter on that list landed separately as
 gh#477, below — with it, Grafana now sees the deep-call spend this gate withholds.)*
 
-**Update (2026-07-30, gh#477) — the LLM-side meter landed; Grafana now sees true total AI spend.** The embed meter
+## Update (2026-07-30) — the LLM-side meter landed; Grafana now sees true total AI spend (gh#477)
+
+The embed meter
 (gh#403) had no LLM counterpart, so Grafana showed embedding spend but **not** LLM spend — the gh#448 "reconcile in
 Grafana" note was partly vapor for the LLM path. Now a **`LlmMetrics`** (Api/Ai) emits `ai.llm.{calls, input_tokens,
 output_tokens, cost_usd, latency}` on the **same `MarqSpec.TradingCopilot.Ai` meter** as embeddings (so it exports with
@@ -326,6 +376,9 @@ is export-only / not app-readable, so the governor's read is **unchanged** — i
 `AIUsage` ledger floor; this closes the **Grafana-visibility** gap only. Amends the gh#448/gh#449 "still open:
 LLM-side meter" notes above — **landed**.
 
+## Follow-ups
+*Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the
+authoritative record — this list is kept only as a decision-provenance changelog.*
 - Define the **trigger / condition model** (DSL or structured schema) and how R-7 rules compile to it; unit-test the
   compiler. *(gh#385: the structured schema + the first condition kind shipped; the R-7 compiler is still open.)*
 - Spec the **deterministic trigger evaluator** as a processor / consumer over the event log (ADR-0001) — inputs
