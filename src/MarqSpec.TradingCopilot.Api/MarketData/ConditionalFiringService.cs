@@ -156,8 +156,12 @@ public sealed class ConditionalFiringService
                 return 0; // resolved by an earlier pass between discovery and now -- nothing to do
             }
 
-            FiringOutcome outcome = await ProcessOneAsync(database, record, contractKey, bid, ask, now, cancellationToken);
-            transmitted = outcome == FiringOutcome.Transmitted;
+            // Mark the transmit at the MOMENT the venue accepts the order (inside ProcessOneAsync), not from its
+            // return value: the journaling runs after the accept but before the method returns, so a throw there must
+            // still classify as the dangerous "accepted but not journaled" window below -- never as a benign
+            // pre-transmit retry that would leave the conditional Pending to re-fire a duplicate (gh#532 review).
+            FiringOutcome outcome = await ProcessOneAsync(
+                database, record, contractKey, bid, ask, now, () => transmitted = true, cancellationToken);
 
             if (outcome != FiringOutcome.Unchanged)
             {
@@ -217,6 +221,7 @@ public sealed class ConditionalFiringService
         decimal bid,
         decimal ask,
         DateTimeOffset now,
+        Action onTransmitted,
         CancellationToken cancellationToken)
     {
         ConditionalOrder conditional = record.ToConditionalOrder();
@@ -265,6 +270,11 @@ public sealed class ConditionalFiringService
 
         if (result.Outcome == ExecutionOutcome.Placed && result.Order is not null)
         {
+            // The venue has ACCEPTED the order. Record the transmit NOW -- before the journaling below -- so that if
+            // any of it throws, the fault is classified as the dangerous "accepted but not journaled" window (gh#577),
+            // never a benign pre-transmit retry that would leave the conditional Pending to re-fire a duplicate.
+            onTransmitted();
+
             SendOrderRequest proposal = new(
                 record.Symbol ?? record.Instrument, record.TickSize, record.PointValue, record.Side, record.Size,
                 record.EntryPrice, record.WorkingStopPrice, record.SafetyStopPrice, record.ReferencePrice,
