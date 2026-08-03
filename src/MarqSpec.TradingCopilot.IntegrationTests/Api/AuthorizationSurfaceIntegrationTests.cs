@@ -63,6 +63,23 @@ public class AuthorizationSurfaceIntegrationTests : IClassFixture<PostgresApiFac
     ];
 
     /// <summary>
+    /// The generated API documentation surface (gh#604) — the OpenAPI spec, the Scalar reference UI, and Scalar's
+    /// own static assets. Public <b>on the record</b>: <c>MapTradingCopilotApiReference</c> marks them
+    /// <c>[AllowAnonymous]</c>, because they expose only the API <b>shape</b> — never data, never an action, each of
+    /// which still requires a token — and that shape is already public in the README this replaces (#605). Adam
+    /// sanctioned them anonymous (the browsable-UI decision on #604). The Scalar routes are present only outside
+    /// production (<c>ScalarUiPolicy</c>); the test host is Development, so all five appear here.
+    /// </summary>
+    private static string[] DocsAnonymous { get; } =
+    [
+        "GET /openapi/{documentName}.json",
+        "GET /scalar/{documentName?}",
+        "GET /scalar/scalar.js",
+        "GET /scalar/scalar.aspnetcore.js",
+        "GET /scalar/favicon.svg",
+    ];
+
+    /// <summary>
     /// The probes, which are open because nothing gates them — <b>not</b> because anything declared them open.
     /// </summary>
     /// <remarks>
@@ -81,7 +98,7 @@ public class AuthorizationSurfaceIntegrationTests : IClassFixture<PostgresApiFac
 
     /// <summary>The complete set of routes that may be reached without a token. Anything else must 401.</summary>
     private static HashSet<string> AnonymousRoutes { get; } =
-        new([.. DeclaredAnonymous, .. UngatedByOmission], StringComparer.OrdinalIgnoreCase);
+        new([.. DeclaredAnonymous, .. DocsAnonymous, .. UngatedByOmission], StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Routes R-18 calls out by name. Membership is asserted explicitly so the sweep cannot quietly stop covering
@@ -182,8 +199,9 @@ public class AuthorizationSurfaceIntegrationTests : IClassFixture<PostgresApiFac
         // route 404 instead of 401, and the sweep above would pass while probing nothing real. So: the table must be
         // populated, and the routes R-18 names must be in it BY TEMPLATE.
         probes.Should().HaveCountGreaterThanOrEqualTo(45,
-            "the application maps 49 routes, 4 of them anonymous; an enumeration returning fewer than 45 means the "
-            + "route table is not being read and both sweeps are passing vacuously");
+            "the application maps ~54 routes — 9 of them reachable without a token (2 auth + the 5-route gh#604 docs "
+            + "surface + the 2 probes); an enumeration returning fewer than 45 means the route table is not being "
+            + "read and both sweeps are passing vacuously");
 
         string[] templates = [.. probes.Select(probe => probe.Key)];
         foreach (string required in MustBeCovered)
@@ -196,8 +214,10 @@ public class AuthorizationSurfaceIntegrationTests : IClassFixture<PostgresApiFac
         // sweep — it makes "a route became reachable" fail HERE, by name and by cause, rather than as a puzzling
         // 200 fifty lines up.
         string[] declared = [.. probes.Where(probe => probe.IsAnonymous).Select(probe => probe.Key)];
-        declared.Should().BeEquivalentTo(DeclaredAnonymous,
-            "the only routes declaring [AllowAnonymous] must be the two this suite sanctions");
+        declared.Should().BeEquivalentTo([.. DeclaredAnonymous, .. DocsAnonymous],
+            "the only routes declaring [AllowAnonymous] are the two auth entrypoints this suite sanctions and the "
+            + "generated documentation surface Adam sanctioned on gh#604 — anything else appearing here was made "
+            + "anonymous without being put on the record");
 
         // The sharp one. With no FallbackPolicy, a route carrying NEITHER [AllowAnonymous] nor an authorization
         // policy is silently public — that is the whole failure mode, and it is a property of the route table, so
@@ -212,7 +232,7 @@ public class AuthorizationSurfaceIntegrationTests : IClassFixture<PostgresApiFac
     }
 
     [Fact]
-    public async Task TheFourAnonymousRoutes_ShouldBeReachable_WithoutAToken()
+    public async Task TheAnonymousRoutes_ShouldBeReachable_WithoutAToken()
     {
         // The other half of the allow-list's honesty: if these silently began requiring a token, the sweep would
         // still be green (it skips them), and the deployment would be broken with nothing to say so.
@@ -224,6 +244,19 @@ public class AuthorizationSurfaceIntegrationTests : IClassFixture<PostgresApiFac
         using (HttpResponseMessage ready = await _client.GetAsync("/ready"))
         {
             ready.StatusCode.Should().Be(HttpStatusCode.OK, "the readiness probe must not require a token");
+        }
+
+        // The gh#604 documentation surface — anonymous by decision (above). The spec is the endpoint reference the
+        // README links to; if it silently began requiring a token, it would 404-for-everyone with nothing to say so.
+        using (HttpResponseMessage spec = await _client.GetAsync("/openapi/v1.json"))
+        {
+            spec.StatusCode.Should().Be(HttpStatusCode.OK, "the generated OpenAPI spec is public (gh#604)");
+        }
+
+        using (HttpResponseMessage ui = await _client.GetAsync("/scalar/v1"))
+        {
+            ui.StatusCode.Should().NotBe(HttpStatusCode.Unauthorized,
+                "the Scalar reference UI is public outside production (gh#604) — it must not require a token");
         }
 
         // Valid credentials, deliberately: an unknown-credentials 401 is indistinguishable from the "no token" 401
