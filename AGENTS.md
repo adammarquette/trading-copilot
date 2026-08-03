@@ -56,8 +56,9 @@ before starting, and add dated entries only when nothing formal fits.
 ## Working rules
 
 - **Docs in lockstep — the same-PR rule.** A change whose behavior, data model, API or UX a document describes
-  updates **the affected section of that document, in the same PR** — the PRD (`R-#`), the data dictionary and
-  its ERD, the wireframes, the ADRs, this file. Update the section, not the whole file. (Engineering §10.)
+  updates **the affected section of that document, in the same PR** — the PRD (`R-#`), the architecture doc, the
+  data dictionary (its domain page, and the ERD in the index), the wireframes, the ADRs, this file. Update the
+  section, not the whole file. (Engineering §10 owns the rule.)
 - **Issue-first — no orphaned PRs.** Every PR cites an issue opened before it (`Closes #N` / `Related to #N`);
   cite issues as `gh#N`. **Task specs and acceptance criteria belong in the issue**, never as files under
   `documentation/` — a parallel spec duplicates the tracker and drifts from it.

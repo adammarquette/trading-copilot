@@ -133,7 +133,8 @@ are explicit** — an adapter declares what it actually supports, so a missing c
 instead of surfacing mid-execution.
 
 The discipline that keeps the seams honest: **enforcement lives below the model.** The LLM proposes; a
-deterministic risk gate decides. No limit is ever held in prompt text.
+deterministic risk gate decides. No limit is ever held in prompt text
+([engineering §6](documentation/trading-platform-engineering.md), [ADR-0007](documentation/adr/0007-order-execution-model.md)).
 
 ## Stack (planned)
 
@@ -177,11 +178,13 @@ repo's documentation rules are consequences of that principle, not housekeeping:
 
 The engineering practice that follows from it:
 
-- **Test-first**, with heightened rigor and change control on the execution / auto-flatten layer.
-- **Enforcement below the model** — the risk/execution gate enforces limits; the LLM only proposes.
-- **Conventional Commits**; add an `Assisted-by:` trailer for AI-authored changes.
-- **Work tracked in GitHub issues & PRs** — issue-first, no orphaned PRs.
+- **Test-first**, with heightened rigor and change control on the execution / auto-flatten layer; bug fixes are
+  **regression-first**.
+- **Conventional Commits**; AI-authored changes carry **both** an `Assisted-by:` and a `Co-Authored-By:` trailer.
 - **Contributing:** branch off `develop`, name branches **`<type>/<work-item-id>_<title>`**, curate commits into units of work and land by **rebase-merge** (squash retired) — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+(*Enforcement below the model* and *issue-first* are stated once each above — the seams section and the
+documentation-layer bullets respectively — rather than repeated here.)
 
 ## Contributing & governance
 

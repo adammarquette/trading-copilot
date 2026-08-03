@@ -74,6 +74,12 @@ sprint boundary: this column *is* the sprint, refilled continuously from Plannin
 the highest item that matches their role and model tier (see *Tagging & model routing*) and move it to In
 Progress.
 
+**Claim it before you start — `scripts/claim.sh <issue-id>`.** Moving the card is *not* a claim: sessions run in
+parallel and the board is manual, so **the pushed branch is the claim** (gh#375). Push it empty first, then work.
+Skipping this has cost a full session's work more than once. Full rules — the 4-hour staleness window, the
+split-issue trap (gh#453), and the two-repo card whose claim hides in a submodule (gh#571) — are in
+[`CONTRIBUTING.md`](../CONTRIBUTING.md) §*Claiming work*.
+
 Two rules specific to this column:
 - **QA/SDET may add directly here.** Integration and smoke-test issues are specified *independently* of the
   implementation (the QA Agent works blind to the code, per its contract), so their acceptance criteria come from
@@ -83,9 +89,12 @@ Two rules specific to this column:
   *Kickback*).
 
 ### In Progress
-Being worked right now. **Self-assign** when you start (the board's Assignees field), so two workers never pick
-the same item. This column holds **both** coding-agent and QA/SDET-agent work, and a single feature can have both
-in flight at once — the coding task and its independent test suite advance in parallel.
+Being worked right now. Self-assign when you start (the board's Assignees field) — but **the assignee is not the
+collision signal and never was**: in a single-operator repo it is `adammarquette` on every issue, and this column
+is manual and goes stale. **The pushed claim branch is the only signal that works** (see *Current ToDo* above and
+[`CONTRIBUTING.md`](../CONTRIBUTING.md) §*Claiming work*). This column holds **both** coding-agent and
+QA/SDET-agent work, and a single feature can have both in flight at once — the coding task and its independent
+test suite advance in parallel.
 
 **Kickback.** If, once you are in, the item has *too many unresolved questions to finish correctly*, move it
 **back to Planning** with a comment enumerating the blocking questions. A stalled item must not sit in In Progress

@@ -10,6 +10,25 @@ pipeline steps 1–3 below run on every merge). **Steps 4 and 6 — deploy and v
 and sets the deploy-hook secrets (*Operator setup* steps 4–5). Step 5, the staging integration tier, is still
 unwired. The cloud environments still need creating, so nothing deploys today.
 
+**Contents** — this is a runbook, so open the procedure you need; nobody should be reading it end to end.
+
+| Section | Read it when |
+|---|---|
+| [Platform](#platform) | you need the Railway project, the GHCR image, or the database shape |
+| [Local development (docker-compose)](#local-development-docker-compose) | standing the stack up on your machine |
+| [Environments ↔ branches](#environments--branches) | working out which branch deploys where |
+| [Secrets & config (per environment)](#secrets--config-per-environment) | a variable is missing or wrong — also [operator password recovery](#operator-password-recovery-r-18-adr-0017-operator-lifecycle) |
+| [Services (as they are built)](#services-as-they-are-built) | you want the list of what actually runs |
+| [CI/CD pipeline (GitHub Actions → GHCR → Railway)](#cicd-pipeline-github-actions--ghcr--railway) | **38% of the file — jump to the sub-section, not the section**: [operator setup](#operator-setup--console-actions-ci-cannot-do-adr-0018) · [automated code review](#automated-code-review--a-ruleset-not-a-workflow) · [branch protection](#branch-protection--required-check-rulesets-gh45) · [combining-PR protection](#combining-pr-protection-on-develop--strict-because-the-merge-queue-is-unavailable-gh357-gh575) · [merge queue](#merge-queue-on-develop--the-design-if-it-ever-becomes-available-gh357) · [reviewer identity](#reviewer-identity--a-github-app-for-agent-verdicts-gh141) |
+| [Observability stack (local, opt-in)](#observability-stack-local-opt-in) | bringing up Prometheus / Loki / Tempo / Grafana — [dashboards](#dashboards-gh366) · [alert receivers](#alerting--receiver-configuration-gh245-adr-0019) |
+| [When a page arrives](#when-a-page-arrives) | **you were paged — start here**, then the matching runbook: [auto-flatten failure](#auto-flatten-failure) · [unprotected position](#unprotected-position) · [orphaned stops](#orphaned-stops) · [backfill shortfall](#backfill-shortfall) · [telemetry pipeline](#telemetry-pipeline). *Those five headings are the live targets of Prometheus `runbook` annotations — link to them, never rename them* |
+| [The dead-man's switch](#the-dead-mans-switch-operator-setup--required-before-live) | before enabling live — the only alerting tier that survives this process dying |
+| [Deploy procedure](#deploy-procedure) | shipping a build |
+| [Rollback procedure](#rollback-procedure) | a build is bad and needs backing out |
+| [Verification / smoke tests](#verification--smoke-tests) | confirming a deploy actually works |
+| [Cost](#cost) | budget questions |
+| [Open items](#open-items) | you are picking up unfinished platform work |
+
 ## Platform
 - **Cloud:** [Railway](https://railway.com) — project **`soothing-illumination`**
   (`2601eb74-b5f9-411f-bb9a-0cd19e6fd540`).

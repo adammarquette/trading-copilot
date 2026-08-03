@@ -129,40 +129,43 @@ back to the end and the dated trail is contiguous once more. **No entry was chan
 index above already listed all thirty-one entries in date order, and still does. That it recurred is the argument
 for validating heading-order/index against the trail in CI rather than by hand — filed as gh#600.)*
 
+**Structure —** the *decision itself* is above this trail: [Context](#context) · [Decision](#decision) ·
+[Alternatives considered](#alternatives-considered) · [Consequences](#consequences) · [Follow-ups](#follow-ups).
+
 | Date | Update |
 |---|---|
-| 2026-07-20 | the risk-gate interface is defined (S2, gh#10) |
-| 2026-07-22 | per-trade risk basis confirmed; the send path composed |
-| 2026-07-24 | the staged-stop plan (increment 4) |
-| 2026-07-24 | the promotion watcher landed (gh#153) |
-| 2026-07-24 | the take-profit bracket (gh#170) |
-| 2026-07-25 | the take-profit wiring (gh#173) |
-| 2026-07-25 | the conditional order, model + persistence (gh#176) |
-| 2026-07-25 | the firing watcher landed (gh#198) |
-| 2026-07-25 | connection-loss orphan handling landed (gh#209) |
-| 2026-07-25 | per-position re-validation on re-arm landed (gh#191) |
-| 2026-07-25 | the kill switch landed (gh#189) |
-| 2026-07-25 | the account-event streaming seam (gh#219) |
-| 2026-07-25 | app-level OCO-cancel-on-exit (gh#183) |
-| 2026-07-25 | the AuditRecord landed (gh#220) |
-| 2026-07-25 | the send-as-is fast path (gh#181) |
-| 2026-07-25 | cancel a working order via the order API (gh#250) |
-| 2026-07-25 | modify a working order via the order API (gh#259) |
-| 2026-07-25 | the default entry action preference (gh#218) |
-| 2026-07-25 | the promotion race fenced (gh#183 follow-up) |
-| 2026-07-26 | reprice a working order's working stop (gh#267) |
-| 2026-07-26 | move the entry and working stop together (gh#278) |
-| 2026-07-26 | resize a working order (gh#292) |
-| 2026-07-26 | the promoted stop is sized to the live remaining (gh#277) |
-| 2026-07-27 | the ATR band is live, and the caller resolves it (gh#311) |
-| 2026-07-28 | resting orders are readable through the app (gh#381) |
-| 2026-07-28 | the consistency target binds, and its posture is per-account (gh#380) |
-| 2026-07-30 | the take path is claimed before it reaches the venue (gh#530) |
-| 2026-07-30 | the kill switch survives a venue that says no (gh#529) |
-| 2026-08-02 | conditional firing commits per record (gh#532) |
-| 2026-08-02 | the direct-send path serializes per account against send-vs-send stacking (gh#531) |
-| 2026-08-02 | the transmit→journal window closes with a durable pre-transmit intent (gh#577) |
-| 2026-08-03 | take + conditional-fire serialize per account; Taking is counted and made recoverable (gh#589) |
+| 2026-07-20 | [the risk-gate interface is defined (S2, gh#10)](#update-2026-07-20--the-risk-gate-interface-is-defined-s2-gh10) |
+| 2026-07-22 | [per-trade risk basis confirmed; the send path composed](#update-2026-07-22--per-trade-risk-basis-confirmed-the-send-path-composed) |
+| 2026-07-24 | [the staged-stop plan (increment 4)](#update-2026-07-24--the-staged-stop-plan-increment-4) |
+| 2026-07-24 | [the promotion watcher landed (gh#153)](#update-2026-07-24--the-promotion-watcher-landed-gh153) |
+| 2026-07-24 | [the take-profit bracket (gh#170)](#update-2026-07-24--the-take-profit-bracket-gh170) |
+| 2026-07-25 | [the take-profit wiring (gh#173)](#update-2026-07-25--the-take-profit-wiring-gh173) |
+| 2026-07-25 | [the conditional order, model + persistence (gh#176)](#update-2026-07-25--the-conditional-order-model--persistence-gh176) |
+| 2026-07-25 | [the firing watcher landed (gh#198)](#update-2026-07-25--the-firing-watcher-landed-gh198) |
+| 2026-07-25 | [connection-loss orphan handling landed (gh#209)](#update-2026-07-25--connection-loss-orphan-handling-landed-gh209) |
+| 2026-07-25 | [per-position re-validation on re-arm landed (gh#191)](#update-2026-07-25--per-position-re-validation-on-re-arm-landed-gh191) |
+| 2026-07-25 | [the kill switch landed (gh#189)](#update-2026-07-25--the-kill-switch-landed-gh189) |
+| 2026-07-25 | [the account-event streaming seam (gh#219)](#update-2026-07-25--the-account-event-streaming-seam-gh219) |
+| 2026-07-25 | [app-level OCO-cancel-on-exit (gh#183)](#update-2026-07-25--app-level-oco-cancel-on-exit-gh183) |
+| 2026-07-25 | [the AuditRecord landed (gh#220)](#update-2026-07-25--the-auditrecord-landed-gh220) |
+| 2026-07-25 | [the send-as-is fast path (gh#181)](#update-2026-07-25--the-send-as-is-fast-path-gh181) |
+| 2026-07-25 | [cancel a working order via the order API (gh#250)](#update-2026-07-25--cancel-a-working-order-via-the-order-api-gh250) |
+| 2026-07-25 | [modify a working order via the order API (gh#259)](#update-2026-07-25--modify-a-working-order-via-the-order-api-gh259) |
+| 2026-07-25 | [the default entry action preference (gh#218)](#update-2026-07-25--the-default-entry-action-preference-gh218) |
+| 2026-07-25 | [the promotion race fenced (gh#183 follow-up)](#update-2026-07-25--the-promotion-race-fenced-gh183-follow-up) |
+| 2026-07-26 | [reprice a working order's working stop (gh#267)](#update-2026-07-26--reprice-a-working-orders-working-stop-gh267) |
+| 2026-07-26 | [move the entry and working stop together (gh#278)](#update-2026-07-26--move-the-entry-and-working-stop-together-gh278) |
+| 2026-07-26 | [resize a working order (gh#292)](#update-2026-07-26--resize-a-working-order-gh292) |
+| 2026-07-26 | [the promoted stop is sized to the live remaining (gh#277)](#update-2026-07-26--the-promoted-stop-is-sized-to-the-live-remaining-gh277) |
+| 2026-07-27 | [the ATR band is live, and the caller resolves it (gh#311)](#update-2026-07-27--the-atr-band-is-live-and-the-caller-resolves-it-gh311) |
+| 2026-07-28 | [resting orders are readable through the app (gh#381)](#update-2026-07-28--resting-orders-are-readable-through-the-app-gh381) |
+| 2026-07-28 | [the consistency target binds, and its posture is per-account (gh#380)](#update-2026-07-28--the-consistency-target-binds-and-its-posture-is-per-account-gh380) |
+| 2026-07-30 | [the take path is claimed before it reaches the venue (gh#530)](#update-2026-07-30--the-take-path-is-claimed-before-it-reaches-the-venue-gh530) |
+| 2026-07-30 | [the kill switch survives a venue that says no (gh#529)](#update-2026-07-30--the-kill-switch-survives-a-venue-that-says-no-gh529) |
+| 2026-08-02 | [conditional firing commits per record (gh#532)](#update-2026-08-02--conditional-firing-commits-per-record-gh532) |
+| 2026-08-02 | [the direct-send path serializes per account against send-vs-send stacking (gh#531)](#update-2026-08-02--the-direct-send-path-serializes-per-account-against-send-vs-send-stacking-gh531) |
+| 2026-08-02 | [the transmit→journal window closes with a durable pre-transmit intent (gh#577)](#update-2026-08-02--the-transmitjournal-window-closes-with-a-durable-pre-transmit-intent-gh577) |
+| 2026-08-03 | [take + conditional-fire serialize per account; Taking is counted and made recoverable (gh#589)](#update-2026-08-03--take--conditional-fire-serialize-per-account-taking-is-counted-and-made-recoverable-gh589) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 

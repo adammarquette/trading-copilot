@@ -17,9 +17,10 @@ limitation the same PR had just removed. Check the claim against the code.
 the diff using this contract; QA test creation is performed blind to the implementation per the
 [QA contract](../../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md).
 
-**Traceability to verify on every PR:** an explicit `Closes #N` / `Related to #N`; and for QA/SDET PRs and
-tracking issues, the title format `QA(task#<parent issue id>) - <Title>`, or `QA(system) - <Title>` for system
-health and deployment smoke suites.
+**Traceability to verify on every PR:** an explicit `Closes #N` / `Related to #N`, and — for QA/SDET PRs and
+tracking issues — the `QA(task#N)` / `QA(system)` title format defined in the
+[QA contract](../../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md). Verify against that definition
+rather than a copy kept here.
 
 ## What to look for
 

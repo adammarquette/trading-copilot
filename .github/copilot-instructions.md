@@ -64,7 +64,8 @@ The size transmitted must be the size the gate **approved**, never the size requ
 
 ## Tests
 
-Test-first is the definition of done. Every public product method needs unit coverage in
+Test-first is the definition of done, and **bug fixes are regression-first** — the failing test reproduces the
+bug before the fix lands, or the fix is unproven. Every public product method needs unit coverage in
 `MarqSpec.TradingCopilot.UnitTests` — xUnit + FakeItEasy + FluentAssertions, fully mocked, folders mirroring the
 namespace, named `MethodUnderTest_Should{ExpectedBehavior}_When{condition}`.
 

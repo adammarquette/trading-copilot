@@ -23,7 +23,9 @@ async-all-the-way with `CancellationToken`, structured logging via `ILogger`, ex
 primitives at boundaries. **Money / prices `decimal`, tick-size-aware — never float.** Enforcement lives below
 the model; integrate brokers only through the venue abstraction (R-17); data via EF Core + `dotnet ef` migrations.
 **Define queries in fluent / method syntax — `.Where(x => …).Select(…)`, never LINQ query-comprehension
-(`from … select …`) — everywhere, EF Core included** (wiki: [.NET coding conventions](../documentation/wiki/pages/dotnet-coding-conventions.md)).
+(`from … select …`) — everywhere, EF Core included** (authoritative:
+[engineering §4](../documentation/trading-platform-engineering.md); background:
+[wiki .NET coding conventions](../documentation/wiki/pages/dotnet-coding-conventions.md)).
 
 ## Stack & dependencies (engineering §2–§3)
 - **Postgres over EF Core** with **TimescaleDB** (time-series — the bulk of the data) and **pgvector** (vectors:
