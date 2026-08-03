@@ -32,4 +32,18 @@ public sealed class SuggestionOptions
 
     /// <summary>The validity window as a <see cref="TimeSpan"/>.</summary>
     public TimeSpan Validity => TimeSpan.FromMinutes(ValidityMinutes);
+
+    /// <summary>
+    /// How far the market may drift from a suggestion's entry, in <b>ticks</b>, before the setup is no longer takeable
+    /// at that level (gh#548). Must be positive.
+    /// </summary>
+    /// <remarks>
+    /// The take path re-measures the current reference against the entry ± this band <b>synchronously</b>, so a
+    /// suggestion the background drift consumer (gh#546) has not yet marked <see cref="Domain.Suggestions.SuggestionState.Stale"/>
+    /// is still refused inside the consumer's lag window (R-12). Carried in ticks, not a price, because a band is only
+    /// meaningful against an instrument's tick size — the same reasoning as the safety-stop distance — so the concrete
+    /// price band is <c>this × the instrument's tick size</c>, resolved from the spec at take time. This is the shared
+    /// drift band the gh#546 consumer will read too.
+    /// </remarks>
+    public int DriftToleranceTicks { get; set; } = 8;
 }
