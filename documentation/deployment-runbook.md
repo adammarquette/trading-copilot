@@ -53,7 +53,9 @@ distinct name so a later `docker compose pull` cannot clobber your build. Buildi
   enabled in dev/staging only, keyed off the R-14 environment), because its "try it" console would put a one-click
   trigger for `POST /accounts/{id}/orders` and `POST /kill-switch` against the **live** venue in front of anyone
   who reaches the page. Every endpoint already requires a JWT, so this is defence in depth; flip the policy to put
-  the UI behind auth in production if preferred — the spec itself is always available.
+  the UI behind auth in production if preferred — the spec itself is always available. The spec + UI are served
+  **anonymously** (they expose only the API *shape*, never data or an action), which the R-18 authorization-surface
+  sweep sanctions by name (`AuthorizationSurfaceIntegrationTests.DocsAnonymous`) rather than leaving them ungated.
 - **Database is config-driven** — `docker-compose.yml` includes a **TimescaleDB + pgvector** service for convenience,
   but the app takes its **connection string from config** (`ConnectionStrings__*` env / `appsettings`), so you can
   point at the compose DB, a local Postgres, or a managed instance instead.

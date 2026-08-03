@@ -53,12 +53,16 @@ public static class OpenApiRegistration
     /// <returns>The same application, for chaining.</returns>
     public static WebApplication MapTradingCopilotApiReference(this WebApplication app)
     {
-        app.MapOpenApi();
+        // Explicitly AllowAnonymous, on the record (R-18, gh#604). The spec + UI expose only the API SHAPE — never
+        // data or an action, every one of which still requires a JWT — and that shape is already public (the README,
+        // #605). Marking them anonymous rather than leaving them ungated makes their reachability a decision the
+        // authorization-surface sweep can see and sanction, not an omission it must flag.
+        app.MapOpenApi().AllowAnonymous();
 
         DeploymentEnvironment environment = app.Services.GetRequiredService<HostTradingEnvironment>().Value;
         if (ScalarUiPolicy.IsEnabledFor(environment))
         {
-            app.MapScalarApiReference();
+            app.MapScalarApiReference().AllowAnonymous();
         }
 
         return app;
