@@ -51,6 +51,16 @@ jobs:
       - name: Doc duplication (one rule, one home)
         run: ./scripts/check-doc-duplication.sh
 
+      # Alert-rule drift and missing coverage fail the PR (gh#585): observability/rules/tests/*.yml is an executable
+      # promtool suite that nothing ran, so a rule shipped with no test (gh#537) and a test silently drifted red from
+      # its rule (gh#482) -- the same silent-monitor class ADR-0019 closes, one layer up. Runs the SAME pinned-image
+      # script (v3.0.1, matching docker-compose) a developer runs locally, so the local check matches CI. It needs
+      # Docker (on the runner) but no .NET, so it sits with the other no-build gates ahead of restore. The script
+      # pulls the image once with a retry, so a transient anonymous-Docker-Hub 429 does not flake this required
+      # gate (gh#585 review); Docker Hub auth is the fuller fix if that recurs.
+      - name: Alert rules (promtool check + test)
+        run: ./scripts/check-alert-rules.sh
+
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 
