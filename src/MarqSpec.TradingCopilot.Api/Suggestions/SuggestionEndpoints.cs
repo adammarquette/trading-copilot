@@ -53,9 +53,10 @@ public static class SuggestionEndpoints
         byId.MapPost("/take", (Guid id, SuggestionTakeRequest? request, ICurrentUser currentUser, TradingCopilotDbContext database,
             IInstrumentSpecSource instrumentSpecs, IOptions<SuggestionOptions> options, IProjectXVenueFactory venueFactory,
             IOptions<ProjectXConnectionOptions> projectXOptions, IOptions<ExecutionOptions> executionOptions,
-            HostTradingEnvironment environment, IKillSwitch killSwitch, IExecutionMetrics metrics, CancellationToken cancellationToken) =>
+            HostTradingEnvironment environment, IKillSwitch killSwitch, IExecutionMetrics metrics,
+            IAccountEntryGuard entryGuard, CancellationToken cancellationToken) =>
             TakeAsync(id, request, DateTimeOffset.UtcNow, currentUser, database, instrumentSpecs, options, venueFactory,
-                projectXOptions, executionOptions, environment, killSwitch, metrics, cancellationToken))
+                projectXOptions, executionOptions, environment, killSwitch, metrics, entryGuard, cancellationToken))
             .WithSummary("Arm an editable, unsent order ticket from a suggestion.");
         return endpoints;
     }
@@ -265,6 +266,7 @@ public static class SuggestionEndpoints
     /// <param name="environment">The host trading environment.</param>
     /// <param name="killSwitch">The kill switch the ladder honours.</param>
     /// <param name="metrics">The execution metrics sink.</param>
+    /// <param name="entryGuard">The per-account entry lock (gh#531) that serializes the stage against a racing take.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The staged ticket with its gate decision, or the refusal that explains why it was not armed.</returns>
     internal static async Task<IResult> TakeAsync(
@@ -281,11 +283,13 @@ public static class SuggestionEndpoints
         HostTradingEnvironment environment,
         IKillSwitch killSwitch,
         IExecutionMetrics metrics,
+        IAccountEntryGuard entryGuard,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(instrumentSpecs);
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(entryGuard);
 
         // A missing or non-positive reference is not a price. Refuse with a clear 400 rather than letting a zero read
         // as a huge drift -- the reference is caller-supplied on every order path, but it must actually be one.
@@ -326,17 +330,15 @@ public static class SuggestionEndpoints
         // the send-vs-take gap (gh#589) could then transmit as double the intended risk. Refuse while a NON-TERMINAL
         // order from this suggestion is already live; a cancelled / rejected / filled one frees it, and the
         // taken-forever semantic is the part-B disposition's (gh#549), not this guard's.
-        bool hasLiveOrder = await database.Orders.AnyAsync(
-            existing => existing.SuggestionId == id
-                && (existing.Status == OrderStatus.Staged || existing.Status == OrderStatus.Taking
-                    || existing.Status == OrderStatus.Working || existing.Status == OrderStatus.PartiallyFilled),
-            cancellationToken);
-        if (hasLiveOrder)
+        //
+        // THIS READ IS A COURTESY REFUSAL, NOT THE GUARD (PR #615 review). It is unsynchronized, so two concurrent
+        // takes can both answer "no" here before either has committed. It stays because it keeps the refusal ladder's
+        // order -- an already-armed suggestion gets its 409 ahead of a spec/drift/ordering refusal -- and returns the
+        // common case without paying for a lock. The AUTHORITATIVE re-check runs under the per-account lock below,
+        // immediately before the insert; that one is what actually closes the race.
+        if (await HasLiveOrderAsync(database, id, cancellationToken))
         {
-            return Results.Conflict(new
-            {
-                error = "This suggestion already has a live order; cancel or complete it before taking again.",
-            });
+            return LiveOrderConflict();
         }
 
         // The three numbers a server-originated proposal cannot invent (gh#541). A miss FAILS CLOSED -- never a
@@ -417,18 +419,54 @@ public static class SuggestionEndpoints
             return Results.Conflict(new { error = result.Reason }); // pre-gate refusal: nothing staged, nothing sized
         }
 
-        // Stage WHATEVER the gate said (a blocked/resized proposal is what the operator edits, ADR-0007), carrying the
-        // suggestion's size, and stamp the originating suggestion so "taken" is traceable end to end (gh#548).
-        Order staged = OrderEndpoints.NewOrderRow(
-            currentUser, composed.Account, armRequest, executionRequest.Contract.Contract.Key,
-            OrderStatus.Staged, suggestion.Size, OrderEntryMethod.ArmedTake);
-        staged.SuggestionId = suggestion.Id;
-        database.Orders.Add(staged);
-        OrderEndpoints.PersistDecision(database, currentUser, composed.Account.Id, staged.Id, result.Decision);
-        await database.SaveChangesAsync(cancellationToken);
+        // Serialize the stage per account (gh#531's seam, reused here for take-vs-take -- PR #615 review). Two
+        // near-simultaneous takes of one suggestion -- a double-click on Approve, or a client retry -- each get their
+        // own scope and their own DbContext, so nothing in process arbitrates them: both read the unsynchronized
+        // check above as false before either has saved, and both insert a Staged ticket against the same suggestion.
+        // That is exactly the double-ticket the check exists to prevent, and via the send-vs-take gap (gh#589) up to
+        // twice the intended risk. gh#531 closed the send-vs-send shape this way and explicitly deferred send-vs-take;
+        // take-vs-take is neither, and is closed here.
+        //
+        // The re-check runs INSIDE the callback deliberately, exactly as TransmitAsync's does: only there is it under
+        // the lock, so two racers cannot both answer "no" before either has journaled. Composition and the gate stay
+        // OUTSIDE -- staging transmits nothing, and the send path re-composes and re-gates under this same lock.
+        return await entryGuard.RunExclusiveAsync(suggestion.AccountId, async () =>
+        {
+            // THE guard. The first racer to get here journals its Staged row; the second, serialized behind it, sees
+            // that row and refuses.
+            if (await HasLiveOrderAsync(database, id, cancellationToken))
+            {
+                return LiveOrderConflict();
+            }
 
-        return Results.Ok(StagedOrderResponse.From(staged, result.Decision));
+            // Stage WHATEVER the gate said (a blocked/resized proposal is what the operator edits, ADR-0007), carrying
+            // the suggestion's size, and stamp the originating suggestion so "taken" is traceable end to end (gh#548).
+            Order staged = OrderEndpoints.NewOrderRow(
+                currentUser, composed.Account, armRequest, executionRequest.Contract.Contract.Key,
+                OrderStatus.Staged, suggestion.Size, OrderEntryMethod.ArmedTake);
+            staged.SuggestionId = suggestion.Id;
+            database.Orders.Add(staged);
+            OrderEndpoints.PersistDecision(database, currentUser, composed.Account.Id, staged.Id, result.Decision);
+            await database.SaveChangesAsync(cancellationToken);
+
+            return Results.Ok(StagedOrderResponse.From(staged, result.Decision));
+        }, cancellationToken);
     }
+
+    // A NON-TERMINAL order from this suggestion means it is already armed. Cancelled / Rejected / Filled free it;
+    // the taken-forever semantic belongs to the part-B disposition (gh#549), not to this check.
+    private static Task<bool> HasLiveOrderAsync(
+        TradingCopilotDbContext database, Guid suggestionId, CancellationToken cancellationToken) =>
+        database.Orders.AnyAsync(
+            existing => existing.SuggestionId == suggestionId
+                && (existing.Status == OrderStatus.Staged || existing.Status == OrderStatus.Taking
+                    || existing.Status == OrderStatus.Working || existing.Status == OrderStatus.PartiallyFilled),
+            cancellationToken);
+
+    private static IResult LiveOrderConflict() => Results.Conflict(new
+    {
+        error = "This suggestion already has a live order; cancel or complete it before taking again.",
+    });
 
     // A blank note is no note: trim, and collapse empty/whitespace to null so "" and "   " are not stored as a note.
     private static string? Normalize(string? note) =>
