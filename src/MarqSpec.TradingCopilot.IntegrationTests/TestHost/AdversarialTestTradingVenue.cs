@@ -40,6 +40,9 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private readonly List<Bar> _seededBars = [];
     private bool _historicalBarsUnsupported;
     private bool _getBarsThrows;
+    // Suggestion-drift's symbol->contract bridge (gh#632, gh#546): a symbol the venue cannot resolve this pass —
+    // the "cannot measure" half of ResolveContractAsync, distinct from a spec miss (which never reaches the venue).
+    private readonly HashSet<string> _resolveContractThrowSymbols = new(StringComparer.OrdinalIgnoreCase);
 
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
 
@@ -188,6 +191,17 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// <summary>Whether <c>GetBarsAsync</c> should throw (see <see cref="MakeGetBarsThrow"/>).</summary>
     internal bool GetBarsThrows => _getBarsThrows;
 
+    /// <summary>
+    /// Makes <c>ResolveContractAsync</c> THROW for <paramref name="symbol"/> — the venue cannot resolve this
+    /// instrument's front-month contract this pass (gh#632, gh#546). Distinct from an unconfigured spec: that
+    /// case never reaches the venue at all, so this is the only way to exercise the venue-round-trip failure half
+    /// of "cannot measure ⇒ no transition".
+    /// </summary>
+    public void MakeResolveContractThrow(string symbol) => _resolveContractThrowSymbols.Add(symbol);
+
+    /// <summary>Whether <c>ResolveContractAsync</c> should throw for a symbol (see <see cref="MakeResolveContractThrow"/>).</summary>
+    internal bool ResolveContractThrows(string symbol) => _resolveContractThrowSymbols.Contains(symbol);
+
     /// <summary>The fed bars whose open falls in the requested window — the stub echoes inputs, nothing computed.</summary>
     internal IReadOnlyList<Bar> BarsIn(DateTimeOffset from, DateTimeOffset to) =>
         [.. _seededBars.Where(bar => bar.OpenTime >= from && bar.OpenTime <= to)];
@@ -214,6 +228,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _seededBars.Clear();
         _historicalBarsUnsupported = false;
         _getBarsThrows = false;
+        _resolveContractThrowSymbols.Clear();
     }
 
     internal IReadOnlyList<WorkingOrder> WorkingOrdersFor(VenueAccountId account) =>
@@ -361,7 +376,9 @@ internal class AdversarialTestTradingVenue : ITradingVenue
     }
 
     public Task<ResolvedContract> ResolveContractAsync(InstrumentId instrument, CancellationToken cancellationToken = default) =>
-        Task.FromResult(new ResolvedContract(VenueContractId.Create(Id, $"{instrument.Symbol}M25"), instrument));
+        _factory.ResolveContractThrows(instrument.Symbol)
+            ? throw new InvalidOperationException($"Venue could not resolve the front-month contract for {instrument.Symbol} (test).")
+            : Task.FromResult(new ResolvedContract(VenueContractId.Create(Id, $"{instrument.Symbol}M25"), instrument));
 
     public Task<IReadOnlyList<Bar>> GetBarsAsync(
         VenueContractId contract,
