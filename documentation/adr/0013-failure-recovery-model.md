@@ -131,7 +131,12 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
   while the process was down is voided, not reported active) **share one guarded one-way `State` writer** — its
   predicate the pure `SuggestionLifecycle.Decide` (a live suggestion past its window), voiding it to `ExpiredVoid`
   with a `StateChangedAt` audit stamp — so recovery and normal operation cannot diverge. A suggestion still returns
-  **inert** and the **take** re-gates (R-12). *Still open:* **restart-triggered venue reconcile** pairs with the
+  **inert**, and **the take path that re-gates it has landed (gh#548, R-12):** `POST /suggestions/{id}/take` arms an
+  order ticket only after re-checking — **synchronously, against the clock and the current price, not the
+  eventually-consistent state flag** — that the survivor is still `Active`, inside its window, un-dispositioned and
+  un-drifted; a survivor that expired or drifted while the process was down is **refused, never silently armed**, and
+  a successful arm stamps `Order.SuggestionId` but **transmits nothing** (sending stays the separate, gated endpoint).
+  *Still open:* **restart-triggered venue reconcile** pairs with the
   settlement pass (gh#193) and the connection monitor (gh#209); **fill**-level reconcile needs the account-event
   seam (gh#219); and the **cross-user-isolation-through-restart** proof (suggestions / orders / positions /
   templates keep their owner) is the QA suite's.

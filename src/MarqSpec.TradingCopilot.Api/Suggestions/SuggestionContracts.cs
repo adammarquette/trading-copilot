@@ -169,6 +169,19 @@ public sealed record SuggestionPassRequest(
     SuggestionPassReason Reasons = SuggestionPassReason.None,
     string? Note = null);
 
+/// <summary>
+/// The body of a take (gh#548, R-11b / R-12). Its <b>only</b> field is the current market reference — the two
+/// numbers a server-originated proposal cannot invent (the tick size, point value and safety-stop distance) come
+/// from the instrument-spec source, never the client (that is ruled out in writing on <see cref="Orders.SendOrderRequest"/>).
+/// </summary>
+/// <param name="ReferencePrice">
+/// The caller's current market price, as on every order path (the server fetches no venue quote). It does double
+/// duty: the take-time <b>drift re-check</b> re-measures it against the suggestion's entry tolerance <b>now</b>
+/// (R-12, not the eventually-consistent <see cref="SuggestionState.Stale"/> flag), and it is the fat-finger band's
+/// reference once the ticket reaches the gate (R-16). Must be positive.
+/// </param>
+public sealed record SuggestionTakeRequest(decimal ReferencePrice);
+
 /// <summary>A recorded disposition (gh#547) — the operator's neutral pass, as written to the journal.</summary>
 /// <param name="SuggestionId">The suggestion that was disposed.</param>
 /// <param name="Kind">The operator act — <see cref="SuggestionDispositionKind.Passed"/> on this route.</param>

@@ -191,8 +191,11 @@ builder.Services.AddOptions<SuggestionOptions>()
         options => options.MaxPageSize >= 1 && options.DefaultPageSize >= 1 && options.DefaultPageSize <= options.MaxPageSize
             // A non-positive validity would emit a suggestion the CK_Suggestions_ExpiresAfterCreated CHECK refuses,
             // so it is caught once at startup rather than on every fire (gh#544).
-            && options.ValidityMinutes >= 1,
-        "Suggestions: require MaxPageSize >= 1, DefaultPageSize in [1, MaxPageSize], and ValidityMinutes >= 1.")
+            && options.ValidityMinutes >= 1
+            // A non-positive drift band would collapse the take-time re-check to "any move refuses" (or worse, a
+            // negative band that never refuses); caught once at startup rather than at take time (gh#548).
+            && options.DriftToleranceTicks >= 1,
+        "Suggestions: require MaxPageSize >= 1, DefaultPageSize in [1, MaxPageSize], ValidityMinutes >= 1, and DriftToleranceTicks >= 1.")
     .ValidateOnStart();
 
 // Indicator projections over that store (gh#310, R-1, ADR-0001: "indicators are projections… rebuild = replay").

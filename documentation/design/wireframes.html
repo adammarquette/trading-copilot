@@ -1548,7 +1548,7 @@
           <div class="mi def"><span class="t">Approve &amp; arm · default</span><span class="d2">opens the editable ticket to review before sending</span></div>
           <div class="mi"><span class="t">Send as-is</span><span class="d2">skip the review — still passes the risk gate, sanity caps &amp; re-validation</span></div>
         </div>
-        <div class="rej-why">The safe path is the default click; the fast path is a deliberate extra step, so an instant send can’t be fat-fingered. <b>Which one is the default is a preference</b> — flip it to “Send as-is” if you trust the co-pilot.</div>
+        <div class="rej-why">The safe path is the default click; the fast path is a deliberate extra step, so an instant send can’t be fat-fingered. <b>Which one is the default is a preference</b> — flip it to “Send as-is” if you trust the co-pilot. <b>Approve re-checks first (R-12, gh#548):</b> if the setup has <b>expired</b>, <b>drifted</b> past its entry tolerance (re-measured against the price right now, not a stale flag), or you’ve <b>already acted</b> on it, the arm is refused with the reason — a stale suggestion is never silently armed.</div>
       </div>
       <div class="flow-step">
         <div class="step-h"><span class="step-n">2</span> Armed ticket — edited, re-checked live</div>
