@@ -21,18 +21,18 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Data;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why this suite exists.</b> Seven guards ship on <c>Suggestions</c> / <c>SuggestionDispositions</c> and,
+/// <b>Why this suite exists.</b> Nine guards ship on <c>Suggestions</c> / <c>SuggestionDispositions</c> and,
 /// before this, <b>not one of them was asserted anywhere</b> — they existed only in the DbContext and a migration.
 /// A constraint nobody tests is a constraint nobody knows is still there: it survives a careless
 /// <c>HasCheckConstraint</c> edit, a regenerated migration, or a "cleanup" that drops it, and the loss is
 /// invisible until bad data is already stored.
 /// </para>
 /// <para>
-/// <b>Invisible to any in-memory provider.</b> These are `CHECK`s, a unique index and a PL/pgSQL constraint
-/// trigger — the EF InMemory provider enforces none of them, so only a container-backed run witnesses them
-/// (QA contract §1). Every case therefore writes <b>straight through the DbContext</b>, deliberately bypassing the
-/// endpoints: the endpoint guards are separately covered, and what is under test here is what the database refuses
-/// when something gets past them.
+/// <b>Invisible to any in-memory provider.</b> These are `CHECK`s, a unique index, a self-referencing
+/// <c>RESTRICT</c> foreign key, a column default, and a PL/pgSQL constraint trigger — the EF InMemory provider
+/// enforces none of them, so only a container-backed run witnesses them (QA contract §1). Every case therefore
+/// writes <b>straight through the DbContext</b>, deliberately bypassing the endpoints: the endpoint guards are
+/// separately covered, and what is under test here is what the database refuses when something gets past them.
 /// </para>
 /// <para>
 /// <b>The mode trigger is the sharp one.</b> <c>ct_suggestions_mode_matches_account</c> is R-14's cross-table
@@ -40,6 +40,13 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Data;
 /// <b>INSERT and on UPDATE of either <c>Mode</c> or <c>AccountId</c></b>, so both update arms are exercised: moving
 /// the mode and moving the row to another account are two different ways to end up with a Live-moded suggestion on
 /// a Practice account.
+/// </para>
+/// <para>
+/// <b>The supersede chain (gh#550, gh#620)</b> adds two more: <c>SupersedesId</c>'s <c>RESTRICT</c> FK — a
+/// superseded row can never be deleted while a later version still points at it, guarded on both the delete-refused
+/// and insert-a-dangling-reference sides, each with its own anti-vacuity control — and <c>Version</c>'s database
+/// default of <c>1</c>, proven by bypassing the CLR initializer that would otherwise make the test pass identically
+/// with no DB default at all (see <see cref="Persistence_ShouldDefaultVersionToOne_WhenNotSupplied"/>).
 /// </para>
 /// </remarks>
 public class SuggestionDatabaseGuardIntegrationTests : IClassFixture<StubbedVenuePostgresFactory>
@@ -263,6 +270,112 @@ public class SuggestionDatabaseGuardIntegrationTests : IClassFixture<StubbedVenu
     }
 
     // =============================================================================================================
+    // The supersede chain (gh#550, R-4 / ADR-0013) — the RESTRICT FK and the Version default, both added by #610
+    // and, until now, unasserted anywhere (gh#611 review; gh#620).
+    // =============================================================================================================
+
+    [Fact]
+    public async Task Persistence_ShouldRefuseToDeleteASupersededSuggestion_WhileALaterVersionPointsAtIt()
+    {
+        // RESTRICT, not cascade: a superseded row can never be silently deleted while a later version still
+        // points at it, or the lineage the R-9 loop reads vanishes. Named per the suite's discipline — a bare
+        // "it threw" would pass on an unrelated failure.
+        Guid accountId = await FreshAccountAsync();
+        Guid operatorId = await OperatorIdAsync();
+        Guid supersededId = await SeedValidSuggestionAsync(accountId, operatorId);
+
+        await ExecuteDbAsync(async db =>
+        {
+            Suggestion superseding = ValidSuggestion(accountId, operatorId);
+            superseding.SupersedesId = supersededId;
+            superseding.Version = 2;
+            db.Suggestions.Add(superseding);
+            await db.SaveChangesAsync();
+        });
+
+        await ExecuteDbAsync(async db =>
+        {
+            Suggestion superseded = await db.Suggestions.IgnoreQueryFilters().SingleAsync(s => s.Id == supersededId);
+            db.Suggestions.Remove(superseded);
+
+            await ShouldViolateTheForeignKeyAsync(
+                () => db.SaveChangesAsync(),
+                "FK_Suggestions_Suggestions_SupersedesId");
+        });
+    }
+
+    [Fact]
+    public async Task Persistence_ShouldAllowDeletingASuggestionThatNothingSupersedes_SoTheFkGuardIsNotRefusingEveryDelete()
+    {
+        // The anti-vacuity split for the case above, same reasoning as the CHECK-constraint control: without this,
+        // that case would also pass if `Suggestions` refused every delete for an unrelated reason, which proves
+        // the table broken rather than the RESTRICT guard working.
+        Guid accountId = await FreshAccountAsync();
+        Guid operatorId = await OperatorIdAsync();
+        Guid unsupersededId = await SeedValidSuggestionAsync(accountId, operatorId);
+
+        await ExecuteDbAsync(async db =>
+        {
+            Suggestion unreferenced = await db.Suggestions.IgnoreQueryFilters().SingleAsync(s => s.Id == unsupersededId);
+            db.Suggestions.Remove(unreferenced);
+
+            Func<Task> save = () => db.SaveChangesAsync();
+            await save.Should().NotThrowAsync("nothing supersedes this row, so the RESTRICT FK has nothing to guard");
+        });
+    }
+
+    [Fact]
+    public async Task Persistence_ShouldRejectASupersedesIdPointingAtANonexistentSuggestion_ViaTheAppliedForeignKey()
+    {
+        // The other half of what an FK is for: it also refuses a dangling reference at insert time, not only a
+        // delete that would create one.
+        Guid accountId = await FreshAccountAsync();
+        Guid operatorId = await OperatorIdAsync();
+
+        await ExecuteDbAsync(async db =>
+        {
+            Suggestion dangling = ValidSuggestion(accountId, operatorId);
+            dangling.SupersedesId = Guid.NewGuid();
+            dangling.Version = 2;
+            db.Suggestions.Add(dangling);
+
+            await ShouldViolateTheForeignKeyAsync(
+                () => db.SaveChangesAsync(),
+                "FK_Suggestions_Suggestions_SupersedesId");
+        });
+    }
+
+    [Fact]
+    public async Task Persistence_ShouldDefaultVersionToOne_WhenNotSupplied()
+    {
+        // Version defaults to 1 at the DATABASE (gh#550) — the DB default is what makes the superseding row's
+        // Version meaningful (+1); if it silently became 0, the chain's ordering is wrong and nothing else would
+        // notice. The CLR initializer on Suggestion.Version already sets 1, so a plain ValidSuggestion() insert
+        // would pass identically even with no DB default at all — it would prove the C# initializer, not the
+        // guard #610 shipped. Setting Version to the CLR sentinel (0) before adding is what makes EF omit the
+        // column from the INSERT and defer to the database's DEFAULT, the same path a raw INSERT that never
+        // mentions Version takes.
+        Guid accountId = await FreshAccountAsync();
+        Guid operatorId = await OperatorIdAsync();
+        Guid suggestionId = Guid.NewGuid();
+
+        await ExecuteDbAsync(async db =>
+        {
+            Suggestion unversioned = ValidSuggestion(accountId, operatorId);
+            unversioned.Id = suggestionId;
+            unversioned.Version = default;
+            db.Suggestions.Add(unversioned);
+            await db.SaveChangesAsync();
+        });
+
+        await ExecuteDbAsync(async db =>
+        {
+            Suggestion stored = await db.Suggestions.IgnoreQueryFilters().SingleAsync(s => s.Id == suggestionId);
+            stored.Version.Should().Be(1, "the DB default is what the superseding row's Version is one higher than");
+        });
+    }
+
+    // =============================================================================================================
     // Helpers.
     // =============================================================================================================
 
@@ -301,6 +414,19 @@ public class SuggestionDatabaseGuardIntegrationTests : IClassFixture<StubbedVenu
             .WithInnerException<DbUpdateException, PostgresException>()
             .Where(error => error.SqlState == PostgresErrorCodes.RaiseException
                 && error.MessageText.Contains("R-14 mode guard", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Asserts the named FOREIGN KEY refused the write — the same naming discipline as
+    /// <see cref="SaveShouldViolateAsync"/>, for the FK guards rather than a CHECK.
+    /// </summary>
+    private static async Task ShouldViolateTheForeignKeyAsync(Func<Task> save, string constraint)
+    {
+        await save.Should().ThrowAsync<DbUpdateException>()
+            .WithInnerException<DbUpdateException, PostgresException>()
+            .Where(error => error.SqlState == PostgresErrorCodes.ForeignKeyViolation
+                && (error.ConstraintName == constraint
+                    || error.MessageText.Contains(constraint, StringComparison.Ordinal)));
     }
 
     private static Suggestion ValidSuggestion(Guid accountId, Guid operatorId) => new()
