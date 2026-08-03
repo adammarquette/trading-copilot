@@ -6,6 +6,7 @@ using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 using Microsoft.EntityFrameworkCore;
