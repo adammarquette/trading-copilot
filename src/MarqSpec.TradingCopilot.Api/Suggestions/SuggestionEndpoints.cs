@@ -37,11 +37,13 @@ public static class SuggestionEndpoints
         ArgumentNullException.ThrowIfNull(endpoints);
 
         // Mirrors the shipped order routes: a per-account collection plus a by-id resource.
-        endpoints.MapGroup("/accounts/{accountId:guid}/suggestions").RequireAuthorization().MapGet("/", ListAsync);
+        endpoints.MapGroup("/accounts/{accountId:guid}/suggestions").RequireAuthorization().WithTags("Suggestions")
+            .MapGet("/", ListAsync).WithSummary("List an account's suggestions.");
 
-        RouteGroupBuilder byId = endpoints.MapGroup("/suggestions/{id:guid}").RequireAuthorization();
-        byId.MapGet("/", GetAsync);
-        byId.MapPost("/pass", PassAsync);
+        RouteGroupBuilder byId = endpoints.MapGroup("/suggestions/{id:guid}").RequireAuthorization().WithTags("Suggestions");
+        byId.MapGet("/", GetAsync).WithSummary("Get a suggestion by id.");
+        byId.MapPost("/pass", PassAsync)
+            .WithSummary("Record a disposition (taken / modified / passed) on a suggestion.");
         return endpoints;
     }
 

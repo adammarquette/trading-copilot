@@ -17,10 +17,12 @@ public static class KillSwitchEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapKillSwitchEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        RouteGroupBuilder group = endpoints.MapGroup("/kill-switch").RequireAuthorization();
-        group.MapPost("/", EngageAsync);
-        group.MapPost("/disengage", DisengageAsync);
-        group.MapGet("/", GetState);
+        RouteGroupBuilder group = endpoints.MapGroup("/kill-switch").RequireAuthorization().WithTags("Kill Switch");
+        group.MapPost("/", EngageAsync)
+            .WithSummary("Engage the kill switch (hold-to-confirm): stop new orders, cancel working orders, flatten or halt.");
+        group.MapPost("/disengage", DisengageAsync)
+            .WithSummary("Disengage the kill switch, re-enabling outbound orders.");
+        group.MapGet("/", GetState).WithSummary("The current kill-switch state.");
 
         return endpoints;
     }

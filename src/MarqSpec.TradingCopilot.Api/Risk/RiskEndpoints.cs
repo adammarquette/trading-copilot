@@ -24,9 +24,10 @@ public static class RiskEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapRiskEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        RouteGroupBuilder group = endpoints.MapGroup("/accounts/{id:guid}/risk").RequireAuthorization();
-        group.MapPut("/", DeclareRiskAsync);
-        group.MapGet("/", GetRiskAsync);
+        RouteGroupBuilder group = endpoints.MapGroup("/accounts/{id:guid}/risk").RequireAuthorization().WithTags("Risk");
+        group.MapPut("/", DeclareRiskAsync)
+            .WithSummary("Declare the account's risk rules (validated whole; refused on any violation).");
+        group.MapGet("/", GetRiskAsync).WithSummary("The account's declared risk profile, if any.");
         return endpoints;
     }
 

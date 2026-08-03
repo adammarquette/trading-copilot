@@ -46,6 +46,14 @@ distinct name so a later `docker compose pull` cannot clobber your build. Buildi
 > returns `unauthorized`/`not found` — so the **dev-override build is the working local path**, or authenticate
 > with `docker login ghcr.io` (`read:packages`). This is a startup-window caveat, not a steady state: once the
 > package is public, the plain pull is the default again.
+- **The API documents itself** (gh#604). Once up, it serves an **OpenAPI 3 spec at `/openapi/v1.json`** and a
+  browsable **Scalar reference UI at `/scalar/v1`**, generated from the live routes so the spec never drifts from
+  the endpoints (the source of truth the README links to, #605). **Production exposure policy:** the **spec JSON is
+  served in every environment**, but the **interactive Scalar UI is disabled in production** (`ScalarUiPolicy` —
+  enabled in dev/staging only, keyed off the R-14 environment), because its "try it" console would put a one-click
+  trigger for `POST /accounts/{id}/orders` and `POST /kill-switch` against the **live** venue in front of anyone
+  who reaches the page. Every endpoint already requires a JWT, so this is defence in depth; flip the policy to put
+  the UI behind auth in production if preferred — the spec itself is always available.
 - **Database is config-driven** — `docker-compose.yml` includes a **TimescaleDB + pgvector** service for convenience,
   but the app takes its **connection string from config** (`ConnectionStrings__*` env / `appsettings`), so you can
   point at the compose DB, a local Postgres, or a managed instance instead.

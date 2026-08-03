@@ -16,11 +16,15 @@ public static class AuthEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapAuthEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        RouteGroupBuilder group = endpoints.MapGroup("/auth");
-        group.MapPost("/login", LoginAsync).AllowAnonymous();
-        group.MapGet("/me", MeAsync).RequireAuthorization();
-        group.MapPost("/invitations", IssueInvitationAsync).RequireAuthorization();
-        group.MapPost("/accept-invite", AcceptInviteAsync).AllowAnonymous();
+        RouteGroupBuilder group = endpoints.MapGroup("/auth").WithTags("Auth");
+        group.MapPost("/login", LoginAsync).AllowAnonymous()
+            .WithSummary("Authenticate with email + password; returns a JWT bearer token.");
+        group.MapGet("/me", MeAsync).RequireAuthorization()
+            .WithSummary("The currently authenticated user.");
+        group.MapPost("/invitations", IssueInvitationAsync).RequireAuthorization()
+            .WithSummary("Issue an invitation to create an account (primary operator only).");
+        group.MapPost("/accept-invite", AcceptInviteAsync).AllowAnonymous()
+            .WithSummary("Redeem an invitation token to create an account; returns a JWT.");
         return endpoints;
     }
 

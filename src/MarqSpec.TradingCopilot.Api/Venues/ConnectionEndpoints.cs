@@ -26,13 +26,16 @@ public static class ConnectionEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapConnectionEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        RouteGroupBuilder group = endpoints.MapGroup("/connections").RequireAuthorization();
-        group.MapPost("/", CreateConnectionAsync);
-        group.MapGet("/", ListConnectionsAsync);
-        group.MapGet("/{id:guid}/accounts", ListAccountsAsync);
-        group.MapPost("/{id:guid}/accounts/discover", DiscoverAccountsAsync);
-        group.MapPut("/{id:guid}/credentials", RotateCredentialsAsync);
-        group.MapDelete("/{id:guid}", DeactivateConnectionAsync);
+        RouteGroupBuilder group = endpoints.MapGroup("/connections").RequireAuthorization().WithTags("Connections");
+        group.MapPost("/", CreateConnectionAsync).WithSummary("Create a firm connection (login).");
+        group.MapGet("/", ListConnectionsAsync).WithSummary("List the operator's connections.");
+        group.MapGet("/{id:guid}/accounts", ListAccountsAsync)
+            .WithSummary("List the accounts discovered through a connection.");
+        group.MapPost("/{id:guid}/accounts/discover", DiscoverAccountsAsync)
+            .WithSummary("Discover accounts through a connection (mode from the firm's declared conventions).");
+        group.MapPut("/{id:guid}/credentials", RotateCredentialsAsync)
+            .WithSummary("Rotate a connection's stored credentials.");
+        group.MapDelete("/{id:guid}", DeactivateConnectionAsync).WithSummary("Deactivate a connection.");
         return endpoints;
     }
 

@@ -16,7 +16,9 @@ public static class PositionReconciliationEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapPositionEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapGet("/accounts/{id:guid}/positions", ReconcileAsync).RequireAuthorization();
+        endpoints.MapGet("/accounts/{id:guid}/positions", ReconcileAsync).RequireAuthorization()
+            .WithTags("Positions")
+            .WithSummary("Reconcile and read the account's open positions against venue truth.");
         return endpoints;
     }
 

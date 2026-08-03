@@ -22,9 +22,11 @@ public static class AccountEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapAccountEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        RouteGroupBuilder group = endpoints.MapGroup("/accounts").RequireAuthorization();
-        group.MapPut("/{id:guid}/stage", SetStageOverrideAsync);
-        group.MapDelete("/{id:guid}/stage", ClearStageOverrideAsync);
+        RouteGroupBuilder group = endpoints.MapGroup("/accounts").RequireAuthorization().WithTags("Accounts");
+        group.MapPut("/{id:guid}/stage", SetStageOverrideAsync)
+            .WithSummary("Set a manual stage override on an account.");
+        group.MapDelete("/{id:guid}/stage", ClearStageOverrideAsync)
+            .WithSummary("Clear the manual stage override on an account.");
         return endpoints;
     }
 

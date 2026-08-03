@@ -27,7 +27,9 @@ public static class WorkingOrderReconciliationEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapWorkingOrderEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapGet("/accounts/{id:guid}/orders", ReadAsync).RequireAuthorization();
+        endpoints.MapGet("/accounts/{id:guid}/orders", ReadAsync).RequireAuthorization()
+            .WithTags("Orders")
+            .WithSummary("Read the account's resting working orders from venue truth.");
         return endpoints;
     }
 
