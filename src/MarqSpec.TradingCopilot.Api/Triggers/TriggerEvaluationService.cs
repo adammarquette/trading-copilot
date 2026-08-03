@@ -719,6 +719,15 @@ public class TriggerEvaluationService
         // whole commit and lose the firing journal + arm transition (a constraint backstops only its transaction's
         // owner). Each issuance voids the prior head, so at most one non-terminal head per (trigger, side) ever exists;
         // OrderByDescending(Version) is defensive should that invariant ever be dented.
+        //
+        // SAFE ONLY UNDER A SINGLE SEQUENTIAL WRITER (gh#617). "At most one live incumbent" borrows a guarantee this
+        // method neither states nor enforces: TriggerScanHost is one BackgroundService whose loop AWAITS each pass, so
+        // ScanAsync never overlaps itself; owners and triggers are walked in sequential foreach loops committed by one
+        // SaveChangesAsync; and TriggerDebounce lets a given trigger fire at most once per pass. Break any of those --
+        // a second app instance, a manual "run scan now" endpoint, or parallelising the owner/trigger loop -- and two
+        // passes could both read "no incumbent" here and both insert, minting two live heads with an identical Version
+        // and no error. Anything that adds a concurrent scan writer must re-establish this invariant at that point (a
+        // serializable transaction or a per-(trigger, side) advisory lock -- NOT the gh#455 unique index). Tracked by gh#617.
         Suggestion? incumbent = await database.Suggestions
             .Where(candidate => candidate.State == SuggestionState.Active || candidate.State == SuggestionState.Stale)
             .Where(candidate => candidate.Instrument == trigger.Symbol && candidate.Side == suggest.Side)
