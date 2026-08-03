@@ -22,8 +22,9 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Observability;
 /// are published on meter construction; the Prometheus series names are derived from the OTLP →
 /// <c>prometheusremotewrite</c> translation (<c>add_metric_suffixes: true</c> on
 /// <c>otel/opentelemetry-collector-contrib:0.115.1</c>): dots to underscores, brace-annotation units <c>{…}</c>
-/// dropped, real units mapped (<c>ms → milliseconds</c>), counters gain <c>_total</c>, histograms gain
-/// <c>_bucket</c>/<c>_sum</c>/<c>_count</c>, gauges bare.
+/// dropped, real units mapped (<c>ms → milliseconds</c>), <b>monotonic</b> sums gain <c>_total</c>, histograms
+/// gain <c>_bucket</c>/<c>_sum</c>/<c>_count</c>, gauges and <b>non-monotonic</b> sums (<c>UpDownCounter</c>)
+/// bare. That translation table is itself pinned by a case, so it cannot silently drift.
 /// </para>
 /// <para>
 /// This tier is venue- and database-independent: it starts no <c>PostgresApiFactory</c>, so it needs no container.
@@ -141,12 +142,17 @@ public sealed class AlertRuleSeriesReconciliationTests
             return [promBase + "_bucket", promBase + "_sum", promBase + "_count"];
         }
 
-        // Counter / UpDownCounter are monotonic-or-not sums; both gain _total. Observable gauges stay bare.
-        if (kind.Contains("Counter", StringComparison.Ordinal))
+        // ONLY A MONOTONIC SUM GAINS _total. `prometheusremotewrite` suffixes a Sum only when `IsMonotonic()` —
+        // so Counter / ObservableCounter get `_total`, while UpDownCounter / ObservableUpDownCounter are
+        // non-monotonic sums and export BARE, exactly like a gauge. `Contains("Counter")` would have suffixed the
+        // up-down pair too and quietly asserted a series the collector never emits (PR #606 review).
+        if (kind.StartsWith("Counter", StringComparison.Ordinal)
+            || kind.StartsWith("ObservableCounter", StringComparison.Ordinal))
         {
             return [promBase + "_total"];
         }
 
+        // UpDownCounter, ObservableUpDownCounter, Gauge, ObservableGauge — all bare.
         return [promBase];
     }
 
@@ -181,7 +187,7 @@ public sealed class AlertRuleSeriesReconciliationTests
 
         foreach (string dashboard in DashboardFiles())
         {
-            foreach (string expr in DashboardExprs(ReadAsset("grafana", "dashboards", dashboard)))
+            foreach (string expr in DashboardExprs(File.ReadAllText(dashboard)))
             {
                 Collect(expr);
             }
@@ -273,11 +279,22 @@ public sealed class AlertRuleSeriesReconciliationTests
 
     private static readonly string[] _observableTagKeys = ["outcome", "tier"];
 
-    private static string[] DashboardFiles() =>
-    [
-        "ai-usage-and-spend.json", "auto-flatten-reliability.json",
-        "execution-and-risk-gate.json", "synthetic-risk-and-pipeline.json",
-    ];
+    // ENUMERATED, never listed by hand. A hardcoded array reconciles only the dashboards someone remembered to
+    // add to it: a fifth dashboard lands, its series and label matchers are never harvested, and this suite still
+    // reports green — the exact "silently never fires" shape gh#536 exists to close, relocated from the alert
+    // rules into the guard's own file list (PR #606 review). Enumerating keeps it a guard by construction.
+    private static string[] DashboardFiles()
+    {
+        string directory = Path.Combine(AppContext.BaseDirectory, "observability", "grafana", "dashboards");
+        string[] files = Directory.GetFiles(directory, "*.json");
+
+        // "Reconciled nothing" must never read the same as "all clean": if the csproj Content Include stops
+        // copying the assets, every dashboard assertion below would pass vacuously instead of failing here.
+        files.Should().NotBeEmpty(
+            $"the Grafana dashboards must be copied next to the test binary at '{directory}' (csproj Content Include)");
+
+        return files;
+    }
 
     private static string ReadAsset(params string[] relative) =>
         File.ReadAllText(Path.Combine([AppContext.BaseDirectory, "observability", .. relative]));
@@ -297,6 +314,12 @@ public sealed class AlertRuleSeriesReconciliationTests
         // Explicit membership of a couple of known series, so a harvest that silently returns the wrong thing fails
         // here rather than passing everything else vacuously.
         referenced.Series.Should().Contain("trading_flatten_deadlines_total");
+
+        // A DASHBOARD-ONLY series (no alert rule references it), so the dashboard harvest cannot silently
+        // contribute nothing while the rules alone keep this anchor green — the enumeration in DashboardFiles()
+        // has to have actually found and parsed the JSON.
+        referenced.Series.Should().Contain("ai_llm_cost_usd_total");
+
         published.Series.Should().Contain("trading_flatten_deadlines_total");
         published.Series.Should().Contain("trading_flatten_time_to_flat_milliseconds_bucket");
         published.Series.Should().Contain("trading_killswitch_engaged");
@@ -374,5 +397,33 @@ public sealed class AlertRuleSeriesReconciliationTests
         published.Series.Should().NotContain("trading_flatten_deadlines_renamed_total");
         published.Bases.Should().NotContain("trading_flatten_deadlines_renamed",
             "case 1 must reject a series that resolves to no published instrument");
+    }
+
+    // ---- Case 5: the guard's own translation table — only a MONOTONIC sum gains _total ----
+
+    [Fact]
+    public void TheOtlpToPrometheusTranslation_ShouldSuffixOnlyMonotonicSums()
+    {
+        // The one part of this suite no application instrument can currently falsify: the meter set contains no
+        // UpDownCounter, so a wrong non-monotonic suffix would sit here unnoticed until the day one is added —
+        // and would then assert a series the collector never emits, i.e. this guard's own silent-never-fires
+        // failure (PR #606 review). Every kind is pinned here, including the ones not yet in use.
+        using Meter meter = new("test.reconcile.kinds." + Guid.NewGuid().ToString("N"));
+
+        // Bound to a variable so the `because`-carrying overload binds — passing the expectation inline would hit
+        // `Equal(params string[])`, which reads the reason as one more expected element.
+        string[] bare = ["m"];
+
+        PrometheusSeries("m", meter.CreateCounter<long>("k.counter")).Should().Equal("m_total");
+        PrometheusSeries("m", meter.CreateObservableCounter("k.obs.counter", () => 0L)).Should().Equal("m_total");
+
+        PrometheusSeries("m", meter.CreateUpDownCounter<long>("k.updown")).Should().Equal(bare,
+            "prometheusremotewrite suffixes a Sum only when it is monotonic — a non-monotonic UpDownCounter is "
+            + "exported bare, so a '_total' here would assert a series the collector never emits");
+        PrometheusSeries("m", meter.CreateObservableUpDownCounter("k.obs.updown", () => 0L)).Should().Equal(bare,
+            "an ObservableUpDownCounter is a non-monotonic sum too, and is likewise exported bare");
+
+        PrometheusSeries("m", meter.CreateObservableGauge("k.gauge", () => 0L)).Should().Equal("m");
+        PrometheusSeries("m", meter.CreateHistogram<double>("k.hist")).Should().Equal("m_bucket", "m_sum", "m_count");
     }
 }
