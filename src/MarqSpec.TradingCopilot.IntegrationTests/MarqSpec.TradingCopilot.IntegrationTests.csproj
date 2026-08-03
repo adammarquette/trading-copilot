@@ -29,4 +29,10 @@
     <Using Include="FluentAssertions" />
   </ItemGroup>
 
+  <!-- The observability assets the AlertRuleSeriesReconciliation suite reads (gh#536), copied next to the test
+       binary under observability/ so the suite reads them from BaseDirectory rather than walking up the tree. -->
+  <ItemGroup>
+    <Content Include="..\..\observability\**\*.*" LinkBase="observability" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
