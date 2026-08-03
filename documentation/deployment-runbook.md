@@ -530,7 +530,18 @@ suppressed outside that window. **A P1 is never suppressed** — that is the ent
 
 #### Verify the rules without deploying
 
-The rules carry executable tests, including a **clean-session fixture** asserting a normal day pages nobody:
+The rules carry executable tests, including a **clean-session fixture** asserting a normal day pages nobody. CI
+runs both `promtool check rules` (lint) and `promtool test rules` (the assertions) on **every PR** via
+`scripts/check-alert-rules.sh` — a step in the `build & unit tests` job (gh#585) — so a rule shipping with no test,
+or a test drifting from its rule, now **fails the PR** rather than being caught only by hand. Run the same script
+locally before pushing:
+
+```bash
+./scripts/check-alert-rules.sh
+```
+
+It uses the pinned `prom/prometheus:v3.0.1` image (the version compose runs), so the local check is the CI check.
+To run a single assertion pass by hand instead:
 
 ```bash
 docker run --rm -v "$PWD/observability:/obs" -w /obs/rules/tests --entrypoint promtool prom/prometheus:v3.0.1 test rules trading-alerts-test.yml

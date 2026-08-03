@@ -261,7 +261,7 @@ alive but not self-reporting.
 
 **A clean session pages nobody, and that is a test.** `observability/rules/tests/` holds `promtool` rule tests,
 and the first fixture is an ordinary day — idle evaluations, a normal flatten — asserting **zero** P1 and zero P2.
-That criterion is now executable rather than argued, and it stays true as rules are added.
+That criterion is now executable rather than argued, and — since CI runs `promtool check rules` + `test rules` on every PR (gh#585, `scripts/check-alert-rules.sh`) — **enforced**, not merely hoped, as rules are added: a rule with no test, or a test drifted from its rule, fails the PR.
 
 **What was deliberately NOT built.** Several conditions this ADR names have no instrument behind them yet:
 *open position with no native safety stop*, `flatten.watchdog.rejected`, `flatten.unconfigured` distinct from

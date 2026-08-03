@@ -44,7 +44,7 @@ gate every PR; integration tests run against **staging** after merge; a tagged s
 production deploy and a failure flags the release for rollback. Environments map to branches — dev ← `develop`,
 staging ← `staging`, production ← `main` — on the one-way ladder in [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
-Four constraints that bite in CI:
+Five constraints that bite in CI:
 
 - The repo has a **submodule** under `external/` — checkout needs `submodules: true`.
 - `dotnet format` must run with `--exclude external/`, or it reformats vendored code.
@@ -55,6 +55,16 @@ Four constraints that bite in CI:
   configuration. Prefer the **null pass-through** (`Key__Name:` with no value) for anything the app already
   defaults — an empty string *binds* and overwrites that default; indexed lists are enumerated and capped on
   purpose, so a new index needs its own line and the cap belongs in `.env.example`.
+- **One rule, one home — enforced, not just asked for.** `./scripts/check-doc-duplication.sh` fails CI when a
+  canonical rule is **restated** in a document that does not own it without **citing** the owner (a link, `§N`,
+  `gh#N`, or `R-#`) — a rule with two homes drifts, and an agent then acts on the stale copy while citing a doc as
+  its authority (`gh#616`). Its `RULES` block is the manifest: rule id, its one canonical file, and a narrow
+  distinguishing phrase; extend it by adding a row, and keep the phrase narrow because a gate that matches the
+  *topic* rather than the rule cries wolf and gets ignored. It needs no .NET SDK, so it runs early beside the
+  env-forwarding gate and fails fast on a docs-only PR. Legitimate self-contained repetition (a role contract that
+  must carry a non-negotiable) is exempted **explicitly** — an append-only-log / ADR path, or a citation the
+  restating line defers to — so an exemption is a reviewable line, never a silent pass. Run it locally exactly as
+  CI does before a docs PR.
 - **Line endings are LF everywhere**, pinned in both `.gitattributes` and `.editorconfig`, which have to agree —
   otherwise `dotnet format` defaults to the host's line ending and a Windows contributor sees violations CI does
   not.
