@@ -110,6 +110,22 @@ services:
       # Null pass-through for the same reason as the Flatten block below: the app already defaults this to 5 s,
       # and restating it here would make compose a second source of truth for it.
       Ingestion__ReconnectDelaySeconds:
+      # Cross-asset CONTEXT symbols (gh#496) -- equities/indices prints for correlation (SPY against ES), on a
+      # data-only source. A SEPARATE list from Ingestion__Symbols above on purpose: those are tradeable contracts
+      # on the execution venue, these are colour from a provider that publishes no book, and the two must never be
+      # edited into one another. Enumerated and capped like every indexed list here (gh#304): a ninth symbol needs
+      # its own line, and the cap is documented in .env.example. Finnhub's free tier caps concurrent subscriptions
+      # well above this, so the binding limit is deliberateness, not the provider.
+      ContextIngestion__Symbols__0:
+      ContextIngestion__Symbols__1:
+      ContextIngestion__Symbols__2:
+      ContextIngestion__Symbols__3:
+      ContextIngestion__Symbols__4:
+      ContextIngestion__Symbols__5:
+      ContextIngestion__Symbols__6:
+      ContextIngestion__Symbols__7:
+      # Null pass-through: the app already defaults this to 5 s.
+      ContextIngestion__ReconnectDelaySeconds:
       # The clean-historical bar store (R-1, gh#302) -- the SECOND market-data path, and the system of record.
       # Null pass-through throughout: the app already defaults the cadence and lookback, and an empty value
       # would bind over those defaults rather than leaving them alone. Unset means the backfill stays idle.
