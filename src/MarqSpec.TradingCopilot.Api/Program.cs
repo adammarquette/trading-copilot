@@ -251,6 +251,15 @@ builder.Services.AddHostedService<ConditionalOrderHost>();
 builder.Services.AddScoped<ISuggestionExpiry, SuggestionExpiry>();
 builder.Services.AddHostedService<SuggestionExpiryHost>();
 
+// The event log's third market.quote consumer (gh#546, R-4 / R-12): the suggestion-drift watcher marks an Active
+// suggestion Stale once price drifts past the entry tolerance, so a scratched setup greys out BEFORE execution
+// (the take-time re-check, gh#548, is the synchronous backstop). Its guarded Active→Stale update is the sibling of
+// the expire sweep's writer above; unlike the other consumers it resolves each Active symbol → contract per pass,
+// so it takes a venue. Harmless with no Active suggestions.
+builder.Services.AddScoped<ISuggestionDrift, SuggestionDrift>();
+builder.Services.AddScoped<SuggestionDriftService>();
+builder.Services.AddHostedService<SuggestionDriftHost>();
+
 // The immutable audit trail (engineering §9, ADR-0007, gh#220): a secondary, failure-tolerant write the orphan
 // guard uses to record each synthetic-stop transition with its synthetic_risk flag. Scoped alongside the guard.
 builder.Services.AddScoped<IAuditLog, AuditLog>();
