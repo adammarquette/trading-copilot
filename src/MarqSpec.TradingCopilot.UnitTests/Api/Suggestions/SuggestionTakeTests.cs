@@ -50,10 +50,19 @@ public class SuggestionTakeTests
 
     private static readonly IOptions<SuggestionOptions> _options = Options.Create(new SuggestionOptions());
 
+    private readonly IAccountEntryGuard _entryGuard = A.Fake<IAccountEntryGuard>();
+
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
     public SuggestionTakeTests()
     {
+        // The account-entry guard (gh#531) just runs the callback here: the in-memory provider is single-threaded and
+        // cannot run the real advisory lock (that is why it is a seam). What the unit tier proves is STRUCTURAL -- the
+        // re-check and the insert live inside the callback, so under the real guard they are inside the lock. The
+        // genuine two-racer proof belongs to QA on container-backed Postgres (gh#614).
+        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .ReturnsLazily((Guid _, Func<Task<IResult>> stage, CancellationToken _) => stage());
+
         A.CallTo(() => _factory.Create(A<FirmConventions>._)).Returns(_venue);
         A.CallTo(() => _venue.Id).Returns(VenueId.Parse("projectx"));
         A.CallTo(() => _venue.Capabilities).Returns(VenueCapabilities.Of(VenueCapability.BracketOrders));
@@ -211,7 +220,7 @@ public class SuggestionTakeTests
         return await SuggestionEndpoints.TakeAsync(
             id, new SuggestionTakeRequest(referencePrice), now ?? _now, new FixedUser(asUser ?? _operator), context,
             _instrumentSpecs, _options, _factory, PxOptions(), ExecOptions(), Development,
-            A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, CancellationToken.None);
+            A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, _entryGuard, CancellationToken.None);
     }
 
     private async Task<int> OrderCountAsync()
@@ -451,6 +460,44 @@ public class SuggestionTakeTests
         await using TradingCopilotDbContext reload = Context();
         (await reload.Orders.CountAsync(order => order.SuggestionId == suggestionId))
             .Should().Be(1, "the second arm mints no second ticket");
+    }
+
+    [Fact]
+    public async Task TakeAsync_ShouldStageNothing_WhenTheAccountEntryGuardDeclinesToRunTheStage()
+    {
+        // The whole correctness of the take-vs-take fix (PR #615 review) rests on the anti-stacking RE-CHECK and the
+        // insert living INSIDE the guard's callback, so that under the real advisory lock they run while the lock is
+        // held. This pins that: a guard that declines to run the callback leaves NO order row and NO gate decision. A
+        // refactor that moved the check or the insert back OUTSIDE RunExclusiveAsync -- reopening the TOCTOU race the
+        // unsynchronized pre-check cannot close -- fails here. (The sibling pin for the send path is
+        // OrderEndpointsTests.SendAsync_ShouldPlaceNothing_WhenTheEntryGuardDeclines.)
+        Guid accountId = await SeedAccountAsync();
+        Guid suggestionId = await SeedSuggestionAsync(accountId: accountId);
+        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .Returns(Results.Conflict(new { error = "guard declined" }));
+
+        IResult result = await TakeAsync(suggestionId);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        (await OrderCountAsync()).Should().Be(0, "the stage never ran, so nothing was journaled");
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.GateDecisions.CountAsync()).Should().Be(0,
+            "the gate decision is persisted inside the same callback, so it cannot outlive a declined stage");
+    }
+
+    [Fact]
+    public async Task TakeAsync_ShouldSerializeOnTheSuggestionsAccount_NotSomeOtherAccount()
+    {
+        // The lock is per ACCOUNT (gh#531's key). Taking it on the wrong id would serialize the wrong racers and leave
+        // two takes of this suggestion free to interleave -- a guard that runs and protects nothing.
+        Guid accountId = await SeedAccountAsync();
+        Guid suggestionId = await SeedSuggestionAsync(accountId: accountId);
+
+        StatusOf(await TakeAsync(suggestionId)).Should().Be(StatusCodes.Status200OK);
+
+        A.CallTo(() => _entryGuard.RunExclusiveAsync(accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
     }
 
     [Fact]
