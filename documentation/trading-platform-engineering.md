@@ -40,7 +40,24 @@ The sections below (§2–§10) are a **deliberately minimal scaffold**, not a f
 - **Decide:** marks an **open choice** we haven't made yet, with a pointer to *when* it needs resolving.
 - `R-#` / `Q-#` link to the PRD's requirements and open questions, keeping the two docs cross-referenced.
 
-**Contents:** §2 Tech stack · §3 Solution structure · §4 Coding standards · §5 Testing & verification · §6 Agentic-AI practices · §7 Observability · §8 Deployment & secrets · §9 Safety-critical discipline · §10 Git workflow & Definition of Done · §11 Companion knowledge wiki · §12 Technical spikes.
+**Contents** — open the section you need rather than the file. Rows are in **document order**; the unnumbered
+scaffold sits between §1 and §2, so the numbering is not the reading order.
+
+| Section | Read it when |
+|---|---|
+| [1. Architecture Patterns](#1-architecture-patterns) | you need the runtime shape — BFF, tool seam, verify-before-act, durable push |
+| [Engineering practices — a lightweight scaffold](#engineering-practices--a-lightweight-scaffold) | *(you are here)* reading a **default** vs. an open **Decide:** |
+| [2. Tech Stack & Platform](#2-tech-stack--platform) | picking a library, framework, or API/real-time surface |
+| [3. Solution & Repository Structure](#3-solution--repository-structure) | adding a project, or deciding where code belongs |
+| [4. Coding Standards & Conventions](#4-coding-standards--conventions) | naming, nullability, or formatting questions |
+| [5. Testing & Verification Strategy](#5-testing--verification-strategy) | choosing a test tier, or how much rigor a path earns |
+| [6. Agentic-AI Development Practices](#6-agentic-ai-development-practices) | building with — or as — the agents themselves |
+| [7. Observability, Monitoring & Alerting](#7-observability-monitoring--alerting) | adding a metric, log, trace, or alert |
+| [8. Deployment, Environments & Secrets](#8-deployment-environments--secrets) | config, secrets, or which environment gets what |
+| [9. Safety-Critical Engineering Discipline](#9-safety-critical-engineering-discipline) | touching the risk gate, execution, auto-flatten, or kill switch |
+| [10. Git Workflow, CI/CD & Definition of Done](#10-git-workflow-cicd--definition-of-done) | branching, PRs, "is this done?" — **the same-PR docs rule lives here** |
+| [11. Companion Knowledge Wiki](#11-companion-knowledge-wiki-development-resource) | you need vendor/venue facts the code depends on |
+| [12. Technical Spikes / Open Engineering Questions](#12-technical-spikes--open-engineering-questions) | an engineering question is still open |
 
 ---
 

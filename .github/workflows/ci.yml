@@ -43,6 +43,14 @@ jobs:
       - name: Env forwarding (compose allowlist)
         run: ./scripts/check-env-forwarding.sh
 
+      # A rule with two homes drifts, and the drift is invisible until an agent reads the stale copy and behaves
+      # wrong WHILE CITING A DOC AS ITS AUTHORITY. The gh#616 audit found ten live instances -- the board told
+      # agents to self-assign to avoid collisions while CONTRIBUTING.md said that signal is worthless here; the
+      # reviewer checklist dropped "bug fixes are regression-first", exactly where it would be enforced. Docs-only
+      # and needs no build, so it runs beside the other config gate (gh#616).
+      - name: Doc duplication (one rule, one home)
+        run: ./scripts/check-doc-duplication.sh
+
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 

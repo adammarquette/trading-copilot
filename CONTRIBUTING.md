@@ -175,8 +175,9 @@ a **dev task** plus an independent **QA task** (engineering §10).
   the commit *type* drives SemVer.
 - AI-authored changes carry an **`Assisted-by:`** trailer (plus `Co-Authored-By:`).
 - **Docs move with the code — the same-PR rule:** any change whose behavior / data model / API / UX a doc describes
-  updates that doc **in the same PR** (PRD `R-#`, the data dictionary + its ERD, wireframes, ADRs). A PR that drifts
-  is **not done**.
+  updates **the affected section of that doc, in the same PR** — PRD `R-#`, the architecture doc, the data
+  dictionary (its domain page, plus the ERD in the index), wireframes, ADRs. Update the section, not the whole
+  file. A PR that drifts is **not done**. (Engineering §10 owns the rule.)
 
 ## Pull requests
 - Open against **`develop`**; reference the tracking issue.

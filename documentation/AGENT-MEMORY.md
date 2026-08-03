@@ -39,8 +39,10 @@ Cross-agent heads-ups and in-session decisions that don't have a formal home yet
 
 - **[2026-07-23 → resolved] QA integration & smoke backlog — promoted out.** The original backlog of QA suites
   (issues #130/#131/#132/#142/#143) has **all shipped and closed**. The living inventory and per-issue status now
-  live authoritatively in [`integration-test-audit.md`](integration-test-audit.md) (§2 inventory, §4 status table) —
-  the tracker is the source of truth (gh#144), so the per-suite specs are not restated here.
+  live authoritatively in the **tracker** (gh#144), with the suite inventory in
+  [`integration-test-audit.md`](integration-test-audit.md) §2. The old §4 per-issue status table was retired in
+  gh#616 — it mirrored the tracker and drifted; §4 now keeps only what a status query cannot recover (the defects
+  those suites caught). Per-suite specs are not restated here.
 - **[2026-07-28 → formalized] Claim work by pushing the branch empty first (gh#375)** — now a formal rule in the root
   [`AGENTS.md`](../AGENTS.md) and [`CONTRIBUTING.md` §*Claiming work*](../CONTRIBUTING.md), which carry the rule, the
   4-hour staleness window, the phantom-claim trap, and the *why*. Pointer only, per this file's own promote-and-point
