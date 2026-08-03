@@ -55,7 +55,9 @@ public class SuggestionEndpointsTests
         OrderSide side = OrderSide.Buy,
         decimal entry = 100m,
         decimal stop = 99m,
-        decimal target = 103m)
+        decimal target = 103m,
+        int version = 1,
+        Guid? supersedesId = null)
     {
         Guid id = Guid.NewGuid();
         Guid ownerId = owner ?? _operator;
@@ -80,6 +82,8 @@ public class SuggestionEndpointsTests
             CitedResolutionMinutes = 1,
             Confidence = 72,
             ExpiresAt = (createdAt ?? _t).AddMinutes(60),
+            Version = version,
+            SupersedesId = supersedesId,
         });
         await context.SaveChangesAsync();
         return id;
@@ -122,6 +126,20 @@ public class SuggestionEndpointsTests
 
         // A decision surface defaults to what can still be acted on; the rest stays reachable by id and by filter.
         list.Items.Should().ContainSingle().Which.Id.Should().Be(active);
+    }
+
+    [Fact]
+    public async Task ListAsync_ShouldReturnOnlyTheHeadOfASupersedeChain_ByDefault()
+    {
+        // A supersede chain (gh#550): the incumbent v1 was voided (ExpiredVoid) and the head v2 links back to it.
+        // The default actionable surface must show only the head -- a superseded row is void, hence excluded by the
+        // Active default. The chain stays addressable by id.
+        Guid v1 = await SeedAsync(SuggestionState.ExpiredVoid, createdAt: _t.AddMinutes(-5), version: 1);
+        Guid v2 = await SeedAsync(SuggestionState.Active, createdAt: _t, version: 2, supersedesId: v1);
+
+        SuggestionListResponse list = ListOf(await ListAsync());
+
+        list.Items.Should().ContainSingle().Which.Id.Should().Be(v2, "only the head of the chain is actionable");
     }
 
     [Fact]
@@ -343,6 +361,23 @@ public class SuggestionEndpointsTests
         SuggestionResponse item = ItemOf(await GetAsync(id));
 
         item.TimeframeMinutes.Should().Be(item.CitedResolutionMinutes);
+    }
+
+    [Fact]
+    public async Task GetAsync_ShouldProjectTheVersionAndSupersedesLink_SoTheChainIsAddressableById()
+    {
+        // The version and the supersede link are part of the spine (gh#550): a client reading the head sees which row
+        // it superseded and can walk the chain by id. A superseded row stays readable in any state.
+        Guid v1 = await SeedAsync(SuggestionState.ExpiredVoid, version: 1);
+        Guid v2 = await SeedAsync(SuggestionState.Active, version: 2, supersedesId: v1);
+
+        SuggestionResponse head = ItemOf(await GetAsync(v2));
+        head.Version.Should().Be(2);
+        head.SupersedesId.Should().Be(v1);
+
+        SuggestionResponse root = ItemOf(await GetAsync(v1));
+        root.Version.Should().Be(1);
+        root.SupersedesId.Should().BeNull("the first version supersedes nothing");
     }
 
     // ---- pass: record a neutral operator disposition (gh#547) ----

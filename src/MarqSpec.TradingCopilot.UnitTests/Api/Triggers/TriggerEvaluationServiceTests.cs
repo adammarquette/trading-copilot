@@ -1335,6 +1335,235 @@ public class TriggerEvaluationServiceTests
         A.CallTo(() => _llmMetrics.RecordLlmCall(A<AiCallCost>._)).MustNotHaveHappened();
     }
 
+    // =====================================================================================================
+    // SUPERSEDE (gh#550, R-4, ADR-0013): a re-formed setup issues a NEW, superseding suggestion rather than
+    // resurrecting the prior one. When the SAME trigger + instrument + side re-arms and fires again, the live,
+    // undispositioned incumbent is voided (ExpiredVoid) and the new row is linked to it (SupersedesId, Version+1),
+    // all inside the scan's shared transaction. Keyed on the TRIGGER identity (the incumbent's originating firing's
+    // TriggerId), never the symbol -- so two different triggers on one symbol+side never destroy each other.
+    // =====================================================================================================
+
+    // Drives one arming edge: re-arm (indicator not satisfied), then fire (indicator satisfied) with the given
+    // proposal. The first call in a test can skip the re-arm by starting from an Armed trigger.
+    private async Task FireAgainAsync(ReviewOutcome.Suggest proposal)
+    {
+        IndicatorReturns(40m); // above the below-30 line -> NotSatisfied -> re-arm + bump the cycle
+        await Service().ScanAsync(Now, CancellationToken.None);
+        IndicatorReturns(25m); // satisfied again -> a fresh crossing fires under the new cycle
+        ReviewerReturns(proposal);
+        await Service().ScanAsync(Now, CancellationToken.None);
+    }
+
+    // (a) A re-arm of the SAME trigger+instrument+side supersedes the incumbent and links the new row.
+    [Fact]
+    public async Task ScanAsync_ShouldSupersedeTheIncumbentAndLinkTheNewRow_WhenTheSameTriggerReArmsAndFiresAgain()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "v1", 72));
+        await Service().ScanAsync(Now, CancellationToken.None); // stage v1 (Active)
+
+        await FireAgainAsync(new ReviewOutcome.Suggest(OrderSide.Buy, 101m, 100m, 104m, "v2", 75)); // stage v2, supersede v1
+
+        await using TradingCopilotDbContext reload = Context();
+        List<Suggestion> chain = await reload.Suggestions.OrderBy(s => s.Version).ToListAsync();
+        chain.Should().HaveCount(2);
+
+        Suggestion v1 = chain[0];
+        Suggestion v2 = chain[1];
+        v1.Version.Should().Be(1);
+        v1.State.Should().Be(SuggestionState.ExpiredVoid, "the incumbent is superseded, reusing ExpiredVoid (gh#550)");
+        v1.SupersedesId.Should().BeNull("the first version supersedes nothing");
+        v2.Version.Should().Be(2, "the superseding row is the next version");
+        v2.State.Should().Be(SuggestionState.Active);
+        v2.SupersedesId.Should().Be(v1.Id, "the new row links to the incumbent it superseded");
+    }
+
+    // (b) Two DIFFERENT triggers on the same symbol+side coexist -- neither supersedes the other (keyed on the
+    // trigger IDENTITY, NOT the symbol). The incumbent from trigger A must be a COMMITTED row when trigger B fires,
+    // or the test proves nothing (gh#550 review): B's incumbent query is a DB read, and a suggestion .Add-ed earlier
+    // in the SAME pass is unsaved and invisible to it -- so a single-pass version passes GREEN even with the
+    // trigger-identity clause deleted. Here A commits in pass 1 and B fires in pass 2, so B's query DOES see A by
+    // (instrument, side); the firing-link clause (firing.TriggerId == B) is what stops it voiding A. Delete that
+    // clause and B supersedes A -> this goes red. That is the guard the whole "key on the trigger" thesis needs.
+    [Fact]
+    public async Task ScanAsync_ShouldNotSupersede_WhenTwoDifferentTriggersShareSymbolAndSide()
+    {
+        Guid accountId = await SeedAccountAsync();
+        // Same symbol (ES) and side (Buy), distinct triggers -- different thresholds = genuinely different setups.
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, threshold: 30m, armState: TriggerArmState.Armed);
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, threshold: 28m, armState: TriggerArmState.Armed);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
+
+        // Pass 1: 29 is below trigger A's 30 but not B's 28 -> ONLY A fires, and its suggestion COMMITS.
+        IndicatorReturns(29m);
+        await Service().ScanAsync(Now, CancellationToken.None);
+        (await Context().Suggestions.CountAsync()).Should().Be(1, "only trigger A fired in pass 1");
+
+        // Pass 2: 25 is below B's 28 -> B fires (A is already Fired and never re-armed, so it does not re-fire). B's
+        // incumbent query now SEES the committed A row by (instrument, side) -- and must still not void it, because
+        // A's firing carries a different TriggerId.
+        IndicatorReturns(25m);
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        List<Suggestion> all = await reload.Suggestions.ToListAsync();
+        all.Should().HaveCount(2);
+        all.Should().OnlyContain(s => s.State == SuggestionState.Active, "different triggers never supersede each other");
+        all.Should().OnlyContain(s => s.SupersedesId == null);
+        all.Should().OnlyContain(s => s.Version == 1);
+    }
+
+    // (b2) A STALE incumbent (not only an Active one) is superseded too -- the query pins {Active, Stale}. Stale is
+    // set by the gh#546 drift sweep, which is not in this base, so simulate the drift: fire once (v1 Active), mark it
+    // Stale, then re-fire the same trigger. Without "Stale" in the query's state filter this goes red.
+    [Fact]
+    public async Task ScanAsync_ShouldSupersedeAStaleIncumbent_NotOnlyAnActiveOne()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "v1", 72));
+        await Service().ScanAsync(Now, CancellationToken.None); // stage v1 (Active)
+
+        Guid v1Id = (await Context().Suggestions.SingleAsync()).Id;
+        await using (TradingCopilotDbContext drift = Context())
+        {
+            Suggestion v1 = await drift.Suggestions.SingleAsync();
+            v1.State = SuggestionState.Stale; // the gh#546 drift, simulated -- an incumbent can be Stale, not only Active
+            await drift.SaveChangesAsync();
+        }
+
+        await FireAgainAsync(new ReviewOutcome.Suggest(OrderSide.Buy, 101m, 100m, 104m, "v2", 75));
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion superseded = await reload.Suggestions.SingleAsync(s => s.Id == v1Id);
+        superseded.State.Should().Be(SuggestionState.ExpiredVoid, "a STALE incumbent is superseded too, not only an Active one");
+        Suggestion v2 = await reload.Suggestions.SingleAsync(s => s.Id != v1Id);
+        v2.Version.Should().Be(2);
+        v2.SupersedesId.Should().Be(v1Id);
+    }
+
+    // (c) An already-DISPOSITIONED incumbent is NOT voided -- it is journal evidence the operator acted on. The
+    // re-fire issues a NEW, independent row (Version 1, supersedes nothing) instead.
+    [Fact]
+    public async Task ScanAsync_ShouldNotVoidADispositionedIncumbent_AndIssueANewIndependentRow()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 2, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "v1", 72));
+        await Service().ScanAsync(Now, CancellationToken.None); // stage v1
+
+        Guid v1Id = (await Context().Suggestions.SingleAsync()).Id;
+        await using (TradingCopilotDbContext dispose = Context())
+        {
+            dispose.SuggestionDispositions.Add(new SuggestionDisposition
+            {
+                Id = Guid.NewGuid(),
+                UserId = _operator,
+                SuggestionId = v1Id,
+                Kind = SuggestionDispositionKind.Passed,
+                Reasons = SuggestionPassReason.None,
+                CreatedAt = Now,
+            });
+            await dispose.SaveChangesAsync();
+        }
+
+        await FireAgainAsync(new ReviewOutcome.Suggest(OrderSide.Buy, 101m, 100m, 104m, "v2", 75));
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion v1 = await reload.Suggestions.SingleAsync(s => s.Id == v1Id);
+        v1.State.Should().Be(SuggestionState.Active, "a dispositioned incumbent is journal evidence -- never voided");
+
+        Suggestion v2 = await reload.Suggestions.SingleAsync(s => s.Id != v1Id);
+        v2.SupersedesId.Should().BeNull("it did not supersede the dispositioned incumbent");
+        v2.Version.Should().Be(1, "a new independent chain, not a continuation");
+        v2.State.Should().Be(SuggestionState.Active);
+    }
+
+    // (d) Version increments monotonically along a chain: v1 -> v2 -> v3, each superseding the last.
+    [Fact]
+    public async Task ScanAsync_ShouldIncrementVersionMonotonically_AlongASupersedeChain()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "v1", 72));
+        await Service().ScanAsync(Now, CancellationToken.None); // v1
+
+        await FireAgainAsync(new ReviewOutcome.Suggest(OrderSide.Buy, 101m, 100m, 104m, "v2", 72)); // v2
+        await FireAgainAsync(new ReviewOutcome.Suggest(OrderSide.Buy, 102m, 101m, 105m, "v3", 72)); // v3
+
+        await using TradingCopilotDbContext reload = Context();
+        List<Suggestion> chain = await reload.Suggestions.OrderBy(s => s.Version).ToListAsync();
+        chain.Select(s => s.Version).Should().Equal(new[] { 1, 2, 3 }, "each re-arm mints the next version");
+        chain.Select(s => s.State).Should().Equal(
+            new[] { SuggestionState.ExpiredVoid, SuggestionState.ExpiredVoid, SuggestionState.Active },
+            "only the head of the chain stays actionable");
+        chain[1].SupersedesId.Should().Be(chain[0].Id);
+        chain[2].SupersedesId.Should().Be(chain[1].Id);
+    }
+
+    // (e) Superseding NEVER mutates the incumbent's trade parameters -- only its lifecycle state. Immutability of an
+    // issued suggestion is the invariant the journal depends on.
+    [Fact]
+    public async Task ScanAsync_ShouldNotMutateTheIncumbentsTradeParameters_WhenSuperseding()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "v1", 72));
+        await Service().ScanAsync(Now, CancellationToken.None);
+        Guid v1Id = (await Context().Suggestions.SingleAsync()).Id;
+
+        // A DELIBERATELY different geometry on the superseding row -- if supersede touched the incumbent's parameters
+        // it would show here.
+        await FireAgainAsync(new ReviewOutcome.Suggest(OrderSide.Buy, 200m, 190m, 230m, "v2", 40));
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion v1 = await reload.Suggestions.SingleAsync(s => s.Id == v1Id);
+        v1.State.Should().Be(SuggestionState.ExpiredVoid, "it was superseded -- the anchor that a supersede happened");
+        v1.EntryPrice.Should().Be(100m, "trade parameters are immutable once issued");
+        v1.StopPrice.Should().Be(99m);
+        v1.TargetPrice.Should().Be(103m);
+        v1.Size.Should().Be(3);
+        v1.Side.Should().Be(OrderSide.Buy);
+    }
+
+    // (f) A SIDE-FLIP re-arm of the SAME trigger issues an INDEPENDENT row, never a supersede -- side is part of the
+    // incumbent key (`candidate.Side == suggest.Side`). The reviewer proposes the OPPOSITE direction on the next
+    // firing; the live Buy incumbent is a genuinely different setup (a long and a short are not two versions of one
+    // idea) and must be left actionable. This is the guard the "side is part of the key" design point (PR body,
+    // ADR-0013, data dictionary) had none of -- every other supersede test uses Buy exclusively (gh#610 review).
+    // Delete or invert the `candidate.Side == suggest.Side` clause in StageSuggestionAsync and this goes RED: the
+    // Sell re-fire would then find the Buy incumbent by (instrument, trigger) and void it.
+    [Fact]
+    public async Task ScanAsync_ShouldNotSupersede_WhenTheSameTriggerReArmsWithAFlippedSide()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "long", 72));
+        await Service().ScanAsync(Now, CancellationToken.None); // stage a BUY incumbent (Active)
+        Guid buyId = (await Context().Suggestions.SingleAsync()).Id;
+
+        // The SAME trigger re-arms and fires again, but the reviewer now proposes a SELL -- geometry inverted for a
+        // short (stop above entry, target below), so it clears SuggestionGeometry as a coherent proposal.
+        await FireAgainAsync(new ReviewOutcome.Suggest(OrderSide.Sell, 100m, 101m, 97m, "short", 70));
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion buy = await reload.Suggestions.SingleAsync(s => s.Id == buyId);
+        buy.State.Should().Be(SuggestionState.Active, "an opposite-side proposal is a different setup -- the live Buy is left untouched");
+        buy.SupersedesId.Should().BeNull();
+
+        Suggestion sell = await reload.Suggestions.SingleAsync(s => s.Id != buyId);
+        sell.Side.Should().Be(OrderSide.Sell);
+        sell.SupersedesId.Should().BeNull("a side-flip issues an INDEPENDENT row, not a supersede");
+        sell.Version.Should().Be(1, "an independent chain starts at version 1, superseding nothing");
+    }
+
     /// <summary>
     /// The scan with its platform-wide spend read forced to FAULT — proves the governor is FAIL-OPEN: a spend-read
     /// blip lets the pass run un-gated (the reviewer still wakes), the deliberate INVERSE of the fail-closed risk gate.

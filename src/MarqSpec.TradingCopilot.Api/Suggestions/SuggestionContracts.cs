@@ -63,6 +63,14 @@ namespace MarqSpec.TradingCopilot.Api.Suggestions;
 /// <see cref="SuggestionState.Active"/> state it was issued in, so the card can show <i>when</i> a suggestion went
 /// stale or void, not merely that it did.
 /// </param>
+/// <param name="Version">
+/// This suggestion's version along its supersede chain (gh#550) — <c>1</c> for a first issuance, one higher for each
+/// re-formed setup. Immutable once issued.
+/// </param>
+/// <param name="SupersedesId">
+/// The suggestion this one supersedes (gh#550), or <see langword="null"/> for the first version — the link a client
+/// follows to walk the chain by id back through its history.
+/// </param>
 public sealed record SuggestionResponse(
     Guid Id,
     Guid AccountId,
@@ -85,7 +93,9 @@ public sealed record SuggestionResponse(
     int CitedResolutionMinutes,
     int Confidence,
     DateTimeOffset ExpiresAt,
-    DateTimeOffset? StateChangedAt)
+    DateTimeOffset? StateChangedAt,
+    int Version,
+    Guid? SupersedesId)
 {
     /// <summary>Projects a persisted suggestion into its API view.</summary>
     /// <param name="suggestion">The persisted row.</param>
@@ -120,7 +130,9 @@ public sealed record SuggestionResponse(
             suggestion.CitedResolutionMinutes,
             suggestion.Confidence,
             suggestion.ExpiresAt,
-            suggestion.StateChangedAt);
+            suggestion.StateChangedAt,
+            suggestion.Version,
+            suggestion.SupersedesId);
     }
 
     // The wireframe's dollar risk/reward, computed SERVER-side from the single shipped money-math seam

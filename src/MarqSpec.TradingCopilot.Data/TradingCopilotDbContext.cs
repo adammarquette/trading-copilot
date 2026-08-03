@@ -226,6 +226,20 @@ public class TradingCopilotDbContext : TenantDbContext
                 .HasForeignKey(s => s.AccountId)
                 .OnDelete(DeleteBehavior.Cascade);
 
+            // The supersede chain (gh#550, R-4 / ADR-0013): a re-formed setup issues a NEW row linked to the one it
+            // supersedes, rather than mutating it. RESTRICT, not cascade: a superseded row can never be silently
+            // deleted while a later version still points at it, so the lineage the R-9 loop reads never vanishes.
+            // EF adds the FK's index automatically. Single-incumbent is enforced in APPLICATION code (the scan), NOT a
+            // partial unique index -- gh#455: the suggestion is staged into the scan pass's shared DbContext with the
+            // firing journal + arm transition, so a unique-index violation would abort that whole SaveChanges and lose
+            // them. Version defaults to 1 (first issuance), the superseding row is one higher.
+            suggestion.HasOne<Suggestion>()
+                .WithMany()
+                .HasForeignKey(s => s.SupersedesId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            suggestion.Property(s => s.Version).HasDefaultValue(1);
+
             // The read model's query shape (gh#540): the R-20 filter pins UserId, the list filters on State and
             // orders by CreatedAt. Owned by this card so the index does not end up owned by nobody once the
             // suggestion table starts growing -- it is an append-only journal.

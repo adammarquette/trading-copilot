@@ -174,3 +174,34 @@ the venue** and no journal behind it. `DecisionStateRehydration.Analyze` now fla
 `synthetic_risk` alert, never a silent repair — the very principle this ADR states: *never auto-act on rehydrated
 state; re-validate against venue truth first* (the order's `customTag` carries the conditional's id so that reconcile
 can match it). The **automated** reconcile that would then recover the order without the operator is deferred (gh#578).
+
+## Update (2026-08-02) — a re-formed setup's "new suggestion" is now a superseding one in data (gh#550)
+
+This ADR states — under *No-risk state fails safe by expiring*, and again in *Consequences* — that a scratched or
+expired setup is **not resurrected**: *"a re-formed setup is a **new** suggestion (R-4)"*, and the
+expire-on-uncertainty bias is accepted because discarded setups *"re-form as new suggestions"*. That held only in
+prose; the old and new rows carried no link. gh#550 makes it true in **data**. `Suggestion` gains `Version` (default
+1) and a self-referencing `SupersedesId` (R-4; [data dictionary §6](../data-dictionary.md)): when the trigger scan
+stages a new suggestion and a **non-terminal (active/stale), undispositioned** incumbent exists for the **same
+trigger + instrument + side** — keyed on the originating firing's `TriggerId`, **not** the symbol, so distinct
+indicators / periods on one symbol do not void one another — the incumbent is voided (reusing
+`SuggestionState.ExpiredVoid`) and the new row is issued at `Version + 1` with `SupersedesId` pointing at it, all **in
+the scan pass's shared transaction** alongside the firing journal and the trigger arm-state transition.
+
+- **Single-incumbent is enforced in application code, not a partial unique index.** An index violation would abort
+  that shared `SaveChanges` and lose the firing journal + arm transition — the gh#455 pattern (*a constraint backstops
+  only its transaction's owner*), the same reason the auto-flatten producers enlist rather than rely on a unique
+  constraint.
+- **The incumbent's trade parameters are never mutated** — only its lifecycle state — so the journal-integrity
+  invariant this model leans on (R-4) holds: a superseding row records the re-form, it does not rewrite history.
+- **The self-FK is `OnDelete: Restrict`,** so a superseded row can never be deleted while a later version points at
+  it and the lineage the R-9 learning loop reads never silently vanishes. There is no suggestion (or account)
+  **hard-delete** path today — accounts are **soft-deleted** — so any interaction between this `Restrict` and an
+  account-level cascade delete is **dormant** rather than a live conflict.
+- **A side-flip re-arm issues an independent row, by design.** An opposite-side re-arm on the same trigger is a
+  legitimately distinct setup, so the dedup key includes side: it starts a new chain (`Version` 1, no `SupersedesId`)
+  rather than superseding the incumbent.
+
+Consistent with this ADR's principles: no-risk state still **fails safe** (the voided incumbent is `ExpiredVoid`, out
+of the actionable set), nothing is **auto-taken or silently resumed** (the head of the chain still re-gates under R-12
+before it can be taken), and the transition is journalled in the shared transaction rather than as a side effect.

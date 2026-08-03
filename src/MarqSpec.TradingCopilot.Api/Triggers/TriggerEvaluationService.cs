@@ -704,6 +704,54 @@ public class TriggerEvaluationService
             return;
         }
 
+        // SUPERSEDE (gh#550, R-4, ADR-0013): a re-formed setup issues a NEW, superseding suggestion rather than
+        // resurrecting the prior one -- ADR-0013 forbids chasing price, and issuing a superseding row IS the
+        // sanctioned alternative. Find the live incumbent from the SAME trigger + instrument + side. Keyed on the
+        // TRIGGER IDENTITY -- the incumbent's originating firing's TriggerId (a Suggestion carries no TriggerId; the
+        // firing link is its trigger provenance, gh#542) -- NEVER the symbol, so two DIFFERENT triggers on one
+        // symbol+side (different indicator/period/threshold) never destroy each other. Undispositioned only: an
+        // incumbent the operator already acted on is journal evidence, left untouched (a new independent row issues
+        // instead). Non-terminal only (Active/Stale): a terminal row is never revived.
+        //
+        // SINGLE-INCUMBENT IS ENFORCED HERE, IN APP CODE -- deliberately NOT a partial unique index (gh#455). This row
+        // is staged into the scan pass's SHARED DbContext alongside the arm-state transition, the TriggerFiringRecord
+        // and the outbox advisory, all committed by ONE SaveChangesAsync; a unique-index violation would abort that
+        // whole commit and lose the firing journal + arm transition (a constraint backstops only its transaction's
+        // owner). Each issuance voids the prior head, so at most one non-terminal head per (trigger, side) ever exists;
+        // OrderByDescending(Version) is defensive should that invariant ever be dented.
+        //
+        // SAFE ONLY UNDER A SINGLE SEQUENTIAL WRITER (gh#617). "At most one live incumbent" borrows a guarantee this
+        // method neither states nor enforces: TriggerScanHost is one BackgroundService whose loop AWAITS each pass, so
+        // ScanAsync never overlaps itself; owners and triggers are walked in sequential foreach loops committed by one
+        // SaveChangesAsync; and TriggerDebounce lets a given trigger fire at most once per pass. Break any of those --
+        // a second app instance, a manual "run scan now" endpoint, or parallelising the owner/trigger loop -- and two
+        // passes could both read "no incumbent" here and both insert, minting two live heads with an identical Version
+        // and no error. Anything that adds a concurrent scan writer must re-establish this invariant at that point (a
+        // serializable transaction or a per-(trigger, side) advisory lock -- NOT the gh#455 unique index). Tracked by gh#617.
+        Suggestion? incumbent = await database.Suggestions
+            .Where(candidate => candidate.State == SuggestionState.Active || candidate.State == SuggestionState.Stale)
+            .Where(candidate => candidate.Instrument == trigger.Symbol && candidate.Side == suggest.Side)
+            .Where(candidate => candidate.TriggerFiringId != null
+                && database.TriggerFirings.Any(firing =>
+                    firing.Id == candidate.TriggerFiringId && firing.TriggerId == trigger.Id))
+            .Where(candidate => !database.SuggestionDispositions.Any(disposition => disposition.SuggestionId == candidate.Id))
+            .OrderByDescending(candidate => candidate.Version)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        int version = 1;
+        Guid? supersedesId = null;
+        if (incumbent is not null)
+        {
+            // A GUARDED one-way transition to ExpiredVoid: the query above already pinned the incumbent to a
+            // non-terminal state, so this void is guarded-by-construction -- a terminal row is never rewritten. This
+            // is the THIRD writer to Suggestion.State (issuance and the gh#545 expiry sweep are the others);
+            // consolidate onto #545's transition helper when it lands. ONLY State changes -- the incumbent's trade
+            // parameters are immutable once issued (R-4), the invariant the journal depends on.
+            incumbent.State = SuggestionState.ExpiredVoid;
+            version = incumbent.Version + 1;
+            supersedesId = incumbent.Id;
+        }
+
         // Size from the TRIGGER (the operator's), mode LIVE from the account -- never the model's. The `!` are sound:
         // an agent-review trigger carries a non-null account + size (the endpoint validation + the DB check).
         database.Suggestions.Add(new Suggestion
@@ -738,6 +786,11 @@ public class TriggerEvaluationService
 
             // The system's window (gh#544), clamped so it cannot outlive this market's auto-flatten deadline.
             ExpiresAt = expiresAt,
+
+            // The supersede spine (gh#550): a first issuance is Version 1 superseding nothing; a re-formed setup is
+            // one version higher and links to the incumbent it just voided above.
+            Version = version,
+            SupersedesId = supersedesId,
         });
 
         // Queue the advisory for the post-commit flush; the suggestion is the durable artifact behind it. The expiry
