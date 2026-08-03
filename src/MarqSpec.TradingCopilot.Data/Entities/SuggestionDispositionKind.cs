@@ -6,7 +6,7 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// </summary>
 /// <remarks>
 /// Deliberately <b>not</b> a lifecycle state: <c>active</c> / <c>stale</c> / <c>expired-void</c> are the clock's and
-/// the market's (see <see cref="SuggestionState"/>), and <c>expired</c> is therefore <b>not</b> a disposition — a
+/// the market's (see <see cref="MarqSpec.TradingCopilot.Domain.Suggestions.SuggestionState"/>), and <c>expired</c> is therefore <b>not</b> a disposition — a
 /// system timeout is not an operator act, so nothing forges one. <see cref="Unknown"/> is the refusable zero (the
 /// <c>CK_Suggestions_State_NotUnknown</c> fail-closed-zero pattern, gh#60); a DB check rejects it.
 /// <para>

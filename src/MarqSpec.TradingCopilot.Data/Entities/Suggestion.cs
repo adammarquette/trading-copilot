@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations.Schema;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
 
 namespace MarqSpec.TradingCopilot.Data.Entities;
@@ -121,4 +122,13 @@ public class Suggestion : IUserOwned
     /// </summary>
     [NotMapped]
     public int TimeframeMinutes => CitedResolutionMinutes;
+
+    /// <summary>
+    /// When the lifecycle <see cref="State"/> last changed (gh#545) — ADR-0013's invariant that <i>every recovery
+    /// transition is audited</i>, with nowhere to land until now. <c>null</c> while the suggestion is still in the
+    /// <see cref="SuggestionState.Active"/> state it was issued in; otherwise stamped by whichever writer transitions
+    /// it (the expire sweep, the drift consumer, the take path), written <b>atomically</b> with the state change so
+    /// the audit can never lag the transition it records.
+    /// </summary>
+    public DateTimeOffset? StateChangedAt { get; set; }
 }

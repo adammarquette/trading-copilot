@@ -3,6 +3,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Recovery;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -54,9 +55,15 @@ public sealed class DecisionStateRehydrator
     /// to no-new-orders and loud.
     /// </summary>
     /// <param name="now">The startup instant — stamps the kill-switch lock if one is engaged.</param>
+    /// <param name="expiredOnRecovery">
+    /// How many suggestions the recovery expire pass (gh#545) voided just before this call — carried into the report
+    /// and the log. The <c>Active</c> count below is taken <b>after</b> that pass, so it is truthful rather than
+    /// reporting a suggestion that expired while the process was down as active.
+    /// </param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The surface report — the counts and any inconsistencies.</returns>
-    public async Task<DecisionSurfaceReport> RehydrateAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    public async Task<DecisionSurfaceReport> RehydrateAsync(
+        DateTimeOffset now, int expiredOnRecovery, CancellationToken cancellationToken)
     {
         // Read the whole surface across every owner -- background plumbing, so the R-20 default-deny filter is
         // bypassed for discovery; ownership is carried on each snapshot (never dropped) and checked below.
@@ -80,7 +87,9 @@ public sealed class DecisionStateRehydrator
             .CountAsync(suggestion => suggestion.State == SuggestionState.Active, cancellationToken);
 
         DecisionSurfaceReport report =
-            DecisionStateRehydration.Analyze(orders, conditionals, stopPlans, activeSuggestions);
+            DecisionStateRehydration.Analyze(orders, conditionals, stopPlans, activeSuggestions)
+            with
+            { ExpiredOnRecovery = expiredOnRecovery };
 
         // The surface is back and INERT: nothing here resumes it. A staged order sends only when the operator takes
         // it (re-gated, R-12); a pending conditional fires only on a genuine trigger (re-gated); a hidden stop
@@ -88,9 +97,11 @@ public sealed class DecisionStateRehydrator
         _logger.LogInformation(
             "Decision surface rehydrated: {Orders} order(s) ({Staged} staged), {Conditionals} conditional(s) "
             + "({Pending} pending), {Hidden} hidden + {Native} native + {Orphaned} orphaned stop(s), {Suggestions} "
-            + "active suggestion(s) — inert; nothing resumed, re-validated on take/fire (R-12).",
+            + "active suggestion(s) ({Expired} expired on recovery) — inert; nothing resumed, re-validated on "
+            + "take/fire (R-12).",
             report.Orders, report.StagedOrders, report.Conditionals, report.PendingConditionals,
-            report.HiddenStops, report.NativeStops, report.OrphanedStops, report.ActiveSuggestions);
+            report.HiddenStops, report.NativeStops, report.OrphanedStops, report.ActiveSuggestions,
+            report.ExpiredOnRecovery);
 
         if (!report.IsConsistent)
         {
