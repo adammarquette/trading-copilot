@@ -1532,6 +1532,38 @@ public class TriggerEvaluationServiceTests
         v1.Side.Should().Be(OrderSide.Buy);
     }
 
+    // (f) A SIDE-FLIP re-arm of the SAME trigger issues an INDEPENDENT row, never a supersede -- side is part of the
+    // incumbent key (`candidate.Side == suggest.Side`). The reviewer proposes the OPPOSITE direction on the next
+    // firing; the live Buy incumbent is a genuinely different setup (a long and a short are not two versions of one
+    // idea) and must be left actionable. This is the guard the "side is part of the key" design point (PR body,
+    // ADR-0013, data dictionary) had none of -- every other supersede test uses Buy exclusively (gh#610 review).
+    // Delete or invert the `candidate.Side == suggest.Side` clause in StageSuggestionAsync and this goes RED: the
+    // Sell re-fire would then find the Buy incumbent by (instrument, trigger) and void it.
+    [Fact]
+    public async Task ScanAsync_ShouldNotSupersede_WhenTheSameTriggerReArmsWithAFlippedSide()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "long", 72));
+        await Service().ScanAsync(Now, CancellationToken.None); // stage a BUY incumbent (Active)
+        Guid buyId = (await Context().Suggestions.SingleAsync()).Id;
+
+        // The SAME trigger re-arms and fires again, but the reviewer now proposes a SELL -- geometry inverted for a
+        // short (stop above entry, target below), so it clears SuggestionGeometry as a coherent proposal.
+        await FireAgainAsync(new ReviewOutcome.Suggest(OrderSide.Sell, 100m, 101m, 97m, "short", 70));
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion buy = await reload.Suggestions.SingleAsync(s => s.Id == buyId);
+        buy.State.Should().Be(SuggestionState.Active, "an opposite-side proposal is a different setup -- the live Buy is left untouched");
+        buy.SupersedesId.Should().BeNull();
+
+        Suggestion sell = await reload.Suggestions.SingleAsync(s => s.Id != buyId);
+        sell.Side.Should().Be(OrderSide.Sell);
+        sell.SupersedesId.Should().BeNull("a side-flip issues an INDEPENDENT row, not a supersede");
+        sell.Version.Should().Be(1, "an independent chain starts at version 1, superseding nothing");
+    }
+
     /// <summary>
     /// The scan with its platform-wide spend read forced to FAULT — proves the governor is FAIL-OPEN: a spend-read
     /// blip lets the pass run un-gated (the reviewer still wakes), the deliberate INVERSE of the fail-closed risk gate.
