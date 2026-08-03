@@ -240,6 +240,13 @@ builder.Services.AddHostedService<StopPromotionHost>();
 builder.Services.AddScoped<ConditionalFiringService>();
 builder.Services.AddHostedService<ConditionalOrderHost>();
 
+// The suggestion expire sweep (gh#545, ADR-0013): a time-driven pass that voids every live suggestion past its
+// validity window, so a dead suggestion drops off the actionable surface without an operator act. The guarded
+// one-way State transition (scoped) is shared with the drift (gh#546) and supersede (gh#550) writers; the startup
+// path (StartupTasks) runs the same transition before the rehydrator counts, so recovery and steady state cannot diverge.
+builder.Services.AddScoped<ISuggestionExpiry, SuggestionExpiry>();
+builder.Services.AddHostedService<SuggestionExpiryHost>();
+
 // The immutable audit trail (engineering §9, ADR-0007, gh#220): a secondary, failure-tolerant write the orphan
 // guard uses to record each synthetic-stop transition with its synthetic_risk flag. Scoped alongside the guard.
 builder.Services.AddScoped<IAuditLog, AuditLog>();

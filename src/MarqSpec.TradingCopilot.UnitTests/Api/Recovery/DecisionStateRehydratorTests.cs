@@ -105,7 +105,7 @@ public class DecisionStateRehydratorTests
             NewConditional(_owner, ConditionalStatus.Pending),
             NewConditional(_owner, ConditionalStatus.Fired, firedOrderId: working.Id));
 
-        DecisionSurfaceReport report = await Rehydrator().RehydrateAsync(_now, CancellationToken.None);
+        DecisionSurfaceReport report = await Rehydrator().RehydrateAsync(_now, 0, CancellationToken.None);
 
         report.IsConsistent.Should().BeTrue();
         report.StagedOrders.Should().Be(1);
@@ -114,11 +114,25 @@ public class DecisionStateRehydratorTests
     }
 
     [Fact]
+    public async Task RehydrateAsync_ShouldCarryTheRecoveryExpiryCount_IntoTheReport_WithoutTrippingTheFailSafe()
+    {
+        // gh#545: the recovery expire pass runs (in StartupTasks) BEFORE the rehydrator counts, and its count is
+        // carried into the report + log. A suggestion carries no risk, so an expired one is a no-risk maintenance
+        // count — it must never enter the consistency verdict or engage the kill switch.
+        DecisionSurfaceReport report =
+            await Rehydrator().RehydrateAsync(_now, expiredOnRecovery: 3, CancellationToken.None);
+
+        report.ExpiredOnRecovery.Should().Be(3);
+        report.IsConsistent.Should().BeTrue();
+        _killSwitch.IsEngaged.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task RehydrateAsync_ShouldEngageHaltOnly_AndPersistTheLock_WhenAnImpossibleCombinationExists()
     {
         await SeedAsync(NewOrder(_owner, OrderStatus.Staged, venueKey: "PX-STALE")); // staged, yet carries a venue key
 
-        DecisionSurfaceReport report = await Rehydrator().RehydrateAsync(_now, CancellationToken.None);
+        DecisionSurfaceReport report = await Rehydrator().RehydrateAsync(_now, 0, CancellationToken.None);
 
         report.IsConsistent.Should().BeFalse();
         _killSwitch.IsEngaged.Should().BeTrue();
@@ -137,7 +151,7 @@ public class DecisionStateRehydratorTests
         Order stagedAtVenue = NewOrder(_owner, OrderStatus.Staged, venueKey: "PX-STALE");
         await SeedAsync(stagedAtVenue);
 
-        await Rehydrator().RehydrateAsync(_now, CancellationToken.None);
+        await Rehydrator().RehydrateAsync(_now, 0, CancellationToken.None);
 
         await using TradingCopilotDbContext context = Context();
         Order reloaded = await context.Orders.IgnoreQueryFilters().SingleAsync(order => order.Id == stagedAtVenue.Id);
@@ -153,7 +167,7 @@ public class DecisionStateRehydratorTests
             NewOrder(_owner, OrderStatus.Working, venueKey: "PX-A"),        // owner A -- coherent
             NewOrder(ownerB, OrderStatus.Staged, venueKey: "PX-B-STALE"));  // owner B -- impossible
 
-        DecisionSurfaceReport report = await Rehydrator().RehydrateAsync(_now, CancellationToken.None);
+        DecisionSurfaceReport report = await Rehydrator().RehydrateAsync(_now, 0, CancellationToken.None);
 
         report.Orders.Should().Be(2); // both owners discovered, though the context carries no request user
         DecisionInconsistency issue = report.Inconsistencies.Should().ContainSingle().Which;
@@ -168,7 +182,7 @@ public class DecisionStateRehydratorTests
         _killSwitch.Engage(KillSwitchMode.FlattenAll, _now, "operator engaged before restart");
         await SeedAsync(NewOrder(_owner, OrderStatus.Staged, venueKey: "PX-STALE"));
 
-        await Rehydrator().RehydrateAsync(_now, CancellationToken.None);
+        await Rehydrator().RehydrateAsync(_now, 0, CancellationToken.None);
 
         _killSwitch.IsEngaged.Should().BeTrue();
         _killSwitch.Status.Mode.Should().Be(KillSwitchMode.FlattenAll); // NOT downgraded to HaltOnly

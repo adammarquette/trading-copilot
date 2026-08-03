@@ -126,9 +126,12 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
   no-new-orders (kill switch, HaltOnly) + loud on any impossible cross-entity combination, never repairing. *Still
   open:* the **suggestion validity-window recompute** — its blocker is **cleared**: the R-4 validity field landed as
   `Suggestion.ExpiresAt` (gh#544), stamped by a pure policy and clamped to the market's auto-flatten deadline so a
-  suggestion can never outlive the flatten. The **recompute itself** (the sweep that acts on it, on both the steady
-  state and the startup path, so recovery and normal operation cannot diverge) is **gh#545**, which closes this item;
-  until it lands the persisted state still returns and the **take** re-gates (R-12); **restart-triggered venue reconcile** pairs with the
+  suggestion can never outlive the flatten. The **recompute itself** has **landed (gh#545)**: the steady-state
+  **expire sweep** and the **startup recompute** (run *before* the rehydrator counts, so a suggestion that expired
+  while the process was down is voided, not reported active) **share one guarded one-way `State` writer** — its
+  predicate the pure `SuggestionLifecycle.Decide` (a live suggestion past its window), voiding it to `ExpiredVoid`
+  with a `StateChangedAt` audit stamp — so recovery and normal operation cannot diverge. A suggestion still returns
+  **inert** and the **take** re-gates (R-12). *Still open:* **restart-triggered venue reconcile** pairs with the
   settlement pass (gh#193) and the connection monitor (gh#209); **fill**-level reconcile needs the account-event
   seam (gh#219); and the **cross-user-isolation-through-restart** proof (suggestions / orders / positions /
   templates keep their owner) is the QA suite's.
