@@ -11,9 +11,11 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The spine gained the <b>rationale + cited signal</b> (gh#542), a <b>confidence</b> (gh#543) and a
-/// <b>validity window</b> (gh#544). Still deferred: strategy linkage (A5 owns the <c>Strategy</c> entity),
-/// retrieval references (VEC — lands with its retrieval consumer), version / supersedes, and dispositions.
+/// The spine gained the <b>rationale + cited signal</b> (gh#542), a <b>confidence</b> (gh#543), a
+/// <b>validity window</b> (gh#544) and now <b>version / supersedes</b> (gh#550) — a re-formed setup issues a
+/// <b>superseding</b> suggestion, versioned and immutable once issued (R-4, ADR-0013). Still deferred: strategy
+/// linkage (A5 owns the <c>Strategy</c> entity), retrieval references (VEC — lands with its retrieval consumer),
+/// and dispositions.
 /// </para>
 /// <para>
 /// <see cref="Mode"/> is <b>mode-guarded</b> (R-14): a DB constraint trigger refuses a suggestion whose mode
@@ -131,4 +133,25 @@ public class Suggestion : IUserOwned
     /// the audit can never lag the transition it records.
     /// </summary>
     public DateTimeOffset? StateChangedAt { get; set; }
+
+    /// <summary>
+    /// This suggestion's version along its supersede chain (gh#550, R-4). The first suggestion for a setup is
+    /// <c>1</c>; a re-formed setup issues a <b>superseding</b> row one version higher (see <see cref="SupersedesId"/>).
+    /// </summary>
+    /// <remarks>
+    /// Versioned/immutable-once-issued is R-4's journal-integrity rule: an issued suggestion's trade parameters never
+    /// change — a re-formed setup issues a new superseding row rather than mutating this one. Defaults to <c>1</c>
+    /// (both a CLR initializer and the DB default), so a first issuance need not set it explicitly.
+    /// </remarks>
+    public int Version { get; set; } = 1;
+
+    /// <summary>
+    /// The suggestion this one supersedes (gh#550, R-4), or <see langword="null"/> for the first version of a setup —
+    /// a self-reference forming the supersede chain, whose <b>head</b> is the row nothing else supersedes.
+    /// </summary>
+    /// <remarks>
+    /// The FK is <c>OnDelete: Restrict</c>: a superseded row can never be deleted while a later version still points
+    /// at it, so the lineage the R-9 learning loop reads never silently vanishes. Set once at issuance, never changed.
+    /// </remarks>
+    public Guid? SupersedesId { get; set; }
 }
