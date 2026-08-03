@@ -35,7 +35,11 @@ public class Suggestion : IUserOwned
     /// <summary>The account the suggestion targets — the parent whose mode the R-14 guard compares against.</summary>
     public Guid AccountId { get; set; }
 
-    /// <summary>The venue contract the suggestion is for (e.g. <c>CON.F.US.MES.U26</c>).</summary>
+    /// <summary>
+    /// The <b>venue-neutral</b> instrument symbol (e.g. <c>ES</c>) — <b>not</b> a venue contract key. The front-month
+    /// contract resolves at take time exactly as an order does, and both the spec source (gh#541) and the venue key
+    /// on this symbol, so the take path (gh#548) resolves the tick size and safety-stop distance from it.
+    /// </summary>
     public required string Instrument { get; set; }
 
     /// <summary>The proposed direction. <c>required</c>: the zero value is a real side, never a default.</summary>

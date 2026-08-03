@@ -318,7 +318,13 @@ operator **confirms** it (gh#470), and a dependency outage is visible rather tha
 the first `SuggestionDisposition`, and the input the R-9 learning loop reads — so a suggestion's life no longer ends
 at issuance. A passed setup drops off the default actionable surface while staying in the journal by id; disposition
 kind is an **operator act** (`taken` / `modified` / `passed`), kept separate from the clock-driven lifecycle state
-(gh#539). `taken` / `modified` follow with the take path (gh#549).
+(gh#539). **The take path arms an order from a suggestion** (gh#548): `POST /suggestions/{id}/take` re-validates it is
+still takeable *now* — `Active`, in-window (clock re-read via the same `SuggestionLifecycle.Decide` the sweep uses),
+un-dispositioned, spec-resolvable, and **un-drifted** (price re-measured against the entry tolerance, not the
+eventually-consistent state flag) — then stages an **editable ticket** through the order gate ladder **minus
+transmission**, taking the **size from the suggestion** and stamping `Order.SuggestionId`; the gate is untouched and
+still resizes/blocks, and sending stays the separate gated endpoint. Its `taken` / `modified` **disposition** writing
+is part B (gh#549).
 
 ### Analysis & management UI
 A **React SPA** — the operator's surface — consuming the BFF's **REST** endpoints and **SignalR** hubs
