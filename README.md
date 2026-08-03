@@ -58,62 +58,26 @@ The API comes up on **http://localhost:8080**, applies the EF migrations, and **
 (`operator@local` / `changeme-local` — local-dev defaults; override in `.env`). Onboarding is just sign-in —
 **one operator per deployment** (ADR-0017):
 
-```
-POST /auth/login              {email, password}          -> JWT
-GET  /auth/me                 (Bearer)                   -> the operator
-POST /firms                   {name, type}   (Bearer)    -> register a firm (gh#76)
-GET  /firms                   (Bearer)                   -> the operator's firms + conventions
-PUT  /firms/{id}/conventions  [{stage, capitalAtRisk}]   -> declare what each stage means (gh#60)
-POST /connections             {firmId, platform, credentialKey} -> a firm login (one per firm x platform)
-GET  /connections             (Bearer)                   -> the operator's connections
-POST /connections/{id}/accounts/discover                 -> pull the venue's roster; each account's mode is
-                                                            COMPUTED from its stage x the firm's declared
-                                                            conventions, never taken from the venue (gh#60)
-GET  /connections/{id}/accounts                          -> the persisted roster (no venue round-trip)
-PUT  /accounts/{id}/stage     {stage}                    -> declare an account's stage, overriding the
-                                                            conservative resolver (it never guesses; you do
-                                                            the telling). Unknown is refused
-DEL  /accounts/{id}/stage                                -> clear the override, fall back to the resolved stage
-POST /accounts/{id}/orders    {the proposal}             -> send ONE order through the whole ladder (gh#11):
-                                                            declared risk rules (refused when absent), the
-                                                            R-14 mode x environment gate, the R-5/R-16 risk
-                                                            gate -- every sized attempt leaves an auditable
-                                                            GateDecision; a placed one journals the Order.
-                                                            Requires a FLAT account (honest unrealized P&L=0)
-POST /accounts/{id}/orders/arm {the proposal}             -> ARM: run the whole ladder but STAGE, not send --
-                                                            an editable ticket, never at the venue (ADR-0007)
-PUT  /orders/{id}             {the proposal}              -> EDIT a staged ticket -- re-gates on every change
-POST /orders/{id}/take                                    -> TAKE: re-validate EVERYTHING fresh (R-12), then
-                                                            transmit. Fails-and-stays-staged if the fresh gate
-                                                            now blocks -- what passed at arm is not authority
-DEL  /orders/{id}                                         -> cancel a staged ticket (before it is taken)
-POST /accounts/{id}/orders/conditional {proposal+trigger} -> the SECOND send mode, "send when conditions met"
-                                                            (gh#176): held local, transmits NOTHING. A watcher
-                                                            (gh#198) fires it on its price trigger through the
-                                                            authoritative fire-time re-gate; drift past the
-                                                            cancel band or the expiry resolves it as a scratch
-PUT  /accounts/{id}/risk      {the whole declaration}    -> declare the account's risk rules (R-5); validated
-                                                            through the domain factories, refused whole on any
-                                                            violation (gh#10)
-GET  /accounts/{id}/risk                                 -> the declared rules; 404 until declared -- absence
-                                                            is the gate's fail-closed input, never a default
-GET  /accounts/{id}/positions                            -> positions from VENUE TRUTH, each tagged with its
-                                                            mark basis -- live / settlement re-mark / declared-
-                                                            unknown when the venue can't be reached. Never a
-                                                            stale live view (gh#193, R-13)
-POST /kill-switch             {mode, reason}             -> ENGAGE (hold-to-confirm): disables every outbound
-                                                            order at the send choke point, cancels working
-                                                            orders, then flattens-all or halts-only. Survives a
-                                                            restart -- nothing silently re-enables trading
-                                                            (gh#189, R-11)
-POST /kill-switch/disengage                              -> release the lock (deliberate, journaled)
-GET  /kill-switch                                        -> the current state: engaged, mode, when, why
-```
+**The endpoints document themselves.** The running API generates an **OpenAPI 3 spec** at `/openapi/v1.json` and
+a browsable **Scalar reference UI** at `/scalar/v1` (the UI outside production only), straight from the routes —
+a reference that **cannot silently drift** from the code (gh#604). Read the surface there, not here.
 
-**These endpoints now document themselves.** The running API generates an **OpenAPI 3 spec** at `/openapi/v1.json`
-and a browsable **Scalar reference UI** at `/scalar/v1` (the UI outside production only), straight from the routes
-above — the reference that **cannot silently drift** from the code (gh#604). The table here is kept for
-at-a-glance reading; slimming it to a link to the generated spec is gh#605.
+What the surface is *for*, so you know what to look for:
+
+- **Onboarding** — sign in, register a firm, declare what each funding **stage** means, then connect a venue
+  login and discover its accounts. An account's **trading mode is computed** from its stage × the firm's declared
+  conventions, never taken from the venue (gh#60).
+- **Two ways to send an order.** *Direct* runs the whole ladder and transmits. *Arm → take* stages an editable
+  ticket that never reaches the venue, then **re-validates everything fresh** at take — what passed at arm is not
+  authority (R-12, ADR-0007). A **conditional** order is the second send mode: held locally, transmitting
+  nothing, until a watcher fires it through an authoritative fire-time re-gate (gh#176, gh#198).
+- **Risk is declared, and its absence is fail-closed.** Rules are validated whole through the domain factories;
+  until declared, the read 404s and the gate refuses — absence is never a default (R-5, gh#10). Every sized
+  attempt leaves an auditable `GateDecision`.
+- **Positions come from venue truth**, each tagged with its mark basis — live, settlement re-mark, or
+  declared-unknown when the venue cannot be reached — never a stale live view (gh#193, R-13).
+- **The kill switch** disables every outbound order at the send choke point, cancels working orders, then
+  flattens-all or halts-only — and **survives a restart**, so nothing silently re-enables trading (gh#189, R-11).
 
 The `/auth/invitations` and `/auth/accept-invite` endpoints also exist and work, but are **dormant** — not part
 of the onboarding story, retained as the plumbing a future read-only / mentee login would reuse (ADR-0017 §4).
@@ -127,17 +91,17 @@ tears it down.
 
 ## For AI agents & new readers — start here
 
-This repo is built to be navigated by AI coding agents as much as by people. Read in this order:
+This repo is built to be navigated by AI coding agents as much as by people. Two entry points, in this order:
 
-| Doc | What's there |
-|---|---|
-| [`documentation/trading-platform-prd.md`](documentation/trading-platform-prd.md) | **Product requirements (PRD)** — problem, goals, the `R-1…R-22` requirements, success metrics, phasing, open questions |
-| [`documentation/trading-platform-engineering.md`](documentation/trading-platform-engineering.md) | **Engineering guide** — architecture patterns, a lightweight engineering-practices scaffold (stack, testing, observability, deployment, safety-critical discipline), and the companion knowledge wiki |
-| [`documentation/trading-platform-architecture.md`](documentation/trading-platform-architecture.md) | **System architecture** — the runtime view: services, event pipeline, data flow, and open design decisions |
-| [`AGENTS.md`](AGENTS.md) | Instructions for AI coding agents (imported by `CLAUDE.md`) — settled conventions and where to find things |
+1. **[`AGENTS.md`](AGENTS.md)** — the rules every agent follows (imported by `CLAUDE.md`, so it loads itself).
+   It routes you to your **role contract** — Coding, QA, Code Reviewer or Platform — which holds the rules the
+   root file deliberately does not repeat.
+2. **[`documentation/README.md`](documentation/README.md)** — the map of the documentation layer: what each
+   document is, when to open it, and what it costs to read. **Go through the map; do not sweep the folder.**
 
-The PRD is *what* the product does; the engineering guide is *how* we build it; the architecture doc is the
-*runtime design*. None is a spec the running system reads — they inform design.
+Orientation for the three you will reach for most: the **PRD** is *what* the product does (`R-1…R-22`), the
+**engineering guide** is *how* we build it, and the **architecture** doc is the *runtime design*. None is a spec
+the running system reads — they inform design.
 
 ## Where to find things
 
@@ -199,12 +163,17 @@ repo's documentation rules are consequences of that principle, not housekeeping:
   [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern), traversed via stable
   IDs — `R-#`, ADR numbers, `gh#N` — which are the layer's **symbol table**. Agents follow them to reconstruct
   context each session instead of re-deriving it.
-- **Docs move in the same PR** as the change they describe. A stale doc is a **build break in the top layer** —
-  the source no longer produces the system — not a housekeeping lapse.
+- **Docs move in the same PR** as the change they describe — **the affected section of the affected document**.
+  A stale doc is a **build break in the top layer** — the source no longer produces the system — not a
+  housekeeping lapse.
 - **Issues and PRs are part of the source, not exhaust.** Issue-first; every PR cites its issue; decisions,
   evidence, and findings are recorded on them where the next session — human or agent — recompiles from.
-- A session **starts by reading the top layer** (this README, then `documentation/`) and derives the rest —
-  which is exactly the compile direction.
+- A session **resolves the top layer on demand**: this README, then the map at
+  [`documentation/README.md`](documentation/README.md), then the one section it actually needs.
+  **Reconstructable does not mean read-it-all** — a compiler resolves the symbols it needs rather than reading
+  every source file, and `R-#` / ADR numbers / `gh#N` are precisely that symbol table. `documentation/` is
+  ~240K tokens; sweeping it is not the compile direction, it is loading the whole object graph to link one
+  symbol. **Route, don't sweep.**
 
 The engineering practice that follows from it:
 

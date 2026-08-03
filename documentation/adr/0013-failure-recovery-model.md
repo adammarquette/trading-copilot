@@ -193,7 +193,7 @@ This ADR states — under *No-risk state fails safe by expiring*, and again in *
 expired setup is **not resurrected**: *"a re-formed setup is a **new** suggestion (R-4)"*, and the
 expire-on-uncertainty bias is accepted because discarded setups *"re-form as new suggestions"*. That held only in
 prose; the old and new rows carried no link. gh#550 makes it true in **data**. `Suggestion` gains `Version` (default
-1) and a self-referencing `SupersedesId` (R-4; [data dictionary §6](../data-dictionary.md)): when the trigger scan
+1) and a self-referencing `SupersedesId` (R-4; [data dictionary §6](../data-dictionary/06-suggestions.md)): when the trigger scan
 stages a new suggestion and a **non-terminal (active/stale), undispositioned** incumbent exists for the **same
 trigger + instrument + side** — keyed on the originating firing's `TriggerId`, **not** the symbol, so distinct
 indicators / periods on one symbol do not void one another — the incumbent is voided (reusing
