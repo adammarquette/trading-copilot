@@ -98,16 +98,19 @@ public sealed class RiskGate : IRiskGate
                     $"Equity {equity} is at or below the drawdown floor {context.Drawdown.Floor}."));
         }
 
-        decimal? dailyLossRemaining = context.Rules.DailyLossLimit is { } limit ? limit - state.DayLoss : null;
-        if (dailyLossRemaining <= 0m)
+        // The day's remaining loss budget under both daily limits (R-5), computed once and reused for the refusals
+        // and the sizing below. One implementation, shared with the gh#587 projection (gh#627).
+        DailyHeadroom daily = DailyHeadroom.Remaining(
+            context.Rules.DailyLossLimit, profile.DailyDrawdownGovernor, state.DayLoss);
+
+        if (daily.DailyLossLimitSpent)
         {
             return GateDecision.Block(
                 RiskLayer.DailyLossLimit,
                 FormattableString.Invariant($"The account's daily loss limit of {context.Rules.DailyLossLimit} is spent."));
         }
 
-        decimal governorRemaining = profile.DailyDrawdownGovernor - state.DayLoss;
-        if (governorRemaining <= 0m)
+        if (daily.GovernorSpent)
         {
             return GateDecision.Block(
                 RiskLayer.DailyGovernor,
@@ -147,10 +150,10 @@ public sealed class RiskGate : IRiskGate
             (RiskLayer.PerTradeRisk, PositionSizer.MaxContracts(profile.PerTradeRiskFraction * headroom, sizingPerContract)),
             (RiskLayer.MaxDrawdownPerTrade, PositionSizer.MaxContracts(profile.MaxDrawdownPerTrade, worstCasePerContract)),
             (RiskLayer.DrawdownFloor, PositionSizer.MaxContracts(headroom, worstCasePerContract)),
-            (RiskLayer.DailyLossLimit, dailyLossRemaining is { } remaining
+            (RiskLayer.DailyLossLimit, daily.UnderDailyLossLimit is { } remaining
                 ? PositionSizer.MaxContracts(remaining, worstCasePerContract)
                 : int.MaxValue),
-            (RiskLayer.DailyGovernor, PositionSizer.MaxContracts(governorRemaining, worstCasePerContract)),
+            (RiskLayer.DailyGovernor, PositionSizer.MaxContracts(daily.UnderGovernor, worstCasePerContract)),
             (RiskLayer.ManualCap, context.Manual.MaxContractsFor(instrument.Id)),
             (RiskLayer.SanityCap, Math.Min(
                 context.Sanity.MaxContractsPerOrder,
