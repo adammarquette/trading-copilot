@@ -196,6 +196,10 @@ a **dev task** plus an independent **QA task** (engineering §10).
 - Before a PR: `dotnet format --verify-no-changes` + **unit tests green**. **Test-first is the Definition of Done**
   (no new public method without a failing test first). Query code uses **fluent / method syntax, never LINQ
   query-comprehension** (engineering §4).
+- **A docs change also faces the duplication guard.** `./scripts/check-doc-duplication.sh` runs in CI and fails a
+  PR that **restates** a canonical rule outside its one home without citing it (`gh#616`); run it locally before a
+  PR that edits `*.md`. Fix a hit by linking the owner instead of repeating it — or, when a self-contained repeat is
+  deliberate, record the exemption in the script rather than letting it pass as prose.
 - **Merge gate — enforced (gh#45).** GitHub **rulesets** protect `develop`, `staging`, and `main`: each requires a
   pull request and green status checks before merge and blocks force-push / deletion, so **a red check now blocks
   the merge.** `build & unit tests`, `commit-hygiene`, and the pre-merge integration suite are required on all
