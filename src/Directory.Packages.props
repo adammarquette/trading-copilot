@@ -38,6 +38,20 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Self-documenting API surface (gh#604, R-10): an OpenAPI 3 document generated from the actual minimal-API
+         routes, and a Scalar reference UI over it. The generated spec replaces the hand-maintained README endpoint
+         table (correct by construction vs. a table that drifts, #605). Both MIT; Microsoft.AspNetCore.OpenApi
+         tracks the 10.0.4 framework version above. -->
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.4" />
+    <PackageVersion Include="Scalar.AspNetCore" Version="2.16.17" />
+    <!-- Transitive pin (CentralPackageTransitivePinningEnabled, above). Microsoft.AspNetCore.OpenApi 10.0.4 floors
+         Microsoft.OpenApi at 2.0.0, which carries a HIGH advisory (GHSA-v5pm-xwqc-g5wc: a circular schema
+         reference can terminate parsing; fixed in 2.7.5). NuGetAudit fails restore (NU1903) on it, correctly, so
+         we override the transitive to the patched latest 2.x. -->
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.11.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Observability (ADR-0002, gh#230): OpenTelemetry SDK + OTLP export, and the instrumentations §7 names.
          All Apache-2.0, matching this repo's licence posture. The exporter is OTLP only: the LGTM stack it
          points at is a deployment concern (gh#231), so nothing here binds us to a specific backend. -->

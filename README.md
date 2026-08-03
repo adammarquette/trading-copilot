@@ -110,6 +110,11 @@ POST /kill-switch/disengage                              -> release the lock (de
 GET  /kill-switch                                        -> the current state: engaged, mode, when, why
 ```
 
+**These endpoints now document themselves.** The running API generates an **OpenAPI 3 spec** at `/openapi/v1.json`
+and a browsable **Scalar reference UI** at `/scalar/v1` (the UI outside production only), straight from the routes
+above — the reference that **cannot silently drift** from the code (gh#604). The table here is kept for
+at-a-glance reading; slimming it to a link to the generated spec is gh#605.
+
 The `/auth/invitations` and `/auth/accept-invite` endpoints also exist and work, but are **dormant** — not part
 of the onboarding story, retained as the plumbing a future read-only / mentee login would reuse (ADR-0017 §4).
 Issuing is **primary-operator-only** (gh#128): an accepted invitee cannot chain further invitations.

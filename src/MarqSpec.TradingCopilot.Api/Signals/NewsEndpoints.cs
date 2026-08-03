@@ -27,10 +27,11 @@ public static class NewsEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapNewsEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        RouteGroupBuilder group = endpoints.MapGroup("/api/news").RequireAuthorization();
-        group.MapGet("/", GetFeedAsync);
-        group.MapPut("/feedback", SetFeedbackAsync);
-        group.MapDelete("/feedback", ClearFeedbackAsync);
+        RouteGroupBuilder group = endpoints.MapGroup("/api/news").RequireAuthorization().WithTags("News");
+        group.MapGet("/", GetFeedAsync)
+            .WithSummary("The operator's personalized news feed, re-ranked by decayed salience.");
+        group.MapPut("/feedback", SetFeedbackAsync).WithSummary("Star or mute a news item (soft salience weight only).");
+        group.MapDelete("/feedback", ClearFeedbackAsync).WithSummary("Clear star/mute feedback on a news item.");
         return endpoints;
     }
 

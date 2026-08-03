@@ -7,6 +7,7 @@ using MarqSpec.TradingCopilot.Api.Accounts;
 using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Auth;
+using MarqSpec.TradingCopilot.Api.Documentation;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.Kill;
@@ -416,6 +417,11 @@ builder.Services
     });
 builder.Services.AddAuthorization();
 
+// The self-documenting API surface (R-10, gh#604): an OpenAPI document generated from the minimal-API routes
+// below, and a Scalar reference UI over it. The spec is the source of truth the README links to (#605); a
+// generated spec cannot silently drop an endpoint the way the hand-kept table could.
+builder.Services.AddTradingCopilotOpenApi();
+
 WebApplication app = builder.Build();
 
 // Resolve the governor gauge EAGERLY (gh#506). An ObservableGauge only exists once its owner is constructed,
@@ -445,6 +451,11 @@ app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
 app.MapPositionEndpoints();
 app.MapWorkingOrderEndpoints();
+
+// The generated spec (/openapi/v1.json, everywhere) and the Scalar reference UI (/scalar/v1, disabled in
+// production). Mapped after the endpoint groups so the document reflects every route above (gh#604).
+app.MapTradingCopilotApiReference();
+
 // Liveness: answers from the process alone and touches NO dependency (§7). A liveness probe that queries the
 // database restarts a healthy app during a database blip -- taking the auto-flatten scheduler down with it.
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));

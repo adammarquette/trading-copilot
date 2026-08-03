@@ -41,13 +41,14 @@ public static class TriggerEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapTriggerEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        RouteGroupBuilder group = endpoints.MapGroup("/api/triggers").RequireAuthorization();
-        group.MapPost("/", CreateTriggerAsync);
-        group.MapGet("/", ListTriggersAsync);
-        group.MapGet("/{id:guid}", GetTriggerAsync);
-        group.MapPatch("/{id:guid}", PatchTriggerAsync);
-        group.MapPost("/{id:guid}/confirm", ConfirmTriggerAsync);
-        group.MapDelete("/{id:guid}", DeleteTriggerAsync);
+        RouteGroupBuilder group = endpoints.MapGroup("/api/triggers").RequireAuthorization().WithTags("Triggers");
+        group.MapPost("/", CreateTriggerAsync).WithSummary("Author a standing deterministic trigger.");
+        group.MapGet("/", ListTriggersAsync).WithSummary("List the operator's triggers.");
+        group.MapGet("/{id:guid}", GetTriggerAsync).WithSummary("Get a trigger by id.");
+        group.MapPatch("/{id:guid}", PatchTriggerAsync).WithSummary("Update a trigger.");
+        group.MapPost("/{id:guid}/confirm", ConfirmTriggerAsync)
+            .WithSummary("Confirm a trigger that requires operator confirmation.");
+        group.MapDelete("/{id:guid}", DeleteTriggerAsync).WithSummary("Delete a trigger.");
         return endpoints;
     }
 

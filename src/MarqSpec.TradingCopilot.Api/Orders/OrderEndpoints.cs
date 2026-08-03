@@ -34,17 +34,23 @@ public static class OrderEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapOrderEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        RouteGroupBuilder accountGroup = endpoints.MapGroup("/accounts/{id:guid}/orders").RequireAuthorization();
-        accountGroup.MapPost("/", SendOrderAsync);
-        accountGroup.MapPost("/arm", ArmOrderAsync);
-        accountGroup.MapPost("/send-as-is", SendAsIsOrderAsync);
-        accountGroup.MapPost("/conditional", CreateConditionalOrderAsync);
+        RouteGroupBuilder accountGroup =
+            endpoints.MapGroup("/accounts/{id:guid}/orders").RequireAuthorization().WithTags("Orders");
+        accountGroup.MapPost("/", SendOrderAsync)
+            .WithSummary("Send an order through the full risk gate (direct send).");
+        accountGroup.MapPost("/arm", ArmOrderAsync)
+            .WithSummary("Arm (stage) an order: evaluate the risk gate without transmitting.");
+        accountGroup.MapPost("/send-as-is", SendAsIsOrderAsync)
+            .WithSummary("Opt-in fast path: send an order as-is.");
+        accountGroup.MapPost("/conditional", CreateConditionalOrderAsync)
+            .WithSummary("Create a conditional (triggered) order.");
 
-        RouteGroupBuilder orderGroup = endpoints.MapGroup("/orders/{id:guid}").RequireAuthorization();
-        orderGroup.MapPut("/", EditStagedOrderAsync);
-        orderGroup.MapPost("/take", TakeStagedOrderAsync);
-        orderGroup.MapDelete("/", CancelOrderAsync);
-        orderGroup.MapPatch("/price", ModifyWorkingOrderPriceAsync);
+        RouteGroupBuilder orderGroup = endpoints.MapGroup("/orders/{id:guid}").RequireAuthorization().WithTags("Orders");
+        orderGroup.MapPut("/", EditStagedOrderAsync).WithSummary("Edit a staged (armed) order.");
+        orderGroup.MapPost("/take", TakeStagedOrderAsync)
+            .WithSummary("Take a staged order: re-validate everything fresh, then transmit.");
+        orderGroup.MapDelete("/", CancelOrderAsync).WithSummary("Cancel a staged or working order.");
+        orderGroup.MapPatch("/price", ModifyWorkingOrderPriceAsync).WithSummary("Modify a working order's price.");
 
         return endpoints;
     }

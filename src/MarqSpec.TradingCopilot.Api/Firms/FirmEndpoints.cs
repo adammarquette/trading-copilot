@@ -21,10 +21,11 @@ public static class FirmEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapFirmEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        RouteGroupBuilder group = endpoints.MapGroup("/firms").RequireAuthorization();
-        group.MapPost("/", CreateFirmAsync);
-        group.MapGet("/", ListFirmsAsync);
-        group.MapPut("/{id:guid}/conventions", DeclareConventionsAsync);
+        RouteGroupBuilder group = endpoints.MapGroup("/firms").RequireAuthorization().WithTags("Firms");
+        group.MapPost("/", CreateFirmAsync).WithSummary("Register a firm the operator trades with.");
+        group.MapGet("/", ListFirmsAsync).WithSummary("List the operator's registered firms.");
+        group.MapPut("/{id:guid}/conventions", DeclareConventionsAsync)
+            .WithSummary("Declare what each account stage means at a firm.");
         return endpoints;
     }
 

@@ -24,15 +24,16 @@ public static class RelevanceEndpoints
     /// <returns>The same builder, for chaining.</returns>
     public static IEndpointRouteBuilder MapRelevanceEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        RouteGroupBuilder group = endpoints.MapGroup("/api/relevance").RequireAuthorization();
-        group.MapPost("/maps", CreateMapAsync);
-        group.MapGet("/maps", ListMapsAsync);
-        group.MapDelete("/maps/{ticker}/{instrument}", DeleteMapAsync);
-        group.MapPost("/topics", CreateTopicAsync);
-        group.MapGet("/topics", ListTopicsAsync);
-        group.MapGet("/topics/{id:guid}", GetTopicAsync);
-        group.MapPatch("/topics/{id:guid}", UpdateTopicAsync);
-        group.MapDelete("/topics/{id:guid}", DeleteTopicAsync);
+        RouteGroupBuilder group = endpoints.MapGroup("/api/relevance").RequireAuthorization().WithTags("Relevance");
+        group.MapPost("/maps", CreateMapAsync).WithSummary("Create a ticker↔instrument relevance map.");
+        group.MapGet("/maps", ListMapsAsync).WithSummary("List the ticker↔instrument maps.");
+        group.MapDelete("/maps/{ticker}/{instrument}", DeleteMapAsync)
+            .WithSummary("Delete a ticker↔instrument map.");
+        group.MapPost("/topics", CreateTopicAsync).WithSummary("Create a relevance topic.");
+        group.MapGet("/topics", ListTopicsAsync).WithSummary("List relevance topics.");
+        group.MapGet("/topics/{id:guid}", GetTopicAsync).WithSummary("Get a relevance topic by id.");
+        group.MapPatch("/topics/{id:guid}", UpdateTopicAsync).WithSummary("Update a relevance topic.");
+        group.MapDelete("/topics/{id:guid}", DeleteTopicAsync).WithSummary("Delete a relevance topic.");
         return endpoints;
     }
 
