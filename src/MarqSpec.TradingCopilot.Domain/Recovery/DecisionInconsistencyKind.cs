@@ -41,4 +41,15 @@ public enum DecisionInconsistencyKind
     /// silently repaired.
     /// </summary>
     ConditionalMidFiring = 8,
+
+    /// <summary>
+    /// A <see cref="Execution.OrderStatus.Taking"/> order persists at rest — the take path's analog of
+    /// <see cref="ConditionalMidFiring"/> (gh#589). The claim (<see cref="Execution.OrderStatus.Staged"/> →
+    /// <see cref="Execution.OrderStatus.Taking"/>, gh#530) is the take's durable pre-transmit intent; taking is
+    /// transient at runtime (one request resolves it to <see cref="Execution.OrderStatus.Working"/> or releases it
+    /// back to <see cref="Execution.OrderStatus.Staged"/>). Found surviving a restart, its order <b>may be live at
+    /// the venue</b> while the journal never marked it working — reconcile against venue truth (by the order's
+    /// <c>customTag</c>) before any resumption; never silently repaired.
+    /// </summary>
+    OrderMidTaking = 9,
 }

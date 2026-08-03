@@ -1,12 +1,15 @@
 using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Domain.Execution;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 
 namespace MarqSpec.TradingCopilot.Api.Orders;
 
 /// <summary>
-/// Serializes entry-transmits for one account, so two concurrent direct sends cannot both size against the same
-/// flat-account snapshot and both reach the venue (gh#531).
+/// Serializes entry-transmits for one account, so two concurrent entries cannot both size against the same
+/// flat-account snapshot and both reach the venue. Opened for send-vs-send (gh#531); extended to the take and
+/// conditional-fire paths, and to counting <see cref="OrderStatus.Taking"/>, once a stranded take became
+/// recoverable rather than a dead-lock (gh#589).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -62,14 +65,42 @@ public interface IAccountEntryGuard
 {
     /// <summary>
     /// Runs <paramref name="transmit"/> under an exclusive per-account lock, so entry-transmits for one account
-    /// serialize. The no-stacking check that keeps a second send from stacking on an outstanding order lives
+    /// serialize. The no-stacking check that keeps a second entry from stacking on an outstanding order lives
     /// inside <paramref name="transmit"/>, so under the real guard it runs while the lock is held.
     /// </summary>
+    /// <typeparam name="T">
+    /// The transmit tail's result — <see cref="IResult"/> for the operator send/take endpoints, the firing outcome
+    /// for the conditional-fire watcher. The guard adds serialization, never an outcome.
+    /// </typeparam>
+    /// <param name="database">
+    /// The caller's context, whose connection is pinned for the lock's lifetime so the SESSION lock, the callback's
+    /// own queries + SaveChanges, and the unlock all run on <b>one backend</b>. The operator paths pass their
+    /// request-scoped context; the conditional-fire watcher passes its per-owner (R-20-scoped) context.
+    /// </param>
     /// <param name="accountId">The account whose entry-transmits serialize.</param>
     /// <param name="transmit">The check-then-place-then-journal tail to run exclusively for the account.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>Whatever <paramref name="transmit"/> returns — this guard adds serialization, never an outcome.</returns>
-    Task<IResult> RunExclusiveAsync(Guid accountId, Func<Task<IResult>> transmit, CancellationToken cancellationToken);
+    Task<T> RunExclusiveAsync<T>(
+        TradingCopilotDbContext database, Guid accountId, Func<Task<T>> transmit, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Like <see cref="RunExclusiveAsync"/>, but <b>non-blocking</b>: if another session already holds the account's
+    /// lock it does NOT wait — it runs <paramref name="onBusy"/> instead. For the conditional-fire watcher, whose
+    /// single background loop must never block on an operator's in-flight send / take (gh#589): a busy account simply
+    /// leaves the conditional Pending to re-decide on the next quote, so one account's operator latency cannot stall
+    /// firing / cancel / expiry for every other account.
+    /// </summary>
+    /// <typeparam name="T">The transmit tail's result (the firing outcome for the watcher).</typeparam>
+    /// <param name="database">The caller's context, whose connection is pinned for the lock's lifetime.</param>
+    /// <param name="accountId">The account whose entry-transmits serialize.</param>
+    /// <param name="transmit">The check-then-place-then-journal tail to run exclusively once the lock is acquired.</param>
+    /// <param name="onBusy">The result to return WITHOUT running <paramref name="transmit"/> when the lock is held elsewhere.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns><paramref name="transmit"/>'s result when the lock was acquired, otherwise <paramref name="onBusy"/>'s.</returns>
+    Task<T> TryRunExclusiveAsync<T>(
+        TradingCopilotDbContext database, Guid accountId, Func<Task<T>> transmit, Func<T> onBusy,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -78,23 +109,19 @@ public interface IAccountEntryGuard
 /// </summary>
 public sealed class AccountEntryGuard : IAccountEntryGuard
 {
-    private readonly TradingCopilotDbContext _database;
-
-    /// <summary>Creates the guard over the scoped database.</summary>
-    /// <param name="database">The scoped database whose connection is pinned for the lock's lifetime.</param>
-    public AccountEntryGuard(TradingCopilotDbContext database) => _database = database;
-
     /// <inheritdoc />
-    public async Task<IResult> RunExclusiveAsync(
-        Guid accountId, Func<Task<IResult>> transmit, CancellationToken cancellationToken)
+    public async Task<T> RunExclusiveAsync<T>(
+        TradingCopilotDbContext database, Guid accountId, Func<Task<T>> transmit, CancellationToken cancellationToken)
     {
-        // Pin the connection so the SESSION lock, the callback's own queries + SaveChanges, and the unlock all run
-        // on one backend -- a session lock is bound to the connection that took it. The interpolated id is a bound
-        // parameter (ExecuteSqlAsync parameterizes a FormattableString), never concatenated into the SQL text.
-        await _database.Database.OpenConnectionAsync(cancellationToken);
+        // Pin the CALLER'S connection so the SESSION lock, the callback's own queries + SaveChanges, and the unlock
+        // all run on one backend -- a session lock is bound to the connection that took it. Stateless by design: the
+        // context is a parameter, not a captured field, so the operator paths lock over their request-scoped context
+        // and the conditional-fire watcher over its per-owner context, each keeping lock and work on one backend. The
+        // interpolated id is a bound parameter (ExecuteSqlAsync parameterizes a FormattableString), never concatenated.
+        await database.Database.OpenConnectionAsync(cancellationToken);
         try
         {
-            await _database.Database.ExecuteSqlAsync(
+            await database.Database.ExecuteSqlAsync(
                 $"SELECT pg_advisory_lock(hashtext({accountId.ToString()}))", cancellationToken);
             try
             {
@@ -102,7 +129,7 @@ public sealed class AccountEntryGuard : IAccountEntryGuard
             }
             finally
             {
-                await _database.Database.ExecuteSqlAsync(
+                await database.Database.ExecuteSqlAsync(
                     $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))", cancellationToken);
             }
         }
@@ -111,7 +138,43 @@ public sealed class AccountEntryGuard : IAccountEntryGuard
             // Closing the connection also releases the session lock even if the unlock above never ran (a crash
             // between lock and unlock), so the account can never be stranded locked. (CloseConnectionAsync takes no
             // token -- closing a connection is not a cancellable operation in EF Core.)
-            await _database.Database.CloseConnectionAsync();
+            await database.Database.CloseConnectionAsync();
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<T> TryRunExclusiveAsync<T>(
+        TradingCopilotDbContext database, Guid accountId, Func<Task<T>> transmit, Func<T> onBusy,
+        CancellationToken cancellationToken)
+    {
+        // Non-blocking sibling of RunExclusiveAsync (gh#589): pg_try_advisory_lock returns immediately with whether it
+        // took the lock, so the single-threaded conditional-fire watcher never waits on an operator's in-flight send /
+        // take on the same account -- which would stall firing / cancel / expiry for EVERY account. A busy account
+        // returns onBusy() (the fire stays Pending, re-decides next quote). Same key + same one-backend discipline.
+        await database.Database.OpenConnectionAsync(cancellationToken);
+        try
+        {
+            bool acquired = await database.Database
+                .SqlQuery<bool>($"SELECT pg_try_advisory_lock(hashtext({accountId.ToString()})) AS \"Value\"")
+                .SingleAsync(cancellationToken);
+            if (!acquired)
+            {
+                return onBusy();
+            }
+
+            try
+            {
+                return await transmit();
+            }
+            finally
+            {
+                await database.Database.ExecuteSqlAsync(
+                    $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))", cancellationToken);
+            }
+        }
+        finally
+        {
+            await database.Database.CloseConnectionAsync();
         }
     }
 }

@@ -52,6 +52,7 @@ public sealed class ConditionalFiringService
     private readonly IOptions<ExecutionOptions> _executionOptions;
     private readonly HostTradingEnvironment _environment;
     private readonly IKillSwitch _killSwitch;
+    private readonly IAccountEntryGuard _entryGuard;
     private readonly ILogger<ConditionalFiringService> _logger;
 
     /// <summary>Creates the service.</summary>
@@ -62,6 +63,10 @@ public sealed class ConditionalFiringService
     /// <param name="executionOptions">The R-16 sanity caps and stop-promotion band.</param>
     /// <param name="environment">The R-14 deployment environment.</param>
     /// <param name="killSwitch">The kill-switch state; a killed system refuses the fire-time send (gh#189).</param>
+    /// <param name="entryGuard">
+    /// Serializes this fire's entry-transmit against operator sends / takes on the same account, and runs the
+    /// no-stacking check under that lock (gh#589) — a fire is a new entry, so it must not stack on an outstanding one.
+    /// </param>
     /// <param name="logger">The logger.</param>
     public ConditionalFiringService(
         TradingCopilotDbContext discovery,
@@ -71,6 +76,7 @@ public sealed class ConditionalFiringService
         IOptions<ExecutionOptions> executionOptions,
         HostTradingEnvironment environment,
         IKillSwitch killSwitch,
+        IAccountEntryGuard entryGuard,
         ILogger<ConditionalFiringService> logger)
     {
         _discovery = discovery;
@@ -80,6 +86,7 @@ public sealed class ConditionalFiringService
         _executionOptions = executionOptions;
         _environment = environment;
         _killSwitch = killSwitch;
+        _entryGuard = entryGuard;
         _logger = logger;
     }
 
@@ -204,15 +211,19 @@ public sealed class ConditionalFiringService
         }
         catch (Exception error) when (mayBeLiveAtVenue)
         {
-            // The dangerous window: the venue ACCEPTED the order but its journal did not commit. The order may be
-            // live and unrecorded. The durable pre-transmit intent (gh#577) has left the conditional Firing -- not
-            // Pending -- so a later quote CANNOT blind-re-fire it; it is reconciled / surfaced against venue truth
-            // instead. Surface it loudly; the pass still presses on.
+            // The dangerous window (gh#577 / gh#589): from the durable Firing intent through the journal an order MAY
+            // be live at the venue and unrecorded -- either the venue SEND faulted (a timeout / transport fault / even
+            // a rejection, all indistinguishable-from-live at this seam) or the venue ACCEPTED it and the journal then
+            // failed. Either way the conditional was left Firing -- never reverted to Pending -- so discovery (Pending-
+            // only) cannot blind-re-fire it and the no-stacking check (which now counts Firing) blocks an operator
+            // send / take from stacking on it. It is reconciled against venue truth via POST /conditionals/{id}/reconcile
+            // at runtime, or flagged on restart (ConditionalMidFiring, ADR-0013). Surface it loudly; the pass presses on.
             _logger.LogError(
                 error,
-                "Conditional order {Id} on {Contract} transmitted an order the venue accepted, but journaling it "
-                + "FAILED. The order may be live at the venue and unrecorded; the conditional is left Firing so it "
-                + "cannot re-fire, and is reconciled against venue truth on replay (gh#577).",
+                "Conditional order {Id} on {Contract} may be live at the venue and unrecorded -- its firing intent "
+                + "committed but the fire was not journaled (a venue send fault, or an accepted-but-unjournaled fire). "
+                + "It is left Firing so it cannot re-fire; resolve it via POST /conditionals/{{id}}/reconcile, or the "
+                + "rehydration flags it on restart (gh#589 / gh#577).",
                 conditionalId, contractKey);
             return 0;
         }
@@ -261,6 +272,68 @@ public sealed class ConditionalFiringService
             return FiringOutcome.Unchanged;
         }
 
+        // Fire is a new entry -- serialize its entry-transmit against operator sends / takes on the same account and
+        // run the no-stacking check under that lock (gh#589). ComposeAsync sizes AS IF flat, so absent this lock an
+        // operator send or take and this fire could both size against the same flat snapshot and both transmit, up to
+        // twice the approved risk. The lock is held across the no-stacking check, the durable intent, the send, and the
+        // journal -- which commits before the lock releases, so the next entry to take the lock sees it.
+        //
+        // NON-BLOCKING (TryRunExclusiveAsync, gh#589): this runs inside the single conditional-fire watcher loop, so it
+        // must never WAIT on an operator's in-flight send / take holding the account lock -- waiting would stall firing
+        // / cancel / expiry for EVERY other account. A busy account leaves the conditional Pending to re-decide on the
+        // next quote (by then the operator's transmit has released the lock, and its journaled entry, if any, is seen
+        // by this fire's own no-stacking check).
+        return await _entryGuard.TryRunExclusiveAsync(
+            database,
+            record.AccountId,
+            () => FireAsync(database, record, contractKey, onMayBeLiveAtVenue, cancellationToken),
+            () => FiringOutcome.Unchanged,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// The fire itself, run under the per-account entry lock (gh#589): the no-stacking check, the authoritative
+    /// fire-time re-gate, the durable pre-transmit intent (gh#577), the venue send, and the journal — all serialized
+    /// against operator sends / takes on the same account, with the journal committed <b>before</b> the lock releases
+    /// (a send / take that acquires the lock next must see the fired order in its own no-stacking check).
+    /// </summary>
+    private async Task<FiringOutcome> FireAsync(
+        TradingCopilotDbContext database,
+        ConditionalOrderRecord record,
+        string contractKey,
+        Action<bool> onMayBeLiveAtVenue,
+        CancellationToken cancellationToken)
+    {
+        // No-stacking (gh#589), identical to the operator paths' check: refuse to fire if the account already holds an
+        // outstanding entry -- everything except Staged / Filled / Cancelled / Rejected (an allow-list, fail closed, so
+        // Working / PartiallyFilled / Taking / Unknown / any future status all block). No self-exclusion: the
+        // conditional is not an Order row, and a fire journals a NEW Order only on success. Leave it Pending and
+        // re-decide next quote, exactly like a fire-time gate refusal -- nothing rests, so may-be-live stays false.
+        bool hasOutstandingEntry = await database.Orders.AnyAsync(
+            candidate => candidate.AccountId == record.AccountId
+                && candidate.Status != OrderStatus.Staged
+                && candidate.Status != OrderStatus.Filled
+                && candidate.Status != OrderStatus.Cancelled
+                && candidate.Status != OrderStatus.Rejected,
+            cancellationToken);
+
+        // A SIBLING mid-fire conditional counts too (gh#589): another conditional on this account left Firing by a
+        // maybe-live send fault is a maybe-live entry with no Order row, so the Orders check cannot see it. This
+        // record is still Pending here (Firing commits below), so `== Firing` never matches itself -- no self-exclusion
+        // needed. Counting it means a stranded fire blocks the whole account until it is reconciled
+        // (POST /conditionals/{id}/reconcile), the same fail-safe the operator send / take paths now honour.
+        bool hasMidFireConditional = await database.ConditionalOrders.AnyAsync(
+            candidate => candidate.AccountId == record.AccountId && candidate.Status == ConditionalStatus.Firing,
+            cancellationToken);
+        if (hasOutstandingEntry || hasMidFireConditional)
+        {
+            _logger.LogInformation(
+                "Conditional order {Id} triggered but the account already holds an outstanding order or a conditional "
+                + "mid-fire; still pending.",
+                record.Id);
+            return FiringOutcome.Unchanged;
+        }
+
         // Fire: the authoritative fire-time re-gate (R-12 / R-5 / R-16), the same ladder the operator's take runs.
         (OrderEndpoints.Composition? composed, _) = await OrderEndpoints.ComposeAsync(
             record.AccountId, database, _venueFactory, _projectXOptions, _executionOptions, _environment, _killSwitch, cancellationToken);
@@ -299,34 +372,21 @@ public sealed class ConditionalFiringService
         onMayBeLiveAtVenue(true);
 
         OwnerUser owner = new(record.UserId);
-        ExecutionResult result;
-        try
-        {
-            result = await composed.Execution.SendAsync(request, cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // A shutdown landed mid-send: the venue MAY have accepted the order (the send was interrupted, its
-            // outcome unknown). Leave the intent Firing -- reverting could strand a live order and then re-fire it --
-            // and let the caller's handler surface it (gh#577). Uncertainty resolves to the safe state (ADR-0013, §9).
-            throw;
-        }
-        catch (Exception)
-        {
-            // The venue REJECTED the send before accepting it (a routine rejection -- ProjectXVenue throws on
-            // !Success), so nothing is resting: clear the may-be-live signal (this is a definitive rejection, not the
-            // dangerous window), revert the durable intent to Pending, and re-decide on the next quote -- the gh#532
-            // containment, preserved. Rethrow so the per-record handler logs it as a routine skip and the pass presses on.
-            //
-            // Residual (gh#577): a *transport* fault that in fact landed also surfaces as a throw here and is reverted
-            // -- telling a definitive rejection from a maybe-landed transport fault needs a venue-seam signal (a
-            // refusal OUTCOME, not a throw), deferred; the customTag handle then lets a reconcile recognise such a
-            // duplicate, and the real-Postgres proof of this window is gh#578.
-            onMayBeLiveAtVenue(false);
-            record.Status = ConditionalStatus.Pending;
-            await database.SaveChangesAsync(cancellationToken);
-            throw;
-        }
+
+        // The send. From the durable Firing intent committed just above, ANY fault here leaves an order that MAY be
+        // live at the venue -- so the conditional is left Firing (never reverted to Pending), mirroring the take path
+        // (gh#589). A venue timeout surfaces as a TaskCanceledException on HttpClient's OWN token (NOT the caller's, so
+        // it is not the clean-shutdown case), a transport fault as an HttpRequestException, and even a definitive
+        // ProjectXVenue "!Success" rejection is indistinguishable at this seam from "accepted but no order id" (LIVE) --
+        // all must fail toward Firing. Reverting a maybe-landed timeout to Pending was a double-transmit (gh#589
+        // review): discovery is Pending-only so the next quote would re-fire it, and the no-stacking check (which now
+        // counts Firing) could not see a Pending row, so an operator send / take would stack on the live order. The
+        // outer handler surfaces it loudly; the runtime POST /conditionals/{id}/reconcile resolves it against venue
+        // truth (adopt if it landed, release to Pending if nothing rests and the account is flat), and a strand that
+        // survives a restart fails safe + loud (ConditionalMidFiring, ADR-0013). A fault BEFORE this intent committed
+        // (compose / gate / build -- above) leaves may-be-live false and re-decides Pending; a clean caller-
+        // cancellation propagates to the outer OperationCanceledException handler unchanged.
+        ExecutionResult result = await composed.Execution.SendAsync(request, cancellationToken);
 
         if (result.Outcome == ExecutionOutcome.Placed && result.Order is not null)
         {
@@ -350,6 +410,12 @@ public sealed class ConditionalFiringService
 
             record.Status = ConditionalStatus.Fired;
             record.FiredOrderId = journaled.Id;
+
+            // Commit the journal WHILE THE ACCOUNT LOCK IS STILL HELD (gh#589): a send or take that acquires the lock
+            // next runs its no-stacking check against committed truth, so it must already see this fired order. The
+            // outer per-record save would commit only after the lock released, reopening the very race this closes.
+            await database.SaveChangesAsync(cancellationToken);
+
             _logger.LogInformation(
                 "Fired conditional order {Id} as order {OrderId} on {Contract}.", record.Id, journaled.Id, contractKey);
             return FiringOutcome.Transmitted;
@@ -358,6 +424,12 @@ public sealed class ConditionalFiringService
         // A clean gate refusal -- the venue was never touched (every SendAsync refusal returns before PlaceOrderAsync),
         // so nothing rests: clear the may-be-live signal, revert the durable intent to Pending, audit the decision, and
         // re-decide on the next quote. Resolved (never Unchanged) so the outer save commits the revert.
+        //
+        // RESIDUAL (gh#622): this revert is committed by the OUTER per-record save, AFTER the account lock releases --
+        // not inside the lock like the take path. Now that the no-stacking check counts Firing, in the tiny
+        // unlock->outer-save window the row still reads Firing, so a concurrent operator send / take can get a transient
+        // spurious 409, and if the outer save fails the row stays Firing until a reconcile. It only ever OVER-blocks
+        // (fail-safe) -- never a double-transmit or a released-over-live order; moving the save inside the lock is gh#622.
         onMayBeLiveAtVenue(false);
         record.Status = ConditionalStatus.Pending;
         OrderEndpoints.PersistDecision(database, owner, record.AccountId, orderId: null, result.Decision);
@@ -370,7 +442,9 @@ public sealed class ConditionalFiringService
     /// <summary>What processing one conditional against a quote resolved to — it drives whether to persist, and
     /// whether an order was transmitted (so a journaling failure AFTER a transmit is surfaced as the dangerous case
     /// it is, not swallowed as an ordinary skip).</summary>
-    private enum FiringOutcome
+    /// <remarks>Internal, not private, only so the unit tests can configure the account-entry guard's callback
+    /// return type (gh#589); it remains an implementation detail of the firing pass.</remarks>
+    internal enum FiringOutcome
     {
         /// <summary>Nothing to persist — not triggered, not yet composable, or a gate refusal with no decision.</summary>
         Unchanged,

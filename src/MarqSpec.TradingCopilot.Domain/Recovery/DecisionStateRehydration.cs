@@ -39,6 +39,20 @@ public static class DecisionStateRehydration
 
         foreach (RehydratedOrder order in orders)
         {
+            // Taking is a durable pre-transmit intent (the gh#530 claim, Staged->Taking) that is transient at runtime
+            // -- one take request resolves it to Working or releases it back to Staged. Caught PERSISTING across a
+            // restart, its order may be live at the venue with no journal marking it Working: an impossible
+            // combination to leave at rest. Flag it (fail safe + loud, reconciled against venue truth by the order's
+            // customTag); never resumed, never silently repaired. The exact analog of the ConditionalMidFiring rule
+            // below (gh#589 mirrors gh#577).
+            if (order.Status == OrderStatus.Taking)
+            {
+                issues.Add(new DecisionInconsistency(
+                    DecisionInconsistencyKind.OrderMidTaking, order.Owner, order.Id,
+                    "An order is stranded mid-take (Taking); the venue may hold a live order it never journaled."));
+                continue;
+            }
+
             // Staged means "armed server-side, NOT at the venue" -- a venue handle on it is a crash between the
             // take (which places it and stamps the key) and the journal that would have marked it Working.
             if (order.Status == OrderStatus.Staged && order.HasVenueKey)

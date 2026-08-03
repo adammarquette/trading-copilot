@@ -1,5 +1,6 @@
 using System.Globalization;
 using MarqSpec.TradingCopilot.Api.Audit;
+using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -7,6 +8,7 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
@@ -49,8 +51,18 @@ public static class OrderEndpoints
         orderGroup.MapPut("/", EditStagedOrderAsync).WithSummary("Edit a staged (armed) order.");
         orderGroup.MapPost("/take", TakeStagedOrderAsync)
             .WithSummary("Take a staged order: re-validate everything fresh, then transmit.");
+        orderGroup.MapPost("/reconcile", ReconcileTakingOrderAsync)
+            .WithSummary("Reconcile a stranded (mid-take) order against venue truth: adopt if live, release if flat.");
         orderGroup.MapDelete("/", CancelOrderAsync).WithSummary("Cancel a staged or working order.");
         orderGroup.MapPatch("/price", ModifyWorkingOrderPriceAsync).WithSummary("Modify a working order's price.");
+
+        // The conditional-fire path's runtime recovery (gh#589), the sibling of /orders/{id}/reconcile: resolve a
+        // conditional stranded Firing by a maybe-live send fault against venue truth -- adopt the fired order if it
+        // rests, release the conditional to Pending if nothing rests and the account is flat.
+        RouteGroupBuilder conditionalGroup =
+            endpoints.MapGroup("/conditionals/{id:guid}").RequireAuthorization().WithTags("Orders");
+        conditionalGroup.MapPost("/reconcile", ReconcileFiringConditionalAsync)
+            .WithSummary("Reconcile a stranded (mid-fire) conditional against venue truth: adopt if live, release if flat.");
 
         return endpoints;
     }
@@ -142,7 +154,7 @@ public static class OrderEndpoints
         // gate at full size and both transmit, up to twice the approved risk. The guard holds a per-account lock
         // across the whole tail below, so the no-stacking check and the place cannot interleave between two racers.
         // The check runs INSIDE this callback deliberately: under the real guard it is therefore inside the lock.
-        return await entryGuard.RunExclusiveAsync(composed.Account.Id, async () =>
+        return await entryGuard.RunExclusiveAsync(database, composed.Account.Id, async () =>
         {
             // The no-stacking rule (gh#531). Together with the per-account lock above, this stops two concurrent
             // sends from each sizing against the same flat snapshot and both transmitting: the first to reach the
@@ -156,23 +168,31 @@ public static class OrderEndpoints
             // exhaustive status switch below is the same fail-closed shape). Safe to ignore:
             //   * Staged -- server-side only, unsent, no exposure, so a staged ticket never blocks a direct send;
             //   * Filled -- already realised into the balance ComposeAsync reads -- and Cancelled / Rejected -- never
-            //     rested -- so a send after a fully-resolved prior order behaves exactly as a first send;
-            //   * Taking -- excluded NOT because it is safe (a take in flight is imminent exposure) but because
-            //     counting it would dead-lock the whole account's send path if a take stranded in Taking (a venue
-            //     timeout or a client disconnect mid-take, no in-app recovery today); gh#531 is send-vs-send only,
-            //     and serializing send-vs-take / -vs-conditional + recovering a stranded Taking are gh#589.
-            // Everything else -- Working, PartiallyFilled, Unknown, and any status added later -- blocks.
+            //     rested -- so a send after a fully-resolved prior order behaves exactly as a first send.
+            // Everything else -- Working, PartiallyFilled, Taking, Unknown, and any status added later -- blocks.
+            // Taking (a take in flight, held by the gh#530 durable claim) is imminent exposure and now COUNTS
+            // (gh#589): it was excluded while a stranded Taking had no recovery -- counting it would then dead-lock
+            // the account's send path -- but gh#589 makes a stranded take recoverable (a mid-take fault releases or
+            // is surfaced loud, and a Taking row surviving a restart fails the rehydration safe + loud), so counting
+            // it is safe and closes the send-vs-take and send-vs-conditional-fire races.
             bool hasOutstandingEntry = await database.Orders.AnyAsync(
                 candidate => candidate.AccountId == composed.Account.Id
                     && candidate.Status != OrderStatus.Staged
                     && candidate.Status != OrderStatus.Filled
                     && candidate.Status != OrderStatus.Cancelled
-                    && candidate.Status != OrderStatus.Rejected
-                    && candidate.Status != OrderStatus.Taking,
+                    && candidate.Status != OrderStatus.Rejected,
                 cancellationToken);
-            if (hasOutstandingEntry)
+
+            // A mid-fire conditional counts too (gh#589): a Firing conditional is the durable pre-transmit intent of a
+            // fire (gh#577) that has NO Order row yet, so the Orders check above cannot see it -- yet it is a maybe-live
+            // entry exactly like a Taking row. Counting it closes send-vs-stranded-fire. Safe to count because a
+            // stranded Firing is now recoverable (POST /conditionals/{id}/reconcile), not a dead-lock.
+            bool hasMidFireConditional = await database.ConditionalOrders.AnyAsync(
+                candidate => candidate.AccountId == composed.Account.Id && candidate.Status == ConditionalStatus.Firing,
+                cancellationToken);
+            if (hasOutstandingEntry || hasMidFireConditional)
             {
-                return Results.Conflict(new { error = "This account already has an outstanding order. A new send requires a clear account: the flat-account gate would size the new order as if that exposure were not there (gh#531)." });
+                return Results.Conflict(new { error = "This account already has an outstanding order or a conditional mid-fire. A new send requires a clear account: the flat-account gate would size the new order as if that exposure were not there (gh#531 / gh#589)." });
             }
 
             (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
@@ -404,6 +424,8 @@ public static class OrderEndpoints
         IKillSwitch killSwitch,
         IExecutionMetrics metrics,
         IStagedOrderClaim claim,
+        IAccountEntryGuard entryGuard,
+        ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
     {
         Order? order = await database.Orders.FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
@@ -417,71 +439,452 @@ public static class OrderEndpoints
             return Results.Conflict(new { error = "Only a staged order can be taken — this one has left staging." });
         }
 
-        // CLAIM THE ROW BEFORE GOING ANYWHERE NEAR THE VENUE (gh#530). The check above is evaluated against THIS
-        // request's change tracker, which a concurrent take does not share -- so both racers passed it, both
-        // transmitted, and both then wrote this one row, leaving a live venue order on no Order row at all.
-        //
-        // Only the database can arbitrate, so the claim is a conditional UPDATE behind IStagedOrderClaim. A
-        // post-venue re-read is the wrong shape: by then the second order exists.
-        if (!await claim.TryClaimAsync(id, cancellationToken))
+        // Serialize entry-transmits per account across the whole tail below (gh#589, extending the send path's gh#531
+        // lock to the take path). Two concurrent takes of DIFFERENT staged orders, a take racing a direct send, or a
+        // take racing a conditional fire each compose a fresh flat-account snapshot -- ComposeAsync reserves nothing
+        // for an outstanding order -- so absent this lock each sizes at full risk and both transmit, up to twice the
+        // approved risk on one account. gh#530's IStagedOrderClaim arbitrates two takes of the SAME row; it does not
+        // stop two takes of DIFFERENT rows, nor a take vs a send / fire -- that is this account-level lock.
+        return await entryGuard.RunExclusiveAsync(database, order.AccountId, async () =>
         {
-            return Results.Conflict(new { error = "This order is already being taken." });
+            // The no-stacking rule, run INSIDE the lock (gh#589) -- identical to the send path's. Refuse if the account
+            // already holds an entry that is not fully resolved. It runs BEFORE the claim, so the row being taken is
+            // still Staged and excludes itself naturally -- no self-exclusion clause needed. Allow-list, fail-CLOSED:
+            // it names the states safe to ignore (Staged / Filled / Cancelled / Rejected) and blocks EVERYTHING else --
+            // Working, PartiallyFilled, Taking, Unknown, any status added later. Taking now counts (another in-flight or
+            // stranded take is imminent / unknown exposure), safe because gh#589 makes a stranded Taking recoverable.
+            bool hasOutstandingEntry = await database.Orders.AnyAsync(
+                candidate => candidate.AccountId == order.AccountId
+                    && candidate.Status != OrderStatus.Staged
+                    && candidate.Status != OrderStatus.Filled
+                    && candidate.Status != OrderStatus.Cancelled
+                    && candidate.Status != OrderStatus.Rejected,
+                cancellationToken);
+
+            // A mid-fire conditional counts too (gh#589), identical to the send path: a Firing conditional (gh#577) is a
+            // maybe-live entry with no Order row yet, so the Orders check cannot see it. Counting it closes take-vs-
+            // stranded-fire; safe because a stranded Firing is recoverable via POST /conditionals/{id}/reconcile.
+            bool hasMidFireConditional = await database.ConditionalOrders.AnyAsync(
+                candidate => candidate.AccountId == order.AccountId && candidate.Status == ConditionalStatus.Firing,
+                cancellationToken);
+            if (hasOutstandingEntry || hasMidFireConditional)
+            {
+                return Results.Conflict(new { error = "This account already has an outstanding order or a conditional mid-fire. Taking a second entry would size against a flat-account snapshot that ignores the first's exposure (gh#589)." });
+            }
+
+            // CLAIM THE ROW BEFORE GOING ANYWHERE NEAR THE VENUE (gh#530), now inside the account lock. Only the
+            // database can arbitrate two takes of the same row, so the claim is a conditional UPDATE (Staged->Taking)
+            // behind IStagedOrderClaim; it also loses cleanly to a concurrent cancel of the staged ticket
+            // (Staged->Cancelled), which does not take this lock. The tracked entity deliberately still reads Staged:
+            // Status has TWO writers -- this change tracker and the claim's conditional UPDATE -- and they must never
+            // both own it, because ComposeAsync runs its own SaveChanges and DetectChanges re-marks the property. So
+            // the claim owns Staged<->Taking, the tracker owns only the terminal write, and every outcome says which.
+            if (!await claim.TryClaimAsync(id, cancellationToken))
+            {
+                return Results.Conflict(new { error = "This order is no longer staged — it was taken or cancelled." });
+            }
+
+            // R-12: EVERYTHING re-validates against fresh truth -- fresh roster, fresh flat check, fresh gate. The
+            // arm-time decision is history, not authorization. Compose + build are pre-venue READS (roster, positions,
+            // contract resolve); a THROW here placed NOTHING, so the claim must be released -- gh#589 counts Taking, so
+            // a strand for a take that never reached the venue would dead-lock the whole account (the outer catch).
+            Composition? composed = null;
+            ExecutionRequest? executionRequest = null;
+            try
+            {
+                IResult? refusal;
+                (composed, refusal) = await ComposeAsync(
+                    order.AccountId, database, venueFactory, projectXOptions, executionOptions, environment, killSwitch, cancellationToken, metrics);
+                if (composed is null)
+                {
+                    // A refused take (a closed market, a tripped kill switch) sent nothing -- release, or it strands.
+                    await claim.ReleaseAsync(id, CancellationToken.None);
+                    return refusal!;
+                }
+
+                // The staged row IS the proposal (kept whole at arm/edit); its venue-neutral Symbol re-resolves the
+                // contract fresh -- the front month may even have rolled since arming, and R-12 wants today's truth.
+                // WorkingStopPrice, not StopPrice: a Limit/Market order has no venue trigger, and rebuilding the stop
+                // from the safety stop would silently re-size against a wider stop than the operator armed (gh#134).
+                IResult? proposalRefusal;
+                (executionRequest, proposalRefusal) = await BuildRequestAsync(
+                    composed, order.Symbol ?? order.Instrument, order.TickSize, order.PointValue, order.Side, order.Size,
+                    order.EntryPrice, order.WorkingStopPrice, order.SafetyStopPrice,
+                    order.ReferencePrice, order.TakeProfitPrice, order.Type, cancellationToken);
+                if (executionRequest is null)
+                {
+                    await claim.ReleaseAsync(id, CancellationToken.None);
+                    return proposalRefusal!;
+                }
+
+                // The correlation handle (gh#589, mirroring the conditional fire's gh#577): stamp the row's own id so
+                // the venue order this take places carries it as a customTag and can be matched back to THIS row by the
+                // reconcile endpoint (POST /orders/{id}/reconcile) -- the durable claim's venue-side counterpart.
+                // Operator direct sends leave it null (a human is in the loop and a send journals its own new row on
+                // success); the take needs it because a fault after the venue accepts but before the key is journaled
+                // strands the claim with a live order behind it.
+                executionRequest = executionRequest with { CorrelationTag = order.Id.ToString() };
+            }
+            catch (Exception)
+            {
+                // A venue read (roster / positions / contract resolve) or DB fault BEFORE the venue was touched --
+                // nothing rests. Release the claim (Taking->Staged) so the ticket stays takeable, then rethrow. This
+                // also covers an OperationCanceledException during compose (a disconnect that placed nothing). None:
+                // the release is a compensating undo that must complete even if the caller's token is already cancelled.
+                await claim.ReleaseAsync(id, CancellationToken.None);
+                throw;
+            }
+
+            ExecutionResult result;
+            try
+            {
+                result = await composed!.Execution.SendAsync(executionRequest!, cancellationToken);
+            }
+            catch (Exception)
+            {
+                // ANY fault from the venue send leaves the order MAYBE-LIVE, so the row is LEFT TAKING -- never released
+                // (releasing a maybe-live order re-opens the gh#530 double-place, the whole hazard gh#589 exists to
+                // close). The cases this catches all resist "nothing rests":
+                //   * a client disconnect / host shutdown (OperationCanceledException, the caller's token) -- interrupted;
+                //   * a venue TIMEOUT -- a TaskCanceledException whose token is HttpClient's, NOT the caller's, so it is
+                //     NOT the cancelled-caller case and is the canonical maybe-landed failure;
+                //   * a transport fault (HttpRequestException);
+                //   * even a ProjectXVenueException -- which is BOTH a definitive "!Success" rejection (nothing rests)
+                //     AND "accepted but returned no order id" (the venue took it -- LIVE); the two are indistinguishable
+                //     at this seam, so both must fail toward Taking.
+                // A definitive rejection is therefore left Taking too, rather than auto-released -- the small cost of
+                // never guessing "dead" wrong; the reconcile endpoint resolves it cheaply (nothing rests -> release;
+                // something rests -> adopt). The venue-seam refusal OUTCOME that would let a definitive rejection
+                // auto-release safely is deferred (gh#578). A durable Taking cannot be re-taken (TryClaim requires
+                // Staged); the operator resolves it via POST /orders/<id>/reconcile, and a restart flags it
+                // (OrderMidTaking). Uncertainty resolves to the safe state (ADR-0013 §9). Surface it loudly.
+                loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
+                    "Take of order {OrderId} on account {AccountId} faulted at the venue send; an order MAY be live at "
+                    + "the venue and unrecorded. The row is left Taking so it cannot be re-taken; resolve it via "
+                    + "POST /orders/<id>/reconcile, or the rehydration flags it on restart (gh#589).",
+                    order.Id, order.AccountId);
+                throw;
+            }
+
+            if (result.Outcome == ExecutionOutcome.Placed && result.Order is not null)
+            {
+                order.Status = OrderStatus.Working;
+                order.VenueOrderKey = result.Order.VenueOrderId;
+                order.PlacedAt = result.Order.AcceptedAt;
+                order.Size = result.Decision?.ApprovedQuantity ?? order.Size;
+                AddStopPlan(database, currentUser, order, executionOptions.Value.StopPromotionTicks);
+            }
+            else
+            {
+                // Not placed -- a gate refusal that returned WITHOUT touching the venue (a venue rejection throws and is
+                // handled above). Release through the CLAIM, not the tracked entity: the tracker still reads Staged, so
+                // assigning Staged here changes nothing and EF would emit no UPDATE, leaving the row stuck in Taking.
+                await claim.ReleaseAsync(id, CancellationToken.None);
+            }
+
+            PersistDecision(database, currentUser, composed!.Account.Id, order.Id, result.Decision);
+            // A fault on this final journal AFTER a Placed send leaves the row Taking (never released above) -- the
+            // accepted-but-not-journaled dangerous window, resolved via reconcile / rehydration, exactly as intended.
+            await database.SaveChangesAsync(cancellationToken);
+
+            return MapSendResult(result, order.Id);
+        }, cancellationToken);
+    }
+
+    internal static async Task<IResult> ReconcileTakingOrderAsync(
+        Guid id,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        WorkingOrderReconciliationService restingOrders,
+        PositionReconciliationService positions,
+        IOptions<ExecutionOptions> executionOptions,
+        IStagedOrderClaim claim,
+        IAccountEntryGuard entryGuard,
+        ILoggerFactory loggerFactory,
+        CancellationToken cancellationToken)
+    {
+        // The runtime resolver for a stranded Taking (gh#589): a take whose venue send was interrupted (a client
+        // disconnect, or a journal fault after the venue accepted) leaves the row Taking with no venue key -- the
+        // no-stacking check counts Taking, so the account is blocked until this resolves it against venue truth. It is
+        // the consumer of the customTag the take stamps: the venue order the take placed carries the row's own id.
+        Order? order = await database.Orders.FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (order is null)
+        {
+            return Results.NotFound(); // not ours (R-20) or gone
         }
 
-        // The tracked entity deliberately still reads Staged. Status now has TWO writers -- this change tracker and
-        // the claim's conditional UPDATE -- and they must never both own it: setting the tracked value here and
-        // clearing IsModified does not hold, because ComposeAsync runs its own SaveChanges and DetectChanges
-        // re-marks the property against the original snapshot. So the claim owns Staged<->Taking, the tracker owns
-        // only the terminal write, and every outcome below says which explicitly.
-
-        // R-12: EVERYTHING re-validates against fresh truth -- fresh roster, fresh flat check, fresh gate. The
-        // arm-time decision is history, not authorization.
-        (Composition? composed, IResult? refusal) = await ComposeAsync(
-            order.AccountId, database, venueFactory, projectXOptions, executionOptions, environment, killSwitch, cancellationToken, metrics);
-        if (composed is null)
+        if (order.Status != OrderStatus.Taking)
         {
-            // Nothing was sent, so the ticket is exactly as takeable as it was -- release, or a refused take (a
-            // closed market, a tripped kill switch) strands it mid-take forever.
+            // Only a stranded Taking is reconcilable. A Working / PartiallyFilled / Filled / Staged / terminal order is
+            // resolved through its own paths (cancel, the account-event stream, take) -- this stays a narrow recovery.
+            return Results.Conflict(new { error = "Only an order stranded mid-take (Taking) can be reconciled." });
+        }
+
+        // Serialize against operator sends / takes and other reconciles on the same account (gh#589): the adopt below
+        // journals a Working order (which the no-stacking check counts), and the release returns the ticket to Staged --
+        // both must be atomic against a concurrent entry. Blocking is fine here: this is an operator request, not the
+        // conditional watcher (which try-locks so it never waits on this).
+        return await entryGuard.RunExclusiveAsync(database, order.AccountId, async () =>
+        {
+            // Re-read under the lock -- a concurrent reconcile (serialized behind us) may have already resolved it.
+            // Reload from DB truth: identity resolution would otherwise hand back our stale pre-lock instance.
+            await database.Entry(order).ReloadAsync(cancellationToken);
+            if (order.Status != OrderStatus.Taking)
+            {
+                return Results.Conflict(new { error = "This order is no longer mid-take — it was already reconciled." });
+            }
+
+            WorkingOrderReconciliation? truth = await restingOrders.ReconcileAsync(
+                order.AccountId, DateTimeOffset.UtcNow, cancellationToken);
+            if (truth is null)
+            {
+                return Results.NotFound(); // account not found / not owned (R-20)
+            }
+
+            if (truth.Basis == PositionMarkBasis.Unknown)
+            {
+                // "We could not ask" is NOT "nothing is there" (gh#381). Never resolve a stranded take against an
+                // unknown book -- releasing could re-take a live order, adopting could invent a phantom. Retry later.
+                return Results.Conflict(new
+                {
+                    error = "The venue could not be reached; a stranded take cannot be safely reconciled right now. Retry when the venue is reachable.",
+                });
+            }
+
+            WorkingOrder? resting = truth.Orders.FirstOrDefault(candidate => candidate.CustomTag == id.ToString());
+            if (resting is not null)
+            {
+                // The take DID place -- adopt the live order so it is tracked (cancellable, kill-switch-sweepable,
+                // orphan-guarded by its venue key) and protected (a promotion plan). This is the terminal Taking->Working
+                // write the tracker owns; the venue view carries no timestamp, so PlacedAt is stamped at the reconcile
+                // instant, and Size takes venue truth (what actually rests).
+                order.Status = OrderStatus.Working;
+                order.VenueOrderKey = resting.VenueOrderKey;
+                order.PlacedAt = DateTimeOffset.UtcNow;
+                order.Size = resting.Size;
+                AddStopPlan(database, currentUser, order, executionOptions.Value.StopPromotionTicks);
+                await database.SaveChangesAsync(cancellationToken);
+
+                loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogWarning(
+                    "Reconciled stranded take {OrderId} on account {AccountId}: the venue order {VenueKey} was live and "
+                    + "is adopted as Working (gh#589).",
+                    order.Id, order.AccountId, resting.VenueOrderKey);
+                return Results.Ok(new { order.Id, status = order.Status.ToString(), adopted = true, venueOrderKey = order.VenueOrderKey });
+            }
+
+            // Nothing rests under this row's tag. But "no working order" is NOT "nothing live" -- the take may have
+            // FILLED before this reconcile (a filled entry is no longer a working order, and its protective bracket legs
+            // carry no customTag). So before releasing, confirm the account is FLAT; otherwise a fill may be this take's,
+            // and releasing (Taking->Staged) would strand an untracked open position (gh#589 round-2 review).
+            PositionReconciliation? positionTruth = await positions.ReconcileAsync(
+                order.AccountId, DateTimeOffset.UtcNow, cancellationToken);
+            if (positionTruth is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (positionTruth.Basis == PositionMarkBasis.Unknown)
+            {
+                return Results.Conflict(new
+                {
+                    error = "Nothing rests under this order's tag, but the venue could not be reached to confirm the account is flat. Retry when the venue is reachable.",
+                });
+            }
+
+            if (positionTruth.Positions.Any(position => !position.IsFlat))
+            {
+                // An open position may be this take's fill. Do NOT release over it -- leave the row Taking + loud; the
+                // operator reconciles the position first (it is protected by its native bracket + auto-flatten
+                // meanwhile). Adopting the FILLED position onto this row (there is no working order to match) is
+                // deferred (gh#578).
+                loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
+                    "Reconcile of stranded take {OrderId} on account {AccountId} found nothing resting under its tag but "
+                    + "an OPEN position on the account -- the take may have filled. The row is left Taking (not released); "
+                    + "resolve the position before reconciling the ticket (gh#589).",
+                    order.Id, order.AccountId);
+                return Results.Conflict(new
+                {
+                    error = "Nothing rests under this order's tag, but the account has an open position — the take may have filled. Resolve the position before reconciling this ticket.",
+                });
+            }
+
+            // Flat and reachable: the take definitively did not place. Release the claim (Taking->Staged) through the
+            // CLAIM (its conditional UPDATE owns Staged<->Taking), so the ticket is takeable again; the tracker keeps
+            // reading Taking, which is fine as we return without saving it.
             await claim.ReleaseAsync(id, cancellationToken);
-            return refusal!;
-        }
+            loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogInformation(
+                "Reconciled stranded take {OrderId} on account {AccountId}: nothing rests at the venue under its tag and "
+                + "the account is flat; the ticket is released to Staged (gh#589).",
+                order.Id, order.AccountId);
+            return Results.Ok(new { order.Id, status = OrderStatus.Staged.ToString(), adopted = false });
+        }, cancellationToken);
+    }
 
-        // The staged row IS the proposal (kept whole at arm/edit); its venue-neutral Symbol re-resolves the
-        // contract fresh -- the front month may even have rolled since arming, and R-12 wants today's truth.
-        // WorkingStopPrice, not StopPrice: a Limit/Market order has no venue trigger, and rebuilding the stop
-        // from the safety stop would silently re-size against a wider stop than the operator armed (gh#134).
-        (ExecutionRequest? executionRequest, IResult? proposalRefusal) = await BuildRequestAsync(
-            composed, order.Symbol ?? order.Instrument, order.TickSize, order.PointValue, order.Side, order.Size,
-            order.EntryPrice, order.WorkingStopPrice, order.SafetyStopPrice,
-            order.ReferencePrice, order.TakeProfitPrice, order.Type, cancellationToken);
-        if (executionRequest is null)
+    internal static async Task<IResult> ReconcileFiringConditionalAsync(
+        Guid id,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        WorkingOrderReconciliationService restingOrders,
+        PositionReconciliationService positions,
+        IOptions<ExecutionOptions> executionOptions,
+        IAccountEntryGuard entryGuard,
+        ILoggerFactory loggerFactory,
+        CancellationToken cancellationToken)
+    {
+        // The runtime resolver for a stranded Firing conditional (gh#589), the sibling of ReconcileTakingOrderAsync: a
+        // fire whose venue send faulted (a timeout, a transport fault, a disconnect, or a journal fault after the venue
+        // accepted) leaves the conditional Firing with no Order row -- the no-stacking check now counts Firing, so the
+        // account is blocked until this resolves it against venue truth. It consumes the customTag the fire stamps: the
+        // venue order the fire placed carries the CONDITIONAL's own id (gh#577).
+        ConditionalOrderRecord? conditional = await database.ConditionalOrders.FirstOrDefaultAsync(
+            candidate => candidate.Id == id, cancellationToken);
+        if (conditional is null)
         {
-            await claim.ReleaseAsync(id, cancellationToken);
-            return proposalRefusal!;
+            return Results.NotFound(); // not ours (R-20) or gone
         }
 
-        ExecutionResult result = await composed.Execution.SendAsync(executionRequest, cancellationToken);
-
-        if (result.Outcome == ExecutionOutcome.Placed && result.Order is not null)
+        if (conditional.Status != ConditionalStatus.Firing)
         {
-            order.Status = OrderStatus.Working;
-            order.VenueOrderKey = result.Order.VenueOrderId;
-            order.PlacedAt = result.Order.AcceptedAt;
-            order.Size = result.Decision?.ApprovedQuantity ?? order.Size;
-            AddStopPlan(database, currentUser, order, executionOptions.Value.StopPromotionTicks);
+            // Only a stranded Firing is reconcilable. A Pending / Fired / Cancelled / Expired conditional is resolved
+            // through its own paths (the watcher fires / cancels / expires it; a fire journals its own Order) -- this
+            // stays a narrow recovery, exactly like the take reconcile's Taking-only guard.
+            return Results.Conflict(new { error = "Only a conditional stranded mid-fire (Firing) can be reconciled." });
         }
-        else
+
+        // Serialize against operator sends / takes, the fire watcher, and other reconciles on the same account (gh#589):
+        // the adopt below journals a Working order (which the no-stacking check counts) and the release returns the
+        // conditional to Pending -- both must be atomic against a concurrent entry. Blocking is fine: this is an operator
+        // request, not the fire watcher (which try-locks so it never waits on this).
+        return await entryGuard.RunExclusiveAsync(database, conditional.AccountId, async () =>
         {
-            // Not placed -- refused, rejected, or the venue said no. Release through the CLAIM, not the tracked
-            // entity: the tracker still reads Staged, so assigning Staged here changes nothing and EF would emit no
-            // UPDATE at all, leaving the row stuck in Taking. The conditional UPDATE is the authoritative writer.
-            await claim.ReleaseAsync(id, cancellationToken);
-        }
+            // Re-read under the lock -- a concurrent reconcile (serialized behind us) may have already resolved it.
+            await database.Entry(conditional).ReloadAsync(cancellationToken);
+            if (conditional.Status != ConditionalStatus.Firing)
+            {
+                return Results.Conflict(new { error = "This conditional is no longer mid-fire — it was already reconciled." });
+            }
 
-        PersistDecision(database, currentUser, composed.Account.Id, order.Id, result.Decision);
-        await database.SaveChangesAsync(cancellationToken);
+            WorkingOrderReconciliation? truth = await restingOrders.ReconcileAsync(
+                conditional.AccountId, DateTimeOffset.UtcNow, cancellationToken);
+            if (truth is null)
+            {
+                return Results.NotFound(); // account not found / not owned (R-20)
+            }
 
-        return MapSendResult(result, order.Id);
+            if (truth.Basis == PositionMarkBasis.Unknown)
+            {
+                // "We could not ask" is NOT "nothing is there" (gh#381). Never resolve a stranded fire against an
+                // unknown book -- releasing could re-fire a live order, adopting could invent a phantom. Retry later.
+                return Results.Conflict(new
+                {
+                    error = "The venue could not be reached; a stranded conditional fire cannot be safely reconciled right now. Retry when the venue is reachable.",
+                });
+            }
+
+            WorkingOrder? resting = truth.Orders.FirstOrDefault(candidate => candidate.CustomTag == id.ToString());
+            if (resting is not null)
+            {
+                // The fire DID place -- adopt the live order. Unlike the take reconcile (which flips an EXISTING Staged
+                // row to Working), a stranded fire journaled NO Order row (it faulted before its success journal), so
+                // adopt CREATES the Working row the fire would have, marks the conditional Fired, and links them -- the
+                // fire's success journal, run now against venue truth. Size takes venue truth (what actually rests); the
+                // venue view carries no timestamp, so PlacedAt is stamped at the reconcile instant. No fresh gate
+                // decision is journaled (the order is already live -- there is nothing to re-decide), exactly as the
+                // take reconcile adopts without re-gating.
+                Account? account = await database.Accounts.FirstOrDefaultAsync(
+                    candidate => candidate.Id == conditional.AccountId, cancellationToken);
+                if (account is null)
+                {
+                    return Results.NotFound();
+                }
+
+                SendOrderRequest proposal = new(
+                    conditional.Symbol ?? conditional.Instrument, conditional.TickSize, conditional.PointValue,
+                    conditional.Side, conditional.Size, conditional.EntryPrice, conditional.WorkingStopPrice,
+                    conditional.SafetyStopPrice, conditional.ReferencePrice, conditional.Type, conditional.TakeProfitPrice);
+                Order journaled = NewOrderRow(
+                    currentUser, account, proposal, conditional.Instrument, OrderStatus.Working, resting.Size,
+                    OrderEntryMethod.Conditional);
+                journaled.VenueOrderKey = resting.VenueOrderKey;
+                journaled.PlacedAt = DateTimeOffset.UtcNow;
+                database.Orders.Add(journaled);
+                AddStopPlan(database, currentUser, journaled, executionOptions.Value.StopPromotionTicks);
+
+                conditional.Status = ConditionalStatus.Fired;
+                conditional.FiredOrderId = journaled.Id;
+                await database.SaveChangesAsync(cancellationToken);
+
+                loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogWarning(
+                    "Reconciled stranded fire {ConditionalId} on account {AccountId}: the venue order {VenueKey} was live "
+                    + "and is adopted as Working order {OrderId}; the conditional is Fired (gh#589).",
+                    conditional.Id, conditional.AccountId, resting.VenueOrderKey, journaled.Id);
+                return Results.Ok(new
+                {
+                    conditionalId = conditional.Id,
+                    orderId = journaled.Id,
+                    status = conditional.Status.ToString(),
+                    adopted = true,
+                    venueOrderKey = journaled.VenueOrderKey,
+                });
+            }
+
+            // Nothing rests under this conditional's tag. But "no working order" is NOT "nothing live" -- the fire may
+            // have FILLED before this reconcile (a filled entry is no longer a working order, and its bracket legs carry
+            // no customTag). So before releasing, confirm the account is FLAT; otherwise a fill may be this fire's, and
+            // releasing (Firing -> Pending) would let the next quote re-fire over an untracked open position.
+            PositionReconciliation? positionTruth = await positions.ReconcileAsync(
+                conditional.AccountId, DateTimeOffset.UtcNow, cancellationToken);
+            if (positionTruth is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (positionTruth.Basis == PositionMarkBasis.Unknown)
+            {
+                return Results.Conflict(new
+                {
+                    error = "Nothing rests under this conditional's tag, but the venue could not be reached to confirm the account is flat. Retry when the venue is reachable.",
+                });
+            }
+
+            if (positionTruth.Positions.Any(position => !position.IsFlat))
+            {
+                // An open position may be this fire's fill. Do NOT release over it -- leave the conditional Firing +
+                // loud; the operator resolves the position first (it is protected by its native bracket + auto-flatten
+                // meanwhile). Adopting the FILLED position onto a new Order (there is no working order to match) is
+                // deferred (gh#578), exactly as on the take path.
+                loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
+                    "Reconcile of stranded fire {ConditionalId} on account {AccountId} found nothing resting under its "
+                    + "tag but an OPEN position on the account -- the fire may have filled. The conditional is left Firing "
+                    + "(not released); resolve the position before reconciling it (gh#589).",
+                    conditional.Id, conditional.AccountId);
+                return Results.Conflict(new
+                {
+                    error = "Nothing rests under this conditional's tag, but the account has an open position — the fire may have filled. Resolve the position before reconciling this conditional.",
+                });
+            }
+
+            // Flat and reachable: nothing rests under the tag. Release the conditional (Firing -> Pending) so it
+            // re-decides on the next quote; the account is provably flat, so it is clear again.
+            //
+            // RESIDUAL (gh#622): "nothing rests + flat" cannot tell a fire that NEVER PLACED (a timeout that did not
+            // land -- the common case, where re-arming to Pending is correct) from one that PLACED, FILLED, and already
+            // ROUND-TRIPPED (its bracket or auto-flatten closed the position). Both look identical here, so this can
+            // re-arm a one-shot whose entry already completed -- an unintended second autonomous entry. It is NOT a
+            // safety-limit breach (the account is provably flat at release, so it never fires over a live position, and
+            // the re-fire re-runs the full gate) and the operator can cancel a re-armed Pending; it is an intent gap.
+            // Distinguishing the two needs a FILL-LEVEL reconcile (was there ever a fill under this customTag?) --
+            // ADR-0013's deferred fill-level reconcile, the fire-side sibling of gh#619's adopt-a-filled-take. Parity
+            // with the take's release-to-Staged (inert) is the operator's confirmed choice (2026-08-03) UNTIL the
+            // fill-level reconcile lands and can disambiguate the round-tripped case; gh#622 tracks that.
+            conditional.Status = ConditionalStatus.Pending;
+            await database.SaveChangesAsync(cancellationToken);
+            loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogInformation(
+                "Reconciled stranded fire {ConditionalId} on account {AccountId}: nothing rests at the venue under its "
+                + "tag and the account is flat; the conditional is released to Pending (gh#589).",
+                conditional.Id, conditional.AccountId);
+            return Results.Ok(new { conditionalId = conditional.Id, status = ConditionalStatus.Pending.ToString(), adopted = false });
+        }, cancellationToken);
     }
 
     internal static async Task<IResult> CancelOrderAsync(

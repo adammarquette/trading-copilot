@@ -166,6 +166,25 @@ public class DecisionStateRehydrationTests
     }
 
     [Fact]
+    public void Analyze_ShouldFlagOrderMidTaking_WhenATakingOrderSurvivesARestart()
+    {
+        // gh#589 — the take path's analog of ConditionalMidFiring (gh#577). The claim (Staged->Taking, gh#530) is the
+        // take's durable pre-transmit intent; Taking is transient at runtime (one request resolves it to Working or
+        // releases it to Staged). Found PERSISTING at rest, its order may be live at the venue with no journal marking
+        // it Working — an impossible combination the rehydration must fail safe + loud on, never resume.
+        Guid order = Guid.NewGuid();
+
+        DecisionSurfaceReport report = Analyze(
+            orders: [Order(order, _owner, OrderStatus.Taking)]);
+
+        DecisionInconsistency issue = report.Inconsistencies.Should().ContainSingle().Which;
+        issue.Kind.Should().Be(DecisionInconsistencyKind.OrderMidTaking);
+        issue.Owner.Should().Be(_owner);
+        issue.EntityId.Should().Be(order);
+        report.IsConsistent.Should().BeFalse();
+    }
+
+    [Fact]
     public void Analyze_ShouldFlagStopPlanWithoutOrder_WhenTheParentOrderIsAbsent()
     {
         Guid plan = Guid.NewGuid();
