@@ -178,7 +178,14 @@ the venue** and no journal behind it. `DecisionStateRehydration.Analyze` now fla
 (`DecisionInconsistencyKind.ConditionalMidFiring`), so the pass fails **safe and loud** — kill switch (HaltOnly) + a
 `synthetic_risk` alert, never a silent repair — the very principle this ADR states: *never auto-act on rehydrated
 state; re-validate against venue truth first* (the order's `customTag` carries the conditional's id so that reconcile
-can match it). The **automated** reconcile that would then recover the order without the operator is deferred (gh#578).
+can match it). The **operator-driven runtime reconcile** that recovers the order without a restart — `POST
+/conditionals/{id}/reconcile`, the sibling of the take's `/orders/{id}/reconcile`, matching the live order by that
+`customTag` — **is now built** (gh#589 review): on a reachable book it **adopts** the fired order (creating the
+`Working` row the fault-interrupted fire never journaled) or, nothing-resting-and-flat, **releases** the conditional to
+`Pending`; it **refuses** on an open position or an unreachable book. So `ConditionalMidFiring` here is the
+**restart-time backstop, not the only recovery**; only the **automatic** background reconcile sweep (no operator in the
+loop) stays deferred (gh#578). This also let the account no-stacking check start **counting** a `Firing` conditional as
+imminent exposure (it could not while a strand had no recovery — the same sequencing `Taking` went through, gh#589).
 
 ## Update (2026-08-02) — a re-formed setup's "new suggestion" is now a superseding one in data (gh#550)
 
@@ -210,3 +217,27 @@ the scan pass's shared transaction** alongside the firing journal and the trigge
 Consistent with this ADR's principles: no-risk state still **fails safe** (the voided incumbent is `ExpiredVoid`, out
 of the actionable set), nothing is **auto-taken or silently resumed** (the head of the chain still re-gates under R-12
 before it can be taken), and the transition is journalled in the shared transaction rather than as a side effect.
+
+## Update (2026-08-03) — the rehydration gains a mid-taking-order inconsistency (gh#589)
+
+The impossible-combination list gains a second transient-intent-caught-at-rest case, the take path's exact analog of
+the mid-firing conditional above. `OrderStatus.Taking` (gh#530, [ADR-0007](0007-order-execution-model.md)) is the
+**durable pre-transmit intent of a take**: the claim moves a staged row Staged → `Taking` *before* the venue is
+touched, so a fault in the transmit→journal window leaves it there rather than back at `Staged`, where it could be
+re-taken over a possibly-live order. It is transient at runtime — one take request resolves it to `Working` or
+releases it to `Staged` — so one found **persisting across a restart** means a crash (or a client disconnect the
+runtime could not release) caught a take mid-flight, with an order that **may be live at the venue** and no journal
+marking it `Working`. `DecisionStateRehydration.Analyze` now flags it (`DecisionInconsistencyKind.OrderMidTaking`),
+so the pass fails **safe and loud** — kill switch (HaltOnly) + a `synthetic_risk` alert, never a silent repair — the
+same principle as the conditional case: *never auto-act on rehydrated state; re-validate against venue truth first*
+(the take now stamps the row id as the venue `customTag` so a reconcile can match it). This is the recovery half of
+gh#589, which also let the account no-stacking check start **counting** `Taking` (it could not while a strand had no
+recovery); at runtime the take path leaves the claim **`Taking` + loud on *any* post-send fault** — a venue rejection,
+a timeout, or a disconnect alike, all indistinguishable-from-live at the send — never releasing a maybe-live order
+(only a **pre-venue** compose / build fault releases the claim, because nothing was placed). The operator then resolves
+a left-`Taking` row **without a restart** via `POST /orders/{id}/reconcile`
+(the `customTag` consumer, [ADR-0007](0007-order-execution-model.md)): it reads venue truth and **adopts** the order
+if it rests (→ `Working`), **releases** the ticket if nothing rests (→ `Staged`), and **refuses** on an unreachable
+book — the same *"unknown ≠ empty"* rule as the resting-orders read (gh#381). So `OrderMidTaking` here is the
+restart-time backstop, not the only recovery. Only the **automatic** background reconcile sweep stays deferred, as
+for the conditional (gh#578-class).

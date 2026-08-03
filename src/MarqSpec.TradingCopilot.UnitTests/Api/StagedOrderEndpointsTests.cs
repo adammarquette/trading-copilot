@@ -1,6 +1,8 @@
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Audit;
+using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.Orders;
+using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -12,6 +14,7 @@ using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -69,6 +72,20 @@ public class StagedOrderEndpointsTests
 
     private static IOptions<ExecutionOptions> ExecOptions() =>
         Microsoft.Extensions.Options.Options.Create(new ExecutionOptions());
+
+    // The reconcile endpoint (gh#589) reads venue truth through this service; empty flatten schedules + a reachable
+    // venue yield a Live basis, so a reachable read is never mistaken for Unknown.
+    private WorkingOrderReconciliationService RestingOrders() => new(
+        Context(), _factory, PxOptions(),
+        Microsoft.Extensions.Options.Options.Create(new FlattenOptions()),
+        NullLogger<WorkingOrderReconciliationService>.Instance);
+
+    // The reconcile also confirms the account is FLAT before releasing (gh#589 round-2): "no working order" is not
+    // "nothing live" -- a filled take leaves a position, not a working order. This reads venue positions.
+    private PositionReconciliationService Positions() => new(
+        Context(), _factory, PxOptions(),
+        Microsoft.Extensions.Options.Options.Create(new FlattenOptions()),
+        NullLogger<PositionReconciliationService>.Instance);
 
     private static HostTradingEnvironment Development { get; } = new(DeploymentEnvironment.Development);
 
@@ -244,7 +261,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
@@ -256,6 +273,518 @@ public class StagedOrderEndpointsTests
         taken.Status.Should().Be(OrderStatus.Working);
         taken.VenueOrderKey.Should().Be("889001");
         (await reload.GateDecisions.CountAsync()).Should().Be(2); // arm-time + take-time: separate audit facts
+    }
+
+    [Fact]
+    public async Task Take_ShouldRefuse_WhenTheAccountAlreadyHasAnotherOutstandingOrder()
+    {
+        // gh#589: a take is an entry-transmit, so it runs the no-stacking check inside the account lock. The account
+        // already holds a DIFFERENT Working order, so taking the staged ticket -- which ComposeAsync would size
+        // against a flat snapshot that ignores that exposure -- is refused. The check runs BEFORE the claim, so the
+        // staged row being taken is still Staged and never counts ITSELF; only the other outstanding order blocks.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context())
+        {
+            orderId = (await read.Orders.SingleAsync(o => o.Status == OrderStatus.Staged)).Id;
+        }
+        await SeedWorkingOrderAsync(accountId);
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Staged, "the no-stacking check refuses before the claim, so the ticket stays takeable");
+    }
+
+    [Fact]
+    public async Task Take_ShouldRunUnderTheAccountEntryGuard()
+    {
+        // The per-account lock (gh#589) that serializes the no-stacking check + the place must actually wrap the take's
+        // transmit tail, so a take and a send / another take cannot both pass the check before either journals. This
+        // pins that the take runs through the guard for THIS account; the real advisory-lock serialization is QA's.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+
+        IAccountEntryGuard guard = PassthroughGuard();
+        await using TradingCopilotDbContext context = Context();
+        await OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), guard, NullLoggerFactory.Instance, CancellationToken.None);
+
+        A.CallTo(() => guard.RunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task Take_ShouldLeaveTaking_WhenTheVenueSendThrows()
+    {
+        // gh#589 round-2 (H1): a venue send that THROWS is maybe-live and must be LEFT Taking, never released. Even a
+        // "!Success" rejection can't be told apart at this seam from an accepted-but-no-id (the venue took it) or a
+        // maybe-landed timeout, so all of them fail toward Taking; releasing would re-open the gh#530 double-place.
+        // The reconcile endpoint then resolves it (nothing rests -> release; something rests -> adopt).
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Throws(() => new InvalidOperationException("venue send faulted (test)"));
+
+        await using TradingCopilotDbContext context = Context();
+        Func<Task> take = () => OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        await take.Should().ThrowAsync<InvalidOperationException>();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Taking, "a venue send fault is maybe-live, so the row is left Taking for /reconcile, never released (gh#589)");
+    }
+
+    [Fact]
+    public async Task Take_ShouldLeaveTaking_WhenTheVenueTimesOut()
+    {
+        // gh#589 round-2 (H1, the sharpest case): a venue/HTTP TIMEOUT surfaces as a TaskCanceledException (an
+        // OperationCanceledException) whose token is HttpClient's internal one, NOT the caller's -- the canonical
+        // maybe-live failure. It must be left Taking like any other send fault, never mistaken for a definitive
+        // rejection and released (which was the double-place bug this fixes). The caller's own token is NOT cancelled.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Throws(() => new TaskCanceledException("venue send timed out (test)"));
+
+        await using TradingCopilotDbContext context = Context();
+        Func<Task> take = () => OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        await take.Should().ThrowAsync<TaskCanceledException>();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Taking, "a venue timeout is maybe-live -> left Taking, never released (the H1 double-place fix, gh#589)");
+    }
+
+    [Fact]
+    public async Task Take_ShouldLeaveTheRowTaking_WhenTheClientDisconnectsMidSend()
+    {
+        // gh#589 Part B: a client disconnect / shutdown (OperationCanceledException, token cancelled) mid-send MAY
+        // have reached the venue -- outcome unknown -- so reverting to Staged could re-take a live order. The row is
+        // left Taking (the durable claim, uncancellable, reconciled on replay); uncertainty resolves to the safe state.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+
+        using CancellationTokenSource cts = new();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes(() => cts.Cancel())
+            .Throws(() => new OperationCanceledException(cts.Token));
+
+        // A fake logger so we can assert the disconnect is surfaced LOUDLY (an order may be live and unrecorded).
+        ILogger takeLogger = A.Fake<ILogger>();
+        ILoggerFactory loggerFactory = A.Fake<ILoggerFactory>();
+        A.CallTo(() => loggerFactory.CreateLogger(A<string>._)).Returns(takeLogger);
+
+        await using TradingCopilotDbContext context = Context();
+        Func<Task> take = () => OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), loggerFactory, cts.Token);
+
+        await take.Should().ThrowAsync<OperationCanceledException>();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Taking, "a disconnect mid-send leaves the row Taking (may be live at the venue), never Staged (gh#589)");
+        A.CallTo(takeLogger)
+            .Where(call => call.Method.Name == "Log" && call.GetArgument<LogLevel>(0) == LogLevel.Error)
+            .MustHaveHappened(); // the may-be-live window is surfaced loudly, not silently stranded
+    }
+
+    [Fact]
+    public async Task Take_ShouldStampTheRowIdAsTheVenueCorrelationTag()
+    {
+        // gh#589 Part B: the take stamps the row's own id as the venue order's customTag, so a take that placed then
+        // stranded (its key not yet journaled) is recognisable against venue truth on replay -- the durable claim's
+        // venue-side counterpart, mirroring the conditional fire (gh#577).
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+
+        OrderRequest? sent = null;
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Invokes((OrderRequest request, CancellationToken _) => sent = request)
+            .Returns(new PlacedOrder(_venueAccount, "889001", DateTimeOffset.UnixEpoch));
+
+        await using TradingCopilotDbContext context = Context();
+        await OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        sent.Should().NotBeNull();
+        sent!.CustomTag.Should().Be(orderId.ToString(), "the venue order carries the row id so a stranded take is reconcilable (gh#589)");
+    }
+
+    [Fact]
+    public async Task Take_ShouldReleaseTheClaim_WhenComposeThrows()
+    {
+        // gh#589 review fix: compose + build are pre-venue READS run AFTER the claim. A throw there (a venue roster /
+        // positions timeout, a DB blip) placed nothing, so the claim must be released -- otherwise the row strands
+        // Taking and, because gh#589 counts Taking, dead-locks the account. Here the take's fresh-truth roster read
+        // throws; the row must return to Staged. (Arming above ran while the roster read still worked.)
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+
+        A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._))
+            .Throws(() => new InvalidOperationException("venue roster read failed mid-take (test)"));
+
+        await using TradingCopilotDbContext context = Context();
+        Func<Task> take = () => OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        await take.Should().ThrowAsync<InvalidOperationException>();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Staged, "a pre-venue compose fault releases the claim rather than stranding the row Taking (gh#589)");
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldAdoptTheLiveVenueOrder_WhenItRestsUnderTheRowsTag()
+    {
+        // gh#589 runtime recovery: a take stranded Taking whose order DID rest at the venue. The reconcile reads venue
+        // truth, matches the resting order by the customTag the take stamped (the row id), and adopts it as a tracked
+        // Working order (with a promotion plan) -- so the account is unblocked and the live order is managed.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SetTakingAsync(orderId);
+
+        VenueContractId contract = VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>(
+            [
+                new WorkingOrder("VENUE-KEY-42", contract, null, null, Size: 1) { CustomTag = orderId.ToString() },
+            ]);
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        await using TradingCopilotDbContext reload = Context();
+        Order adopted = await reload.Orders.FirstAsync(o => o.Id == orderId);
+        adopted.Status.Should().Be(OrderStatus.Working, "the live venue order is adopted, so the row is tracked and the account unblocked");
+        adopted.VenueOrderKey.Should().Be("VENUE-KEY-42");
+        (await reload.StopPlans.AnyAsync(p => p.OrderId == orderId)).Should().BeTrue("an adopted working order gets a promotion plan");
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldReleaseToStaged_WhenNothingRestsAtTheVenue()
+    {
+        // gh#589: a stranded Taking whose order never rested (a rejection, or a fault before the place). On a REACHABLE
+        // venue with nothing under the tag, the reconcile releases the claim (Taking->Staged) -- the ticket is takeable
+        // again and the account unblocked.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SetTakingAsync(orderId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]); // reachable venue, nothing rests
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _venue.CancelOrderAsync(A<VenueAccountId>._, A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Staged, "nothing rests, so the claim is released and the ticket is takeable again");
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldRefuseAndLeaveTaking_WhenNothingRestsButAPositionIsOpen()
+    {
+        // gh#589 round-2: "no working order under the tag" is NOT "nothing live" -- a stranded take may have FILLED
+        // before the reconcile (a filled entry is no longer a working order; its bracket legs carry no tag). Releasing
+        // then would strand an untracked open position. So a reachable venue with nothing under the tag but an OPEN
+        // position refuses: the row stays Taking, and the operator resolves the position first.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SetTakingAsync(orderId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]); // nothing resting under the tag...
+        VenueContractId contract = VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>(
+                [new PositionSnapshot(_venueAccount, contract, NetQuantity: 1, new Price(5300m))]); // ...but a position IS open
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Taking, "a possibly-filled take is never released over an open position — the row stays Taking (gh#589)");
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldRefuseAndLeaveTaking_WhenTheVenueIsUnreachable()
+    {
+        // gh#589 + gh#381: "we could not ask" is not "nothing is there". A stranded Taking is NEVER resolved against an
+        // unknown book -- releasing could re-take a live order, adopting could invent a phantom. The row stays Taking.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SetTakingAsync(orderId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Throws(() => new InvalidOperationException("venue unreachable (test)")); // -> Basis Unknown
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Taking, "an unknown venue book is never used to resolve a stranded take");
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldRefuse_WhenTheOrderIsNotTaking()
+    {
+        // Only a stranded Taking is reconcilable -- a plain Staged ticket (or any other status) is resolved through its
+        // own paths, so reconcile stays a narrow recovery rather than a general force-write.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+    }
+
+    [Fact]
+    public async Task ReconcileFiringConditional_ShouldAdoptTheLiveVenueOrder_WhenItRestsUnderTheConditionalsTag()
+    {
+        // gh#589 runtime recovery, the fire-path sibling of Reconcile_ShouldAdopt... : a conditional stranded Firing
+        // whose order DID rest at the venue. Unlike the take (which flips an existing Staged row), the stranded fire
+        // journaled NO Order row, so the reconcile CREATES the Working row -- matched by the customTag the fire stamped
+        // (the conditional's id) -- marks the conditional Fired, and protects the position with a promotion plan.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await SeedFiringConditionalAsync(accountId);
+
+        VenueContractId contract = VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>(
+            [
+                new WorkingOrder("VENUE-KEY-77", contract, null, null, Size: 1) { CustomTag = conditionalId.ToString() },
+            ]);
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileFiringConditionalAsync(
+            conditionalId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        await using TradingCopilotDbContext reload = Context();
+        ConditionalOrderRecord conditional = await reload.ConditionalOrders.FirstAsync(c => c.Id == conditionalId);
+        conditional.Status.Should().Be(ConditionalStatus.Fired, "the live venue order is adopted, so the conditional is Fired");
+        conditional.FiredOrderId.Should().NotBeNull("the adopted Working order is linked to the conditional");
+        Order adopted = await reload.Orders.FirstAsync(o => o.Id == conditional.FiredOrderId!.Value);
+        adopted.Status.Should().Be(OrderStatus.Working, "the live venue order is adopted, so the account is unblocked");
+        adopted.VenueOrderKey.Should().Be("VENUE-KEY-77");
+        adopted.EntryMethod.Should().Be(OrderEntryMethod.Conditional, "the adopted order is journaled as a conditional fire");
+        (await reload.StopPlans.AnyAsync(p => p.OrderId == adopted.Id)).Should().BeTrue("an adopted working order gets a promotion plan");
+    }
+
+    [Fact]
+    public async Task ReconcileFiringConditional_ShouldReleaseToPending_WhenNothingRestsAndTheAccountIsFlat()
+    {
+        // gh#589: a conditional stranded Firing whose order never rested (a rejection, or a fault before the place). On a
+        // REACHABLE, FLAT account with nothing under the tag, the reconcile releases the conditional (Firing->Pending) --
+        // it re-decides on the next quote and the account is unblocked.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await SeedFiringConditionalAsync(accountId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]); // reachable, nothing rests; positions default flat
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileFiringConditionalAsync(
+            conditionalId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.FirstAsync(c => c.Id == conditionalId)).Status.Should().Be(
+            ConditionalStatus.Pending, "nothing rests and the account is flat, so the conditional is released to Pending");
+        (await reload.Orders.AnyAsync()).Should().BeFalse("nothing was journaled -- the fire did not place");
+    }
+
+    [Fact]
+    public async Task ReconcileFiringConditional_ShouldRefuseAndLeaveFiring_WhenNothingRestsButAPositionIsOpen()
+    {
+        // gh#589 round-2: "no working order under the tag" is NOT "nothing live" -- the fire may have FILLED before the
+        // reconcile. Releasing then would re-fire over an untracked open position. A reachable venue with nothing under
+        // the tag but an OPEN position refuses: the conditional stays Firing, and the operator resolves the position first.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await SeedFiringConditionalAsync(accountId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]); // nothing under the tag...
+        VenueContractId contract = VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>(
+                [new PositionSnapshot(_venueAccount, contract, NetQuantity: 1, new Price(5300m))]); // ...but a position IS open
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileFiringConditionalAsync(
+            conditionalId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.FirstAsync(c => c.Id == conditionalId)).Status.Should().Be(
+            ConditionalStatus.Firing, "a possibly-filled fire is never released over an open position — the conditional stays Firing (gh#589)");
+        (await reload.Orders.AnyAsync()).Should().BeFalse("nothing is adopted when there is no working order to match");
+    }
+
+    [Fact]
+    public async Task ReconcileFiringConditional_ShouldRefuseAndLeaveFiring_WhenTheVenueIsUnreachable()
+    {
+        // gh#589 + gh#381: "we could not ask" is not "nothing is there". A stranded Firing is NEVER resolved against an
+        // unknown book -- releasing could re-fire a live order, adopting could invent a phantom. The conditional stays Firing.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await SeedFiringConditionalAsync(accountId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Throws(() => new InvalidOperationException("venue unreachable (test)")); // -> Basis Unknown
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileFiringConditionalAsync(
+            conditionalId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.FirstAsync(c => c.Id == conditionalId)).Status.Should().Be(
+            ConditionalStatus.Firing, "an unknown venue book is never used to resolve a stranded fire");
+    }
+
+    [Fact]
+    public async Task ReconcileFiringConditional_ShouldRefuse_WhenTheConditionalIsNotFiring()
+    {
+        // Only a stranded Firing is reconcilable -- a Pending conditional (or any other status) is resolved through its
+        // own paths (the watcher fires / cancels / expires it), so reconcile stays a narrow recovery.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await SeedFiringConditionalAsync(accountId, ConditionalStatus.Pending);
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileFiringConditionalAsync(
+            conditionalId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+    }
+
+    [Fact]
+    public async Task Take_ShouldRefuse_WhenTheAccountHasAMidFireFiringConditional()
+    {
+        // gh#589: the no-stacking check counts a mid-fire Firing conditional, not only an outstanding Order. A Firing
+        // conditional is a maybe-live entry with no Order row, so a take that ignored it would size against a flat
+        // snapshot. The take is refused (409) before the claim, so the ticket stays Staged and takeable.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SeedFiringConditionalAsync(accountId);
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Staged, "the no-stacking check counts the Firing conditional and refuses before the claim");
+    }
+
+    private async Task<Guid> SeedFiringConditionalAsync(Guid accountId, ConditionalStatus status = ConditionalStatus.Firing)
+    {
+        // A conditional in a chosen lifecycle state (default Firing -- the stranded mid-fire). Minimal but valid: the
+        // no-stacking check reads AccountId + Status; the reconcile adopt reads the trade fields to journal the Order.
+        Guid id = Guid.NewGuid();
+        await using TradingCopilotDbContext seed = Context();
+        seed.ConditionalOrders.Add(new ConditionalOrderRecord
+        {
+            Id = id,
+            UserId = _operator,
+            AccountId = accountId,
+            Instrument = "CON.F.US.MES.U26",
+            Symbol = "MES",
+            Side = OrderSide.Buy,
+            Size = 1,
+            Type = OrderType.Market,
+            EntryPrice = 5300m,
+            WorkingStopPrice = 5295m,
+            SafetyStopPrice = 5290m,
+            ReferencePrice = 5300m,
+            TickSize = 0.25m,
+            PointValue = 5m,
+            TriggerPrice = 5310m,
+            TriggerDirection = ConditionalCrossDirection.RisesTo,
+            Status = status,
+            Mode = TradingMode.Practice,
+            CreatedAt = DateTimeOffset.UnixEpoch,
+        });
+        await seed.SaveChangesAsync();
+        return id;
+    }
+
+    private async Task SetTakingAsync(Guid orderId)
+    {
+        // Strand a staged ticket in Taking, as a take interrupted mid-send leaves it -- via the same claim (Staged ->
+        // Taking) the take uses, so the row's status transition matches production.
+        await using TradingCopilotDbContext context = Context();
+        (await Claim(context).TryClaimAsync(orderId, CancellationToken.None)).Should().BeTrue();
+    }
+
+    private async Task SeedWorkingOrderAsync(Guid accountId)
+    {
+        await using TradingCopilotDbContext seed = Context();
+        seed.Orders.Add(new Order
+        {
+            Id = Guid.NewGuid(),
+            UserId = _operator,
+            AccountId = accountId,
+            Instrument = "CON.F.US.MES.U26",
+            Side = OrderSide.Buy,
+            Size = 1,
+            Type = OrderType.Market,
+            Status = OrderStatus.Working,
+            Mode = TradingMode.Practice,
+            VenueOrderKey = "999999",
+            PlacedAt = DateTimeOffset.UnixEpoch,
+        });
+        await seed.SaveChangesAsync();
     }
 
     [Fact]
@@ -278,7 +807,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
 
         // R-12 working as designed: what passed at arm does not pass now -> refused, transmitted nothing,
         // still staged for another edit.
@@ -322,7 +851,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
 
         // Fixed: take rebuilds the working stop, sizes as arm did, and transmits. (Under the defect this is a
         // 422 -- PerTradeRisk sizes against the safety stop and leaves room for zero.)
@@ -355,7 +884,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         sent!.ProfitTarget.Should().Be(new Price(5310m)); // rebuilt from the row and transmitted, not dropped
@@ -416,7 +945,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
-            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
@@ -498,7 +1027,7 @@ public class StagedOrderEndpointsTests
         {
             await OrderEndpoints.TakeStagedOrderAsync(
                 orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development,
-                A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
+                A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
         }
 
         await using TradingCopilotDbContext reload = Context();
@@ -524,7 +1053,7 @@ public class StagedOrderEndpointsTests
         {
             await OrderEndpoints.TakeStagedOrderAsync(
                 orderId, new FixedUser(_operator), take, _factory, PxOptions(), ExecOptions(), Development,
-                A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(take), CancellationToken.None);
+                A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(take), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
         }
 
         // The deviation is carried all the way to the placed order -- a reader sees a modified take, not an armed one.
@@ -553,7 +1082,7 @@ public class StagedOrderEndpointsTests
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.TakeStagedOrderAsync(
             orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development,
-            A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, LostClaim(), CancellationToken.None);
+            A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, LostClaim(), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
         A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
@@ -578,11 +1107,25 @@ public class StagedOrderEndpointsTests
         await using TradingCopilotDbContext context = Context();
         await OrderEndpoints.TakeStagedOrderAsync(
             orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development,
-            engaged, NullExecutionMetrics.Instance, Claim(context), CancellationToken.None);
+            engaged, NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
 
         await using TradingCopilotDbContext reload = Context();
         (await reload.Orders.SingleAsync()).Status.Should().Be(
             OrderStatus.Staged, "a take that never reached the venue leaves the ticket takeable");
+    }
+
+    /// <summary>
+    /// The account-entry guard (gh#589) that just runs the callback: the in-memory provider is single-threaded and
+    /// cannot run the real advisory lock (that is why it is a seam). The deterministic no-stacking check INSIDE the
+    /// callback is what the unit tier proves; the real cross-request serialization is proven on Postgres by QA.
+    /// </summary>
+    private static IAccountEntryGuard PassthroughGuard()
+    {
+        IAccountEntryGuard guard = A.Fake<IAccountEntryGuard>();
+        A.CallTo(() => guard.RunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .ReturnsLazily((TradingCopilotDbContext _, Guid _, Func<Task<IResult>> transmit, CancellationToken _) => transmit());
+        return guard;
     }
 
     /// <summary>A claim that always loses — the second of two concurrent takes.</summary>

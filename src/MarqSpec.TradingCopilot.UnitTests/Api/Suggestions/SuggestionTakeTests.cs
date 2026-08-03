@@ -60,8 +60,8 @@ public class SuggestionTakeTests
         // cannot run the real advisory lock (that is why it is a seam). What the unit tier proves is STRUCTURAL -- the
         // re-check and the insert live inside the callback, so under the real guard they are inside the lock. The
         // genuine two-racer proof belongs to QA on container-backed Postgres (gh#614).
-        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
-            .ReturnsLazily((Guid _, Func<Task<IResult>> stage, CancellationToken _) => stage());
+        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .ReturnsLazily((TradingCopilotDbContext _, Guid _, Func<Task<IResult>> stage, CancellationToken _) => stage());
 
         A.CallTo(() => _factory.Create(A<FirmConventions>._)).Returns(_venue);
         A.CallTo(() => _venue.Id).Returns(VenueId.Parse("projectx"));
@@ -473,7 +473,7 @@ public class SuggestionTakeTests
         // OrderEndpointsTests.SendAsync_ShouldPlaceNothing_WhenTheEntryGuardDeclines.)
         Guid accountId = await SeedAccountAsync();
         Guid suggestionId = await SeedSuggestionAsync(accountId: accountId);
-        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
             .Returns(Results.Conflict(new { error = "guard declined" }));
 
         IResult result = await TakeAsync(suggestionId);
@@ -496,7 +496,7 @@ public class SuggestionTakeTests
 
         StatusOf(await TakeAsync(suggestionId)).Should().Be(StatusCodes.Status200OK);
 
-        A.CallTo(() => _entryGuard.RunExclusiveAsync(accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<TradingCopilotDbContext>._, accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
     }
 

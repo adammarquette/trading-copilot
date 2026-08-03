@@ -58,8 +58,9 @@ public class OrderEndpointsTests
         // The account-entry guard (gh#531) just runs the callback here: the in-memory provider is single-threaded
         // and cannot run the real advisory lock (that is why it is a seam). The deterministic no-stacking check
         // INSIDE the callback is what the unit tier proves; the real serialization is proven on Postgres by QA.
-        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
-            .ReturnsLazily((Guid _, Func<Task<IResult>> transmit, CancellationToken _) => transmit());
+        A.CallTo(() => _entryGuard.RunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .ReturnsLazily((TradingCopilotDbContext _, Guid _, Func<Task<IResult>> transmit, CancellationToken _) => transmit());
     }
 
     private TradingCopilotDbContext Context(Guid? asUser = null)
@@ -195,6 +196,36 @@ public class OrderEndpointsTests
         return orderId;
     }
 
+    private async Task SeedFiringConditionalAsync(Guid accountId)
+    {
+        // A mid-fire Firing conditional (gh#589): a maybe-live entry with NO Order row. The no-stacking check reads only
+        // AccountId + Status, so a minimal-but-valid record suffices to block a send.
+        await using TradingCopilotDbContext context = Context();
+        context.ConditionalOrders.Add(new ConditionalOrderRecord
+        {
+            Id = Guid.NewGuid(),
+            UserId = _operator,
+            AccountId = accountId,
+            Instrument = "CON.F.US.MES.U26",
+            Symbol = "MES",
+            Side = OrderSide.Buy,
+            Size = 1,
+            Type = OrderType.Market,
+            EntryPrice = 5300m,
+            WorkingStopPrice = 5295m,
+            SafetyStopPrice = 5290m,
+            ReferencePrice = 5300m,
+            TickSize = 0.25m,
+            PointValue = 5m,
+            TriggerPrice = 5310m,
+            TriggerDirection = ConditionalCrossDirection.RisesTo,
+            Status = ConditionalStatus.Firing,
+            Mode = TradingMode.Practice,
+            CreatedAt = DateTimeOffset.UnixEpoch,
+        });
+        await context.SaveChangesAsync();
+    }
+
     [Fact]
     public async Task SendOrder_ShouldReturnNotFound_ForAnUnknownAccount()
     {
@@ -320,21 +351,36 @@ public class OrderEndpointsTests
     }
 
     [Fact]
-    public async Task SendOrder_ShouldNotBeBlockedByATakingRow_BecauseSendVsTakeIsGh589()
+    public async Task SendOrder_ShouldBeBlockedByATakingRow_BecauseGh589CountsTakingNow()
     {
-        // gh#531 is send-vs-send ONLY, and Taking is DELIBERATELY excluded from the no-stacking set: the take path
-        // does not take this guard (so counting Taking would not close send-vs-take anyway), and a take stranded in
-        // Taking -- a venue timeout or a client disconnect mid-take, with no in-app recovery today -- would otherwise
-        // dead-lock the WHOLE account's send path (a gh#531 adversarial-review finding). So a Taking row does NOT
-        // block a direct send here. Serializing send-vs-take and recovering a stranded Taking are gh#589; this test
-        // pins the scope so that re-including Taking is a deliberate, test-breaking change.
+        // The deliberate flip the pre-gh#589 test warned would break here. gh#531 EXCLUDED Taking because a stranded
+        // take had no recovery, so counting it would dead-lock the account's send path. gh#589 makes a stranded Taking
+        // recoverable -- ANY post-send venue fault (rejection / timeout / disconnect) leaves it Taking + loud (only a
+        // pre-venue compose fault releases the claim, since nothing was placed), resolved via POST /orders/{id}/reconcile,
+        // and a Taking surviving a restart fails the rehydration safe + loud -- so a take in flight is now counted as the
+        // imminent exposure it is: a direct send on an account with a Taking row is REFUSED, closing send-vs-take.
         Guid accountId = await SeedAsync();
         await SeedOutstandingOrderAsync(accountId, OrderStatus.Taking);
 
         IResult result = await SendAsync(accountId, SmallBuy());
 
-        StatusOf(result).Should().Be(StatusCodes.Status200OK);
-        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task SendOrder_ShouldRefuse_WhenTheAccountHasAMidFireFiringConditional()
+    {
+        // gh#589: the no-stacking check counts a mid-fire Firing conditional, not only an outstanding Order. A Firing
+        // conditional is a maybe-live entry with NO Order row (its fire faulted before journaling), so a send that
+        // ignored it would size against a flat snapshot. The direct send is REFUSED, closing send-vs-stranded-fire.
+        Guid accountId = await SeedAsync();
+        await SeedFiringConditionalAsync(accountId);
+
+        IResult result = await SendAsync(accountId, SmallBuy());
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
     [Fact]
@@ -377,7 +423,8 @@ public class OrderEndpointsTests
         // This pins that: a guard that declines to run the callback produces NO venue place and NO order row. A
         // refactor that moved the check or the place OUTSIDE RunExclusiveAsync (reopening the TOCTOU race) fails here.
         Guid accountId = await SeedAsync();
-        A.CallTo(() => _entryGuard.RunExclusiveAsync(A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+        A.CallTo(() => _entryGuard.RunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<IResult>>>._, A<CancellationToken>._))
             .Returns(Results.Conflict(new { error = "guard declined" }));
 
         IResult result = await SendAsync(accountId, SmallBuy());
@@ -417,7 +464,8 @@ public class OrderEndpointsTests
         IResult result = await SendAsync(accountId, SmallBuy());
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
-        A.CallTo(() => _entryGuard.RunExclusiveAsync(accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+        A.CallTo(() => _entryGuard.RunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
     }
 

@@ -162,6 +162,7 @@ for validating heading-order/index against the trail in CI rather than by hand �
 | 2026-08-02 | conditional firing commits per record (gh#532) |
 | 2026-08-02 | the direct-send path serializes per account against send-vs-send stacking (gh#531) |
 | 2026-08-02 | the transmit→journal window closes with a durable pre-transmit intent (gh#577) |
+| 2026-08-03 | take + conditional-fire serialize per account; Taking is counted and made recoverable (gh#589) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 
@@ -981,6 +982,92 @@ surfacing to the operator, and the resting-orders read must carry side/type befo
 The one residual the intent does not cover — a **transport fault that in fact landed** (indistinguishable from a
 definitive rejection without a venue-seam refusal *outcome*, so reverted to `Pending`) — and the independent
 real-Postgres proof of the whole window are **gh#578**.
+
+## Update (2026-08-03) — take + conditional-fire serialize per account; Taking is counted and made recoverable (gh#589)
+
+gh#531 closed **send-vs-send** stacking with a per-account advisory lock (`IAccountEntryGuard`) and a no-stacking
+check, but scoped itself there and **deliberately excluded `Taking`** from the counted set: the take path took no
+such lock, and a take stranded in `Taking` — a venue timeout or a client disconnect mid-take, with no in-app
+recovery — would have dead-locked the whole account's send path. gh#589 closes the remaining account-snapshot races
+and removes that exclusion by first removing its cause.
+
+**Serialize the other two entry paths.** The take (`TakeStagedOrderAsync`) and the conditional fire
+(`ConditionalFiringService`) now run their compose → gate → transmit → journal tail **inside**
+`IAccountEntryGuard.RunExclusiveAsync`, with the **same no-stacking check** the send path runs. Two concurrent takes
+of *different* staged rows, a take racing a direct send, a fire racing either — each previously composed a fresh
+**flat** snapshot (which reserves nothing for an outstanding order) and could transmit at full size; now the
+per-account lock serializes them and the second sees the first's journaled entry and refuses. gh#530's
+`IStagedOrderClaim` still arbitrates two takes of the *same* row; this lock is the account-level complement. In the
+take path the no-stacking check runs **before** the claim, so the row being taken is still `Staged` and excludes
+itself — no self-exclusion clause needed. The fire commits its journal **while the lock is still held**, so the next
+entry to take the lock sees it in its own check. And the fire takes the lock **non-blocking** (`TryRunExclusiveAsync`,
+`pg_try_advisory_lock`): it runs inside the single conditional-fire watcher, which must never *wait* on an operator's
+in-flight entry — waiting would stall firing / cancel / expiry for **every** account — so a busy account leaves the
+conditional `Pending` to re-decide on the next quote.
+
+**`Taking` and a mid-fire `Firing` now count.** With both strands made recoverable (below), the no-stacking check on
+all three paths counts **`Taking`** (a take in flight) **and a `Firing` conditional** (a fire in flight, gh#577) as the
+imminent exposure each is. A `Firing` conditional has **no `Order` row yet**, so the `Orders` check alone cannot see
+it — the second query is what closes an operator send / take (or a peer fire) stacking on a stranded fire, on top of
+send-vs-take and send/take-vs-fire.
+
+**A stranded `Taking` is recoverable — the take path's mirror of the conditional `Firing` intent (gh#577).** The
+gh#530 claim (Staged → `Taking`) *is* the take's durable pre-transmit intent. **Any fault at the venue send leaves
+the row `Taking`** — never released — because none of them can prove nothing rests: a client disconnect, a venue
+**timeout** (a `TaskCanceledException` on HttpClient's *own* token, not the caller's — the canonical maybe-landed
+failure), a transport fault, and even a `ProjectXVenueException` (which is *both* a definitive `!Success` rejection
+*and* "accepted but no order id", indistinguishable at this seam). Releasing a maybe-live order would re-open the
+gh#530 double-place. A definitive rejection is therefore left `Taking` too and resolved cheaply by the reconcile below
+rather than auto-released — auto-releasing it safely would need the venue-seam refusal *outcome* that stays deferred
+(gh#578). Only a fault **before** the venue is touched (the compose/build reads) releases the claim, because nothing
+was placed. A `Taking`
+row that survives a **restart** is now an impossible combination the decision-state rehydration fails **safe + loud**
+on (`OrderMidTaking`, the exact analog of `ConditionalMidFiring`, ADR-0013). And the take stamps its **row id as the
+venue `customTag`**, the durable claim's venue-side counterpart, so a stranded take is reconcilable against venue
+truth **at runtime** — not only on restart.
+
+**The runtime recovery is built — `POST /orders/{id}/reconcile` (the `customTag` consumer).** An operator resolves a
+stranded `Taking` without a restart: it reads venue truth (the gh#381 resting-orders read), and on a **reachable**
+book either **adopts** the order the take placed — matched by the `customTag` above — as a tracked `Working` (venue
+key, size from venue truth, a promotion plan), or, when nothing rests under the tag **and the account is flat**,
+**releases** the claim (`Taking` → `Staged`) so the ticket is takeable again. When nothing rests **but a position is
+open** it **refuses** and leaves the row `Taking` — the take may have *filled* (a filled entry is no longer a working
+order, and its bracket legs carry no tag), so a fill is never released over; the operator resolves the position first
+(it is protected by its native bracket + auto-flatten meanwhile). On an **unreachable** venue it also refuses —
+*"we could not ask"* is not *"nothing is there"* (gh#381), and resolving on an unknown book could re-take a live
+order or adopt a phantom. It runs under the (blocking) account lock, so it is atomic against a concurrent send /
+take. This is why counting `Taking` is safe: a strand is resolvable in-app, not only by the restart fail-safe.
+
+**The conditional fire is the take's mirror — same fault treatment, same runtime recovery (gh#589 review).** The
+review caught the fire path still *reverting a maybe-live send fault to `Pending`* — the exact double-transmit the take
+path had just been fixed for (a venue **timeout** is a `TaskCanceledException` on HttpClient's *own* token, not the
+caller's, so it is not a clean shutdown; reverting it to `Pending` let the next quote re-fire, and the no-stacking
+check cannot see a `Pending` row). It now leaves the conditional **`Firing`** on **any** send fault — timeout,
+transport fault, disconnect, or even a definitive rejection, all indistinguishable-from-live at this seam — exactly as
+the take leaves the row `Taking`; discovery is `Pending`-only, so a stranded `Firing` can never blind-re-fire. The
+runtime recovery is the sibling endpoint **`POST /conditionals/{id}/reconcile`**, the consumer of the `customTag` the
+fire already stamps (the conditional's id): on a **reachable** book it **adopts** the fired order — *creating* the
+`Working` row the fault-interrupted fire never journaled (unlike the take's adopt, which flips an existing `Staged`
+row) and marking the conditional `Fired` — or, when nothing rests **and the account is flat**, **releases** it to
+`Pending` to re-decide; it **refuses** (leaving `Firing` + loud) on an **open position** (a possible fill) or an
+**unreachable** book, on exactly the take reconcile's rules. `ConditionalMidFiring` (ADR-0013) stays the restart-time
+backstop, not the only recovery.
+
+**Residual, and what stays deferred (gh#578).** As with gh#577, a **transport fault that in fact landed** is
+indistinguishable at the send from a definitive rejection without a venue-seam refusal *outcome*, so **both are left
+`Taking`** (never auto-released — the paragraph above); the residual now **narrows to a reconcile call** (the operator
+resolves it: nothing-rests-and-flat releases the claim, a `customTag` match adopts the duplicate if it landed). **The
+conditional fire is symmetric** (gh#589 review): the same maybe-landed fault leaves it `Firing`, resolved the same way
+by `POST /conditionals/{id}/reconcile`. **One asymmetry remains** (gh#622, from the review's adversarial pass): the
+fire's *release* returns the conditional to **auto-firing `Pending`** where the take's returns to **inert `Staged`** —
+safe (the account is provably flat at release, and the re-fire re-gates) but able to re-arm a one-shot whose fire in
+fact already *round-tripped* (filled and closed), which "nothing-rests-and-flat" cannot distinguish from "never placed";
+telling them apart needs the deferred **fill-level** reconcile. Deferred: that venue-seam refusal outcome (which would let each path itself
+tell a rejection from a landed fault), an **automatic** background reconcile sweep (**both** endpoints keep a human in
+the loop, resisting *auto-acting on rehydrated state*), and the real-Postgres concurrent proofs. The guard was
+generalized (generic over its result, taking the caller's `DbContext`) so the fire watcher serializes on its own
+per-owner context with lock + work on one backend. The unit tier proves the deterministic no-stacking, fault-leaves-
+`Firing`/`Taking`, and reconcile (adopt / release / refuse) logic on both paths.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the

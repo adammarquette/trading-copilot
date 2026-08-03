@@ -430,7 +430,7 @@ public static class SuggestionEndpoints
         // The re-check runs INSIDE the callback deliberately, exactly as TransmitAsync's does: only there is it under
         // the lock, so two racers cannot both answer "no" before either has journaled. Composition and the gate stay
         // OUTSIDE -- staging transmits nothing, and the send path re-composes and re-gates under this same lock.
-        return await entryGuard.RunExclusiveAsync(suggestion.AccountId, async () =>
+        return await entryGuard.RunExclusiveAsync(database, suggestion.AccountId, async () =>
         {
             // THE guard. The first racer to get here journals its Staged row; the second, serialized behind it, sees
             // that row and refuses.
