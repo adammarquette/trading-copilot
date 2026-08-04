@@ -86,4 +86,44 @@ public interface IOrderExecutor : IVenue
         VenueAccountId account,
         CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("This venue does not support listing working orders.");
+
+    /// <summary>
+    /// Asks whether an order stamped with <paramref name="customTag"/> ever <b>filled</b> (gh#631) — the fill-level
+    /// counterpart to <see cref="GetWorkingOrdersAsync"/>, which by construction can only see orders still resting.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It exists because "nothing rests under this tag" and "this order never reached the market" are different
+    /// statements. A filled entry is no longer a working order, and once its bracket closes the position the account
+    /// reads flat again — so a fire that placed, filled and round-tripped is indistinguishable, through the resting
+    /// and position reads alone, from one that never placed at all. Only fill history separates them.
+    /// </para>
+    /// <para>
+    /// <b>Why this defaults to <see cref="TaggedFillStatus.Unsupported"/> rather than throwing, unlike its
+    /// fail-closed sibling above.</b> <see cref="GetWorkingOrdersAsync"/> throws because its answer <i>authorises</i>
+    /// something — a caller acts on the belief that no protective leg is standing, so silence must be loud. This
+    /// answer authorises nothing: per <see cref="TaggedFillEvidence"/> it is a <b>veto only</b>, so the worst a
+    /// missing capability can do is leave the caller with the behaviour it already had. Throwing would instead turn
+    /// every venue without fill history into a permanently unreconcilable one, which is a strictly worse outcome
+    /// than the status quo it is trying to protect.
+    /// </para>
+    /// <para>
+    /// An implementation must return <see cref="TaggedFillStatus.Unavailable"/> — never
+    /// <see cref="TaggedFillStatus.NoFillFound"/> — when it cannot complete the read.
+    /// </para>
+    /// </remarks>
+    /// <param name="account">The account the order was placed on.</param>
+    /// <param name="customTag">The tag stamped on the order at transmit time.</param>
+    /// <param name="since">
+    /// How far back to search. The caller supplies it from the row's own durable transmit instant, so the window
+    /// always covers the attempt.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>What the venue could tell us — never <see langword="null"/>.</returns>
+    Task<TaggedFillEvidence> FindFilledOrderByTagAsync(
+        VenueAccountId account,
+        string customTag,
+        DateTimeOffset since,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(TaggedFillEvidence.Unsupported(customTag));
 }

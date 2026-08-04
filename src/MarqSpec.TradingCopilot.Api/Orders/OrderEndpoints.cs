@@ -555,7 +555,7 @@ public static class OrderEndpoints
                 // A definitive rejection is therefore left Taking too, rather than auto-released -- the small cost of
                 // never guessing "dead" wrong; the reconcile endpoint resolves it cheaply (nothing rests -> release;
                 // something rests -> adopt). The venue-seam refusal OUTCOME that would let a definitive rejection
-                // auto-release safely is deferred (gh#578). A durable Taking cannot be re-taken (TryClaim requires
+                // auto-release safely is deferred (gh#629). A durable Taking cannot be re-taken (TryClaim requires
                 // Staged); the operator resolves it via POST /orders/<id>/reconcile, and a restart flags it
                 // (OrderMidTaking). Uncertainty resolves to the safe state (ADR-0013 §9). Surface it loudly.
                 loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
@@ -597,6 +597,7 @@ public static class OrderEndpoints
         TradingCopilotDbContext database,
         WorkingOrderReconciliationService restingOrders,
         PositionReconciliationService positions,
+        FillReconciliationService fills,
         IOptions<ExecutionOptions> executionOptions,
         IStagedOrderClaim claim,
         IAccountEntryGuard entryGuard,
@@ -696,7 +697,7 @@ public static class OrderEndpoints
                 // An open position may be this take's fill. Do NOT release over it -- leave the row Taking + loud; the
                 // operator reconciles the position first (it is protected by its native bracket + auto-flatten
                 // meanwhile). Adopting the FILLED position onto this row (there is no working order to match) is
-                // deferred (gh#578).
+                // deferred (gh#631 covers the round-tripped case; adopting a still-OPEN position is not yet built).
                 loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
                     "Reconcile of stranded take {OrderId} on account {AccountId} found nothing resting under its tag but "
                     + "an OPEN position on the account -- the take may have filled. The row is left Taking (not released); "
@@ -708,9 +709,64 @@ public static class OrderEndpoints
                 });
             }
 
-            // Flat and reachable: the take definitively did not place. Release the claim (Taking->Staged) through the
-            // CLAIM (its conditional UPDATE owns Staged<->Taking), so the ticket is takeable again; the tracker keeps
-            // reading Taking, which is fine as we return without saving it.
+            // Flat and reachable, nothing resting -- which is NOT the same as "the take never placed". A take that
+            // placed, filled and round-tripped (its bracket closed the position) looks exactly like this. Releasing it
+            // is not dangerous the way the conditional's re-arm is -- Staged is inert, so nothing re-transmits -- but
+            // it silently DISCARDS a trade that really happened, and the journal is the system's memory (R-8/R-9). So
+            // ask fill history before releasing (gh#631).
+            // PlacedAt is stamped when the ticket is armed, i.e. before any transmit, so it always precedes the
+            // attempt this is searching for. A window that starts too early is safe here; one that starts too late
+            // would miss the fill and let the release proceed.
+            TaggedFillEvidence? takeFill = await fills.FindFillAsync(
+                order.AccountId, id.ToString(), order.PlacedAt, cancellationToken);
+            if (takeFill is null)
+            {
+                return Results.NotFound(); // account not found / not owned (R-20)
+            }
+
+            if (takeFill.VetoesRelease)
+            {
+                // It filled and round-tripped. Journal the fill onto this row rather than handing the ticket back as
+                // if nothing happened. No StopPlan: the account is provably flat, so there is no live position left.
+                order.Status = OrderStatus.Filled;
+                order.VenueOrderKey = takeFill.VenueOrderKey;
+                order.PlacedAt = DateTimeOffset.UtcNow;
+                order.Size = (int)takeFill.FilledSize;
+                await database.SaveChangesAsync(cancellationToken);
+
+                loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogWarning(
+                    "Reconciled stranded take {OrderId} on account {AccountId}: nothing rests and the account is flat, "
+                    + "but venue fill history shows this tag FILLED {FilledSize} -- the take executed and round-tripped. "
+                    + "The ticket is journaled Filled rather than released to Staged (gh#631).",
+                    order.Id, order.AccountId, takeFill.FilledSize);
+                return Results.Ok(new
+                {
+                    order.Id,
+                    status = order.Status.ToString(),
+                    adopted = true,
+                    filled = true,
+                    venueOrderKey = order.VenueOrderKey,
+                });
+            }
+
+            if (takeFill.Status == TaggedFillStatus.Unavailable)
+            {
+                loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
+                    "Reconcile of stranded take {OrderId} on account {AccountId} found nothing resting and a flat "
+                    + "account, but the venue's fill history could not be read -- the ticket is left Taking rather than "
+                    + "released on an unknown (gh#631).",
+                    order.Id, order.AccountId);
+                return Results.Conflict(new
+                {
+                    error = "Nothing rests under this order's tag and the account is flat, but the venue's fill history "
+                        + "could not be read, so it cannot be confirmed that the take never executed. Retry when the "
+                        + "venue is reachable.",
+                });
+            }
+
+            // The venue positively reports no fill, or has no fill history to consult. Release the claim
+            // (Taking->Staged) through the CLAIM (its conditional UPDATE owns Staged<->Taking), so the ticket is
+            // takeable again; the tracker keeps reading Taking, which is fine as we return without saving it.
             await claim.ReleaseAsync(id, cancellationToken);
             loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogInformation(
                 "Reconciled stranded take {OrderId} on account {AccountId}: nothing rests at the venue under its tag and "
@@ -726,6 +782,7 @@ public static class OrderEndpoints
         TradingCopilotDbContext database,
         WorkingOrderReconciliationService restingOrders,
         PositionReconciliationService positions,
+        FillReconciliationService fills,
         IOptions<ExecutionOptions> executionOptions,
         IAccountEntryGuard entryGuard,
         ILoggerFactory loggerFactory,
@@ -852,7 +909,7 @@ public static class OrderEndpoints
                 // An open position may be this fire's fill. Do NOT release over it -- leave the conditional Firing +
                 // loud; the operator resolves the position first (it is protected by its native bracket + auto-flatten
                 // meanwhile). Adopting the FILLED position onto a new Order (there is no working order to match) is
-                // deferred (gh#578), exactly as on the take path.
+                // deferred (gh#631 covers the round-tripped case; adopting a still-OPEN position is not yet built).
                 loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
                     "Reconcile of stranded fire {ConditionalId} on account {AccountId} found nothing resting under its "
                     + "tag but an OPEN position on the account -- the fire may have filled. The conditional is left Firing "
@@ -864,19 +921,89 @@ public static class OrderEndpoints
                 });
             }
 
-            // Flat and reachable: nothing rests under the tag. Release the conditional (Firing -> Pending) so it
-            // re-decides on the next quote; the account is provably flat, so it is clear again.
+            // Flat and reachable, nothing resting. Before releasing, close the gh#622 gap: "nothing rests + flat"
+            // cannot by itself tell a fire that NEVER PLACED (a timeout that did not land -- the common case, where
+            // re-arming is correct) from one that PLACED, FILLED and already ROUND-TRIPPED (its bracket or the
+            // auto-flatten closed the position). Both look identical through the resting and position reads, so
+            // releasing the second one re-arms a one-shot whose entry already completed -- and because HasFired is a
+            // LEVEL test rather than an edge test, the very next quote past the trigger fires it again. That is an
+            // unintended second autonomous entry.
             //
-            // RESIDUAL (gh#622): "nothing rests + flat" cannot tell a fire that NEVER PLACED (a timeout that did not
-            // land -- the common case, where re-arming to Pending is correct) from one that PLACED, FILLED, and already
-            // ROUND-TRIPPED (its bracket or auto-flatten closed the position). Both look identical here, so this can
-            // re-arm a one-shot whose entry already completed -- an unintended second autonomous entry. It is NOT a
-            // safety-limit breach (the account is provably flat at release, so it never fires over a live position, and
-            // the re-fire re-runs the full gate) and the operator can cancel a re-armed Pending; it is an intent gap.
-            // Distinguishing the two needs a FILL-LEVEL reconcile (was there ever a fill under this customTag?) --
-            // ADR-0013's deferred fill-level reconcile, the fire-side sibling of gh#619's adopt-a-filled-take. Parity
-            // with the take's release-to-Staged (inert) is the operator's confirmed choice (2026-08-03) UNTIL the
-            // fill-level reconcile lands and can disambiguate the round-tripped case; gh#622 tracks that.
+            // Fill history is the only thing that separates them, so ask (gh#631).
+            TaggedFillEvidence? fill = await fills.FindFillAsync(
+                conditional.AccountId, id.ToString(), conditional.CreatedAt, cancellationToken);
+            if (fill is null)
+            {
+                return Results.NotFound(); // account not found / not owned (R-20)
+            }
+
+            if (fill.VetoesRelease)
+            {
+                // The fire DID reach the market and execute. Resolve it as Fired rather than re-arming, and journal
+                // the entry that actually happened so the trade is not lost from the record. No StopPlan and no
+                // adoption of a live position: we only reach this branch on a provably FLAT account, so this fill has
+                // already round-tripped -- there is nothing left to protect.
+                Account? filledAccount = await database.Accounts.FirstOrDefaultAsync(
+                    candidate => candidate.Id == conditional.AccountId, cancellationToken);
+                if (filledAccount is null)
+                {
+                    return Results.NotFound();
+                }
+
+                SendOrderRequest executed = new(
+                    conditional.Symbol ?? conditional.Instrument, conditional.TickSize, conditional.PointValue,
+                    conditional.Side, conditional.Size, conditional.EntryPrice, conditional.WorkingStopPrice,
+                    conditional.SafetyStopPrice, conditional.ReferencePrice, conditional.Type, conditional.TakeProfitPrice);
+                Order executedRow = NewOrderRow(
+                    currentUser, filledAccount, executed, conditional.Instrument, OrderStatus.Filled,
+                    (int)fill.FilledSize, OrderEntryMethod.Conditional);
+                executedRow.VenueOrderKey = fill.VenueOrderKey;
+                executedRow.PlacedAt = DateTimeOffset.UtcNow;
+                database.Orders.Add(executedRow);
+
+                conditional.Status = ConditionalStatus.Fired;
+                conditional.FiredOrderId = executedRow.Id;
+                await database.SaveChangesAsync(cancellationToken);
+
+                loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogWarning(
+                    "Reconciled stranded fire {ConditionalId} on account {AccountId}: nothing rests and the account is "
+                    + "flat, but venue fill history shows this tag FILLED {FilledSize} -- the entry already executed and "
+                    + "round-tripped. The conditional is resolved Fired (NOT re-armed) and the entry is journaled as "
+                    + "order {OrderId} (gh#631).",
+                    conditional.Id, conditional.AccountId, fill.FilledSize, executedRow.Id);
+                return Results.Ok(new
+                {
+                    conditionalId = conditional.Id,
+                    orderId = executedRow.Id,
+                    status = conditional.Status.ToString(),
+                    adopted = true,
+                    filled = true,
+                    venueOrderKey = executedRow.VenueOrderKey,
+                });
+            }
+
+            if (fill.Status == TaggedFillStatus.Unavailable)
+            {
+                // We could ask, and the asking failed. "We could not tell" is never "it did not fill" -- releasing on
+                // it would re-arm on a guess. Leave the conditional Firing for the operator, consistent with how both
+                // reads above treat an unreachable venue.
+                loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
+                    "Reconcile of stranded fire {ConditionalId} on account {AccountId} found nothing resting and a flat "
+                    + "account, but the venue's fill history could not be read -- the conditional is left Firing rather "
+                    + "than re-armed on an unknown (gh#631).",
+                    conditional.Id, conditional.AccountId);
+                return Results.Conflict(new
+                {
+                    error = "Nothing rests under this conditional's tag and the account is flat, but the venue's fill "
+                        + "history could not be read, so it cannot be confirmed that the fire never executed. Retry when "
+                        + "the venue is reachable.",
+                });
+            }
+
+            // Either the venue positively reports no fill under this tag, or it has no fill history to consult
+            // (TaggedFillStatus.Unsupported). Neither adds a reason to hold the row, so release exactly as before
+            // this read existed -- the account is provably flat, so the release never happens over a live position and
+            // any re-fire re-runs the full gate.
             conditional.Status = ConditionalStatus.Pending;
             await database.SaveChangesAsync(cancellationToken);
             loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogInformation(
