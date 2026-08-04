@@ -136,6 +136,12 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
   eventually-consistent state flag** — that the survivor is still `Active`, inside its window, un-dispositioned and
   un-drifted; a survivor that expired or drifted while the process was down is **refused, never silently armed**, and
   a successful arm stamps `Order.SuggestionId` but **transmits nothing** (sending stays the separate, gated endpoint).
+  **The drift writer completes the lifecycle (gh#546):** the `Active → Stale` transition named in the *no-risk state*
+  principle now has its own writer — a third `market.quote` consumer that marks a drifted suggestion `Stale` in steady
+  state, forward-only and guarded exactly like the expire sweep. Recovery needs no special path for it: a survivor that
+  drifted while the process was down is caught **synchronously** by the take-time re-check above, and re-marked `Stale`
+  by the consumer on the next quote — eventually consistent, never a chase, and *cannot-measure ⇒ no transition* keeps
+  a missing quote from fabricating one.
   *Still open:* **restart-triggered venue reconcile** pairs with the
   settlement pass (gh#193) and the connection monitor (gh#209); **fill**-level reconcile needs the account-event
   seam (gh#219); and the **cross-user-isolation-through-restart** proof (suggestions / orders / positions /
