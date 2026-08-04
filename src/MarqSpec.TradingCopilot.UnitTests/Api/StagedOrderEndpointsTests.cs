@@ -1251,6 +1251,79 @@ public class StagedOrderEndpointsTests
         only.Id.Should().Be(preExistingId, "the pre-existing disposition stands; the take adds none");
     }
 
+    [Theory]
+    [MemberData(nameof(DispositionSaveFaults))]
+    public async Task Take_ShouldStandAndSkipTheDisposition_WhenTheDispositionSaveFaults(string label, Exception fault)
+    {
+        // THE recovery path for the concurrent-pass race, and until now unreachable by any test (PR #636 review). The
+        // already-disposed case short-circuits on the pre-check and never reaches SaveChangesAsync, and EF InMemory
+        // enforces no unique index, so no test can lose a real race. Faulting the disposition save directly is what
+        // exercises the catch.
+        //
+        // Both shapes matter. A DbUpdateException is the unique-index reject the design expects. Anything else -- a
+        // cancellation, a provider-level fault -- is the one the narrower catch let escape: the order is already
+        // durably Working, so surfacing it would report a FAILED take for an order that is live at the venue.
+        _ = label;
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await LinkStagedToSuggestionAsync(orderId);
+
+        await using FaultingDispositionSaveDbContext context = new(
+            new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
+            new FixedUser(_operator),
+            fault);
+
+        IResult result = await OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK,
+            "the order is durably Working before the journal write; a journal failure must never report a failed take");
+        context.DispositionSaveAttempted.Should().BeTrue("the test is vacuous unless the faulting save was actually reached");
+        context.ChangeTracker.Entries<SuggestionDisposition>().Should().BeEmpty(
+            "the catch clears the tracker, so the rejected row is detached rather than left pending for a later save");
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.SingleAsync(order => order.Id == orderId)).Status.Should().Be(
+            OrderStatus.Working, "the venue send is authoritative; a journal failure must not roll the take back");
+        (await reload.SuggestionDispositions.AnyAsync()).Should().BeFalse("the rejected disposition is skipped, not retried");
+    }
+
+    public static TheoryData<string, Exception> DispositionSaveFaults() => new()
+    {
+        // The expected shape: the one-per-suggestion unique index rejecting the losing insert.
+        { "unique-index reject", new DbUpdateException("duplicate key value violates unique constraint (test)") },
+
+        // The shapes the DbUpdateException-only catch let escape.
+        { "cancellation", new TaskCanceledException("the request was cancelled mid-journal (test)") },
+        { "provider fault", new InvalidOperationException("a transient provider fault (test)") },
+    };
+
+    /// <summary>
+    /// Faults the <b>disposition</b> save specifically — the only one whose tracker carries an added
+    /// <see cref="SuggestionDisposition"/>. Every earlier save (notably the order's Working flip) commits normally, so
+    /// the order really is durable when the journal write fails, which is the precondition the recovery path rests on.
+    /// </summary>
+    private sealed class FaultingDispositionSaveDbContext(
+        DbContextOptions<TradingCopilotDbContext> options, ICurrentUser currentUser, Exception fault)
+        : TradingCopilotDbContext(options, currentUser)
+    {
+        /// <summary>Whether the faulting save was actually reached — asserted, so the case cannot pass vacuously.</summary>
+        public bool DispositionSaveAttempted { get; private set; }
+
+        public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            if (ChangeTracker.Entries<SuggestionDisposition>().Any(entry => entry.State == EntityState.Added))
+            {
+                DispositionSaveAttempted = true;
+                throw fault;
+            }
+
+            return base.SaveChangesAsync(cancellationToken);
+        }
+    }
+
     [Fact]
     public async Task Take_ShouldStillReachWorking_AndWriteNoDisposition_WhenTheArmingSuggestionIsMissing()
     {

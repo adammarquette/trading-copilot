@@ -2189,9 +2189,18 @@ public static class OrderEndpoints
     /// take is <b>not</b> serialized against — <c>PassAsync</c> takes no account lock — so a concurrent pass on the same
     /// suggestion can commit between the pre-check below and this insert. Were the disposition part of the order's
     /// transaction, that race would roll back a take that is LIVE at the venue (the exact hazard gh#455 names). Because
-    /// it is a separate save over an already-durable order, it cannot: a rejected insert is caught and swallowed — the
-    /// take stands and the one-per-suggestion journal holds, and a missing deviation record is the recoverable gap the
-    /// design accepts where a rolled-back live take is not. The pre-check keeps the common already-disposed case clean
+    /// it is a separate save over an already-durable order, it cannot: a rejected insert is caught and swallowed and the
+    /// take stands.
+    /// <para>
+    /// <b>Be exact about what that costs, because it is not merely a missing record</b> (PR #636 review). When a
+    /// concurrent pass wins, the suggestion is left permanently journaled <see cref="SuggestionDispositionKind.Passed"/>
+    /// — a <b>wrong</b> disposition, with a live taken order sitting behind it — and R-9's taken-vs-suggested history is
+    /// incorrect for that suggestion until someone corrects it. The order is never at risk; the journal is. That trade
+    /// is still the right one (a wrong journal row beats a rolled-back live take), but it is a real defect to be
+    /// surfaced, not an absence. gh#614's Postgres-tier race proof should therefore assert on the <i>resulting
+    /// disposition content</i> being wrong, not merely that the take was not aborted.
+    /// </para>
+    /// The pre-check keeps the common already-disposed case clean
     /// (no exception); the catch covers the race. A missing suggestion (hard-deleted provenance) skips rather than
     /// throws. <paramref name="submittedSize"/> is the operator-armed size, captured by the caller BEFORE the gate's
     /// approved quantity overwrites <see cref="Order.Size"/>, so a gate reduction is never misread as an operator size
@@ -2251,18 +2260,39 @@ public static class OrderEndpoints
             // Lost the insert race with a concurrent, non-serialized disposition writer: a pass on this suggestion
             // takes no account lock, so it can commit between the pre-check above and this insert, and the unique
             // IX_SuggestionDispositions_SuggestionId rejects this second row. The order is ALREADY durably Working
-            // (its own save committed before this method was called), so this NEVER fails the take — the
-            // one-per-suggestion journal holds and the missing deviation record is the recoverable gap the design
-            // accepts over a rolled-back live take (gh#455/gh#549). ForTake cannot emit a CHECK-violating row (its
-            // Kind / Deviations / snapshot are internally consistent), so the unique index is the only expected reject;
-            // any other DbUpdateException here is likewise a journal-only failure over a durable order and must not
-            // surface. Clear the tracker so the rejected row is detached.
+            // (its own save committed before this method was called), so this NEVER fails the take. ForTake cannot
+            // emit a CHECK-violating row (its Kind / Deviations / snapshot are internally consistent), so the unique
+            // index is the only expected reject. Clear the tracker so the rejected row is detached.
+            //
+            // What survives is a WRONG journal row, not a gap: the winner's Passed disposition now describes a
+            // suggestion with a live taken order behind it (see the remarks). Logged at Warning with the suggestion
+            // id so it is findable, because nothing downstream will notice on its own.
             database.ChangeTracker.Clear();
             logger.LogWarning(
                 exception,
                 "The take disposition for suggestion {SuggestionId} (order {OrderId}) was rejected at save — most "
-                + "likely a concurrent pass on the same suggestion. The take stands (the order is durably Working); "
-                + "the disposition is skipped (gh#549).",
+                + "likely a concurrent pass on the same suggestion, whose disposition now stands and MISDESCRIBES a "
+                + "suggestion that was in fact taken. The take itself stands (the order is durably Working); the "
+                + "take's disposition is skipped (gh#549).",
+                suggestionId, order.Id);
+        }
+        catch (Exception exception)
+        {
+            // EVERY failure of this save is journal-only, so none of them may resurface (PR #636 review). By the time
+            // this method runs the order is durably Working; the caller wraps it in no further try/catch, so letting
+            // anything out would report "take failed" for an order that is in fact live at the venue — the
+            // state-mismatch this codebase treats as dangerous on the maybe-live send path just above.
+            //
+            // Deliberately includes OperationCanceledException: a caller cancelling mid-journal does not un-place the
+            // order, so the take has still succeeded and must be reported as such. Narrowing this back to
+            // DbUpdateException alone reopens exactly that hole — proven by the cancellation and provider-fault cases
+            // in Take_ShouldStandAndSkipTheDisposition_WhenTheDispositionSaveFaults, which go red without this catch.
+            database.ChangeTracker.Clear();
+            logger.LogWarning(
+                exception,
+                "The take disposition for suggestion {SuggestionId} (order {OrderId}) could not be journaled. The take "
+                + "stands (the order is durably Working) and the failure is not surfaced to the operator; the "
+                + "suggestion is left without a disposition (gh#549).",
                 suggestionId, order.Id);
         }
     }
