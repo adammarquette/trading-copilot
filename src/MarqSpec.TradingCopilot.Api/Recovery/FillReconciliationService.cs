@@ -107,6 +107,24 @@ public sealed class FillReconciliationService
             TaggedFillEvidence evidence = await venue.FindFilledOrderByTagAsync(
                 venueAccount.Id, customTag, since, cancellationToken);
 
+            // MORE THAN ONE executed record under this tag means the evidence describes only the earliest, so anything
+            // journaled from it understates the venue (PR #637 review). The veto is unaffected — any match withholds
+            // the row from release — but the operator is the one who has to reconcile the remainder, and reconcile is
+            // a human-in-the-loop endpoint, so say it loudly rather than let the gap stay silent.
+            if (evidence.IsAmbiguous)
+            {
+                _logger.LogWarning(
+                    "Custom tag {CustomTag} on account {AccountId} matches {MatchCount} EXECUTED venue orders, not one "
+                    + "— a prior re-transmit under the same tag round-tripped more than once. The earliest "
+                    + "({VenueOrderKey}, filled {FilledSize}) is what gets journaled and the row is correctly withheld "
+                    + "from release, but the journal understates the venue: reconcile the remainder by hand (gh#631).",
+                    customTag,
+                    accountId,
+                    evidence.MatchCount,
+                    evidence.VenueOrderKey,
+                    evidence.FilledSize);
+            }
+
             // An adapter that answers with an unset status has not actually answered. Coerce to Unsupported rather
             // than Unavailable: an unset enum is OUR bug, not a venue condition, and the caller treats Unavailable
             // as a reason to refuse and strand the row. Failing our own bug closed would strand every reconcile on

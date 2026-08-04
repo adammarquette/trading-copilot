@@ -73,13 +73,27 @@ public enum TaggedFillStatus
 /// </param>
 /// <param name="FilledPrice">The average fill price when the venue reports one. <c>decimal</c> — a price is money.</param>
 /// <param name="VenueOrderKey">The venue's own identifier for the filled order, when it reports one.</param>
+/// <param name="MatchCount">
+/// How many <b>executed</b> venue records carried this tag. Normally 1. A tag is a correlation handle, not a venue
+/// idempotency key, so a re-transmit after a transport fault can leave more than one — in which case the size, price
+/// and key above describe only the earliest, and the journal therefore <b>understates</b> the venue (PR #637 review).
+/// Carried here rather than logged at the adapter so the ambiguity is part of the evidence: the veto is unaffected
+/// (any match vetoes), but a caller that journals from this evidence can say so.
+/// </param>
 public sealed record TaggedFillEvidence(
     TaggedFillStatus Status,
     string CustomTag,
     decimal FilledSize = 0m,
     decimal? FilledPrice = null,
-    string? VenueOrderKey = null)
+    string? VenueOrderKey = null,
+    int MatchCount = 1)
 {
+    /// <summary>
+    /// Whether the venue reported <b>more than one</b> executed record under this tag, so the fill fields describe
+    /// only the earliest of them and the journal is knowingly incomplete.
+    /// </summary>
+    public bool IsAmbiguous => Status == TaggedFillStatus.Filled && MatchCount > 1;
+
     /// <summary>
     /// Whether this evidence <b>vetoes</b> a release or re-arm — true only for a positively reported fill.
     /// </summary>
@@ -94,14 +108,26 @@ public sealed record TaggedFillEvidence(
     /// <param name="filledSize">The executed quantity; must be greater than zero.</param>
     /// <param name="filledPrice">The average fill price, when reported.</param>
     /// <param name="venueOrderKey">The venue's identifier for the order, when reported.</param>
+    /// <param name="matchCount">
+    /// How many executed records carried the tag; 1 unless a re-transmit left several, in which case the values above
+    /// describe the earliest. Must be at least 1 — this factory is only reached when a match was found.
+    /// </param>
     /// <returns>Evidence of a fill.</returns>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="filledSize"/> is not greater than zero.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="filledSize"/> is not greater than zero, or <paramref name="matchCount"/> is less than one.
+    /// </exception>
     public static TaggedFillEvidence Filled(
-        string customTag, decimal filledSize, decimal? filledPrice = null, string? venueOrderKey = null)
+        string customTag,
+        decimal filledSize,
+        decimal? filledPrice = null,
+        string? venueOrderKey = null,
+        int matchCount = 1)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(customTag);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(filledSize, 0m);
-        return new TaggedFillEvidence(TaggedFillStatus.Filled, customTag, filledSize, filledPrice, venueOrderKey);
+        ArgumentOutOfRangeException.ThrowIfLessThan(matchCount, 1);
+        return new TaggedFillEvidence(
+            TaggedFillStatus.Filled, customTag, filledSize, filledPrice, venueOrderKey, matchCount);
     }
 
     /// <summary>The venue was reachable, carries fill history, and reports no fill under this tag.</summary>
