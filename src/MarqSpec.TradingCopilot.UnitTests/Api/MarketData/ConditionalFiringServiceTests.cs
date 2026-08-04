@@ -376,6 +376,57 @@ public class ConditionalFiringServiceTests
     }
 
     [Fact]
+    public async Task ProcessQuote_ShouldRevertToPendingInsideTheAccountLock_WhenTheFireTimeGateRefuses()
+    {
+        // gh#630 (of #622): the gate-refusal revert (Firing -> Pending) must COMMIT INSIDE the account lock, like the
+        // Firing-commit and the Fired paths -- not rely on the outer per-record save that runs AFTER the lock releases.
+        // Otherwise, in the tiny unlock -> outer-save window the row still reads Firing, and a concurrent operator
+        // send / take (whose no-stacking check now counts Firing, gh#589) gets a spurious 409. This observes the
+        // committed status a concurrent reader would see at the instant the lock releases.
+        Guid accountId = await SeedAccountAsync();
+        await AddConditionalAsync(accountId, safetyStop: 5200m); // 100pt = $500/contract vs the $300 MaxDD -> gate refuses
+
+        ConditionalStatus? seenAtUnlock = null;
+        IAccountEntryGuard observing = ObservingGuard(status => seenAtUnlock = status);
+
+        int acted = await Service(guard: observing)
+            .ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, CancellationToken.None);
+
+        acted.Should().Be(0, "a gate-refused fire transmits nothing");
+        seenAtUnlock.Should().Be(
+            ConditionalStatus.Pending,
+            "the revert must commit inside the lock, so a concurrent send never sees a stale Firing and 409s (gh#630)");
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.SingleAsync()).Status.Should().Be(ConditionalStatus.Pending); // durable end state unchanged
+    }
+
+    /// <summary>
+    /// A guard that runs the fire callback and then, still "holding the lock", reads the conditional's COMMITTED status
+    /// from a fresh context -- exactly what a concurrent send / take would see in the unlock -> outer-save window. The
+    /// captured status is <see cref="ConditionalStatus.Firing"/> if the revert was left to the outer save (the gh#630
+    /// bug), and <see cref="ConditionalStatus.Pending"/> once it commits inside the lock (the fix).
+    /// </summary>
+    private IAccountEntryGuard ObservingGuard(Action<ConditionalStatus?> capture)
+    {
+        IAccountEntryGuard guard = A.Fake<IAccountEntryGuard>();
+        A.CallTo(() => guard.TryRunExclusiveAsync<ConditionalFiringService.FiringOutcome>(
+                A<TradingCopilotDbContext>._, A<Guid>._,
+                A<Func<Task<ConditionalFiringService.FiringOutcome>>>._,
+                A<Func<ConditionalFiringService.FiringOutcome>>._, A<CancellationToken>._))
+            .ReturnsLazily(async (TradingCopilotDbContext _, Guid _,
+                Func<Task<ConditionalFiringService.FiringOutcome>> transmit,
+                Func<ConditionalFiringService.FiringOutcome> _, CancellationToken _) =>
+            {
+                ConditionalFiringService.FiringOutcome outcome = await transmit();
+                await using TradingCopilotDbContext reader = Context();
+                ConditionalOrderRecord? seen = await reader.ConditionalOrders.FirstOrDefaultAsync();
+                capture(seen?.Status);
+                return outcome;
+            });
+        return guard;
+    }
+
+    [Fact]
     public async Task ProcessQuote_ShouldJournalAnEarlierFire_WhenALaterConditionalOnAnotherAccountThrows()
     {
         // gh#532 — the P1, updated for gh#589. Two pending conditionals cross on the same quote, on DIFFERENT accounts

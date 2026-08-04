@@ -446,16 +446,19 @@ public sealed class ConditionalFiringService
 
         // A clean gate refusal -- the venue was never touched (every SendAsync refusal returns before PlaceOrderAsync),
         // so nothing rests: clear the may-be-live signal, revert the durable intent to Pending, audit the decision, and
-        // re-decide on the next quote. Resolved (never Unchanged) so the outer save commits the revert.
+        // re-decide on the next quote.
         //
-        // RESIDUAL (gh#622): this revert is committed by the OUTER per-record save, AFTER the account lock releases --
-        // not inside the lock like the take path. Now that the no-stacking check counts Firing, in the tiny
-        // unlock->outer-save window the row still reads Firing, so a concurrent operator send / take can get a transient
-        // spurious 409, and if the outer save fails the row stays Firing until a reconcile. It only ever OVER-blocks
-        // (fail-safe) -- never a double-transmit or a released-over-live order; moving the save inside the lock is gh#622.
+        // Commit the revert (Firing -> Pending) + its decision WHILE THE ACCOUNT LOCK IS STILL HELD (gh#630, of #622) --
+        // exactly like the Firing-commit and the Fired paths above, and the take path. The Firing intent committed
+        // before the send and the no-stacking check counts Firing (gh#589); were this revert left to the OUTER
+        // per-record save (which runs only AFTER the lock releases), a concurrent operator send / take that acquired
+        // the lock in the unlock->outer-save window would still read Firing and get a spurious 409. It is fail-safe
+        // either way -- it only ever OVER-blocks, never a double-transmit -- but committing inside the lock closes the
+        // window; the outer per-record save then finds nothing left to write for this record.
         onMayBeLiveAtVenue(false);
         record.Status = ConditionalStatus.Pending;
         OrderEndpoints.PersistDecision(database, owner, record.AccountId, orderId: null, result.Decision);
+        await database.SaveChangesAsync(cancellationToken);
         _logger.LogWarning(
             "Conditional order {Id} triggered but the fire-time gate refused ({Reason}); reverted to pending.",
             record.Id, result.Reason);
