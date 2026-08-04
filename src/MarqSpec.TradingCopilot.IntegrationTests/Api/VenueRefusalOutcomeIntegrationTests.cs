@@ -257,6 +257,8 @@ public class VenueRefusalOutcomeIntegrationTests : IClassFixture<StubbedVenuePos
             order.VenueOrderKey.Should().Be(
                 AdoptedVenueKey, "the adopted venue handle survives — the release wrote nothing over it");
         });
+
+        VenueFactory.ClearPlaceOrderFaults();
     }
 
     // =============================================================================================================
@@ -488,6 +490,8 @@ public class VenueRefusalOutcomeIntegrationTests : IClassFixture<StubbedVenuePos
             (await db.ConditionalOrders.IgnoreQueryFilters().SingleAsync(c => c.Id == conditionalId))
                 .Status.Should().Be(ConditionalStatus.Pending, "the refused conditional stays re-decidable throughout");
         });
+
+        VenueFactory.ClearPlaceOrderFaults();
     }
 
     // =============================================================================================================
