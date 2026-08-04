@@ -56,7 +56,11 @@ Constraints:
 - **Two-tier daily risk control.** A **personal daily-drawdown governor** sits **inside** the hard prop daily limit.
   As its headroom depletes it **throttles / filters suggestions** (R-4) at *suggestion-time* — fewer, smaller,
   higher-conviction, then suppress — so risk is managed **proactively** before the execution gate blocks orders
-  **reactively**.
+  **reactively**. *The proactive read this needs is separate from the gate but never a second definition:* the daily
+  arithmetic is one pure `DailyHeadroom` the gate consumes (extracted gh#627), and the **read surface**
+  (`GET …/risk/headroom`, gh#587) feeds it the day's realized loss **recomputed from stored closed trades** — no
+  venue round-trip, no persisted projection, so it reads correctly (and, until the R-8/R-9 journal writes trades,
+  identically to the gate's still-deferred day-realized input) without a send.
 - **Overriding controls.** The **kill switch** instantly disables outbound orders and cancels working orders, and —
   per a **user preference** (`kill-switch mode`) — **flattens all open positions by default** (the same
   **native-first flatten sequence** as auto-flatten, gated by a **hold-to-confirm**) or, in **halt-only** mode,
