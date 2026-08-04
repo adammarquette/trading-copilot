@@ -169,6 +169,7 @@ for validating heading-order/index against the trail in CI rather than by hand �
 | 2026-08-02 | [conditional firing commits per record (gh#532)](#update-2026-08-02--conditional-firing-commits-per-record-gh532) |
 | 2026-08-02 | [the direct-send path serializes per account against send-vs-send stacking (gh#531)](#update-2026-08-02--the-direct-send-path-serializes-per-account-against-send-vs-send-stacking-gh531) |
 | 2026-08-02 | [the transmit→journal window closes with a durable pre-transmit intent (gh#577)](#update-2026-08-02--the-transmitjournal-window-closes-with-a-durable-pre-transmit-intent-gh577) |
+| 2026-08-03 | [a stranded reconcile consults fill history, so a round-tripped entry is never re-armed (gh#631)](#update-2026-08-03--a-stranded-reconcile-consults-fill-history-so-a-round-tripped-entry-is-never-re-armed-gh631) |
 | 2026-08-03 | [take + conditional-fire serialize per account; Taking is counted and made recoverable (gh#589)](#update-2026-08-03--take--conditional-fire-serialize-per-account-taking-is-counted-and-made-recoverable-gh589) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
@@ -1075,6 +1076,46 @@ the loop, resisting *auto-acting on rehydrated state*), and the real-Postgres co
 generalized (generic over its result, taking the caller's `DbContext`) so the fire watcher serializes on its own
 per-owner context with lock + work on one backend. The unit tier proves the deterministic no-stacking, fault-leaves-
 `Firing`/`Taking`, and reconcile (adopt / release / refuse) logic on both paths.
+
+## Update (2026-08-03) — a stranded reconcile consults fill history, so a round-tripped entry is never re-armed (gh#631)
+
+The gh#589 reconcile resolves a stranded `Taking` / `Firing` row against venue truth, and until now that truth was
+two reads: *what rests* and *what positions are open*. Neither can see the one outcome that matters most here. A
+fire that **placed, filled and round-tripped** — its bracket or the auto-flatten closed the position — leaves
+nothing resting and a flat account, which is **byte-identical** to a fire that never reached the market at all.
+
+That ambiguity was recorded as the residual on the gh#589 update above, and it is not benign. Releasing the second
+case is correct; releasing the first re-arms a **one-shot** conditional whose entry already completed. Because
+`ConditionalOrder.HasFired` is a **level test rather than an edge test**, the very next quote still past the trigger
+fires it again — an unintended second autonomous entry, with no operator in the loop.
+
+**The read.** `IOrderExecutor.FindFilledOrderByTagAsync` asks the venue whether an order stamped with a given
+`customTag` ever filled; `FillReconciliationService` wraps it with the same credential-scoping and R-20 filtering as
+its resting-orders and positions siblings. The ProjectX adapter answers from the gateway's **order history** rather
+than its open-orders book, because a filled order has by definition left that book.
+
+**The discipline that makes it safe — a veto, never an authorisation.** A reported fill may only *stop* a release
+the reconcile would otherwise perform. No other answer may *start* one it would not. This asymmetry is the whole
+design, and it exists because `NoFillFound` is a **negative existence claim over an external search index**: a
+venue that answers "no rows" when the truth is "not yet indexed", "indexed without the tag echoed on the terminal
+record", or "silently truncated" is indistinguishable from one genuinely reporting no fill. Used as a veto that
+uncertainty costs at worst a missed resolution and the caller keeps the behaviour it already had. Used as an
+authorisation, the same uncertainty places a **second live order**. An adversarial review of three candidate
+designs killed all three on precisely that point before this one was written.
+
+So the outcomes are four-valued and deliberately asymmetric: **Filled** vetoes the release; **Unavailable** refuses
+and leaves the row stranded for the operator, exactly as an unreachable venue already does; **NoFillFound** and
+**Unsupported** change nothing, so a venue with no fill-history capability is never made permanently
+unreconcilable.
+
+**Both siblings, different stakes.** On the conditional the veto resolves the row `Fired` and journals the entry
+that executed — this is the safety fix. On the take the released state (`Staged`) is inert, so nothing
+re-transmits; there the veto stops a real trade being **silently discarded from the journal** (R-8/R-9), which is a
+memory defect rather than a safety one.
+
+**Still deferred:** adopting a fill whose position is **still open**. Both reconcile paths continue to refuse and
+leave the row loud in that case — the operator resolves the position first, and it is protected by its native
+bracket and the auto-flatten meanwhile.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the

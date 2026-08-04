@@ -338,6 +338,13 @@ builder.Services.AddScoped<PositionReconciliationService>();
 // account, including the attached protective bracket and its SIZE. Read-only -- the gate is untouched.
 builder.Services.AddScoped<WorkingOrderReconciliationService>();
 
+// The FILL-HISTORY sibling of the two reads above (gh#631). Neither of them can see an order that placed, filled
+// and round-tripped -- a fill is not a working order, and its bracket leaves the account flat again -- so through
+// those two alone that outcome is indistinguishable from an attempt that never reached the market. Only this read
+// separates them, which is what stops a stranded one-shot conditional being re-armed after it already executed.
+// Scoped like its siblings: it takes the request-scoped DbContext, so the R-20 filter applies.
+builder.Services.AddScoped<FillReconciliationService>();
+
 // Auto-flatten (R-13, gh#185, ADR-0013): the PRIMARY scheduler that closes open positions at each instrument's
 // per-market deadline on the DST-aware market clock. On by default and cannot be silently disabled -- so it
 // ALWAYS runs; a market is turned off per-instrument in the Flatten config, not by omitting the host. The
