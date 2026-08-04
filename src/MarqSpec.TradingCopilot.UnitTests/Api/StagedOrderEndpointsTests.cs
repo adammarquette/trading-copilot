@@ -722,9 +722,10 @@ public class StagedOrderEndpointsTests
     public async Task ReconcileFiringConditional_ShouldResolveFired_WhenTheVenueReportsOnlyAPartialFill()
     {
         // A partial fill is still a fill: the order reached the market and entered a position, so re-arming would
-        // still be a second entry. The veto must not be conditional on the fill being complete.
+        // still be a second entry. The veto must not be conditional on the fill being complete -- so this asks for
+        // THREE and is filled ONE, which is a genuine partial rather than a full fill dressed up as one.
         Guid accountId = await SeedAccountAsync();
-        Guid conditionalId = await SeedFiringConditionalAsync(accountId);
+        Guid conditionalId = await SeedFiringConditionalAsync(accountId, size: 3);
 
         A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
             .Returns<IReadOnlyList<WorkingOrder>>([]);
@@ -738,8 +739,11 @@ public class StagedOrderEndpointsTests
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         await using TradingCopilotDbContext reload = Context();
-        (await reload.ConditionalOrders.FirstAsync(c => c.Id == conditionalId)).Status.Should().Be(
-            ConditionalStatus.Fired, "any executed quantity means the fire entered the market");
+        ConditionalOrderRecord partial = await reload.ConditionalOrders.FirstAsync(c => c.Id == conditionalId);
+        partial.Status.Should().Be(ConditionalStatus.Fired, "any executed quantity means the fire entered the market");
+        Order partialRow = await reload.Orders.FirstAsync(o => o.Id == partial.FiredOrderId!.Value);
+        partialRow.Size.Should().Be(
+            1, "the journal records what actually executed (1), not what was asked for (3)");
     }
 
     [Fact]
@@ -853,7 +857,7 @@ public class StagedOrderEndpointsTests
             OrderStatus.Staged, "the no-stacking check counts the Firing conditional and refuses before the claim");
     }
 
-    private async Task<Guid> SeedFiringConditionalAsync(Guid accountId, ConditionalStatus status = ConditionalStatus.Firing)
+    private async Task<Guid> SeedFiringConditionalAsync(Guid accountId, ConditionalStatus status = ConditionalStatus.Firing, int size = 1)
     {
         // A conditional in a chosen lifecycle state (default Firing -- the stranded mid-fire). Minimal but valid: the
         // no-stacking check reads AccountId + Status; the reconcile adopt reads the trade fields to journal the Order.
@@ -867,7 +871,7 @@ public class StagedOrderEndpointsTests
             Instrument = "CON.F.US.MES.U26",
             Symbol = "MES",
             Side = OrderSide.Buy,
-            Size = 1,
+            Size = size,
             Type = OrderType.Market,
             EntryPrice = 5300m,
             WorkingStopPrice = 5295m,
