@@ -476,6 +476,14 @@ public class VenueRefusalOutcomeIntegrationTests : IClassFixture<StubbedVenuePos
 
         if (peerResponse.StatusCode == HttpStatusCode.Conflict)
         {
+            // Tie THIS 409 to the documented lock-timing window specifically — the no-stacking check's own reason
+            // (OrderEndpoints.cs), not just any 409 — so an unrelated conflict (e.g. a risk-gate rejection racing
+            // the same request) cannot be silently waved through as "the known gh#622 residual."
+            (await peerResponse.Content.ReadAsStringAsync()).Should().Contain(
+                "conditional mid-fire",
+                "the tolerated over-block must be the no-stacking check reading the still-Firing conditional "
+                + "(gh#589/gh#622), not an unrelated conflict that happens to also 409");
+
             // Settled state: nothing is live, nothing is stranded, and the account is takeable again — the revert
             // really did commit, rather than leaving the conditional Firing and the account blocked.
             using HttpResponseMessage settled = await client.PostAsync($"/orders/{stagedOrderId}/take", null);
