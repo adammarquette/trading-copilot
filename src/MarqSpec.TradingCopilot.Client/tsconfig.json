@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+
+    // Vite owns emit; tsc runs only as the type gate in `npm run build`.
+    "noEmit": true,
+
+    // The non-negotiable half. `strict` is the point of the "+ TypeScript" in this scaffold -- turning
+    // it off later would silently un-type everything built on top.
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUncheckedSideEffectImports": true,
+
+    // No ambient @types are pulled in automatically: this is a browser bundle, and an accidental
+    // Node global that typechecks here would fail at runtime. vite/client is referenced explicitly
+    // from src/vite-env.d.ts.
+    "types": []
+  },
+  "include": ["src", "vite.config.ts"]
+}

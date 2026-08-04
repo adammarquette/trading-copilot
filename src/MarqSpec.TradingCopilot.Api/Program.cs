@@ -456,6 +456,16 @@ app.Services.GetRequiredService<FlattenScheduleReporter>().Report(DateTimeOffset
 
 await StartupTasks.MigrateAndBootstrapAsync(app);
 
+// The built SPA, served from this origin (ADR-0020, gh#646). Deliberately BEFORE authentication: a browser cannot
+// present a token until it has loaded the page that collects one, so the shell must be reachable anonymously. That
+// is not a hole in R-18 -- the shell is static markup and script carrying no data and no action, and every API
+// route it goes on to call still requires a token. It is recorded by name in the R-18 authorization sweep's
+// allow-list so it stays a decision on the record rather than an omission.
+//
+// Serving static files when no bundle has been built is a no-op, so a pure-backend `dotnet run` is unaffected.
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapAuthEndpoints();
@@ -496,6 +506,17 @@ app.MapGet("/ready", async (TradingCopilotDbContext database, CancellationToken 
         return Results.Json(new { status = "not-ready", reason = "database unreachable" }, statusCode: 503);
     }
 });
+
+// The SPA fallback (ADR-0020): a client-side route hard-refreshed -- /suggestions, say -- must return the shell
+// rather than 404, because the router that understands that path lives in the bundle. Mapped LAST so it can never
+// shadow an API route.
+//
+// Mapped UNCONDITIONALLY, not only when a bundle is present. Gating it on the file existing was the first instinct
+// and it is the wrong one: the test host has no built bundle, so the route would vanish from the route table the
+// R-18 authorization sweep reads, and production would carry an anonymous endpoint the sweep had never seen. A
+// guard that inspects a different surface than the one that ships is not a guard. With no bundle the fallback
+// simply 404s like any missing file, so an API-only `dotnet run` behaves exactly as before.
+app.MapFallbackToFile("index.html").AllowAnonymous();
 
 app.Run();
 
