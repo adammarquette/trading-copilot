@@ -149,9 +149,18 @@ public static class SuggestionEndpoints
             .AsNoTracking()
             .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
 
-        return suggestion is null
-            ? Results.NotFound()
-            : Results.Ok(Project(suggestion, instrumentSpecs));
+        if (suggestion is null)
+        {
+            return Results.NotFound();
+        }
+
+        // Surface the operator's disposition and its deviations on the get-by-id read (gh#549, R-8): at most one exists
+        // (the one-per-suggestion rule), and R-20 auto-scopes it to the caller. The list read omits it deliberately.
+        SuggestionDisposition? disposition = await database.SuggestionDispositions
+            .AsNoTracking()
+            .FirstOrDefaultAsync(candidate => candidate.SuggestionId == id, cancellationToken);
+
+        return Results.Ok(Project(suggestion, instrumentSpecs, disposition));
     }
 
     // Every defined pass reason OR'd together — the mask an incoming [Flags] value must fit inside.
@@ -474,7 +483,8 @@ public static class SuggestionEndpoints
 
     // Money-values the geometry where the instrument has a configured spec (gh#541). An unparseable or unconfigured
     // symbol simply omits the dollar figures -- a display concern degrades, it does not fail the read.
-    private static SuggestionResponse Project(Suggestion suggestion, IInstrumentSpecSource instrumentSpecs)
+    private static SuggestionResponse Project(
+        Suggestion suggestion, IInstrumentSpecSource instrumentSpecs, SuggestionDisposition? disposition = null)
     {
         InstrumentContractSpec? spec = null;
         if (InstrumentId.TryParse(suggestion.Instrument, out InstrumentId instrument))
@@ -482,6 +492,6 @@ public static class SuggestionEndpoints
             instrumentSpecs.TryResolve(instrument, out spec);
         }
 
-        return SuggestionResponse.From(suggestion, spec);
+        return SuggestionResponse.From(suggestion, spec, disposition);
     }
 }

@@ -437,6 +437,80 @@ public class SuggestionEndpointsTests
         (await DispositionCountAsync(id)).Should().Be(1, "the second pass must not add or overwrite a row");
     }
 
+    // ---- take (part B): the disposition surfaces on the read, and blocks a later pass (gh#549) ----
+
+    [Fact]
+    public async Task GetAsync_ShouldSurfaceTheDispositionAndItsDeviations_WhenTheSuggestionWasTakenModified()
+    {
+        // gh#549: the get-by-id read carries the disposition so the client can render the taken-vs-suggested deltas.
+        // The suggested numbers stay on the suggestion; the submitted snapshot is on the disposition -- together they
+        // are the wireframe's "was 99 -> 98.5".
+        Guid id = await SeedAsync(stop: 99m); // the AI suggested a 99 stop
+        await SeedDispositionAsync(
+            id, SuggestionDispositionKind.Modified, SuggestionDeviation.Stop,
+            takenEntry: 100m, takenStop: 98.5m, takenTarget: 103m, takenSize: 2); // the operator submitted 98.5
+
+        SuggestionResponse item = ItemOf(await GetAsync(id));
+
+        item.StopPrice.Should().Be(99m, "the suggested geometry is unchanged by the disposition");
+        item.Disposition.Should().NotBeNull();
+        item.Disposition!.Kind.Should().Be(SuggestionDispositionKind.Modified);
+        item.Disposition.Deviations.Should().Be(SuggestionDeviation.Stop);
+        item.Disposition.TakenStopPrice.Should().Be(98.5m, "the submitted stop is what the operator actually took");
+        item.Disposition.TakenEntryPrice.Should().Be(100m);
+        item.Disposition.TakenSize.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task GetAsync_ShouldCarryNoDisposition_WhenTheOperatorHasNotActed()
+    {
+        Guid id = await SeedAsync();
+
+        ItemOf(await GetAsync(id)).Disposition.Should().BeNull("no disposition has been recorded yet");
+    }
+
+    [Fact]
+    public async Task PassAsync_ShouldConflict_WhenTheSuggestionWasAlreadyTaken()
+    {
+        // The one-disposition-per-suggestion rule holds in BOTH directions (gh#549): the take path refuses arming an
+        // already-passed suggestion (part A), and -- asserted here -- the pass path refuses a suggestion already taken.
+        Guid id = await SeedAsync();
+        await SeedDispositionAsync(
+            id, SuggestionDispositionKind.Taken, SuggestionDeviation.None,
+            takenEntry: 100m, takenStop: 99m, takenTarget: 103m, takenSize: 2);
+
+        StatusOf(await PassAsync(id, new SuggestionPassRequest(SuggestionPassReason.Sizing)))
+            .Should().Be(StatusCodes.Status409Conflict);
+        (await DispositionCountAsync(id)).Should().Be(1, "a taken suggestion cannot then be passed");
+    }
+
+    private async Task SeedDispositionAsync(
+        Guid suggestionId,
+        SuggestionDispositionKind kind,
+        SuggestionDeviation deviations,
+        decimal takenEntry,
+        decimal takenStop,
+        decimal? takenTarget,
+        int takenSize)
+    {
+        await using TradingCopilotDbContext context = Context();
+        context.SuggestionDispositions.Add(new SuggestionDisposition
+        {
+            Id = Guid.NewGuid(),
+            UserId = _operator,
+            SuggestionId = suggestionId,
+            Kind = kind,
+            Reasons = SuggestionPassReason.None,
+            Deviations = deviations,
+            TakenEntryPrice = takenEntry,
+            TakenStopPrice = takenStop,
+            TakenTargetPrice = takenTarget,
+            TakenSize = takenSize,
+            CreatedAt = _t,
+        });
+        await context.SaveChangesAsync();
+    }
+
     [Theory]
     [InlineData(SuggestionState.Stale)]
     [InlineData(SuggestionState.ExpiredVoid)]

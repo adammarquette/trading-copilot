@@ -566,8 +566,10 @@ public static class OrderEndpoints
                 throw;
             }
 
+            int? armedSizeForDisposition = null;
             if (result.Outcome == ExecutionOutcome.Placed && result.Order is not null)
             {
+                armedSizeForDisposition = order.Size; // operator-armed size, captured BEFORE the gate's approved quantity overwrites it below
                 order.Status = OrderStatus.Working;
                 order.VenueOrderKey = result.Order.VenueOrderId;
                 order.PlacedAt = result.Order.AcceptedAt;
@@ -586,6 +588,15 @@ public static class OrderEndpoints
             // A fault on this final journal AFTER a Placed send leaves the row Taking (never released above) -- the
             // accepted-but-not-journaled dangerous window, resolved via reconcile / rehydration, exactly as intended.
             await database.SaveChangesAsync(cancellationToken);
+
+            // The suggestion disposition (gh#549) is journaled in its OWN save AFTER the order is durably Working above,
+            // so a concurrent pass on the same suggestion (not serialized against this take) can never roll the live
+            // take back -- gh#455. A direct ticket writes none.
+            if (armedSizeForDisposition is { } armedSize)
+            {
+                await RecordTakeDispositionAsync(
+                    database, order, armedSize, loggerFactory.CreateLogger(nameof(OrderEndpoints)), cancellationToken);
+            }
 
             return MapSendResult(result, order.Id);
         }, cancellationToken);
@@ -659,12 +670,20 @@ public static class OrderEndpoints
                 // orphan-guarded by its venue key) and protected (a promotion plan). This is the terminal Taking->Working
                 // write the tracker owns; the venue view carries no timestamp, so PlacedAt is stamped at the reconcile
                 // instant, and Size takes venue truth (what actually rests).
+                int submittedSize = order.Size; // operator-armed size, captured BEFORE venue truth overwrites it below
                 order.Status = OrderStatus.Working;
                 order.VenueOrderKey = resting.VenueOrderKey;
                 order.PlacedAt = DateTimeOffset.UtcNow;
                 order.Size = resting.Size;
                 AddStopPlan(database, currentUser, order, executionOptions.Value.StopPromotionTicks);
                 await database.SaveChangesAsync(cancellationToken);
+
+                // Adopting the live order is the point a stranded suggestion-armed take is finally confirmed placed, so
+                // the disposition is written here too (gh#549) — in its OWN save AFTER the adopt above, so it can never
+                // abort the adopt (gh#455); the pre-check / catch skips it if the take's own send already journaled one
+                // before the strand, or a concurrent pass wrote one.
+                await RecordTakeDispositionAsync(
+                    database, order, submittedSize, loggerFactory.CreateLogger(nameof(OrderEndpoints)), cancellationToken);
 
                 loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogWarning(
                     "Reconciled stranded take {OrderId} on account {AccountId}: the venue order {VenueKey} was live and "
@@ -2282,5 +2301,126 @@ public static class OrderEndpoints
             Advisories = GateAdvisoryJson.Serialize(decision.Advisories),
             DecidedAt = DateTimeOffset.UtcNow,
         });
+    }
+
+    /// <summary>
+    /// Journals the operator's take disposition (gh#549, R-8/R-9) <b>after</b> the order is durably Working: exactly
+    /// one <see cref="SuggestionDisposition"/> — <see cref="SuggestionDispositionKind.Taken"/> when the submitted
+    /// parameters match the suggestion, <see cref="SuggestionDispositionKind.Modified"/> with the recorded deviations
+    /// when they do not. It writes in its <b>own</b> unit of work, so it can <b>never</b> abort the order's transaction.
+    /// A direct ticket (<see cref="Order.SuggestionId"/> is <see langword="null"/>) writes none.
+    /// </summary>
+    /// <remarks>
+    /// <b>Call this only AFTER the order's Working-flip <c>SaveChangesAsync</c> has committed (the issue's DoD; gh#455 —
+    /// a constraint backstops only its transaction's owner).</b> The one-per-suggestion unique index has a writer this
+    /// take is <b>not</b> serialized against — <c>PassAsync</c> takes no account lock — so a concurrent pass on the same
+    /// suggestion can commit between the pre-check below and this insert. Were the disposition part of the order's
+    /// transaction, that race would roll back a take that is LIVE at the venue (the exact hazard gh#455 names). Because
+    /// it is a separate save over an already-durable order, it cannot: a rejected insert is caught and swallowed and the
+    /// take stands.
+    /// <para>
+    /// <b>Be exact about what that costs, because it is not merely a missing record</b> (PR #636 review). When a
+    /// concurrent pass wins, the suggestion is left permanently journaled <see cref="SuggestionDispositionKind.Passed"/>
+    /// — a <b>wrong</b> disposition, with a live taken order sitting behind it — and R-9's taken-vs-suggested history is
+    /// incorrect for that suggestion until someone corrects it. The order is never at risk; the journal is. That trade
+    /// is still the right one (a wrong journal row beats a rolled-back live take), but it is a real defect to be
+    /// surfaced, not an absence. gh#614's Postgres-tier race proof should therefore assert on the <i>resulting
+    /// disposition content</i> being wrong, not merely that the take was not aborted.
+    /// </para>
+    /// The pre-check keeps the common already-disposed case clean
+    /// (no exception); the catch covers the race. A missing suggestion (hard-deleted provenance) skips rather than
+    /// throws. <paramref name="submittedSize"/> is the operator-armed size, captured by the caller BEFORE the gate's
+    /// approved quantity overwrites <see cref="Order.Size"/>, so a gate reduction is never misread as an operator size
+    /// deviation. The comparison itself is exact on the persisted decimals (<see cref="SuggestionDisposition.ForTake"/>).
+    /// </remarks>
+    private static async Task RecordTakeDispositionAsync(
+        TradingCopilotDbContext database,
+        Order order,
+        int submittedSize,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (order.SuggestionId is not { } suggestionId)
+        {
+            return; // a manual / direct-armed ticket has no suggestion to dispose
+        }
+
+        // R-20 auto-scopes this read to the operator; a suggestion that is not theirs is simply not found.
+        Suggestion? suggestion = await database.Suggestions.FirstOrDefaultAsync(
+            candidate => candidate.Id == suggestionId, cancellationToken);
+        if (suggestion is null)
+        {
+            logger.LogWarning(
+                "Order {OrderId} was armed from suggestion {SuggestionId}, but the suggestion is no longer present; "
+                + "no take disposition is written (gh#549).",
+                order.Id, suggestionId);
+            return;
+        }
+
+        // Keep the common already-disposed case clean (no exception): a suggestion passed before the take completed, or
+        // a prior reconcile that already adopted it. The catch below is the backstop for the concurrent race.
+        bool alreadyDisposed = await database.SuggestionDispositions.AnyAsync(
+            candidate => candidate.SuggestionId == suggestionId, cancellationToken);
+        if (alreadyDisposed)
+        {
+            logger.LogWarning(
+                "Suggestion {SuggestionId} already carries a disposition; the take of order {OrderId} adds none "
+                + "(gh#549).",
+                suggestionId, order.Id);
+            return;
+        }
+
+        database.SuggestionDispositions.Add(SuggestionDisposition.ForTake(
+            suggestion,
+            order.EntryPrice,
+            order.WorkingStopPrice,
+            order.TakeProfitPrice,
+            submittedSize,
+            DateTimeOffset.UtcNow));
+
+        try
+        {
+            await database.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception)
+        {
+            // Lost the insert race with a concurrent, non-serialized disposition writer: a pass on this suggestion
+            // takes no account lock, so it can commit between the pre-check above and this insert, and the unique
+            // IX_SuggestionDispositions_SuggestionId rejects this second row. The order is ALREADY durably Working
+            // (its own save committed before this method was called), so this NEVER fails the take. ForTake cannot
+            // emit a CHECK-violating row (its Kind / Deviations / snapshot are internally consistent), so the unique
+            // index is the only expected reject. Clear the tracker so the rejected row is detached.
+            //
+            // What survives is a WRONG journal row, not a gap: the winner's Passed disposition now describes a
+            // suggestion with a live taken order behind it (see the remarks). Logged at Warning with the suggestion
+            // id so it is findable, because nothing downstream will notice on its own.
+            database.ChangeTracker.Clear();
+            logger.LogWarning(
+                exception,
+                "The take disposition for suggestion {SuggestionId} (order {OrderId}) was rejected at save — most "
+                + "likely a concurrent pass on the same suggestion, whose disposition now stands and MISDESCRIBES a "
+                + "suggestion that was in fact taken. The take itself stands (the order is durably Working); the "
+                + "take's disposition is skipped (gh#549).",
+                suggestionId, order.Id);
+        }
+        catch (Exception exception)
+        {
+            // EVERY failure of this save is journal-only, so none of them may resurface (PR #636 review). By the time
+            // this method runs the order is durably Working; the caller wraps it in no further try/catch, so letting
+            // anything out would report "take failed" for an order that is in fact live at the venue — the
+            // state-mismatch this codebase treats as dangerous on the maybe-live send path just above.
+            //
+            // Deliberately includes OperationCanceledException: a caller cancelling mid-journal does not un-place the
+            // order, so the take has still succeeded and must be reported as such. Narrowing this back to
+            // DbUpdateException alone reopens exactly that hole — proven by the cancellation and provider-fault cases
+            // in Take_ShouldStandAndSkipTheDisposition_WhenTheDispositionSaveFaults, which go red without this catch.
+            database.ChangeTracker.Clear();
+            logger.LogWarning(
+                exception,
+                "The take disposition for suggestion {SuggestionId} (order {OrderId}) could not be journaled. The take "
+                + "stands (the order is durably Working) and the failure is not surfaced to the operator; the "
+                + "suggestion is left without a disposition (gh#549).",
+                suggestionId, order.Id);
+        }
     }
 }
