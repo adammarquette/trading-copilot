@@ -116,3 +116,53 @@ public sealed record RiskProfileResponse(
             record.DefaultEntryAction);
     }
 }
+
+/// <summary>
+/// Today's remaining daily loss budget and target progress (gh#587, R-5), readable <b>without composing a send</b> —
+/// the proactive, suggestion-time governor's read surface (R-4 consumer, gh#551) over the <b>same</b>
+/// <see cref="DailyHeadroom"/> arithmetic the send-time gate enforces (extracted gh#627), so a read can never be a
+/// second definition of the limit.
+/// </summary>
+/// <param name="UnderGovernor">Room left under the operator's daily drawdown governor (always present).</param>
+/// <param name="UnderDailyLossLimit">Room left under the firm's hard daily loss limit, or <see langword="null"/> when none is imposed.</param>
+/// <param name="GovernorSpent">The governor is fully spent — the gate's <c>DailyGovernor</c> refusal.</param>
+/// <param name="DailyLossLimitSpent">The hard daily loss limit is fully spent — the gate's <c>DailyLossLimit</c> refusal.</param>
+/// <param name="DayLoss">Today's realized loss as a non-negative amount (zero on a green day) — the input consumed.</param>
+/// <param name="DayRealizedProfit">Today's realized profit as a non-negative amount (zero on a red day) — for target progress.</param>
+/// <param name="DailyProfitTarget">The daily profit target, or <see langword="null"/> when none is declared.</param>
+/// <param name="DailyTargetReached">
+/// The profit target is reached <b>and</b> stand-down is enabled — the gate's stop-for-day condition (a breach the
+/// operator should heed, not a hard refusal to add risk).
+/// </param>
+public sealed record DailyHeadroomResponse(
+    decimal UnderGovernor,
+    decimal? UnderDailyLossLimit,
+    bool GovernorSpent,
+    bool DailyLossLimitSpent,
+    decimal DayLoss,
+    decimal DayRealizedProfit,
+    decimal? DailyProfitTarget,
+    bool DailyTargetReached)
+{
+    /// <summary>Projects the computed headroom and the day's realized figures into the response shape.</summary>
+    /// <param name="headroom">The remaining budget under each daily limit.</param>
+    /// <param name="dayLoss">Today's realized loss (non-negative).</param>
+    /// <param name="dayRealizedProfit">Today's realized profit (non-negative).</param>
+    /// <param name="profile">The account's declared risk profile — the target and stand-down flag.</param>
+    /// <returns>The response.</returns>
+    public static DailyHeadroomResponse From(
+        DailyHeadroom headroom, decimal dayLoss, decimal dayRealizedProfit, RiskProfileRecord profile)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        return new DailyHeadroomResponse(
+            headroom.UnderGovernor,
+            headroom.UnderDailyLossLimit,
+            headroom.GovernorSpent,
+            headroom.DailyLossLimitSpent,
+            dayLoss,
+            dayRealizedProfit,
+            profile.DailyProfitTarget,
+            // The gate's stop-for-day condition (RiskGate): stand-down enabled AND the target is reached on realized.
+            profile.StopForDayAtProfitTarget && profile.DailyProfitTarget is { } target && dayRealizedProfit >= target);
+    }
+}
