@@ -47,6 +47,20 @@ unwired. The cloud environments still need creating, so nothing deploys today.
 [ADR-0018](adr/0018-image-registry-ghcr.md), engineering §8). The `app` service **pulls the GHCR image** — the same
 artifact Railway runs — so **local ≡ cloud** literally, not just the same Dockerfile.
 
+**The client is inside that image** ([ADR-0020](adr/0020-spa-served-by-the-bff.md), gh#646). The Dockerfile's `client`
+stage runs `npm ci && npm run build` and the bundle is copied into the API's `wwwroot`, so the app and the API answer
+on **one origin** — browse the running stack and the SPA is simply there, no second service and no CORS to configure.
+Nothing extra to deploy: a client change rides the same image promotion as any API change.
+
+**While developing the client**, `npm run dev` in `src/MarqSpec.TradingCopilot.Client` is faster than rebuilding the
+image. Vite serves the SPA on its own port, so set **`VITE_BFF_ORIGIN`** to the running BFF (e.g.
+`http://localhost:8080`) and the dev server proxies to it — **today only `/health`, which is all the scaffold calls**;
+the proxy list grows with the API client (gh#648). There is deliberately **no default target**: a guessed host is a
+wrong host, so with the variable unset the probe honestly reports unreachable rather than silently hitting Vite.
+
+A plain `dotnet run` with no bundle built is unaffected — static-file serving finds nothing and the API behaves
+exactly as before.
+
 **Two modes:**
 
 | Goal | Command |

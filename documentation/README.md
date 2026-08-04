@@ -25,7 +25,7 @@ Sizes below are approximate tokens, so you can see what a read costs before you 
 | [`AGENT-MEMORY.md`](AGENT-MEMORY.md) | 0.9K | **Before starting any work** — the catch-all for practices with no formal home. Cheap; just read it. |
 | [`integration-test-audit.md`](integration-test-audit.md) | 17.7K | You are writing integration tests and need the existing inventory. §2 is the inventory; live per-issue status is **the tracker**, not this file. |
 
-## Decisions — [`adr/`](adr/) (20 records, ~81K)
+## Decisions — [`adr/`](adr/) (21 records, ~84K)
 
 **Never read the folder.** [`adr/README.md`](adr/README.md) indexes every record; open the one ADR you need.
 Decisions are appended as dated `## Update` sections and **superseded, never rewritten**, so an ADR is a trail:
