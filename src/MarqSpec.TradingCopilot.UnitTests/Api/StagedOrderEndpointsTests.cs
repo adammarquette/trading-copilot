@@ -381,6 +381,54 @@ public class StagedOrderEndpointsTests
     }
 
     [Fact]
+    public async Task Take_ShouldReleaseToStaged_WhenTheVenueDefinitivelyRejects()
+    {
+        // gh#629: a DEFINITIVE venue rejection (VenueRefusalException, Kind == Definitive) placed NOTHING, so -- unlike
+        // the maybe-live faults above -- the take releases the claim back to Staged (re-takeable) and returns the
+        // reason as a 409, rather than stranding the row Taking for a human. This is the definitive-only auto-resolve.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Throws(() => new VenueRefusalException("ProjectX rejected: invalid stop", VenueRefusalKind.Definitive, 42));
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Staged, "a definitive rejection placed nothing, so the ticket is released to Staged for amendment (gh#629)");
+    }
+
+    [Fact]
+    public async Task Take_ShouldLeaveTaking_WhenTheVenueRefusalIsIndeterminate()
+    {
+        // gh#629 THE SAFETY CASE: an INDETERMINATE VenueRefusalException (accepted-but-no-id -- the venue MAY hold the
+        // order) must be left Taking and rethrown, NEVER auto-released. Mis-classifying it as definitive would release
+        // a maybe-live order -- the exact hazard the outcome type exists to prevent.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Throws(() => new VenueRefusalException("accepted but returned no order id", VenueRefusalKind.Indeterminate));
+
+        await using TradingCopilotDbContext context = Context();
+        Func<Task> take = () => OrderEndpoints.TakeStagedOrderAsync(
+            orderId, new FixedUser(_operator), context, _factory, PxOptions(), ExecOptions(), Development, A.Fake<IKillSwitch>(), NullExecutionMetrics.Instance, Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        await take.Should().ThrowAsync<VenueRefusalException>();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Taking, "an indeterminate refusal is maybe-live -> left Taking, never released (gh#629 safety)");
+    }
+
+    [Fact]
     public async Task Take_ShouldLeaveTheRowTaking_WhenTheClientDisconnectsMidSend()
     {
         // gh#589 Part B: a client disconnect / shutdown (OperationCanceledException, token cancelled) mid-send MAY

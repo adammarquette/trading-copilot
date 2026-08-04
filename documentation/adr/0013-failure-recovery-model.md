@@ -193,6 +193,14 @@ can match it). The **operator-driven runtime reconcile** that recovers the order
 loop) stays deferred (gh#578). This also let the account no-stacking check start **counting** a `Firing` conditional as
 imminent exposure (it could not while a strand had no recovery — the same sequencing `Taking` went through, gh#589).
 
+A typed **venue-refusal outcome** now narrows what can strand at all (gh#629): the adapter classifies a gateway
+`!success` rejection as **definitive** — it responded in the negative and placed nothing — versus **indeterminate**
+(accepted-but-no-id, a timeout, a transport fault, where the order may be live). A definitive rejection **auto-resolves**
+— the fire reverts to `Pending`, the take releases to `Staged` — so only a genuinely-indeterminate fault ever leaves a
+`Firing` / `Taking` strand for the reconcile or this rehydration backstop. Classification is at the adapter's throw
+site (where `!success` is unambiguous), and anything a catch site does not positively recognise as definitive stays
+indeterminate **by construction** — the one direction that could release a maybe-live order is never taken by default.
+
 ## Update (2026-08-02) — a re-formed setup's "new suggestion" is now a superseding one in data (gh#550)
 
 This ADR states — under *No-risk state fails safe by expiring*, and again in *Consequences* — that a scratched or
