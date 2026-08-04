@@ -14,8 +14,11 @@ using Microsoft.Extensions.DependencyInjection;
 // uses unqualified.
 using FirmConventions = MarqSpec.TradingCopilot.Domain.Venue.FirmConventions;
 using IOrderExecutor = MarqSpec.TradingCopilot.Domain.Venue.IOrderExecutor;
+using OrderRequest = MarqSpec.TradingCopilot.Domain.Venue.OrderRequest;
+using PlacedOrder = MarqSpec.TradingCopilot.Domain.Venue.PlacedOrder;
 using TaggedFillEvidence = MarqSpec.TradingCopilot.Domain.Venue.TaggedFillEvidence;
 using VenueAccountId = MarqSpec.TradingCopilot.Domain.Venue.VenueAccountId;
+using VenueContractId = MarqSpec.TradingCopilot.Domain.Venue.VenueContractId;
 using VenueId = MarqSpec.TradingCopilot.Domain.Venue.VenueId;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost.Staging;
@@ -29,10 +32,21 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost.Staging;
 /// never source; R-14), it authenticates as the operator and reads the <b>same account the app placed onto</b>.
 /// </summary>
 /// <remarks>
+/// <para>
 /// This is the QA-side venue-truth reader the staging harness always anticipated: the app remains the only thing
-/// that <i>places</i> or <i>modifies</i> (through its real gate — the whole point of the gate is that nothing
-/// bypasses it), while the test observes the gateway's authoritative resting state. The only writes this reader
-/// performs are <see cref="FlattenAsync"/> — the caller's own cleanup, so a serialized rerun starts flat.
+/// that <i>places</i> or <i>modifies</i> a <b>valid</b> order (through its real gate — the whole point of the gate is
+/// that nothing bypasses it), while the test observes the gateway's authoritative resting state. Its writes are
+/// <see cref="FlattenAsync"/> — the caller's own cleanup, so a serialized rerun starts flat — and the one deliberate
+/// exception below.
+/// </para>
+/// <para>
+/// <b>The exception: <see cref="PlaceOrderAsync"/> (gh#668).</b> One question cannot be asked through the app at
+/// all — <i>what does the venue do with an order it must reject?</i> The app's risk / execution gate refuses a
+/// malformed ticket <b>before</b> it is transmitted, which is correct and is exactly why the venue would never see
+/// it. Proving that a genuine venue rejection surfaces as <c>VenueRefusalKind.Definitive</c> therefore requires
+/// transmitting through the production <see cref="ProjectXVenue"/> seam directly. This is <b>not</b> a licence to
+/// bypass the gate for valid orders — see that method's own remarks.
+/// </para>
 /// </remarks>
 internal sealed class StagingProjectXGateway : IAsyncDisposable
 {
@@ -183,12 +197,51 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
     /// the tag — the gh#643 assumption is false.
     /// </summary>
     public Task<TaggedFillEvidence> FindFilledOrderByTagAsync(
-        int accountId, string customTag, DateTimeOffset since, CancellationToken cancellationToken = default)
-    {
-        VenueAccountId account = VenueAccountId.Create(
-            VenueId.Parse("projectx"), accountId.ToString(CultureInfo.InvariantCulture));
-        return _orderExecutor.FindFilledOrderByTagAsync(account, customTag, since, cancellationToken);
-    }
+        int accountId, string customTag, DateTimeOffset since, CancellationToken cancellationToken = default) =>
+        _orderExecutor.FindFilledOrderByTagAsync(VenueAccount(accountId), customTag, since, cancellationToken);
+
+    /// <summary>
+    /// Transmits <paramref name="request"/> through the <b>production</b>
+    /// <see cref="ProjectXVenue.PlaceOrderAsync"/> — the real adapter, over the reserved practice credentials, with
+    /// nothing faked between the ticket and the gateway (gh#668).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this bypasses the app, and why that is not a loophole.</b> Every other placement in the staging tier
+    /// goes through the deployed API so the risk / execution gate stays in the loop, and that must remain the rule
+    /// for anything <b>valid</b>. gh#668 asks the one question that rule makes unanswerable: whether a
+    /// <i>genuine</i> venue rejection arrives as <see cref="MarqSpec.TradingCopilot.Domain.Venue.VenueRefusalKind.Definitive"/>.
+    /// A deliberately-invalid ticket is refused by the app's own pre-flight first, so the venue never sees it and
+    /// the <c>!success</c> arm of <see cref="ProjectXVenue.PlaceOrderAsync"/> is never reached. Reaching it means
+    /// transmitting here.
+    /// </para>
+    /// <para>
+    /// PRACTICE ONLY (R-14) — the credentials this gateway is built from are the reserved practice ones, and a live
+    /// account is never wired into staging. A caller is nonetheless responsible for its own cleanup
+    /// (<see cref="FlattenAsync"/>): if the venue accepts what the caller expected it to reject, an order rests.
+    /// </para>
+    /// </remarks>
+    public Task<PlacedOrder> PlaceOrderAsync(OrderRequest request, CancellationToken cancellationToken = default) =>
+        _orderExecutor.PlaceOrderAsync(request, cancellationToken);
+
+    /// <summary>
+    /// The ProjectX-qualified account handle the venue-neutral seam takes, from the gateway's own integer account id
+    /// (<see cref="ResolveAccountIdAsync"/>). Qualified rather than bare so a foreign handle cannot reach ProjectX on
+    /// a colliding key (R-17).
+    /// </summary>
+    public static VenueAccountId VenueAccount(int accountId) =>
+        VenueAccountId.Create(ProjectXVenueId, accountId.ToString(CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// The ProjectX-qualified contract handle the venue-neutral seam takes, from a gateway contract id such as
+    /// <c>CON.F.US.EP.M25</c> (<see cref="ResolveContractAsync"/>). The key is passed through opaquely — including a
+    /// deliberately unknown one, which is the whole point of the gh#668 gate.
+    /// </summary>
+    public static VenueContractId VenueContract(string contractKey) =>
+        VenueContractId.Create(ProjectXVenueId, contractKey);
+
+    /// <summary>The venue every handle this gateway mints is tagged with — one login is one firm (ADR-0016).</summary>
+    private static VenueId ProjectXVenueId { get; } = VenueId.Parse("projectx");
 
     /// <summary>
     /// Cleanup for a serialized rerun: closes any open position on the contract and cancels every order still resting
