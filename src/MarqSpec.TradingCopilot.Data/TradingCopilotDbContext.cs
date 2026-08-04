@@ -287,11 +287,32 @@ public class TradingCopilotDbContext : TenantDbContext
 
             disposition.Property(d => d.Note).HasMaxLength(SuggestionDisposition.NoteMaxLength);
 
+            // Take-time price snapshot (gh#549) -- the Taken* columns mirror the suggestion's own bare `numeric`
+            // prices (arbitrary precision, tick-size-aware), so they carry no HasPrecision, matching EntryPrice /
+            // StopPrice / TargetPrice above.
             disposition.ToTable(table =>
+            {
                 // Kind records an operator ACT, so the refusable zero is refused (the CK_Suggestions_State_NotUnknown
                 // pattern). Reasons deliberately carries NO such check: a pass is a neutral decline and its reason is
                 // optional (R-4), so 0 (none) is a legitimate answer, not a sentinel.
-                table.HasCheckConstraint("CK_SuggestionDispositions_Kind_NotUnknown", "\"Kind\" <> 0"));
+                table.HasCheckConstraint("CK_SuggestionDispositions_Kind_NotUnknown", "\"Kind\" <> 0");
+
+                // R-9 integrity, backstopped below the model (gh#549): the classifier records deviations IFF the take
+                // was Modified (Kind = 2). A Modified with no deviated field, or a Taken/Passed carrying deviations, is
+                // a malformed row -- this refuses a direct write that bypassed SuggestionDisposition.ForTake.
+                table.HasCheckConstraint(
+                    "CK_SuggestionDispositions_Deviations_MatchModified",
+                    "(\"Kind\" = 2) = (\"Deviations\" <> 0)");
+
+                // A take (Taken = 1 / Modified = 2) carries its price snapshot; a pass (Passed = 3) carries none.
+                // TakenTargetPrice is exempt on the take side -- a take may legitimately drop the target (it is null).
+                table.HasCheckConstraint(
+                    "CK_SuggestionDispositions_TakeSnapshot",
+                    "(\"Kind\" IN (1, 2) AND \"TakenEntryPrice\" IS NOT NULL AND \"TakenStopPrice\" IS NOT NULL "
+                        + "AND \"TakenSize\" IS NOT NULL) "
+                        + "OR (\"Kind\" = 3 AND \"TakenEntryPrice\" IS NULL AND \"TakenStopPrice\" IS NULL "
+                        + "AND \"TakenTargetPrice\" IS NULL AND \"TakenSize\" IS NULL)");
+            });
         });
 
         modelBuilder.Entity<Order>(order =>

@@ -71,6 +71,10 @@ namespace MarqSpec.TradingCopilot.Api.Suggestions;
 /// The suggestion this one supersedes (gh#550), or <see langword="null"/> for the first version — the link a client
 /// follows to walk the chain by id back through its history.
 /// </param>
+/// <param name="Disposition">
+/// The operator's recorded disposition (gh#547 pass / gh#549 take) with its deviations, present only on the get-by-id
+/// read and only once the operator has acted; <see langword="null"/> on the list read and before any disposition.
+/// </param>
 public sealed record SuggestionResponse(
     Guid Id,
     Guid AccountId,
@@ -95,7 +99,8 @@ public sealed record SuggestionResponse(
     DateTimeOffset ExpiresAt,
     DateTimeOffset? StateChangedAt,
     int Version,
-    Guid? SupersedesId)
+    Guid? SupersedesId,
+    SuggestionDispositionResponse? Disposition = null)
 {
     /// <summary>Projects a persisted suggestion into its API view.</summary>
     /// <param name="suggestion">The persisted row.</param>
@@ -103,8 +108,13 @@ public sealed record SuggestionResponse(
     /// The instrument's contract facts (gh#541) used to money-value the geometry, or <see langword="null"/> when the
     /// instrument is not configured — in which case the dollar figures are omitted rather than guessed.
     /// </param>
+    /// <param name="disposition">
+    /// The suggestion's recorded disposition (gh#547 / gh#549), surfaced on the get-by-id read so the client can render
+    /// the taken-vs-suggested deviations; <see langword="null"/> on the list read and when the operator has not yet acted.
+    /// </param>
     /// <returns>The response.</returns>
-    public static SuggestionResponse From(Suggestion suggestion, InstrumentContractSpec? spec = null)
+    public static SuggestionResponse From(
+        Suggestion suggestion, InstrumentContractSpec? spec = null, SuggestionDisposition? disposition = null)
     {
         ArgumentNullException.ThrowIfNull(suggestion);
 
@@ -132,7 +142,8 @@ public sealed record SuggestionResponse(
             suggestion.ExpiresAt,
             suggestion.StateChangedAt,
             suggestion.Version,
-            suggestion.SupersedesId);
+            suggestion.SupersedesId,
+            disposition is null ? null : SuggestionDispositionResponse.From(disposition));
     }
 
     // The wireframe's dollar risk/reward, computed SERVER-side from the single shipped money-math seam
@@ -182,16 +193,34 @@ public sealed record SuggestionPassRequest(
 /// </param>
 public sealed record SuggestionTakeRequest(decimal ReferencePrice);
 
-/// <summary>A recorded disposition (gh#547) — the operator's neutral pass, as written to the journal.</summary>
+/// <summary>
+/// A recorded disposition (gh#547 pass, gh#549 take) — the operator's act on a suggestion, as written to the journal.
+/// </summary>
 /// <param name="SuggestionId">The suggestion that was disposed.</param>
-/// <param name="Kind">The operator act — <see cref="SuggestionDispositionKind.Passed"/> on this route.</param>
-/// <param name="Reasons">The pass reasons (may be <see cref="SuggestionPassReason.None"/>).</param>
+/// <param name="Kind">
+/// The operator act — <see cref="SuggestionDispositionKind.Passed"/> on the pass route,
+/// <see cref="SuggestionDispositionKind.Taken"/> / <see cref="SuggestionDispositionKind.Modified"/> on the take route.
+/// </param>
+/// <param name="Reasons">The pass reasons (may be <see cref="SuggestionPassReason.None"/>; always <c>None</c> for a take).</param>
+/// <param name="Deviations">
+/// For a <see cref="SuggestionDispositionKind.Modified"/> take, which fields the operator changed (gh#549);
+/// <see cref="SuggestionDeviation.None"/> for a <c>Taken</c> or a <c>Passed</c> disposition.
+/// </param>
+/// <param name="TakenEntryPrice">The entry actually submitted at take time, or <see langword="null"/> for a pass. The suggested value is on the parent <see cref="SuggestionResponse"/>, so the client renders the was → now delta per field.</param>
+/// <param name="TakenStopPrice">The working (protective) stop actually submitted at take time, or <see langword="null"/> for a pass.</param>
+/// <param name="TakenTargetPrice">The take-profit actually submitted at take time; <see langword="null"/> when the take carried none, or for a pass.</param>
+/// <param name="TakenSize">The size actually submitted at take time, or <see langword="null"/> for a pass.</param>
 /// <param name="Note">The operator's note, or <see langword="null"/>.</param>
 /// <param name="CreatedAt">When the disposition was recorded.</param>
 public sealed record SuggestionDispositionResponse(
     Guid SuggestionId,
     SuggestionDispositionKind Kind,
     SuggestionPassReason Reasons,
+    SuggestionDeviation Deviations,
+    decimal? TakenEntryPrice,
+    decimal? TakenStopPrice,
+    decimal? TakenTargetPrice,
+    int? TakenSize,
     string? Note,
     DateTimeOffset CreatedAt)
 {
@@ -205,6 +234,11 @@ public sealed record SuggestionDispositionResponse(
             disposition.SuggestionId,
             disposition.Kind,
             disposition.Reasons,
+            disposition.Deviations,
+            disposition.TakenEntryPrice,
+            disposition.TakenStopPrice,
+            disposition.TakenTargetPrice,
+            disposition.TakenSize,
             disposition.Note,
             disposition.CreatedAt);
     }
