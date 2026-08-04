@@ -5,8 +5,10 @@ Short, numbered records of significant architecture decisions — the *why* behi
 not rewritten or reversed in place; a later ADR **supersedes** it. The *record*, though, is a living trail: it is
 **extended by increment** with dated `## Update` entries under a `## Decision log`, and structural housekeeping that
 **preserves every word** (the gh#492 / gh#524 decision-log treatment — re-heading and re-ordering the trail, never
-touching the reasoning) is allowed. What must never change is the reasoning itself. Referenced from the
-[architecture doc](../trading-platform-architecture.md).
+touching the reasoning) is allowed. What must never change is the reasoning itself. That **structure** — `## Follow-ups`
+last, the `## Decision log` index matching the `## Update` trail one-to-one, dates ascending — is checked in CI
+(`scripts/check-adr-decision-log.sh`, gh#600), so a drifting append fails at PR time instead of being re-fixed by hand a
+fourth time (gh#492 → gh#524 → gh#580). Referenced from the [architecture doc](../trading-platform-architecture.md).
 
 | ADR | Title | Status |
 |---|---|---|

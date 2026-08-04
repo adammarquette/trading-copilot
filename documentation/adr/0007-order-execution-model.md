@@ -171,6 +171,7 @@ for validating heading-order/index against the trail in CI rather than by hand �
 | 2026-08-02 | [the transmit→journal window closes with a durable pre-transmit intent (gh#577)](#update-2026-08-02--the-transmitjournal-window-closes-with-a-durable-pre-transmit-intent-gh577) |
 | 2026-08-03 | [a stranded reconcile consults fill history, so a round-tripped entry is never re-armed (gh#631)](#update-2026-08-03--a-stranded-reconcile-consults-fill-history-so-a-round-tripped-entry-is-never-re-armed-gh631) |
 | 2026-08-03 | [take + conditional-fire serialize per account; Taking is counted and made recoverable (gh#589)](#update-2026-08-03--take--conditional-fire-serialize-per-account-taking-is-counted-and-made-recoverable-gh589) |
+| 2026-08-04 | [a typed venue-refusal outcome, so a definitive rejection auto-resolves (gh#629)](#update-2026-08-04--a-typed-venue-refusal-outcome-so-a-definitive-rejection-auto-resolves-gh629) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 

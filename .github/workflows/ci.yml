@@ -61,6 +61,15 @@ jobs:
       - name: Alert rules (promtool check + test)
         run: ./scripts/check-alert-rules.sh
 
+      # The `## Decision log` convention (gh#492 for ADR-0007, gh#524 for ADR-0008) is maintained by hand and keeps
+      # re-drifting: gh#580 had to RE-fix ADR-0007 after five updates (gh#530/#529/#532/#531/#577) accumulated AFTER
+      # `## Follow-ups`, so a reader again met a non-final "final" list -- the third manual fix of one class. This
+      # asserts the structure (Follow-ups last, index matches the trail, dates ascending) so the next drifting append
+      # fails here at PR time, not by a fourth re-fix. Docs-only and needs no .NET, so it runs with the other
+      # no-build gates ahead of restore (gh#600).
+      - name: ADR decision-log invariants
+        run: ./scripts/check-adr-decision-log.sh
+
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 
