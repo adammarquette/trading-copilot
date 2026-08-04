@@ -91,9 +91,15 @@ public class AuthorizationSurfaceIntegrationTests : IClassFixture<PostgresApiFac
     /// separately-hosted shell is equally public, merely on another origin where this sweep could not see it at all.
     /// Listed here for the same reason as <see cref="DocsAnonymous"/> — so it is a decision on the record.
     /// </remarks>
+    /// <remarks>
+    /// <b>Two entries, not one.</b> <c>MapFallbackToFile</c> maps <c>HEAD</c> alongside <c>GET</c>, and the sweep
+    /// enumerates the real route table rather than the one you meant to write — listing only the <c>GET</c> left the
+    /// <c>HEAD</c> reachable-and-unlisted, which is precisely the omission this suite exists to catch. It caught it.
+    /// </remarks>
     private static string[] ClientAnonymous { get; } =
     [
         "GET /{*path:nonfile}",
+        "HEAD /{*path:nonfile}",
     ];
 
     /// <summary>
