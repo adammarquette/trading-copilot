@@ -1,0 +1,5 @@
+dist/
+coverage/
+
+# npm owns this file's formatting; reformatting it would churn on every `npm install`.
+package-lock.json
