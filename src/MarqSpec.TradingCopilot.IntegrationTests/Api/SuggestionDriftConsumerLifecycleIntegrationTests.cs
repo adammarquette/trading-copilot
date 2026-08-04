@@ -68,6 +68,17 @@ public class SuggestionDriftConsumerLifecycleIntegrationTests : IClassFixture<Su
         SuggestionState final = await WaitForStateAsync(suggestionId, SuggestionState.Stale, TimeSpan.FromSeconds(30));
 
         final.Should().Be(SuggestionState.Stale, "the live host consumed the drifting quote end to end");
+
+        // WAIT FOR THE CURSOR, don't read it off the back of the state change. The Stale write happens INSIDE
+        // ProcessQuotesAsync; CommitCursorAsync runs after it returns. So WaitForStateAsync above can return while
+        // the commit is still in flight, and asserting the cursor here immediately is a race the pass usually — but
+        // not always — wins. Observed failing exactly once across two local runs of this suite before this wait was
+        // added, which is precisely how it would have presented in CI: an intermittent red on a correct consumer.
+        // Pass 1 already waits this way; this mirrors it.
+        await WaitUntilAsync(
+            async () => await GetCursorAsync() >= driftingQuote.Sequence,
+            "the suggestion-drift cursor to commit past the second (drifting) batch");
+
         (await GetCursorAsync()).Should().BeGreaterThanOrEqualTo(
             driftingQuote.Sequence, "the cursor commits past the second batch too — each pass commits its own batch");
         (await GetCursorAsync()).Should().BeGreaterThan(
