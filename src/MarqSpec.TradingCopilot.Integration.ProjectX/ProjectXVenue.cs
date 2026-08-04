@@ -366,10 +366,11 @@ public sealed class ProjectXVenue : ITradingVenue
         // resting read above cannot see it. The window starts at the caller's instant (the stranded row's own
         // creation) and is left open-ended, because an order can fill well after it was placed.
         //
-        // UNVERIFIED AGAINST A LIVE GATEWAY (gh#642): the submodule's SearchOrderRequest may serialise startTime /
-        // endTime where the gateway expects startTimestamp / endTimestamp, in which case this search returns nothing
-        // and the veto below silently degrades to the pre-gh#631 behaviour. Fail-safe — an empty history reads as
-        // NoFillFound, which authorises nothing — but it would look shipped while doing nothing, so it is tracked.
+        // Window field names confirmed against the gateway swagger and corrected (gh#642): the submodule's
+        // SearchOrderRequest now serialises startTimestamp / endTimestamp — the names /api/Order/search requires
+        // (and startTimestamp is mandatory). It previously sent startTime / endTime, which the gateway dropped, so
+        // this search returned nothing and the veto silently degraded to the pre-gh#631 behaviour — fail-safe (an
+        // empty history reads as NoFillFound, authorising nothing) but shipped-yet-inert until the field-name fix.
         IEnumerable<ClientModels.Order> history = await _api.GetOrdersAsync(
             ProjectXMapping.ToAccountId(account, Id),
             since.UtcDateTime,
