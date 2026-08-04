@@ -401,10 +401,19 @@ public sealed class ConditionalFiringService
             // Pending and re-decide on the next quote (the gh#532 containment), mirroring the gate-refusal revert
             // below. Everything else (an indeterminate no-id, a transport timeout on HttpClient's token, an
             // HttpRequestException, a caller cancellation) is NOT caught here and reaches the outer maybe-live handler,
-            // which correctly leaves it Firing (gh#589). The revert is committed by the outer per-record save, exactly
-            // as the gate-refusal path below (the gh#622 lock-timing residual is shared, and benign -- over-blocks only).
+            // which correctly leaves it Firing (gh#589).
+            //
+            // Commit the revert (Firing -> Pending) WHILE THE ACCOUNT LOCK IS STILL HELD -- the same discipline gh#630
+            // (of #622) established for the gate-refusal arm below, and for the Firing-commit and Fired paths above.
+            // The Firing intent committed before the send and the no-stacking check counts Firing (gh#589), so were
+            // this left to the OUTER per-record save (which runs only AFTER the lock releases), a concurrent operator
+            // send / take that acquired the lock in the unlock->outer-save window would still read Firing and get a
+            // spurious 409. Fail-safe either way -- it only ever OVER-blocks, never a double-transmit -- but this arm
+            // is new in gh#629 and must not re-open the window gh#630 just closed next door; the outer per-record save
+            // then finds nothing left to write for this record.
             onMayBeLiveAtVenue(false);
             record.Status = ConditionalStatus.Pending;
+            await database.SaveChangesAsync(cancellationToken);
             _logger.LogWarning(
                 "Conditional order {Id} triggered but the venue DEFINITIVELY rejected the fire: {Reason}. "
                 + "Nothing rests, reverted to pending.", record.Id, refusal.Message);
