@@ -203,6 +203,7 @@ builder.Services.AddOptions<SuggestionOptions>()
 // exist without their indicators. IIndicatorSource is the read seam the promotion watcher will consult (gh#311)
 // once the band is resolved by the caller rather than inside StopPlan, which stays pure.
 builder.Services.Configure<IndicatorOptions>(builder.Configuration.GetSection(IndicatorOptions.SectionName));
+builder.Services.Configure<MarketDataReadOptions>(builder.Configuration.GetSection(MarketDataReadOptions.SectionName));
 // The bar-derived indicator set (R-22): ATR at the safety band's period + RSI. Built from options in one place
 // (IndicatorSet), so the safety band's producer cannot be configured away. A third indicator is one line there.
 builder.Services.AddSingleton<IReadOnlyList<IIndicator>>(sp =>
@@ -480,6 +481,7 @@ app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
 app.MapPositionEndpoints();
 app.MapWorkingOrderEndpoints();
+app.MapMarketDataEndpoints();
 
 // The generated spec (/openapi/v1.json, everywhere) and the Scalar reference UI (/scalar/v1, disabled in
 // production). Mapped after the endpoint groups so the document reflects every route above (gh#604).

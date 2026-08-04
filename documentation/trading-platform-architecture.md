@@ -333,7 +333,10 @@ as an **installable PWA** — a presentation client only (R-19, [ADR-0010](adr/0
 owns the packaging and the platform caveats).
 **The chart is its central component:** a purpose-built candlestick chart (**Lightweight
 Charts**, ADR-0004 — with RSI/MACD indicator subcharts in panes) onto which everything **overlays** — indicators incl. custom (pre-computed by the processor), price levels, suggestion
-entry/stop/target zones, live positions / orders / fills, and the operator's own drawings (R-10). The order
+entry/stop/target zones, live positions / orders / fills, and the operator's own drawings (R-10). The chart's
+underlying data reaches the client over HTTP (gh#644): `/api/marketdata/bars`, `/indicators` and `/levels` serve
+OHLCV, the **pre-computed** indicator series (R-22's single number, never re-derived in the browser) and the active
+price levels — authenticated (R-18), bounded, and global (not operator-owned). The order
 ticket, journal, rulebook, and chat panels sit around it (R-6, R-11). A separate **order-flow / Depth-of-Market**
 visual sits beside it, fed by the depth/trade streams (R-3, R-1) — *why it is bespoke rather than a library, and
 what renders it, are [ADR-0004](adr/0004-charting.md)'s.*
