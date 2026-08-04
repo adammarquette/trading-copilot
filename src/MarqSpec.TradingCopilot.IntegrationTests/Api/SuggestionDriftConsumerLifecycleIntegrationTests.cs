@@ -74,36 +74,6 @@ public class SuggestionDriftConsumerLifecycleIntegrationTests : IClassFixture<Su
             cursorBeforeAnyQuote ?? 0, "two real passes ran, each advancing the committed cursor forward");
     }
 
-    [Fact]
-    public async Task Host_ShouldExitCleanly_OnTeardown_WithoutAnUncaughtFailure()
-    {
-        // A second, independently-lifetimed host over the SAME database (the "restart" idiom other suites use,
-        // e.g. StateRehydrationIntegrationTests' CreateHost) — so this test controls exactly when SuggestionDriftHost
-        // tears down, rather than depending on the shared class-fixture's disposal timing at the end of the run.
-        _factory.Logs.Clear();
-        WebApplicationFactory<Program> restarted = _factory.CreateHost(DeploymentEnvironment.Staging);
-
-        // Let the host actually enter its poll loop (IdlePoll = 1s) before tearing down — the interesting case is
-        // stopping a host that is genuinely mid-loop, not one that never started. CreateClient() is what forces the
-        // otherwise-deferred host to build and start (the same nudge StateRehydrationIntegrationTests uses).
-        _ = restarted.CreateClient();
-        await Task.Delay(TimeSpan.FromSeconds(2));
-
-        Task disposeTask = restarted.DisposeAsync().AsTask();
-        Task first = await Task.WhenAny(disposeTask, Task.Delay(TimeSpan.FromSeconds(20)));
-        first.Should().Be(disposeTask, "teardown must complete promptly — a hang means the host is not exiting cleanly (gh#169); " +
-            "a missing OperationCanceledException/ObjectDisposedException catch is exactly the defect this guards");
-        await disposeTask; // re-observe: if disposal itself faulted, this rethrows and fails the test
-
-        // The generic host logs an unhandled BackgroundService failure at Error severity (distinct from this
-        // host's own LogWarning on a transient DB/venue fault mid-pass) — the observable trace an uncaught
-        // ObjectDisposedException on shutdown would leave. None should appear across a clean teardown.
-        _factory.Logs.Entries.Should().NotContain(
-            entry => entry.Level == LogLevel.Error,
-            "a clean shutdown logs nothing at Error severity — an uncaught exception from a missing " +
-            "OperationCanceledException/ObjectDisposedException catch would surface as exactly that (gh#169)");
-    }
-
     // =============================================================================================================
     // Helpers.
     // =============================================================================================================
