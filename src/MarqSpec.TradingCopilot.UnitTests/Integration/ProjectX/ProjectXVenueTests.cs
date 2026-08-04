@@ -655,4 +655,121 @@ public class ProjectXVenueTests
 
         await quotes.DisposeAsync();
     }
+
+    // gh#631 — the fill-history read. This is the ONE method the stranded-reconcile veto depends on: if its tag match
+    // or its FillVolume predicate is wrong, every answer silently becomes NoFillFound, the veto never fires, and the
+    // second-entry hazard it exists to close is exactly as open as before — with the whole suite green. So the
+    // translation is pinned here rather than only through the endpoints that consume it.
+    private static ClientModels.Order HistoryOrder(
+        long id, string? tag, int fillVolume, decimal? filledPrice = null, DateTime? created = null) =>
+        new()
+        {
+            Id = id,
+            AccountId = 9001,
+            ContractId = "CON.F.US.MES.U26",
+            CustomTag = tag,
+            FillVolume = fillVolume,
+            FilledPrice = filledPrice,
+            CreationTimestamp = created ?? new DateTime(2026, 8, 3, 12, 0, 0, DateTimeKind.Utc),
+        };
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldReportFilled_WhenHistoryCarriesTheTagWithExecutedVolume()
+    {
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Order>>(
+                [HistoryOrder(1, "someone-else", 3), HistoryOrder(77, "the-tag", 2, 5301.25m)]);
+
+        TaggedFillEvidence evidence = await _venue.FindFilledOrderByTagAsync(
+            Account, "the-tag", DateTimeOffset.UtcNow.AddHours(-1), CancellationToken.None);
+
+        evidence.Status.Should().Be(TaggedFillStatus.Filled);
+        evidence.VetoesRelease.Should().BeTrue("a reported fill is what stops a stranded row being released");
+        evidence.FilledSize.Should().Be(2m);
+        evidence.FilledPrice.Should().Be(5301.25m);
+        evidence.VenueOrderKey.Should().Be("77");
+    }
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldReportNoFillFound_WhenNoRecordCarriesTheTag()
+    {
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Order>>([HistoryOrder(1, "someone-else", 3)]);
+
+        TaggedFillEvidence evidence = await _venue.FindFilledOrderByTagAsync(
+            Account, "the-tag", DateTimeOffset.UtcNow.AddHours(-1), CancellationToken.None);
+
+        evidence.Status.Should().Be(TaggedFillStatus.NoFillFound);
+        evidence.VetoesRelease.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldReportNoFillFound_WhenTheTaggedOrderNeverExecuted()
+    {
+        // The tag is present but nothing executed — a placed-then-cancelled or rejected order. That must NOT veto:
+        // the row genuinely never entered a position, so releasing it is correct.
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Order>>([HistoryOrder(77, "the-tag", fillVolume: 0)]);
+
+        TaggedFillEvidence evidence = await _venue.FindFilledOrderByTagAsync(
+            Account, "the-tag", DateTimeOffset.UtcNow.AddHours(-1), CancellationToken.None);
+
+        evidence.Status.Should().Be(TaggedFillStatus.NoFillFound);
+    }
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldTakeTheEarliestExecution_WhenOneTagHasTwo()
+    {
+        // The tag is a CORRELATION handle, not a venue idempotency key, so a re-attempt after a transport fault can
+        // leave two executed records under it. The gateway documents no ordering, so the pick must be deterministic:
+        // the earliest execution is the one that actually opened the position.
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Order>>(
+            [
+                HistoryOrder(99, "the-tag", 1, 5310m, new DateTime(2026, 8, 3, 12, 5, 0, DateTimeKind.Utc)),
+                HistoryOrder(77, "the-tag", 2, 5301m, new DateTime(2026, 8, 3, 12, 0, 0, DateTimeKind.Utc)),
+            ]);
+
+        TaggedFillEvidence evidence = await _venue.FindFilledOrderByTagAsync(
+            Account, "the-tag", DateTimeOffset.UtcNow.AddHours(-1), CancellationToken.None);
+
+        evidence.VenueOrderKey.Should().Be("77", "the earliest execution under the tag is the entry that opened the position");
+    }
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldSearchFromTheCallersInstant_WithAnOpenEndedWindow()
+    {
+        // The window is the caller's safety margin: it starts at the stranded row's own instant so it always covers
+        // the transmit, and stays open-ended because an order can fill long after it was placed. A window that starts
+        // too late would miss the fill and let the release proceed.
+        DateTime? capturedStart = null;
+        DateTime? capturedEnd = null;
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Invokes((int _, DateTime? start, DateTime? end, CancellationToken _) =>
+            {
+                capturedStart = start;
+                capturedEnd = end;
+            })
+            .Returns<IEnumerable<ClientModels.Order>>([]);
+
+        DateTimeOffset since = new(2026, 8, 3, 11, 30, 0, TimeSpan.FromHours(-5));
+        await _venue.FindFilledOrderByTagAsync(Account, "the-tag", since, CancellationToken.None);
+
+        capturedStart.Should().Be(since.UtcDateTime, "the search starts at the caller's instant, normalised to UTC");
+        capturedEnd.Should().BeNull("an order can fill well after it was placed, so the window stays open-ended");
+    }
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldLetAGatewayFailureSurface_SoTheCallerReportsUnavailable()
+    {
+        // It must NOT swallow the failure into NoFillFound. The calling service maps a throw to Unavailable, which
+        // strands the row for an operator — "we could not tell" is never "it did not fill".
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .ThrowsAsync(new InvalidOperationException("gateway order-search failed"));
+
+        Func<Task> act = async () => await _venue.FindFilledOrderByTagAsync(
+            Account, "the-tag", DateTimeOffset.UtcNow.AddHours(-1), CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
 }

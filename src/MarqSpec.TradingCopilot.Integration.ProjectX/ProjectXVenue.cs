@@ -368,8 +368,17 @@ public sealed class ProjectXVenue : ITradingVenue
 
         // Match on the tag we stamped, and require an EXECUTED quantity. A partial fill counts: any executed size
         // means the order reached the market and did something, which is exactly what the caller needs to know.
-        ClientModels.Order? filled = history.FirstOrDefault(order =>
-            string.Equals(order.CustomTag, customTag, StringComparison.Ordinal) && order.FillVolume > 0);
+        //
+        // ORDERED, deliberately. The tag is a CORRELATION handle, not a venue idempotency key -- a re-attempt after a
+        // transport fault stamps the same tag again -- so two executed records under one tag is possible. The gateway
+        // documents no ordering, and picking whichever the JSON array happened to list first would journal an
+        // arbitrary one of them. Take the EARLIEST execution: it is the entry that actually opened the position, and
+        // it is stable across calls. (Which one is chosen never changes the veto itself -- any match vetoes.)
+        ClientModels.Order? filled = history
+            .Where(order => string.Equals(order.CustomTag, customTag, StringComparison.Ordinal) && order.FillVolume > 0)
+            .OrderBy(order => order.CreationTimestamp)
+            .ThenBy(order => order.Id)
+            .FirstOrDefault();
 
         // Absence is reported as NoFillFound rather than Unavailable ONLY because the call itself succeeded. Note
         // that the caller treats the two identically for the purpose of releasing a row -- neither authorises
