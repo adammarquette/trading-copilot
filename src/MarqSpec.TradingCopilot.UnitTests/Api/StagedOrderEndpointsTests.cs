@@ -576,6 +576,40 @@ public class StagedOrderEndpointsTests
     }
 
     [Fact]
+    public async Task Reconcile_ShouldRefuseAndLeaveTaking_WhenTheFillHistoryCannotBeRead()
+    {
+        // The take path's mirror of ReconcileFiringConditional_ShouldRefuseAndLeaveFiring_WhenTheFillHistoryCannotBeRead
+        // (PR #637 review). The conditional path had this; the take path had the same Unavailable-refuse branch in the
+        // same commit with nothing exercising it.
+        //
+        // It matters because "release" is the DEFAULT here: the Unavailable branch sits immediately beside the
+        // release-on-NoFillFound fallthrough, so a refactor folding the two together is an easy mistake — and it would
+        // silently re-enable "release a stranded take on an unreadable venue" with the suite still fully green. The
+        // resting read is deliberately made to SUCCEED (nothing resting) so the refusal can only come from the fill
+        // read; otherwise this would pass on the venue-unreachable path above instead.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SetTakingAsync(orderId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]);
+        A.CallTo(() => _venue.FindFilledOrderByTagAsync(
+                A<VenueAccountId>._, A<string>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .ThrowsAsync(new InvalidOperationException("gateway order-history read failed"));
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), Fills(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Taking, "an unreadable fill history strands the take rather than releasing it on an unknown");
+    }
+
+    [Fact]
     public async Task Reconcile_ShouldRefuse_WhenTheOrderIsNotTaking()
     {
         // Only a stranded Taking is reconcilable -- a plain Staged ticket (or any other status) is resolved through its
@@ -1537,7 +1571,7 @@ public class StagedOrderEndpointsTests
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
-            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), Fills(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         await using TradingCopilotDbContext reload = Context();

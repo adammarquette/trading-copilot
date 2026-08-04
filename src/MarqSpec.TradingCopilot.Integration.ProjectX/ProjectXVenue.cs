@@ -360,6 +360,11 @@ public sealed class ProjectXVenue : ITradingVenue
         // The gateway's ORDER HISTORY, not its open orders (gh#631): a filled order has left the open book, so the
         // resting read above cannot see it. The window starts at the caller's instant (the stranded row's own
         // creation) and is left open-ended, because an order can fill well after it was placed.
+        //
+        // UNVERIFIED AGAINST A LIVE GATEWAY (gh#642): the submodule's SearchOrderRequest may serialise startTime /
+        // endTime where the gateway expects startTimestamp / endTimestamp, in which case this search returns nothing
+        // and the veto below silently degrades to the pre-gh#631 behaviour. Fail-safe — an empty history reads as
+        // NoFillFound, which authorises nothing — but it would look shipped while doing nothing, so it is tracked.
         IEnumerable<ClientModels.Order> history = await _api.GetOrdersAsync(
             ProjectXMapping.ToAccountId(account, Id),
             since.UtcDateTime,
@@ -374,11 +379,19 @@ public sealed class ProjectXVenue : ITradingVenue
         // documents no ordering, and picking whichever the JSON array happened to list first would journal an
         // arbitrary one of them. Take the EARLIEST execution: it is the entry that actually opened the position, and
         // it is stable across calls. (Which one is chosen never changes the veto itself -- any match vetoes.)
-        ClientModels.Order? filled = history
+        List<ClientModels.Order> matches = [.. history
             .Where(order => string.Equals(order.CustomTag, customTag, StringComparison.Ordinal) && order.FillVolume > 0)
             .OrderBy(order => order.CreationTimestamp)
-            .ThenBy(order => order.Id)
-            .FirstOrDefault();
+            .ThenBy(order => order.Id)];
+
+        ClientModels.Order? filled = matches.FirstOrDefault();
+
+        // REPORT the count, do not just silently take the earliest (PR #637 review). Choosing the earliest keeps the
+        // veto correct — any match vetoes, so the row is never released either way — but the evidence below describes
+        // only that one record, so a caller journaling from it UNDERSTATES the venue: a re-transmit that round-tripped
+        // twice leaves two executions and journals one. That narrows the R-8/R-9 discard this feature exists to stop,
+        // from "the whole fill" to "the second fill". Narrower, but still silent unless someone is told — so the count
+        // rides on the evidence and FillReconciliationService, which has the logger, raises it.
 
         // Absence is reported as NoFillFound rather than Unavailable ONLY because the call itself succeeded. Note
         // that the caller treats the two identically for the purpose of releasing a row -- neither authorises
@@ -390,7 +403,8 @@ public sealed class ProjectXVenue : ITradingVenue
                 customTag,
                 filled.FillVolume,
                 filled.FilledPrice,
-                filled.Id.ToString(CultureInfo.InvariantCulture));
+                filled.Id.ToString(CultureInfo.InvariantCulture),
+                matches.Count);
     }
 
     private async IAsyncEnumerable<Quote> ReadQuotesAsync(
