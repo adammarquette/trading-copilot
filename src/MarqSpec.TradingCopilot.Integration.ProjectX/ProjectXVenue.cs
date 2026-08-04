@@ -226,15 +226,20 @@ public sealed class ProjectXVenue : ITradingVenue
 
         if (!response.Success)
         {
-            throw new ProjectXVenueException(
+            // DEFINITIVE (gh#629): the gateway responded in the negative and placed nothing, so the caller can
+            // auto-resolve the row. Classified HERE, where !success is unambiguous -- never inferred at the catch.
+            throw new VenueRefusalException(
                 $"ProjectX rejected the order: {response.ErrorMessage ?? "no reason given"}.",
+                VenueRefusalKind.Definitive,
                 response.ErrorCode);
         }
 
         if (response.OrderId is not { } orderId)
         {
-            // Accepted but unidentified leaves nothing to cancel or flatten against -- treat it as a failure.
-            throw new ProjectXVenueException("ProjectX accepted the order but returned no order id.");
+            // INDETERMINATE (gh#629): accepted but unidentified -- the venue took it, so an order MAY be resting with
+            // no handle to cancel or flatten against. The caller must keep the durable intent, never assume absence.
+            throw new VenueRefusalException(
+                "ProjectX accepted the order but returned no order id.", VenueRefusalKind.Indeterminate);
         }
 
         return new PlacedOrder(

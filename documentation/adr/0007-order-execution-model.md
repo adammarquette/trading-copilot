@@ -1117,6 +1117,29 @@ memory defect rather than a safety one.
 leave the row loud in that case — the operator resolves the position first, and it is protected by its native
 bracket and the auto-flatten meanwhile.
 
+## Update (2026-08-04) — a typed venue-refusal outcome, so a definitive rejection auto-resolves (gh#629)
+
+Several updates above record the same missing seam: at the venue send a **definitive** rejection (the gateway answered
+`!success` and placed nothing) was *indistinguishable* from a maybe-live fault "without a venue-seam refusal
+*outcome*", so both were left `Taking` / `Firing` for the reconcile. That outcome now exists. The adapter classifies
+its `PlaceOrder` failure **at the throw site** — where `!success` is unambiguous — into a venue-neutral
+`VenueRefusalException` (Domain.Venue, the `VenueCapabilityNotSupportedException` pattern) carrying a
+`VenueRefusalKind`: **Definitive** (`!success`, nothing placed) or **Indeterminate** (accepted-but-no-id, where the
+order may be live). Both catch sites consume the neutral kind, so neither depends on a venue-specific exception:
+
+- **Take** (`TakeStagedOrderAsync`): a definitive rejection releases the claim `Taking → Staged` (re-takeable, so the
+  operator amends and retries) and returns the reason, instead of stranding the row for `POST /orders/{id}/reconcile`.
+- **Fire** (`ConditionalFiringService`): a definitive rejection reverts `Firing → Pending` (the gh#532 containment,
+  re-decidable next quote), mirroring the gate-refusal revert.
+
+Everything else is **unchanged and indeterminate by construction**: a timeout (a `TaskCanceledException` on
+HttpClient's own token), a transport fault, a disconnect, and an indeterminate no-id all still fail toward `Taking` /
+`Firing`, resolved by the reconcile / rehydration. `VenueRefusalKind.Indeterminate` is the enum's **zero value** and
+the parameterless default, so an unrecognised or unset refusal can never be read as definitive — the one direction
+that could release a maybe-live order, closed structurally rather than by a positive list. This shrinks the maybe-live
+surface to genuinely-uncertain faults; it does **not** resolve the *transport-fault-that-landed* residual (that fault
+is correctly indeterminate — the deferred **fill-level** reconcile, gh#631 above, is what tells a landed one apart).
+
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the
 authoritative record — this list is kept only as a decision-provenance changelog.*
