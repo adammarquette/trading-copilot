@@ -8,7 +8,7 @@ using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.MarketData;
@@ -54,8 +54,10 @@ public class SuggestionDriftServiceTests
         new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
             new FixedUser(asUser ?? _operator));
 
+    private readonly RecordingLogger _log = new();
+
     private SuggestionDriftService Service(TradingCopilotDbContext context) =>
-        new(context, _specs, _options, new InMemoryDrift(context), NullLogger<SuggestionDriftService>.Instance);
+        new(context, _specs, _options, new InMemoryDrift(context), _log);
 
     private async Task<Guid> SeedAsync(
         SuggestionState state = SuggestionState.Active,
@@ -94,6 +96,19 @@ public class SuggestionDriftServiceTests
 
     private static StopPromotionService.DecodedQuote Quote(string symbol, decimal bid, decimal ask) =>
         new(VenueId.Parse("projectx"), ContractKey(symbol), bid, ask);
+
+    // Every neutral symbol resolves to ONE shared front-month key — the collision the by-contract map has to survive.
+    private void ResolveEverySymbolTo(string contractKey) =>
+        A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._))
+            .ReturnsLazily((InstrumentId instrument, CancellationToken _) => Task.FromResult(
+                new ResolvedContract(VenueContractId.Create(VenueId.Parse("projectx"), contractKey), instrument)));
+
+    // Back to the constructor's behaviour: each symbol resolves to its own key.
+    private void ResolveEachSymbolToItsOwnKey() =>
+        A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._))
+            .ReturnsLazily((InstrumentId instrument, CancellationToken _) => Task.FromResult(
+                new ResolvedContract(
+                    VenueContractId.Create(VenueId.Parse("projectx"), ContractKey(instrument.Symbol)), instrument)));
 
     private async Task<int> RunAsync(params StopPromotionService.DecodedQuote[] quotes)
     {
@@ -221,6 +236,56 @@ public class SuggestionDriftServiceTests
         A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
+    // ---- contract-key collision: keep the first, skip the loser, drop nobody (PR #633 review) ----
+
+    [Fact]
+    public async Task ProcessQuotesAsync_ShouldKeepTheFirstSymbolAndWarn_WhenTwoResolveToTheSameContract()
+    {
+        // The collision branch exists because a pre-review found the map SILENTLY OVERWRITING: the second symbol
+        // replaced the first, so the first's suggestions vanished from the pass with nothing said.
+        //
+        // Be precise about what the fix changes, because the obvious assertions do NOT pin it. Either way exactly one
+        // symbol is measured and the other is left Active -- "one transition, one untouched" is equally true of the
+        // bug. What actually changed is (a) WHICH symbol survives -- the first to claim the key, not the last -- and
+        // (b) that the skip is now LOUD. Both are asserted below; drop either and this case passes against the bug it
+        // exists to catch.
+        Guid es = await SeedAsync(instrument: "ES", entry: 5_300m); // seeded first => resolved first => keeps the key
+        Guid nq = await SeedAsync(instrument: "NQ", entry: 5_300m);
+        ResolveEverySymbolTo(ContractKey("ES"));
+
+        int stale = await RunAsync(Quote("ES", bid: 5_304.75m, ask: 5_305m));
+
+        stale.Should().Be(1, "one symbol owns the key; the collision must swallow neither both nor nothing");
+        (await StateOfAsync(es)).Should().Be(SuggestionState.Stale, "the FIRST symbol to claim the contract is kept");
+        (await StateOfAsync(nq)).Should().Be(SuggestionState.Active,
+            "the loser is skipped, never measured against another product's price");
+
+        _log.Warnings.Should().ContainSingle("the whole point of the fix is that the skip stops being silent")
+            .Which.Should().Contain("kept ES").And.Contain("skipped NQ",
+                "a warning that does not name what it dropped cannot be acted on");
+    }
+
+    [Fact]
+    public async Task ProcessQuotesAsync_ShouldStillProcessTheSkippedSymbol_OnceTheKeysDifferAgain()
+    {
+        // Not a guard for the overwrite bug (it holds either way) -- it pins the neighbouring property that makes the
+        // skip acceptable at all: "skipped" means skipped for THIS pass, not evicted from the watcher. A future change
+        // that cached the collision, or dropped the loser from discovery, would leave a suggestion whose drift guard is
+        // permanently off -- silently, which is the failure this whole feature exists to prevent.
+        await SeedAsync(instrument: "ES", entry: 5_300m);
+        Guid nq = await SeedAsync(instrument: "NQ", entry: 5_300m);
+        ResolveEverySymbolTo(ContractKey("ES"));
+        await RunAsync(Quote("ES", bid: 5_304.75m, ask: 5_305m));
+
+        // The catalogue resolves them apart again; NQ must now transition on its own quote.
+        ResolveEachSymbolToItsOwnKey();
+        int stale = await RunAsync(Quote("NQ", bid: 5_304.75m, ask: 5_305m));
+
+        stale.Should().Be(1);
+        (await StateOfAsync(nq)).Should().Be(SuggestionState.Stale,
+            "a collision defers a symbol by one pass; it does not retire the suggestion");
+    }
+
     [Fact]
     public async Task ProcessQuotesAsync_ShouldStampStateChangedAt_OnTheTransition()
     {
@@ -230,6 +295,36 @@ public class SuggestionDriftServiceTests
 
         await using TradingCopilotDbContext context = Context();
         (await context.Suggestions.IgnoreQueryFilters().SingleAsync(s => s.Id == id)).StateChangedAt.Should().Be(_now);
+    }
+
+    /// <summary>
+    /// Captures what the service logged. The collision branch's whole contribution is that a skip becomes <b>visible</b>
+    /// — a `NullLogger` would swallow exactly the signal under test, so the suite would pass against the silent bug.
+    /// </summary>
+    private sealed class RecordingLogger : ILogger<SuggestionDriftService>
+    {
+        private readonly List<string> _warnings = [];
+
+        /// <summary>The formatted messages logged at <see cref="LogLevel.Warning"/>.</summary>
+        public IReadOnlyList<string> Warnings => _warnings;
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+            if (logLevel == LogLevel.Warning)
+            {
+                _warnings.Add(formatter(state, exception));
+            }
+        }
     }
 
     /// <summary>
