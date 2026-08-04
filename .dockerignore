@@ -7,3 +7,8 @@
 documentation/
 *.md
 .env
+
+# The client's dependency tree (gh#646). Tens of thousands of files that the image builds from the lockfile
+# anyway -- leaving them in the context makes every image build crawl for no benefit.
+**/node_modules/
+**/dist/

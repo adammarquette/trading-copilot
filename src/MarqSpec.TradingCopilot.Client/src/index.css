@@ -1,0 +1,41 @@
+/* Deliberately unopinionated. Picking a design system is gh#647's call, not the scaffold's, so this
+   file carries only enough to prove the CSS pipeline emits an asset the BFF can serve. */
+
+:root {
+  color-scheme: light dark;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  line-height: 1.5;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  margin: 0 auto;
+  max-width: 40rem;
+  padding: 3rem 1.5rem;
+}
+
+.app__title {
+  margin: 0;
+}
+
+.app__subtitle {
+  margin: 0.25rem 0 2rem;
+  opacity: 0.7;
+}
+
+/* Colour is driven off the probe result rather than a class per state, so the status element stays
+   one node and the test can assert on data-status. */
+.app__health[data-status='reachable'] strong {
+  color: #1a7f37;
+}
+
+.app__health[data-status='unreachable'] strong {
+  color: #b42318;
+}

@@ -80,6 +80,47 @@ jobs:
   # PostgreSQL container (Testcontainers, the same image the compose stack runs), so the real
   # migrations and DB-level guards are exercised on every PR. Staging/venue integration and the
   # production smoke subset remain post-merge tiers (engineering guide §5, §10).
+  # The SPA (gh#646). Its own job rather than steps inside build-test: it needs no .NET SDK and no submodule, so it
+  # starts immediately and reports in well under a minute -- a client-only PR learns it is red without waiting on a
+  # restore it never needed. A red client build fails the PR exactly as a red .NET build does, which is the point:
+  # the bundle ships inside the API image (ADR-0020), so a client that does not compile is a deploy that cannot be
+  # built.
+  client:
+    name: client (build, lint, tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/MarqSpec.TradingCopilot.Client
+    steps:
+      - uses: actions/checkout@v4
+        # No submodules: the client builds against none of them.
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/MarqSpec.TradingCopilot.Client/package-lock.json
+
+      # `npm ci`, never `npm install` -- it installs the lockfile exactly and fails if package.json and the lock
+      # have drifted, which is the npm equivalent of the reproducible restore the .NET side already relies on.
+      - name: Install
+        run: npm ci
+
+      # Lint and format are separate gates for the same reason `dotnet format --verify-no-changes` is its own step:
+      # they fail rather than fix, so the diff a reviewer reads is the diff the author wrote.
+      - name: Lint
+        run: npm run lint
+
+      - name: Format (verify)
+        run: npm run format:check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
   integration-test:
     name: integration tests (pre-merge)
     runs-on: ubuntu-latest

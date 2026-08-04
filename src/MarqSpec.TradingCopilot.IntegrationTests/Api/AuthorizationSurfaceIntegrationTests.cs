@@ -80,6 +80,23 @@ public class AuthorizationSurfaceIntegrationTests : IClassFixture<PostgresApiFac
     ];
 
     /// <summary>
+    /// The SPA shell (gh#646, [ADR-0020](../../../documentation/adr/0020-spa-served-by-the-bff.md)) — the
+    /// client-side-routing fallback that returns <c>index.html</c> for any unmatched path.
+    /// </summary>
+    /// <remarks>
+    /// Public <b>necessarily</b>, not merely by sanction: a browser cannot present a token until it has loaded the
+    /// page that collects one, so requiring auth here would make sign-in unreachable. It carries no data and no
+    /// action — every API route the shell subsequently calls still requires a token, which is what the rest of this
+    /// suite pins. Note the alternative serving model ADR-0020 rejected would not have avoided this: a
+    /// separately-hosted shell is equally public, merely on another origin where this sweep could not see it at all.
+    /// Listed here for the same reason as <see cref="DocsAnonymous"/> — so it is a decision on the record.
+    /// </remarks>
+    private static string[] ClientAnonymous { get; } =
+    [
+        "GET /{*path:nonfile}",
+    ];
+
+    /// <summary>
     /// The probes, which are open because nothing gates them — <b>not</b> because anything declared them open.
     /// </summary>
     /// <remarks>
@@ -98,7 +115,7 @@ public class AuthorizationSurfaceIntegrationTests : IClassFixture<PostgresApiFac
 
     /// <summary>The complete set of routes that may be reached without a token. Anything else must 401.</summary>
     private static HashSet<string> AnonymousRoutes { get; } =
-        new([.. DeclaredAnonymous, .. DocsAnonymous, .. UngatedByOmission], StringComparer.OrdinalIgnoreCase);
+        new([.. DeclaredAnonymous, .. DocsAnonymous, .. ClientAnonymous, .. UngatedByOmission], StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Routes R-18 calls out by name. Membership is asserted explicitly so the sweep cannot quietly stop covering
@@ -214,7 +231,7 @@ public class AuthorizationSurfaceIntegrationTests : IClassFixture<PostgresApiFac
         // sweep — it makes "a route became reachable" fail HERE, by name and by cause, rather than as a puzzling
         // 200 fifty lines up.
         string[] declared = [.. probes.Where(probe => probe.IsAnonymous).Select(probe => probe.Key)];
-        declared.Should().BeEquivalentTo([.. DeclaredAnonymous, .. DocsAnonymous],
+        declared.Should().BeEquivalentTo([.. DeclaredAnonymous, .. DocsAnonymous, .. ClientAnonymous],
             "the only routes declaring [AllowAnonymous] are the two auth entrypoints this suite sanctions and the "
             + "generated documentation surface Adam sanctioned on gh#604 — anything else appearing here was made "
             + "anonymous without being put on the record");
