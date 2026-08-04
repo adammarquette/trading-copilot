@@ -50,11 +50,22 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// has found a defect — report it, don't fix it."</i> Every scope bullet in gh#638 requires the missing HTTP
 /// route, so there is no partial slice of this card that is unblocked. The correct deliverable is this suite,
 /// fully written to the spec and ready to run the moment gh#640 ships, with every test <c>Skip</c>-annotated
-/// rather than left silently green or silently red. Each test below was run <b>unskipped</b> against this branch
-/// first to confirm it fails for the <i>stated</i> reason — the route resolves to <c>404 Not Found</c> before
-/// any of the test's own assertions run, i.e. the failure is the missing endpoint, not a defect in this suite —
-/// before the <c>Skip</c> attribute was added. That is this suite's "prove the red" for a card whose subject does
-/// not exist yet: there is no narrower perturbation to make on a route that isn't mapped.
+/// rather than left silently green or silently red.
+/// </para>
+/// <para>
+/// <b>"Prove the red" for this suite, honestly stated:</b> the blocking defect itself — the absent route and
+/// reader — is established directly by source inspection (above), not by a live HTTP 404, because this
+/// development sandbox's egress policy separately blocks Docker Hub's CDN
+/// (<c>production.cloudfront.docker.com</c> / <c>pkg-containers.githubusercontent.com</c>, both <c>403</c> from
+/// the pre-configured proxy), so the container tier's Postgres/Ryuk images could not be pulled locally at all.
+/// Each test below <b>was</b> run unskipped against this branch and did fail — every one at the identical
+/// infrastructure step (the shared <see cref="StubbedVenuePostgresFactory"/> fixture's container failing to
+/// start), confirming the tests are not independently broken and the suite is wired correctly end to end up to
+/// that point — but that is a sandbox-network red, not the endpoint's own 404. Do not read the comment on any
+/// individual test as a claim that its specific HTTP assertion was observed to fail; only source inspection
+/// backs the "the route does not exist" claim. CI's own network context is expected to pull these images
+/// normally, and the `integration tests (pre-merge)` check on this suite's PR is the authoritative signal for
+/// what actually happens once un-skipped.
 /// </para>
 /// <para>
 /// <b>Tier:</b> pre-merge, container-backed Postgres (<see cref="StubbedVenuePostgresFactory"/>). Venue-independent
