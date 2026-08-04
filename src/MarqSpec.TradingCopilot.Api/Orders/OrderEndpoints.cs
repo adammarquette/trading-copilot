@@ -540,24 +540,37 @@ public static class OrderEndpoints
             {
                 result = await composed!.Execution.SendAsync(executionRequest!, cancellationToken);
             }
+            catch (VenueRefusalException refusal) when (refusal.Kind == VenueRefusalKind.Definitive)
+            {
+                // A DEFINITIVE venue rejection (gh#629): the venue responded in the negative and placed NOTHING, so --
+                // unlike the maybe-live faults in the broad catch below -- it is safe to release the claim back to
+                // Staged (re-takeable, so the operator can amend and retry) and return the reason, rather than
+                // stranding the row Taking for a human to reconcile. The release is the claim's conditional UPDATE
+                // (WHERE Taking), so the two-writers rule holds. Only the adapter's !success classification reaches
+                // here; an indeterminate no-id, a timeout, or a transport fault falls through to the broad catch.
+                await claim.ReleaseAsync(id, CancellationToken.None);
+                loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogWarning(
+                    "Take of order {OrderId} on account {AccountId} was DEFINITIVELY rejected by the venue: {Reason}. "
+                    + "Nothing rests, so the ticket is released to Staged for amendment.",
+                    order.Id, order.AccountId, refusal.Message);
+                return Results.Conflict(new { error = refusal.Message });
+            }
             catch (Exception)
             {
-                // ANY fault from the venue send leaves the order MAYBE-LIVE, so the row is LEFT TAKING -- never released
+                // ANY remaining fault leaves the order MAYBE-LIVE, so the row is LEFT TAKING -- never released
                 // (releasing a maybe-live order re-opens the gh#530 double-place, the whole hazard gh#589 exists to
-                // close). The cases this catches all resist "nothing rests":
+                // close). Only the DEFINITIVE venue rejection is auto-resolved (above, gh#629); everything this broad
+                // catch takes is indeterminate by construction and resists "nothing rests":
                 //   * a client disconnect / host shutdown (OperationCanceledException, the caller's token) -- interrupted;
                 //   * a venue TIMEOUT -- a TaskCanceledException whose token is HttpClient's, NOT the caller's, so it is
                 //     NOT the cancelled-caller case and is the canonical maybe-landed failure;
                 //   * a transport fault (HttpRequestException);
-                //   * even a ProjectXVenueException -- which is BOTH a definitive "!Success" rejection (nothing rests)
-                //     AND "accepted but returned no order id" (the venue took it -- LIVE); the two are indistinguishable
-                //     at this seam, so both must fail toward Taking.
-                // A definitive rejection is therefore left Taking too, rather than auto-released -- the small cost of
-                // never guessing "dead" wrong; the reconcile endpoint resolves it cheaply (nothing rests -> release;
-                // something rests -> adopt). The venue-seam refusal OUTCOME that would let a definitive rejection
-                // auto-release safely is deferred (gh#629). A durable Taking cannot be re-taken (TryClaim requires
-                // Staged); the operator resolves it via POST /orders/<id>/reconcile, and a restart flags it
-                // (OrderMidTaking). Uncertainty resolves to the safe state (ADR-0013 §9). Surface it loudly.
+                //   * an INDETERMINATE VenueRefusalException -- "accepted but returned no order id" (the venue took it
+                //     -- LIVE), which the adapter classifies Indeterminate precisely because it must fail toward Taking.
+                // Anything unrecognised falls here too and stays indeterminate -- the safe default is structural, not a
+                // list. A durable Taking cannot be re-taken (TryClaim requires Staged); the operator resolves it via
+                // POST /orders/<id>/reconcile, and a restart flags it (OrderMidTaking). Uncertainty resolves to the
+                // safe state (ADR-0013 §9). Surface it loudly.
                 loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
                     "Take of order {OrderId} on account {AccountId} faulted at the venue send; an order MAY be live at "
                     + "the venue and unrecorded. The row is left Taking so it cannot be re-taken; resolve it via "

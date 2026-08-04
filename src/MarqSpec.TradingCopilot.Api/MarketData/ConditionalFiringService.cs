@@ -38,8 +38,9 @@ namespace MarqSpec.TradingCopilot.Api.MarketData;
 /// venue is touched, so a fault in the transmit→journal window — a DB fault, or a shutdown after the venue accepted
 /// but before the order journaled — leaves the conditional <b>Firing</b>, not Pending; discovery is Pending-only, so
 /// it can never blind-re-fire a live-but-unjournaled order (it is reconciled / surfaced against venue truth on
-/// replay, ADR-0013). A venue rejection <i>before</i> acceptance reverts the intent to Pending (the gh#532
-/// containment). Each fire's venue order carries the conditional's id as a <c>customTag</c>, so a replay can
+/// replay, ADR-0013). A <b>definitive</b> venue rejection — the gateway placed nothing (gh#629) — reverts the intent
+/// to Pending (the gh#532 containment); an <b>indeterminate</b> one, where the order may be live, is kept Firing.
+/// Each fire's venue order carries the conditional's id as a <c>customTag</c>, so a replay can
 /// recognise its own already-placed order rather than transmit a duplicate.
 /// </para>
 /// </remarks>
@@ -373,20 +374,42 @@ public sealed class ConditionalFiringService
 
         OwnerUser owner = new(record.UserId);
 
-        // The send. From the durable Firing intent committed just above, ANY fault here leaves an order that MAY be
-        // live at the venue -- so the conditional is left Firing (never reverted to Pending), mirroring the take path
-        // (gh#589). A venue timeout surfaces as a TaskCanceledException on HttpClient's OWN token (NOT the caller's, so
-        // it is not the clean-shutdown case), a transport fault as an HttpRequestException, and even a definitive
-        // ProjectXVenue "!Success" rejection is indistinguishable at this seam from "accepted but no order id" (LIVE) --
-        // all must fail toward Firing. Reverting a maybe-landed timeout to Pending was a double-transmit (gh#589
-        // review): discovery is Pending-only so the next quote would re-fire it, and the no-stacking check (which now
-        // counts Firing) could not see a Pending row, so an operator send / take would stack on the live order. The
-        // outer handler surfaces it loudly; the runtime POST /conditionals/{id}/reconcile resolves it against venue
-        // truth (adopt if it landed, release to Pending if nothing rests and the account is flat), and a strand that
-        // survives a restart fails safe + loud (ConditionalMidFiring, ADR-0013). A fault BEFORE this intent committed
-        // (compose / gate / build -- above) leaves may-be-live false and re-decides Pending; a clean caller-
-        // cancellation propagates to the outer OperationCanceledException handler unchanged.
-        ExecutionResult result = await composed.Execution.SendAsync(request, cancellationToken);
+        // The send. From the durable Firing intent committed just above, a MAYBE-LIVE fault here leaves an order that
+        // may be resting at the venue -- so the conditional is left Firing (never reverted to Pending), mirroring the
+        // take path (gh#589). A venue timeout surfaces as a TaskCanceledException on HttpClient's OWN token (NOT the
+        // caller's, so it is not the clean-shutdown case), a transport fault as an HttpRequestException, and an
+        // INDETERMINATE VenueRefusalException ("accepted but no order id" -- LIVE) all fail toward Firing. Reverting a
+        // maybe-landed timeout to Pending was a double-transmit (gh#589 review): discovery is Pending-only so the next
+        // quote would re-fire it, and the no-stacking check (which now counts Firing) could not see a Pending row, so
+        // an operator send / take would stack on the live order. The outer handler surfaces it loudly; the runtime
+        // POST /conditionals/{id}/reconcile resolves it against venue truth (adopt if it landed, release to Pending if
+        // nothing rests and the account is flat), and a strand that survives a restart fails safe + loud
+        // (ConditionalMidFiring, ADR-0013). The ONE fault this now tells apart is a DEFINITIVE VenueRefusalException
+        // (gh#629): the gateway responded "!success" and placed nothing, so the try/catch below reverts it to Pending
+        // (the gh#532 containment) rather than stranding it Firing. A fault BEFORE this intent committed (compose /
+        // gate / build -- above) leaves may-be-live false and re-decides Pending; a clean caller-cancellation
+        // propagates to the outer OperationCanceledException handler unchanged.
+        ExecutionResult result;
+        try
+        {
+            result = await composed.Execution.SendAsync(request, cancellationToken);
+        }
+        catch (VenueRefusalException refusal) when (refusal.Kind == VenueRefusalKind.Definitive)
+        {
+            // A DEFINITIVE venue rejection (gh#629): the venue responded in the negative and placed NOTHING, so --
+            // unlike the maybe-live faults that propagate to the outer handler -- revert the durable Firing intent to
+            // Pending and re-decide on the next quote (the gh#532 containment), mirroring the gate-refusal revert
+            // below. Everything else (an indeterminate no-id, a transport timeout on HttpClient's token, an
+            // HttpRequestException, a caller cancellation) is NOT caught here and reaches the outer maybe-live handler,
+            // which correctly leaves it Firing (gh#589). The revert is committed by the outer per-record save, exactly
+            // as the gate-refusal path below (the gh#622 lock-timing residual is shared, and benign -- over-blocks only).
+            onMayBeLiveAtVenue(false);
+            record.Status = ConditionalStatus.Pending;
+            _logger.LogWarning(
+                "Conditional order {Id} triggered but the venue DEFINITIVELY rejected the fire: {Reason}. "
+                + "Nothing rests, reverted to pending.", record.Id, refusal.Message);
+            return FiringOutcome.Resolved;
+        }
 
         if (result.Outcome == ExecutionOutcome.Placed && result.Order is not null)
         {

@@ -400,28 +400,32 @@ public class ProjectXVenueTests
     }
 
     [Fact]
-    public async Task PlaceOrderAsync_ShouldThrow_WhenTheGatewayReportsFailure()
+    public async Task PlaceOrderAsync_ShouldThrowDefinitive_WhenTheGatewayReportsFailure()
     {
         // A rejected order comes back as Success=false with a 200 response. Ignoring that would leave us
-        // believing a position exists that does not.
+        // believing a position exists that does not. The gateway responded in the negative and placed nothing, so it
+        // is a DEFINITIVE refusal (gh#629) -- the caller can auto-resolve. The error code rides along.
         A.CallTo(() => _api.PlaceOrderAsync(A<ClientModels.PlaceOrderRequest>._, A<CancellationToken>._))
             .Returns(new ClientModels.PlaceOrderResponse { Success = false, ErrorCode = 42, ErrorMessage = "Insufficient margin" });
 
         Func<Task> act = async () => await _venue.PlaceOrderAsync(MarketBuy(), CancellationToken.None);
 
-        await act.Should().ThrowAsync<ProjectXVenueException>().Where(e => e.Message.Contains("Insufficient margin"));
+        (await act.Should().ThrowAsync<VenueRefusalException>().Where(e => e.Message.Contains("Insufficient margin")))
+            .Which.Should().Match<VenueRefusalException>(e => e.Kind == VenueRefusalKind.Definitive && e.ErrorCode == 42);
     }
 
     [Fact]
-    public async Task PlaceOrderAsync_ShouldThrow_WhenTheGatewayReportsSuccessWithoutAnOrderId()
+    public async Task PlaceOrderAsync_ShouldThrowIndeterminate_WhenTheGatewayReportsSuccessWithoutAnOrderId()
     {
-        // Success with no handle leaves nothing to cancel or flatten against -- refuse rather than carry on.
+        // Success with no handle leaves nothing to cancel or flatten against -- the venue TOOK it but gave no handle,
+        // so an order MAY be resting. That is INDETERMINATE (gh#629): the caller must never assume absence.
         A.CallTo(() => _api.PlaceOrderAsync(A<ClientModels.PlaceOrderRequest>._, A<CancellationToken>._))
             .Returns(new ClientModels.PlaceOrderResponse { Success = true, OrderId = null });
 
         Func<Task> act = async () => await _venue.PlaceOrderAsync(MarketBuy(), CancellationToken.None);
 
-        await act.Should().ThrowAsync<ProjectXVenueException>();
+        (await act.Should().ThrowAsync<VenueRefusalException>())
+            .Which.Kind.Should().Be(VenueRefusalKind.Indeterminate);
     }
 
     [Fact]
