@@ -39,16 +39,34 @@ public sealed class OrphanTestPostgresFactory : StubbedVenuePostgresFactory
     }
 }
 
+/// <summary>One captured log record, including the <b>category</b> that emitted it.</summary>
+/// <param name="Category">The logger category — normally the emitting type's full name.</param>
+/// <param name="Level">The severity.</param>
+/// <param name="Message">The formatted message.</param>
+public sealed record CapturedLog(string Category, LogLevel Level, string Message);
+
 /// <summary>An in-memory sink for captured log records — the suite asserts on level + message text.</summary>
 public sealed class InMemoryLogCollector
 {
-    private readonly ConcurrentQueue<(LogLevel Level, string Message)> _entries = new();
+    private readonly ConcurrentQueue<CapturedLog> _entries = new();
 
-    /// <summary>Records one log entry.</summary>
-    public void Add(LogLevel level, string message) => _entries.Enqueue((level, message));
+    /// <summary>Records one log entry whose category is not of interest to the caller.</summary>
+    public void Add(LogLevel level, string message) => Add(string.Empty, level, message);
 
-    /// <summary>A snapshot of everything captured so far.</summary>
-    public IReadOnlyList<(LogLevel Level, string Message)> Entries => [.. _entries];
+    /// <summary>Records one log entry with the category that emitted it.</summary>
+    public void Add(string category, LogLevel level, string message) =>
+        _entries.Enqueue(new CapturedLog(category, level, message));
+
+    /// <summary>A snapshot of everything captured so far, level + message only.</summary>
+    public IReadOnlyList<(LogLevel Level, string Message)> Entries =>
+        [.. _entries.Select(entry => (entry.Level, entry.Message))];
+
+    /// <summary>
+    /// A snapshot including each record's category. Needed wherever a factory keeps <b>several</b> hosted services
+    /// running: an unscoped "nothing at Error" assertion is then failed by any unrelated consumer, which makes a red
+    /// mean something other than the defect under test (gh#632 review).
+    /// </summary>
+    public IReadOnlyList<CapturedLog> Records => [.. _entries];
 
     /// <summary>Drops everything captured — call at the start of each test for isolation.</summary>
     public void Clear() => _entries.Clear();
@@ -57,13 +75,13 @@ public sealed class InMemoryLogCollector
 /// <summary>A logger provider that funnels every category's records into a shared <see cref="InMemoryLogCollector"/>.</summary>
 internal sealed class CapturingLoggerProvider(InMemoryLogCollector collector) : ILoggerProvider
 {
-    public ILogger CreateLogger(string categoryName) => new CapturingLogger(collector);
+    public ILogger CreateLogger(string categoryName) => new CapturingLogger(collector, categoryName);
 
     public void Dispose()
     {
     }
 
-    private sealed class CapturingLogger(InMemoryLogCollector collector) : ILogger
+    private sealed class CapturingLogger(InMemoryLogCollector collector, string category) : ILogger
     {
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -73,7 +91,7 @@ internal sealed class CapturingLoggerProvider(InMemoryLogCollector collector) : 
             LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
             ArgumentNullException.ThrowIfNull(formatter);
-            collector.Add(logLevel, formatter(state, exception));
+            collector.Add(category, logLevel, formatter(state, exception));
         }
     }
 }
