@@ -43,6 +43,14 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     // Suggestion-drift's symbol->contract bridge (gh#632, gh#546): a symbol the venue cannot resolve this pass —
     // the "cannot measure" half of ResolveContractAsync, distinct from a spec miss (which never reaches the venue).
     private readonly HashSet<string> _resolveContractThrowSymbols = new(StringComparer.OrdinalIgnoreCase);
+    // The venue-refusal seam (gh#663, of #629): the fault a transmit meets AT the venue. The double only FEEDS the
+    // exception the test names — it never decides what the catch site does with it, and a refused transmit mints NO
+    // venue order id, so "nothing rests" is a property of the double rather than an answer it hands the system.
+    private readonly Dictionary<string, Func<Exception>> _placeFaultsByCustomTag = new(StringComparer.Ordinal);
+    private Func<Exception>? _placeFault;
+    private readonly List<(long Entered, long Left)> _placeSpans = [];
+    private readonly object _placeSpanGate = new();
+    private long _placeSequence;
 
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
 
@@ -202,6 +210,77 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// <summary>Whether <c>ResolveContractAsync</c> should throw for a symbol (see <see cref="MakeResolveContractThrow"/>).</summary>
     internal bool ResolveContractThrows(string symbol) => _resolveContractThrowSymbols.Contains(symbol);
 
+    /// <summary>
+    /// Makes <b>every</b> <c>PlaceOrderAsync</c> refuse with the exception <paramref name="fault"/> builds — the
+    /// venue-refusal seam (gh#663, of #629). A refused transmit mints <b>no</b> venue order id and hands back
+    /// nothing, so the catch site's decision (release the row, or keep the durable intent) is production's alone:
+    /// the double feeds the fault and never the answer.
+    /// </summary>
+    /// <param name="fault">Builds the exception to throw — a fresh instance per transmit.</param>
+    public void MakePlaceOrderThrow(Func<Exception> fault) => _placeFault = fault;
+
+    /// <summary>
+    /// Makes only the transmit carrying <paramref name="customTag"/> refuse (gh#663) — the correlation handle the
+    /// take stamps with its order id and the conditional fire with its own id (gh#577 / gh#589). Lets one entry on
+    /// an account be refused while a concurrent peer transmits normally, which is what the serialization case needs.
+    /// </summary>
+    /// <param name="customTag">The correlation handle the refused transmit carries.</param>
+    /// <param name="fault">Builds the exception to throw — a fresh instance per transmit.</param>
+    public void MakePlaceOrderThrowFor(string customTag, Func<Exception> fault) =>
+        _placeFaultsByCustomTag[customTag] = fault;
+
+    /// <summary>Clears every armed place-order refusal, so transmits succeed again (gh#663).</summary>
+    public void ClearPlaceOrderFaults()
+    {
+        _placeFault = null;
+        _placeFaultsByCustomTag.Clear();
+    }
+
+    /// <summary>
+    /// Every <c>PlaceOrderAsync</c> call as an <b>ordinal span</b> — the sequence number on entry and on exit, from
+    /// one monotonic counter shared by all venues this factory creates (gh#663). Two spans that interleave witness
+    /// two entry-transmits in flight on the account at once, which <c>IAccountEntryGuard</c> exists to prevent; a
+    /// wall clock could not say it as cheaply or as deterministically.
+    /// </summary>
+    public IReadOnlyList<(long Entered, long Left)> PlaceOrderCallSpans
+    {
+        get
+        {
+            lock (_placeSpanGate)
+            {
+                return [.. _placeSpans];
+            }
+        }
+    }
+
+    /// <summary>Forgets every recorded transmit span, so a case reads only its own (gh#663).</summary>
+    public void ResetPlaceOrderCallSpans()
+    {
+        lock (_placeSpanGate)
+        {
+            _placeSpans.Clear();
+        }
+    }
+
+    /// <summary>The refusal armed for this transmit, if any — the tag-specific one first, then the global.</summary>
+    internal Exception? PlaceFaultFor(string? customTag) =>
+        customTag is not null && _placeFaultsByCustomTag.TryGetValue(customTag, out Func<Exception>? tagged)
+            ? tagged()
+            : _placeFault?.Invoke();
+
+    /// <summary>Stamps a transmit's entry ordinal (see <see cref="PlaceOrderCallSpans"/>).</summary>
+    internal long EnterPlaceCall() => Interlocked.Increment(ref _placeSequence);
+
+    /// <summary>Closes the span opened at <paramref name="entered"/> (see <see cref="PlaceOrderCallSpans"/>).</summary>
+    internal void LeavePlaceCall(long entered)
+    {
+        long left = Interlocked.Increment(ref _placeSequence);
+        lock (_placeSpanGate)
+        {
+            _placeSpans.Add((entered, left));
+        }
+    }
+
     /// <summary>The fed bars whose open falls in the requested window — the stub echoes inputs, nothing computed.</summary>
     internal IReadOnlyList<Bar> BarsIn(DateTimeOffset from, DateTimeOffset to) =>
         [.. _seededBars.Where(bar => bar.OpenTime >= from && bar.OpenTime <= to)];
@@ -229,6 +308,11 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _historicalBarsUnsupported = false;
         _getBarsThrows = false;
         _resolveContractThrowSymbols.Clear();
+        ClearPlaceOrderFaults();
+        lock (_placeSpanGate)
+        {
+            _placeSpans.Clear();
+        }
     }
 
     internal IReadOnlyList<WorkingOrder> WorkingOrdersFor(VenueAccountId account) =>
@@ -412,11 +496,29 @@ internal class AdversarialTestTradingVenue : ITradingVenue
 
     public async Task<PlacedOrder> PlaceOrderAsync(OrderRequest request, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(request);
         _placedOrders.Add(request);
-        string venueOrderId = _factory.RecordPlaced($"STUB-ORDER-{Guid.NewGuid():N}");
-        // The seam gh#274 uses to interleave a concurrent retire at the exact race window; a no-op otherwise.
-        await _factory.InvokePlaceSideEffectAsync();
-        return new PlacedOrder(request.Account, venueOrderId, DateTimeOffset.UtcNow);
+        long entered = _factory.EnterPlaceCall();
+        try
+        {
+            if (_factory.PlaceFaultFor(request.CustomTag) is { } refusal)
+            {
+                // A REFUSED transmit (gh#663): the side effect runs first, so a test can interleave a peer while
+                // this transmit is still in flight; then the venue throws WITHOUT minting a venue order id, so
+                // nothing rests and nothing is handed back for the catch site to journal.
+                await _factory.InvokePlaceSideEffectAsync();
+                throw refusal;
+            }
+
+            string venueOrderId = _factory.RecordPlaced($"STUB-ORDER-{Guid.NewGuid():N}");
+            // The seam gh#274 uses to interleave a concurrent retire at the exact race window; a no-op otherwise.
+            await _factory.InvokePlaceSideEffectAsync();
+            return new PlacedOrder(request.Account, venueOrderId, DateTimeOffset.UtcNow);
+        }
+        finally
+        {
+            _factory.LeavePlaceCall(entered);
+        }
     }
 
     public Task<IReadOnlyList<WorkingOrder>> GetWorkingOrdersAsync(VenueAccountId account, CancellationToken cancellationToken = default) =>

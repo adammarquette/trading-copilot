@@ -563,6 +563,54 @@ public class ConditionalFiringServiceTests
     }
 
     [Fact]
+    public async Task ProcessQuote_ShouldRevertToPending_WhenTheVenueDefinitivelyRejectsTheFire()
+    {
+        // gh#629: a DEFINITIVE venue rejection (VenueRefusalException, Kind == Definitive) placed NOTHING, so the fire
+        // reverts the durable Firing intent to Pending -- re-decidable on the next quote (the gh#532 containment) --
+        // rather than being left Firing like a maybe-live fault. It mirrors the gate-refusal revert and does not throw.
+        Guid accountId = await SeedAccountAsync();
+        await AddConditionalAsync(accountId);
+
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Returns(Task.FromException<PlacedOrder>(
+                new VenueRefusalException("ProjectX rejected: invalid stop", VenueRefusalKind.Definitive, 42)));
+
+        await Service().ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.SingleAsync()).Status.Should().Be(
+            ConditionalStatus.Pending, "a definitive rejection placed nothing, so the fire reverts to Pending (gh#629)");
+        (await reload.Orders.AnyAsync()).Should().BeFalse("nothing rests -- the venue rejected the order");
+    }
+
+    [Fact]
+    public async Task ProcessQuote_ShouldLeaveFiring_WhenTheVenueRefusalIsIndeterminate()
+    {
+        // gh#629 THE SAFETY CASE: an INDETERMINATE VenueRefusalException (accepted-but-no-id -- the venue MAY hold the
+        // order) is maybe-live and must be left Firing, NEVER reverted to a re-fireable Pending. Mis-classifying it as
+        // definitive would revert a maybe-live fire, which the next quote would re-fire -- a double-transmit.
+        Guid accountId = await SeedAccountAsync();
+        await AddConditionalAsync(accountId);
+
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Returns(Task.FromException<PlacedOrder>(
+                new VenueRefusalException("accepted but returned no order id", VenueRefusalKind.Indeterminate)));
+
+        try
+        {
+            await Service().ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // Tolerated — the property under test is the DB state (Firing), not whether the fault escaped the pass.
+        }
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.SingleAsync()).Status.Should().Be(
+            ConditionalStatus.Firing, "an indeterminate refusal is maybe-live -> left Firing, never reverted (gh#629 safety)");
+    }
+
+    [Fact]
     public async Task ProcessQuote_ShouldHoldTheFire_WhenTheAccountAlreadyHasAMidFireFiringConditional()
     {
         // gh#589: the no-stacking check counts a mid-fire Firing conditional, not only an outstanding Order. A Firing

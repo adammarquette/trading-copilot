@@ -226,15 +226,20 @@ public sealed class ProjectXVenue : ITradingVenue
 
         if (!response.Success)
         {
-            throw new ProjectXVenueException(
+            // DEFINITIVE (gh#629): the gateway responded in the negative and placed nothing, so the caller can
+            // auto-resolve the row. Classified HERE, where !success is unambiguous -- never inferred at the catch.
+            throw new VenueRefusalException(
                 $"ProjectX rejected the order: {response.ErrorMessage ?? "no reason given"}.",
+                VenueRefusalKind.Definitive,
                 response.ErrorCode);
         }
 
         if (response.OrderId is not { } orderId)
         {
-            // Accepted but unidentified leaves nothing to cancel or flatten against -- treat it as a failure.
-            throw new ProjectXVenueException("ProjectX accepted the order but returned no order id.");
+            // INDETERMINATE (gh#629): accepted but unidentified -- the venue took it, so an order MAY be resting with
+            // no handle to cancel or flatten against. The caller must keep the durable intent, never assume absence.
+            throw new VenueRefusalException(
+                "ProjectX accepted the order but returned no order id.", VenueRefusalKind.Indeterminate);
         }
 
         return new PlacedOrder(
@@ -361,10 +366,11 @@ public sealed class ProjectXVenue : ITradingVenue
         // resting read above cannot see it. The window starts at the caller's instant (the stranded row's own
         // creation) and is left open-ended, because an order can fill well after it was placed.
         //
-        // UNVERIFIED AGAINST A LIVE GATEWAY (gh#642): the submodule's SearchOrderRequest may serialise startTime /
-        // endTime where the gateway expects startTimestamp / endTimestamp, in which case this search returns nothing
-        // and the veto below silently degrades to the pre-gh#631 behaviour. Fail-safe — an empty history reads as
-        // NoFillFound, which authorises nothing — but it would look shipped while doing nothing, so it is tracked.
+        // Window field names confirmed against the gateway swagger and corrected (gh#642): the submodule's
+        // SearchOrderRequest now serialises startTimestamp / endTimestamp — the names /api/Order/search requires
+        // (and startTimestamp is mandatory). It previously sent startTime / endTime, which the gateway dropped, so
+        // this search returned nothing and the veto silently degraded to the pre-gh#631 behaviour — fail-safe (an
+        // empty history reads as NoFillFound, authorising nothing) but shipped-yet-inert until the field-name fix.
         IEnumerable<ClientModels.Order> history = await _api.GetOrdersAsync(
             ProjectXMapping.ToAccountId(account, Id),
             since.UtcDateTime,
