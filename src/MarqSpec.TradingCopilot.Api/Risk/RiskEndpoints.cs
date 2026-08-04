@@ -28,6 +28,10 @@ public static class RiskEndpoints
         group.MapPut("/", DeclareRiskAsync)
             .WithSummary("Declare the account's risk rules (validated whole; refused on any violation).");
         group.MapGet("/", GetRiskAsync).WithSummary("The account's declared risk profile, if any.");
+        // The clock is read at the boundary (the route) and passed in, so the day-boundary logic stays testable.
+        group.MapGet("/headroom", (Guid id, TradingCopilotDbContext database, CancellationToken cancellationToken) =>
+                GetHeadroomAsync(id, DateTimeOffset.UtcNow, database, cancellationToken))
+            .WithSummary("Today's remaining daily-loss budget and target progress, readable without a send (gh#587).");
         return endpoints;
     }
 
@@ -162,5 +166,46 @@ public static class RiskEndpoints
 
         // No default is invented for an undeclared account: absence IS the answer (the gate fail-closes on it).
         return profile is null ? Results.NotFound() : Results.Ok(RiskProfileResponse.From(profile));
+    }
+
+    /// <summary>
+    /// Today's remaining daily-loss budget and target progress for an account (gh#587, R-5), computed
+    /// <b>without composing a send</b> — the proactive read the suggestion throttle (gh#551) and any headroom display
+    /// (U3 gh#25) need. A <b>read surface over the gate's own arithmetic</b>: the same <see cref="DailyHeadroom"/>
+    /// the send-time gate enforces (extracted gh#627), fed the same persisted limits and the day's realized loss
+    /// derived from stored closed trades — never a second definition of the limit (R-5).
+    /// </summary>
+    /// <param name="id">The account whose headroom to read.</param>
+    /// <param name="now">The current time, supplied by the caller — the trading-day boundary is derived from it.</param>
+    /// <param name="database">The scoped, R-20-filtered database.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The headroom, or <b>404</b> when the account has declared no risk profile (no governor to project).</returns>
+    internal static async Task<IResult> GetHeadroomAsync(
+        Guid id,
+        DateTimeOffset now,
+        TradingCopilotDbContext database,
+        CancellationToken cancellationToken)
+    {
+        RiskProfileRecord? profile = await database.RiskProfiles
+            .FirstOrDefaultAsync(candidate => candidate.AccountId == id, cancellationToken);
+
+        // Two DISTINCT absences: no declared profile => no governor to project => 404 (mirrors GetRiskAsync, and the
+        // gate fail-closes on it too). A declared profile with a quiet day is NOT absent -- it reads FULL headroom
+        // below (dayLoss = 0), the empty-window honesty rule.
+        if (profile is null)
+        {
+            return Results.NotFound();
+        }
+
+        decimal realized = await database.TodayRealizedPnLForAccountAsync(id, now, cancellationToken);
+        decimal dayLoss = Math.Max(0m, -realized);
+        decimal dayProfit = Math.Max(0m, realized);
+
+        // The SAME arithmetic + the SAME persisted limits the gate uses (RiskGate reads DailyLossLimit /
+        // DailyDrawdownGovernor through a passthrough mapping, then DailyHeadroom.Remaining). The gate currently feeds
+        // dayLoss = 0 (the gh#11 day-realized deferral); this feeds the real trade-derived loss, so the two agree
+        // today (no Trade writer yet) and stay agreed the moment the gate's own day tracking lands.
+        DailyHeadroom headroom = DailyHeadroom.Remaining(profile.DailyLossLimit, profile.DailyDrawdownGovernor, dayLoss);
+        return Results.Ok(DailyHeadroomResponse.From(headroom, dayLoss, dayProfit, profile));
     }
 }
