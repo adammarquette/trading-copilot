@@ -1,10 +1,22 @@
+using System.Globalization;
 using MarqSpec.Client.ProjectX;
 using MarqSpec.Client.ProjectX.Api.Models;
 using MarqSpec.Client.ProjectX.Configuration;
 using MarqSpec.Client.ProjectX.DependencyInjection;
 using MarqSpec.Client.ProjectX.Exceptions;
+using MarqSpec.Client.ProjectX.WebSocket;
+using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+
+// Aliased rather than a blanket `using MarqSpec.TradingCopilot.Domain.Venue;` — that namespace's own `OrderType`
+// collides with the ProjectX client's `OrderType` (Api.Models), which every venue-truth read in this file already
+// uses unqualified.
+using FirmConventions = MarqSpec.TradingCopilot.Domain.Venue.FirmConventions;
+using IOrderExecutor = MarqSpec.TradingCopilot.Domain.Venue.IOrderExecutor;
+using TaggedFillEvidence = MarqSpec.TradingCopilot.Domain.Venue.TaggedFillEvidence;
+using VenueAccountId = MarqSpec.TradingCopilot.Domain.Venue.VenueAccountId;
+using VenueId = MarqSpec.TradingCopilot.Domain.Venue.VenueId;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost.Staging;
 
@@ -26,17 +38,23 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
 {
     private readonly ServiceProvider _provider;
     private readonly IProjectXApiClient _api;
+    private readonly IOrderExecutor _orderExecutor;
 
-    private StagingProjectXGateway(ServiceProvider provider, IProjectXApiClient api)
+    private StagingProjectXGateway(ServiceProvider provider, IProjectXApiClient api, IOrderExecutor orderExecutor)
     {
         _provider = provider;
         _api = api;
+        _orderExecutor = orderExecutor;
     }
 
     /// <summary>
     /// Builds a client over the reserved practice credentials (<c>STAGING_PROJECTX_API_KEY/SECRET</c>, optional
     /// <c>STAGING_PROJECTX_API_BASE_URL</c>). Gated behind <see cref="StagingGatewayFactAttribute"/>, so the config
-    /// is guaranteed present when this runs.
+    /// is guaranteed present when this runs. Also builds the production <see cref="ProjectXVenue"/> over the same
+    /// client — <c>AddProjectXApiClient</c> registers <see cref="IProjectXWebSocketClient"/> too, and building it
+    /// here does not open a connection (that only happens on an explicit <c>Connect*Async</c> call, which nothing
+    /// here makes) — so <see cref="FindFilledOrderByTagAsync"/> below has a real production seam to call without
+    /// paying for realtime plumbing this gate never uses.
     /// </summary>
     public static StagingProjectXGateway Create()
     {
@@ -54,7 +72,18 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
         ServiceCollection services = new();
         services.AddProjectXApiClient(configuration);
         ServiceProvider provider = services.BuildServiceProvider();
-        return new StagingProjectXGateway(provider, provider.GetRequiredService<IProjectXApiClient>());
+        IProjectXApiClient api = provider.GetRequiredService<IProjectXApiClient>();
+
+        // Simulated matches the practice-account context every staging gate operates in (R-14 — practice and
+        // evaluation credentials are entitled to the simulated data universe); FirmConventions.None mirrors the
+        // "nothing declared" default ProjectXVenueFactory itself falls back to. Neither is expected to matter for
+        // an order-history read, but both are required constructor parameters regardless.
+        IOrderExecutor orderExecutor = new ProjectXVenue(
+            api,
+            provider.GetRequiredService<IProjectXWebSocketClient>(),
+            ProjectXDataTier.Simulated,
+            FirmConventions.None);
+        return new StagingProjectXGateway(provider, api, orderExecutor);
     }
 
     /// <summary>The gateway's own account id for the reserved practice account, matched by its venue name (R-14).</summary>
@@ -110,6 +139,55 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(openOrders);
         return openOrders.SingleOrDefault(order => order.Type == OrderType.Stop
             && order.ContractId.Contains(contractIdHint, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// The venue's <b>order-history</b> read for the account since <paramref name="since"/> — the only venue-truth
+    /// surface that still shows an order once it has gone <b>terminal</b> (filled, cancelled, expired, rejected)
+    /// and left the resting book. Added for the gh#643 fill-echo gate: once a round-tripped fill closes out and the
+    /// account goes flat again, neither <see cref="OpenOrdersAsync"/> nor <see cref="OpenPositionsAsync"/> retains
+    /// any trace of it — this is the one read that can.
+    /// </summary>
+    public async Task<IReadOnlyList<Order>> GetOrdersAsync(
+        int accountId, DateTime since, CancellationToken cancellationToken = default) =>
+        [.. await _api.GetOrdersAsync(accountId, since, endTime: null, cancellationToken)];
+
+    /// <summary>
+    /// The <b>executed</b> order-history record stamped with <paramref name="customTag"/>, if the venue's order
+    /// history echoes the tag on it — <c>null</c> when no such record exists. "Executed" means
+    /// <see cref="Order.FillVolume"/> is greater than zero; a partial fill still counts, mirroring the veto
+    /// semantics of <c>TaggedFillEvidence</c> ("a partial fill is a fill").
+    /// </summary>
+    /// <remarks>
+    /// Deliberately independent of — and never delegates to — the production
+    /// <c>IOrderExecutor.FindFilledOrderByTagAsync</c> matching: gh#643 exists to prove the <b>venue</b>
+    /// characteristic that method assumes (that ProjectX echoes <c>customTag</c> on a terminal record), not to
+    /// re-run the production method's own logic against itself and call that proof.
+    /// </remarks>
+    public static Order? ExecutedOrderWithTag(IReadOnlyList<Order> orders, string customTag)
+    {
+        ArgumentNullException.ThrowIfNull(orders);
+        ArgumentException.ThrowIfNullOrWhiteSpace(customTag);
+        return orders.FirstOrDefault(order =>
+            string.Equals(order.CustomTag, customTag, StringComparison.Ordinal) && order.FillVolume > 0);
+    }
+
+    /// <summary>
+    /// Calls the production <c>IOrderExecutor.FindFilledOrderByTagAsync</c> directly, against a real
+    /// <see cref="ProjectXVenue"/> built over this gateway's authenticated client (gh#643). Unlike
+    /// <see cref="ExecutedOrderWithTag"/> — which independently proves the venue echoes the tag, without ever
+    /// touching production code — this exercises the production seam itself: its window handling, its own
+    /// comparison, its mapping onto <see cref="TaggedFillEvidence"/>. The two are complementary diagnostics: if
+    /// this call comes back red while <see cref="ExecutedOrderWithTag"/> still finds the record, the venue is
+    /// fine and the production matching is wrong; if both come back red together, the venue itself does not echo
+    /// the tag — the gh#643 assumption is false.
+    /// </summary>
+    public Task<TaggedFillEvidence> FindFilledOrderByTagAsync(
+        int accountId, string customTag, DateTimeOffset since, CancellationToken cancellationToken = default)
+    {
+        VenueAccountId account = VenueAccountId.Create(
+            VenueId.Parse("projectx"), accountId.ToString(CultureInfo.InvariantCulture));
+        return _orderExecutor.FindFilledOrderByTagAsync(account, customTag, since, cancellationToken);
     }
 
     /// <summary>
