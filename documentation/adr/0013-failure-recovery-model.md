@@ -247,3 +247,23 @@ if it rests (→ `Working`), **releases** the ticket if nothing rests (→ `Stag
 book — the same *"unknown ≠ empty"* rule as the resting-orders read (gh#381). So `OrderMidTaking` here is the
 restart-time backstop, not the only recovery. Only the **automatic** background reconcile sweep stays deferred, as
 for the conditional (gh#578-class).
+
+## Update (2026-08-03) — the reconcile gains a fill-history read, closing the round-tripped ambiguity (gh#631)
+
+§9's "uncertainty resolves to the safe state" had one case it could not actually resolve. The runtime reconcile
+reads *what rests* and *what positions are open*; an entry that placed, **filled and round-tripped** leaves neither,
+so it is indistinguishable from an attempt that never reached the market. For a one-shot conditional the two demand
+opposite handling — release the second, never the first, because releasing it re-arms a completed entry and
+`HasFired` is a level test, so the next quote past the trigger fires it again.
+
+A third venue-truth read now separates them: `FillReconciliationService`, the fill-history sibling of the
+resting-orders and positions reads, asking whether an order under a given `customTag` ever filled.
+
+It is deliberately a **veto and never an authorisation** — a reported fill may stop a release, no other answer may
+start one. `NoFillFound` is a negative existence claim over an external index, and this model does not let one of
+those authorise a re-transmission. **Unavailable** therefore strands the row for the operator rather than releasing
+it, which is the same posture §9 already takes toward an unreachable venue: not-knowing resolves to the safe state,
+and here the safe state is "leave it stranded", not "assume it never happened".
+
+Adopting a fill whose position is **still open** remains deferred; both paths still refuse loudly there, with the
+position protected by its native bracket and the auto-flatten meanwhile.
