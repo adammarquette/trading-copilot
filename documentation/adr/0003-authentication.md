@@ -72,9 +72,10 @@ since this ADR is where the client's error model and the "one attach path" claim
   `refused` — rendered as "the gate said no," never retried — for a request the gate may never have evaluated. A
   5xx is never a gate answer; it is now always a `failed` (retry meaningful).
 - **The "one JWT-attach path" is now enforced, not asserted.** #648's acceptance asked that a bypassing call
-  "does not compile or is caught by a test"; it rested on a doc comment. A lint rule (`no-restricted-globals` on
-  `fetch`) now fails any bare `fetch` outside `api/client.ts`, with the anonymous `/health` probe the one
-  allow-listed exception — a new one is a deliberate, reviewable edit to that list.
+  "does not compile or is caught by a test"; it rested on a doc comment. A lint rule now fails any `fetch` outside
+  `api/client.ts` — bare `fetch(...)`, or the `window`/`globalThis`/`self` `.fetch(...)` member forms that
+  resolve to the same global — with the anonymous `/health` probe the one allow-listed exception; a new one is a
+  deliberate, reviewable edit to that list.
 
 ## Follow-ups
 - Token **issuance + refresh** flow (login → JWT; refresh strategy; expiry).
