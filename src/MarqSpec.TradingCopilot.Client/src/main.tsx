@@ -16,6 +16,7 @@ import '@fontsource/roboto-mono/latin-400.css';
 import '@fontsource/roboto-mono/latin-500.css';
 
 import { App } from './App';
+import { registerAppShellServiceWorker } from './registerSW';
 import './index.css';
 
 const rootElement = document.getElementById('root');
@@ -33,3 +34,8 @@ createRoot(rootElement).render(
     </BrowserRouter>
   </StrictMode>,
 );
+
+// Register the app-shell service worker (gh#650, R-19). Presentation-only: it caches the shell for an
+// offline-capable launch and never caches server state. Registered after mount so a failed registration cannot
+// block first paint.
+registerAppShellServiceWorker();
