@@ -303,6 +303,305 @@ public class KeyLevelsTests
         zone.Bottom.Should().Be(0.10m, "the half-width narrows to half the price rather than breaching the invariant");
     }
 
+    // ---- significance: how far the pivot stood out, in ATR multiples ----
+
+    [Fact]
+    public void FindPivots_ShouldMeasureProminence_AsTheDistanceBeyondTheWindowsRunnerUp()
+    {
+        // "How extreme the originating pivot is" (PriceLevel.Significance) has to be measured where the window
+        // still exists -- by zone time it is gone. Prominence is the gap to the next-best bar in the window: the
+        // spike tops 120 against neighbours at 100, so it stands out by 20.
+        IReadOnlyList<SwingPivot> pivots = KeyLevels.FindPivots(
+            SpikeAtIndexTwo(), Tiny() with { Source = PivotSource.HighLow });
+
+        pivots[0].Prominence.Should().Be(20m);
+    }
+
+    [Fact]
+    public void FindPivots_ShouldMeasureProminenceSymmetrically_ForAPivotLow()
+    {
+        IReadOnlyList<Bar> dip =
+        [
+            Bar(0, open: 100, high: 100, low: 100, close: 100),
+            Bar(1, open: 100, high: 100, low: 100, close: 100),
+            Bar(2, open: 100, high: 100, low: 80, close: 100),
+            Bar(3, open: 100, high: 100, low: 100, close: 100),
+            Bar(4, open: 100, high: 100, low: 100, close: 100),
+        ];
+
+        KeyLevels.FindPivots(dip, Tiny() with { Source = PivotSource.HighLow })[0]
+            .Prominence.Should().Be(20m, "a low that undercuts its window by 20 is as prominent as a high that tops it by 20");
+    }
+
+    [Fact]
+    public void ZoneFor_ShouldScoreSignificance_AsProminenceInAtrMultiples()
+    {
+        // Normalised by ATR so the score is comparable ACROSS instruments and volatility regimes: 20 points of
+        // prominence is a major level on a quiet ES session and noise on a wild one. A raw price distance would
+        // rank every high-priced or high-volatility instrument above every other, which is not a ranking.
+        SwingPivot pivot = new(2, Open(2), 100m, KeyLevelKind.Resistance, Prominence: 20m);
+
+        KeyLevels.ZoneFor(pivot, atr: 4m, Zoning()).Significance.Should().Be(5m);
+    }
+
+    [Fact]
+    public void ZoneFor_ShouldScoreZero_WhenThereIsNoAtrToNormaliseBy()
+    {
+        // Cannot measure => do not fabricate, the same posture FindPivots takes on a missing spec. A score invented
+        // from a zero ATR would rank a level the detector has no volatility context for.
+        SwingPivot pivot = new(2, Open(2), 100m, KeyLevelKind.Resistance, Prominence: 20m);
+
+        KeyLevels.ZoneFor(pivot, atr: 0m, Zoning()).Significance.Should().Be(0m);
+    }
+
+    [Fact]
+    public void MergeOverlapping_ShouldKeepTheStrongestSignificance()
+    {
+        // Touch count and significance answer different questions -- how OFTEN price respected the level, and how
+        // hard it turned there. Merging takes the max rather than the sum or the mean: the level is at least as
+        // strong as its strongest touch, and averaging would let a string of weak retests dilute a decisive turn.
+        IReadOnlyList<KeyLevelZone> merged = KeyLevels.MergeOverlapping(
+            [Zone(98m, 102m) with { Significance = 2m }, Zone(101m, 105m) with { Significance = 7m }]);
+
+        merged.Should().ContainSingle();
+        merged[0].Significance.Should().Be(7m);
+        merged[0].TouchCount.Should().Be(2, "the counts still add -- they measure a different thing");
+    }
+
+    // ---- bounded eviction: the set cannot grow without limit ----
+
+    [Fact]
+    public void EvictAllButMostRecent_ShouldKeepTheNewestPerKind()
+    {
+        // Unbounded, every session's pivots accumulate forever and the oldest levels -- formed under a market that
+        // no longer exists -- crowd the chart the operator actually reads.
+        IReadOnlyList<KeyLevelZone> kept = KeyLevels.EvictAllButMostRecent(
+            [Zone(98m, 102m, minute: 1), Zone(110m, 114m, minute: 5), Zone(120m, 124m, minute: 9)],
+            maxPerKind: 2);
+
+        kept.Should().HaveCount(2);
+        kept.Select(zone => zone.FormedAtBucket).Should().BeEquivalentTo([Open(5), Open(9)]);
+    }
+
+    [Fact]
+    public void EvictAllButMostRecent_ShouldBoundEachSideIndependently()
+    {
+        // A trending session makes highs and lows at very different rates. One shared cap would let a run of new
+        // highs evict every floor beneath price -- exactly the levels that matter when it turns.
+        IReadOnlyList<KeyLevelZone> kept = KeyLevels.EvictAllButMostRecent(
+            [
+                Zone(98m, 102m, KeyLevelKind.Resistance, minute: 1),
+                Zone(110m, 114m, KeyLevelKind.Resistance, minute: 5),
+                Zone(80m, 84m, KeyLevelKind.Support, minute: 2),
+            ],
+            maxPerKind: 1);
+
+        kept.Should().HaveCount(2, "one per side, not one in total");
+        kept.Should().ContainSingle(zone => zone.Kind == KeyLevelKind.Support);
+        kept.Single(zone => zone.Kind == KeyLevelKind.Resistance).FormedAtBucket.Should().Be(Open(5));
+    }
+
+    [Fact]
+    public void EvictAllButMostRecent_ShouldKeepEverything_WhenUnderTheCap() =>
+        KeyLevels.EvictAllButMostRecent([Zone(98m, 102m), Zone(110m, 114m)], maxPerKind: 5)
+            .Should().HaveCount(2);
+
+    [Fact]
+    public void EvictAllButMostRecent_ShouldBreakTiesOnStrength_NotArbitrarily()
+    {
+        // Two levels formed on the SAME bar is ordinary -- a bar can be both a pivot high and, on another
+        // instrument's window, part of a cluster. Falling back to significance keeps the decision deterministic
+        // AND defensible; leaving it to input order would make a rebuild drop a different level than the live pass.
+        IReadOnlyList<KeyLevelZone> kept = KeyLevels.EvictAllButMostRecent(
+            [
+                Zone(98m, 102m, minute: 4) with { Significance = 1m },
+                Zone(110m, 114m, minute: 4) with { Significance = 9m },
+            ],
+            maxPerKind: 1);
+
+        kept.Should().ContainSingle();
+        kept[0].Significance.Should().Be(9m);
+    }
+
+    [Fact]
+    public void EvictAllButMostRecent_ShouldRefuse_WhenTheCapIsNotPositive() =>
+        FluentActions.Invoking(() => KeyLevels.EvictAllButMostRecent([Zone(98m, 102m)], maxPerKind: 0))
+            .Should().Throw<ArgumentOutOfRangeException>();
+
+    // ---- merging overlapping zones: one level, counted twice ----
+
+    private static KeyLevelZone Zone(
+        decimal bottom, decimal top, KeyLevelKind kind = KeyLevelKind.Resistance, int minute = 2, int touches = 1) =>
+        new(bottom, top, kind, Open(minute), touches);
+
+    [Fact]
+    public void MergeOverlapping_ShouldFoldTwoOverlappingZonesIntoOne_RaisingTheTouchCount()
+    {
+        // A price revisited is a STRONGER level, not a second one. Two zones left side by side would each look
+        // half as significant as the single level they actually describe.
+        IReadOnlyList<KeyLevelZone> merged = KeyLevels.MergeOverlapping([Zone(98m, 102m), Zone(101m, 105m)]);
+
+        merged.Should().ContainSingle();
+        merged[0].Bottom.Should().Be(98m);
+        merged[0].Top.Should().Be(105m, "the band spans both touches -- price respected the whole of it");
+        merged[0].TouchCount.Should().Be(2);
+    }
+
+    [Fact]
+    public void MergeOverlapping_ShouldLeaveDisjointZonesAlone()
+    {
+        IReadOnlyList<KeyLevelZone> merged = KeyLevels.MergeOverlapping([Zone(98m, 102m), Zone(110m, 114m)]);
+
+        merged.Should().HaveCount(2);
+        merged.Select(zone => zone.TouchCount).Should().AllBeEquivalentTo(1);
+    }
+
+    [Fact]
+    public void MergeOverlapping_ShouldCollapseThree_WhenOneZoneBridgesTwoNeighbours()
+    {
+        // THE case the DoD names. Two disjoint zones plus a third that overlaps BOTH is one level, not two: a
+        // single pass that merges pairwise and stops would leave the bridge folded into whichever neighbour it
+        // met first and the other stranded, so the same price would carry two levels of half the strength.
+        IReadOnlyList<KeyLevelZone> merged = KeyLevels.MergeOverlapping(
+            [Zone(98m, 102m), Zone(108m, 112m), Zone(101m, 109m)]);
+
+        merged.Should().ContainSingle("the bridging zone makes all three one level");
+        merged[0].Bottom.Should().Be(98m);
+        merged[0].Top.Should().Be(112m);
+        merged[0].TouchCount.Should().Be(3);
+    }
+
+    [Fact]
+    public void MergeOverlapping_ShouldMergeZonesThatMerelyTouch()
+    {
+        // Contiguous bands are one band: a gap of exactly nothing is not a gap, and leaving them apart would put a
+        // seam at a price the operator sees as a single level.
+        IReadOnlyList<KeyLevelZone> merged = KeyLevels.MergeOverlapping([Zone(98m, 102m), Zone(102m, 106m)]);
+
+        merged.Should().ContainSingle();
+        merged[0].TouchCount.Should().Be(2);
+    }
+
+    [Fact]
+    public void MergeOverlapping_ShouldNeverMergeAcrossKinds()
+    {
+        // A floor and a ceiling at the same price are two different claims about what price does there -- one says
+        // it holds above, the other below. Folding them would have to pick a side, and a level that silently
+        // changed which way it faces is worse than two honest ones. Role REVERSAL is the sanctioned way a zone
+        // changes side, and it is a close through the band, not an overlap.
+        IReadOnlyList<KeyLevelZone> merged = KeyLevels.MergeOverlapping(
+            [Zone(98m, 102m, KeyLevelKind.Support), Zone(99m, 103m, KeyLevelKind.Resistance)]);
+
+        merged.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void MergeOverlapping_ShouldNotShrinkALevel_WhenAZoneFallsWhollyInsideIt()
+    {
+        // A tight touch inside a wide level must STRENGTHEN it, not narrow it. Taking the newcomer's top instead of
+        // the union would quietly shave the band every time price retested it near the middle -- the level would
+        // creep tighter with each confirmation, which is backwards.
+        IReadOnlyList<KeyLevelZone> merged = KeyLevels.MergeOverlapping([Zone(98m, 110m), Zone(101m, 105m)]);
+
+        merged.Should().ContainSingle();
+        merged[0].Bottom.Should().Be(98m);
+        merged[0].Top.Should().Be(110m, "the wider band stands; a contained touch cannot shrink it");
+        merged[0].TouchCount.Should().Be(2);
+    }
+
+    [Fact]
+    public void MergeOverlapping_ShouldKeepTheEarliestFormation()
+    {
+        // The level dates from when price FIRST respected it; a later touch strengthens it without resetting its age.
+        IReadOnlyList<KeyLevelZone> merged = KeyLevels.MergeOverlapping(
+            [Zone(101m, 105m, minute: 9), Zone(98m, 102m, minute: 3)]);
+
+        merged.Should().ContainSingle();
+        merged[0].FormedAtBucket.Should().Be(Open(3));
+    }
+
+    [Fact]
+    public void MergeOverlapping_ShouldNotDependOnInputOrder()
+    {
+        // Same bars in -> same zones out (the DoD). Pivots arrive in bar order, but a merge that depended on it
+        // would make a rebuild produce a different chart from the live pass.
+        KeyLevelZone[] zones = [Zone(98m, 102m), Zone(108m, 112m), Zone(101m, 109m)];
+
+        KeyLevels.MergeOverlapping(zones.Reverse().ToList())
+            .Should().BeEquivalentTo(KeyLevels.MergeOverlapping(zones), options => options.WithStrictOrdering());
+    }
+
+    [Fact]
+    public void MergeOverlapping_ShouldReturnNothing_ForAnEmptySet() =>
+        KeyLevels.MergeOverlapping([]).Should().BeEmpty();
+
+    // ---- role reversal: broken support becomes resistance ----
+
+    [Fact]
+    public void ApplyClose_ShouldFlipSupportToResistance_WhenPriceClosesBelowIt()
+    {
+        // The classic reversal: a floor that gave way is a ceiling on the way back up. Leaving it Support would
+        // have the operator reading a floor under a price that has already fallen through it.
+        IReadOnlyList<KeyLevelZone> after = KeyLevels.ApplyClose([Zone(98m, 102m, KeyLevelKind.Support)], close: 97m);
+
+        after.Should().ContainSingle();
+        after[0].Kind.Should().Be(KeyLevelKind.Resistance);
+        after[0].Bottom.Should().Be(98m, "a reversal changes which way the level faces, never where it sits");
+        after[0].Top.Should().Be(102m);
+    }
+
+    [Fact]
+    public void ApplyClose_ShouldFlipResistanceToSupport_WhenPriceClosesAboveIt()
+    {
+        IReadOnlyList<KeyLevelZone> after = KeyLevels.ApplyClose([Zone(98m, 102m, KeyLevelKind.Resistance)], close: 103m);
+
+        after[0].Kind.Should().Be(KeyLevelKind.Support);
+    }
+
+    [Fact]
+    public void ApplyClose_ShouldLeaveTheZoneAlone_WhenTheCloseIsInsideTheBand()
+    {
+        // Price trading INSIDE the zone has not broken it -- that is the level being tested, which is the ordinary
+        // case and the whole reason a zone is a band rather than a line.
+        KeyLevels.ApplyClose([Zone(98m, 102m, KeyLevelKind.Support)], close: 100m)[0]
+            .Kind.Should().Be(KeyLevelKind.Support);
+    }
+
+    [Theory]
+    [InlineData(98)]
+    [InlineData(102)]
+    public void ApplyClose_ShouldNotFlip_WhenTheCloseSitsExactlyOnABoundary(decimal close)
+    {
+        // THE boundary case the DoD names. A close AT the edge is at the level, not through it -- the band is
+        // inclusive of its own bounds. Using a non-strict comparison here would flip a level every time price
+        // merely touched its edge, which is the most common thing price does at a level it respects.
+        KeyLevels.ApplyClose([Zone(98m, 102m, KeyLevelKind.Support)], close)[0]
+            .Kind.Should().Be(KeyLevelKind.Support);
+    }
+
+    [Fact]
+    public void ApplyClose_ShouldReFlip_WhenPriceClosesBackThroughTheOtherSide()
+    {
+        // THE re-flip the DoD names. A whipsaw through a level and back is common, and the second flip has to be
+        // as available as the first -- a one-shot reversal would leave the level permanently facing the wrong way
+        // after a single fake-out.
+        IReadOnlyList<KeyLevelZone> broken = KeyLevels.ApplyClose([Zone(98m, 102m, KeyLevelKind.Support)], close: 97m);
+        broken[0].Kind.Should().Be(KeyLevelKind.Resistance);
+
+        IReadOnlyList<KeyLevelZone> reclaimed = KeyLevels.ApplyClose(broken, close: 103m);
+        reclaimed[0].Kind.Should().Be(KeyLevelKind.Support, "price reclaimed the level, so it faces the other way again");
+    }
+
+    [Fact]
+    public void ApplyClose_ShouldPreserveEverythingButTheKind()
+    {
+        KeyLevelZone before = Zone(98m, 102m, KeyLevelKind.Support, minute: 7, touches: 4);
+
+        KeyLevelZone after = KeyLevels.ApplyClose([before], close: 97m)[0];
+
+        after.Should().BeEquivalentTo(before with { Kind = KeyLevelKind.Resistance });
+    }
+
     [Fact]
     public void ZoneFor_ShouldRefuse_WhenTheAtrIsNegative() =>
         FluentActions.Invoking(() => KeyLevels.ZoneFor(HighAt(100m), atr: -1m, Zoning()))
