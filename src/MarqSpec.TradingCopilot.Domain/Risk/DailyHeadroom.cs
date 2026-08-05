@@ -40,4 +40,20 @@ public readonly record struct DailyHeadroom(decimal? UnderDailyLossLimit, decima
     /// refusal).
     /// </summary>
     public bool GovernorSpent => UnderGovernor <= 0m;
+
+    /// <summary>
+    /// Governor headroom as a <b>fraction</b> of the day's governor budget: <c>1</c> untouched, <c>0.5</c> half
+    /// spent, <c>0</c> at the governor, <b>negative</b> past it. This is the single definition of the fraction the
+    /// R-4 suggestion throttle (gh#551) consumes as its <c>HeadroomFraction</c> — kept here, on the headroom type the
+    /// gate and the <c>/risk/headroom</c> read already share, so the throttle reads the same number the gate blocks on
+    /// rather than a second, driftable definition.
+    /// </summary>
+    /// <param name="dailyDrawdownGovernor">
+    /// The operator's daily drawdown governor (the denominator). <see cref="RiskProfile"/> declares it positive; a
+    /// non-positive value here <b>fails safe to <c>0</c></b> (read as no room, which the throttle suppresses) rather
+    /// than dividing by zero or widening into headroom that does not exist (R-5: absence is never a licence).
+    /// </param>
+    /// <returns>The remaining governor headroom as a fraction of the budget.</returns>
+    public decimal GovernorFractionRemaining(decimal dailyDrawdownGovernor) =>
+        dailyDrawdownGovernor <= 0m ? 0m : UnderGovernor / dailyDrawdownGovernor;
 }
