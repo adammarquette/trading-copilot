@@ -584,6 +584,38 @@ public class ConditionalFiringServiceTests
     }
 
     [Fact]
+    public async Task ProcessQuote_ShouldRevertToPendingInsideTheAccountLock_WhenTheVenueDefinitivelyRejectsTheFire()
+    {
+        // gh#629 + gh#630 (of #622): the DEFINITIVE-refusal revert (Firing -> Pending) must COMMIT INSIDE the account
+        // lock, exactly like the gate-refusal revert next door -- not rely on the outer per-record save that runs AFTER
+        // the lock releases. Otherwise, in the unlock -> outer-save window the row still reads Firing and a concurrent
+        // operator send / take (whose no-stacking check counts Firing, gh#589) gets a spurious 409. gh#630 closed this
+        // window for the gate-refusal arm; this arm is new in gh#629 and must not re-open it. Same ObservingGuard as
+        // ProcessQuote_ShouldRevertToPendingInsideTheAccountLock_WhenTheFireTimeGateRefuses: it reads the COMMITTED
+        // status a concurrent reader would see at the instant the lock releases.
+        Guid accountId = await SeedAccountAsync();
+        await AddConditionalAsync(accountId);
+
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._))
+            .Returns(Task.FromException<PlacedOrder>(
+                new VenueRefusalException("ProjectX rejected: invalid stop", VenueRefusalKind.Definitive, 42)));
+
+        ConditionalStatus? seenAtUnlock = null;
+        IAccountEntryGuard observing = ObservingGuard(status => seenAtUnlock = status);
+
+        await Service(guard: observing)
+            .ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, CancellationToken.None);
+
+        seenAtUnlock.Should().Be(
+            ConditionalStatus.Pending,
+            "the definitive-refusal revert must commit inside the lock, so a concurrent send never sees a stale Firing "
+            + "and 409s -- the gh#622 window gh#630 closed for the gate-refusal arm must not re-open here (gh#629)");
+        await using TradingCopilotDbContext reloadInLock = Context();
+        (await reloadInLock.ConditionalOrders.SingleAsync()).Status.Should().Be(
+            ConditionalStatus.Pending, "the durable end state is unchanged -- only WHEN it commits moves");
+    }
+
+    [Fact]
     public async Task ProcessQuote_ShouldLeaveFiring_WhenTheVenueRefusalIsIndeterminate()
     {
         // gh#629 THE SAFETY CASE: an INDETERMINATE VenueRefusalException (accepted-but-no-id -- the venue MAY hold the

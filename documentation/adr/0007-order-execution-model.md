@@ -1131,7 +1131,11 @@ order may be live). Both catch sites consume the neutral kind, so neither depend
 - **Take** (`TakeStagedOrderAsync`): a definitive rejection releases the claim `Taking → Staged` (re-takeable, so the
   operator amends and retries) and returns the reason, instead of stranding the row for `POST /orders/{id}/reconcile`.
 - **Fire** (`ConditionalFiringService`): a definitive rejection reverts `Firing → Pending` (the gh#532 containment,
-  re-decidable next quote), mirroring the gate-refusal revert.
+  re-decidable next quote), mirroring the gate-refusal revert — **including committing that revert inside the account
+  lock**, the discipline gh#630 (of gh#622) established next door. Leaving it to the outer per-record save, which runs
+  only after the lock releases, would let a concurrent send / take read a stale `Firing` in the unlock→save window and
+  take a spurious 409. Fail-safe either way (it over-blocks, never double-transmits), but a *new* arm adopts the
+  closed-window pattern rather than re-opening it.
 
 Everything else is **unchanged and indeterminate by construction**: a timeout (a `TaskCanceledException` on
 HttpClient's own token), a transport fault, a disconnect, and an indeterminate no-id all still fail toward `Taking` /
