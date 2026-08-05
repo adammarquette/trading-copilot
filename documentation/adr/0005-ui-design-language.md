@@ -56,6 +56,35 @@ Operator preferences (settled): a **dark theme**, **Material Design**, and an **
   is what keeps it specific; hold that line.
 - Dense trading data can fight Material's default spacing — expect to **tighten component density**.
 
+## Update (2026-08-05) — MUI confirmed, and the wireframe's tokens are the source (gh#647)
+
+The Decision above left one thing open: *"Implementation (**likely — to confirm**): MUI"*. Building the app shell
+is where that had to be answered, so it is answered here rather than left implicit in a `package.json`.
+
+**MUI v7 is confirmed** as the component library. Nothing in the alternatives changed — the operator specified
+Material, and MUI remains the mature Material implementation for React with the dark-theme and token support this
+palette needs. What settled it in practice is that Material 3's *window size classes* and its adaptive-navigation
+components (bottom bar → icon rail → labelled rail) arrive off the shelf, which is the part of this ADR most
+expensive to hand-roll.
+
+**The token palette is taken verbatim from `documentation/design/wireframes.html`, not re-derived.** The wireframe
+is the artifact the operator validates UX against, and it already carries both the dark palette and the
+`[data-theme="light"]` swap this ADR describes. Re-deriving "equivalent" colours in the SPA would have created two
+sources for one design language and guaranteed drift — so the shell reads the same hex values, and the wireframe
+stays primary.
+
+**One divergence, recorded deliberately.** This ADR is normative in specifying Material's **window size classes**
+(compact `<600`, medium `600–839`, expanded `≥840`). The wireframe's own media queries are `720px` / `900px`. The
+SPA follows **this ADR**, because the wireframe's breakpoints are an artifact of a static HTML mock rather than a
+design decision, and Material's classes are what its adaptive components key off. The three drawn surfaces —
+*Trading workspace*, *Tablet*, *Phone* — are unchanged in what they show; only the pixel at which they swap moves.
+Flagged rather than silently reconciled, because the wireframe is the primary UX artifact and a divergence from it
+is the operator's to accept.
+
+**Semantic trading colours are kept structurally unreachable from the accent** — they live on their own palette
+branch rather than as variants of `primary`, so the "status never competes with the brand accent" rule above is
+enforced by the type system instead of by discipline.
+
 ## Follow-ups
 - **Pick the React component library + version** (MUI likely) under Central Package Management; stand up the
   **token file** (surfaces, accent, semantic colors, type scale) as the single source of theming.
