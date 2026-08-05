@@ -39,6 +39,7 @@ using MarqSpec.TradingCopilot.Integration.Finnhub;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
 using MarqSpec.TradingCopilot.Integration.Tiingo;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
@@ -459,6 +460,10 @@ builder.Services.AddAuthorization();
 // The realtime hub (gh#645, R-10). SignalR ships in the ASP.NET Core shared framework; the fan-out host tails the
 // event log and pushes each presentation signal to connected clients. Nothing is invocable on the hub.
 builder.Services.AddSignalR();
+// Per-owner routing for the owner-scoped pushes (gh#683): a custom IUserIdProvider (the `sub` claim, since
+// MapInboundClaims=false) so Clients.User resolves, and the notifier the account-ingestion path pushes through.
+builder.Services.AddSingleton<IUserIdProvider, RealtimeUserIdProvider>();
+builder.Services.AddSingleton<IAccountRealtimeNotifier, AccountRealtimeNotifier>();
 builder.Services.AddHostedService<RealtimeEventLogFanoutHost>();
 
 // The self-documenting API surface (R-10, gh#604): an OpenAPI document generated from the minimal-API routes
