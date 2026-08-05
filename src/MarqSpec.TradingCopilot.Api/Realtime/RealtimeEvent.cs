@@ -34,3 +34,35 @@ public sealed record RealtimeGap(
     public static RealtimeGap From(EventRetentionGap gap) =>
         new(gap.RequestedAfterSequence, gap.OldestAvailableSequence, gap.OldestAvailableOccurredAt);
 }
+
+/// <summary>The phase of a fan-out catch-up bracket (gh#645, #690).</summary>
+public enum RealtimeCatchUpPhase
+{
+    /// <summary>Catch-up is beginning — every event that follows, up to <see cref="Completed"/>, is HISTORY, not live.</summary>
+    Started,
+
+    /// <summary>Catch-up is done — the stream is live from here.</summary>
+    Completed,
+}
+
+/// <summary>
+/// Brackets a fan-out <b>catch-up</b> after a restart (gh#645, #690). When <see cref="RealtimeEventLogFanoutHost"/>
+/// resumes from a committed cursor and finds a backlog — events that accrued while it was down — it broadcasts a
+/// <see cref="RealtimeCatchUpPhase.Started"/>, replays the missed events as <b>history</b>, then broadcasts a
+/// <see cref="RealtimeCatchUpPhase.Completed"/> and goes live. The presentation reads the bracket to render the
+/// replay as a catch-up from an outage rather than as live signals, so a <b>historical</b> kill-switch / auto-flatten
+/// never renders as a <b>live</b> safety banner (R-13 / R-16). It is broadcast to every connection, like the events
+/// it brackets. A cold first start (no committed cursor) is not an outage: the whole log is history, so it catches
+/// up silently and emits no bracket.
+/// </summary>
+/// <param name="Phase">Whether the catch-up is beginning or has completed.</param>
+/// <param name="Sequence">
+/// The cursor at this boundary — the resume point the catch-up starts <i>from</i> at
+/// <see cref="RealtimeCatchUpPhase.Started"/>, and the head it caught up <i>through</i> at
+/// <see cref="RealtimeCatchUpPhase.Completed"/>.
+/// </param>
+public sealed record RealtimeCatchUp(RealtimeCatchUpPhase Phase, long Sequence)
+{
+    /// <summary>The client method the hub invokes to bracket a catch-up.</summary>
+    public const string ClientMethod = "realtimeCatchUp";
+}

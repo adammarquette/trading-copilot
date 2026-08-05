@@ -194,3 +194,74 @@ public class RealtimeEventTests
         RealtimeGap.From(gap).Should().Be(new RealtimeGap(10, 25, DateTimeOffset.UnixEpoch));
     }
 }
+
+/// <summary>
+/// The fan-out's pure catch-up phase machine (gh#645, #690). It decides, per read pass, whether to announce a
+/// catch-up start, whether to broadcast the page's events, whether to announce caught-up, and the next phase — so
+/// a restart replays its outage backlog as bracketed HISTORY rather than as live signals, while a cold first start
+/// still swallows the whole-log backlog silently. Pure, so the safety-relevant transitions are pinned here rather
+/// than inside the hosted loop.
+/// </summary>
+public class RealtimeFanoutPlanTests
+{
+    private const int Batch = 256;
+
+    private static FanoutPassPlan Plan(RealtimeFanoutPhase phase, int eventCount) =>
+        RealtimeEventLogFanoutHost.PlanPass(phase, eventCount, Batch);
+
+    [Fact]
+    public void FirstStart_ShouldSwallowTheBacklogSilently_AndNeverBracket()
+    {
+        // A cold start is not an outage: the whole log is history. Catch up silently — no broadcast, no bracket —
+        // so a historical kill-switch / auto-flatten is never pushed as a live safety banner on a first-ever start.
+        Plan(RealtimeFanoutPhase.SilentCatchUp, Batch)
+            .Should().Be(new FanoutPassPlan(false, false, false, RealtimeFanoutPhase.SilentCatchUp));
+
+        Plan(RealtimeFanoutPhase.SilentCatchUp, 10) // a short page reaches head
+            .Should().Be(new FanoutPassPlan(false, false, false, RealtimeFanoutPhase.Live));
+    }
+
+    [Fact]
+    public void Restart_WithNoBacklog_ShouldGoLiveSilently_WithNoBracket() =>
+        // A fast restart already at head has no outage to announce.
+        Plan(RealtimeFanoutPhase.RestartPending, 0)
+            .Should().Be(new FanoutPassPlan(false, false, false, RealtimeFanoutPhase.Live));
+
+    [Fact]
+    public void Restart_WithABacklogInOnePage_ShouldBracketTheReplayAndGoLive() =>
+        // Announce the start, replay the backlog as history, announce caught-up — all when the first page reaches head.
+        Plan(RealtimeFanoutPhase.RestartPending, 10)
+            .Should().Be(new FanoutPassPlan(
+                AnnounceCatchUpStart: true, BroadcastEvents: true, AnnounceCaughtUp: true, RealtimeFanoutPhase.Live));
+
+    [Fact]
+    public void Restart_WithABacklogSpanningPages_ShouldAnnounceStartThenReplayUntilHead()
+    {
+        // First full page: announce the start and replay as history, but head is not reached — no caught-up yet.
+        Plan(RealtimeFanoutPhase.RestartPending, Batch)
+            .Should().Be(new FanoutPassPlan(true, true, false, RealtimeFanoutPhase.AnnouncedCatchUp));
+
+        // A middle full page: keep replaying history, still not at head, no bracket edge.
+        Plan(RealtimeFanoutPhase.AnnouncedCatchUp, Batch)
+            .Should().Be(new FanoutPassPlan(false, true, false, RealtimeFanoutPhase.AnnouncedCatchUp));
+
+        // The final short page: replay the tail, announce caught-up, go live.
+        Plan(RealtimeFanoutPhase.AnnouncedCatchUp, 3)
+            .Should().Be(new FanoutPassPlan(false, true, true, RealtimeFanoutPhase.Live));
+    }
+
+    [Fact]
+    public void AnnouncedCatchUp_DrainingExactlyAtABatchBoundary_ShouldAnnounceCaughtUpOnTheEmptyPage() =>
+        // A backlog that is an exact multiple of the batch reaches head on the empty page after the last full one.
+        Plan(RealtimeFanoutPhase.AnnouncedCatchUp, 0)
+            .Should().Be(new FanoutPassPlan(false, true, true, RealtimeFanoutPhase.Live));
+
+    [Fact]
+    public void Live_ShouldBroadcastAndStayLive()
+    {
+        Plan(RealtimeFanoutPhase.Live, 5)
+            .Should().Be(new FanoutPassPlan(false, true, false, RealtimeFanoutPhase.Live));
+        Plan(RealtimeFanoutPhase.Live, 0)
+            .Should().Be(new FanoutPassPlan(false, true, false, RealtimeFanoutPhase.Live));
+    }
+}
