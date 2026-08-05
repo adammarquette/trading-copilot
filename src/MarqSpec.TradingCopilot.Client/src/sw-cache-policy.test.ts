@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import viteConfigSource from '../vite.config.ts?raw';
+
 import { isNetworkOnlyPath, NETWORK_ONLY_PATH, PWA_WORKBOX_OPTIONS } from './sw-cache-policy';
 
 // The acceptance criterion for gh#650: "No state read is cache-served — asserted by a test, not by inspection."
@@ -77,6 +79,18 @@ describe('sw-cache-policy', () => {
       // key's absence on the object vite.config.ts actually assigns to `workbox:` — not a restatement of it —
       // means adding runtimeCaching anywhere in the real config necessarily edits this tested constant.
       expect('runtimeCaching' in PWA_WORKBOX_OPTIONS).toBe(false);
+    });
+
+    it('is assigned to `workbox:` directly, never spread with extra options', () => {
+      // The two assertions above rest on a claim they cannot check themselves: that vite.config.ts uses THIS
+      // object as-is. Spreading it — `workbox: { ...PWA_WORKBOX_OPTIONS, runtimeCaching: [...] }` — leaves both
+      // of them green while the built worker caches /api, because the constant is untouched. Verified: injecting
+      // exactly that spread passes every other test in this file and fails only here.
+      //
+      // Reading the config's source is how a unit test reaches a file the bundler owns, the same way
+      // theme/tokens.test.ts reads index.css with `?raw`.
+      expect(viteConfigSource).toContain('workbox: PWA_WORKBOX_OPTIONS');
+      expect(viteConfigSource).not.toContain('runtimeCaching');
     });
   });
 });
