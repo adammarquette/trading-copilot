@@ -1,6 +1,9 @@
 import Button from '@mui/material/Button';
 import { Link, Route, Routes } from 'react-router';
 
+import { AcceptInvitePage } from '../auth/AcceptInvitePage';
+import { RequireAuth } from '../auth/RequireAuth';
+import { SignInPage } from '../auth/SignInPage';
 import { EmptyState } from '../components/EmptyState';
 import { AppShell } from '../layout/AppShell';
 import { destinations } from '../navigation/destinations';
@@ -27,6 +30,15 @@ function NotFoundSurface() {
 /**
  * The route table, generated from the navigation table.
  *
+ * Two tiers, and the split is the R-18 authorization boundary drawn in the client:
+ *
+ * - `/sign-in` and `/accept-invite` are the **anonymous** surfaces. They sit outside both the guard and
+ *   the shell -- an operator with no session must be able to reach them, and they carry no navigation or
+ *   safety region because there is no session to drive one.
+ * - Everything else sits behind `RequireAuth`, inside `AppShell`. The generated surfaces (and the 404,
+ *   which is a signed-in operator mistyping a path -- not a reason to drop their safety controls) live
+ *   there.
+ *
  * Generated, not hand-written beside it: a destination with no route renders a dead link, a route with
  * no destination is unreachable, and both are the kind of drift nobody notices until a demo. One list
  * makes each impossible.
@@ -37,23 +49,27 @@ function NotFoundSurface() {
 export function AppRoutes() {
   return (
     <Routes>
-      <Route element={<AppShell />}>
-        {destinations.map((destination) =>
-          destination.path === '/' ? (
-            <Route
-              key={destination.id}
-              index
-              element={<SurfacePlaceholder destination={destination} />}
-            />
-          ) : (
-            <Route
-              key={destination.id}
-              path={destination.path}
-              element={<SurfacePlaceholder destination={destination} />}
-            />
-          ),
-        )}
-        <Route path="*" element={<NotFoundSurface />} />
+      <Route path="/sign-in" element={<SignInPage />} />
+      <Route path="/accept-invite" element={<AcceptInvitePage />} />
+      <Route element={<RequireAuth />}>
+        <Route element={<AppShell />}>
+          {destinations.map((destination) =>
+            destination.path === '/' ? (
+              <Route
+                key={destination.id}
+                index
+                element={<SurfacePlaceholder destination={destination} />}
+              />
+            ) : (
+              <Route
+                key={destination.id}
+                path={destination.path}
+                element={<SurfacePlaceholder destination={destination} />}
+              />
+            ),
+          )}
+          <Route path="*" element={<NotFoundSurface />} />
+        </Route>
       </Route>
     </Routes>
   );

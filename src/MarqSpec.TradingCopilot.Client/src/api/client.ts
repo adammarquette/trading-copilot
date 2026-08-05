@@ -203,3 +203,39 @@ export async function signIn(credentials: LoginRequest): Promise<ApiResult<void>
 export function signOut(): void {
   clearToken();
 }
+
+type AcceptInviteRequest = components['schemas']['AcceptInviteRequest'];
+
+/**
+ * Redeems an invitation and stores the JWT — the accept-invite analogue of {@link signIn}. The invitation model
+ * is deliberately dormant (ADR-0015 / ADR-0017: one deployment, one operator; the sanctioned future is read-only
+ * mentee observers), so this redeems the token the endpoint already accepts and nothing more.
+ */
+export async function acceptInvite(redemption: AcceptInviteRequest): Promise<ApiResult<void>> {
+  const result = await request<TokenResponse>(
+    'POST',
+    '/auth/accept-invite' satisfies keyof paths,
+    redemption,
+  );
+  if (result.ok) {
+    storeToken(result.data.token);
+    return { ok: true, data: undefined };
+  }
+  return result;
+}
+
+/** The signed-in operator, from `GET /auth/me` (an anonymous-object response the spec does not type, so named here). */
+export interface CurrentUser {
+  readonly id: string;
+  readonly email: string;
+  readonly displayName: string;
+}
+
+/**
+ * Reads the signed-in operator's identity — used on load to establish the session from a stored token. A missing
+ * or expired token comes back as `failed` with `status: 401` (via {@link request}, which also clears the token),
+ * which the caller reads as "signed out"; it does not throw.
+ */
+export async function getCurrentUser(): Promise<ApiResult<CurrentUser>> {
+  return request<CurrentUser>('GET', '/auth/me' satisfies keyof paths);
+}
