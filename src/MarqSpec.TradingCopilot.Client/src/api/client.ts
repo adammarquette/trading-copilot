@@ -123,17 +123,22 @@ export async function request<T>(
     return { ok: true, data };
   }
 
-  // A non-2xx that is not 401. If it carries a JSON `{ error }`, the gate ANSWERED — surface it as a refusal with
-  // the reason and, where the API names it, the binding layer. Otherwise the call failed and a retry is meaningful.
-  const refusal = await readRefusal(response);
-  if (refusal !== null) {
-    return {
-      ok: false,
-      kind: 'refused',
-      status: response.status,
-      reason: refusal.reason,
-      layer: refusal.layer,
-    };
+  // A non-2xx that is not 401. A **4xx** that carries a JSON `{ error }` is the gate's ANSWER — surface it as a
+  // refusal with the reason and, where the API names it, the binding layer. The 4xx gate is load-bearing: a 5xx
+  // is never a gate answer even when it happens to carry an `{ error }` body (an unhandled exception / ASP.NET
+  // ProblemDetails / proxy response does), so it must fall through to `failed` — retry is meaningful — and never
+  // read to the operator as an authoritative refusal they cannot retry (R-11).
+  if (response.status >= 400 && response.status < 500) {
+    const refusal = await readRefusal(response);
+    if (refusal !== null) {
+      return {
+        ok: false,
+        kind: 'refused',
+        status: response.status,
+        reason: refusal.reason,
+        layer: refusal.layer,
+      };
+    }
   }
   return {
     ok: false,

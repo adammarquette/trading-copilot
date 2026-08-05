@@ -61,6 +61,22 @@ not about whether some account exists. The accept-invite surface is the dormant-
 the endpoint already accepts; no role selection or management), per ADR-0015 / ADR-0017. This closes the client
 side of the **login → JWT** issuance follow-up below; refresh and SignalR access-token wiring remain.
 
+## Update (2026-08-05) — two corrections from the #677 review (gh#685)
+
+The #648 client reached develop stacked under #652; the #677 review caught two things worth recording here,
+since this ADR is where the client's error model and the "one attach path" claim live.
+
+- **`refused` is now gated on a 4xx status, not just an `{ error }` body.** The refused-vs-`failed` split (R-11)
+  is the client's reason for existing, and it was inverted for an unexpected status: a 5xx that happened to carry
+  a JSON `{ error }` (an unhandled exception / ProblemDetails response does) was classified as an authoritative
+  `refused` — rendered as "the gate said no," never retried — for a request the gate may never have evaluated. A
+  5xx is never a gate answer; it is now always a `failed` (retry meaningful).
+- **The "one JWT-attach path" is now enforced, not asserted.** #648's acceptance asked that a bypassing call
+  "does not compile or is caught by a test"; it rested on a doc comment. A lint rule now fails any `fetch` outside
+  `api/client.ts` — bare `fetch(...)`, or the `window`/`globalThis`/`self` `.fetch(...)` member forms that
+  resolve to the same global — with the anonymous `/health` probe the one allow-listed exception; a new one is a
+  deliberate, reviewable edit to that list.
+
 ## Follow-ups
 - Token **issuance + refresh** flow (login → JWT; refresh strategy; expiry).
 - **Signing-key** storage / rotation (server-side secret, §8).
