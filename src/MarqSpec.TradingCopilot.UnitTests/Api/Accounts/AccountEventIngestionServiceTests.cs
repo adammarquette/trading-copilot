@@ -1,6 +1,7 @@
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Accounts;
 using MarqSpec.TradingCopilot.Api.Audit;
+using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -27,6 +28,7 @@ public class AccountEventIngestionServiceTests
     private readonly string _database = Guid.NewGuid().ToString();
     private readonly DateTimeOffset _now = new(2026, 1, 15, 14, 30, 0, TimeSpan.Zero);
     private readonly IAuditLog _auditLog = A.Fake<IAuditLog>();
+    private readonly IAccountRealtimeNotifier _notifier = A.Fake<IAccountRealtimeNotifier>();
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
@@ -38,6 +40,7 @@ public class AccountEventIngestionServiceTests
         Context(),
         new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
         _auditLog,
+        _notifier,
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = OurCredentialKey }),
         NullLogger<AccountEventIngestionService>.Instance);
 
@@ -161,6 +164,83 @@ public class AccountEventIngestionServiceTests
 
         (await FillsAsync()).Should().HaveCount(2);
         (await OrderAsync(orderId)).Status.Should().Be(OrderStatus.Filled);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_ShouldPushTheFill_ToTheOwningOperator_AfterRecordingIt()
+    {
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedOrderAsync(owner, accountId, "55001", OrderStatus.Working, size: 2);
+
+        await Service().ProcessAsync(Fill("9001", "55001", "88001", quantity: 2), CancellationToken.None);
+
+        // The owner's own fill reaches only their connections (R-20), pushed after the journal write (gh#683).
+        A.CallTo(() => _notifier.FillRecordedAsync(
+            owner,
+            A<RealtimeFill>.That.Matches(fill =>
+                fill.VenueFillKey == "88001" && fill.VenueOrderKey == "55001" && fill.Size == 2),
+            A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_ShouldAlsoPushTheOrderState_WhenAFillAdvancesTheStatus()
+    {
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedOrderAsync(owner, accountId, "55001", OrderStatus.Working, size: 2);
+
+        await Service().ProcessAsync(Fill("9001", "55001", "88001", quantity: 2), CancellationToken.None); // fully fills
+
+        // realtimeOrderState is the COMPLETE status stream: a fill that flips the order to Filled emits it too (gh#683).
+        A.CallTo(() => _notifier.OrderStateChangedAsync(
+            owner,
+            A<RealtimeOrderState>.That.Matches(state =>
+                state.VenueOrderKey == "55001" && state.Status == nameof(OrderStatus.Filled)),
+            A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_ShouldPushTheOrderState_WhenAWorkingOrderGoesTerminal()
+    {
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedOrderAsync(owner, accountId, "55001", OrderStatus.Working, size: 3);
+
+        await Service().ProcessAsync(OrderState("9001", "55001", VenueOrderState.Cancelled), CancellationToken.None);
+
+        A.CallTo(() => _notifier.OrderStateChangedAsync(
+            owner,
+            A<RealtimeOrderState>.That.Matches(state =>
+                state.VenueOrderKey == "55001" && state.Status == nameof(OrderStatus.Cancelled)),
+            A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_ShouldNotPush_ForAForeignAccount()
+    {
+        // An event for an account this process does not own resolves no owner -> ignored before any write or push.
+        bool acted = await Service().ProcessAsync(
+            Fill("unknown-account", "55001", "88001", quantity: 1), CancellationToken.None);
+
+        acted.Should().BeFalse();
+        A.CallTo(_notifier).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_ShouldStillRecordTheFill_WhenTheRealtimePushThrows()
+    {
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedOrderAsync(owner, accountId, "55001", OrderStatus.Working, size: 2);
+        A.CallTo(() => _notifier.FillRecordedAsync(A<Guid>._, A<RealtimeFill>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("the hub is down"));
+
+        // The push is best-effort and happens AFTER the commit: a throwing hub must never fail the journal (gh#683).
+        bool acted = await Service().ProcessAsync(Fill("9001", "55001", "88001", quantity: 2), CancellationToken.None);
+
+        acted.Should().BeTrue();
+        (await FillsAsync()).Should().ContainSingle();
     }
 
     [Fact]

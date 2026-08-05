@@ -68,3 +68,8 @@ poll-until-refresh until then.
   claim, since `MapInboundClaims = false`).
 - QA hub E2E (independent, ADR-0006/§3): unauthenticated connection refused, resume-without-gaps-or-double-delivery,
   and the no-command-channel guarantee under a live SignalR runtime.
+- **Landed** (gh#683): the **order/fill** half of the per-owner seam — `AccountEventIngestionService` pushes a fill /
+  order-state change to the owning operator (`Clients.User`, via a custom `IUserIdProvider` resolving the `sub`
+  claim) **after** the journal write commits, best-effort so a hub failure can never affect the write.
+  `realtimeOrderState` is the **complete** order-status stream (fill-driven PartiallyFilled / Filled *and* terminal
+  Cancelled / Rejected); `realtimeFill` carries each execution. The **suggestion** half (gh#684) remains.

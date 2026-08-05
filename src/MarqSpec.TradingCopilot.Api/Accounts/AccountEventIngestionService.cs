@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Api.Audit;
+using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -40,6 +41,7 @@ public sealed class AccountEventIngestionService
     private readonly TradingCopilotDbContext _discovery;
     private readonly DbContextOptions<TradingCopilotDbContext> _options;
     private readonly IAuditLog _auditLog;
+    private readonly IAccountRealtimeNotifier _notifier;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly ILogger<AccountEventIngestionService> _logger;
 
@@ -47,12 +49,14 @@ public sealed class AccountEventIngestionService
     /// <param name="discovery">The scoped context, used only to discover the owning account (across owners).</param>
     /// <param name="options">The context options, used to build a per-owner (R-20-scoped) context for the writes.</param>
     /// <param name="auditLog">The immutable audit trail — a retired stop plan is recorded (gh#220), a secondary write.</param>
+    /// <param name="notifier">Read-side realtime push to the owning operator (gh#683) — best-effort, after the commit.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
     /// <param name="logger">The logger.</param>
     public AccountEventIngestionService(
         TradingCopilotDbContext discovery,
         DbContextOptions<TradingCopilotDbContext> options,
         IAuditLog auditLog,
+        IAccountRealtimeNotifier notifier,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         ILogger<AccountEventIngestionService> logger)
     {
@@ -61,6 +65,7 @@ public sealed class AccountEventIngestionService
         _discovery = discovery;
         _options = options;
         _auditLog = auditLog;
+        _notifier = notifier;
         _projectX = projectXOptions.Value;
         _logger = logger;
     }
@@ -158,6 +163,7 @@ public sealed class AccountEventIngestionService
         });
 
         // Only a live order advances on fills -- never resurrect a terminal one.
+        OrderStatus statusBefore = order.Status;
         if (order.Status is OrderStatus.Working or OrderStatus.PartiallyFilled)
         {
             order.Status = priorFilled + fill.Quantity >= order.Size ? OrderStatus.Filled : OrderStatus.PartiallyFilled;
@@ -174,6 +180,25 @@ public sealed class AccountEventIngestionService
             // status its first, committed fill already set; a replayed fill never strands it at Working.
             _logger.LogInformation("Fill {Fill} already recorded for order {Order}; idempotent skip.", fill.VenueFillKey, order.Id);
             return false;
+        }
+
+        // Read-side pushes to the owning operator (gh#683) -- AFTER the commit, so a push failure can never affect
+        // the journal; NotifySafelyAsync swallows all but cancellation. The fill carries the execution; if it also
+        // advanced the order's status, emit that too, so realtimeOrderState is the COMPLETE status stream --
+        // fill-driven (PartiallyFilled / Filled) and terminal (Cancelled / Rejected) alike (ADR-0021).
+        await NotifySafelyAsync(
+            token => _notifier.FillRecordedAsync(
+                owner.UserId,
+                new RealtimeFill(fill.VenueOrderKey, fill.VenueFillKey, fill.ExecutionPrice.Value, fill.Quantity, fill.At),
+                token),
+            cancellationToken);
+
+        if (order.Status != statusBefore)
+        {
+            await NotifySafelyAsync(
+                token => _notifier.OrderStateChangedAsync(
+                    owner.UserId, new RealtimeOrderState(fill.VenueOrderKey, order.Status.ToString(), fill.At), token),
+                cancellationToken);
         }
 
         return true;
@@ -228,6 +253,10 @@ public sealed class AccountEventIngestionService
         await database.SaveChangesAsync(cancellationToken);
         _logger.LogInformation("Order {Order} moved to {Status} from venue truth.", order.Id, status);
         await AuditSafelyAsync(planAudit, cancellationToken);
+        await NotifySafelyAsync(
+            token => _notifier.OrderStateChangedAsync(
+                owner.UserId, new RealtimeOrderState(state.VenueOrderKey, status.ToString(), state.At), token),
+            cancellationToken);
         return true;
     }
 
@@ -278,6 +307,24 @@ public sealed class AccountEventIngestionService
         catch (Exception error)
         {
             _logger.LogError(error, "Audit write failed for a retired stop plan on a terminal order; the retire still completed.");
+        }
+    }
+
+    private async Task NotifySafelyAsync(Func<CancellationToken, Task> push, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await push(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // The journal write already committed; a realtime push is best-effort presentation and must never take
+            // the ingestion consumer down or roll anything back (gh#683).
+            _logger.LogWarning(error, "Realtime account push failed after a committed journal write; ignored.");
         }
     }
 
