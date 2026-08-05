@@ -1,0 +1,2252 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "Trading Co-Pilot API",
+    "description": "The single-operator futures trading co-pilot BFF (R-10). Generated from the live minimal-API routes (gh#604) — the source of truth the README links to, replacing the hand-kept table.",
+    "version": "v1"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080/"
+    }
+  ],
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Authenticate with email + password; returns a JWT bearer token.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "The currently authenticated user.",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/auth/invitations": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Issue an invitation to create an account (primary operator only).",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueInvitationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/auth/accept-invite": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Redeem an invitation token to create an account; returns a JWT.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/firms": {
+      "post": {
+        "tags": ["Firms"],
+        "summary": "Register a firm the operator trades with.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateFirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "get": {
+        "tags": ["Firms"],
+        "summary": "List the operator's registered firms.",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/firms/{id}/conventions": {
+      "put": {
+        "tags": ["Firms"],
+        "summary": "Declare what each account stage means at a firm.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeclareConventionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/connections": {
+      "post": {
+        "tags": ["Connections"],
+        "summary": "Create a firm connection (login).",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConnectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "get": {
+        "tags": ["Connections"],
+        "summary": "List the operator's connections.",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/connections/{id}/accounts": {
+      "get": {
+        "tags": ["Connections"],
+        "summary": "List the accounts discovered through a connection.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/connections/{id}/accounts/discover": {
+      "post": {
+        "tags": ["Connections"],
+        "summary": "Discover accounts through a connection (mode from the firm's declared conventions).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/connections/{id}/credentials": {
+      "put": {
+        "tags": ["Connections"],
+        "summary": "Rotates which credential key a connection names (gh#210, R-17, ADR-0015).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The connection.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The caller's cancellation token.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotateCredentialsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated connection, or a refusal."
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/connections/{id}": {
+      "delete": {
+        "tags": ["Connections"],
+        "summary": "Deactivates a connection and cascades to its accounts — a soft delete (gh#210, R-17, R-20).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The connection.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ok on deactivation (idempotent), or 404 when it is not the operator's."
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/accounts/{id}/stage": {
+      "put": {
+        "tags": ["Accounts"],
+        "summary": "Set a manual stage override on an account.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetStageOverrideRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "delete": {
+        "tags": ["Accounts"],
+        "summary": "Clear the manual stage override on an account.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/accounts/{id}/risk": {
+      "put": {
+        "tags": ["Risk"],
+        "summary": "Declare the account's risk rules (validated whole; refused on any violation).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeclareRiskProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "get": {
+        "tags": ["Risk"],
+        "summary": "The account's declared risk profile, if any.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/accounts/{id}/risk/headroom": {
+      "get": {
+        "tags": ["Risk"],
+        "summary": "Today's remaining daily-loss budget and target progress, readable without a send (gh#587).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/triggers": {
+      "post": {
+        "tags": ["Triggers"],
+        "summary": "Author a standing deterministic trigger.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTriggerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "get": {
+        "tags": ["Triggers"],
+        "summary": "List the operator's triggers.",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/triggers/{id}": {
+      "get": {
+        "tags": ["Triggers"],
+        "summary": "Get a trigger by id.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "patch": {
+        "tags": ["Triggers"],
+        "summary": "Update a trigger.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchTriggerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "delete": {
+        "tags": ["Triggers"],
+        "summary": "Delete a trigger.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/triggers/{id}/confirm": {
+      "post": {
+        "tags": ["Triggers"],
+        "summary": "Confirm a trigger that requires operator confirmation.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/relevance/maps": {
+      "post": {
+        "tags": ["Relevance"],
+        "summary": "Create a ticker↔instrument relevance map.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TickerMapRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "get": {
+        "tags": ["Relevance"],
+        "summary": "List the ticker↔instrument maps.",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/relevance/maps/{ticker}/{instrument}": {
+      "delete": {
+        "tags": ["Relevance"],
+        "summary": "Delete a ticker↔instrument map.",
+        "parameters": [
+          {
+            "name": "ticker",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "instrument",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/relevance/topics": {
+      "post": {
+        "tags": ["Relevance"],
+        "summary": "Create a relevance topic.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TopicRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "get": {
+        "tags": ["Relevance"],
+        "summary": "List relevance topics.",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/relevance/topics/{id}": {
+      "get": {
+        "tags": ["Relevance"],
+        "summary": "Get a relevance topic by id.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "patch": {
+        "tags": ["Relevance"],
+        "summary": "Update a relevance topic.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TopicRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "delete": {
+        "tags": ["Relevance"],
+        "summary": "Delete a relevance topic.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/news": {
+      "get": {
+        "tags": ["News"],
+        "summary": "The personalized feed: recent news re-ranked by the operator's decayed salience profile.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": ["integer", "string"],
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/news/feedback": {
+      "put": {
+        "tags": ["News"],
+        "summary": "Stars or mutes a news item — an upsert: re-rating replaces, so an item carries at most one feedback.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewsFeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "delete": {
+        "tags": ["News"],
+        "summary": "Un-stars / un-mutes an item — the personalization round-trips, so its salience returns to base.",
+        "parameters": [
+          {
+            "name": "dedupKey",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/accounts/{accountId}/suggestions": {
+      "get": {
+        "tags": ["Suggestions"],
+        "summary": "Lists an account's suggestions, newest first. Defaults to the <b>actionable</b> set\n(SuggestionState.Active) — a decision surface should not open on rows that can no longer be\nacted on; the rest stay reachable by explicit filter and by id.",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account whose suggestions to list.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "The lifecycle state to filter to; omitted means active only.",
+            "schema": {
+              "$ref": "#/components/schemas/SuggestionState"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The page size; clamped to the configured maximum.",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": ["integer", "string"],
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The page of suggestions."
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/suggestions/{id}": {
+      "get": {
+        "tags": ["Suggestions"],
+        "summary": "Reads one suggestion by id, in <b>any</b> state — an expired or superseded row stays readable, because the\njournal outlives the decision window.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The suggestion's id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The suggestion, or 404 when it does not exist or belongs to another operator."
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/suggestions/{id}/pass": {
+      "post": {
+        "tags": ["Suggestions"],
+        "summary": "Records a <b>neutral pass</b> on a suggestion (gh#547, R-4/R-8): `POST /suggestions/{id}/pass`. A pass\ntouches no order, gate or venue — it writes one SuggestionDisposition so the R-9 learning loop\nhas the operator's decline to read.",
+        "description": "A pass on an <b>already stale or expired</b> suggestion is still accepted — the operator's note is worth\nkeeping, and lifecycle state is the clock's, not the disposition's (gh#539). One disposition per suggestion:\na second <b>conflicts</b> (409) rather than overwriting, because the journal records the decision, not the\nlatest edit.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The suggestion to pass on.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The caller's cancellation token.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SuggestionPassRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The recorded disposition, 404 when the suggestion is not the caller's, or 409 when already disposed."
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/suggestions/{id}/take": {
+      "post": {
+        "tags": ["Suggestions"],
+        "summary": "Arm an editable, unsent order ticket from a suggestion.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SuggestionTakeRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/accounts/{id}/orders": {
+      "post": {
+        "tags": ["Orders"],
+        "summary": "Send an order through the full risk gate (direct send).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "get": {
+        "tags": ["Orders"],
+        "summary": "Read the account's resting working orders from venue truth.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/accounts/{id}/orders/arm": {
+      "post": {
+        "tags": ["Orders"],
+        "summary": "Arm (stage) an order: evaluate the risk gate without transmitting.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/accounts/{id}/orders/send-as-is": {
+      "post": {
+        "tags": ["Orders"],
+        "summary": "Opt-in fast path: send an order as-is.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/accounts/{id}/orders/conditional": {
+      "post": {
+        "tags": ["Orders"],
+        "summary": "Create a conditional (triggered) order.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConditionalOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/orders/{id}": {
+      "put": {
+        "tags": ["Orders"],
+        "summary": "Edit a staged (armed) order.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "delete": {
+        "tags": ["Orders"],
+        "summary": "Cancel a staged or working order.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/orders/{id}/take": {
+      "post": {
+        "tags": ["Orders"],
+        "summary": "Take a staged order: re-validate everything fresh, then transmit.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/orders/{id}/reconcile": {
+      "post": {
+        "tags": ["Orders"],
+        "summary": "Reconcile a stranded (mid-take) order against venue truth: adopt if live, release if flat.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/orders/{id}/price": {
+      "patch": {
+        "tags": ["Orders"],
+        "summary": "Modifies a <b>working</b> order in place (gh#259/gh#267/gh#278/gh#292, ADR-0007) — the venue-facing sibling of\nthe cancel. Unlike a cancel (risk-reducing, gate-exempt), a modify can add risk (a likelier-to-fill entry, a\nwider stop, a larger size), so it runs the <b>full</b> send ladder and is re-gated before the venue is\ntouched: the gate must approve the new terms, or nothing is transmitted (enforcement below the model). It can\nmove the entry, re-stage the hidden working stop, and/or <b>resize</b> the order; the <b>safety stop</b> is\nheld invariant on every path. A working-stop-only move with no size change re-stages locally (no venue call).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModifyWorkingOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/conditionals/{id}/reconcile": {
+      "post": {
+        "tags": ["Orders"],
+        "summary": "Reconcile a stranded (mid-fire) conditional against venue truth: adopt if live, release if flat.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/kill-switch": {
+      "post": {
+        "tags": ["Kill Switch"],
+        "summary": "Engage the kill switch (hold-to-confirm): stop new orders, cancel working orders, flatten or halt.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngageKillSwitchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      },
+      "get": {
+        "tags": ["Kill Switch"],
+        "summary": "The current kill-switch state.",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/kill-switch/disengage": {
+      "post": {
+        "tags": ["Kill Switch"],
+        "summary": "Disengage the kill switch, re-enabling outbound orders.",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/accounts/{id}/positions": {
+      "get": {
+        "tags": ["Positions"],
+        "summary": "Reconcile and read the account's open positions against venue truth.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["MarqSpec.TradingCopilot.Api"],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": ["MarqSpec.TradingCopilot.Api"],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/marketdata/bars": {
+      "get": {
+        "tags": ["Market data"],
+        "summary": "OHLCV bars for a venue + instrument + resolution over a bounded time window (ascending).",
+        "parameters": [
+          {
+            "name": "venue",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "instrument",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "resolution",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": ["integer", "string"],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/marketdata/indicators": {
+      "get": {
+        "tags": ["Market data"],
+        "summary": "A stored indicator series (e.g. atr, rsi) over a bounded time window — never recomputed (R-22).",
+        "parameters": [
+          {
+            "name": "venue",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "instrument",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "resolution",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": ["integer", "string"],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "indicator",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "period",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": ["integer", "string"],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
+    "/api/marketdata/levels": {
+      "get": {
+        "tags": ["Market data"],
+        "summary": "Active price levels for a venue + instrument across the requested timeframes.",
+        "parameters": [
+          {
+            "name": "venue",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "instrument",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timeframes",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "pattern": "^-?(?:0|[1-9]\\d*)$",
+                "type": ["integer", "string"],
+                "format": "int32"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AcceptInviteRequest": {
+        "required": ["token", "password", "displayName"],
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The invite token from the invitation."
+          },
+          "password": {
+            "type": "string",
+            "description": "The chosen plaintext password."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "The chosen display name."
+          }
+        },
+        "description": "A request to accept an invitation and create the account."
+      },
+      "AccountStage": {
+        "type": "integer",
+        "description": "Where an account sits in a firm's programme. Read from what the venue reports — for ProjectX that means the\naccount <b>name</b>, which really does encode size, stage, and status."
+      },
+      "ConditionalCrossDirection": {
+        "type": "integer",
+        "description": "Which way price must cross the trigger for a conditional order to fire (ADR-0007, gh#176). A <b>refusable\nzero</b>: ConditionalCrossDirection.Unknown is the unset value and never fires — a direction must be declared, or the\norder would rest forever."
+      },
+      "ConsistencyEnforcement": {
+        "type": "integer",
+        "description": "How the gate treats a breached consistency target (gh#380).",
+        "default": 0
+      },
+      "CreateConditionalOrderRequest": {
+        "required": ["order", "triggerPrice", "triggerDirection"],
+        "type": "object",
+        "properties": {
+          "order": {
+            "description": "The entry proposal to hold and fire when the trigger crosses.",
+            "$ref": "#/components/schemas/SendOrderRequest"
+          },
+          "triggerPrice": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The price at which the order fires.",
+            "format": "double"
+          },
+          "triggerDirection": {
+            "description": "Which way price must cross the trigger to fire (RisesTo / FallsTo).",
+            "$ref": "#/components/schemas/ConditionalCrossDirection"
+          },
+          "cancelDrift": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The optional cancel band — the stale-side price past which the setup is abandoned.",
+            "format": "double"
+          },
+          "expiresAt": {
+            "type": ["null", "string"],
+            "description": "The optional validity deadline; past it, a still-pending order cancels.",
+            "format": "date-time"
+          }
+        },
+        "description": "The request to create a <b>synthetic conditional</b> entry order (gh#176, ADR-0007) — the \"send when\nconditions met\" mode. The proposal rides an ordinary SendOrderRequest; the conditional part is\nthe trigger and its cancel-if / expiry."
+      },
+      "CreateConnectionRequest": {
+        "required": ["firmId", "platform", "credentialKey"],
+        "type": "object",
+        "properties": {
+          "firmId": {
+            "type": "string",
+            "description": "The firm this login belongs to.",
+            "format": "uuid"
+          },
+          "platform": {
+            "type": "string",
+            "description": "The platform key (e.g. `projectx`). Only wired adapters are accepted."
+          },
+          "credentialKey": {
+            "type": "string",
+            "description": "The <b>non-secret</b> env-entry name the credentials live under."
+          }
+        },
+        "description": "The request to register a firm login (ADR-0016: one per firm × platform)."
+      },
+      "CreateFirmRequest": {
+        "required": ["name", "type"],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The firm's name (e.g. `Topstep`)."
+          },
+          "type": {
+            "description": "Prop firm (staged) or brokerage (live/paper only).",
+            "$ref": "#/components/schemas/FirmType"
+          }
+        },
+        "description": "The request to register a firm the operator trades with."
+      },
+      "CreateTriggerRequest": {
+        "required": [
+          "symbol",
+          "indicator",
+          "period",
+          "resolutionMinutes",
+          "comparison",
+          "threshold",
+          "route"
+        ],
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "The venue-neutral instrument symbol (e.g. `ES`)."
+          },
+          "indicator": {
+            "type": "string",
+            "description": "The R-22 indicator name (`atr` / `rsi`), case-insensitive."
+          },
+          "period": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": ["integer", "string"],
+            "description": "The indicator period; must be positive.",
+            "format": "int32"
+          },
+          "resolutionMinutes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": ["integer", "string"],
+            "description": "The bar size in minutes; must be positive.",
+            "format": "int32"
+          },
+          "comparison": {
+            "description": "Below or Above; Unknown is refused.",
+            "$ref": "#/components/schemas/IndicatorComparison"
+          },
+          "threshold": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The threshold to compare against.",
+            "format": "double"
+          },
+          "route": {
+            "description": "Where a fire routes; Mechanical or AgentReview.",
+            "$ref": "#/components/schemas/TriggerRoute"
+          },
+          "hysteresis": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The optional re-arm dead-band; null means none, and it must be positive when set.",
+            "format": "double"
+          },
+          "severity": {
+            "description": "How loudly the alert arrives; defaults to NotificationSeverity.Notify.",
+            "$ref": "#/components/schemas/NotificationSeverity"
+          },
+          "accountId": {
+            "type": ["null", "string"],
+            "description": "The account a fired agent-review suggestion issues against — <b>required</b> for AgentReview (owned + mode\ndeclared), <b>refused</b> for Mechanical. Null otherwise.",
+            "format": "uuid"
+          },
+          "size": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": ["null", "integer", "string"],
+            "description": "The contract size a fired agent-review suggestion issues at — <b>required</b> and positive for AgentReview,\n<b>refused</b> for Mechanical. The operator's size, never the model's.",
+            "format": "int32"
+          }
+        },
+        "description": "The body of a create-trigger request (gh#385). Only the indicator-threshold kind is authored today."
+      },
+      "DeclareConventionsRequest": {
+        "required": ["conventions"],
+        "type": "object",
+        "properties": {
+          "conventions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StageConventionDto"
+            },
+            "description": "The declarations. Each stage may appear at most once, and none may be Unknown."
+          }
+        },
+        "description": "The request to declare a firm's full set of stage conventions (replaces any existing)."
+      },
+      "DeclareRiskProfileRequest": {
+        "required": [
+          "dailyLossLimit",
+          "accountProfitTarget",
+          "startingBalance",
+          "floorSource",
+          "trailingMode",
+          "trailingAmount",
+          "locksAt",
+          "perTradeRiskFraction",
+          "targetRewardRatio",
+          "maxDrawdownPerTrade",
+          "dailyDrawdownGovernor",
+          "dailyProfitTarget",
+          "stopForDayAtProfitTarget",
+          "sizingBasis",
+          "maxContractsPerOrder",
+          "maxBestDayFraction"
+        ],
+        "type": "object",
+        "properties": {
+          "dailyLossLimit": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The hard daily loss limit; null when the account has none.",
+            "format": "double"
+          },
+          "accountProfitTarget": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The account's profit target (evaluation accounts); null otherwise.",
+            "format": "double"
+          },
+          "startingBalance": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The account's declared starting balance — where the floor starts from. Positive.",
+            "format": "double"
+          },
+          "floorSource": {
+            "description": "Whether the loss floor is firm-imposed or self-imposed.",
+            "$ref": "#/components/schemas/FloorSource"
+          },
+          "trailingMode": {
+            "description": "How the drawdown floor trails — end-of-day or intraday.",
+            "$ref": "#/components/schemas/TrailingMode"
+          },
+          "trailingAmount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The trailing distance below the equity high-water mark. Positive.",
+            "format": "double"
+          },
+          "locksAt": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The ceiling the floor stops trailing at, if any.",
+            "format": "double"
+          },
+          "perTradeRiskFraction": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "Risk per trade as a fraction of headroom to the floor — in (0, 1].",
+            "format": "double"
+          },
+          "targetRewardRatio": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The target reward-to-risk ratio. Positive.",
+            "format": "double"
+          },
+          "maxDrawdownPerTrade": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The per-trade hard loss cap. Positive.",
+            "format": "double"
+          },
+          "dailyDrawdownGovernor": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The personal daily governor. Positive.",
+            "format": "double"
+          },
+          "dailyProfitTarget": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The personal daily profit target; null means none.",
+            "format": "double"
+          },
+          "stopForDayAtProfitTarget": {
+            "type": "boolean",
+            "description": "Whether reaching the daily target stops trading for the day."
+          },
+          "sizingBasis": {
+            "description": "Whether sizing uses the working stop or the safety stop.",
+            "$ref": "#/components/schemas/SizingBasis"
+          },
+          "maxContractsPerOrder": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": ["integer", "string"],
+            "description": "The manual per-order contract cap; 0 means uncapped.",
+            "format": "int32"
+          },
+          "maxBestDayFraction": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The consistency target — best day ÷ total net profit, in (0, 1]; null means none.",
+            "format": "double"
+          },
+          "consistencyEnforcement": {
+            "description": "Whether breaching that target refuses the order or only warns (gh#380); only consulted when a target is set.",
+            "$ref": "#/components/schemas/ConsistencyEnforcement"
+          },
+          "defaultEntryAction": {
+            "description": "Which entry action is primary on the Approve split button (R-11, gh#218). Defaults to `ApproveAndArm` (review-first); `SendAsIs` is practice-only and requires ConfirmSendAsIsDefault.",
+            "$ref": "#/components/schemas/DefaultEntryAction"
+          },
+          "confirmSendAsIsDefault": {
+            "type": "boolean",
+            "description": "The explicit confirmation required to default to `SendAsIs` — a request that sets `SendAsIs` without it is refused 422 (the kill switch's hold-to-confirm shape).",
+            "default": false
+          }
+        },
+        "description": "The request to declare an account's risk rules (R-5, gh#10) — the complete declaration; a redeclaration\nreplaces the whole profile."
+      },
+      "DefaultEntryAction": {
+        "type": "integer",
+        "description": "Which entry action is the operator's <b>default</b> — the primary half of the Approve split button (R-11,\nADR-0007, gh#218).",
+        "default": 0
+      },
+      "EngageKillSwitchRequest": {
+        "required": ["mode", "confirmed", "reason"],
+        "type": "object",
+        "properties": {
+          "mode": {
+            "description": "Flatten all open positions (default) or halt only (leave them on native safety stops).",
+            "$ref": "#/components/schemas/KillSwitchMode"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "The hold-to-confirm gesture — must be `true` to engage."
+          },
+          "reason": {
+            "type": ["null", "string"],
+            "description": "The operator's reason, optional, journaled with the action."
+          }
+        },
+        "description": "A request to engage the kill switch (gh#189)."
+      },
+      "FirmType": {
+        "type": "integer",
+        "description": "What kind of account provider a Firm is. A <b>prop firm</b> runs staged programmes\n(evaluation → funded); a <b>brokerage</b> does not — its accounts are simply live or paper. The distinction\nmatters because stage conventions (gh#60) apply to prop firms only (gh#76)."
+      },
+      "FloorSource": {
+        "type": "integer",
+        "description": "Where the loss floor comes from. The risk-budget dynamic is identical either way — only the origin and the\nconsequence of a breach differ (R-5)."
+      },
+      "IndicatorComparison": {
+        "type": "integer",
+        "description": "How an indicator value is compared to a threshold in a trigger condition (R-4 / R-7, ADR-0008)."
+      },
+      "IssueInvitationRequest": {
+        "required": ["email"],
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The email to invite."
+          }
+        },
+        "description": "A request to issue an onboarding invitation."
+      },
+      "KillSwitchMode": {
+        "type": "integer",
+        "description": "What the kill switch does to <b>open positions</b> when engaged (ADR-0007, R-11, gh#189)."
+      },
+      "LoginRequest": {
+        "required": ["email", "password"],
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The user's email."
+          },
+          "password": {
+            "type": "string",
+            "description": "The user's plaintext password."
+          }
+        },
+        "description": "A login request."
+      },
+      "ModifyWorkingOrderRequest": {
+        "required": ["entryPrice"],
+        "type": "object",
+        "properties": {
+          "entryPrice": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The new entry price, or `null` to leave it. When present, the entry reprices at the venue and\nre-gates (gh#259); decimal? ModifyWorkingOrderRequest.ReferencePrice is then required.",
+            "format": "double"
+          },
+          "workingStopPrice": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The new <b>hidden</b> working-stop price, or `null` to leave it (gh#267). A hidden stop is a\npromotion target, not a venue order, so re-staging it <b>alone</b> is a <b>local</b> write — no venue call. It\nre-gates <b>only</b> when it <i>widens</i> under `SizingBasis.ActualStop` (the one enforced layer measured\nat the working stop). Moving it onto the safety stop (removing it) is out of scope.",
+            "format": "double"
+          },
+          "referencePrice": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The <b>caller's</b> current market reference the fat-finger band re-measures a new <b>entry</b> against (R-16)\n— <b>required when decimal? ModifyWorkingOrderRequest.EntryPrice is present</b>. Caller-supplied, as on every order path (the server\nfetches no venue quote), so it is the client's freshness, not the venue's. A move that does not touch the entry\n(a working-stop re-stage or a pure resize) does not need it.",
+            "format": "double"
+          },
+          "size": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": ["null", "integer", "string"],
+            "description": "The new contract quantity, or `null` to leave it (gh#292). A resize re-gates at the new size and\nmodifies the order in place at the venue, transmitting the <b>gate-approved</b> quantity (a downsize the gate\nbinds is honoured, never silently exceeded). The always-native safety bracket carries no size of its own — the\ngateway attaches it <i>on fill</i>, sized to the realized fill — so a resize leaves the eventual fill protected\nby construction (verified on practice before live, gh#293). `&lt;= 0` is refused; the order must be\n`Working` (a partially-filled order is refused, closing the only stale-bracket-size window).",
+            "format": "int32"
+          }
+        },
+        "description": "The request to modify a <b>working</b> order in place — a PATCH that moves the resting <b>entry</b> at the venue\n(gh#259), re-stages the hidden <b>working stop</b> (gh#267), moves <b>both together</b> (gh#278), and/or\n<b>resizes</b> the order (gh#292). At least one of decimal? ModifyWorkingOrderRequest.EntryPrice / decimal? ModifyWorkingOrderRequest.WorkingStopPrice /\nint? ModifyWorkingOrderRequest.Size must be present (a int? ModifyWorkingOrderRequest.Size equal to the order's current size is a no-op). The\n<b>safety stop</b> stays invariant on every path, so the R-5 catastrophic floor is untouched; the full chain\n`safety → working → entry` is re-validated before the venue is touched."
+      },
+      "NewsFeedbackRequest": {
+        "required": ["dedupKey", "kind"],
+        "type": "object",
+        "properties": {
+          "dedupKey": {
+            "type": "string",
+            "description": "The rated item's dedup key (its NewsRecord primary key)."
+          },
+          "kind": {
+            "description": "Star or mute (never SoftSignalKind.Unknown).",
+            "$ref": "#/components/schemas/SoftSignalKind"
+          }
+        },
+        "description": "A star/mute request on a news item (gh#27). The dedup key rides in the body — it is a URL, not path-safe."
+      },
+      "NotificationSeverity": {
+        "type": "integer",
+        "description": "How loudly a notification should arrive (gh#243, ADR-0019's P1/P2/P3 taxonomy).",
+        "default": 1
+      },
+      "OrderSide": {
+        "type": "integer",
+        "description": "Which way an order goes. Venue wire values differ (ProjectX sends 0 bid / 1 ask); adapters map."
+      },
+      "OrderType": {
+        "type": "integer",
+        "description": "The venue-neutral order types. Deliberately the common set — venue-specific extras (ProjectX\n`JoinBid`/`JoinAsk`) stay out of the core, and types not every venue offers are gated by\nVenueCapability rather than assumed (R-17).",
+        "default": 0
+      },
+      "PatchTriggerRequest": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": ["null", "boolean"],
+            "description": "Enable or disable the trigger."
+          },
+          "threshold": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "A new threshold.",
+            "format": "double"
+          },
+          "hysteresis": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "A new re-arm dead-band; must be positive when set (clearing it is not offered here).",
+            "format": "double"
+          },
+          "comparison": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "description": "A new comparison; Unknown is refused.",
+                "$ref": "#/components/schemas/IndicatorComparison"
+              }
+            ]
+          },
+          "severity": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "description": "A new alert severity.",
+                "$ref": "#/components/schemas/NotificationSeverity"
+              }
+            ]
+          }
+        },
+        "description": "The body of a patch-trigger request (gh#385). Every field is optional — null means \"leave unchanged\". The\ndebounce state (`ArmState`, `ArmCycle`, `LastFiredAt`, `LastEvaluatedValue`) is deliberately\nabsent: it is the scan's and the journal's, never the caller's, and any edit re-seeds the arm state silently."
+      },
+      "RotateCredentialsRequest": {
+        "required": ["credentialKey"],
+        "type": "object",
+        "properties": {
+          "credentialKey": {
+            "type": "string",
+            "description": "The new credential key this connection should name."
+          }
+        },
+        "description": "Rotate which credential key a connection names (gh#210, ADR-0015)."
+      },
+      "SendOrderRequest": {
+        "required": [
+          "symbol",
+          "tickSize",
+          "pointValue",
+          "side",
+          "quantity",
+          "entry",
+          "stop",
+          "safetyStop",
+          "referencePrice"
+        ],
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "The venue-neutral instrument symbol (e.g. `MES`)."
+          },
+          "tickSize": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The instrument's tick size.",
+            "format": "double"
+          },
+          "pointValue": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The instrument's point value (currency per point per contract).",
+            "format": "double"
+          },
+          "side": {
+            "description": "Buy or sell.",
+            "$ref": "#/components/schemas/OrderSide"
+          },
+          "quantity": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": ["integer", "string"],
+            "description": "The contracts asked for — the gate decides what is actually authorized.",
+            "format": "int32"
+          },
+          "entry": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The intended entry price.",
+            "format": "double"
+          },
+          "stop": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The working stop price.",
+            "format": "double"
+          },
+          "safetyStop": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The safety-stop price — the deterministic worst case (R-5).",
+            "format": "double"
+          },
+          "referencePrice": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The current reference price the fat-finger band measures from.",
+            "format": "double"
+          },
+          "type": {
+            "description": "How the order rests. Trailing stops are refused (no trail distance on the ticket).",
+            "$ref": "#/components/schemas/OrderType"
+          },
+          "target": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["null", "number", "string"],
+            "description": "The optional take-profit price (ADR-0007, gh#173) — the profit side of a native OCO bracket. It must sit on\nthe <b>winning</b> side of Entry (above for a long, below for a short); a wrong-side\ntarget is refused before the gate. `null` means no profit leg (the two-leg bracket).",
+            "format": "double"
+          }
+        },
+        "description": "The request to send one order through the gate (gh#11). The instrument's tick size and point value ride the\nrequest because no Instrument entity exists yet (recorded on the dictionary §1 row) — the caller supplies\nthe spec the risk math needs."
+      },
+      "SetStageOverrideRequest": {
+        "required": ["stage"],
+        "type": "object",
+        "properties": {
+          "stage": {
+            "description": "The declared stage. `Unknown` is refused — clearing the override says that.",
+            "$ref": "#/components/schemas/AccountStage"
+          }
+        },
+        "description": "The request to declare an account's stage, overriding the conservative name-resolver (gh#76)."
+      },
+      "SizingBasis": {
+        "type": "integer",
+        "description": "Which stop the per-trade risk budget is divided by when sizing (configurable, R-5 / ADR-0007)."
+      },
+      "SoftSignalKind": {
+        "type": "integer",
+        "description": "The kind of per-user feedback on a soft-signal / news item (gh#27, ADR-0014). A <b>refusable zero</b>:\nSoftSignalKind.Unknown is never a real kind — feedback must declare its intent — refused at construction and by a\nDB check. One entity (`SoftSignalFeedback`) unifies all kinds; <b>star</b> and <b>mute</b> ship now, and the\n👍/👎 <b>sentiment</b> (direction) axis is deferred (R-2) and will extend this enum without reshaping the store."
+      },
+      "StageConventionDto": {
+        "required": ["stage", "capitalAtRisk"],
+        "type": "object",
+        "properties": {
+          "stage": {
+            "description": "The stage being classified. Never AccountStage.Unknown.",
+            "$ref": "#/components/schemas/AccountStage"
+          },
+          "capitalAtRisk": {
+            "type": "boolean",
+            "description": "`true` if capital is at risk at this stage (maps to Live)."
+          }
+        },
+        "description": "One stage declaration — what a stage means at a firm (gh#60)."
+      },
+      "SuggestionPassReason": {
+        "type": "integer",
+        "description": "Why the operator passed a Suggestion — the canonical <b>eight</b> reasons settled by gh#539, taken\nfrom the operator-validated pass sheet in the wireframes. A multi-select, so it is a `[Flags]` value stored\nin one integer and sliced by R-9 with a bitwise test.",
+        "default": 0
+      },
+      "SuggestionPassRequest": {
+        "type": "object",
+        "properties": {
+          "reasons": {
+            "description": "The pass reasons, a `[Flags]` multi-select. SuggestionPassReason.None (the default) is a valid,\nneutral pass.",
+            "$ref": "#/components/schemas/SuggestionPassReason"
+          },
+          "note": {
+            "type": ["null", "string"],
+            "description": "An optional free-text note, capped at int SuggestionDisposition.NoteMaxLength."
+          }
+        },
+        "description": "The body of a pass (gh#547, R-4). <b>Both fields are optional</b>: a pass is a <b>neutral decline</b>, not a\nrejection, so the operator need give no reason at all."
+      },
+      "SuggestionState": {
+        "type": "integer"
+      },
+      "SuggestionTakeRequest": {
+        "required": ["referencePrice"],
+        "type": "object",
+        "properties": {
+          "referencePrice": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": ["number", "string"],
+            "description": "The caller's current market price, as on every order path (the server fetches no venue quote). It does double\nduty: the take-time <b>drift re-check</b> re-measures it against the suggestion's entry tolerance <b>now</b>\n(R-12, not the eventually-consistent SuggestionState.Stale flag), and it is the fat-finger band's\nreference once the ticket reaches the gate (R-16). Must be positive.",
+            "format": "double"
+          }
+        },
+        "description": "The body of a take (gh#548, R-11b / R-12). Its <b>only</b> field is the current market reference — the two\nnumbers a server-originated proposal cannot invent (the tick size, point value and safety-stop distance) come\nfrom the instrument-spec source, never the client (that is ruled out in writing on SendOrderRequest)."
+      },
+      "TickerMapRequest": {
+        "required": ["ticker", "instrument"],
+        "type": "object",
+        "properties": {
+          "ticker": {
+            "type": "string",
+            "description": "The provider ticker (e.g. `SPY`)."
+          },
+          "instrument": {
+            "type": "string",
+            "description": "The traded instrument it maps to (e.g. `ES`)."
+          }
+        },
+        "description": "A ticker↔instrument map create request (gh#359)."
+      },
+      "TopicRequest": {
+        "required": ["name", "keywords", "scope", "instrument"],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The topic name (e.g. `fomc`)."
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The keywords that mark the topic matched."
+          },
+          "scope": {
+            "description": "Instrument-scoped or global (never TopicScope.Unknown).",
+            "$ref": "#/components/schemas/TopicScope"
+          },
+          "instrument": {
+            "type": ["null", "string"],
+            "description": "The instrument for an instrument-scoped topic; ignored for a global one."
+          }
+        },
+        "description": "A topic create / edit request (gh#359). PATCH replaces the topic whole."
+      },
+      "TopicScope": {
+        "type": "integer",
+        "description": "A topic's reach (gh#359). A <b>refusable zero</b>: TopicScope.Unknown never matches — a topic must declare\nwhether it is instrument-scoped or global, so an unset scope can't silently attach news to an instrument.\nRefused at construction and by a DB check."
+      },
+      "TrailingMode": {
+        "type": "integer",
+        "description": "How an account's trailing drawdown floor moves. A property of the <b>account</b>, not the firm — Apex sells\nboth kinds, so it is keyed off the account."
+      },
+      "TriggerRoute": {
+        "type": "integer",
+        "description": "Where a trigger fire routes (ADR-0008) — the two outcomes a trigger definition chooses between."
+      }
+    },
+    "securitySchemes": {
+      "Bearer": {
+        "type": "http",
+        "description": "JWT issued by POST /auth/login, sent as: Authorization: Bearer {token}.",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Auth"
+    },
+    {
+      "name": "Firms"
+    },
+    {
+      "name": "Connections"
+    },
+    {
+      "name": "Accounts"
+    },
+    {
+      "name": "Risk"
+    },
+    {
+      "name": "Triggers"
+    },
+    {
+      "name": "Relevance"
+    },
+    {
+      "name": "News"
+    },
+    {
+      "name": "Suggestions"
+    },
+    {
+      "name": "Orders"
+    },
+    {
+      "name": "Kill Switch"
+    },
+    {
+      "name": "Positions"
+    },
+    {
+      "name": "MarqSpec.TradingCopilot.Api"
+    },
+    {
+      "name": "Market data"
+    }
+  ]
+}

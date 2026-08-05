@@ -1,5 +1,12 @@
 dist/
 coverage/
 
+# Generated from openapi/v1.json by `npm run codegen` (openapi-typescript owns its formatting).
+src/api/schema.ts
+
+# Captured from the running BFF (`GET /openapi/v1.json`, gh#604) as the codegen source — a snapshot artifact,
+# not hand-formatted, so a fresh capture commits without a reformat step.
+openapi/v1.json
+
 # npm owns this file's formatting; reformatting it would churn on every `npm install`.
 package-lock.json
