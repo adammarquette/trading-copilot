@@ -142,6 +142,21 @@ describe('request — the one JWT-attach path', () => {
     }
   });
 
+  it('maps a 5xx that DOES carry an { error } body to failed, not refused — a 5xx is not a gate answer', async () => {
+    // An unhandled exception / ASP.NET ProblemDetails / proxy response can return 500 with `{ error }`.
+    // Classifying that as `refused` (R-11) would render a transient server fault as an authoritative "the gate
+    // said no" — never retried — for a request the gate may never have evaluated. It is a `failed`.
+    stubFetch(() => Promise.resolve(response(500, { error: 'An unexpected error occurred.' })));
+
+    const result = await request('POST', '/accounts/1/orders', {});
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.kind).toBe('failed');
+      expect(result.status).toBe(500);
+    }
+  });
+
   it('maps a thrown fetch (offline / aborted) to failed', async () => {
     stubFetch(() => Promise.reject(new TypeError('Failed to fetch')));
 
