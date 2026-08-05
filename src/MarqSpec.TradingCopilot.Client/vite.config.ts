@@ -3,7 +3,7 @@ import { loadEnv } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 import { defineConfig } from 'vitest/config';
 
-import { NETWORK_ONLY_PATH } from './src/sw-cache-policy';
+import { PWA_WORKBOX_OPTIONS } from './src/sw-cache-policy';
 
 export default defineConfig(({ mode }) => {
   // loadEnv folds matching process.env entries in with any .env file, so `VITE_BFF_ORIGIN=... npm run
@@ -15,22 +15,13 @@ export default defineConfig(({ mode }) => {
     plugins: [
       react(),
       // The installable PWA (gh#650, R-19 / ADR-0010). Workbox generates the worker; registration is explicit
-      // (registerSW.ts, from main.tsx), not injected. The cache boundary is NETWORK_ONLY_PATH — a single source of
-      // truth shared with the test that asserts "no state read is cache-served".
+      // (registerSW.ts, from main.tsx), not injected. `workbox` is assigned PWA_WORKBOX_OPTIONS directly, not a
+      // copy of it — sw-cache-policy.test.ts asserts that exact object, so this is the wiring under test, not a
+      // restatement of it that could drift.
       VitePWA({
         registerType: 'prompt',
         injectRegister: null,
-        workbox: {
-          // Precache the app SHELL only — the static bundle assets. No API response is a build artifact, so no
-          // server state is ever precached.
-          globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest,woff,woff2}'],
-          navigateFallback: '/index.html',
-          // A client-side route is answered with the cached shell offline, but a state path (/api, /health,
-          // /ready) is denied it and must reach the network — a stale shell must never stand in for live state.
-          navigateFallbackDenylist: [NETWORK_ONLY_PATH],
-          // No runtimeCaching, by design: nothing under /api is ever cached, so a position, order or kill-switch
-          // read is always live-or-absent, never stale (gh#650, R-19).
-        },
+        workbox: PWA_WORKBOX_OPTIONS,
         manifest: {
           name: 'Trading Co-Pilot',
           short_name: 'Co-Pilot',
