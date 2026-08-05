@@ -6,9 +6,9 @@ import { Outlet, useLocation } from 'react-router';
 
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { ConnectionStatus } from '../health/ConnectionStatus';
+import { AccountSwitcher } from '../accounts/AccountSwitcher';
 import { AdaptiveNavigation, SecondaryDestinationLinks } from '../navigation/AdaptiveNavigation';
 import { AccountMenu } from './AccountMenu';
-import { ModeChipSlot } from './ModeChipSlot';
 import { SafetyRegion } from './SafetyRegion';
 import { ThemeModeToggle } from './ThemeModeToggle';
 import { useWindowSizeClass } from './useWindowSizeClass';
@@ -67,7 +67,7 @@ export function AppShell() {
 
           {/* R-14. Beside the product name because "which account is this" is the first question any
               control in this bar begs. */}
-          <ModeChipSlot />
+          <AccountSwitcher />
 
           <Box sx={{ flex: 1, minWidth: 8 }} />
 

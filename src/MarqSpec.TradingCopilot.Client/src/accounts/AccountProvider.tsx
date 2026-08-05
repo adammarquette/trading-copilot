@@ -33,9 +33,15 @@ export type AccountContextValue =
 
 const AccountContext = createContext<AccountContextValue | null>(null);
 
+/** The account context, or `null` outside an {@link AccountProvider} — for the app-bar switcher, which the shell
+ * mounts with or without one. Every gated surface should prefer {@link useAccounts}. */
+export function useOptionalAccounts(): AccountContextValue | null {
+  return useContext(AccountContext);
+}
+
 /** The account context. Throws outside an {@link AccountProvider} so a mis-mounted surface fails loudly. */
 export function useAccounts(): AccountContextValue {
-  const value = useContext(AccountContext);
+  const value = useOptionalAccounts();
   if (value === null) {
     throw new Error('useAccounts must be used inside an <AccountProvider>.');
   }
@@ -67,8 +73,7 @@ export function AccountProvider({ children }: { readonly children: ReactNode }) 
     };
   }, []);
 
-  const reload = useCallback(() => {
-    setState({ kind: 'loading' });
+  const load = useCallback(() => {
     void listAllAccounts().then((result) => {
       if (!mounted.current) {
         return;
@@ -81,9 +86,17 @@ export function AccountProvider({ children }: { readonly children: ReactNode }) 
     });
   }, []);
 
+  // Mount kicks off the load. The initial state is already `loading`, so the effect sets no state synchronously
+  // (react-hooks/set-state-in-effect) — only the async resolution moves it off `loading`.
   useEffect(() => {
-    reload();
-  }, [reload]);
+    load();
+  }, [load]);
+
+  // A manual retry from the error state re-shows loading, then reloads.
+  const reload = useCallback(() => {
+    setState({ kind: 'loading' });
+    load();
+  }, [load]);
 
   const setActiveAccount = useCallback((id: string) => {
     localStorage.setItem(ACTIVE_ACCOUNT_KEY, id);
