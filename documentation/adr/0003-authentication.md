@@ -32,6 +32,18 @@ The frontend is a **React SPA** consuming the BFF's **REST** endpoints and **Sig
 - Discipline required: authorization must *always* go through policies/claims — a stray hard-coded `if (isOperator)` erodes the RBAC-readiness.
 - SignalR needs the token wired through the connection (`access_token` query on negotiate/websocket).
 
+## Update (2026-08-05) — the SPA's authenticated client lands (gh#648)
+
+The client half of the bearer decision above shipped, in `src/MarqSpec.TradingCopilot.Client/src/api`: the JWT is
+acquired at sign-in and attached as `Authorization: Bearer …` from **one** request path, so a surface cannot issue
+an unauthenticated call. The token lives in **`localStorage`** — the *implementation* of the bearer choice, not a
+new decision: an httpOnly cookie would trade the header model chosen above for cookie auth + CSRF handling.
+`localStorage` is XSS-reachable and this client can send orders, so the exposure rests on the single-origin
+premise already decided — a first-party bundle served same-origin by the BFF under a strict CSP, no third-party
+script surface. A 401 clears the token and routes to sign-in; it is never retried. This closes the *issuance +
+expiry* part of the token follow-up below (refresh remains); the client's request types are generated from the
+gh#604 OpenAPI spec, so an API-contract change is a client build failure rather than a runtime 400.
+
 ## Follow-ups
 - Token **issuance + refresh** flow (login → JWT; refresh strategy; expiry).
 - **Signing-key** storage / rotation (server-side secret, §8).
