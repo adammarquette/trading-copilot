@@ -1,22 +1,34 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
+import { destinations } from './navigation/destinations';
+import { ALL_WINDOW_SIZE_CLASSES, setWindowSizeClass } from './testing/viewport';
 
-/** A stand-in for the parts of Response the probe actually reads. */
-function healthResponse(status: number): Response {
-  return { ok: status >= 200 && status < 300, status } as unknown as Response;
+/**
+ * `App` brings its own theme provider; only the router is missing, because production supplies a
+ * `BrowserRouter` in `main.tsx` and a test wants a `MemoryRouter`. That split is the whole reason `App`
+ * does not carry a router of its own.
+ */
+function renderApp(route = '/') {
+  return render(
+    <MemoryRouter initialEntries={[route]}>
+      <App />
+    </MemoryRouter>,
+  );
 }
 
-function stubFetch(impl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
-  const fetchMock = vi.fn(impl);
-  vi.stubGlobal('fetch', fetchMock);
-  return fetchMock;
-}
-
-function status() {
-  return screen.getByRole('status');
-}
+beforeEach(() => {
+  window.localStorage.clear();
+  setWindowSizeClass('expanded');
+  // Every surface renders inside the shell, and the shell probes /health. Left unstubbed the probe
+  // would reject against jsdom's absent network and colour these tests with an unrelated failure.
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => new Promise<Response>(() => {})),
+  );
+});
 
 afterEach(() => {
   cleanup();
@@ -25,77 +37,57 @@ afterEach(() => {
 
 describe('App', () => {
   it('renders the application name', () => {
-    stubFetch(() => new Promise<Response>(() => {}));
-
-    render(<App />);
+    renderApp();
 
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Trading Co-Pilot');
   });
 
-  it('probes a same-origin /health so the BFF that served the bundle answers it', () => {
-    const fetchMock = stubFetch(() => new Promise<Response>(() => {}));
+  it('opens on the workspace, because the chart is the central surface', () => {
+    // R-10 / ADR-0004. The root route is the workspace on purpose; anything else makes the operator
+    // navigate to the thing they came for.
+    renderApp();
 
-    render(<App />);
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url] = fetchMock.mock.calls[0];
-    // The value matters more than the call: an absolute URL here would pin the SPA to one host.
-    expect(url).toBe('/health');
+    expect(screen.getByTestId('surface').dataset.surface).toBe('workspace');
   });
 
-  it('reports checking until the probe settles', () => {
-    stubFetch(() => new Promise<Response>(() => {}));
+  it.each(destinations.map((destination) => [destination.id, destination.path] as const))(
+    'routes %s to its own surface',
+    (id, path) => {
+      // Routes and navigation are generated from one table, so this also proves no destination links
+      // somewhere that does not exist.
+      renderApp(path);
 
-    render(<App />);
+      expect(screen.getByTestId('surface').dataset.surface).toBe(id);
+    },
+  );
 
-    expect(status().dataset.status).toBe('checking');
+  it('navigates between surfaces without leaving the shell', () => {
+    renderApp();
+
+    fireEvent.click(screen.getByRole('link', { name: 'Journal' }));
+
+    expect(screen.getByTestId('surface').dataset.surface).toBe('journal');
+    // The shell -- and with it the safety region -- survives navigation rather than remounting.
+    expect(screen.getByRole('region', { name: 'Safety controls' })).toBeTruthy();
   });
 
-  it('reports the BFF reachable when /health answers 200', async () => {
-    stubFetch(() => Promise.resolve(healthResponse(200)));
+  it('keeps the operator inside the shell on an unknown path', () => {
+    // A 404 is not a reason to drop the kill switch and the countdown.
+    renderApp('/no-such-surface');
 
-    render(<App />);
-
-    await waitFor(() => {
-      expect(status().dataset.status).toBe('reachable');
-    });
-    expect(status().textContent).toContain('reachable');
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('No such surface');
+    expect(screen.getByRole('region', { name: 'Safety controls' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Back to the workspace' })).toBeTruthy();
   });
 
-  it('reports the BFF unreachable when /health answers an error status', async () => {
-    // Guards the difference between "the request completed" and "the BFF is healthy" -- a 503 still
-    // resolves the fetch promise, so a naive .then would call a down BFF reachable.
-    stubFetch(() => Promise.resolve(healthResponse(503)));
+  it.each(ALL_WINDOW_SIZE_CLASSES)('renders a complete shell at %s', (sizeClass) => {
+    setWindowSizeClass(sizeClass);
 
-    render(<App />);
+    renderApp();
 
-    await waitFor(() => {
-      expect(status().dataset.status).toBe('unreachable');
-    });
-  });
-
-  it('reports the BFF unreachable when the probe fails outright', async () => {
-    stubFetch(() => Promise.reject(new TypeError('Failed to fetch')));
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(status().dataset.status).toBe('unreachable');
-    });
-  });
-
-  it('aborts an in-flight probe on unmount', () => {
-    let captured: AbortSignal | undefined;
-    stubFetch((_input, init) => {
-      captured = init?.signal ?? undefined;
-      return new Promise<Response>(() => {});
-    });
-
-    const { unmount } = render(<App />);
-    expect(captured?.aborted).toBe(false);
-
-    unmount();
-
-    expect(captured?.aborted).toBe(true);
+    expect(screen.getByRole('region', { name: 'Safety controls' })).toBeTruthy();
+    expect(screen.getByTestId('mode-chip-slot')).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: 'Primary' })).toBeTruthy();
+    expect(screen.getByTestId('surface')).toBeTruthy();
   });
 });
