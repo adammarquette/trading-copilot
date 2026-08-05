@@ -2031,9 +2031,18 @@
         <div class="infield"><span class="il">Password</span><span class="box">••••••••••</span></div>
         <div class="btn fill" style="justify-content:center">Sign in</div>
       </div>
+      <div class="authcard">
+        <div class="auth-brand"><svg class="glyph" viewBox="0 0 64 64" aria-hidden="true"><use href="#tc-logo"/></svg>Trading Co-Pilot</div>
+        <div class="auth-h">Accept your invitation</div>
+        <div class="auth-sub">Dormant model · gh#652</div>
+        <div class="infield"><span class="il">Invitation token</span><span class="box">inv_9f2c… · prefilled from the link</span></div>
+        <div class="infield"><span class="il">Display name</span><span class="box ph">how you'll be shown</span></div>
+        <div class="infield"><span class="il">Choose a password</span><span class="box">••••••••••</span></div>
+        <div class="btn fill" style="justify-content:center">Accept invitation</div>
+      </div>
     </div>
     <div class="warnbn" style="margin-top:14px"><span class="ic">🔒</span><div>Credentials are <b>hashed server-side</b> — never stored or echoed in the browser; the session carries a <b>JWT</b>. Every operator-owned row (connections, accounts, rules, risk profiles, journal) carries an <b>owning identity</b> and every query is scoped to it at the data layer — kept as a <b>fail-closed</b> property (a forgotten scope returns <b>nothing</b>, not everything), not to separate users.</div></div>
-    <div class="rej-why" style="margin-top:12px">Sign-in is the whole flow — <b>no invite / accept card</b>, because a single-operator deployment has nobody to invite. The invitation mechanism stays <b>dormant in the codebase</b> (ADR-0017 §4), the plumbing a future <b>read-only / mentee</b> login would reuse — a mentor offering tips, or showing someone their own trading profile. Broker / prop-firm logins are added <b>after</b> sign-in via <b>Connection &amp; account onboarding</b>. Billing / paid plans are out of scope.</div>
+    <div class="rej-why" style="margin-top:12px">Sign-in is the whole flow for the seeded operator — there is nobody to invite. The <b>accept-invite</b> card beside it (gh#652) is the dormant model's <b>minimum</b>, not a new capability: it redeems the token the <code>/auth/accept-invite</code> endpoint already accepts — invitation token, display name, password — and <b>nothing more</b> (no roles, no management), the plumbing a future <b>read-only / mentee</b> login would reuse (ADR-0017 §4) — a mentor offering tips, or showing someone their own trading profile. Both are the <b>only</b> surfaces reachable without a session, and both stay off any screen that shows account state — a credential field never shares a surface with an identity, so <b>sign-out lives in the app bar</b> with the operator's name, not here. A rejected sign-in reads the same whether the email is unknown or the password wrong (no account enumeration); an <b>invitation</b> failure <i>is</i> named, because it is about the invite, not an account. Broker / prop-firm logins are added <b>after</b> sign-in via <b>Connection &amp; account onboarding</b>. Billing / paid plans are out of scope.</div>
   </section>
 
   <section class="onb">

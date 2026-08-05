@@ -7,7 +7,9 @@ import tseslint from 'typescript-eslint';
 // Flat config (the only format ESLint 10 reads). `npm run lint` never writes -- it reports and exits
 // non-zero, mirroring `dotnet format --verify-no-changes` on the .NET side of the repo.
 export default tseslint.config(
-  { ignores: ['dist/', 'coverage/'] },
+  // src/api/schema.ts is generated from openapi/v1.json (`npm run codegen`); it is not hand-edited and
+  // openapi-typescript owns its style, so it is excluded from lint the same way dist/ output is.
+  { ignores: ['dist/', 'coverage/', 'src/api/schema.ts'] },
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

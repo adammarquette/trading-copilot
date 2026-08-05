@@ -7,6 +7,7 @@ import { Outlet, useLocation } from 'react-router';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { ConnectionStatus } from '../health/ConnectionStatus';
 import { AdaptiveNavigation, SecondaryDestinationLinks } from '../navigation/AdaptiveNavigation';
+import { AccountMenu } from './AccountMenu';
 import { ModeChipSlot } from './ModeChipSlot';
 import { SafetyRegion } from './SafetyRegion';
 import { ThemeModeToggle } from './ThemeModeToggle';
@@ -76,6 +77,7 @@ export function AppShell() {
           <SafetyRegion dense={compact} />
           {compact ? <SecondaryDestinationLinks /> : null}
           <ThemeModeToggle />
+          <AccountMenu />
         </Toolbar>
       </AppBar>
 
