@@ -1,0 +1,196 @@
+using System.Reflection;
+using FakeItEasy;
+using FluentAssertions;
+using MarqSpec.TradingCopilot.Api.Flatten;
+using MarqSpec.TradingCopilot.Api.Kill;
+using MarqSpec.TradingCopilot.Api.Realtime;
+using MarqSpec.TradingCopilot.Domain.Events;
+using MarqSpec.TradingCopilot.Domain.MarketData;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Logging;
+
+namespace MarqSpec.TradingCopilot.UnitTests.Api.Realtime;
+
+public class RealtimeHubTests
+{
+    private static readonly DateTimeOffset _at = DateTimeOffset.UnixEpoch.AddYears(56);
+
+    private readonly IEventLog _eventLog = A.Fake<IEventLog>();
+    private readonly IClientProxy _caller = A.Fake<IClientProxy>();
+
+    private RealtimeHub Hub() => new(_eventLog, A.Fake<ILogger<RealtimeHub>>());
+
+    private static EventEnvelope Event(long sequence, string type) =>
+        new(Guid.NewGuid(), sequence, type, "test", _at.AddSeconds(sequence), _at.AddSeconds(sequence), "{}", null);
+
+    private void PageAfter(long afterSequence, EventPage page) =>
+        A.CallTo(() => _eventLog.ReadAfterAsync(afterSequence, A<int>._, A<CancellationToken>._)).Returns(page);
+
+    private bool SentEvent(long sequence) => Fake.GetCalls(_caller).Any(call =>
+        call.Method.Name == nameof(IClientProxy.SendCoreAsync)
+        && (string)call.Arguments[0]! == RealtimeEvent.ClientMethod
+        && ((object?[])call.Arguments[1]!)[0] is RealtimeEvent e && e.Sequence == sequence);
+
+    private int GapNotices() => Fake.GetCalls(_caller).Count(call =>
+        call.Method.Name == nameof(IClientProxy.SendCoreAsync)
+        && (string)call.Arguments[0]! == RealtimeGap.ClientMethod);
+
+    // ---- resume-cursor parsing ----
+
+    [Theory]
+    [InlineData("5", true, 5)]
+    [InlineData("0", true, 0)]
+    [InlineData(null, false, 0)]
+    [InlineData("", false, 0)]
+    [InlineData("not-a-number", false, 0)]
+    [InlineData("-1", false, 0)] // a negative cursor is nonsense; treat as no resume, not "from the start"
+    public void TryParseResumeAfter_ShouldParseOnlyANonNegativeInteger(string? raw, bool expected, long expectedAfter)
+    {
+        RealtimeHub.TryParseResumeAfter(raw, out long after).Should().Be(expected);
+        after.Should().Be(expectedAfter);
+    }
+
+    // ---- backlog replay (idempotent resume) ----
+
+    [Fact]
+    public async Task ReplayBacklogAsync_ShouldReplayBroadcastEventsAfterTheCursor_AndSkipNonBroadcastTypes()
+    {
+        PageAfter(0, EventPage.Of(
+        [
+            Event(1, QuoteIngestionService.QuoteEventType),
+            Event(2, "internal.not-broadcast"), // not on the allow-list: never leaves the server
+            Event(3, KillSwitchService.EngagedEventType),
+        ]));
+
+        await Hub().ReplayBacklogAsync(afterSequence: 0, _caller, CancellationToken.None);
+
+        SentEvent(1).Should().BeTrue();
+        SentEvent(3).Should().BeTrue();
+        SentEvent(2).Should().BeFalse("a type not in RealtimeEventCatalog is never forwarded to a client");
+    }
+
+    [Fact]
+    public async Task ReplayBacklogAsync_ShouldTellTheClientToRefetch_WhenTheCursorFellOffTheRetentionWindow()
+    {
+        PageAfter(10, new EventPage(
+            [Event(11, QuoteIngestionService.QuoteEventType)],
+            new EventRetentionGap(RequestedAfterSequence: 10, OldestAvailableSequence: 11, _at)));
+
+        await Hub().ReplayBacklogAsync(afterSequence: 10, _caller, CancellationToken.None);
+
+        GapNotices().Should().Be(1, "a retention gap is reported, never silently skipped");
+        SentEvent(11).Should().BeTrue("the tail the log did return still replays");
+    }
+
+    [Fact]
+    public async Task ReplayBacklogAsync_ShouldBoundTheReplay_AndReportAGap_WhenTheClientIsTooFarBehind()
+    {
+        PageAfter(0, EventPage.Of(
+        [
+            Event(1, QuoteIngestionService.QuoteEventType),
+            Event(2, QuoteIngestionService.QuoteEventType),
+            Event(3, QuoteIngestionService.QuoteEventType),
+        ]));
+
+        // A resume from far behind must not stream the whole retention window; cap it and tell the client to refetch.
+        await Hub().ReplayBacklogAsync(afterSequence: 0, _caller, CancellationToken.None, maxEvents: 2);
+
+        SentEvent(1).Should().BeTrue();
+        SentEvent(2).Should().BeTrue();
+        SentEvent(3).Should().BeFalse("the replay stopped at the cap");
+        GapNotices().Should().Be(1);
+    }
+
+    [Fact]
+    public async Task ReplayBacklogAsync_ShouldBoundByRowsExamined_NotJustBroadcastEvents()
+    {
+        // A long run of non-broadcast rows must still trip the cap — the resume bounds WORK done, not just sends,
+        // so it can never scan the whole retention window on one connect.
+        PageAfter(0, EventPage.Of(
+        [
+            Event(1, "internal.not-broadcast"),
+            Event(2, "internal.not-broadcast"),
+            Event(3, "internal.not-broadcast"),
+            Event(4, QuoteIngestionService.QuoteEventType),
+        ]));
+
+        await Hub().ReplayBacklogAsync(afterSequence: 0, _caller, CancellationToken.None, maxEvents: 2);
+
+        SentEvent(4).Should().BeFalse("the cap fires on rows examined, before the loop ever reaches the broadcast row");
+        GapNotices().Should().Be(1);
+    }
+
+    [Fact]
+    public async Task ReplayBacklogAsync_ShouldReplayNothing_ForAnEmptyBacklog()
+    {
+        PageAfter(99, EventPage.Of([]));
+
+        await Hub().ReplayBacklogAsync(afterSequence: 99, _caller, CancellationToken.None);
+
+        Fake.GetCalls(_caller).Should().BeEmpty();
+    }
+
+    // ---- the presentation-only guarantee ----
+
+    [Fact]
+    public void RealtimeHub_ShouldExposeNoInvocableMethod_SoItCanNeverBeACommandChannel()
+    {
+        // SignalR invokes public instance methods declared on a hub. The only one here is the OnConnectedAsync
+        // lifecycle override; anything else would be a second path to state — this asserts there is none (R-18, ADR-0007).
+        IEnumerable<string> invocable = typeof(RealtimeHub)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Select(method => method.Name);
+
+        invocable.Should().BeEquivalentTo([nameof(RealtimeHub.OnConnectedAsync)]);
+    }
+}
+
+public class RealtimeEventCatalogTests
+{
+    [Theory]
+    [InlineData("market.quote")]
+    [InlineData("market.context-trade")]
+    [InlineData("killswitch.engaged")]
+    [InlineData("killswitch.disengaged")]
+    [InlineData("flatten.executed")]
+    [InlineData("flatten.warning")]
+    [InlineData("flatten.watchdog.critical")]
+    public void IsBroadcast_ShouldAllowTheMarketDataAndSafetyStripTypes(string type) =>
+        RealtimeEventCatalog.IsBroadcast(type).Should().BeTrue();
+
+    [Theory]
+    [InlineData("order.filled")] // owner-scoped: reaches clients via the gh#683 per-owner seam, never this hub
+    [InlineData("suggestion.issued")] // owner-scoped: gh#684
+    [InlineData("news")]
+    [InlineData("")]
+    public void IsBroadcast_ShouldRefuseAnythingNotOnTheAllowList(string type) =>
+        RealtimeEventCatalog.IsBroadcast(type).Should().BeFalse();
+
+    [Fact]
+    public void BroadcastTypeCount_ShouldPinTheBoundary_SoAnAdditionIsADeliberateReviewedChange() =>
+        // Market quote + context-trade (2) + kill-switch (3) + flatten (6) + flatten-watchdog (3) = 14.
+        RealtimeEventCatalog.BroadcastTypeCount.Should().Be(14);
+}
+
+public class RealtimeEventTests
+{
+    [Fact]
+    public void From_ShouldProjectTheDurableEnvelopeOntoTheWireShape_DroppingTheServerSideId()
+    {
+        var envelope = new EventEnvelope(
+            Guid.NewGuid(), Sequence: 42, "market.quote", "projectx",
+            DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, "{\"bid\":1}", TraceParent: "trace");
+
+        RealtimeEvent projected = RealtimeEvent.From(envelope);
+
+        projected.Should().Be(new RealtimeEvent(42, "market.quote", DateTimeOffset.UnixEpoch, "{\"bid\":1}"));
+    }
+
+    [Fact]
+    public void From_ShouldProjectARetentionGapOntoTheWireShape()
+    {
+        var gap = new EventRetentionGap(RequestedAfterSequence: 10, OldestAvailableSequence: 25, DateTimeOffset.UnixEpoch);
+
+        RealtimeGap.From(gap).Should().Be(new RealtimeGap(10, 25, DateTimeOffset.UnixEpoch));
+    }
+}
