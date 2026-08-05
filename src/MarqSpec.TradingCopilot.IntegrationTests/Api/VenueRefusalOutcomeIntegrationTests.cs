@@ -464,32 +464,20 @@ public class VenueRefusalOutcomeIntegrationTests : IClassFixture<StubbedVenuePos
         VenueFactory.PlacedVenueOrderIds.Count.Should().BeLessThanOrEqualTo(
             restingBefore + 1, "at most ONE of the two racing entries may rest at the venue");
 
-        // The peer may legitimately be refused with a 409 in the instant between the lock releasing and the revert
-        // committing — the fire path's revert is committed by the OUTER per-record save, so the row can still read
-        // Firing to a racer that acquires the lock first. That is fail-safe (it only ever OVER-blocks) and is the
-        // gh#622 residual; gh#630 closed it for the gate-refusal arm, and the gh#629 definitive arm inherits the old
-        // shape. Pinned as OBSERVED behaviour rather than blessed: the required property is that the account settles
-        // takeable, which is asserted below, so this flips into a regression guard if the window is ever closed.
-        peerResponse.StatusCode.Should().BeOneOf(
-            new[] { HttpStatusCode.OK, HttpStatusCode.Conflict },
-            "the peer either serializes behind the revert and transmits, or is transiently over-blocked (gh#622)");
-
-        if (peerResponse.StatusCode == HttpStatusCode.Conflict)
-        {
-            // Tie THIS 409 to the documented lock-timing window specifically — the no-stacking check's own reason
-            // (OrderEndpoints.cs), not just any 409 — so an unrelated conflict (e.g. a risk-gate rejection racing
-            // the same request) cannot be silently waved through as "the known gh#622 residual."
-            (await peerResponse.Content.ReadAsStringAsync()).Should().Contain(
-                "conditional mid-fire",
-                "the tolerated over-block must be the no-stacking check reading the still-Firing conditional "
-                + "(gh#589/gh#622), not an unrelated conflict that happens to also 409");
-
-            // Settled state: nothing is live, nothing is stranded, and the account is takeable again — the revert
-            // really did commit, rather than leaving the conditional Firing and the account blocked.
-            using HttpResponseMessage settled = await client.PostAsync($"/orders/{stagedOrderId}/take", null);
-            settled.StatusCode.Should().Be(
-                HttpStatusCode.OK, "once the revert commits the account is free — the over-block is transient only");
-        }
+        // The peer transmits — deterministically. The gh#622 over-block window this assertion used to tolerate is
+        // CLOSED on this arm: the definitive fire-revert commits Firing -> Pending while the account lock is STILL
+        // HELD (gh#629 / PR #667), the same discipline gh#630 established next door for the gate-refusal arm. There
+        // is therefore no unlock -> outer-per-record-save gap in which a racer can acquire the lock and still read
+        // Firing; the peer blocks on the advisory lock and, the instant it acquires, the no-stacking check (which
+        // counts Firing — gh#589) reads a COMMITTED Pending and has nothing to refuse.
+        //
+        // So a 409 here is no longer a tolerable transient — it is the regression. Keeping Conflict on an allow-list
+        // would let someone move that SaveChangesAsync back outside the lock, re-opening gh#622 on this arm, with the
+        // suite still green (gh#674). Be(OK) is what makes this test able to fail on the thing it guards.
+        peerResponse.StatusCode.Should().Be(
+            HttpStatusCode.OK,
+            "the peer serializes behind the in-lock revert commit (gh#630 / gh#667) and transmits; a 409 here means "
+            + "the revert commit escaped the account lock and re-opened the gh#622 over-block window");
 
         await ExecuteDbContextAsync(async db =>
         {
