@@ -55,10 +55,12 @@ Nothing extra to deploy: a client change rides the same image promotion as any A
 > **That stage copies a *subset* of the repo, and everything `npm ci` needs must be in the manifests layer** —
 > `package.json`, `package-lock.json` **and `.npmrc`** (gh#691). `.npmrc` carries `legacy-peer-deps=true`, without
 > which the install ERESOLVEs on `openapi-typescript`'s stale peer range. Every other check runs from a full
-> checkout where that file is simply present, so the image is the only place a missing-input bug can exist — and
-> `publish image (GHCR)` does not run on PRs, so it is invisible until after merge. It cost six develop commits
-> with no publishable image. Adding a build-time input to the client means adding it to that `COPY`; gh#692 tracks
-> catching this class pre-merge.
+> checkout where that file is simply present, so the image is the only place a missing-input bug can exist. It
+> cost **seven** develop commits with no publishable image, because `publish image (GHCR)` runs only after merge.
+> Adding a build-time input to the client means adding it to that `COPY`.
+>
+> **`build image (no publish)` now closes that window** (gh#692): it builds this same Dockerfile on every PR,
+> pushing nothing, so a missing-input break fails the PR that introduced it instead of surfacing on `develop`.
 
 **While developing the client**, `npm run dev` in `src/MarqSpec.TradingCopilot.Client` is faster than rebuilding the
 image. Vite serves the SPA on its own port, so set **`VITE_BFF_ORIGIN`** to the running BFF (e.g.
@@ -321,6 +323,14 @@ and would have deadlocked every merge if enabled — was deleted at the same tim
   long-lived branches and `publish image` runs only on `push`, so requiring either would leave a required check
   forever pending and **deadlock the merge**. This is the trap to remember before adding any required check:
   confirm it actually runs on that branch's PRs.
+- **`build image (no publish)` is the one that CAN be required** (gh#692). It builds the same Dockerfile as
+  `publish image` but pushes nothing, and it is guarded `if: github.event_name != 'push'` — the exact complement
+  of `publish image` — so it runs on **pull requests** (and on `merge_group`, if a queue ever becomes available
+  here). It therefore does not hit the deadlock above.
+  **Maintainer action, not yet applied:** adding it to `protect-develop`'s required set is a **ruleset change in
+  the web UI** and is not done by this repo's code. Until it is, a red `build image` is *visible* on the PR but
+  does not *block* the merge. Add it, and add it to `protect-staging` / `protect-main` alongside their existing
+  sets, to make the gate binding.
 ### Combining-PR protection on `develop` — `strict`, because the merge queue is unavailable (gh#357, gh#575)
 
 > **The merge queue cannot be enabled on this repository.** Adding the `merge_queue` rule to `protect-develop`
