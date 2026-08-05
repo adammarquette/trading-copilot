@@ -33,8 +33,10 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// can present a defaulted or resolved value for something the wire never carried, which would let this suite
 /// bless a document no client can use. The reader is used for exactly one thing —
 /// <see cref="TheSpec_ShouldBeServed_AsAParseableOpenApi3Document"/>, where "does this parse as OpenAPI 3" is the
-/// question — and nowhere else. That distinction is not academic here: it is what found the gh#604 defect pinned
-/// in <see cref="TheBearerRequirement_ShouldNameTheBearerScheme"/>.
+/// question — and nowhere else. That distinction is not academic here: it is what found the gh#604 defect
+/// (gh#680), which <see cref="TheBearerRequirement_ShouldNameTheBearerScheme"/> pinned and now guards against
+/// regressing. Reading the model back would have shown a scheme reference that looked correct; only the wire
+/// showed the empty <c>{}</c> the serializer actually emitted.
 /// </para>
 /// </remarks>
 public class OpenApiDocumentIntegrationTests : IClassFixture<PostgresApiFactory>
@@ -365,36 +367,36 @@ public class OpenApiDocumentIntegrationTests : IClassFixture<PostgresApiFactory>
             .GetProperty("security")[0];
 
         // ------------------------------------------------------------------------------------------------------
-        // DEFECT gh#680 (in gh#604's BearerSecurityRequirementTransformer; found by gh#612) — PINNING OBSERVED
-        // BEHAVIOUR, NOT BLESSING IT. Per the QA contract §"Pin an observed defect; never bless it".
+        // gh#680 FIXED — this pin is now the regression guard it was written to become (QA contract §2).
         //
-        // Every secured operation emits `"security": [ { } ]` — an EMPTY requirement object. The scheme name is
-        // absent, so nothing in the document ever references the `Bearer` scheme declared in components. In
-        // OpenAPI an empty security requirement object means "no security required", so the shipped spec tells
-        // Scalar and every client generator that POST /accounts/{id}/orders and POST /kill-switch are open — the
-        // exact inversion of what gh#604 set out to express.
+        // It previously asserted the *broken* shape: every secured operation emitted `"security": [ { } ]`, an
+        // EMPTY requirement object, which in OpenAPI means "no security required". Nothing referenced the `Bearer`
+        // scheme declared in components, so Scalar and every client generator read POST /accounts/{id}/orders and
+        // POST /kill-switch as open — the exact inversion of what gh#604 set out to express.
         //
-        // Cause, reproduced in isolation against Microsoft.OpenApi 2.11.0: the requirement's key is built as
+        // Cause and fix: the requirement's key was built as
         //     new OpenApiSecuritySchemeReference(BearerSecurity.SchemeName, hostDocument: null)
-        // and a reference with no host document cannot resolve its target, so the serializer writes no key.
-        // Passing the document instead — `context.Document`, which OpenApiOperationTransformerContext exposes —
-        // emits `{ "Bearer": [] }`. It is a one-argument fix, and it belongs to the Coding Agent: QA contract §3,
-        // "a suite that cannot go green without a production change has found a defect — report it, don't fix it".
+        // and a reference with no host document cannot resolve its target, so the serializer wrote no key at all.
+        // It now resolves against `context.Document` (gh#680), via BearerSecurity.CreateRequirement, whose own
+        // unit regression asserts the serialized form directly.
         //
-        // WHEN THE FIX LANDS this test goes red, and that red is its purpose: replace the assertion below with
-        //     requirement.TryGetProperty("Bearer", out JsonElement scopes).Should().BeTrue(...);
-        //     scopes.GetArrayLength().Should().Be(0, "an http/bearer scheme takes no scopes");
-        // and it becomes the fix's regression guard. Do not simply delete it.
+        // WHY THE ASSERTION IS ON THE SERIALIZED DOCUMENT, not the object graph: the reference object existed in
+        // both the broken and fixed shapes. Only the emitted JSON distinguishes them, which is why the defect
+        // survived gh#604's review and why this test reads the real /openapi/v1.json.
         //
-        // Note what this does NOT undermine: SecuredOperations_ShouldDocumentASecurityRequirement_AndAnonymousOnesShouldNot
-        // above still holds and is still meaningful — the PRESENCE of the (empty) entry tracks the endpoint's
-        // authorization metadata correctly, so RequiresBearer itself is demonstrably right end to end. What is
-        // broken is only the requirement's contents. Neither test may be cited as evidence that the shipped spec
-        // advertises authentication, because it does not.
+        // Its sibling SecuredOperations_ShouldDocumentASecurityRequirement_AndAnonymousOnesShouldNot was green
+        // throughout and still is: the PRESENCE of the entry always tracked the endpoint's authorization metadata
+        // correctly (RequiresBearer was never the broken part). The two together now cover both halves — WHICH
+        // operations are secured, and WHAT the requirement actually says.
         // ------------------------------------------------------------------------------------------------------
-        requirement.EnumerateObject().Should().BeEmpty(
-            "DEFECT gh#680: the Bearer requirement serializes as an empty object because the scheme reference is "
-            + "built with hostDocument: null — see the comment above; this assertion pins reality until the fix lands");
+        requirement.TryGetProperty("Bearer", out JsonElement scopes).Should().BeTrue(
+            "a secured operation must NAME the scheme it requires — an empty requirement object means 'no security "
+            + "required' in OpenAPI, so the document would advertise the whole API as open (gh#680)");
+
+        scopes.ValueKind.Should().Be(
+            JsonValueKind.Array, "a security requirement maps a scheme name to its list of scopes");
+        scopes.GetArrayLength().Should().Be(
+            0, "an http/bearer scheme takes no scopes — the list is present but empty");
     }
 
     // =================================================================================================================

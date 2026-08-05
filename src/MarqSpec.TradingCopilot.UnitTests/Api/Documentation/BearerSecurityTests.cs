@@ -1,5 +1,6 @@
 using MarqSpec.TradingCopilot.Api.Documentation;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.OpenApi;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Documentation;
 
@@ -46,5 +47,60 @@ public class BearerSecurityTests
     public void RequiresBearer_ShouldBeFalse_WhenThereIsNoAuthorizationMetadata()
     {
         BearerSecurity.RequiresBearer([]).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The gh#680 regression guard. <see cref="BearerSecurity.RequiresBearer"/> decides <i>whether</i> an operation
+    /// carries the requirement; this pins <i>what the requirement says</i> once serialized — the half that was
+    /// silently broken from gh#604 until gh#612's drift-guard caught it.
+    /// </summary>
+    [Fact]
+    public void CreateRequirement_ShouldNameTheBearerScheme_WhenSerialized()
+    {
+        // The failure this guards is not an exception or a missing entry — it is a requirement that serializes as
+        // `{}`, which in OpenAPI means "NO security required". A scheme reference built without a host document
+        // cannot resolve its target, so the serializer emits no key and the document ends up advertising the whole
+        // API as open while still declaring a Bearer scheme nothing points at. Asserting on the object graph would
+        // miss it entirely: the reference exists either way. Only the SERIALIZED form can witness this.
+        OpenApiDocument document = HostDocumentDeclaringTheBearerScheme();
+
+        OpenApiSecurityRequirement requirement = BearerSecurity.CreateRequirement(document);
+
+        string json = Serialize(requirement);
+        json.Should().Contain(
+            BearerSecurity.SchemeName,
+            "the requirement must NAME the scheme it requires — an empty `{{}}` requirement means 'no security "
+            + "required' in OpenAPI, so every generated client would read the API as open (gh#680)");
+        json.Should().NotBe(
+            "{ }",
+            "an empty requirement object is the exact defect gh#680 fixed — see the comment above");
+    }
+
+    /// <summary>A minimal document declaring the Bearer scheme, as <c>BearerSecuritySchemeTransformer</c> does.</summary>
+    private static OpenApiDocument HostDocumentDeclaringTheBearerScheme() =>
+        new()
+        {
+            Info = new OpenApiInfo { Title = "Trading Co-Pilot", Version = "v1" },
+            Components = new OpenApiComponents
+            {
+                SecuritySchemes = new Dictionary<string, IOpenApiSecurityScheme>
+                {
+                    [BearerSecurity.SchemeName] = new OpenApiSecurityScheme
+                    {
+                        Type = SecuritySchemeType.Http,
+                        Scheme = "bearer",
+                        BearerFormat = "JWT",
+                    },
+                },
+            },
+        };
+
+    private static string Serialize(OpenApiSecurityRequirement requirement)
+    {
+        StringWriter text = new();
+        OpenApiJsonWriter writer = new(text);
+        requirement.SerializeAsV31(writer);
+        text.Flush();
+        return text.ToString();
     }
 }
