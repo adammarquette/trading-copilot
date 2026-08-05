@@ -413,7 +413,14 @@ public sealed class ConditionalFiringService
             // then finds nothing left to write for this record.
             onMayBeLiveAtVenue(false);
             record.Status = ConditionalStatus.Pending;
-            await database.SaveChangesAsync(cancellationToken);
+
+            // TEMPORARY REGRESSION PROBE (gh#674) -- DO NOT MERGE. The in-lock `await
+            // database.SaveChangesAsync(cancellationToken);` that belongs on the line above has been removed, so the
+            // revert is committed only by the OUTER per-record save, which runs AFTER the lock releases. That is the
+            // pre-#667 shape and re-opens the gh#622 over-block window on this arm. It exists solely to prove the
+            // tightened Be(HttpStatusCode.OK) assertion in
+            // DefinitiveFireRevert_ShouldSerializeAgainstAConcurrentTake_AndNeverLetItStack can actually redden on the
+            // regression it names (QA contract, guard discipline rule 1). Reverted before this PR leaves draft.
             _logger.LogWarning(
                 "Conditional order {Id} triggered but the venue DEFINITIVELY rejected the fire: {Reason}. "
                 + "Nothing rests, reverted to pending.", record.Id, refusal.Message);
