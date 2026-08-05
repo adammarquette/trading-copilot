@@ -105,4 +105,36 @@ public class DailyHeadroomTests
 
         atLargerLoss.Should().BeLessThan(atSmallLoss);
     }
+
+    // GovernorFractionRemaining — the single definition of the headroom-as-a-fraction-of-the-governor bridge the
+    // R-4 suggestion throttle (gh#551) consumes as SuggestionThrottleContext.HeadroomFraction. It lives here, on the
+    // one headroom type the gate and the /risk/headroom read already share, so there is never a second definition.
+
+    [Fact]
+    public void GovernorFractionRemaining_ShouldBeOne_OnAGreenDay() =>
+        DailyHeadroom.Remaining(dailyLossLimit: null, dailyDrawdownGovernor: 2_000m, dayLoss: 0m)
+            .GovernorFractionRemaining(2_000m).Should().Be(1m);
+
+    [Fact]
+    public void GovernorFractionRemaining_ShouldBeHalf_WhenHalfTheGovernorIsSpent() =>
+        DailyHeadroom.Remaining(dailyLossLimit: null, dailyDrawdownGovernor: 2_000m, dayLoss: 1_000m)
+            .GovernorFractionRemaining(2_000m).Should().Be(0.5m);
+
+    [Fact]
+    public void GovernorFractionRemaining_ShouldBeZero_AtTheGovernor() =>
+        DailyHeadroom.Remaining(dailyLossLimit: null, dailyDrawdownGovernor: 2_000m, dayLoss: 2_000m)
+            .GovernorFractionRemaining(2_000m).Should().Be(0m);
+
+    [Fact]
+    public void GovernorFractionRemaining_ShouldGoNegative_PastTheGovernor() =>
+        // Past the governor the fraction is negative, so the throttle reads GovernorReached (<= 0 => Suppressed).
+        DailyHeadroom.Remaining(dailyLossLimit: null, dailyDrawdownGovernor: 2_000m, dayLoss: 2_500m)
+            .GovernorFractionRemaining(2_000m).Should().Be(-0.25m);
+
+    [Fact]
+    public void GovernorFractionRemaining_ShouldFailSafeToZero_WhenTheGovernorIsNonPositive() =>
+        // RiskProfile.Declare enforces governor > 0, but a non-positive governor must fail SAFE — read as no room
+        // (fraction 0 => the throttle suppresses), never a divide-by-zero and never widened into headroom.
+        DailyHeadroom.Remaining(dailyLossLimit: null, dailyDrawdownGovernor: 0m, dayLoss: 0m)
+            .GovernorFractionRemaining(0m).Should().Be(0m);
 }
