@@ -153,6 +153,13 @@ And **claim in both repos** — push the empty claim branch in the submodule rep
 **do not delete the outer claim branch while the inner PR is open**. A card whose submodule work is in review
 belongs in **Review**, not *Current ToDo* ([board workflow](documentation/project-board-workflow.md)).
 
+### Creating a new supporting repo
+
+Create it from **[`MarqSpec.Repo.Template`](https://github.com/adammarquette/MarqSpec.Repo.Template)**, then run
+its `scripts/bootstrap.sh` — that script applies the ladder, merge methods, rulesets and label taxonomy, which
+are GitHub *settings* and therefore the half no template can carry. Its `TEMPLATE-BOOTSTRAP.md` owns the rest;
+do not copy an existing sibling instead, which is how the four current ones came to disagree.
+
 ### What this does not do
 
 It does not make claiming atomic — two sessions can check in the same second and both proceed. It narrows the
