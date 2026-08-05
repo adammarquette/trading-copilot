@@ -8,7 +8,15 @@ FROM node:22-alpine AS client
 WORKDIR /client
 # Manifests first: this layer -- the expensive one -- re-runs only when dependencies actually change, not on every
 # source edit.
-COPY src/MarqSpec.TradingCopilot.Client/package.json src/MarqSpec.TradingCopilot.Client/package-lock.json ./
+#
+# .npmrc BELONGS IN THIS COPY, not the source one below (gh#691). It is an INPUT TO THE INSTALL, not source: it
+# carries `legacy-peer-deps=true`, without which `npm ci` ERESOLVEs on openapi-typescript's stale `peer typescript
+# ^5.x` against this scaffold's TypeScript 6. Left to the source COPY it arrives one layer too late and the image
+# build dies while every other check stays green -- because everything else runs from a full checkout where .npmrc
+# is simply present, and only the image copies a subset. That cost six develop commits with no publishable image.
+COPY src/MarqSpec.TradingCopilot.Client/package.json \
+     src/MarqSpec.TradingCopilot.Client/package-lock.json \
+     src/MarqSpec.TradingCopilot.Client/.npmrc ./
 RUN npm ci
 COPY src/MarqSpec.TradingCopilot.Client/ ./
 RUN npm run build
