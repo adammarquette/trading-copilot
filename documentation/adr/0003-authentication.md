@@ -44,6 +44,23 @@ script surface. A 401 clears the token and routes to sign-in; it is never retrie
 expiry* part of the token follow-up below (refresh remains); the client's request types are generated from the
 gh#604 OpenAPI spec, so an API-contract change is a client build failure rather than a runtime 400.
 
+## Update (2026-08-05) — the sign-in / accept-invite surfaces and session land (gh#652)
+
+The operator-facing half of the bearer decision, in `src/MarqSpec.TradingCopilot.Client/src/auth`. The SPA now
+boots **through** the R-18 gate: `AuthProvider` establishes the session once on load from `GET /auth/me`,
+`RequireAuth` is the single place a signed-out operator is turned away — to `/sign-in`, remembering where they
+were headed — and the app-bar account menu is the one sign-out. `/sign-in` and `/accept-invite` are the only
+surfaces outside the gate, mirroring the BFF's anonymous allow-list (login + accept-invite), and they render
+outside the shell: a credential field never shares a screen with account state, which is why sign-out lives with
+the operator's identity in the app bar and not on the sign-in card.
+
+Two properties are carried deliberately from the server. A rejected sign-in reads **identically** whether the
+email is unknown or the password wrong — the surface cannot enumerate accounts, matching the endpoint's single
+401 — whereas an invitation failure *is* named, because "invalid, already used, or expired" is about the invite,
+not about whether some account exists. The accept-invite surface is the dormant-model minimum (redeem the token
+the endpoint already accepts; no role selection or management), per ADR-0015 / ADR-0017. This closes the client
+side of the **login → JWT** issuance follow-up below; refresh and SignalR access-token wiring remain.
+
 ## Follow-ups
 - Token **issuance + refresh** flow (login → JWT; refresh strategy; expiry).
 - **Signing-key** storage / rotation (server-side secret, §8).
