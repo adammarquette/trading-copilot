@@ -30,6 +30,11 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       include: ['src/**/*.test.{ts,tsx}'],
       restoreMocks: true,
+
+      // Vitest stubs CSS imports to empty by default, which also empties a `?raw` import of a
+      // stylesheet. `tokens.test.ts` reads src/index.css that way to pin the one token value CSS
+      // cannot import, so the stylesheet has to arrive with its contents intact.
+      css: true,
     },
   };
 });

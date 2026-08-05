@@ -1,41 +1,30 @@
-/* Deliberately unopinionated. Picking a design system is gh#647's call, not the scaffold's, so this
-   file carries only enough to prove the CSS pipeline emits an asset the BFF can serve. */
+/* Almost everything that used to live here now comes from the theme: MUI's CssBaseline applies the
+   reset, and `createAppTheme` emits the ADR-0005 tokens as `--tc-*` custom properties plus the
+   height rules the shell depends on. Adding colours here would re-open the exact hole the token module
+   closes -- a value that is not in the token set and does not swap with the theme.
 
-:root {
-  color-scheme: light dark;
-  font-family:
-    system-ui,
-    -apple-system,
-    'Segoe UI',
-    sans-serif;
-  line-height: 1.5;
+   What is left is the pre-paint state. These rules ship in the stylesheet so they apply before React
+   mounts; anything the theme emits only exists once the app is running.
+
+   The two literals below are the one place a token value is repeated outside `tokens.ts`, because CSS
+   cannot import it. `tokens.test.ts` reads this file and asserts they still match, so the duplication
+   is pinned rather than left to drift. */
+
+html {
+  /* Dark is the product default (ADR-0005). Without this the browser paints a white canvas for the
+     frame or two before the theme lands, which on a dark cockpit reads as a flash of failure. */
+  color-scheme: dark;
+  background-color: #101318;
+}
+
+html[data-theme='light'] {
+  /* ThemeModeProvider mirrors the operator's mode onto this attribute (the wireframe's own
+     `[data-theme="light"]` switch), so the canvas behind the app follows the theme rather than staying
+     the dark default under a light UI. */
+  color-scheme: light;
+  background-color: #e9edf4;
 }
 
 body {
   margin: 0;
-}
-
-.app {
-  margin: 0 auto;
-  max-width: 40rem;
-  padding: 3rem 1.5rem;
-}
-
-.app__title {
-  margin: 0;
-}
-
-.app__subtitle {
-  margin: 0.25rem 0 2rem;
-  opacity: 0.7;
-}
-
-/* Colour is driven off the probe result rather than a class per state, so the status element stays
-   one node and the test can assert on data-status. */
-.app__health[data-status='reachable'] strong {
-  color: #1a7f37;
-}
-
-.app__health[data-status='unreachable'] strong {
-  color: #b42318;
 }
