@@ -1,6 +1,9 @@
 import react from '@vitejs/plugin-react';
 import { loadEnv } from 'vite';
+import { VitePWA } from 'vite-plugin-pwa';
 import { defineConfig } from 'vitest/config';
+
+import { PWA_WORKBOX_OPTIONS } from './src/sw-cache-policy';
 
 export default defineConfig(({ mode }) => {
   // loadEnv folds matching process.env entries in with any .env file, so `VITE_BFF_ORIGIN=... npm run
@@ -9,7 +12,40 @@ export default defineConfig(({ mode }) => {
   const bffOrigin = loadEnv(mode, '.', 'VITE_').VITE_BFF_ORIGIN;
 
   return {
-    plugins: [react()],
+    plugins: [
+      react(),
+      // The installable PWA (gh#650, R-19 / ADR-0010). Workbox generates the worker; registration is explicit
+      // (registerSW.ts, from main.tsx), not injected. `workbox` is assigned PWA_WORKBOX_OPTIONS directly, not a
+      // copy of it — sw-cache-policy.test.ts asserts that exact object, so this is the wiring under test, not a
+      // restatement of it that could drift.
+      VitePWA({
+        registerType: 'prompt',
+        injectRegister: null,
+        workbox: PWA_WORKBOX_OPTIONS,
+        manifest: {
+          name: 'Trading Co-Pilot',
+          short_name: 'Co-Pilot',
+          description: 'Single-operator futures trading co-pilot.',
+          id: '/',
+          start_url: '/',
+          scope: '/',
+          display: 'standalone',
+          orientation: 'any',
+          theme_color: '#101318',
+          background_color: '#101318',
+          icons: [
+            { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+            { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+            {
+              src: '/icons/icon-maskable-512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'maskable',
+            },
+          ],
+        },
+      }),
+    ],
 
     // Root-absolute asset URLs. The bundle is served by the BFF out of its wwwroot at "/", so
     // "/assets/…" resolves regardless of the deployed host.
