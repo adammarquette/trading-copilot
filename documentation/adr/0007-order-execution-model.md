@@ -172,6 +172,7 @@ for validating heading-order/index against the trail in CI rather than by hand �
 | 2026-08-03 | [a stranded reconcile consults fill history, so a round-tripped entry is never re-armed (gh#631)](#update-2026-08-03--a-stranded-reconcile-consults-fill-history-so-a-round-tripped-entry-is-never-re-armed-gh631) |
 | 2026-08-03 | [take + conditional-fire serialize per account; Taking is counted and made recoverable (gh#589)](#update-2026-08-03--take--conditional-fire-serialize-per-account-taking-is-counted-and-made-recoverable-gh589) |
 | 2026-08-04 | [a typed venue-refusal outcome, so a definitive rejection auto-resolves (gh#629)](#update-2026-08-04--a-typed-venue-refusal-outcome-so-a-definitive-rejection-auto-resolves-gh629) |
+| 2026-08-05 | [the client no longer retries a place, so the definitive classification is sound (gh#673)](#update-2026-08-05--the-client-no-longer-retries-a-place-so-the-definitive-classification-is-sound-gh673) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 
@@ -1144,6 +1145,23 @@ the parameterless default, so an unrecognised or unset refusal can never be read
 that could release a maybe-live order, closed structurally rather than by a positive list. This shrinks the maybe-live
 surface to genuinely-uncertain faults; it does **not** resolve the *transport-fault-that-landed* residual (that fault
 is correctly indeterminate — the deferred **fill-level** reconcile, gh#631 above, is what tells a landed one apart).
+
+## Update (2026-08-05) — the client no longer retries a place, so the definitive classification is sound (gh#673)
+
+The classification above rests on one premise: a **Definitive** `!success` means the gateway *placed nothing*. That
+holds only if a place is sent **at most once** — and it was not. The `MarqSpec.Client.ProjectX` resilience pipeline
+retried every transient fault (transport fault / `429` / `5xx`) on **all** routes, including the non-idempotent
+`POST /api/Order/place`. So a place whose first attempt booked the order but lost its ack — or drew a `5xx` *after*
+acceptance — was **retried**, and the duplicate returned `!success` ("insufficient margin", "duplicate order"): a
+*definitive-looking* rejection the take / fire arms would read as "placed nothing" and **release over a live order**,
+the very double-place #530 / #589 exist to close.
+
+The client now excludes the placement route from its retry predicate (client PR #16): a place fault surfaces to the
+caller rather than being re-sent — a transport fault is *not* a `VenueRefusalException`, so it stays `Taking` /
+`Firing` (correctly indeterminate), and only a genuine single-shot `!success` throws **Definitive**. `develop`'s
+submodule pin is bumped to submodule `master` to adopt it — retiring the in-flight branch-tip pin it had held to
+reach gh#642, and carrying the auth / WebSocket fixes on `master` besides. The classification above is now sound; no
+app code changes.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the

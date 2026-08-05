@@ -29,6 +29,27 @@ internal static class BearerSecurity
         bool requiresAuthorization = endpointMetadata.OfType<IAuthorizeData>().Any();
         return requiresAuthorization && !allowsAnonymous;
     }
+
+    /// <summary>
+    /// Builds the operation-level Bearer security requirement, keyed by a reference to the scheme declared in
+    /// <paramref name="hostDocument"/>'s components.
+    /// </summary>
+    /// <remarks>
+    /// <b>The host document is required, and that is the whole point of this method existing (gh#680).</b> An
+    /// <see cref="OpenApiSecuritySchemeReference"/> built without one cannot resolve its target, so the serializer
+    /// writes <b>no key at all</b> and the requirement collapses to <c>{}</c> — which in OpenAPI means "no security
+    /// required". The document then declares a <c>Bearer</c> scheme that nothing references, and every client
+    /// generator reads the whole API as open: the exact inversion of what gh#604 set out to express, and a
+    /// documentation defect that survived review once already because <c>{}</c> looks like an empty-but-present
+    /// entry rather than a wrong one.
+    /// </remarks>
+    /// <param name="hostDocument">The document being generated — the reference resolves the scheme against it.</param>
+    /// <returns>A requirement that serializes as <c>{ "Bearer": [] }</c>.</returns>
+    internal static OpenApiSecurityRequirement CreateRequirement(OpenApiDocument hostDocument) =>
+        new()
+        {
+            [new OpenApiSecuritySchemeReference(SchemeName, hostDocument)] = new List<string>(),
+        };
 }
 
 /// <summary>
@@ -74,12 +95,19 @@ internal sealed class BearerSecurityRequirementTransformer : IOpenApiOperationTr
     {
         if (BearerSecurity.RequiresBearer(context.Description.ActionDescriptor.EndpointMetadata))
         {
+            // Fail loudly rather than emit a requirement we cannot name (gh#680). The generator always supplies the
+            // document, so this is unreachable in practice -- but the two silent alternatives are both a lie the
+            // document would then carry: passing null reproduces the original `{}` ("no security required"), and
+            // skipping the requirement documents a gated endpoint as open. A broken /openapi/v1.json is visible and
+            // costs nothing; a spec that quietly advertises the order and kill-switch endpoints as open is what this
+            // issue existed to stop. Nothing about enforcement rides on this path -- R-18 is enforced by the routes.
+            OpenApiDocument document = context.Document
+                ?? throw new InvalidOperationException(
+                    "The OpenAPI operation transformer was given no host document, so the Bearer security "
+                    + "requirement cannot reference the scheme it requires (gh#680).");
+
             operation.Security ??= new List<OpenApiSecurityRequirement>();
-            operation.Security.Add(new OpenApiSecurityRequirement
-            {
-                [new OpenApiSecuritySchemeReference(BearerSecurity.SchemeName, hostDocument: null)]
-                    = new List<string>(),
-            });
+            operation.Security.Add(BearerSecurity.CreateRequirement(document));
         }
 
         return Task.CompletedTask;
