@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trading Co-Pilot</title>
+    <!-- PWA (gh#650, R-19). The manifest <link> is injected at build by vite-plugin-pwa; the icons, theme colour
+         and Apple metas below are authored here. iOS/Safari has no manifest support, so Add-to-Home-Screen relies
+         on the apple-touch icon + the apple-mobile-web-app metas (best-effort, ADR-0010). -->
+    <meta name="theme-color" content="#101318" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/icons/favicon-16.png" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Co-Pilot" />
   </head>
   <body>
     <div id="root"></div>

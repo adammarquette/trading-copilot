@@ -14,8 +14,9 @@ Design-time UI artifacts for the trading co-pilot's **React SPA**. The **UI desi
   [ADR-0010](../adr/0010-progressive-web-app.md) follow-up "author the manifest + icon set" (R-19). **Provisionally
   leaning: E (Candle Reticle — the candle sequence framed by the HUD reticle, "a cockpit locked on a setup"; B + D)** — promoted to [`logo/app-icon.svg`](logo/app-icon.svg) (+
   [`app-icon-maskable.svg`](logo/app-icon-maskable.svg)) and wired into the wireframe app-bar; **open to change**.
-  The full PNG icon set (192 / 512 / maskable / apple-touch / favicon) + `manifest.webmanifest` wiring remain the
-  ADR-0010 follow-up.
+  The full PNG icon set (192 / 512 / maskable / apple-touch / favicon) + `manifest.webmanifest` wiring **landed**
+  (gh#650) — generated from these SVGs into the client's `public/icons/` by
+  [`logo/generate-pwa-icons.mjs`](logo/generate-pwa-icons.mjs).
 - [`wireframes.html`](wireframes.html) — mid-fidelity wireframes in the dark-Material, adaptive language,
   self-contained (open in any browser, no build). Each region is tagged with the requirement it satisfies. Covers:
   - the **main trading workspace** across **desktop / tablet / phone**;
