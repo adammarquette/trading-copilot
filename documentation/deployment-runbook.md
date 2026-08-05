@@ -52,6 +52,14 @@ stage runs `npm ci && npm run build` and the bundle is copied into the API's `ww
 on **one origin** — browse the running stack and the SPA is simply there, no second service and no CORS to configure.
 Nothing extra to deploy: a client change rides the same image promotion as any API change.
 
+> **That stage copies a *subset* of the repo, and everything `npm ci` needs must be in the manifests layer** —
+> `package.json`, `package-lock.json` **and `.npmrc`** (gh#691). `.npmrc` carries `legacy-peer-deps=true`, without
+> which the install ERESOLVEs on `openapi-typescript`'s stale peer range. Every other check runs from a full
+> checkout where that file is simply present, so the image is the only place a missing-input bug can exist — and
+> `publish image (GHCR)` does not run on PRs, so it is invisible until after merge. It cost six develop commits
+> with no publishable image. Adding a build-time input to the client means adding it to that `COPY`; gh#692 tracks
+> catching this class pre-merge.
+
 **While developing the client**, `npm run dev` in `src/MarqSpec.TradingCopilot.Client` is faster than rebuilding the
 image. Vite serves the SPA on its own port, so set **`VITE_BFF_ORIGIN`** to the running BFF (e.g.
 `http://localhost:8080`) and the dev server proxies to it — **today only `/health`, which is all the scaffold calls**;
