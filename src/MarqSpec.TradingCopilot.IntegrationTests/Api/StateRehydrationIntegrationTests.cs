@@ -72,10 +72,14 @@ public class StateRehydrationIntegrationTests : IClassFixture<RehydrationTestPos
     [Fact]
     public async Task Rehydration_ShouldNotResurrectExpiredSuggestionAsTakeable_WhenValidityWindowPassed()
     {
-        // By construction: a suggestion is inert data with NO endpoint that turns it into an order (a repo-wide
-        // search finds `Suggestion` only in DecisionStateRehydrator, which merely counts the Active ones). So a
-        // Stale / ExpiredVoid suggestion can never be silently transmitted on restart. This pins that reality and
-        // becomes the regression guard the day a suggestion→order path is added.
+        // A suggestion→order path now EXISTS (gh#548: POST /suggestions/{id}/take), so the old "inert data with no
+        // endpoint" reading of this guard is retired. What still holds — and is what this pins — is the property
+        // that matters on restart: no path SILENTLY transmits a suggestion. A take is an explicit operator action
+        // that merely ARMS an inert `Staged` ticket, itself requiring a separate, fully gated send, and rehydration
+        // invokes neither. So a Stale / ExpiredVoid suggestion still comes back as data and nothing else: the
+        // order count is unmoved and the lifecycle state is untouched. The take path's own refusals (a non-Active
+        // suggestion can never be armed at all) are covered independently by SuggestionTakeIntegrationTests
+        // (gh#614); this case guards the restart edge those cannot reach.
         (Guid accountId, string _) = await FreshAccountAsync();
         Guid operatorId = await OperatorIdAsync();
         Guid suggestionId = await SeedSuggestionAsync(accountId, operatorId, SuggestionState.ExpiredVoid);
