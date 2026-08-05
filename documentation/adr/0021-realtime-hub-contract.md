@@ -37,6 +37,14 @@ Three tensions make the contract worth recording:
   exactly-once (matching the event log's own discipline, ADR-0001). A cursor that has fallen off the 24h retention
   window, or a resume beyond a bounded size, is reported as a **gap** (the client re-fetches state over REST), never
   silently skipped.
+- **Restart catch-up is bracketed; a cold start is silent.** The fan-out's cursor is durable (a committed consumer
+  group, ADR-0001), so a restart resumes exactly where it left off — nothing is skipped. But the events that accrued
+  while it was down are **history, not live**: broadcasting them "live at once" would render a *historical*
+  kill-switch / auto-flatten as a **live safety banner**. So a restart **brackets** its backlog — a `realtimeCatchUp`
+  **Started**, the missed events replayed as history, then a `realtimeCatchUp` **Completed** and live from there — and
+  the presentation decides how to render a catch-up, never mistaking it for live. A **cold first start** (no committed
+  cursor) is not an outage — its "backlog" is the whole log — so it catches up to head **silently**, emitting no
+  bracket; a fast restart already at head emits none either.
 - **Lifecycle.** A hosted fan-out tails the log with a **fresh DI scope per pass** and a **clean stop-token exit**
   (the `StopPromotionHost` discipline, gh#153) so it never outlives the host or cascades an `ObjectDisposedException`.
 
