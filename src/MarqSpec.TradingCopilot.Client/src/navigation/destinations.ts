@@ -5,6 +5,9 @@ import MenuBookIcon from '@mui/icons-material/MenuBook';
 import NewspaperIcon from '@mui/icons-material/Newspaper';
 import RuleIcon from '@mui/icons-material/Rule';
 import SettingsIcon from '@mui/icons-material/Settings';
+import type { ComponentType } from 'react';
+
+import { SuggestionsSurface } from '../suggestions/SuggestionsSurface';
 
 /**
  * Primary destinations are the ones the navigation offers directly at every window size class.
@@ -13,6 +16,12 @@ import SettingsIcon from '@mui/icons-material/Settings';
  * and pushing a sixth in makes every target smaller than a thumb.
  */
 export type DestinationTier = 'primary' | 'secondary';
+
+/**
+ * What a destination renders. Every surface takes its own destination so it can carry the shell's
+ * `data-surface` contract without a second copy of the id.
+ */
+export type SurfaceComponent = ComponentType<{ readonly destination: Destination }>;
 
 export interface Destination {
   /** Stable key; also the test handle. Never derived from the label, which is copy and will change. */
@@ -26,6 +35,12 @@ export interface Destination {
   readonly requirement: string;
   readonly Icon: SvgIconComponent;
   readonly tier: DestinationTier;
+  /**
+   * The built surface, once its card lands. Left off, the route renders the placeholder — so the one table still
+   * guarantees a destination has a route and a route has a destination, and "built" versus "not built yet" is a
+   * single field rather than a second list to keep in step.
+   */
+  readonly Surface?: SurfaceComponent;
 }
 
 /**
@@ -42,6 +57,9 @@ export const destinations: readonly Destination[] = [
     requirement: 'R-10',
     Icon: CandlestickChartIcon,
     tier: 'primary',
+    // The suggestion half of the workspace is built (gh#654); the chart, ticket and positions are still their
+    // own cards, so this surface holds what exists and does not mock up what does not.
+    Surface: SuggestionsSurface,
   },
   {
     id: 'chat',
