@@ -7,9 +7,18 @@ import { RequireAuth } from '../auth/RequireAuth';
 import { SignInPage } from '../auth/SignInPage';
 import { EmptyState } from '../components/EmptyState';
 import { AppShell } from '../layout/AppShell';
-import { destinations } from '../navigation/destinations';
+import { type Destination, destinations } from '../navigation/destinations';
 import { RealtimeProvider } from '../realtime/RealtimeProvider';
 import { SurfacePlaceholder } from './SurfacePlaceholder';
+
+/**
+ * What a destination renders: its own surface once that card has landed, and the placeholder until then. Read
+ * from the one navigation table, so "built" is a field on the destination rather than a second list.
+ */
+function surfaceFor(destination: Destination) {
+  const Surface = destination.Surface ?? SurfacePlaceholder;
+  return <Surface destination={destination} />;
+}
 
 /**
  * An unmatched path. Still rendered inside the shell -- a 404 is not a reason to drop the operator's
@@ -65,16 +74,12 @@ export function AppRoutes() {
         >
           {destinations.map((destination) =>
             destination.path === '/' ? (
-              <Route
-                key={destination.id}
-                index
-                element={<SurfacePlaceholder destination={destination} />}
-              />
+              <Route key={destination.id} index element={surfaceFor(destination)} />
             ) : (
               <Route
                 key={destination.id}
                 path={destination.path}
-                element={<SurfacePlaceholder destination={destination} />}
+                element={surfaceFor(destination)}
               />
             ),
           )}
