@@ -59,6 +59,28 @@ describe('AccountSwitcher', () => {
     expect(screen.getByTestId('mode-chip-slot').dataset.filled).toBe('false');
   });
 
+  it('surfaces a failed roster load distinctly, with a retry — never the silent empty slot', () => {
+    const reload = vi.fn();
+    useOptionalAccountsMock.mockReturnValue({ status: 'error', message: 'BFF down', reload });
+
+    renderSwitcher();
+
+    const error = screen.getByTestId('account-error');
+    // Filled (solid), not the dashed empty slot the operator also sees while loading.
+    expect(screen.getByTestId('mode-chip-slot').dataset.filled).toBe('true');
+    fireEvent.click(error);
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it('shows a distinct empty state when there are no accounts', () => {
+    useOptionalAccountsMock.mockReturnValue({ status: 'empty', reload: vi.fn() });
+
+    renderSwitcher();
+
+    expect(screen.getByTestId('account-empty')).toBeTruthy();
+    expect(screen.queryByTestId('account-switcher')).toBeNull();
+  });
+
   it('shows the active account and its resolved mode', () => {
     const active = account('a1', TradingMode.Live);
     useOptionalAccountsMock.mockReturnValue(ready([active], active));
