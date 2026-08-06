@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -62,6 +63,7 @@ public class TriggerEvaluationService
     private readonly TimeSpan _suggestionValidity;
     private readonly IAiSpendGovernor _governor;
     private readonly AiSpendBudget? _budget;
+    private readonly ISuggestionRealtimeNotifier _suggestionNotifier;
     private readonly ILogger<TriggerEvaluationService> _logger;
 
     /// <summary>Creates the service.</summary>
@@ -98,6 +100,11 @@ public class TriggerEvaluationService
     /// LLM call. It gates <b>whether</b> a call is made (cost), never what it proposes (enforcement lives below the model).
     /// </param>
     /// <param name="governorOptions">The governor's budget config; absent (null budget) leaves the governor inert.</param>
+    /// <param name="suggestionNotifier">
+    /// The realtime push seam (gh#684): a read-side, best-effort notifier called AFTER a suggestion write commits, so
+    /// an issued / superseded row reaches the owning operator's live surfaces without a poll. Presentation-only — its
+    /// failure never affects the write (enforcement lives below the model; this is below the write).
+    /// </param>
     /// <param name="logger">The logger.</param>
     public TriggerEvaluationService(
         TradingCopilotDbContext discovery,
@@ -112,6 +119,7 @@ public class TriggerEvaluationService
         IOptions<SuggestionOptions> suggestionOptions,
         IAiSpendGovernor governor,
         IOptions<GovernorOptions> governorOptions,
+        ISuggestionRealtimeNotifier suggestionNotifier,
         ILogger<TriggerEvaluationService> logger)
     {
         ArgumentNullException.ThrowIfNull(governorOptions);
@@ -129,6 +137,7 @@ public class TriggerEvaluationService
         _suggestionValidity = suggestionOptions.Value.Validity;
         _governor = governor;
         _budget = governorOptions.Value.ToBudget(); // null == inert (no cap configured); computed once per pass
+        _suggestionNotifier = suggestionNotifier;
         _logger = logger;
     }
 
@@ -302,6 +311,10 @@ public class TriggerEvaluationService
         // this -- it sends BEFORE the commit and re-arms on non-delivery. The two orderings are kept apart on purpose.
         List<Notification> advisories = [];
 
+        // Alongside the advisories (gh#684): the per-owner realtime pushes for suggestions issued / superseded THIS
+        // pass, flushed AFTER the same commit so a hub fault never affects the write, and never pushing an uncommitted row.
+        List<RealtimeSuggestion> suggestionPushes = [];
+
         foreach (TriggerRecord trigger in triggers)
         {
             IndicatorThresholdCondition condition = trigger.ToCondition();
@@ -366,7 +379,7 @@ public class TriggerEvaluationService
                 // A fire is a fire regardless of the outcome -- suppress advances the arm to Fired too, which is what
                 // debounces the review to ONE per arming edge (a persistently-true condition must not re-review every
                 // pass). COMMIT-THEN-NOTIFY: the advisory flushes after SaveChanges below.
-                await FireAgentReviewAsync(database, trigger, owner, value!.Value, now, advisories, governorPass, cancellationToken);
+                await FireAgentReviewAsync(database, trigger, owner, value!.Value, now, advisories, suggestionPushes, governorPass, cancellationToken);
                 fires++;
             }
             else if (decision.ReArmed)
@@ -381,6 +394,15 @@ public class TriggerEvaluationService
         if (changed)
         {
             await database.SaveChangesAsync(cancellationToken);
+        }
+
+        // REALTIME PUSH (gh#684): the issued / superseded rows are now durable, so push each lifecycle change to the
+        // OWNING operator's connections (R-20, Clients.User -- never broadcast). Best-effort and AFTER the commit,
+        // exactly like the advisory flush below: a hub fault must never fail or roll back the write. A SaveChanges that
+        // THREW skips this entirely (the per-owner guard discards the pass), so only committed rows are ever pushed.
+        foreach (RealtimeSuggestion push in suggestionPushes)
+        {
+            await NotifySafelyAsync(owner, push, cancellationToken);
         }
 
         // COMMIT-THEN-NOTIFY (agent-review only): the Suggestion + firing + arm advance are now durable, so flush the
@@ -449,6 +471,7 @@ public class TriggerEvaluationService
         decimal observed,
         DateTimeOffset now,
         List<Notification> advisories,
+        List<RealtimeSuggestion> suggestionPushes,
         GovernorPass? governorPass,
         CancellationToken cancellationToken)
     {
@@ -570,7 +593,7 @@ public class TriggerEvaluationService
         {
             case ReviewOutcome.Suggest suggest:
                 await StageSuggestionAsync(
-                    database, trigger, owner, suggest, now, dedupKey, firingId, advisories, cancellationToken);
+                    database, trigger, owner, suggest, now, dedupKey, firingId, advisories, suggestionPushes, cancellationToken);
                 break;
 
             case ReviewOutcome.Suppress { Reason: SuppressReason.NoReviewerConfigured }:
@@ -670,6 +693,7 @@ public class TriggerEvaluationService
         string dedupKey,
         Guid firingId,
         List<Notification> advisories,
+        List<RealtimeSuggestion> suggestionPushes,
         CancellationToken cancellationToken)
     {
         // The validity window (gh#544): the operator's configured span, clamped so the suggestion cannot outlive this
@@ -750,13 +774,18 @@ public class TriggerEvaluationService
             incumbent.State = SuggestionState.ExpiredVoid;
             version = incumbent.Version + 1;
             supersedesId = incumbent.Id;
+
+            // gh#684: the incumbent is now terminal -- queue its transition so the owner's card surface clears it. The
+            // push fires only after the commit below; a rolled-back pass never reaches the flush, so this is never seen.
+            suggestionPushes.Add(new RealtimeSuggestion(incumbent.Id, SuggestionState.ExpiredVoid.ToString(), now));
         }
 
         // Size from the TRIGGER (the operator's), mode LIVE from the account -- never the model's. The `!` are sound:
         // an agent-review trigger carries a non-null account + size (the endpoint validation + the DB check).
+        Guid suggestionId = Guid.NewGuid(); // hoisted (gh#684) so the realtime push can cite the id that was staged
         database.Suggestions.Add(new Suggestion
         {
-            Id = Guid.NewGuid(),
+            Id = suggestionId,
             UserId = owner,
             AccountId = trigger.AccountId!.Value,
             Instrument = trigger.Symbol,
@@ -793,6 +822,9 @@ public class TriggerEvaluationService
             SupersedesId = supersedesId,
         });
 
+        // gh#684: the new row is staged -- queue its arrival so the owner's card surface adds it after the commit.
+        suggestionPushes.Add(new RealtimeSuggestion(suggestionId, SuggestionState.Active.ToString(), now));
+
         // Queue the advisory for the post-commit flush; the suggestion is the durable artifact behind it. The expiry
         // rides along in market wall-clock (gh#544), so the operator learns the window on the channel that already
         // reaches them rather than only in the app.
@@ -803,6 +835,30 @@ public class TriggerEvaluationService
             + $"{suggest.EntryPrice} (stop {suggest.StopPrice}, target {suggest.TargetPrice}). "
             + FormattableString.Invariant($"Valid until {MarketClock.ToMarketTime(expiresAt):HH:mm} CT."),
             dedupKey));
+    }
+
+    /// <summary>
+    /// Pushes one suggestion lifecycle change to the owning operator's realtime connections, best-effort (gh#684).
+    /// Mirrors the advisory flush and the gh#683 account notifier: a hub fault is logged and swallowed so it can
+    /// never fail or roll back the write that already committed. Only the caller's own cancellation escapes.
+    /// </summary>
+    private async Task NotifySafelyAsync(Guid owner, RealtimeSuggestion push, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _suggestionNotifier.SuggestionChangedAsync(owner, push, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error,
+                "Realtime suggestion push for {SuggestionId} ({State}) failed for owner {Owner}; the write is committed regardless.",
+                push.SuggestionId, push.State, owner);
+        }
     }
 
     private static void JournalFiring(
