@@ -8,6 +8,7 @@ import { SignInPage } from '../auth/SignInPage';
 import { EmptyState } from '../components/EmptyState';
 import { AppShell } from '../layout/AppShell';
 import { destinations } from '../navigation/destinations';
+import { RealtimeProvider } from '../realtime/RealtimeProvider';
 import { SurfacePlaceholder } from './SurfacePlaceholder';
 
 /**
@@ -55,9 +56,11 @@ export function AppRoutes() {
       <Route element={<RequireAuth />}>
         <Route
           element={
-            <AccountProvider>
-              <AppShell />
-            </AccountProvider>
+            <RealtimeProvider>
+              <AccountProvider>
+                <AppShell />
+              </AccountProvider>
+            </RealtimeProvider>
           }
         >
           {destinations.map((destination) =>

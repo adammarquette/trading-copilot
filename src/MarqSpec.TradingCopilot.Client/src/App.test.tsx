@@ -6,6 +6,17 @@ import { App } from './App';
 import { destinations } from './navigation/destinations';
 import { ALL_WINDOW_SIZE_CLASSES, setWindowSizeClass } from './testing/viewport';
 
+// The signed-in shell mounts a RealtimeProvider, which would otherwise open a real SignalR socket against a URL
+// jsdom cannot resolve. Stub the transport at its seam — the same posture as the `/health` fetch stub below — so
+// these tests stay about the shell, not the wire. The connection's own behaviour is covered in `realtime/`.
+vi.mock('./realtime/connection', () => ({
+  createRealtimeConnection: () => ({
+    start: () => Promise.resolve(),
+    stop: () => Promise.resolve(),
+    state: 'down',
+  }),
+}));
+
 /**
  * `App` brings its own theme provider and, since gh#652, its own session provider; only the router is
  * missing, because production supplies a `BrowserRouter` in `main.tsx` and a test wants a `MemoryRouter`.
