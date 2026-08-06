@@ -77,7 +77,7 @@ public sealed record SwingPivot(
 /// level, so this is the within-timeframe confluence count <c>PriceLevel</c> persists.
 /// </param>
 /// <param name="Significance">
-/// The originating pivot's prominence <b>in ATR multiples</b> ? the ranking score <c>PriceLevel</c> persists. Higher
+/// The originating pivot's prominence <b>in ATR multiples</b> — the ranking score <c>PriceLevel</c> persists. Higher
 /// is stronger. Normalised so the score compares across instruments and volatility regimes: twenty points of
 /// prominence is a major level on a quiet session and noise on a wild one, so a raw price distance would rank every
 /// high-priced instrument above every other and rank nothing. Across a merge this keeps the <b>strongest</b> of the
