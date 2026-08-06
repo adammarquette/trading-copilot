@@ -61,6 +61,15 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.MarketData;
 /// </item>
 /// </list>
 /// <para>
+/// <b>Case 3 is about the live host, not this suite's producer call</b> (PR #711 review). The fixture configures
+/// <c>Ingestion:Symbols</c> so <c>MarketDataIngestionHost</c> actually starts — without it the host returns at its
+/// first statement and the thing the criterion names would never have run — and the case witnesses <b>fresh</b>
+/// subscription cycles from that host's own supervisor before it goes on to prove the log and the consumers still
+/// work. Every liveness count in this file is taken as <b>growth from a snapshot</b> rather than an absolute,
+/// because the class fixture is shared: a cumulative counter already satisfied by an earlier case cannot tell a
+/// looping host from a stalled one.
+/// </para>
+/// <para>
 /// <b>The venue seam is the sole double</b> (QA contract §1) and stays adversarial: it feeds the open position and
 /// records what was transmitted, and never decides whether to promote or fire. The context source is likewise a
 /// pure feed — it streams the prints it is handed and reports nothing about the event type, the id, or the append,
@@ -177,10 +186,31 @@ public class ContextIngestionLiveHostIntegrationTests : IClassFixture<ContextLiv
             async () => await ConditionalStatusAsync(conditionalId) == ConditionalStatus.Fired,
             $"the conditional-order watcher to fire the pending conditional off the market.quote at {quoteSequence}");
 
-        VenueFactory.TotalPlacedOrderCount.Should().BeGreaterThan(
-            placementsBefore,
-            "the promoted native stop and the fired entry both reach the venue — which is exactly what the identical "
-            + "price did NOT do while it was a context print");
+        // EXACTLY two, not "more than none" (PR #711 review). This control's job is to prove that BOTH execution
+        // paths transmit on the same price a context print could not move them with; `BeGreaterThan` was satisfied
+        // by either one alone, so a regression that moved a row to Native or Fired WITHOUT reaching the venue —
+        // the "we recorded a protective stop that does not exist at the exchange" failure ADR-0007 is built to
+        // prevent — would have kept this green. There is one transmit per path and no more: the promotion sends a
+        // single native stop (StopPromotionService.cs:179) and the fire sends a single bracketed entry, its safety
+        // stop attached to that same request rather than sent separately (OrderExecutionService.cs:185, ADR-0007).
+        VenueFactory.TotalPlacedOrderCount.Should().Be(
+            placementsBefore + 2,
+            "exactly two orders reach the venue on the strength of the quote — one promoted native stop and one "
+            + "fired entry — which is exactly what the identical price did NOT do while it was a context print");
+
+        // …and they are the two we named, not two of anything. A count alone cannot tell "the stop promoted and
+        // the conditional fired" from "one path transmitted twice", which is the shape a retry bug takes.
+        // `TotalPlacedOrderCount` is the length of the very list `AllPlacedOrderRequests` flattens, so skipping the
+        // snapshot count leaves exactly this control's own transmits.
+        IReadOnlyList<OrderRequest> transmitted = [.. VenueFactory.AllPlacedOrderRequests.Skip(placementsBefore)];
+
+        transmitted.Should().ContainSingle(
+            request => request.Type == OrderType.Stop && request.StopPrice.HasValue
+                && request.StopPrice.Value.Value == 5_295m,
+            "the promoted native stop rests at the plan's actual stop — the leg the hidden staging was holding back");
+        transmitted.Should().ContainSingle(
+            request => request.Type == OrderType.Market && request.ProtectiveStop.HasValue,
+            "the fired conditional's entry is transmitted with its always-native safety stop attached (ADR-0007)");
     }
 
     // =============================================================================================================
@@ -196,9 +226,26 @@ public class ContextIngestionLiveHostIntegrationTests : IClassFixture<ContextLiv
         // ContextIngestionHost.ExecuteAsync would take the WHOLE application down, the quote feed, the auto-flatten
         // watchdog and the kill switch with it, because an optional colour feed was misconfigured.
 
+        // Snapshot FIRST (PR #711 review). The captured log is cumulative and the case above boots the same class
+        // fixture, so an absolute count of quote-subscription cycles could be satisfied entirely by history — a
+        // quote host that had since stalled would be indistinguishable from one still looping. Only growth after
+        // this line witnesses a live host, so every liveness assertion below is stated as growth.
+        int quoteCyclesAtStart = QuoteSubscriptionCycles();
+
         // Building the client is what boots the host and its background services — nothing below can be observed
         // until they have started.
         using HttpClient client = _factory.CreateClient();
+
+        // The no-source deployment must be CONSTRUCTED, not assumed (PR #711 review). Omitting Finnhub:ApiKey does
+        // not clear an ambient Finnhub__ApiKey from a developer's shell or a CI runner; the fixture overrides it to
+        // empty, and this is the assertion that the override held. With a source registered this case would be
+        // silently exercising the outage scenario next door instead of the cannot-be-constructed one.
+        await using (AsyncServiceScope probe = _factory.Services.CreateAsyncScope())
+        {
+            probe.ServiceProvider.GetService<IContextMarketDataSource>().Should().BeNull(
+                "case 3's deployment is the one where the context source cannot be constructed at all — Program.cs "
+                + "registers IContextMarketDataSource only when a Finnhub key is configured");
+        }
 
         // First, prove the context path really is broken. Without this the rest asserts nothing: a platform that
         // ingests tradeable data while context is perfectly healthy is not evidence of independence.
@@ -212,7 +259,18 @@ public class ContextIngestionLiveHostIntegrationTests : IClassFixture<ContextLiv
         health.StatusCode.Should().Be(
             HttpStatusCode.OK, "a context source that cannot be constructed must never stop the platform");
 
-        // Tradeable quotes still land: the SHIPPED producer, over the venue seam, into the real event log.
+        // THE LIVE TRADEABLE HOST IS STILL LOOPING — the criterion itself, and it is about MarketDataIngestionHost,
+        // not about this suite's own producer call below (PR #711 review). The fixture configures Ingestion:Symbols
+        // precisely so that host starts at all; its supervisor re-subscribes after every stream end, so two cycles
+        // logged AFTER the snapshot above mean at least one complete end -> back off -> re-subscribe -> end round
+        // trip ran while the context feed had no source. A host that had been taken down with the context feed —
+        // or that never started — cannot produce them.
+        await WaitUntilAsync(
+            () => Task.FromResult(QuoteSubscriptionCycles() >= quoteCyclesAtStart + 2),
+            "the live ProjectX quote host to complete two FRESH subscription cycles while context has no source");
+
+        // Tradeable quotes still land: the SHIPPED producer, over the venue seam, into the real event log. This is
+        // the log-and-consumers half of the criterion — the host's own liveness was established above.
         int appended = await IngestQuotesAsync(UnrelatedContractKey, bid: 4_999.75m, ask: 5_000m);
         appended.Should().Be(1, "the tradeable producer is unaffected by the context feed's absence");
 
@@ -234,6 +292,14 @@ public class ContextIngestionLiveHostIntegrationTests : IClassFixture<ContextLiv
 
     private AdversarialTestProjectXVenueFactory VenueFactory =>
         _factory.Services.GetRequiredService<AdversarialTestProjectXVenueFactory>();
+
+    /// <summary>
+    /// How many subscription cycles the <b>live</b> <c>MarketDataIngestionHost</c>'s supervisor has completed —
+    /// <c>QuoteSubscriptionSupervisor</c> logs exactly one of these per stream end, immediately before backing off
+    /// and re-subscribing. Cumulative across the class fixture, so callers must compare growth, never an absolute.
+    /// </summary>
+    private int QuoteSubscriptionCycles() => _factory.Logs.Entries.Count(entry =>
+        entry.Message.Contains("Quote stream for", StringComparison.Ordinal));
 
     /// <summary>Runs the shipped context producer over a feed-only source, as the context host does per subscription.</summary>
     private async Task IngestContextPrintsAsync(params VenueContractId[] contracts)
