@@ -40,12 +40,12 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 /// <c>OrphanGuardEventOrderingIntegrationTests</c> can assert what was actually displaced, the same fidelity check
 /// <c>InstrumentationSafetyPostgresFactory</c> established.
 /// </para>
-/// </remarks>
-/// <remarks>
+/// <para>
 /// Subclasses <see cref="StubbedVenuePostgresFactory"/> directly (not <c>OrphanTestPostgresFactory</c>, which is
 /// <see langword="sealed"/>) and re-derives its host-stripping: the only orphan / re-arm pass must be this suite's
 /// own explicit call, or the always-on <c>VenueConnectionMonitorHost</c> would transition the seeded
 /// <c>StopPlan</c> out from under the very instant this factory means to observe.
+/// </para>
 /// </remarks>
 public sealed class OrphanGuardOrderingPostgresFactory : StubbedVenuePostgresFactory
 {
