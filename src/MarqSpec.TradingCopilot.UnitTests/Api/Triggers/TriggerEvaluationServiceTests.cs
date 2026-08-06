@@ -1,5 +1,6 @@
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Data;
@@ -41,6 +42,7 @@ public class TriggerEvaluationServiceTests
     private readonly IAiUsageLedger _ledger = A.Fake<IAiUsageLedger>();
     private readonly ILlmMetrics _llmMetrics = A.Fake<ILlmMetrics>();
     private readonly ISessionDeadlineSource _deadlines = A.Fake<ISessionDeadlineSource>();
+    private readonly ISuggestionRealtimeNotifier _suggestionNotifier = A.Fake<ISuggestionRealtimeNotifier>();
     private static DateTimeOffset Now { get; } = DateTimeOffset.UnixEpoch.AddYears(56);
 
     // The cost a real LLM call surfaces (gh#431). Any non-null Cost makes the scan record a usage row; the SPECIFIC
@@ -69,7 +71,7 @@ public class TriggerEvaluationServiceTests
         Context(), Options, _indicators, _notifications, _reviewer, enrichment ?? _enrichment, ledger ?? _ledger,
         _llmMetrics, _deadlines, Microsoft.Extensions.Options.Options.Create(new SuggestionOptions()), new AiSpendGovernor(),
         Microsoft.Extensions.Options.Options.Create(governor ?? new GovernorOptions()),
-        NullLogger<TriggerEvaluationService>.Instance);
+        _suggestionNotifier, NullLogger<TriggerEvaluationService>.Instance);
 
     // The reviewer returns an AgentReview: the outcome the route acts on plus the LLM-call cost(s) the scan ledgers,
     // one row per billed call (gh#449). Passing no costs defaults to a single _sampleCost, so every EXISTING caller
@@ -555,6 +557,93 @@ public class TriggerEvaluationServiceTests
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
     }
 
+    // --- gh#684: the realtime suggestion push (issued / superseded), per-owner and best-effort AFTER the commit ---
+
+    // (h1) An issued suggestion is pushed to the OWNING operator (R-20) once it is durable, carrying its id + Active.
+    [Fact]
+    public async Task ScanAsync_ShouldPushTheIssuedSuggestionToTheOwner_WhenAgentReviewStagesOne()
+    {
+        Guid accountId = await SeedAccountAsync(mode: TradingMode.Practice);
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        Guid issuedId = (await Context().Suggestions.SingleAsync()).Id;
+        A.CallTo(() => _suggestionNotifier.SuggestionChangedAsync(
+                _operator,
+                A<RealtimeSuggestion>.That.Matches(s => s.SuggestionId == issuedId && s.State == "Active"),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    // (h2) A supersede pushes BOTH transitions: the incumbent going ExpiredVoid and the new row arriving Active, so a
+    // card surface clears the old and adds the new without a poll. (v1 Active in pass 1; v1 ExpiredVoid + v2 Active in pass 2.)
+    [Fact]
+    public async Task ScanAsync_ShouldPushBothTheVoidedIncumbentAndTheSupersedingRow_WhenSuperseding()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "v1", 72));
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await FireAgainAsync(new ReviewOutcome.Suggest(OrderSide.Buy, 101m, 100m, 104m, "v2", 75));
+
+        await using TradingCopilotDbContext reload = Context();
+        List<Suggestion> chain = await reload.Suggestions.OrderBy(s => s.Version).ToListAsync();
+        Guid v1 = chain[0].Id;
+        Guid v2 = chain[1].Id;
+
+        A.CallTo(() => _suggestionNotifier.SuggestionChangedAsync(
+                _operator, A<RealtimeSuggestion>.That.Matches(s => s.SuggestionId == v1 && s.State == "Active"), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => _suggestionNotifier.SuggestionChangedAsync(
+                _operator, A<RealtimeSuggestion>.That.Matches(s => s.SuggestionId == v1 && s.State == "ExpiredVoid"), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => _suggestionNotifier.SuggestionChangedAsync(
+                _operator, A<RealtimeSuggestion>.That.Matches(s => s.SuggestionId == v2 && s.State == "Active"), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    // (h3) No push when no suggestion is staged -- an incoherent proposal is rejected before persist, nothing to send.
+    [Fact]
+    public async Task ScanAsync_ShouldNotPushAnySuggestion_WhenNoneIsStaged()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 105m, 110m, "broken", 72)); // stop above entry
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _suggestionNotifier.SuggestionChangedAsync(A<Guid>._, A<RealtimeSuggestion>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    // (h4) The push is best-effort: a throwing notifier must never fail the scan or roll back the durable suggestion.
+    // fires == 1 is the discriminator -- an UNguarded throw would unwind to the per-owner catch, losing the count.
+    [Fact]
+    public async Task ScanAsync_ShouldKeepTheSuggestionAndNotThrow_WhenTheRealtimePushThrows()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 2, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
+        A.CallTo(() => _suggestionNotifier.SuggestionChangedAsync(A<Guid>._, A<RealtimeSuggestion>._, A<CancellationToken>._))
+            .ThrowsAsync(new InvalidOperationException("hub down"));
+
+        int fires = await Service().ScanAsync(Now, CancellationToken.None); // must NOT propagate
+
+        fires.Should().Be(1);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.CountAsync()).Should().Be(1);            // durable regardless of the best-effort push
+        TriggerRecord trigger = await reload.Triggers.SingleAsync(t => t.Id == id);
+        trigger.ArmState.Should().Be(TriggerArmState.Fired);
+        trigger.LastFiredAt.Should().Be(Now);
+    }
+
     // (i) A THROWING reviewer must still debounce: the seam admits a provider-backed reviewer that throws on a
     // transient fault, and a throw must be treated fail-closed -- no suggestion, the arm still advances to Fired (so
     // it is NOT re-reviewed every pass), the firing is journaled, and the operator is advised. A throw must never
@@ -951,7 +1040,7 @@ public class TriggerEvaluationServiceTests
         TriggerEvaluationService service = new ThrowingReadService(
             Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, _llmMetrics, _deadlines, Microsoft.Extensions.Options.Options.Create(new SuggestionOptions()), new AiSpendGovernor(),
             Microsoft.Extensions.Options.Options.Create(new GovernorOptions { DailyBudgetUsd = 10m }),
-            NullLogger<TriggerEvaluationService>.Instance);
+            _suggestionNotifier, NullLogger<TriggerEvaluationService>.Instance);
 
         Func<Task> act = () => service.ScanAsync(Now, CancellationToken.None);
 
@@ -1585,8 +1674,9 @@ public class TriggerEvaluationServiceTests
             IOptions<SuggestionOptions> suggestionOptions,
             IAiSpendGovernor governor,
             IOptions<GovernorOptions> governorOptions,
+            ISuggestionRealtimeNotifier suggestionNotifier,
             ILogger<TriggerEvaluationService> logger)
-            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, logger)
+            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, logger)
         {
         }
 

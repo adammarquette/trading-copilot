@@ -72,7 +72,7 @@ poll-until-refresh until then.
   order-state change to the owning operator (`Clients.User`, via a custom `IUserIdProvider` resolving the `sub`
   claim) **after** the journal write commits, best-effort so a hub failure can never affect the write.
   `realtimeOrderState` is the **complete** order-status stream (fill-driven PartiallyFilled / Filled *and* terminal
-  Cancelled / Rejected); `realtimeFill` carries each execution. The **suggestion** half (gh#684) remains.
+  Cancelled / Rejected); `realtimeFill` carries each execution. The **suggestion** half (gh#684) lands incrementally — see below.
 - **Landed** (gh#649): the **client** this contract was written for (SPA `src/realtime/`). A single connection owns
   reconnect and resume — it rebuilds with `?after=<lastSequence>` on every (re)connect (manual, *not*
   `withAutomaticReconnect`, whose build-time URL would re-send the original cursor and miss the outage backlog) and
@@ -80,3 +80,13 @@ poll-until-refresh until then.
   `realtimeCatchUp` bracket tags replayed events as history, not a live safety banner. Owner-scoped order/fill pushes
   carry no sequence and are live-only, so a *reconnect* re-fetches that state (there is nothing to replay). The
   connection state is surfaced to the operator (declared-unknown over stale, R-19 / ADR-0013).
+- **Landed** (gh#684, partial): the **issued / superseded** half of the suggestion seam. The trigger scan
+  (`TriggerEvaluationService`) queues a compact `realtimeSuggestion` (the id, the new `SuggestionState`, and when) as
+  it stages a new `Active` row and, on a supersede, as it voids the incumbent to `ExpiredVoid`; both flush **after**
+  the pass's single `SaveChanges` commits, per-owner (`Clients.User`) and best-effort, so a hub fault can never fail
+  or roll back the write. The **drift → Stale** (gh#546) and **expiry → ExpiredVoid** (gh#545) transitions are
+  **deferred**: each is a database-evaluated, set-based `ExecuteUpdate` across *all* owners that returns only a
+  *count*, so pushing them per-owner needs a contract change (read-then-update, or `RETURNING`, to recover the
+  affected `(id, owner)` rows) — carded as gh#718. Until it lands, those two transitions reach a card only
+  on its next REST read. The payload is the compact signal by design (id + state), never the full projection: the
+  card surface (gh#654) upserts by id and reconciles against the REST read model, which stays the source of truth.
