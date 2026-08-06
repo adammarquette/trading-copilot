@@ -226,6 +226,36 @@ public class KeyLevelsTests
             .Should().Throw<ArgumentOutOfRangeException>();
     }
 
+    [Fact]
+    public void FindPivots_ShouldRefuse_WhenTheSourceIsTheUnknownZero()
+    {
+        // The one guard here worth more than boilerplate. `PivotSource.Unknown` is the default(PivotSource), so a
+        // caller who forgets to set Source gets it for free -- and if this refusal were ever weakened into a
+        // fall-through-to-default, every such caller would silently read a DIFFERENT price series than they asked
+        // for and get a plausible-looking set of levels off it. That is the "an enum whose zero value is the
+        // permissive one is a defect" pattern the repo instructions name; the code fails closed today, and this is
+        // what keeps it that way.
+        KeyLevelOptions unset = Tiny() with { Source = PivotSource.Unknown };
+
+        // Pinned by PARAMETER NAME, and that is the whole point of the assertion. Deleting the early refusal does
+        // not make this call succeed -- the source-to-series switch has an exhaustive default that throws too, so a
+        // bare Throw<ArgumentOutOfRangeException>() stays green with the guard gone and proves nothing. The early
+        // guard names `options`; the switch default names `source`. Only the parameter name tells them apart, and
+        // only the early one refuses BEFORE any bar is touched.
+        FluentActions.Invoking(() => KeyLevels.FindPivots(SpikeAtIndexTwo(), unset))
+            .Should().Throw<ArgumentOutOfRangeException>().WithParameterName("options");
+    }
+
+    [Fact]
+    public void FindPivots_ShouldRefuse_WhenTheSeriesIsNull() =>
+        FluentActions.Invoking(() => KeyLevels.FindPivots(null!, Tiny()))
+            .Should().Throw<ArgumentNullException>();
+
+    [Fact]
+    public void FindPivots_ShouldRefuse_WhenTheOptionsAreNull() =>
+        FluentActions.Invoking(() => KeyLevels.FindPivots(SpikeAtIndexTwo(), null!))
+            .Should().Throw<ArgumentNullException>();
+
     // ---- the zone around a pivot ----
 
     /// <summary>Half the ATR, capped at 5% of price, floored at 0.25 — the three arms, all hand-checkable.</summary>
@@ -606,4 +636,74 @@ public class KeyLevelsTests
     public void ZoneFor_ShouldRefuse_WhenTheAtrIsNegative() =>
         FluentActions.Invoking(() => KeyLevels.ZoneFor(HighAt(100m), atr: -1m, Zoning()))
             .Should().Throw<ArgumentOutOfRangeException>();
+
+    // The three width arms are business-rule invariants, not boilerplate: each one, left unguarded, produces a
+    // zone that is silently WRONG rather than absent. A non-positive AtrMultiple or MinHalfWidth collapses the
+    // band to a line or inverts it (Bottom above Top), so nothing can ever overlap it and every level reads as
+    // untouched; a MaxHalfWidthFraction above 1 lets the cap exceed price itself, minting a zone that swallows the
+    // whole chart and swallows every close with it. Both failures look like "no levels formed", which is exactly
+    // what a quiet session looks like -- so nothing downstream would flag them.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-0.5)]
+    public void ZoneFor_ShouldRefuse_WhenTheAtrMultipleIsNotPositive(decimal multiple) =>
+        FluentActions.Invoking(() => KeyLevels.ZoneFor(HighAt(100m), atr: 4m, Zoning() with { AtrMultiple = multiple }))
+            .Should().Throw<ArgumentOutOfRangeException>();
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-0.25)]
+    public void ZoneFor_ShouldRefuse_WhenTheMinimumHalfWidthIsNotPositive(decimal floor) =>
+        FluentActions.Invoking(() => KeyLevels.ZoneFor(HighAt(100m), atr: 4m, Zoning() with { MinHalfWidth = floor }))
+            .Should().Throw<ArgumentOutOfRangeException>();
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-0.05)]
+    [InlineData(1.5)]
+    public void ZoneFor_ShouldRefuse_WhenTheMaximumHalfWidthFractionIsOutOfRange(decimal fraction) =>
+        FluentActions.Invoking(() => KeyLevels.ZoneFor(
+                HighAt(100m), atr: 4m, Zoning() with { MaxHalfWidthFraction = fraction }))
+            .Should().Throw<ArgumentOutOfRangeException>();
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-100)]
+    public void ZoneFor_ShouldRefuse_WhenThePivotPriceIsNotPositive(decimal price) =>
+        FluentActions.Invoking(() => KeyLevels.ZoneFor(HighAt(price), atr: 4m, Zoning()))
+            .Should().Throw<ArgumentOutOfRangeException>();
+
+    [Fact]
+    public void ZoneFor_ShouldRefuse_WhenThePivotIsNull() =>
+        FluentActions.Invoking(() => KeyLevels.ZoneFor(null!, atr: 4m, Zoning()))
+            .Should().Throw<ArgumentNullException>();
+
+    [Fact]
+    public void ZoneFor_ShouldRefuse_WhenTheOptionsAreNull() =>
+        FluentActions.Invoking(() => KeyLevels.ZoneFor(HighAt(100m), atr: 4m, null!))
+            .Should().Throw<ArgumentNullException>();
+
+    // ---- the remaining null guards ----
+
+    // All three pin the PARAMETER NAME, for the same reason the PivotSource.Unknown case does: a bare
+    // Throw<ArgumentNullException>() cannot fail here. Each method hands its collection straight to LINQ
+    // (OrderBy / Select / GroupBy), and LINQ null-checks its own `source` argument -- so the call throws the right
+    // EXCEPTION TYPE whether or not this file guards anything, and the test would stay green over a deleted guard.
+    // The explicit guard names `zones`; LINQ names `source`. Asserting the name is what makes these tests able to
+    // fail, and what pins the guard's real value: refusing at the boundary, named for the caller's own argument,
+    // rather than surfacing from inside a chain the caller never wrote.
+    [Fact]
+    public void MergeOverlapping_ShouldRefuse_WhenTheZonesAreNull() =>
+        FluentActions.Invoking(() => KeyLevels.MergeOverlapping(null!))
+            .Should().Throw<ArgumentNullException>().WithParameterName("zones");
+
+    [Fact]
+    public void ApplyClose_ShouldRefuse_WhenTheZonesAreNull() =>
+        FluentActions.Invoking(() => KeyLevels.ApplyClose(null!, close: 100m))
+            .Should().Throw<ArgumentNullException>().WithParameterName("zones");
+
+    [Fact]
+    public void EvictAllButMostRecent_ShouldRefuse_WhenTheZonesAreNull() =>
+        FluentActions.Invoking(() => KeyLevels.EvictAllButMostRecent(null!, maxPerKind: 1))
+            .Should().Throw<ArgumentNullException>().WithParameterName("zones");
 }
