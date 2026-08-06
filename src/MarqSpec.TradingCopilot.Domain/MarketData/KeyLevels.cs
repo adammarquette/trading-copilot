@@ -121,10 +121,19 @@ public sealed record KeyLevelOptions
 /// ATR-normalised band each one projects.
 /// </summary>
 /// <remarks>
+/// <para>
 /// <b>A pure function of what is handed in</b> — no clock, no store, no DI — so the same bars always produce the
 /// same zones and a rebuild restores history rather than rewriting it (ADR-0001). The host that schedules this and
 /// persists <c>PriceLevel</c> rows is gh#597; ATR arrives as a <i>value</i> (gh#311 computes it), never as a
 /// dependency read from here.
+/// </para>
+/// <para>
+/// <b>Attribution.</b> The behaviour and default parameters follow the <i>Bjorgum Key Levels</i> TradingView
+/// indicator (© Bjorgum, MPL-2.0), the reference method recorded on gh#595. <b>None of that script is vendored or
+/// translated here.</b> The technique itself — swing-pivot support/resistance with ATR-normalised zones, role
+/// reversal and overlap merging — is standard technical analysis, reimplemented independently in C# over this
+/// system's own bar store. The reference is credited, not incorporated.
+/// </para>
 /// </remarks>
 public static class KeyLevels
 {
