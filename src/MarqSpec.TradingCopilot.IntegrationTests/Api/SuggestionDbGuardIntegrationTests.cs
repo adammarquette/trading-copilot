@@ -42,8 +42,8 @@ public sealed class SuggestionDbGuardIntegrationTests
         // Seeded onto an UNDECLARED account so the mode-match trigger is satisfied (undeclared == undeclared) and the
         // failure can only be the check constraint under test — an undeclared account is tradeable nowhere, so a
         // suggestion must never carry that mode regardless of which account it names.
-        Guid accountId = await SeedAccountAsync(TradingMode.Undeclared);
-        Suggestion invalid = ValidSuggestion(accountId, TradingMode.Undeclared);
+        (Guid accountId, Guid operatorId) = await SeedAccountAsync(TradingMode.Undeclared);
+        Suggestion invalid = ValidSuggestion(accountId, operatorId, TradingMode.Undeclared);
 
         (await Inserting(invalid).Should().ThrowAsync<DbUpdateException>())
             .Which.InnerException.Should().BeOfType<PostgresException>()
@@ -53,8 +53,8 @@ public sealed class SuggestionDbGuardIntegrationTests
     [Fact]
     public async Task Insert_IsRejected_WhenStateUnknown()
     {
-        Guid accountId = await SeedAccountAsync(TradingMode.Practice);
-        Suggestion invalid = ValidSuggestion(accountId, TradingMode.Practice);
+        (Guid accountId, Guid operatorId) = await SeedAccountAsync(TradingMode.Practice);
+        Suggestion invalid = ValidSuggestion(accountId, operatorId, TradingMode.Practice);
         invalid.State = SuggestionState.Unknown;
 
         (await Inserting(invalid).Should().ThrowAsync<DbUpdateException>())
@@ -67,8 +67,8 @@ public sealed class SuggestionDbGuardIntegrationTests
     [InlineData(-1)]
     public async Task Insert_IsRejected_WhenSizeNotPositive(int size)
     {
-        Guid accountId = await SeedAccountAsync(TradingMode.Practice);
-        Suggestion invalid = ValidSuggestion(accountId, TradingMode.Practice);
+        (Guid accountId, Guid operatorId) = await SeedAccountAsync(TradingMode.Practice);
+        Suggestion invalid = ValidSuggestion(accountId, operatorId, TradingMode.Practice);
         invalid.Size = size;
 
         (await Inserting(invalid).Should().ThrowAsync<DbUpdateException>())
@@ -82,8 +82,8 @@ public sealed class SuggestionDbGuardIntegrationTests
         // The cross-table R-14 guard: a check constraint cannot read another table, so this is a constraint trigger
         // that raises rather than a named constraint. Both modes are valid (non-undeclared), so only the mismatch
         // trips — the account is Practice, the suggestion claims Live.
-        Guid accountId = await SeedAccountAsync(TradingMode.Practice);
-        Suggestion mismatched = ValidSuggestion(accountId, TradingMode.Live);
+        (Guid accountId, Guid operatorId) = await SeedAccountAsync(TradingMode.Practice);
+        Suggestion mismatched = ValidSuggestion(accountId, operatorId, TradingMode.Live);
 
         PostgresException pg = (await Inserting(mismatched).Should().ThrowAsync<DbUpdateException>())
             .Which.InnerException.Should().BeOfType<PostgresException>().Which;
@@ -97,14 +97,40 @@ public sealed class SuggestionDbGuardIntegrationTests
     {
         // The positive control the guard tests need: prove the seed graph and a well-formed suggestion are otherwise
         // accepted, so a rejection above is the specific violation and not a broken fixture.
-        Guid accountId = await SeedAccountAsync(TradingMode.Practice);
-        Suggestion valid = ValidSuggestion(accountId, TradingMode.Practice);
+        (Guid accountId, Guid operatorId) = await SeedAccountAsync(TradingMode.Practice);
+        Suggestion valid = ValidSuggestion(accountId, operatorId, TradingMode.Practice);
 
         await Inserting(valid).Should().NotThrowAsync();
+
+        // Inserting without throwing is only half of "well-formed" — the row must also be OWNED. Guid.Empty is not
+        // a neutral placeholder here: the data layer reserves it as the fail-closed "no user context ⇒ read
+        // nothing" sentinel (ICurrentUser, and SystemOwner's own remarks), so a real row carrying it is readable by
+        // any context with no user at all. An unowned suggestion therefore inserts perfectly happily and still
+        // fails to be the well-formed row this positive control claims to license the other four guards with.
+        //
+        // Read back with IgnoreQueryFilters and assert the owner explicitly, rather than relying on a filtered read
+        // to surface it: this suite's scopes carry no request, so the ambient filter is UserId == Guid.Empty, and a
+        // filtered read would pass on the ORPHAN and fail on the correctly-owned row — backwards.
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+
+        Suggestion stored = await database.Suggestions.IgnoreQueryFilters()
+            .SingleAsync(suggestion => suggestion.Id == valid.Id);
+
+        stored.UserId.Should().Be(operatorId, "a well-formed suggestion is owned by the operator whose account it names (R-20)");
+        stored.UserId.Should().NotBe(Guid.Empty, "Guid.Empty is the fail-closed no-user sentinel, not an owner");
     }
 
-    /// <summary>Seeds a firm → connection → account graph, the account carrying <paramref name="mode"/>.</summary>
-    private async Task<Guid> SeedAccountAsync(TradingMode mode)
+    /// <summary>
+    /// Seeds a firm → connection → account graph, the account carrying <paramref name="mode"/>.
+    /// </summary>
+    /// <returns>
+    /// The account, <b>and the operator that owns it</b>. The owner is returned rather than kept private because
+    /// every row this suite inserts has to carry it: the schema is per-user and fail-closed (R-20, ADR-0017), so a
+    /// suggestion left on <c>Guid.Empty</c> is an orphan no legitimate query would surface — which would make the
+    /// positive control prove that an *orphaned* row inserts, not a well-formed one.
+    /// </returns>
+    private async Task<(Guid AccountId, Guid OperatorId)> SeedAccountAsync(TradingMode mode)
     {
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
@@ -142,14 +168,18 @@ public sealed class SuggestionDbGuardIntegrationTests
         database.Connections.Add(connection);
         database.Accounts.Add(account);
         await database.SaveChangesAsync();
-        return account.Id;
+        return (account.Id, operatorId);
     }
 
-    /// <summary>A fully-specified, guard-satisfying suggestion for <paramref name="accountId"/> in <paramref name="mode"/>.</summary>
-    private static Suggestion ValidSuggestion(Guid accountId, TradingMode mode) => new()
+    /// <summary>
+    /// A fully-specified, guard-satisfying suggestion for <paramref name="accountId"/> in <paramref name="mode"/>,
+    /// owned by <paramref name="operatorId"/> — the same operator the seeded firm, connection and account carry.
+    /// </summary>
+    private static Suggestion ValidSuggestion(Guid accountId, Guid operatorId, TradingMode mode) => new()
     {
         Id = Guid.NewGuid(),
         AccountId = accountId,
+        UserId = operatorId,
         Instrument = "ES",
         Side = OrderSide.Buy,
         Size = 1,
