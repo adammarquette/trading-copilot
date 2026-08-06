@@ -51,7 +51,7 @@ public enum KeyLevelKind
 /// <param name="Kind">A pivot high is a <see cref="KeyLevelKind.Resistance"/>; a pivot low a <see cref="KeyLevelKind.Support"/>.</param>
 /// <param name="Prominence">
 /// How far the pivot stood beyond the <b>next-best bar in its own window</b>, as a price distance. Measured here
-/// because this is the only place the window still exists ? by zone time it is gone. Never negative: a confirmed
+/// because this is the only place the window still exists — by zone time it is gone. Never negative: a confirmed
 /// pivot is by definition at least as extreme as its neighbours.
 /// </param>
 public sealed record SwingPivot(
@@ -81,7 +81,7 @@ public sealed record SwingPivot(
 /// is stronger. Normalised so the score compares across instruments and volatility regimes: twenty points of
 /// prominence is a major level on a quiet session and noise on a wild one, so a raw price distance would rank every
 /// high-priced instrument above every other and rank nothing. Across a merge this keeps the <b>strongest</b> of the
-/// folded zones ? see <see cref="KeyLevels.MergeOverlapping"/>.
+/// folded zones — see <see cref="KeyLevels.MergeOverlapping"/>.
 /// </param>
 public sealed record KeyLevelZone(
     decimal Bottom,
@@ -194,16 +194,7 @@ public static class KeyLevels
     }
 
     /// <summary>
-    /// Whether <paramref name="index"/> is the window's extreme, with the tie-break that makes a plateau ONE level.
-    /// </summary>
-    /// <remarks>
-    /// <b>Strictly beyond on the left, at-or-beyond on the right.</b> Three equal highs in a row are one turn, not
-    /// three levels — and without an asymmetry they are either three or none. Requiring strictness only on the left
-    /// elects the <i>earliest</i> bar of a plateau: the bar where price first reached the level, which is the one
-    /// the chart's own swing label sits on.
-    /// </remarks>
-    /// <summary>
-    /// How far the pivot stands beyond the <b>runner-up</b> in its own window ? the gap to the next-best bar, not to
+    /// How far the pivot stands beyond the <b>runner-up</b> in its own window — the gap to the next-best bar, not to
     /// the window's mean or its opposite extreme.
     /// </summary>
     /// <remarks>
@@ -237,6 +228,15 @@ public static class KeyLevels
         return Math.Max(0m, gap);
     }
 
+    /// <summary>
+    /// Whether <paramref name="index"/> is the window's extreme, with the tie-break that makes a plateau ONE level.
+    /// </summary>
+    /// <remarks>
+    /// <b>Strictly beyond on the left, at-or-beyond on the right.</b> Three equal highs in a row are one turn, not
+    /// three levels — and without an asymmetry they are either three or none. Requiring strictness only on the left
+    /// elects the <i>earliest</i> bar of a plateau: the bar where price first reached the level, which is the one
+    /// the chart's own swing label sits on.
+    /// </remarks>
     private static bool IsExtreme(decimal[] series, int index, KeyLevelOptions options, bool highest)
     {
         decimal candidate = series[index];
@@ -325,14 +325,17 @@ public static class KeyLevels
     /// </para>
     /// </remarks>
     /// <param name="zones">The bands to fold, in any order — the result does not depend on it.</param>
-    /// <returns>The merged bands, ordered by lower bound then kind.</returns>
+    /// <returns>
+    /// The merged bands, ordered by <b>kind first, then lower bound</b> (then upper bound). The same order
+    /// <see cref="EvictAllButMostRecent"/> returns, so a host can rely on one comparison across both.
+    /// </returns>
     public static IReadOnlyList<KeyLevelZone> MergeOverlapping(IEnumerable<KeyLevelZone> zones)
     {
         ArgumentNullException.ThrowIfNull(zones);
 
         // Sorted by lower bound WITHIN each kind, so the sweep below only ever has to look at the band it is
         // currently accumulating: anything that overlaps an earlier one must also overlap the running union.
-        // Ordering by Bottom then Top then kind makes the output independent of the input order (the DoD).
+        // Ordering by kind, then Bottom, then Top makes the output independent of the input order (the DoD).
         List<KeyLevelZone> ordered = [.. zones
             .OrderBy(zone => zone.Kind)
             .ThenBy(zone => zone.Bottom)
@@ -403,14 +406,13 @@ public static class KeyLevels
         _ => false,                                        // a kindless zone is never flipped into a side it lacks
     };
 
-    /// <summary>The other side. <see cref="KeyLevelKind.Unknown"/> stays unknown rather than being invented into a side.</summary>
     /// <summary>
     /// Bounds the live set: keeps the <paramref name="maxPerKind"/> most recently formed bands <b>of each kind</b>.
     /// </summary>
     /// <remarks>
     /// <para>
     /// <b>Per kind, not overall.</b> A trending session makes highs and lows at very different rates, so one shared
-    /// cap would let a run of new highs evict every floor beneath price ? precisely the levels that matter when it
+    /// cap would let a run of new highs evict every floor beneath price — precisely the levels that matter when it
     /// turns.
     /// </para>
     /// <para>
@@ -442,6 +444,7 @@ public static class KeyLevels
             .ThenBy(zone => zone.Top)];
     }
 
+    /// <summary>The other side. <see cref="KeyLevelKind.Unknown"/> stays unknown rather than being invented into a side.</summary>
     private static KeyLevelKind Flip(KeyLevelKind kind) => kind switch
     {
         KeyLevelKind.Support => KeyLevelKind.Resistance,
