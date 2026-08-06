@@ -1,96 +1,68 @@
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { cleanup, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { RealtimeConnectionState } from '../realtime/connection';
 import { renderWithProviders } from '../testing/render';
 import { ConnectionStatus } from './ConnectionStatus';
 
-/** A stand-in for the parts of Response the probe actually reads. */
-function healthResponse(status: number): Response {
-  return { ok: status >= 200 && status < 300, status } as unknown as Response;
-}
+const { realtimeMock } = vi.hoisted(() => ({ realtimeMock: vi.fn() }));
+vi.mock('../realtime/RealtimeProvider', () => ({ useOptionalRealtime: () => realtimeMock() }));
 
-function stubFetch(impl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
-  const fetchMock = vi.fn(impl);
-  vi.stubGlobal('fetch', fetchMock);
-  return fetchMock;
+afterEach(() => {
+  cleanup();
+  realtimeMock.mockReset();
+});
+
+function withState(connectionState: RealtimeConnectionState): void {
+  realtimeMock.mockReturnValue({ connectionState });
 }
 
 function status() {
   return screen.getByRole('status');
 }
 
-afterEach(() => {
-  cleanup();
-  vi.unstubAllGlobals();
-});
-
 describe('ConnectionStatus', () => {
-  it('probes a same-origin /health so the BFF that served the bundle answers it', () => {
-    const fetchMock = stubFetch(() => new Promise<Response>(() => {}));
+  it('reads the realtime connection state, not a /health poll', () => {
+    withState('live');
 
     renderWithProviders(<ConnectionStatus />);
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url] = fetchMock.mock.calls[0];
-    // The value matters more than the call: an absolute URL here would pin the SPA to one host.
-    expect(url).toBe('/health');
-  });
-
-  it('reports checking until the probe settles', () => {
-    stubFetch(() => new Promise<Response>(() => {}));
-
-    renderWithProviders(<ConnectionStatus />);
-
-    expect(status().dataset.status).toBe('checking');
-    // Not an optimistic green: a probe that has not answered is not a connection that works.
-    expect(status().textContent).toContain('Checking');
-  });
-
-  it('reports the server reachable when /health answers 200', async () => {
-    stubFetch(() => Promise.resolve(healthResponse(200)));
-
-    renderWithProviders(<ConnectionStatus />);
-
-    await waitFor(() => {
-      expect(status().dataset.status).toBe('reachable');
-    });
+    expect(status().dataset.status).toBe('live');
     expect(status().textContent).toContain('Live');
   });
 
-  it('reports the server unreachable when /health answers an error status', async () => {
-    // Guards the difference between "the request completed" and "the BFF is healthy" -- a 503 still
-    // resolves the fetch promise, so a naive .then would call a down BFF reachable.
-    stubFetch(() => Promise.resolve(healthResponse(503)));
+  it('labels a reconnecting socket so a stale view is not mistaken for live', () => {
+    withState('reconnecting');
 
     renderWithProviders(<ConnectionStatus />);
 
-    await waitFor(() => {
-      expect(status().dataset.status).toBe('unreachable');
-    });
+    expect(status().dataset.status).toBe('reconnecting');
+    expect(status().textContent).toContain('Reconnecting');
   });
 
-  it('reports the server unreachable when the probe fails outright', async () => {
-    stubFetch(() => Promise.reject(new TypeError('Failed to fetch')));
+  it('shows offline when the socket is down', () => {
+    withState('down');
 
     renderWithProviders(<ConnectionStatus />);
 
-    await waitFor(() => {
-      expect(status().dataset.status).toBe('unreachable');
-    });
+    expect(status().dataset.status).toBe('down');
+    expect(status().textContent).toContain('Offline');
   });
 
-  it('aborts an in-flight probe on unmount', () => {
-    let captured: AbortSignal | undefined;
-    stubFetch((_input, init) => {
-      captured = init?.signal ?? undefined;
-      return new Promise<Response>(() => {});
-    });
+  it('is not optimistically green while connecting', () => {
+    withState('connecting');
 
-    const { unmount } = renderWithProviders(<ConnectionStatus />);
-    expect(captured?.aborted).toBe(false);
+    renderWithProviders(<ConnectionStatus />);
 
-    unmount();
+    // A socket that has not connected is not a connection that works.
+    expect(status().dataset.status).toBe('connecting');
+  });
 
-    expect(captured?.aborted).toBe(true);
+  it('falls back to down outside a provider, never a false green', () => {
+    realtimeMock.mockReturnValue(null);
+
+    renderWithProviders(<ConnectionStatus />);
+
+    expect(status().dataset.status).toBe('down');
   });
 });
