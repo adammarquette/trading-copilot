@@ -43,10 +43,22 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.MarketData;
 /// adapter resolved from the running host's container rather than a stub whose capability set is whatever a test
 /// says it is: the source refuses every capability it does not grant with
 /// <see cref="VenueCapabilityNotSupportedException"/> — an explicit failure, never an empty result — and it is not
-/// assignable to the executable-price seams at all. The one shape that cannot be reached from here is a
-/// <c>FinnhubMarketDataSource</c> that does <i>not</i> grant <see cref="VenueCapability.ContextTrades"/>: its grant
-/// is a constant, so <c>StreamContextTradesAsync</c>'s own <c>Require</c> can only be witnessed on a source double,
-/// which would be a stub asserting itself. That is noted rather than faked.
+/// assignable to the executable-price seams at all. Its <b>own operations are exercised, not merely inspected</b>
+/// (PR #711 review): <c>ResolveContractAsync</c> and <c>StreamContextTradesAsync</c> are both called on the
+/// adapter resolved from the container, so the <c>Capabilities.Require(ContextTrades)</c> each opens with is on
+/// the stack, and the stream call carries the runtime half of "refuses, never returns empty" — the provider is
+/// unreachable for the whole run, so the seam must surface that failure rather than hand back an empty sequence.
+/// </para>
+/// <para>
+/// <b>The residual, stated rather than faked</b> (gh#712). The one shape that cannot be reached from here is a
+/// <c>FinnhubMarketDataSource</c> that does <i>not</i> grant <see cref="VenueCapability.ContextTrades"/>: the
+/// grant is a compile-time constant on a sealed type, so removing <c>StreamContextTradesAsync</c>'s own
+/// <c>Require</c> is unobservable through the real adapter, and the only alternative subject is a double whose
+/// capability set — and whose refusal — the test itself would have written. gh#705's scoping note asked for this
+/// against the real adapter precisely to avoid that, so it is carded (gh#712) rather than satisfied with a stub
+/// asserting itself. What this suite does guard is the input to that <c>Require</c>: the grant is read off the
+/// shipped adapter, so an adapter that started claiming <c>Quotes</c> — the refactor that would actually put a
+/// context feed on the execution path — turns the matrix below red.
 /// </para>
 /// </remarks>
 public class ContextSourceOutageIntegrationTests : IClassFixture<ContextOutageTestPostgresFactory>
@@ -68,7 +80,16 @@ public class ContextSourceOutageIntegrationTests : IClassFixture<ContextOutageTe
     [Fact]
     public async Task TradeableIngestion_ShouldKeepRunning_WhileTheContextSourceIsInOutage()
     {
-        // 0. Building the client boots the host and its background services — the context host, the quote host and
+        // 0. SNAPSHOT EVERY CUMULATIVE COUNTER FIRST (PR #711 review). The transport's attempt count and the
+        //    captured log both live on the class fixture, which the capability case below boots and shares — so an
+        //    absolute "at least two" could be satisfied entirely by history, and a subscription that had since
+        //    stalled would be indistinguishable from one still cycling. Every assertion in this test is therefore
+        //    about growth AFTER this line: what the platform is doing now, not what it once did.
+        int contextAttemptsAtStart = _factory.ContextTransport.SubscribeAttempts;
+        int contextDropsAtStart = ContextDropsLogged();
+        int quoteCyclesAtStart = QuoteSubscriptionCycles();
+
+        //    Building the client boots the host and its background services — the context host, the quote host and
         //    the two execution watchers all start here, and nothing below can be observed before they do.
         using HttpClient client = _factory.CreateClient();
 
@@ -76,14 +97,18 @@ public class ContextSourceOutageIntegrationTests : IClassFixture<ContextOutageTe
         //    healthy proves nothing about independence, and "the supervisor retried" distinguishes a live outage
         //    from a single failure that quietly ended the subscription for good.
         await WaitUntilAsync(
-            () => Task.FromResult(_factory.ContextTransport.SubscribeAttempts >= 2),
-            "the context supervisor to have retried the downed provider at least twice");
+            () => Task.FromResult(_factory.ContextTransport.SubscribeAttempts >= contextAttemptsAtStart + 2),
+            "the context supervisor to have retried the downed provider twice SINCE this test began");
 
-        _factory.Logs.Entries.Should().Contain(
-            entry => entry.Message.Contains("Context stream for", StringComparison.Ordinal)
-                && entry.Message.Contains("dropped", StringComparison.Ordinal),
-            "the context subscription must report its drop — an outage that logged nothing would be the silent "
+        //    A fresh drop log, not merely some drop log: the attempt counter increments inside the transport, and
+        //    the supervisor writes this only once the failure has propagated all the way back up through the real
+        //    adapter — so it is the wait, not the counter, that witnesses the full outage path.
+        await WaitUntilAsync(
+            () => Task.FromResult(ContextDropsLogged() > contextDropsAtStart),
+            "the context subscription to report a FRESH drop — an outage that logged nothing would be the silent "
             + "never-ticks gap the seam exists to prevent");
+
+        int contextAttemptsWithOutageProven = _factory.ContextTransport.SubscribeAttempts;
 
         // 2. THE APPLICATION IS STILL UP. This is the StopHost failure mode, stated directly: had the exception
         //    escaped ContextIngestionHost, there would be no web host left to answer.
@@ -93,12 +118,14 @@ public class ContextSourceOutageIntegrationTests : IClassFixture<ContextOutageTe
             "a cross-asset context outage must never stop the platform — the auto-flatten watchdog and the kill "
             + "switch ride the same host");
 
-        // 3. THE TRADEABLE INGESTION HOST IS ALIVE. Its supervisor re-subscribes on every stream end, so a second
-        //    cycle logged while context is failing is the quote path's own witness that it is still looping.
+        // 3. THE TRADEABLE INGESTION HOST IS ALIVE — measured from the snapshot, never absolutely (PR #711 review).
+        //    Its supervisor re-subscribes on every stream end, so two cycles logged AFTER this test began mean at
+        //    least one complete end -> back off -> re-subscribe -> end round trip ran while context was failing.
+        //    That is the quote path's own witness that it is still looping; a count inherited from an earlier case
+        //    would have said only that it once did.
         await WaitUntilAsync(
-            () => Task.FromResult(_factory.Logs.Entries.Count(entry =>
-                entry.Message.Contains("Quote stream for", StringComparison.Ordinal)) >= 2),
-            "the ProjectX quote subscription to keep cycling while the context source is down");
+            () => Task.FromResult(QuoteSubscriptionCycles() >= quoteCyclesAtStart + 2),
+            "the ProjectX quote subscription to complete two FRESH cycles while the context source is down");
 
         // 4. QUOTES STILL LAND — through the SHIPPED producer, into the real event log.
         int appended = await IngestQuotesAsync(bid: 5_299.75m, ask: 5_300m);
@@ -115,10 +142,13 @@ public class ContextSourceOutageIntegrationTests : IClassFixture<ContextOutageTe
             async () => await CursorAsync(ConditionalOrderHost.ConsumerGroup) >= sequence,
             $"the conditional-order consumer's cursor to advance past sequence {sequence}");
 
-        // And the outage never stopped: the retries kept coming throughout, so none of the above happened in a
-        // window where context had quietly given up and the two feeds were no longer contending at all.
+        // And the outage never stopped: the retries kept coming THROUGHOUT the tradeable work above, so none of it
+        // happened in a window where context had quietly given up and the two feeds were no longer contending at
+        // all. Measured against the count taken when the outage was first proven, not against a bare constant.
         _factory.ContextTransport.SubscribeAttempts.Should().BeGreaterThan(
-            2, "the context supervisor keeps retrying for the whole run — the outage is a live condition, not a blip");
+            contextAttemptsWithOutageProven,
+            "the context supervisor keeps retrying for the whole run — the outage is a live condition throughout "
+            + "the tradeable path's work, not a blip that had ended before the quotes flowed");
     }
 
     // =============================================================================================================
@@ -161,6 +191,46 @@ public class ContextSourceOutageIntegrationTests : IClassFixture<ContextOutageTe
                     ungranted, "the refusal names the capability that was missing, so the caller can act on it");
         }
 
+        // ---- The source's OWN operations, exercised rather than inspected (PR #711 review) ---------------------
+        //
+        // Everything above reads a capability value off the adapter and drives VenueCapabilities.Require directly,
+        // which is a statement about the value, not about the adapter's behaviour. These two calls run the shipped
+        // methods themselves — each opens with Capabilities.Require(ContextTrades) — so the enforcement path is on
+        // the stack rather than reasoned about, and the seam is asked to do real work.
+        ResolvedContract resolved = await source.ResolveContractAsync(
+            InstrumentId.Parse(ContextOutageTestPostgresFactory.ContextSymbol), CancellationToken.None);
+
+        resolved.Contract.ToString().Should().Be(
+            $"finnhub:{ContextOutageTestPostgresFactory.ContextSymbol}",
+            "the context source mints handles under its OWN venue — a finnhub SPY and a projectx contract must never "
+            + "compare equal however alike their keys look, which is what keeps a context print off the execution path");
+        resolved.Instrument.Symbol.Should().Be(
+            ContextOutageTestPostgresFactory.ContextSymbol,
+            "a handle is returned PAIRED with the instrument it was resolved for, so a caller can never size one "
+            + "instrument and subscribe another");
+
+        // The live half of "refuses, never returns empty". The provider behind this adapter is unreachable for the
+        // whole run, and asking it to stream must SURFACE that: an adapter that swallowed the downed subscribe and
+        // handed back an empty sequence would be exactly the silent never-ticks gap R-17's loud refusal exists to
+        // prevent (gh#496) — a caller would sit forever on a feed that had already failed. This is the assertion
+        // that goes red for it, and it can only pass by running StreamContextTradesAsync for real.
+        List<ContextTrade> streamed = [];
+        Func<Task> streamWhileTheProviderIsDown = async () =>
+        {
+            await foreach (ContextTrade print in source.StreamContextTradesAsync(
+                resolved.Contract, CancellationToken.None))
+            {
+                streamed.Add(print);
+            }
+        };
+
+        await streamWhileTheProviderIsDown.Should().ThrowAsync<IOException>(
+            "asking the REAL adapter to stream while its provider is unreachable must fail loudly — an empty "
+            + "sequence is the one answer a context seam may never give");
+
+        streamed.Should().BeEmpty(
+            "the downed transport feeds nothing, so the refusal above is the whole of the adapter's answer");
+
         // The compile-time half of case 5, witnessed at runtime so it can actually go red. A "unified market data"
         // refactor that made the context source implement an executable-price seam would hand it to the execution
         // path directly — the failure the type split exists to make impossible (gh#496's operator decision).
@@ -178,6 +248,22 @@ public class ContextSourceOutageIntegrationTests : IClassFixture<ContextOutageTe
     private static IEnumerable<VenueCapability> Ungranted() => Enum
         .GetValues<VenueCapability>()
         .Where(capability => capability is not (VenueCapability.None or VenueCapability.ContextTrades));
+
+    /// <summary>
+    /// How many drops the <b>context</b> supervisor has reported. Cumulative across the class fixture, so callers
+    /// compare growth, never an absolute — the fixture's outage is a standing condition, and an entry inherited
+    /// from an earlier case would say nothing about whether the supervisor is still retrying now.
+    /// </summary>
+    private int ContextDropsLogged() => _factory.Logs.Entries.Count(entry =>
+        entry.Message.Contains("Context stream for", StringComparison.Ordinal)
+        && entry.Message.Contains("dropped", StringComparison.Ordinal));
+
+    /// <summary>
+    /// How many subscription cycles the <b>tradeable</b> quote supervisor has completed — exactly one log per
+    /// stream end, written immediately before it backs off and re-subscribes. Cumulative for the same reason.
+    /// </summary>
+    private int QuoteSubscriptionCycles() => _factory.Logs.Entries.Count(entry =>
+        entry.Message.Contains("Quote stream for", StringComparison.Ordinal));
 
     /// <summary>Runs the shipped quote producer over a feed-only market-data source — the tradeable path's producer.</summary>
     private async Task<int> IngestQuotesAsync(decimal bid, decimal ask)

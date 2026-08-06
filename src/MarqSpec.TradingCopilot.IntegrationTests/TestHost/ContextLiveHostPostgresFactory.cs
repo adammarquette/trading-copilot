@@ -16,12 +16,27 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Context symbols configured, no Finnhub key — deliberately.</b> This is the deployment gh#496's most
-/// important acceptance criterion describes: an operator asked for context data and the provider is not there
-/// (<c>Finnhub__ApiKey</c> unset ⇒ no <c>IContextMarketDataSource</c> is registered at all, so the source cannot
-/// be constructed). The platform must still run, and the tradeable feed must be untouched. The symbols use the
-/// <c>ContextIngestion:Symbols:0</c> allowlist shape (gh#304) — its <c>__0..__7</c> environment form under
-/// compose — so the host reaches the same code path a real deployment does.
+/// <b>Context symbols configured, the Finnhub key explicitly empty — deliberately.</b> This is the deployment
+/// gh#496's most important acceptance criterion describes: an operator asked for context data and the provider is
+/// not there (a blank <c>Finnhub__ApiKey</c> ⇒ <c>Program.cs</c> registers no <c>IContextMarketDataSource</c> at
+/// all, so the source cannot be constructed). The platform must still run, and the tradeable feed must be
+/// untouched. The symbols use the <c>ContextIngestion:Symbols:0</c> allowlist shape (gh#304) — its
+/// <c>__0..__7</c> environment form under compose — so the host reaches the same code path a real deployment does.
+/// The key is <b>set to empty rather than merely left unset</b> (PR #711 review): omitting a setting does not
+/// clear an ambient <c>Finnhub__ApiKey</c> inherited from a developer's shell or a CI runner, and in that
+/// environment the real adapter and its websocket transport would be registered — the scenario this fixture
+/// exists to construct would simply not be the one under test.
+/// </para>
+/// <para>
+/// <b>The tradeable feed is configured too</b> (<c>Ingestion:Symbols</c>), and that is load-bearing rather than
+/// scenery (PR #711 review). Case 3's acceptance criterion is that the <i>live</i> <c>MarketDataIngestionHost</c>
+/// keeps running while context is dead; with no symbols that host returns at its first statement
+/// (<c>MarketDataIngestionHost.cs:46-51</c>, "ingestion is disabled"), so a suite calling
+/// <c>QuoteIngestionService</c> directly would be witnessing the <i>producer</i> and never the host. The
+/// reconnect delay is shortened to a second so a case sees several supervised cycles without a long wait. Nothing
+/// is appended to the log by this: the adversarial venue's <c>StreamQuotesAsync</c> yields no quotes, so the host
+/// cycles subscribe → end → re-subscribe and the execution watchers see no quote they did not ask for — which is
+/// what keeps the case-2 negative half honest with the quote host live.
 /// </para>
 /// <para>
 /// <b>Why <see cref="VenueConnectionMonitorHost"/> is the one host stripped.</b> Its first pass reconciles the
@@ -38,6 +53,9 @@ public sealed class ContextLiveHostPostgresFactory : StubbedVenuePostgresFactory
     /// <summary>The configured context symbol — an equity, deliberately not a futures contract.</summary>
     public const string ContextSymbol = "SPY";
 
+    /// <summary>The configured <b>tradeable</b> symbol, so the live ProjectX quote host runs alongside the context host.</summary>
+    public const string TradeableSymbol = "MES";
+
     /// <summary>The captured log stream, so a background host's own account of what it did can be asserted.</summary>
     public InMemoryLogCollector Logs { get; } = new();
 
@@ -46,9 +64,18 @@ public sealed class ContextLiveHostPostgresFactory : StubbedVenuePostgresFactory
     {
         base.ConfigureWebHost(builder);
 
+        // The ABSENT credential is the scenario, so it is stated rather than assumed (PR #711 review): leaving the
+        // setting off would let an ambient Finnhub__ApiKey register the real adapter and its network transport.
+        builder.UseSetting("Finnhub:ApiKey", string.Empty);
+
         // gh#304's allowlist shape: an indexed element, exactly as ContextIngestion__Symbols__0 arrives under
         // compose. No credential accompanies it — that absence IS the scenario (see the class remarks).
         builder.UseSetting($"{ContextIngestionOptions.SectionName}:Symbols:0", ContextSymbol);
+
+        // The TRADEABLE feed, whose survival is the acceptance criterion: without it MarketDataIngestionHost exits
+        // immediately and the host case 3 is about never starts (see the class remarks).
+        builder.UseSetting($"{IngestionOptions.SectionName}:Symbols:0", TradeableSymbol);
+        builder.UseSetting($"{IngestionOptions.SectionName}:ReconnectDelaySeconds", "1");
 
         builder.ConfigureLogging(logging => logging.AddProvider(new CapturingLoggerProvider(Logs)));
     }
