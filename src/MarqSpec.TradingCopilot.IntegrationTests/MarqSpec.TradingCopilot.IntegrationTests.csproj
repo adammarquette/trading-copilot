@@ -22,6 +22,10 @@
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Data\MarqSpec.TradingCopilot.Data.csproj" />
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Domain\MarqSpec.TradingCopilot.Domain.csproj" />
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.ProjectX\MarqSpec.TradingCopilot.Integration.ProjectX.csproj" />
+    <!-- The cross-asset CONTEXT price adapter and its transport seam (gh#705, of gh#496): the outage / capability
+         cases assert against the REAL FinnhubMarketDataSource resolved from the host, and stand its
+         IFinnhubQuoteStream down, rather than replacing the adapter with a stub. -->
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Finnhub\MarqSpec.TradingCopilot.Integration.Finnhub.csproj" />
   </ItemGroup>
 
   <ItemGroup>
