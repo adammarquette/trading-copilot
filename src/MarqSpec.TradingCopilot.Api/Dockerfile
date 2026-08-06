@@ -15,8 +15,7 @@ WORKDIR /client
 # build dies while every other check stays green -- because everything else runs from a full checkout where .npmrc
 # is simply present, and only the image copies a subset. That cost six develop commits with no publishable image.
 COPY src/MarqSpec.TradingCopilot.Client/package.json \
-     src/MarqSpec.TradingCopilot.Client/package-lock.json \
-     src/MarqSpec.TradingCopilot.Client/.npmrc ./
+     src/MarqSpec.TradingCopilot.Client/package-lock.json ./
 RUN npm ci
 COPY src/MarqSpec.TradingCopilot.Client/ ./
 RUN npm run build
