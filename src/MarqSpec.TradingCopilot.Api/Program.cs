@@ -15,6 +15,7 @@ using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Notifications;
 using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Orders;
+using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Relevance;
 using MarqSpec.TradingCopilot.Api.Risk;
@@ -434,8 +435,31 @@ builder.Services
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.SigningKey)),
             ValidateLifetime = true,
         };
+
+        // A SignalR WebSocket cannot send an Authorization header, so the JWT arrives on the query string for the
+        // hub path; lift it onto the token the handler validates. Scoped to the hub path (R-18) so no other route
+        // ever accepts a query-string token.
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                string? accessToken = context.Request.Query["access_token"];
+                if (!string.IsNullOrEmpty(accessToken)
+                    && context.HttpContext.Request.Path.StartsWithSegments(RealtimeHub.Path))
+                {
+                    context.Token = accessToken;
+                }
+
+                return Task.CompletedTask;
+            },
+        };
     });
 builder.Services.AddAuthorization();
+
+// The realtime hub (gh#645, R-10). SignalR ships in the ASP.NET Core shared framework; the fan-out host tails the
+// event log and pushes each presentation signal to connected clients. Nothing is invocable on the hub.
+builder.Services.AddSignalR();
+builder.Services.AddHostedService<RealtimeEventLogFanoutHost>();
 
 // The self-documenting API surface (R-10, gh#604): an OpenAPI document generated from the minimal-API routes
 // below, and a Scalar reference UI over it. The spec is the source of truth the README links to (#605); a
@@ -482,6 +506,12 @@ app.MapKillSwitchEndpoints();
 app.MapPositionEndpoints();
 app.MapWorkingOrderEndpoints();
 app.MapMarketDataEndpoints();
+
+// The realtime hub (gh#645, R-10 / R-18). A literal path so it is a concrete authenticated route ahead of the SPA
+// fallback; RequireAuthorization so the R-18 auth-surface sweep treats its negotiate / connect endpoints as gated.
+// ExcludeFromDescription keeps the WebSocket hub out of the REST OpenAPI document (gh#604/#612) — it is not an HTTP
+// operation a client generator can call, and it must not perturb that spec's exact-set drift-guard.
+app.MapHub<RealtimeHub>(RealtimeHub.Path).RequireAuthorization().ExcludeFromDescription();
 
 // The generated spec (/openapi/v1.json, everywhere) and the Scalar reference UI (/scalar/v1, disabled in
 // production). Mapped after the endpoint groups so the document reflects every route above (gh#604).
