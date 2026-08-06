@@ -328,7 +328,7 @@ is part B (gh#549).
 
 ### Analysis & management UI
 A **React SPA** — the operator's surface — consuming the BFF's **REST** endpoints and **SignalR** hubs
-(websockets); the Internet-exposed frontend, **authenticated by JWT** (R-18; see *Authentication* below). It ships
+(websockets — the hub is authenticated, **presentation-only**, with idempotent resume: [ADR-0021](adr/0021-realtime-hub-contract.md), gh#645); the Internet-exposed frontend, **authenticated by JWT** (R-18; see *Authentication* below). It ships
 as an **installable PWA** — a presentation client only (R-19, [ADR-0010](adr/0010-progressive-web-app.md), which
 owns the packaging and the platform caveats).
 **The chart is its central component:** a purpose-built candlestick chart (**Lightweight
@@ -353,7 +353,10 @@ what renders it, are [ADR-0004](adr/0004-charting.md)'s.*
   **JWT** on every request/connection (R-18). Authorization runs through a **claims / policy layer** that **scopes every request to the authenticated user** —
   data is scoped at the data layer by default-deny filters — a fail-closed safety property, not tenancy (R-20, [ADR-0017](adr/0017-single-operator-data-isolation.md));
   richer roles remain an incremental add ([ADR-0003](adr/0003-authentication.md)). Execution, kill-switch,
-  and account endpoints sit behind this same gate — no unauthenticated path to order actions.
+  and account endpoints sit behind this same gate — no unauthenticated path to order actions. The **realtime hub**
+  authorizes on the **connection**: a WebSocket carries the JWT on the `access_token` query string (lifted for the
+  hub path only), scoped once at connect for the socket's life, and the hub is **presentation-only** — never a path
+  to an action ([ADR-0021](adr/0021-realtime-hub-contract.md), gh#645).
 
 ## Open decisions (spikes)
 - **Event backbone — resolved:** an **append-only Timescale event log** ([ADR-0001](adr/0001-event-backbone.md)) — store + replayable log, consumers with cursors, indicators as projections. NATS JetStream is the documented upgrade path if we outgrow Postgres.

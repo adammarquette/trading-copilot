@@ -1,6 +1,7 @@
 import Button from '@mui/material/Button';
 import { Link, Route, Routes } from 'react-router';
 
+import { AccountProvider } from '../accounts/AccountProvider';
 import { AcceptInvitePage } from '../auth/AcceptInvitePage';
 import { RequireAuth } from '../auth/RequireAuth';
 import { SignInPage } from '../auth/SignInPage';
@@ -52,7 +53,13 @@ export function AppRoutes() {
       <Route path="/sign-in" element={<SignInPage />} />
       <Route path="/accept-invite" element={<AcceptInvitePage />} />
       <Route element={<RequireAuth />}>
-        <Route element={<AppShell />}>
+        <Route
+          element={
+            <AccountProvider>
+              <AppShell />
+            </AccountProvider>
+          }
+        >
           {destinations.map((destination) =>
             destination.path === '/' ? (
               <Route

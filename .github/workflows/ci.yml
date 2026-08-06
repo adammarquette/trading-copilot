@@ -153,6 +153,61 @@ jobs:
       - name: Integration tests (Testcontainers Postgres)
         run: dotnet test src/MarqSpec.TradingCopilot.IntegrationTests/MarqSpec.TradingCopilot.IntegrationTests.csproj --configuration Release --filter "Category!=Smoke"
 
+  # Build the image WITHOUT publishing it, so an image-only break fails the PR that caused it (gh#692).
+  #
+  # Why this is not covered by the jobs above: every one of them runs from a FULL checkout, while the
+  # Dockerfile COPYs a SUBSET of the tree. The image is therefore the only consumer of a partial repo, and
+  # the only place a "the build needs a file the Dockerfile never copies" defect can exist at all. gh#691
+  # was exactly that -- `.npmrc` missing from the client manifests layer -- and it failed `publish image`
+  # on SEVEN consecutive develop commits while every PR reported clean, because publishing only runs after
+  # merge. Nothing was deployable for over an hour and no check said so.
+  #
+  # It runs on pull_request AND merge_group, never on push -- the exact complement of publish-image below,
+  # which does the real build-and-push on merges. Covering merge_group is load-bearing twice over: this is
+  # a required check, and the header's warning applies (a required check that never runs there leaves every
+  # queued PR waiting forever), and the queue is also where two PRs that each build alone but break combined
+  # would surface.
+  #
+  # It does NOT push and takes no packages:write. That is the whole of publish-image's "a PR must not
+  # publish" rationale -- a fork PR cannot hold that scope -- and none of it argues against BUILDING.
+  #
+  # Deliberately NOT path-filtered. gh#691's break was introduced by a PR that never touched the Dockerfile:
+  # `.npmrc` arrived with the client scaffold and only became load-bearing later. A filter keyed on
+  # Dockerfile/client paths would have skipped that PR and missed the defect it shipped, which is the exact
+  # failure this job exists to prevent.
+  build-image:
+    name: build image (no publish)
+    # Gated on build-test purely to avoid burning Buildx minutes on a PR that is already broken: the image build
+    # consumes nothing build-test produces and targets an unrelated failure mode (a Docker COPY subset, not a
+    # full-checkout `dotnet build`), so this is a cost choice, not a correctness one. The trade is that the
+    # image-break signal arrives after the workflow's longest job rather than in parallel with `client` and
+    # `integration-test` -- drop this line if that feedback delay ever costs more than the wasted minutes would
+    # (PR #694 review).
+    needs: build-test
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The Dockerfile COPYs external/ (the ProjectX submodule) into the build.
+          submodules: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/MarqSpec.TradingCopilot.Api/Dockerfile
+          push: false
+          # Read the cache publish-image writes on develop, but do not write one back: a PR's layers are
+          # throwaway, and populating the shared cache from unmerged branches only adds eviction pressure
+          # on the entries that make the real publish fast.
+          cache-from: type=gha
+
   # Build the deployment image ONCE and publish it to GHCR, so local dev and Railway consume the
   # same artifact rather than each rebuilding from source (ADR-0018, extends ADR-0012).
   publish-image:
