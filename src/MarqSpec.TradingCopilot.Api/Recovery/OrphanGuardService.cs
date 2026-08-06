@@ -1,8 +1,10 @@
+using System.Text.Json;
 using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Audit;
+using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
@@ -22,16 +24,34 @@ namespace MarqSpec.TradingCopilot.Api.Recovery;
 /// Background plumbing with <b>no authenticated user</b>, so its queries <c>IgnoreQueryFilters</c> the R-20
 /// default-deny filter — it acts for the deployment, over whoever owns the stops; ownership is preserved on write
 /// (the same discipline as the stop-promotion watcher). Each transition is recorded as an immutable
-/// <c>AuditRecord</c> carrying the <c>synthetic_risk</c> flag (gh#220), a <b>secondary</b> write that never fails
-/// the safety action; the high-severity <b>log</b> remains the interim operator alert until the real-time channel
-/// (Phase-4 SPA, gh#222) lands.
+/// <c>AuditRecord</c> carrying the <c>synthetic_risk</c> flag (gh#220) <b>and</b> journalled to the event log
+/// (gh#704) so the realtime hub can raise the operator alert (gh#645/gh#222) — both <b>secondary</b> writes that
+/// never fail the safety action; the high-severity <b>log</b> remains the interim alert until the alert surface lands.
 /// </remarks>
 public sealed class OrphanGuardService
 {
+    /// <summary>The producing system for the orphan guard's protection-state events.</summary>
+    public const string EventSource = "orphan-guard";
+
+    /// <summary>
+    /// Synthetic protection degraded — hidden working stops were orphaned on a venue-connection loss (gh#704). The
+    /// operator's <b>tighter</b> stop is orphaned; the native safety stop remains the floor (R-19), so this is never
+    /// "unprotected". The realtime hub broadcasts it as the immediate operator alert (gh#645 / gh#222).
+    /// </summary>
+    public const string OrphanedEventType = "protection.orphaned";
+
+    /// <summary>
+    /// Synthetic protection restored — orphaned stops were re-armed (and/or retired) on reconnect after venue-truth
+    /// re-validation (gh#704). The payload carries how many were re-armed, retired, and left orphaned so a consumer
+    /// can clear or reduce the alert.
+    /// </summary>
+    public const string RestoredEventType = "protection.restored";
+
     private readonly TradingCopilotDbContext _database;
     private readonly IProjectXVenueFactory _venueFactory;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly IAuditLog _auditLog;
+    private readonly IEventLog _eventLog;
     private readonly IExecutionMetrics _metrics;
     private readonly ILogger<OrphanGuardService> _logger;
 
@@ -40,6 +60,7 @@ public sealed class OrphanGuardService
     /// <param name="venueFactory">Builds a venue for a connection's firm conventions — the source of re-arm truth.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
     /// <param name="auditLog">Records each synthetic-stop transition — a secondary, failure-tolerant write (gh#220).</param>
+    /// <param name="eventLog">Journals each protection transition for the realtime hub — a secondary, failure-tolerant write (gh#704).</param>
     /// <param name="metrics">The execution SLIs (gh#295) — live synthetic-risk exposure.</param>
     /// <param name="logger">The logger.</param>
     public OrphanGuardService(
@@ -47,6 +68,7 @@ public sealed class OrphanGuardService
         IProjectXVenueFactory venueFactory,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IAuditLog auditLog,
+        IEventLog eventLog,
         IExecutionMetrics metrics,
         ILogger<OrphanGuardService> logger)
     {
@@ -56,6 +78,7 @@ public sealed class OrphanGuardService
         _venueFactory = venueFactory;
         _projectX = projectXOptions.Value;
         _auditLog = auditLog;
+        _eventLog = eventLog;
         _metrics = metrics;
         _logger = logger;
     }
@@ -96,6 +119,14 @@ public sealed class OrphanGuardService
                 hidden.Select(plan => AuditFor(
                     plan, StopStaging.Hidden, StopStaging.Orphaned,
                     "Venue connection lost — hidden working stop orphaned; native safety stop remains the floor.")),
+                cancellationToken);
+
+            // Put the degradation on the event log so the realtime hub raises the operator alert (gh#645 / gh#222).
+            // Secondary and best-effort, exactly like the audit — the append never undoes the orphaning, and the
+            // high-severity log above stands as the interim alert. R-19 rides the payload: the native stop is the floor.
+            await JournalSafelyAsync(
+                OrphanedEventType,
+                new { orphaned = hidden.Count, nativeSafetyStopRemainsFloor = true },
                 cancellationToken);
         }
 
@@ -267,6 +298,17 @@ public sealed class OrphanGuardService
         // left orphaned transitioned to nothing, so it contributes no row — the exposure window stays reconstructable.
         await AuditSafelyAsync(auditRows, cancellationToken);
 
+        // Journal a protection-restored event when something actually transitioned (gh#704): a stop that could not
+        // re-arm stayed orphaned and transitioned nothing, so an all-unverifiable pass restores nothing and is not
+        // journalled — the earlier orphaned alert stands. Secondary and best-effort, like the audit.
+        if (rearmed + retired > 0)
+        {
+            await JournalSafelyAsync(
+                RestoredEventType,
+                new { rearmed, retired, stillOrphaned },
+                cancellationToken);
+        }
+
         // Re-arm must refresh the gauge too, or a recovered system reads as permanently degraded (gh#295).
         await PublishOrphanExposureAsync(cancellationToken);
         return new RearmOutcome(rearmed, retired, stillOrphaned);
@@ -312,6 +354,28 @@ public sealed class OrphanGuardService
             _logger.LogError(
                 error, "Audit write failed for {Count} synthetic_risk transition(s); the safety action still completed.",
                 rows.Count);
+        }
+    }
+
+    // Puts a protection-state event on the event log tolerating any failure (gh#704): the safety action has already
+    // committed and its high-severity log stands, so an append failure is logged and swallowed — it must never fail
+    // the guard (the audit-write discipline, gh#220). Only a cooperative cancellation propagates. OccurredAt is a
+    // record-keeping timestamp, not a decision input (as AuditFor's RecordedAt).
+    private async Task JournalSafelyAsync(string type, object payload, CancellationToken cancellationToken)
+    {
+        try
+        {
+            string json = JsonSerializer.Serialize(payload);
+            await _eventLog.AppendAsync(new EventDraft(type, EventSource, DateTimeOffset.UtcNow, json), cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error, "Event-log append failed for a {Type} protection event; the safety transition still completed.", type);
         }
     }
 }

@@ -7,6 +7,7 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Audit;
+using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
@@ -35,6 +36,8 @@ public class OrphanGuardServiceTests
     private readonly string _database = Guid.NewGuid().ToString();
     private readonly IProjectXVenueFactory _factory = A.Fake<IProjectXVenueFactory>();
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
+    private readonly IEventLog _eventLog = A.Fake<IEventLog>();
+    private readonly List<EventDraft> _appended = [];
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
@@ -46,6 +49,12 @@ public class OrphanGuardServiceTests
             [new VenueAccount(AccountId, "PRAC-50K", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Practice)]);
         // Default: the protected position is still open (a 2-lot long) unless a test says otherwise.
         VenuePositions(Pos(2));
+
+        // Capture every event-log append so a test can assert the protection transition it journals; return a
+        // stored envelope so the caller's await completes.
+        A.CallTo(() => _eventLog.AppendAsync(A<EventDraft>._, A<CancellationToken>._))
+            .Invokes((EventDraft draft, CancellationToken _) => _appended.Add(draft))
+            .Returns(new EventEnvelope(Guid.NewGuid(), 1, "", "", default, default, "{}", null));
     }
 
     private TradingCopilotDbContext Context(Guid? user = null) =>
@@ -54,7 +63,7 @@ public class OrphanGuardServiceTests
 
     private OrphanGuardService Service(string credentialKey = "topstep-main", IAuditLog? auditLog = null) =>
         new(Context(), _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
-            auditLog ?? new AuditLog(Context()), NullExecutionMetrics.Instance, NullLogger<OrphanGuardService>.Instance);
+            auditLog ?? new AuditLog(Context()), _eventLog, NullExecutionMetrics.Instance, NullLogger<OrphanGuardService>.Instance);
 
     private static PositionSnapshot Pos(int net) =>
         new(AccountId, VenueContractId.Create(Projectx, Contract), net, new Price(5_000m));
@@ -197,6 +206,72 @@ public class OrphanGuardServiceTests
 
         orphaned.Should().Be(0);
         (await AllStopsAsync()).Should().OnlyContain(s => s.Staging == StopStaging.Native);
+    }
+
+    // --- Event-log journalling (gh#704): the protection transition is put on the event log so the realtime hub
+    //     can alert the operator (gh#645 / gh#222) — a SECONDARY, best-effort write that never undoes the safety
+    //     action. The high-severity log stays the interim alert.
+
+    [Fact]
+    public async Task OrphanAsync_ShouldJournalAProtectionOrphanedEvent_CarryingTheCountAndTheR19Distinction()
+    {
+        await SeedStopAsync(StopStaging.Hidden);
+        await SeedStopAsync(StopStaging.Hidden);
+
+        await Service().OrphanAsync(CancellationToken.None);
+
+        EventDraft draft = _appended.Single(d => d.Type == OrphanGuardService.OrphanedEventType);
+        draft.Source.Should().Be(OrphanGuardService.EventSource);
+        draft.Payload.Should().Contain("\"orphaned\":2");
+        // R-19: the tighter working stop is orphaned, but the native safety stop remains the floor — never "unprotected".
+        draft.Payload.Should().Contain("nativeSafetyStopRemainsFloor");
+    }
+
+    [Fact]
+    public async Task OrphanAsync_ShouldJournalNothing_WhenNoHiddenStopsAreOrphaned()
+    {
+        await SeedStopAsync(StopStaging.Native);
+
+        await Service().OrphanAsync(CancellationToken.None);
+
+        _appended.Should().BeEmpty("no protection changed, so nothing is broadcast");
+    }
+
+    [Fact]
+    public async Task OrphanAsync_ShouldStillOrphanTheStops_WhenTheEventLogAppendFails()
+    {
+        // The event write is SECONDARY: a hub-append failure must never undo the orphaning (the log alert stands).
+        Guid planId = await SeedStopAsync(StopStaging.Hidden);
+        A.CallTo(() => _eventLog.AppendAsync(A<EventDraft>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("event log unreachable"));
+
+        int orphaned = await Service().OrphanAsync(CancellationToken.None);
+
+        orphaned.Should().Be(1);
+        (await ReloadAsync(planId)).Staging.Should().Be(StopStaging.Orphaned);
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldJournalAProtectionRestoredEvent_WhenStopsReArm()
+    {
+        await SeedOrphanedAsync(); // the position is still open (default), so the stop re-arms
+
+        await Service().RearmAsync(CancellationToken.None);
+
+        EventDraft draft = _appended.Single(d => d.Type == OrphanGuardService.RestoredEventType);
+        draft.Payload.Should().Contain("\"rearmed\":1");
+    }
+
+    [Fact]
+    public async Task RearmAsync_ShouldJournalNoRestoredEvent_WhenNothingCouldReArm()
+    {
+        // The venue is unreachable, so the stop stays orphaned — nothing transitioned, so there is nothing to restore.
+        await SeedOrphanedAsync();
+        VenueUnreachable();
+
+        await Service().RearmAsync(CancellationToken.None);
+
+        _appended.Should().NotContain(d => d.Type == OrphanGuardService.RestoredEventType);
     }
 
     // --- Re-arm re-validation (gh#191) ---
