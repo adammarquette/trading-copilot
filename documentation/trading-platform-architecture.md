@@ -336,7 +336,11 @@ Charts**, ADR-0004 — with RSI/MACD indicator subcharts in panes) onto which ev
 entry/stop/target zones, live positions / orders / fills, and the operator's own drawings (R-10). The chart's
 underlying data reaches the client over HTTP (gh#644): `/api/marketdata/bars`, `/indicators` and `/levels` serve
 OHLCV, the **pre-computed** indicator series (R-22's single number, never re-derived in the browser) and the active
-price levels — authenticated (R-18), bounded, and global (not operator-owned). The order
+price levels — authenticated (R-18), bounded, and global (not operator-owned). The **realtime** half is a single
+JWT-authenticated SignalR connection (gh#649, [ADR-0021](adr/0021-realtime-hub-contract.md)): it resumes from its
+last-applied `sequence` on reconnect and dedupes by that cursor, so a drop-and-reconnect is gap-free and
+double-free, and its connection state is **always visible** — a degraded socket is shown degraded, never rendered
+as a live view (R-19, [ADR-0013](adr/0013-failure-recovery-model.md)). The order
 ticket, journal, rulebook, and chat panels sit around it (R-6, R-11). A separate **order-flow / Depth-of-Market**
 visual sits beside it, fed by the depth/trade streams (R-3, R-1) — *why it is bespoke rather than a library, and
 what renders it, are [ADR-0004](adr/0004-charting.md)'s.*

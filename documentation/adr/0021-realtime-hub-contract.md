@@ -73,3 +73,10 @@ poll-until-refresh until then.
   claim) **after** the journal write commits, best-effort so a hub failure can never affect the write.
   `realtimeOrderState` is the **complete** order-status stream (fill-driven PartiallyFilled / Filled *and* terminal
   Cancelled / Rejected); `realtimeFill` carries each execution. The **suggestion** half (gh#684) remains.
+- **Landed** (gh#649): the **client** this contract was written for (SPA `src/realtime/`). A single connection owns
+  reconnect and resume — it rebuilds with `?after=<lastSequence>` on every (re)connect (manual, *not*
+  `withAutomaticReconnect`, whose build-time URL would re-send the original cursor and miss the outage backlog) and
+  dedupes by the monotonic `sequence`, so replay-then-live is a no-op; a `realtimeGap` re-fetches over REST, and the
+  `realtimeCatchUp` bracket tags replayed events as history, not a live safety banner. Owner-scoped order/fill pushes
+  carry no sequence and are live-only, so a *reconnect* re-fetches that state (there is nothing to replay). The
+  connection state is surfaced to the operator (declared-unknown over stale, R-19 / ADR-0013).

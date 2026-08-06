@@ -2,45 +2,49 @@ import Box from '@mui/material/Box';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 
-import { useBffHealth, type HealthStatus } from './useBffHealth';
+import type { RealtimeConnectionState } from '../realtime/connection';
+import { useOptionalRealtime } from '../realtime/RealtimeProvider';
 
-const LABELS: Readonly<Record<HealthStatus, string>> = {
-  checking: 'Checking',
-  reachable: 'Live',
-  unreachable: 'Offline',
+const LABELS: Readonly<Record<RealtimeConnectionState, string>> = {
+  connecting: 'Connecting',
+  live: 'Live',
+  reconnecting: 'Reconnecting',
+  down: 'Offline',
 };
 
-const DESCRIPTIONS: Readonly<Record<HealthStatus, string>> = {
-  checking: 'Checking whether the server is reachable',
-  reachable: 'The server answered /health',
-  unreachable: 'The server did not answer /health',
+const DESCRIPTIONS: Readonly<Record<RealtimeConnectionState, string>> = {
+  connecting: 'Opening the realtime connection',
+  live: 'Realtime connection is live',
+  reconnecting: 'Realtime connection dropped — reconnecting; this view may be stale',
+  down: 'No realtime connection — this view is not live',
+};
+
+const DOT_COLORS: Readonly<Record<RealtimeConnectionState, string>> = {
+  connecting: 'text.disabled',
+  live: 'trading.long',
+  reconnecting: 'warning.main',
+  down: 'trading.critical',
 };
 
 /**
- * The app bar's connection dot -- the wireframe's "● Live" HUD chip.
+ * The app bar's connection dot -- the wireframe's "● Live" HUD chip, now driven by the realtime socket (gh#649).
  *
- * The dot is drawn from the trading semantics, not the accent: a dead connection is a state the
- * operator must read instantly, and ADR-0005 reserves exactly this scale for that. `checking` is a
- * third colour rather than an optimistic green, because a probe that has not answered is not a
- * connection that works.
+ * The dot reads the SignalR connection state, not a `/health` poll: a degraded socket must LOOK degraded (R-19,
+ * ADR-0013 -- declared-unknown over stale-but-confident). `reconnecting` is amber and says the view may be stale;
+ * `down` is the trading-critical red. Green is reserved for a genuinely live stream, never an optimistic default.
+ * Outside a `RealtimeProvider` (which should never happen in the shell) it falls back to `down`, not a false green.
  */
 export function ConnectionStatus() {
-  const health = useBffHealth();
-
-  const dotColor =
-    health === 'reachable'
-      ? 'trading.long'
-      : health === 'unreachable'
-        ? 'trading.critical'
-        : 'text.disabled';
+  const realtime = useOptionalRealtime();
+  const state: RealtimeConnectionState = realtime?.connectionState ?? 'down';
 
   return (
-    <Tooltip title={DESCRIPTIONS[health]}>
+    <Tooltip title={DESCRIPTIONS[state]}>
       <Box
-        // role="status" is both the honest semantics (a polite live region announcing a result that
-        // arrives after paint) and what the test queries by -- no test-only attribute needed.
+        // role="status" is both the honest semantics (a polite live region announcing the connection state) and
+        // what the test queries by -- no test-only attribute needed.
         role="status"
-        data-status={health}
+        data-status={state}
         sx={{
           display: 'flex',
           alignItems: 'center',
@@ -56,10 +60,16 @@ export function ConnectionStatus() {
       >
         <Box
           aria-hidden
-          sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: dotColor, flex: 'none' }}
+          sx={{
+            width: 8,
+            height: 8,
+            borderRadius: '50%',
+            bgcolor: DOT_COLORS[state],
+            flex: 'none',
+          }}
         />
         <Typography variant="caption" sx={{ color: 'text.secondary', whiteSpace: 'nowrap' }}>
-          {LABELS[health]}
+          {LABELS[state]}
         </Typography>
       </Box>
     </Tooltip>

@@ -40,10 +40,11 @@ export default tseslint.config(
     // acceptance asked that a bypassing call "does not compile or is caught by a test"). It takes two rules
     // because the bypass has two shapes: a bare `fetch(...)` identifier, and the member forms
     // `window`/`globalThis`/`self` `.fetch(...)` that resolve to the same global and would slip past the first.
-    // The one sanctioned exception is the anonymous `/health` probe, which wants a raw request rather than an
-    // `ApiResult`; adding another is a deliberate, reviewable edit to this allow-list.
+    // `src/api/client.ts` is the sole sanctioned exception (it owns the bearer); adding another is a deliberate,
+    // reviewable edit to this allow-list. (The realtime client reaches the hub through `@microsoft/signalr`, which
+    // owns its own transport — it never touches `fetch`, so it needs no exception here.)
     files: ['src/**/*.{ts,tsx}'],
-    ignores: ['src/api/client.ts', 'src/health/useBffHealth.ts'],
+    ignores: ['src/api/client.ts'],
     rules: {
       'no-restricted-globals': ['error', { name: 'fetch', message: ROUTE_THROUGH_CLIENT }],
       'no-restricted-properties': [
