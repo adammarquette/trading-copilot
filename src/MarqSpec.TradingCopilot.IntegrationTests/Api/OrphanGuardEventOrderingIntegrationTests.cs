@@ -110,7 +110,14 @@ public class OrphanGuardEventOrderingIntegrationTests : IClassFixture<OrphanGuar
             + "keeps alive and wraps — if that binding ever changes, this guard must be re-pointed at the new one "
             + "rather than silently observing an append the deployment does not perform");
 
-        _factory.Services.GetRequiredService<IEventLog>().Should().BeOfType<ObservingEventLog>(
+        // Resolved from a SCOPE, not from _factory.Services directly. IEventLog is scoped (it holds a scoped
+        // DbContext), so asking the root provider for it throws "Cannot resolve scoped service ... from root
+        // provider" under the host's scope validation — the assertion never even runs. Resolving the way the
+        // production consumers do (OrphanGuardService is itself resolved per scope) is also the only resolve that
+        // proves anything about the chain they actually get.
+        using IServiceScope scope = _factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<IEventLog>().Should().BeOfType<ObservingEventLog>(
             "the host these ordering cases actually run against must resolve the decorator, not a bare log");
     }
 
