@@ -30,9 +30,11 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// <c>timescale/timescaledb-ha:pg17</c>: a genuine append with a log-assigned sequence, that a subsequent
 /// <see cref="IEventLog.ReadAfterAsync"/> returns it with the count and the R-19 flag intact in the payload; that
 /// <c>protection.restored</c> is appended for the transitioning re-arm shapes (re-arm, retire, partial-close) and
-/// withheld on an all-unverifiable pass; that the event is appended only <b>after</b> the <c>StopPlan</c>
-/// transition has durably committed; and — the safety-critical half — that a genuine Postgres-level append
-/// failure leaves the orphaning / re-arm <b>committed</b>, never rolled back.
+/// withheld on an all-unverifiable pass; that once the pass returns, the event and a <b>committed</b>
+/// <c>StopPlan</c> agree (<b>terminal consistency</b> — the append/commit <i>ordering</i> itself is deliberately
+/// <b>not</b> claimed here, see the section comment on those two cases and gh#715); and — the safety-critical
+/// half — that a genuine Postgres-level append failure leaves the orphaning / re-arm <b>committed</b>, never
+/// rolled back.
 /// </para>
 /// <para>
 /// <b>The append-fault tests use a real Postgres fault, not a mock.</b> The QA contract's sole sanctioned test
@@ -229,11 +231,21 @@ public class OrphanGuardEventLogIntegrationTests : IClassFixture<OrphanTestPostg
     }
 
     // ---------------------------------------------------------------------------------------------------------
-    // Ordering — the event is visible only after the safety transition is durable.
+    // Terminal consistency — after the pass, the event and the committed StopPlan agree.
+    //
+    // WHAT THESE TWO DO NOT PROVE: the ORDER of the append against the commit (gh#715). Both cases run the pass
+    // to COMPLETION and only then read, and the end state is identical whether the journal happens before or
+    // after SaveChanges -- so neither observation is ordering-sensitive. Measured, not assumed: reversing
+    // OrphanGuardService's save/journal order in both OrphanAsync and RearmAsync left BOTH of these green
+    // (it reddened Orphan_/Rearm_ShouldStillOrphanTheStops_WhenTheEventLogAppendFails instead, which is a
+    // different property). Per the QA contract's guard discipline, a test that passes with and against the
+    // defect is documentation, not verification -- so these are named and scoped for what they can witness, and
+    // the real ordering guard (which needs to observe DURING the pass, the ObservingGuard shape from gh#667)
+    // is carded as gh#715. Do not cite these as evidence the append follows the commit.
     // ---------------------------------------------------------------------------------------------------------
 
     [Fact]
-    public async Task Orphan_ShouldAppendTheEventOnlyAfterTheStopPlanHasCommitted()
+    public async Task Orphan_ShouldLeaveTheEventAndTheCommittedStopPlanConsistent()
     {
         // Reads the StopPlan back from a BRAND-NEW scope after observing the event — a fresh DbContext is a
         // fresh connection with no shared change tracker, so this is what any independent consumer reacting to
@@ -250,12 +262,12 @@ public class OrphanGuardEventLogIntegrationTests : IClassFixture<OrphanTestPostg
 
         (await StagingAsync(planId)).Should().Be(
             StopStaging.Orphaned,
-            "the event is appended only after the StopPlan orphan has committed — a consumer that reacts to "
-            + "protection.orphaned by reading the StopPlan must never observe it still Hidden");
+            "once the pass returns, a consumer reacting to protection.orphaned reads a COMMITTED Orphaned plan — "
+            + "the two agree in the terminal state (the ordering itself is gh#715)");
     }
 
     [Fact]
-    public async Task Rearm_ShouldAppendTheEventOnlyAfterTheStopPlanHasCommitted()
+    public async Task Rearm_ShouldLeaveTheEventAndTheCommittedStopPlanConsistent()
     {
         Fixture fixture = await FreshAccountAsync();
         Guid orderId = await SeedOrderAsync(fixture);
@@ -270,8 +282,8 @@ public class OrphanGuardEventLogIntegrationTests : IClassFixture<OrphanTestPostg
 
         (await StagingAsync(planId)).Should().Be(
             StopStaging.Hidden,
-            "the restored event is appended only after the re-arm has committed — a consumer must never observe "
-            + "protection.restored for a stop still recorded Orphaned");
+            "once the pass returns, a consumer reacting to protection.restored reads a COMMITTED re-armed plan — "
+            + "the two agree in the terminal state (the ordering itself is gh#715)");
     }
 
     // ---------------------------------------------------------------------------------------------------------
