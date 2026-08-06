@@ -177,6 +177,12 @@ jobs:
   # failure this job exists to prevent.
   build-image:
     name: build image (no publish)
+    # Gated on build-test purely to avoid burning Buildx minutes on a PR that is already broken: the image build
+    # consumes nothing build-test produces and targets an unrelated failure mode (a Docker COPY subset, not a
+    # full-checkout `dotnet build`), so this is a cost choice, not a correctness one. The trade is that the
+    # image-break signal arrives after the workflow's longest job rather than in parallel with `client` and
+    # `integration-test` -- drop this line if that feedback delay ever costs more than the wasted minutes would
+    # (PR #694 review).
     needs: build-test
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
