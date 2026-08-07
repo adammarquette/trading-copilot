@@ -1,3 +1,5 @@
+using MarqSpec.TradingCopilot.Domain.Venue;
+
 namespace MarqSpec.TradingCopilot.Domain;
 
 /// <summary>
@@ -50,6 +52,31 @@ public sealed record InstrumentSpec
     public decimal LossPerContract(Price entry, Price exit)
     {
         return Math.Abs(entry.Value - exit.Value) * PointValue;
+    }
+
+    /// <summary>
+    /// The <b>signed</b> realized money a round trip of <paramref name="size"/> contract(s) made or lost, having
+    /// entered <paramref name="side"/> at <paramref name="entry"/> and exited at <paramref name="exit"/>. Positive
+    /// is a profit, negative a loss. Unlike <see cref="LossPerContract"/> (absolute, for direction-agnostic sizing),
+    /// this is <b>direction-aware</b> — a long profits when the exit is above the entry, a short when it is below —
+    /// so it is the realized P&amp;L the journal records (gh#731). Exact <see langword="decimal"/>: money is never
+    /// rounded here.
+    /// </summary>
+    /// <param name="entry">The average entry price.</param>
+    /// <param name="exit">The average exit price.</param>
+    /// <param name="side">The side the position <b>entered</b> — <see cref="OrderSide.Buy"/> is long, <see cref="OrderSide.Sell"/> is short.</param>
+    /// <param name="size">The number of contracts closed; must be positive.</param>
+    /// <returns>The signed realized P&amp;L in account currency.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="size"/> is not positive.</exception>
+    public decimal RealizedPnL(Price entry, Price exit, OrderSide side, int size)
+    {
+        if (size <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(size), size, "Size must be positive.");
+        }
+
+        int sideSign = side == OrderSide.Buy ? 1 : -1;
+        return (exit.Value - entry.Value) * sideSign * size * PointValue;
     }
 
     /// <summary>The notional value one contract represents at <paramref name="price"/>.</summary>
