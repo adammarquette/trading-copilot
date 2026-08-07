@@ -168,8 +168,16 @@ public class AccountEntryConcurrencyIntegrationTests : IClassFixture<StubbedVenu
             firePassReturnedInsideTheLock = firePass.IsCompleted;
         });
 
-        using HttpResponseMessage take = await TakeAsync(client, staged);
-        VenueFactory.OnPlaceOrder(null);
+        // Unconditional reset, for the reason spelled out in RaceFromInsideTheFirstTransmitAsync: this callback is
+        // fixture-lifetime, not test-lifetime, so a throw here would leak it into the next test in the class.
+        try
+        {
+            using HttpResponseMessage take = await TakeAsync(client, staged);
+        }
+        finally
+        {
+            VenueFactory.OnPlaceOrder(null);
+        }
 
         launched.Should().BeTrue("the interleave must have run — otherwise nothing was raced");
         firePass.Should().NotBeNull();
@@ -192,6 +200,76 @@ public class AccountEntryConcurrencyIntegrationTests : IClassFixture<StubbedVenu
                 ConditionalStatus.Pending,
                 "a skipped conditional stays re-decidable — a contended pass must not resolve or strand it");
         });
+    }
+
+    [Fact]
+    public async Task ASendRacingAFire_ShouldTransmitExactlyOne_AndNeverOverlap()
+    {
+        // gh#724 case 3, and it runs the contention the OTHER WAY ROUND from case 4 on purpose. Case 4 has the take
+        // holding and the fire arriving, so it proves the fire's try-lock fails fast. This one has the FIRE holding
+        // and the operator's send arriving — the direction that proves a fired conditional is a real account entry
+        // that the operator path must serialize behind (gh#589), not merely a caller that gives way to one.
+        //
+        // Nothing already in the suite covers it. Case 2 races two operator paths, and
+        // VenueRefusalOutcomeIntegrationTests races a REFUSED fire's revert against a take — a revert, not a healthy
+        // fire's transmit. A guard that held the lock only on the operator paths would pass every one of those and
+        // fail here.
+        HttpClient client = await AuthenticatedClientAsync();
+        Guid accountId = await SetupTradeableAccountAsync(client, "Topstep-SendVsFire");
+        await DeclareRiskProfileAsync(client, accountId);
+        (Guid conditionalId, string contractKey) = await ArmConditionalAsync(client, accountId, "MYM", trigger: 5_010m);
+
+        VenueFactory.ClearPlaceOrderFaults();
+        VenueFactory.ResetPlaceOrderCallSpans();
+        int restingBefore = VenueFactory.PlacedVenueOrderIds.Count;
+
+        Task<HttpResponseMessage>? send = null;
+        bool sendFinishedInsideTheLock = false;
+        bool launched = false;
+
+        VenueFactory.OnPlaceOrder(async () =>
+        {
+            if (launched)
+            {
+                return;
+            }
+
+            launched = true;
+            send = client.PostAsJsonAsync($"/accounts/{accountId}/orders", ValidProposal("MES"));
+
+            // Sampled, never awaited here — awaiting the blocking acquisition from inside the holder's own transmit
+            // would deadlock the test rather than fail it, exactly as in the sibling cases.
+            await Task.Delay(TimeSpan.FromMilliseconds(750));
+            sendFinishedInsideTheLock = send.IsCompleted;
+        });
+
+        int acted;
+        try
+        {
+            acted = await FireQuoteAsync(contractKey, bid: 5_009m, ask: 5_010m, Now);
+        }
+        finally
+        {
+            VenueFactory.OnPlaceOrder(null);
+        }
+
+        acted.Should().Be(1, "the conditional must actually have fired — otherwise nothing was raced");
+        launched.Should().BeTrue("the interleave must have run — otherwise nothing was raced");
+        send.Should().NotBeNull();
+
+        using HttpResponseMessage sendResponse = await send!;
+
+        sendFinishedInsideTheLock.Should().BeFalse(
+            "a direct send must WAIT on the account-entry guard while a fired conditional's transmit is in flight; "
+            + "if it ran through, the fire and the send each composed the same flat-account snapshot and both could "
+            + "reach the venue at twice the approved risk (gh#531)");
+
+        AssertTransmitsNeverOverlapped();
+
+        VenueFactory.PlacedVenueOrderIds.Count.Should().BeLessThanOrEqualTo(
+            restingBefore + 1,
+            "at most ONE of the racing fire and send may rest at the venue — the loser is refused, not queued into a "
+            + "second transmit");
     }
 
     // =================================================================================================================
@@ -224,8 +302,18 @@ public class AccountEntryConcurrencyIntegrationTests : IClassFixture<StubbedVenu
             finishedInsideTheLock = peerCall.IsCompleted;
         });
 
-        using HttpResponseMessage _ = await first();
-        VenueFactory.OnPlaceOrder(null);
+        // The reset is UNCONDITIONAL. The venue factory comes from the shared IClassFixture, so this callback
+        // outlives the test method: if first() throws, a reset left on the success path never runs and the callback
+        // leaks into whichever test executes next, silently turning its first PlaceOrderAsync into an unwanted
+        // peer-launch. That is a spectacularly confusing failure to diagnose in a suite whose whole job is races.
+        try
+        {
+            using HttpResponseMessage _ = await first();
+        }
+        finally
+        {
+            VenueFactory.OnPlaceOrder(null);
+        }
 
         peerCall.Should().NotBeNull("the interleave must have run — otherwise nothing was raced");
         return (await peerCall!, finishedInsideTheLock);
