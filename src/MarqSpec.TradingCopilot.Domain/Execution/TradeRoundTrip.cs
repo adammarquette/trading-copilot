@@ -1,0 +1,102 @@
+using MarqSpec.TradingCopilot.Domain.Venue;
+
+namespace MarqSpec.TradingCopilot.Domain.Execution;
+
+/// <summary>
+/// One execution feeding a round trip — venue facts only (gh#731). The composition below reads nothing else, so
+/// it stays a pure function over fills and can be tested without a database or a venue.
+/// </summary>
+/// <param name="Side">The side this execution traded.</param>
+/// <param name="Price">The execution price.</param>
+/// <param name="Size">The executed size in contracts; positive.</param>
+/// <param name="ExecutedAt">When the execution happened.</param>
+public readonly record struct RoundTripFill(OrderSide Side, decimal Price, int Size, DateTimeOffset ExecutedAt)
+{
+    /// <summary>Fees and commissions attributed to this execution.</summary>
+    public decimal Fees { get; init; }
+}
+
+/// <summary>
+/// A composed round trip — the entry and exit terms a <c>Trade</c> journals (gh#731).
+/// </summary>
+/// <param name="EntrySide">The side the position <b>entered</b>.</param>
+/// <param name="EntryPrice">The size-weighted average entry price.</param>
+/// <param name="ExitPrice">The size-weighted average exit price.</param>
+/// <param name="Size">The number of contracts round-tripped.</param>
+/// <param name="ClosedAt">When the closing execution happened.</param>
+/// <param name="Fees">The total fees across both legs.</param>
+public sealed record RoundTrip(
+    OrderSide EntrySide,
+    decimal EntryPrice,
+    decimal ExitPrice,
+    int Size,
+    DateTimeOffset ClosedAt,
+    decimal Fees);
+
+/// <summary>
+/// Collapses a contract's executions into the single <b>enter → exit → flat</b> round trip the journal records
+/// (gh#731, R-8/R-9).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Foundational scope, deliberately.</b> This composes the round trip whose two legs <b>balance</b> — the same
+/// number of contracts out as in. Scale-in with a partial exit, and stop-and-reverse (flat → re-open opposite),
+/// are <b>refused</b> rather than guessed at: they need a pairing policy (FIFO / average / per-leg) that gh#731
+/// defers to a follow-up. A refusal writes no <c>Trade</c>, which is the honest outcome — a wrong
+/// <c>RealizedPnL</c> feeds the daily governor and would silently mis-state the operator's headroom.
+/// </para>
+/// <para>
+/// The entry leg is the side of the <b>earliest</b> execution; everything on that side is entry, everything on the
+/// other side is exit. Both averages are <b>size-weighted</b> and exact in <see langword="decimal"/>.
+/// </para>
+/// </remarks>
+public static class TradeRoundTrip
+{
+    /// <summary>Composes the balanced round trip described by <paramref name="fills"/>, if there is one.</summary>
+    /// <param name="fills">The contract's executions, in any order.</param>
+    /// <param name="roundTrip">The composed round trip, or <see langword="null"/> when the fills do not form one.</param>
+    /// <returns><see langword="true"/> when a balanced round trip was composed.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="fills"/> is <see langword="null"/>.</exception>
+    public static bool TryCompose(IReadOnlyCollection<RoundTripFill> fills, out RoundTrip? roundTrip)
+    {
+        ArgumentNullException.ThrowIfNull(fills);
+
+        roundTrip = null;
+        if (fills.Count == 0)
+        {
+            return false;
+        }
+
+        // The entry side is whichever side traded FIRST; the opposite side closes it.
+        OrderSide entrySide = fills.OrderBy(fill => fill.ExecutedAt).First().Side;
+
+        List<RoundTripFill> entries = [.. fills.Where(fill => fill.Side == entrySide)];
+        List<RoundTripFill> exits = [.. fills.Where(fill => fill.Side != entrySide)];
+        if (exits.Count == 0)
+        {
+            return false; // never closed -- the position is still open
+        }
+
+        int entrySize = entries.Sum(fill => fill.Size);
+        int exitSize = exits.Sum(fill => fill.Size);
+
+        // Unbalanced means this is NOT the simple round trip: a scale-in mid-flight, a partial exit, or a
+        // reversal. Refuse -- the pairing policy those need is a documented follow-up, not a guess here.
+        if (entrySize != exitSize || entrySize == 0)
+        {
+            return false;
+        }
+
+        roundTrip = new RoundTrip(
+            entrySide,
+            SizeWeightedAverage(entries, entrySize),
+            SizeWeightedAverage(exits, exitSize),
+            entrySize,
+            exits.Max(fill => fill.ExecutedAt),
+            fills.Sum(fill => fill.Fees));
+        return true;
+    }
+
+    private static decimal SizeWeightedAverage(List<RoundTripFill> leg, int totalSize) =>
+        leg.Sum(fill => fill.Price * fill.Size) / totalSize;
+}
