@@ -144,11 +144,17 @@ public class ContextSourceOutageIntegrationTests : IClassFixture<ContextOutageTe
 
         // And the outage never stopped: the retries kept coming THROUGHOUT the tradeable work above, so none of it
         // happened in a window where context had quietly given up and the two feeds were no longer contending at
-        // all. Measured against the count taken when the outage was first proven, not against a bare constant.
-        _factory.ContextTransport.SubscribeAttempts.Should().BeGreaterThan(
-            contextAttemptsWithOutageProven,
-            "the context supervisor keeps retrying for the whole run — the outage is a live condition throughout "
-            + "the tradeable path's work, not a blip that had ended before the quotes flowed");
+        // all. Measured against the count taken when the outage was first proven, not against a bare constant —
+        // and WAITED FOR (gh#739), not sampled once. The supervisor's retry cadence is a free-running background
+        // loop with no relationship to how long steps 2-5 happen to take, so a single point-in-time comparison can
+        // land exactly on the boundary on a slow/busy runner even though the property itself — "still retrying" —
+        // holds; that was gh#705's flake. The guard still fails on the defect it exists to catch: a supervisor
+        // that has quietly stopped retrying will never produce another attempt, and this poll times out.
+        await WaitUntilAsync(
+            () => Task.FromResult(_factory.ContextTransport.SubscribeAttempts > contextAttemptsWithOutageProven),
+            "the context supervisor to make at least one MORE resubscribe attempt beyond the count taken when the "
+            + "outage was first proven — the outage is a live condition throughout the tradeable path's work, not "
+            + "a blip that had ended before the quotes flowed");
     }
 
     // =============================================================================================================
