@@ -87,6 +87,22 @@ public enum SuppressReason
     /// Distinct from <see cref="BudgetExhausted"/>, where no call is made at all.
     /// </summary>
     EscalationDeclined = 7,
+
+    /// <summary>
+    /// The R-4 suggestion throttle (gh#551) suppressed the setup because the account's <b>daily-drawdown governor is
+    /// reached</b> — no new entries; manage or flatten only. Decided <b>before</b> the reviewer, so no LLM call and no
+    /// spend; the operator is told the co-pilot went quiet and why. Advisory, ahead of the execution gate — a
+    /// suggestion carries no risk, so this never substitutes for the gate.
+    /// </summary>
+    GovernorReached = 8,
+
+    /// <summary>
+    /// The R-4 suggestion throttle (gh#551) suppressed the setup because the account's <b>daily profit target is
+    /// reached and stand-down is on</b> (the R-5 consistency discipline) — no new entries this session. Decided before
+    /// the reviewer, so no LLM call and no spend. Distinct from <see cref="GovernorReached"/>: headroom may be ample,
+    /// the operator has simply chosen to stand down on the target.
+    /// </summary>
+    DailyTargetStandDown = 9,
 }
 
 /// <summary>

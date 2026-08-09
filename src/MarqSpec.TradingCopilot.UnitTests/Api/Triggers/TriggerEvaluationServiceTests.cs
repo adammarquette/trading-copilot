@@ -10,6 +10,7 @@ using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Notifications;
+using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Triggers;
 using MarqSpec.TradingCopilot.Domain.Venue;
@@ -67,11 +68,12 @@ public class TriggerEvaluationServiceTests
     // Every existing test defaults to an INERT governor (a bare GovernorOptions has DailyBudgetUsd null => no cap),
     // so behaviour is byte-for-byte unchanged from before gh#448. The gh#448 cases pass a configured GovernorOptions.
     private TriggerEvaluationService Service(
-        IAiUsageLedger? ledger = null, GovernorOptions? governor = null, IReviewEnrichmentSource? enrichment = null) => new(
+        IAiUsageLedger? ledger = null, GovernorOptions? governor = null, IReviewEnrichmentSource? enrichment = null,
+        SuggestionOptions? suggestionOptions = null) => new(
         Context(), Options, _indicators, _notifications, _reviewer, enrichment ?? _enrichment, ledger ?? _ledger,
-        _llmMetrics, _deadlines, Microsoft.Extensions.Options.Options.Create(new SuggestionOptions()), new AiSpendGovernor(),
+        _llmMetrics, _deadlines, Microsoft.Extensions.Options.Options.Create(suggestionOptions ?? new SuggestionOptions()), new AiSpendGovernor(),
         Microsoft.Extensions.Options.Options.Create(governor ?? new GovernorOptions()),
-        _suggestionNotifier, NullLogger<TriggerEvaluationService>.Instance);
+        _suggestionNotifier, new SuggestionThrottle(), NullLogger<TriggerEvaluationService>.Instance);
 
     // The reviewer returns an AgentReview: the outcome the route acts on plus the LLM-call cost(s) the scan ledgers,
     // one row per billed call (gh#449). Passing no costs defaults to a single _sampleCost, so every EXISTING caller
@@ -1040,7 +1042,7 @@ public class TriggerEvaluationServiceTests
         TriggerEvaluationService service = new ThrowingReadService(
             Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, _llmMetrics, _deadlines, Microsoft.Extensions.Options.Options.Create(new SuggestionOptions()), new AiSpendGovernor(),
             Microsoft.Extensions.Options.Options.Create(new GovernorOptions { DailyBudgetUsd = 10m }),
-            _suggestionNotifier, NullLogger<TriggerEvaluationService>.Instance);
+            _suggestionNotifier, new SuggestionThrottle(), NullLogger<TriggerEvaluationService>.Instance);
 
         Func<Task> act = () => service.ScanAsync(Now, CancellationToken.None);
 
@@ -1653,6 +1655,297 @@ public class TriggerEvaluationServiceTests
         sell.Version.Should().Be(1, "an independent chain starts at version 1, superseding nothing");
     }
 
+    // =====================================================================================================
+    // R-4 SUGGESTION THROTTLE (gh#551, ADR-0007/ADR-0008): the scan consults the pure SuggestionThrottle (gh#588)
+    // BEFORE it wakes the reviewer, fed the account's daily-drawdown headroom + daily-target state read from THIS
+    // owner's own R-20-filtered context. As headroom depletes it issues fewer, higher-conviction suggestions; at the
+    // governor or the daily-target stand-down it SUPPRESSES new entries (advisory, ahead of the execution gate). It
+    // can only ever REDUCE or SUPPRESS issuance -- never increase it -- and a model-authored confidence can never lift
+    // the headroom-derived cap. Inert until SuggestionOptions.ThrottleEnabled, so every test above is unchanged.
+    // =====================================================================================================
+
+    // A SuggestionOptions with the throttle turned ON. FullWindowCap defaults to 1 here so a Throttled decision's cap is
+    // deterministically 1 (max(1, round(1 * bandFraction)) == 1 for any in-band headroom) -- a cap test can seed exactly
+    // one prior suggestion and assert the next is refused without depending on the linear cap-scaling arithmetic.
+    private static SuggestionOptions ThrottleOptions(
+        decimal thresholdFraction = 0.5m, int fullWindowCap = 1, int convictionFloor = 70) =>
+        new()
+        {
+            ThrottleEnabled = true,
+            ThrottleThresholdFraction = thresholdFraction,
+            ThrottleFullWindowCap = fullWindowCap,
+            ThrottleConvictionFloor = convictionFloor,
+        };
+
+    // Seeds the one RiskProfile row per account the throttle reads its governor / target / stand-down from. Only the
+    // four fields the throttle consults vary; the rest are valid filler (the in-memory provider enforces no DB checks).
+    private async Task SeedRiskProfileAsync(
+        Guid accountId,
+        decimal governor = 1_000m,
+        decimal? dailyProfitTarget = null,
+        bool stopForDayAtProfitTarget = false,
+        decimal? dailyLossLimit = null,
+        Guid? owner = null)
+    {
+        Guid ownerId = owner ?? _operator;
+        await using TradingCopilotDbContext context = Context(ownerId);
+        context.RiskProfiles.Add(new RiskProfileRecord
+        {
+            Id = Guid.NewGuid(),
+            UserId = ownerId,
+            AccountId = accountId,
+            StartingBalance = 50_000m,
+            DailyLossLimit = dailyLossLimit,
+            FloorSource = FloorSource.FirmImposed,
+            TrailingMode = TrailingMode.EndOfDay,
+            TrailingAmount = 2_000m,
+            PerTradeRiskFraction = 0.1m,
+            TargetRewardRatio = 1.5m,
+            MaxDrawdownPerTrade = 300m,
+            DailyDrawdownGovernor = governor,
+            DailyProfitTarget = dailyProfitTarget,
+            StopForDayAtProfitTarget = stopForDayAtProfitTarget,
+            SizingBasis = SizingBasis.ActualStop,
+            MaxContractsPerOrder = 0,
+        });
+        await context.SaveChangesAsync();
+    }
+
+    // Seeds a CLOSED trade whose realized P&L feeds the day's loss/profit the headroom read consumes: positive = profit,
+    // negative = loss. Closed at Now, so it lands in the same Central trading day the throttle counts issuance over.
+    private async Task SeedClosedTradeAsync(Guid accountId, decimal realizedPnL, Guid? owner = null)
+    {
+        Guid ownerId = owner ?? _operator;
+        await using TradingCopilotDbContext context = Context(ownerId);
+        context.Trades.Add(new Trade
+        {
+            Id = Guid.NewGuid(),
+            UserId = ownerId,
+            AccountId = accountId,
+            Instrument = "CON.F.US.ES.U26",
+            Side = OrderSide.Buy,
+            Size = 1,
+            EntryPrice = 100m,
+            ExitPrice = 100m + realizedPnL,
+            RealizedPnL = realizedPnL,
+            Mode = TradingMode.Practice,
+            ClosedAt = Now,
+        });
+        await context.SaveChangesAsync();
+    }
+
+    // Seeds one existing ACTIVE suggestion for the account today, so a throttled window's issued-count is non-zero.
+    private async Task SeedSuggestionAsync(Guid accountId, Guid? owner = null)
+    {
+        Guid ownerId = owner ?? _operator;
+        await using TradingCopilotDbContext context = Context(ownerId);
+        context.Suggestions.Add(new Suggestion
+        {
+            Id = Guid.NewGuid(),
+            UserId = ownerId,
+            AccountId = accountId,
+            Instrument = Symbol,
+            Side = OrderSide.Buy,
+            Size = 1,
+            EntryPrice = 100m,
+            StopPrice = 99m,
+            TargetPrice = 103m,
+            Mode = TradingMode.Practice,
+            State = SuggestionState.Active,
+            CreatedAt = Now,
+            Rationale = "seeded incumbent",
+            CitedIndicator = Indicator,
+            CitedPeriod = Period,
+            CitedResolutionMinutes = Resolution,
+            Confidence = 80,
+            ExpiresAt = Now.AddHours(1),
+        });
+        await context.SaveChangesAsync();
+    }
+
+    // (a) OPT-OUT NO-OP: the flag is the master switch. Even with a fully blown governor (a full day's loss seeded),
+    // a DISABLED throttle proposes exactly as before -- proving nothing in the wiring fires until an operator opts in.
+    [Fact]
+    public async Task ScanAsync_ShouldProposeNormally_WhenTheThrottleIsDisabled()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -1_000m); // governor fully spent -- but the throttle is OFF
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        await Service().ScanAsync(Now, CancellationToken.None); // default SuggestionOptions => ThrottleEnabled false => inert
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
+        (await Context().Suggestions.CountAsync()).Should().Be(1);
+    }
+
+    // (b) NO GOVERNOR TO THROTTLE AGAINST: enabled, but the account declared no RiskProfile -> inert (FullThrottle), the
+    // same posture as an account that set no limit. Proposes normally.
+    [Fact]
+    public async Task ScanAsync_ShouldProposeNormally_WhenEnabledButTheAccountHasNoRiskProfile()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
+        (await Context().Suggestions.CountAsync()).Should().Be(1);
+    }
+
+    // (c) HEALTHY HEADROOM -> FULL: enabled, a declared governor, and a GREEN day (no realized loss) -> headroom == 1,
+    // at/above the threshold, so the regime is Full and issuance is unthrottled. Proposes normally.
+    [Fact]
+    public async Task ScanAsync_ShouldProposeNormally_WhenHeadroomIsHealthy()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m); // no seeded loss => dayLoss 0 => headroom 1.0
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
+        (await Context().Suggestions.CountAsync()).Should().Be(1);
+    }
+
+    // (d) GOVERNOR REACHED -> SUPPRESS BEFORE SPEND: the day's realized loss equals the governor, so headroom is 0. The
+    // reviewer is NOT called (no LLM call, no spend row), NOTHING is suggested, yet a fire is still a fire (journaled +
+    // debounced to Fired) and the operator gets exactly one "Suggestions paused" advisory. The safety-critical shape:
+    // the throttle caps WHETHER a call happens, one layer ahead of and cheaper than the AI-spend governor.
+    [Fact]
+    public async Task ScanAsync_ShouldSuppressBeforeSpendAndAdvise_WhenTheGovernorIsReached()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -1_000m); // dayLoss 1000 == governor => headroom 0
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "must never be reached", 99));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustNotHaveHappened();
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.AiUsage.IgnoreQueryFilters().AnyAsync()).Should().BeFalse();   // no call => no spend row
+        (await reload.Suggestions.AnyAsync()).Should().BeFalse();                    // nothing issued
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();          // a fire is still a fire
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Notify && n.Title.Contains("Suggestions paused")),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    // (e) DAILY-TARGET STAND-DOWN -> SUPPRESS, INDEPENDENT OF HEADROOM: headroom is fully healthy (no loss), but the
+    // daily profit target is hit and stand-down is ON -- the R-5 consistency discipline. Suppressed before the reviewer,
+    // with a distinct "standing down" advisory, proving the stand-down is not a headroom effect.
+    [Fact]
+    public async Task ScanAsync_ShouldSuppressBeforeSpendAndAdvise_WhenTheDailyTargetStandDownIsOn()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m, dailyProfitTarget: 500m, stopForDayAtProfitTarget: true);
+        await SeedClosedTradeAsync(accountId, realizedPnL: 600m); // green day AND past the 500 target => stand down
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "must never be reached", 99));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustNotHaveHappened();
+        (await Context().Suggestions.AnyAsync()).Should().BeFalse();
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n => n.Title.Contains("Suggestions paused") && n.Body.Contains("standing down")),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    // (f) TARGET REACHED but STAND-DOWN OFF -> PROPOSE: the same green-past-target day, but the operator did not enable
+    // stand-down. Pins that DecideThrottleAsync feeds the RAW target-reached (not pre-ANDed with the flag) so the policy
+    // applies the flag itself -- otherwise this day would wrongly suppress.
+    [Fact]
+    public async Task ScanAsync_ShouldProposeNormally_WhenTheDailyTargetIsReachedButStandDownIsOff()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m, dailyProfitTarget: 500m, stopForDayAtProfitTarget: false);
+        await SeedClosedTradeAsync(accountId, realizedPnL: 600m); // past target, but stand-down is OFF
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
+        (await Context().Suggestions.CountAsync()).Should().Be(1);
+    }
+
+    // (g) THROTTLED + WINDOW CAP REACHED -> REVIEW, THEN REFUSE: in-band headroom (0.05 of a 0.5 threshold) throttles to
+    // a cap of 1; one suggestion already exists this window. Unlike a suppression, the reviewer IS still called (the
+    // throttle only caps ISSUANCE here, not whether review runs) -- but the proposal is not staged, and the incumbent is
+    // left standing (the refusal returns before the supersede). So the window count stays at the one seeded row.
+    [Fact]
+    public async Task ScanAsync_ShouldReviewButNotStage_WhenThrottledAndTheWindowCapIsReached()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -950m); // headroom 0.05 -> Throttled, cap 1 (FullWindowCap 1)
+        await SeedSuggestionAsync(accountId);                      // the window already holds its one admitted suggestion
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "another setup", 80));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
+        (await Context().Suggestions.CountAsync()).Should().Be(1); // only the seeded incumbent -- the new one was refused
+    }
+
+    // (h) THE R-4 INVARIANT -- CONFIDENCE CANNOT LIFT THE CAP: identical to (g) but the proposal comes in at MAXIMUM
+    // confidence. The per-window cap is a function of HEADROOM alone; a model-authored 100 can drop a candidate below a
+    // floor but can never inflate its way past the deterministic cap. Still refused.
+    [Fact]
+    public async Task ScanAsync_ShouldRefuseTheSuggestion_EvenAtMaximumConfidence_WhenTheWindowCapIsReached()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -950m);
+        await SeedSuggestionAsync(accountId);
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "maximum conviction", 100));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        (await Context().Suggestions.CountAsync()).Should().Be(1); // the model cannot buy its way past the headroom cap
+    }
+
+    // (i) THROTTLED + UNDER CAP -> THE CONVICTION FLOOR FILTERS: in-band headroom (cap 1, floor 70) with an EMPTY window.
+    // A candidate at/above the floor is staged; one below it is refused. Confidence is a one-way filter -- it can drop a
+    // candidate, never lift the cap (that is (h)). Asserts the resulting issued count both ways.
+    [Theory]
+    [InlineData(80, 1)] // >= floor 70 and under the cap of 1 -> admitted
+    [InlineData(50, 0)] // <  floor 70 -> refused, even under the cap
+    public async Task ScanAsync_ShouldApplyTheConvictionFloor_WhenThrottledAndUnderCap(int confidence, int expectedIssued)
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -950m); // headroom 0.05 -> Throttled, cap 1, floor 70
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "in-band", confidence));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
+        (await Context().Suggestions.CountAsync()).Should().Be(expectedIssued);
+    }
+
     /// <summary>
     /// The scan with its platform-wide spend read forced to FAULT — proves the governor is FAIL-OPEN: a spend-read
     /// blip lets the pass run un-gated (the reviewer still wakes), the deliberate INVERSE of the fail-closed risk gate.
@@ -1675,8 +1968,9 @@ public class TriggerEvaluationServiceTests
             IAiSpendGovernor governor,
             IOptions<GovernorOptions> governorOptions,
             ISuggestionRealtimeNotifier suggestionNotifier,
+            ISuggestionThrottle throttle,
             ILogger<TriggerEvaluationService> logger)
-            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, logger)
+            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, throttle, logger)
         {
         }
 
