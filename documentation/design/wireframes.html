@@ -1880,6 +1880,7 @@
       <div class="set-body">
         <h3>Risk tolerance</h3>
         <div class="sub">Seeds position sizing and benchmarks your reward-to-risk; enforced by the risk gate before any order is sent.</div>
+        <div class="sub"><b>Built · gh#658:</b> the R-5 risk profile — daily governor, consistency target, loss floor, per-trade sizing and entry default — plus today's live headroom, over <span class="mono">/accounts/{id}/risk</span> and <span class="mono">/risk/headroom</span>, as a <b>declares-not-enforces</b> surface (the gate stops a trade, not this screen). <b>Kill-switch action</b> and <b>auto-flatten times</b> drawn in this panel are their own endpoints and stay their own surfaces; <b>AI usage &amp; spend</b> (no read endpoint yet) and <b>News &amp; relevance</b> (the news surface, R-2) are follow-ups.</div>
         <div class="field"><div class="fl"><div class="fn">Risk per trade</div><div class="fd">% of account risked to the actual stop — seeds the ticket size</div></div><div class="fc"><span class="inp">1.0 %</span></div></div>
         <div class="field"><div class="fl"><div class="fn">Target reward : risk</div><div class="fd">reward 1.5× the risk — your R:R discipline and the central KPI benchmark</div></div><div class="fc"><span class="rr-inp"><span class="accent2">1.5</span> : 1</span></div></div>
         <div class="field"><div class="fl"><div class="fn">Max drawdown / trade</div><div class="fd">the per-trade hard cap — where the always-native safety stop sits</div></div><div class="fc"><span class="inp">$700</span></div></div>
