@@ -7,6 +7,7 @@ import RuleIcon from '@mui/icons-material/Rule';
 import SettingsIcon from '@mui/icons-material/Settings';
 import type { ComponentType } from 'react';
 
+import { SettingsSurface } from '../settings/SettingsSurface';
 import { SuggestionsSurface } from '../suggestions/SuggestionsSurface';
 
 /**
@@ -105,6 +106,9 @@ export const destinations: readonly Destination[] = [
     requirement: 'R-5 · R-14',
     Icon: SettingsIcon,
     tier: 'secondary',
+    // The R-5 risk profile + headroom half is built (gh#658); AI spend and news relevance are their own increments,
+    // so the surface holds what exists and does not mock up what does not.
+    Surface: SettingsSurface,
   },
 ];
 
