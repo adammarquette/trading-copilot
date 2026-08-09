@@ -15,7 +15,7 @@ describe('getBars', () => {
   it('reads the bars route with the venue/instrument/resolution/window as query params', async () => {
     requestMock.mockResolvedValue({
       ok: true,
-      data: { venue: 'topstepx', instrument: 'ES', resolution: 1, points: [] },
+      data: { venue: 'topstepx', instrument: 'ES', resolutionMinutes: 1, bars: [] },
     });
 
     await getBars('topstepx', 'ES', 1, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');
@@ -33,11 +33,11 @@ describe('getBars', () => {
   });
 
   it('returns the bar series on success', async () => {
-    const series = {
+    const wireSeries = {
       venue: 'topstepx',
       instrument: 'ES',
-      resolution: 1,
-      points: [
+      resolutionMinutes: 1,
+      bars: [
         {
           bucketStart: '2026-01-01T00:00:00Z',
           open: 5300,
@@ -48,11 +48,16 @@ describe('getBars', () => {
         },
       ],
     };
-    requestMock.mockResolvedValue({ ok: true, data: series });
+    requestMock.mockResolvedValue({ ok: true, data: wireSeries });
 
     await expect(getBars('topstepx', 'ES', 1, 'a', 'b')).resolves.toEqual({
       ok: true,
-      data: series,
+      data: {
+        venue: 'topstepx',
+        instrument: 'ES',
+        resolution: 1,
+        points: wireSeries.bars,
+      },
     });
   });
 
