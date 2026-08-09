@@ -1,3 +1,4 @@
+import { ThemeProvider, createTheme } from '@mui/material/styles';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -7,9 +8,15 @@ const { chartMock } = vi.hoisted(() => {
   const setData = vi.fn();
   const remove = vi.fn();
   const fitContent = vi.fn();
+  const applyOptions = vi.fn();
   const addSeries = vi.fn(() => ({ setData }));
-  const createChart = vi.fn(() => ({ addSeries, remove, timeScale: () => ({ fitContent }) }));
-  return { chartMock: { setData, remove, fitContent, addSeries, createChart } };
+  const createChart = vi.fn(() => ({
+    addSeries,
+    remove,
+    applyOptions,
+    timeScale: () => ({ fitContent }),
+  }));
+  return { chartMock: { setData, remove, fitContent, applyOptions, addSeries, createChart } };
 });
 vi.mock('lightweight-charts', () => ({
   createChart: chartMock.createChart,
@@ -110,6 +117,65 @@ describe('MarketChart', () => {
     render(<MarketChart venue="topstepx" instrument="ES" resolution={1} />);
 
     expect(await screen.findByText('The request failed (500).')).toBeTruthy();
+  });
+
+  it('recolors in place on a theme toggle, never tearing the chart down and blanking it (R-19)', async () => {
+    // The regression for the review's 🔴 finding. A light/dark toggle rebuilds the MUI theme object
+    // (ThemeModeProvider), so the palette values the chart reads change. If that tore the chart down and recreated
+    // it, the already-loaded candles would be gone and the freshly created series would render empty until the next
+    // unrelated fetch — the exact "confident blank" this component's own doc comment promises never happens.
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+    const dark = createTheme({ palette: { mode: 'dark' } });
+    const light = createTheme({ palette: { mode: 'light' } });
+
+    const { rerender } = render(
+      <ThemeProvider theme={dark}>
+        <MarketChart venue="topstepx" instrument="ES" resolution={1} />
+      </ThemeProvider>,
+    );
+    await waitFor(() => expect(chartMock.setData).toHaveBeenCalledOnce());
+
+    rerender(
+      <ThemeProvider theme={light}>
+        <MarketChart venue="topstepx" instrument="ES" resolution={1} />
+      </ThemeProvider>,
+    );
+
+    // Created once and recolored in place: the series (and its candles) is never destroyed by a toggle.
+    expect(chartMock.createChart).toHaveBeenCalledOnce();
+    expect(chartMock.remove).not.toHaveBeenCalled();
+    expect(chartMock.applyOptions).toHaveBeenCalled();
+  });
+
+  it('sizes the default window under the server row cap at every resolution', async () => {
+    // The regression for the review's 🟠 finding. A flat 5-day default lookback is ~7200 bars at 1-minute
+    // resolution, past the server's 5000-row cap (MarketDataReadOptions.MaxRows) — so the DEFAULT view (no
+    // lookbackMinutes prop) opened onto a "window too wide" refusal instead of a chart. The default now scales with
+    // resolution so the implied bar count stays under the cap whatever the operator picks first.
+    const SERVER_ROW_CAP = 5000;
+    const nowMs = Date.parse('2026-01-10T00:00:00Z');
+
+    for (const resolution of [1, 5, 15, 60]) {
+      getBarsMock.mockClear();
+      getBarsMock.mockResolvedValue(barsOk([]));
+
+      render(
+        <MarketChart venue="topstepx" instrument="ES" resolution={resolution} now={() => nowMs} />,
+      );
+
+      const [, , , from, to] = getBarsMock.mock.calls[0] as [
+        string,
+        string,
+        number,
+        string,
+        string,
+      ];
+      const windowMinutes = (Date.parse(to) - Date.parse(from)) / 60_000;
+      const impliedBars = windowMinutes / resolution;
+      expect(impliedBars).toBeLessThan(SERVER_ROW_CAP);
+
+      cleanup();
+    }
   });
 
   it('tears the chart down on unmount — no leaked canvas', async () => {
