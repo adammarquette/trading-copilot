@@ -109,7 +109,16 @@ builder.Services.AddHostedService<ContextIngestionHost>();
 // the 24-hour event log. Opt-in and configured independently of Ingestion:Symbols: an operator may want history
 // without a live subscription, or the reverse.
 builder.Services.Configure<BarBackfillOptions>(builder.Configuration.GetSection(BarBackfillOptions.SectionName));
+// The restart heal's session calendar (gh#696) is validated at startup: a malformed SessionClose or holiday
+// entry fails fast rather than mid-heal, the same fail-fast stance as the Flatten schedule below.
+BarBackfillOptions healOptions = builder.Configuration.GetSection(BarBackfillOptions.SectionName).Get<BarBackfillOptions>() ?? new BarBackfillOptions();
+_ = BarSessionCalendar.Parse(healOptions.SessionClose, healOptions.SessionHolidays);
 builder.Services.AddScoped<BarBackfillService>();
+// The restart heal pass (gh#696, R-1): the durable tables are the anchor on ingestion start -- interior holes
+// are backfilled from the venue's retained history and the tail resumes forward, before the periodic poll loop
+// takes over. Distinct from the event-log gap backfill above (gh#306): the store's missing history IS state to
+// rebuild, not a cursor to advance.
+builder.Services.AddScoped<BarStoreHealService>();
 builder.Services.AddHostedService<BarBackfillHost>();
 
 // R-2's news / soft-signal ingestion (gh#358): every registered INewsSource polled into the deduped NewsRecord
