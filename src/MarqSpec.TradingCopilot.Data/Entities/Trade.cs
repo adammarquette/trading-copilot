@@ -51,4 +51,13 @@ public class Trade : IUserOwned
 
     /// <summary>When the trade closed; null while open.</summary>
     public DateTimeOffset? ClosedAt { get; set; }
+
+    /// <summary>
+    /// The <see cref="Fill"/> that closed the round trip — the trade's <b>natural key</b> (gh#731). A unique
+    /// index over it makes the journal writer idempotent: a replayed flat <c>PositionEvent</c> recomposes the
+    /// same round trip, whose closing fill is the same row, and the second insert is rejected rather than
+    /// double-counting the day's realized P&amp;L into the daily governor. Null for rows journaled before the
+    /// production writer existed (and for any future writer that does not compose from fills).
+    /// </summary>
+    public Guid? ClosingFillId { get; set; }
 }
