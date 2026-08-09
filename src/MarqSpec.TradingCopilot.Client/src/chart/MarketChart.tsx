@@ -65,10 +65,11 @@ export function MarketChart({
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
 
-  // Fetch the window whenever the series identity changes. `active` guards a resolve landing after a fast switch.
+  // Fetch the window once per mount. The workspace keys this component on `(venue, instrument, resolution)`, so a
+  // change to any of them remounts it — the initial `loading` state resets for free, with no synchronous setState in
+  // the effect (React's reset-on-key pattern). `active` still guards a resolve landing after an unmount.
   useEffect(() => {
     let active = true;
-    setState({ status: 'loading' });
 
     const nowMs = now();
     const to = new Date(nowMs).toISOString();

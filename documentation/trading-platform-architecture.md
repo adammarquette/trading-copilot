@@ -335,10 +335,12 @@ as an **installable PWA** — a presentation client only (R-19, [ADR-0010](adr/0
 owns the packaging and the platform caveats).
 **The chart is its central component:** a purpose-built candlestick chart (**Lightweight
 Charts**, ADR-0004 — with RSI/MACD indicator subcharts in panes) onto which everything **overlays** — indicators incl. custom (pre-computed by the processor), price levels, suggestion
-entry/stop/target zones, live positions / orders / fills, and the operator's own drawings (R-10). The chart's
+entry/stop/target zones, and live positions / orders / fills. **Drawing tools are out of scope** (ADR-0004). The
+candlestick base is built (gh#725, Lightweight Charts) on the workspace, beside the suggestion panel (gh#654); its
 underlying data reaches the client over HTTP (gh#644): `/api/marketdata/bars`, `/indicators` and `/levels` serve
 OHLCV, the **pre-computed** indicator series (R-22's single number, never re-derived in the browser) and the active
-price levels — authenticated (R-18), bounded, and global (not operator-owned). The **realtime** half is a single
+price levels — authenticated (R-18), bounded, and global (not operator-owned). The indicator panes and the overlay
+set (levels, suggestion zones, live markers) are their own cards (gh#726 / gh#727). The **realtime** half is a single
 JWT-authenticated SignalR connection (gh#649, [ADR-0021](adr/0021-realtime-hub-contract.md)): it resumes from its
 last-applied `sequence` on reconnect and dedupes by that cursor, so a drop-and-reconnect is gap-free and
 double-free, and its connection state is **always visible** — a degraded socket is shown degraded, never rendered
