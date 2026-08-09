@@ -177,11 +177,19 @@ public sealed class TradeJournalService
             .OrderByDescending(fill => fill.ExecutedAt)
             .First();
 
-        // Point value is the one snapshotted on the ENTRY order -- a fact of placement, not of now.
-        Order entryOrder = orders
-            .Where(order => order.Side == roundTrip.EntrySide)
-            .OrderBy(order => order.PlacedAt)
+        // The entry order is the one that actually produced this round trip's OPENING fill -- taken from the fills
+        // that compose the trip, never re-picked from `orders` by side. `orders` is deliberately unfiltered by
+        // status for venue truth (above), so it also holds zero-fill Rejected/Cancelled orders on the entry side --
+        // a risk-gate rejection, or a resting order cancelled before any execution. Selecting the earliest of THOSE
+        // by PlacedAt could land on an order that never traded, and the trade would inherit its Mode / SuggestionId /
+        // PointValue: a Live round trip journalled under an earlier rejected order's Practice is exactly the R-14
+        // blending this writer copies placement-time Mode to avoid (gh#734 review). The opening fill's own order is
+        // the placement whose facts this trade inherits; a zero-fill order has no fill here and cannot be it.
+        Fill openingFill = unjournalled
+            .Where(fill => sideByOrder[fill.OrderId] == roundTrip.EntrySide)
+            .OrderBy(fill => fill.ExecutedAt)
             .First();
+        Order entryOrder = orders.First(order => order.Id == openingFill.OrderId);
 
         decimal pointValue = entryOrder.PointValue;
         if (pointValue <= 0m)

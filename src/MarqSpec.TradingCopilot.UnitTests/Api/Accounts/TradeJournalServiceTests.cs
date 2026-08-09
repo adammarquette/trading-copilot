@@ -86,7 +86,8 @@ public class TradeJournalServiceTests
         decimal pointValue = 5m,
         TradingMode mode = TradingMode.Practice,
         Guid? suggestionId = null,
-        OrderStatus status = OrderStatus.Filled)
+        OrderStatus status = OrderStatus.Filled,
+        int placedMinute = 0)
     {
         Guid orderId = Guid.NewGuid();
         await using TradingCopilotDbContext context = Context();
@@ -107,7 +108,7 @@ public class TradeJournalServiceTests
             Status = status,
             Mode = mode,
             VenueOrderKey = $"venue-{orderId:N}",
-            PlacedAt = _now,
+            PlacedAt = _now.AddMinutes(placedMinute),
         });
         foreach ((decimal price, int size, int minute) in fills)
         {
@@ -123,6 +124,46 @@ public class TradeJournalServiceTests
             });
         }
 
+        await context.SaveChangesAsync();
+        return orderId;
+    }
+
+    /// <summary>
+    /// Seeds an order that produced <b>no fills</b> — a risk-gate rejection, or a resting order cancelled before any
+    /// execution. It ends in <paramref name="status"/> with zero <see cref="Fill"/> rows: venue truth is that
+    /// nothing traded, so it must never be mistaken for the leg of a round trip. Returns the order id.
+    /// </summary>
+    private async Task<Guid> SeedZeroFillOrderAsync(
+        Guid owner,
+        Guid accountId,
+        OrderSide side,
+        OrderStatus status,
+        int placedMinute = 0,
+        decimal pointValue = 5m,
+        TradingMode mode = TradingMode.Practice,
+        Guid? suggestionId = null)
+    {
+        Guid orderId = Guid.NewGuid();
+        await using TradingCopilotDbContext context = Context();
+        context.Orders.Add(new Order
+        {
+            Id = orderId,
+            UserId = owner,
+            AccountId = accountId,
+            SuggestionId = suggestionId,
+            Instrument = Contract,
+            Side = side,
+            Size = 1,
+            Type = OrderType.Market,
+            EntryPrice = 5_000m,
+            WorkingStopPrice = 5_290m,
+            SafetyStopPrice = 5_280m,
+            PointValue = pointValue,
+            Status = status,
+            Mode = mode,
+            VenueOrderKey = $"venue-{orderId:N}",
+            PlacedAt = _now.AddMinutes(placedMinute),
+        });
         await context.SaveChangesAsync();
         return orderId;
     }
@@ -317,6 +358,45 @@ public class TradeJournalServiceTests
         await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
 
         (await TradesAsync()).Should().ContainSingle().Subject.SuggestionId.Should().Be(suggestionId);
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldAttributeToTheFillingOrder_NotAnEarlierZeroFillOrderOnTheEntrySide()
+    {
+        // gh#734 review. `orders` is deliberately unfiltered by status (venue truth), so it also holds zero-fill
+        // Rejected/Cancelled orders on the entry side — a risk-gate rejection, or a resting order cancelled before
+        // any execution. Deriving the entry order by earliest PlacedAt among ALL entry-side orders can therefore
+        // land on one that NEVER filled, inheriting its Mode / SuggestionId / PointValue. The entry order must be the
+        // one that actually produced the opening fill.
+        //
+        // Here: a Practice buy is rejected at the open (zero fills), then a Live buy actually fills and the trip
+        // closes. Attributing the trade to the earlier rejected Practice order would journal a LIVE round trip as
+        // Practice — invisible to the live account's daily governor (R-14) — and compute its P&L off the wrong point
+        // value.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001", mode: TradingMode.Live);
+        Guid rejectedSuggestion = Guid.NewGuid();
+
+        // The earlier, zero-fill rejected entry-side order: Practice, its own suggestion, a wrong point value.
+        await SeedZeroFillOrderAsync(
+            owner, accountId, OrderSide.Buy, OrderStatus.Rejected,
+            placedMinute: 0, pointValue: 999m, mode: TradingMode.Practice, suggestionId: rejectedSuggestion);
+        // The real entry: a Live buy that actually fills, placed later.
+        await SeedFilledOrderAsync(
+            owner, accountId, OrderSide.Buy, [(5_000m, 1, 5)], mode: TradingMode.Live, placedMinute: 5);
+        await SeedFilledOrderAsync(
+            owner, accountId, OrderSide.Sell, [(5_010m, 1, 10)], mode: TradingMode.Live, placedMinute: 10);
+
+        await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        Trade trade = (await TradesAsync()).Should().ContainSingle().Subject;
+        trade.Mode.Should().Be(
+            TradingMode.Live,
+            "the round trip is composed from the Live order that actually filled, not the earlier rejected one");
+        trade.SuggestionId.Should().NotBe(
+            rejectedSuggestion, "the rejected zero-fill order never entered this round trip");
+        trade.RealizedPnL.Should().Be(
+            50m, "10 points * 1 * $5 from the FILLING order's point value, not the rejected order's 999");
     }
 
     [Fact]
