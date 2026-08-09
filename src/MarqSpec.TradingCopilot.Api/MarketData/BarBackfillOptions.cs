@@ -42,4 +42,28 @@ public sealed class BarBackfillOptions
 
     /// <summary>Whether anything is configured to archive.</summary>
     public bool IsConfigured => Instruments.Length > 0 && ResolutionMinutes.Length > 0;
+
+    /// <summary>
+    /// The product's daily session close in market (Central) <c>HH:mm</c> time, used by the restart heal's
+    /// gap-detection (gh#696) to keep the daily maintenance window out of the gap report. Defaults to the CME
+    /// equity-index close (wiki: market sessions &amp; settlement); per-product values come from the same
+    /// reference the flatten schedule uses. Malformed values fail loudly at parse time, never guess.
+    /// </summary>
+    public string SessionClose { get; init; } = "16:00";
+
+    /// <summary>
+    /// Declared market holidays (<c>yyyy-MM-dd</c>, market calendar days) for the heal's gap-detection (gh#696).
+    /// Empty by default — an undeclared holiday then reads as an unhealable residual gap, which is the honest
+    /// direction: the operator sees the shortfall and declares the day, rather than detection silently excusing
+    /// arbitrary absences.
+    /// </summary>
+    public string[] SessionHolidays { get; init; } = [];
+
+    /// <summary>
+    /// How far back the startup heal pass reaches, in minutes (gh#696). The heal anchors on the durable tables
+    /// but is bounded by venue retention, so this window caps the ask; holes older than it are left to whatever
+    /// already covers them. Default 7 days — comfortably inside a venue's history tier, long enough to span a
+    /// week-long outage.
+    /// </summary>
+    public int MaxHealWindowMinutes { get; init; } = 10080;
 }
