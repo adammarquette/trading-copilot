@@ -337,6 +337,32 @@ public class BarStoreHealServiceTests
     // --- Resolutions are independent series, same key discipline as the periodic pass ---
 
     [Fact]
+    public async Task HealAsync_ShouldStampRecordedAtWithThePassInstant_NotTheBucketsOwnTime()
+    {
+        // RecordedAt answers "when WE recorded it", not "when it happened" (the bucket carries the latter). A
+        // heal is ONE logical recording event: a recovered hole is stamped with the pass's instant, not the
+        // hole's own age. Pinning this deliberately — the stamp is `now`, the same value the periodic pass uses
+        // for its window end, so a heal and a poll write the same instant for the same bucket.
+        await using TradingCopilotDbContext context = Context();
+        DateTimeOffset hole = Now.AddMinutes(-30);
+        for (int minute = -60; minute < 0; minute++)
+        {
+            if (minute != -30)
+            {
+                context.Bars.Add(Record(Now.AddMinutes(minute)));
+            }
+        }
+
+        await context.SaveChangesAsync();
+        ITradingVenue venue = Venue((from, to) => [Bar(hole)]);
+
+        await Service(context).HealAsync(venue, Now, CancellationToken.None);
+
+        BarRecord healed = await context.Bars.SingleAsync(bar => bar.BucketStart == hole);
+        healed.RecordedAt.Should().Be(Now, "a heal is one recording event stamped with the pass instant");
+    }
+
+    [Fact]
     public async Task HealAsync_ShouldKeepResolutionsApart_WhenTwoAreConfigured()
     {
         await using TradingCopilotDbContext context = Context();

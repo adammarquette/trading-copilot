@@ -195,6 +195,13 @@ public sealed class BarStoreHealService
     /// as the periodic pass: revisions win in place, the bucket is the key, and a still-forming bar is never
     /// stored as final.
     /// </summary>
+    /// <remarks>
+    /// <b>RecordedAt is deliberate, not inherited.</b> Every row this pass writes is stamped with
+    /// <paramref name="to"/> — the heal's <c>now</c> — because <c>RecordedAt</c> answers "when <b>we</b>
+    /// recorded it", never "when it happened" (the bucket carries that). A heal is one logical recording
+    /// event, and this is the same value the periodic pass stamps as its window end, so both write paths agree
+    /// on the stamp's meaning.
+    /// </remarks>
     private async Task<int> FetchAndUpsertAsync(
         ITradingVenue venue,
         string venueKey,

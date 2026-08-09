@@ -13,8 +13,9 @@ namespace MarqSpec.TradingCopilot.UnitTests.Domain.MarketData;
 /// <see cref="MarketSession.MaintenanceWindow"/> — rather than inventing a second calendar: a session closes at
 /// the instrument's session close, the daily maintenance window runs one hour from the close, and the next
 /// session reopens at close + maintenance. CME equity index runs Sunday-evening → Friday-close, so weekend
-/// buckets are non-session and Sunday-evening buckets belong to Monday's session. Declared holidays are
-/// non-session days outright.
+/// buckets are non-session and Sunday-evening buckets belong to Monday's session. A declared holiday closes
+/// its own session outright — but its evening reopen belongs to the next day's session and opens when that
+/// day trades.
 /// </remarks>
 public class BarSessionCalendarTests
 {
@@ -168,6 +169,41 @@ public class BarSessionCalendarTests
         HashSet<DateOnly> holidays = [new(2026, 7, 6)]; // a Monday holiday
 
         Calendar(holidays).IsExpectedSlot(Market(7, 5, 17, 0), OneMinute).Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsExpectedSlot_ShouldBeTrue_ForTheEveningReopenOnADeclaredHoliday()
+    {
+        // Thanksgiving 2026-11-26 (a Thursday) is declared; CME equity index reopens 17:00 CT that evening and
+        // trades into Friday 2026-11-27, a normal session. Those overnight buckets belong to FRIDAY's session —
+        // a holiday suppresses its own daytime buckets, never the reopen that feeds the next trading day.
+        HashSet<DateOnly> holidays = [new(2026, 11, 26)];
+
+        Calendar(holidays).IsExpectedSlot(Market(11, 26, 17, 0), OneMinute).Should().BeTrue();
+        Calendar(holidays).IsExpectedSlot(Market(11, 26, 22, 30), OneMinute).Should().BeTrue();
+    }
+
+    [Fact]
+    public void IsExpectedSlot_ShouldBeFalse_ForTheHolidayDaytimeAndMaintenanceWindows()
+    {
+        // The same Thursday: the holiday's own session stays closed — daytime buckets, the close, and the
+        // maintenance window are all non-session; only the 17:00 reopen belongs to the next session.
+        HashSet<DateOnly> holidays = [new(2026, 11, 26)];
+
+        Calendar(holidays).IsExpectedSlot(Market(11, 26, 10, 0), OneMinute).Should().BeFalse();
+        Calendar(holidays).IsExpectedSlot(Market(11, 26, 15, 59), OneMinute).Should().BeFalse();
+        Calendar(holidays).IsExpectedSlot(Market(11, 26, 16, 0), OneMinute).Should().BeFalse();
+        Calendar(holidays).IsExpectedSlot(Market(11, 26, 16, 59), OneMinute).Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsExpectedSlot_ShouldBeFalse_ForTheEveningReopen_WhenTheNextDayIsAlsoAHoliday()
+    {
+        // Thursday AND Friday declared (a long weekend): Thursday's reopen would feed a closed Friday, so it
+        // stays shut — the same "!holidays.Contains(tomorrow)" shape the Sunday and Friday paths apply.
+        HashSet<DateOnly> holidays = [new(2026, 11, 26), new(2026, 11, 27)];
+
+        Calendar(holidays).IsExpectedSlot(Market(11, 26, 17, 0), OneMinute).Should().BeFalse();
     }
 
     // --- The calendar follows the instrument's own session close ---

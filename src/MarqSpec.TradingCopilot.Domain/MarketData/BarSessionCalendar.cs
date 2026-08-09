@@ -15,8 +15,9 @@ namespace MarqSpec.TradingCopilot.Domain.MarketData;
 /// window is <see cref="MarketSession.MaintenanceWindow"/> from the session close, and the next session
 /// reopens at close + maintenance. CME equity index runs Sunday-evening → Friday-close, so Saturday carries
 /// no session, Sunday buckets before the reopen belong to the weekend gap, and Sunday-evening buckets belong
-/// to Monday's session. Declared holidays are non-session days outright — and they also suppress the
-/// Sunday-evening session that would belong to them.
+/// to Monday's session. A declared holiday closes its <b>own</b> session outright — and suppresses the
+/// Sunday-evening session that would belong to it — but its evening reopen still belongs to the next day's
+/// session and opens when that day trades.
 /// </para>
 /// <para>
 /// <b>Known bound:</b> a bucket longer than the remaining session (one that would straddle a close or a
@@ -89,7 +90,7 @@ public sealed class BarSessionCalendar
         DateTime marketEnd = MarketClock.ToMarketTime(bucketStart + barSize);
         DateOnly day = DateOnly.FromDateTime(marketStart);
 
-        if (day.DayOfWeek == DayOfWeek.Saturday || _holidays.Contains(day))
+        if (day.DayOfWeek == DayOfWeek.Saturday)
         {
             return false;
         }
@@ -103,6 +104,17 @@ public sealed class BarSessionCalendar
             // The weekend runs Friday close -> Sunday reopen; a Sunday-evening session belongs to Monday, so a
             // holiday Monday suppresses it too.
             return startTime >= reopen && !_holidays.Contains(day.AddDays(1));
+        }
+
+        if (_holidays.Contains(day))
+        {
+            // A declared holiday closes its OWN session -- the daytime buckets and the maintenance window are
+            // non-session. But the evening reopen belongs to the NEXT day's session (CME equity index trades
+            // Thursday-evening-into-Friday after a Thursday holiday), so it opens exactly when that day trades --
+            // the same "!holidays.Contains(tomorrow)" shape the Sunday and Friday paths apply. Suppressing the
+            // whole day here would report zero gaps over buckets the venue really produces, and the heal would
+            // never fill them.
+            return startTime >= reopen && day.DayOfWeek != DayOfWeek.Friday && !_holidays.Contains(day.AddDays(1));
         }
 
         if (startTime < close)
