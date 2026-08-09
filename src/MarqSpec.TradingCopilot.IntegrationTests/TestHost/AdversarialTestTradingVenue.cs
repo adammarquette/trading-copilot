@@ -134,19 +134,29 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// <param name="stopPrice">The stop trigger, or <see langword="null"/> for a limit-only leg.</param>
     /// <param name="limitPrice">The limit price, or <see langword="null"/>.</param>
     /// <param name="size">How much the leg covers.</param>
+    /// <param name="customTag">
+    /// The venue's echo of the tag the placing call stamped. <c>POST /orders/{id}/reconcile</c> matches a resting
+    /// order back to its stranded row by <b>exactly this</b> (<c>CustomTag == orderId</c>, gh#589), so a seeded
+    /// order without one can never be adopted — which is the whole subject of gh#736's adopt case. Left null by
+    /// default so every existing caller keeps the untagged order it was seeding.
+    /// </param>
     public void SeedWorkingOrder(
         string accountKey,
         string venueOrderKey,
         string contractKey,
         decimal? stopPrice = 4_980m,
         decimal? limitPrice = null,
-        int size = 1) =>
+        int size = 1,
+        string? customTag = null) =>
         _workingOrders.Add((accountKey, new WorkingOrder(
             venueOrderKey,
             VenueContractId.Create(VenueId.Parse("projectx"), contractKey),
             stopPrice is null ? null : new Price(stopPrice.Value),
             limitPrice is null ? null : new Price(limitPrice.Value),
-            size)));
+            size)
+        {
+            CustomTag = customTag,
+        }));
 
     /// <summary>Makes <c>CancelOrderAsync</c> THROW for a venue order key — the "already gone" rejection the OCO-exit
     /// path must swallow without corrupting the record or retry-storming (gh#184).</summary>
