@@ -1,11 +1,17 @@
 import Box from '@mui/material/Box';
 import { useTheme } from '@mui/material/styles';
-import { CandlestickSeries, createChart } from 'lightweight-charts';
-import type { CandlestickData, IChartApi, ISeriesApi, UTCTimestamp } from 'lightweight-charts';
+import { CandlestickSeries, LineSeries, createChart } from 'lightweight-charts';
+import type {
+  CandlestickData,
+  IChartApi,
+  ISeriesApi,
+  LineData,
+  UTCTimestamp,
+} from 'lightweight-charts';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import type { BarPoint, BarSeries } from '../api/marketData';
-import { getBars } from '../api/marketData';
+import type { BarPoint, BarSeries, IndicatorPoint } from '../api/marketData';
+import { getBars, getIndicators } from '../api/marketData';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
 
@@ -34,6 +40,13 @@ type ChartState =
   /** A refusal (e.g. window too wide) or a failure (network, 5xx, unknown series) — shown, never a blank chart. */
   | { readonly status: 'error'; readonly message: string };
 
+/** An indicator pane to render below the candles (gh#726): the pre-computed series name, its period, and a colour. */
+export interface IndicatorSpec {
+  readonly indicator: string;
+  readonly period: number;
+  readonly color?: string;
+}
+
 export interface MarketChartProps {
   readonly venue: string;
   readonly instrument: string;
@@ -42,6 +55,8 @@ export interface MarketChartProps {
   readonly lookbackMinutes?: number;
   /** The moment "now" resolves to for the window; injectable for the same reason. Defaults to the wall clock. */
   readonly now?: () => number;
+  /** Indicator panes to render below the candles (gh#726), each fed by `/api/marketdata/indicators` (R-22). */
+  readonly indicators?: readonly IndicatorSpec[];
 }
 
 /** Maps the server's OHLCV bars to Lightweight-Charts candles: `bucketStart` (ISO) → a UNIX-second `UTCTimestamp`. */
@@ -55,6 +70,14 @@ function toCandles(points: readonly BarPoint[]): CandlestickData<UTCTimestamp>[]
   }));
 }
 
+/** Maps a pre-computed indicator series to Lightweight-Charts line data (gh#726): `bucketStart` → a UNIX-second time. */
+function toIndicatorLine(points: readonly IndicatorPoint[]): LineData<UTCTimestamp>[] {
+  return points.map((point) => ({
+    time: Math.floor(Date.parse(point.bucketStart) / 1000) as UTCTimestamp,
+    value: point.value,
+  }));
+}
+
 /**
  * The central candlestick chart (gh#725, R-10, ADR-0004) — TradingView Lightweight Charts over the pre-computed
  * bars the BFF serves (gh#644), fetched through the authenticated client (R-18).
@@ -62,8 +85,8 @@ function toCandles(points: readonly BarPoint[]): CandlestickData<UTCTimestamp>[]
  * <b>Honest states over a confident blank (R-19, ADR-0013):</b> a degraded read is *shown* — a window wider than the
  * server's cap and an unknown series surface as an error, an in-range gap as "no bars", loading as a spinner — never
  * a chart drawn empty as though the market went silent. The chart instance is created once and torn down on unmount
- * (no leaked canvas / `ResizeObserver`). Live tick updates and indicator panes / overlays are their own cards
- * (gh#726, gh#727); this renders the historical candles and the resolution it was handed.
+ * (no leaked canvas / `ResizeObserver`). Indicator panes (gh#726) render below the candles from the pre-computed
+ * series (R-22); live tick updates and the price overlays are their own cards (gh#649 / gh#727).
  */
 export function MarketChart({
   venue,
@@ -71,6 +94,7 @@ export function MarketChart({
   resolution,
   lookbackMinutes,
   now = Date.now,
+  indicators = [],
 }: MarketChartProps): React.JSX.Element {
   // Default the window from the resolution, not a flat constant, so it stays under the server's row cap whatever
   // resolution the workspace opens on (gh#725 review).
@@ -78,21 +102,28 @@ export function MarketChart({
   const theme = useTheme();
   const [state, setState] = useState<ChartState>({ status: 'loading' });
 
+  // The `[from, to)` window, computed ONCE on mount (a useState initializer, not a render-time clock read) and shared
+  // by the bars and every indicator series so they align on the same axis. The workspace keys this component on the
+  // series identity, so a change remounts it and recomputes the window.
+  const [chartWindow] = useState(() => {
+    const nowMs = now();
+    return {
+      from: new Date(nowMs - effectiveLookback * 60_000).toISOString(),
+      to: new Date(nowMs).toISOString(),
+    };
+  });
+
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
 
-  // Fetch the window once per mount. The workspace keys this component on `(venue, instrument, resolution)`, so a
-  // change to any of them remounts it — the initial `loading` state resets for free, with no synchronous setState in
-  // the effect (React's reset-on-key pattern). `active` still guards a resolve landing after an unmount.
+  // Fetch the bars once per mount. The workspace keys this component on `(venue, instrument, resolution)`, so a change
+  // remounts it — the initial `loading` state resets for free, no synchronous setState in the effect (React's
+  // reset-on-key pattern). `active` still guards a resolve landing after an unmount.
   useEffect(() => {
     let active = true;
 
-    const nowMs = now();
-    const to = new Date(nowMs).toISOString();
-    const from = new Date(nowMs - effectiveLookback * 60_000).toISOString();
-
-    void getBars(venue, instrument, resolution, from, to).then((result) => {
+    void getBars(venue, instrument, resolution, chartWindow.from, chartWindow.to).then((result) => {
       if (!active) {
         return;
       }
@@ -113,7 +144,7 @@ export function MarketChart({
     return () => {
       active = false;
     };
-  }, [venue, instrument, resolution, effectiveLookback, now]);
+  }, [venue, instrument, resolution, chartWindow]);
 
   // Create the chart ONCE, tear it down on unmount. Kept out of the fetch effect so a re-fetch never re-creates it,
   // and — deliberately — free of any theme dependency: a light/dark toggle must NOT recreate the chart, because that
@@ -168,6 +199,56 @@ export function MarketChart({
       chartRef.current?.timeScale().fitContent();
     }
   }, [candles]);
+
+  // Indicator panes (gh#726): one line series per indicator, each in its own pane BELOW the candles (pane 0), fed by
+  // the pre-computed series (R-22 — never recomputed here). Added dynamically (not via the mount key) so toggling an
+  // indicator does not refetch the candles. `chart` is captured so a resolve/cleanup only touches series while THIS
+  // chart is still current — a theme-driven recreation already disposed the old one with its panes.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (chart === null || indicators.length === 0) {
+      return;
+    }
+    let active = true;
+    const added: ISeriesApi<'Line'>[] = [];
+
+    void Promise.all(
+      indicators.map((spec, index) =>
+        getIndicators(
+          venue,
+          instrument,
+          resolution,
+          spec.indicator,
+          spec.period,
+          chartWindow.from,
+          chartWindow.to,
+        ).then((result) => {
+          if (!active || chartRef.current !== chart || !result.ok) {
+            return;
+          }
+          const line = chart.addSeries(
+            LineSeries,
+            {
+              color: spec.color ?? '#f0b90b',
+              lineWidth: 2,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            },
+            index + 1, // pane 0 is the candles; each indicator gets the next pane down
+          );
+          line.setData(toIndicatorLine(result.data.points));
+          added.push(line);
+        }),
+      ),
+    );
+
+    return () => {
+      active = false;
+      if (chartRef.current === chart) {
+        added.forEach((line) => chart.removeSeries(line));
+      }
+    };
+  }, [indicators, venue, instrument, resolution, chartWindow]);
 
   return (
     <Box data-testid="market-chart" sx={{ position: 'relative', height: '100%', minHeight: 240 }}>

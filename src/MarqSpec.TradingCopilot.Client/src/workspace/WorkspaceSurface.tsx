@@ -1,8 +1,11 @@
 import Box from '@mui/material/Box';
+import Checkbox from '@mui/material/Checkbox';
+import FormControlLabel from '@mui/material/FormControlLabel';
 import TextField from '@mui/material/TextField';
-import { useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 
 import { MarketChart } from '../chart/MarketChart';
+import type { IndicatorSpec } from '../chart/MarketChart';
 import type { Destination } from '../navigation/destinations';
 import { SuggestionsPanel } from '../suggestions/SuggestionsPanel';
 
@@ -21,6 +24,17 @@ const RESOLUTIONS: readonly { readonly minutes: number; readonly label: string }
   { minutes: 60, label: '1h' },
 ];
 
+/** The indicators the operator can toggle into their own pane — the ones the projection computes (gh#644: atr, rsi). */
+const AVAILABLE_INDICATORS: readonly {
+  readonly indicator: string;
+  readonly period: number;
+  readonly label: string;
+  readonly color: string;
+}[] = [
+  { indicator: 'rsi', period: 14, label: 'RSI', color: '#f0b90b' },
+  { indicator: 'atr', period: 14, label: 'ATR', color: '#4a90d9' },
+];
+
 export interface WorkspaceSurfaceProps {
   readonly destination: Destination;
 }
@@ -34,6 +48,35 @@ export interface WorkspaceSurfaceProps {
 export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.JSX.Element {
   const [instrument, setInstrument] = useState(DEFAULT_INSTRUMENT);
   const [resolution, setResolution] = useState(RESOLUTIONS[0].minutes);
+  const [enabledIndicators, setEnabledIndicators] = useState<ReadonlySet<string>>(
+    () => new Set(['rsi']),
+  );
+
+  // A STABLE array so toggling an indicator (not the instrument/resolution) never re-runs the chart's bars fetch for
+  // no reason; the chart adds/removes the pane in place rather than remounting.
+  const indicators = useMemo<readonly IndicatorSpec[]>(
+    () =>
+      AVAILABLE_INDICATORS.filter((option) => enabledIndicators.has(option.indicator)).map(
+        (option) => ({
+          indicator: option.indicator,
+          period: option.period,
+          color: option.color,
+        }),
+      ),
+    [enabledIndicators],
+  );
+
+  const toggleIndicator = useCallback((indicator: string) => {
+    setEnabledIndicators((current) => {
+      const next = new Set(current);
+      if (next.has(indicator)) {
+        next.delete(indicator);
+      } else {
+        next.add(indicator);
+      }
+      return next;
+    });
+  }, []);
 
   return (
     <Box
@@ -53,16 +96,20 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
         <ChartControls
           instrument={instrument}
           resolution={resolution}
+          enabledIndicators={enabledIndicators}
           onInstrument={setInstrument}
           onResolution={setResolution}
+          onToggleIndicator={toggleIndicator}
         />
         <Box sx={{ flex: 1, minHeight: 0 }}>
-          {/* Key on the series identity so a change remounts the chart (fresh loading + fetch, no in-effect setState). */}
+          {/* Key on the series identity so a change remounts the chart (fresh loading + fetch, no in-effect setState).
+              Indicators are NOT in the key — they add / remove their pane in place. */}
           <MarketChart
             key={`${DEFAULT_VENUE}:${instrument}:${resolution}`}
             venue={DEFAULT_VENUE}
             instrument={instrument}
             resolution={resolution}
+            indicators={indicators}
           />
         </Box>
       </Box>
@@ -86,8 +133,10 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
 interface ChartControlsProps {
   readonly instrument: string;
   readonly resolution: number;
+  readonly enabledIndicators: ReadonlySet<string>;
   readonly onInstrument: (instrument: string) => void;
   readonly onResolution: (resolution: number) => void;
+  readonly onToggleIndicator: (indicator: string) => void;
 }
 
 /**
@@ -97,8 +146,10 @@ interface ChartControlsProps {
 function ChartControls({
   instrument,
   resolution,
+  enabledIndicators,
   onInstrument,
   onResolution,
+  onToggleIndicator,
 }: ChartControlsProps): React.JSX.Element {
   const [draft, setDraft] = useState(instrument);
 
@@ -112,7 +163,7 @@ function ChartControls({
           onInstrument(next);
         }
       }}
-      sx={{ display: 'flex', gap: 1, alignItems: 'center', px: 2, py: 1 }}
+      sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center', px: 2, py: 1 }}
     >
       <TextField
         label="Instrument"
@@ -136,6 +187,20 @@ function ChartControls({
           </option>
         ))}
       </TextField>
+
+      {AVAILABLE_INDICATORS.map((option) => (
+        <FormControlLabel
+          key={option.indicator}
+          control={
+            <Checkbox
+              size="small"
+              checked={enabledIndicators.has(option.indicator)}
+              onChange={() => onToggleIndicator(option.indicator)}
+            />
+          }
+          label={option.label}
+        />
+      ))}
     </Box>
   );
 }

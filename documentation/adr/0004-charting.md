@@ -33,5 +33,5 @@ The **chart is the central UI component** (R-10) — a candlestick chart onto wh
 - **The order-flow / DOM heatmap is the hardest piece** — a Bookmap-class component is real R&D (canvas/WebGL, dense real-time data). Scope it deliberately; it lands with order-flow work (Phase 3) and is "an option," not a Phase-1 must.
 
 ## Follow-ups
-- Prototype the Lightweight Charts pane setup for RSI/MACD from pre-computed series; define the overlay contract (indicator series, price lines, suggestion zones, position/fill markers).
+- **Landed** (gh#726): the Lightweight Charts pane setup — RSI / ATR each render in their own pane below the candles from the pre-computed series (R-22), toggled by the operator. MACD is not computed server-side, so it is not offered. The **overlay contract** (indicator overlays, price lines, suggestion zones, position/fill markers) is gh#727's.
 - **Spike the DOM / order-flow renderer** (canvas vs. WebGL — e.g. PixiJS / regl) against `GatewayDepth` / `GatewayTrade` volumes (§12; Phase 3).

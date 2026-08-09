@@ -4,12 +4,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // Stub the chart (its own suite covers it, and it would open a real canvas) and the panel (its own suite covers the
 // R-14 scoping). The chart stub reflects its props as data-attributes so the composition + retargeting are assertable.
 vi.mock('../chart/MarketChart', () => ({
-  MarketChart: (props: { venue: string; instrument: string; resolution: number }) => (
+  MarketChart: (props: {
+    venue: string;
+    instrument: string;
+    resolution: number;
+    indicators?: readonly { indicator: string }[];
+  }) => (
     <div
       data-testid="chart-stub"
       data-venue={props.venue}
       data-instrument={props.instrument}
       data-resolution={props.resolution}
+      data-indicators={(props.indicators ?? []).map((spec) => spec.indicator).join(',')}
     />
   ),
 }));
@@ -63,5 +69,17 @@ describe('WorkspaceSurface', () => {
     fireEvent.change(screen.getByLabelText('Resolution'), { target: { value: '15' } });
 
     expect(screen.getByTestId('chart-stub').dataset.resolution).toBe('15');
+  });
+
+  it('shows RSI by default and toggles indicators onto the chart (gh#726)', () => {
+    render(<WorkspaceSurface destination={destination} />);
+    const indicators = () => screen.getByTestId('chart-stub').dataset.indicators;
+    expect(indicators()).toBe('rsi'); // RSI on by default
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'RSI' }));
+    expect(indicators()).toBe(''); // toggled off
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'ATR' }));
+    expect(indicators()).toBe('atr'); // a second indicator toggled on
   });
 });

@@ -339,8 +339,9 @@ entry/stop/target zones, and live positions / orders / fills. **Drawing tools ar
 candlestick base is built (gh#725, Lightweight Charts) on the workspace, beside the suggestion panel (gh#654); its
 underlying data reaches the client over HTTP (gh#644): `/api/marketdata/bars`, `/indicators` and `/levels` serve
 OHLCV, the **pre-computed** indicator series (R-22's single number, never re-derived in the browser) and the active
-price levels — authenticated (R-18), bounded, and global (not operator-owned). The indicator panes and the overlay
-set (levels, suggestion zones, live markers) are their own cards (gh#726 / gh#727). The **realtime** half is a single
+price levels — authenticated (R-18), bounded, and global (not operator-owned). The **indicator panes** are built
+(gh#726 — RSI / ATR, each in its own pane below the candles, toggled by the operator); the overlay set (levels,
+suggestion zones, live position / order / fill markers) is gh#727's. The **realtime** half is a single
 JWT-authenticated SignalR connection (gh#649, [ADR-0021](adr/0021-realtime-hub-contract.md)): it resumes from its
 last-applied `sequence` on reconnect and dedupes by that cursor, so a drop-and-reconnect is gap-free and
 double-free, and its connection state is **always visible** — a degraded socket is shown degraded, never rendered
