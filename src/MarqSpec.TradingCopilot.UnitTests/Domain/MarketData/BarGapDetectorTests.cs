@@ -17,9 +17,9 @@ public class BarGapDetectorTests
     private static BarSessionCalendar Calendar() => new(new(16, 0), NoHolidays);
 
     /// <summary>An instant at a Central wall-clock time, carrying the zone's real offset for that date.</summary>
-    private static DateTimeOffset Market(int month, int day, int hour, int minute = 0)
+    private static DateTimeOffset Market(int month, int day, int hour, int minute = 0, int second = 0)
     {
-        DateTime wall = new(2026, month, day, hour, minute, 0, DateTimeKind.Unspecified);
+        DateTime wall = new(2026, month, day, hour, minute, second, DateTimeKind.Unspecified);
         return new DateTimeOffset(wall, MarketClock.CentralTime.GetUtcOffset(wall));
     }
 
@@ -70,13 +70,14 @@ public class BarGapDetectorTests
     public void MissingBuckets_ShouldNotReportTheDailyMaintenanceWindow()
     {
         // Tuesday 15:55 → 17:05 crosses the 16:00 close and the hour of maintenance. Expected buckets are
-        // 15:55–15:59 (closing at or before the close) and 17:00 (the reopen) — nothing in between.
+        // 15:55–15:59 (closing at or before the close) and 17:00–17:04 (the reopen onward) — nothing in
+        // between, and storing every expected bucket means no gap is reported.
         DateTimeOffset from = Market(7, 21, 15, 55);
         DateTimeOffset to = Market(7, 21, 17, 5);
         List<DateTimeOffset> stored =
         [
             .. Buckets(Market(7, 21, 15, 55), Market(7, 21, 16, 0)),
-            Market(7, 21, 17, 0),
+            .. Buckets(Market(7, 21, 17, 0), Market(7, 21, 17, 5)),
         ];
 
         IReadOnlyList<DateTimeOffset> missing =
@@ -88,9 +89,10 @@ public class BarGapDetectorTests
     [Fact]
     public void MissingBuckets_ShouldReportTheReopenBucket_WhenItIsAbsent()
     {
-        // The flip side: the first bucket after maintenance IS expected, so its absence is a real hole.
+        // The flip side: the first bucket after maintenance IS expected, so its absence is a real hole. The
+        // window ends one minute after the reopen so the reopen bucket is the only expected one missing.
         DateTimeOffset from = Market(7, 21, 15, 55);
-        DateTimeOffset to = Market(7, 21, 17, 5);
+        DateTimeOffset to = Market(7, 21, 17, 1);
         List<DateTimeOffset> stored = Buckets(Market(7, 21, 15, 55), Market(7, 21, 16, 0));
 
         IReadOnlyList<DateTimeOffset> missing =

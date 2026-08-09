@@ -110,6 +110,11 @@ builder.Services.AddHostedService<ContextIngestionHost>();
 // without a live subscription, or the reverse.
 builder.Services.Configure<BarBackfillOptions>(builder.Configuration.GetSection(BarBackfillOptions.SectionName));
 builder.Services.AddScoped<BarBackfillService>();
+// The restart heal pass (gh#696, R-1): the durable tables are the anchor on ingestion start -- interior holes
+// are backfilled from the venue's retained history and the tail resumes forward, before the periodic poll loop
+// takes over. Distinct from the event-log gap backfill above (gh#306): the store's missing history IS state to
+// rebuild, not a cursor to advance.
+builder.Services.AddScoped<BarStoreHealService>();
 builder.Services.AddHostedService<BarBackfillHost>();
 
 // R-2's news / soft-signal ingestion (gh#358): every registered INewsSource polled into the deduped NewsRecord
