@@ -119,15 +119,29 @@ public sealed class TradeJournalService
             return false;
         }
 
-        // Already journalled? Every fill of a round trip we have written is spoken for by its Trade's closing
-        // fill; re-composing over them would form a second, duplicate trade from the same executions.
-        HashSet<Guid> journalledClosings = [.. await database.Trades
-            .Where(trade => trade.AccountId == account.AccountId && trade.ClosingFillId != null)
-            .Select(trade => trade.ClosingFillId!.Value)
-            .ToListAsync(cancellationToken)];
+        // Already journalled? The boundary is TIME, not the closing fill id (gh#734 review).
+        //
+        // A written Trade records only its CLOSING fill, so excluding fills by `ClosingFillId` removes exactly ONE
+        // fill per journalled trade and leaves every earlier ENTRY fill in the candidate set indefinitely. The
+        // second round trip on a contract was then composed from {old entry, new entry, new exit} -- two entries
+        // against one exit, which cannot balance -- so it was refused and logged as a scale-in, and no trade after
+        // the first was ever written for that account+contract. For a day-trading account that is the common case,
+        // not an edge one, and it puts DailyRealizedReader and the R-4 throttle back to reading ~zero, which is the
+        // gap gh#731 exists to close.
+        //
+        // Round trips on one contract are sequential and non-overlapping -- the account is flat between them, which
+        // is what triggers this pass at all -- so the latest journalled close is a sound watermark. Strictly `>`:
+        // the closing fill of the previous trip sits exactly ON the boundary and is already spoken for.
+        DateTimeOffset? lastJournalledClose = await database.Trades
+            .Where(trade => trade.AccountId == account.AccountId
+                && trade.Instrument == exit.Contract.Key
+                && trade.ClosedAt != null)
+            .MaxAsync(trade => (DateTimeOffset?)trade.ClosedAt, cancellationToken);
 
         Dictionary<Guid, OrderSide> sideByOrder = orders.ToDictionary(order => order.Id, order => order.Side);
-        List<Fill> unjournalled = [.. fills.Where(fill => !journalledClosings.Contains(fill.Id))];
+        List<Fill> unjournalled = lastJournalledClose is null
+            ? fills
+            : [.. fills.Where(fill => fill.ExecutedAt > lastJournalledClose.Value)];
         if (unjournalled.Count == 0)
         {
             return false;

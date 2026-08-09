@@ -155,6 +155,43 @@ public class TradeJournalServiceTests
     }
 
     [Fact]
+    public async Task ProcessFlatAsync_ShouldJournalTheSecondRoundTrip_WhenTheContractIsTradedAgainLater()
+    {
+        // gh#734 review, blocking finding. A journalled trade records only its CLOSING fill, so an "already
+        // journalled?" filter keyed on that removes exactly ONE fill per written trade -- the entry fill of every
+        // earlier round trip stays in the candidate set forever. Trip 2 is then composed from {A(buy), C(buy),
+        // D(sell)}: two entries against one exit, which cannot balance, so it is refused and silently logged as a
+        // scale-in. For a day-trading account, re-trading one contract is the COMMON case, and the whole point of
+        // gh#731 is that DailyRealizedReader and the R-4 throttle stop reading zero -- which this would restore.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        // Round trip 1: in at 5,000, out at 5,010. Journalled on the first flat event.
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 5)]);
+        await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+        (await TradesAsync()).Should().ContainSingle("the first round trip journals — the fixture's precondition");
+
+        // Round trip 2 on the SAME account and contract, later in the session.
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_020m, 1, 10)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_030m, 1, 15)]);
+
+        await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        List<Trade> trades = await TradesAsync();
+        trades.Should().HaveCount(
+            2,
+            "a second round trip on the same account+contract is journalled like any other — the first trip's fills "
+            + "are spoken for and must not be re-composed into it");
+
+        Trade second = trades.OrderBy(trade => trade.ClosedAt).Last();
+        second.EntryPrice.Should().Be(5_020m, "the second trip is composed from ITS OWN fills, not the first's");
+        second.ExitPrice.Should().Be(5_030m);
+        second.Size.Should().Be(1, "a stale entry fill leaking in would size this at 2");
+        second.RealizedPnL.Should().Be(50m, "10 points * 1 contract * $5 point value");
+    }
+
+    [Fact]
     public async Task ProcessFlatAsync_ShouldSignThePnLByTheEntrySide_WhenAShortClosesForAProfit()
     {
         Guid owner = Guid.NewGuid();
