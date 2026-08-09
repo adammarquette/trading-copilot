@@ -97,11 +97,7 @@ export function MarketChart({
         return;
       }
       if (result.ok) {
-        setState(
-          result.data.points.length === 0
-            ? { status: 'empty' }
-            : { status: 'ready', series: result.data },
-        );
+        setState(result.data.bars.length === 0 ? { status: 'empty' } : { status: 'ready', series: result.data });
       } else {
         setState({
           status: 'error',
@@ -159,7 +155,7 @@ export function MarketChart({
 
   // Push the candles onto the series whenever a ready window arrives.
   const candles = useMemo(
-    () => (state.status === 'ready' ? toCandles(state.series.points) : null),
+    () => (state.status === 'ready' ? toCandles(state.series.bars) : null),
     [state],
   );
   useEffect(() => {

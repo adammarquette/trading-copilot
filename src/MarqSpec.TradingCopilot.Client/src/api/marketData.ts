@@ -20,8 +20,8 @@ export interface BarPoint {
 export interface BarSeries {
   readonly venue: string;
   readonly instrument: string;
-  readonly resolution: number;
-  readonly points: readonly BarPoint[];
+  readonly resolutionMinutes: number;
+  readonly bars: readonly BarPoint[];
 }
 
 /** The wire shape from `/api/marketdata/bars` (`BarSeriesResponse`), mapped to {@link BarSeries} for callers. */
@@ -36,7 +36,7 @@ interface BarSeriesWire {
  * Reads OHLCV bars for a `(venue, instrument, resolution)` over a bounded `[from, to)` window (gh#644), through the
  * authenticated client (R-18 — never a raw `fetch`). The three degraded outcomes are distinct and the caller must
  * keep them so (R-19): a window wider than the server's cap is a **refusal** (`kind: 'refused'`), an unknown series
- * is a 404 **failure**, and a *known* series with no bars in the window is a success with an **empty** `points`.
+ * is a 404 **failure**, and a *known* series with no bars in the window is a success with an **empty** `bars`.
  */
 export function getBars(
   venue: string,
