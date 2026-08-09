@@ -85,7 +85,8 @@ public class TradeJournalServiceTests
         (decimal Price, int Size, int Minute)[] fills,
         decimal pointValue = 5m,
         TradingMode mode = TradingMode.Practice,
-        Guid? suggestionId = null)
+        Guid? suggestionId = null,
+        OrderStatus status = OrderStatus.Filled)
     {
         Guid orderId = Guid.NewGuid();
         await using TradingCopilotDbContext context = Context();
@@ -103,7 +104,7 @@ public class TradeJournalServiceTests
             WorkingStopPrice = 5_290m,
             SafetyStopPrice = 5_280m,
             PointValue = pointValue,
-            Status = OrderStatus.Filled,
+            Status = status,
             Mode = mode,
             VenueOrderKey = $"venue-{orderId:N}",
             PlacedAt = _now,
@@ -152,6 +153,33 @@ public class TradeJournalServiceTests
         trade.AccountId.Should().Be(accountId);
         trade.UserId.Should().Be(owner);
         trade.ClosingFillId.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldJournalTheEntry_WhenItsOrderWasCancelledAfterPartiallyFilling()
+    {
+        // gh#734 review. Selecting orders by their CURRENT status drops venue-truth fills: ingestion deliberately
+        // moves a partially-filled order to Cancelled when the remainder is cancelled or rejected, and its Fill rows
+        // still stand — the executions happened and the money is real. Filtering on Filled/PartiallyFilled therefore
+        // lost the entry leg entirely, so the round trip could never balance and was never journalled. Presence of
+        // FILLS is what proves an order executed, not the status the order ended up in.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        // A 1-of-2 entry: one lot filled, the remainder cancelled, so the order rests Cancelled with a real fill.
+        await SeedFilledOrderAsync(
+            owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)], status: OrderStatus.Cancelled);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 5)]);
+
+        await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        List<Trade> trades = await TradesAsync();
+        trades.Should().ContainSingle(
+            "the entry executed — a cancelled remainder does not un-fill the lot that traded, and the journal reads "
+            + "venue truth (the Fill rows), not the order's final status");
+        trades[0].EntryPrice.Should().Be(5_000m);
+        trades[0].Size.Should().Be(1, "one lot filled before the remainder was cancelled");
+        trades[0].RealizedPnL.Should().Be(50m, "10 points * 1 contract * $5");
     }
 
     [Fact]

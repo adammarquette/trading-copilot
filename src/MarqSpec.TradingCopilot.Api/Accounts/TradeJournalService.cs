@@ -99,11 +99,14 @@ public sealed class TradeJournalService
         // Per-owner context: every read and the write below are R-20-scoped to the account's owner.
         await using TradingCopilotDbContext database = new(_options, new OwnerUser(account.UserId));
 
-        // The orders of ours on the contract that actually executed -- the journal's own record of the round trip.
+        // The orders of ours on the contract -- deliberately NOT filtered by status (gh#734 review). Ingestion moves
+        // a partially-filled order to Cancelled when its remainder is cancelled or rejected, and the Fill rows for
+        // the lots that DID trade still stand: the executions happened and the money is real. Selecting on
+        // Filled/PartiallyFilled dropped that entry leg entirely, so the round trip could never balance and was
+        // never journalled. What proves an order executed is the presence of FILLS, which the query below reads --
+        // venue truth, not the status the order happened to end in.
         List<Order> orders = await database.Orders
-            .Where(order => order.AccountId == account.AccountId
-                && order.Instrument == exit.Contract.Key
-                && (order.Status == OrderStatus.Filled || order.Status == OrderStatus.PartiallyFilled))
+            .Where(order => order.AccountId == account.AccountId && order.Instrument == exit.Contract.Key)
             .ToListAsync(cancellationToken);
         if (orders.Count == 0)
         {
