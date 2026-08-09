@@ -115,6 +115,37 @@ public sealed class FinnhubMarketDataSourceTests : IDisposable
     }
 
     [Fact]
+    public void Capabilities_ShouldGrantExactlyContextTrades_SoTheGrantCannotSilentlyWiden()
+    {
+        // The exhaustive backstop under the three boundaries above: whatever a future edit adds — News, a second
+        // data capability, an execution flag — trips exact equality, so the one capability this gh#496 split exists
+        // to isolate cannot broaden without a test going red, not only the specific flags spelled out above.
+        Source().Capabilities.Flags.Should().Be(VenueCapability.ContextTrades);
+    }
+
+    [Theory]
+    [InlineData(VenueCapability.Quotes)]         // the drift that would put a context feed on the execution path
+    [InlineData(VenueCapability.HistoricalBars)] // a paid feature the seam refuses rather than serving empty
+    public void CapabilitiesRequire_ShouldThrowNamingTheCapability_WhenTheRealAdapterDoesNotGrantIt(
+        VenueCapability ungranted)
+    {
+        // gh#705 case 5 asked for the absent-grant refusal "confirmed against the real Finnhub adapter", but as
+        // written that is unreachable: the adapter is sealed and always grants ContextTrades, so no test can put it
+        // in the state its operations' Require(ContextTrades) guards. What IS witnessable on the real adapter is the
+        // composition those operations rely on — its own Capabilities.Require refusing a capability it does not
+        // grant. The tests above assert Supports (the predicate); this asserts Require (the throwing guard
+        // ResolveContractAsync / StreamContextTradesAsync actually call). The Require call-site inside those two
+        // methods stays behaviourally unobservable by construction and is guarded at the integration tier (#711) —
+        // the accepted residual of re-scoping rather than adding a test-only production seam (gh#712, option 2).
+        VenueCapabilities capabilities = Source().Capabilities;
+
+        Action require = () => capabilities.Require(ungranted);
+
+        require.Should().Throw<VenueCapabilityNotSupportedException>()
+            .Which.MissingCapability.Should().Be(ungranted);
+    }
+
+    [Fact]
     public async Task ResolveContract_ShouldMapTheInstrumentToAFinnhubContract_PairedWithWhatItResolvedFor()
     {
         ResolvedContract resolved = await Source().ResolveContractAsync(InstrumentId.Parse(Symbol), CancellationToken.None);
