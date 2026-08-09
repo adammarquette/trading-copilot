@@ -52,12 +52,7 @@ describe('getBars', () => {
 
     await expect(getBars('topstepx', 'ES', 1, 'a', 'b')).resolves.toEqual({
       ok: true,
-      data: {
-        venue: 'topstepx',
-        instrument: 'ES',
-        resolution: 1,
-        points: wireSeries.bars,
-      },
+      data: wireSeries,
     });
   });
 

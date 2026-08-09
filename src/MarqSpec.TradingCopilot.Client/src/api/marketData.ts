@@ -24,14 +24,6 @@ export interface BarSeries {
   readonly bars: readonly BarPoint[];
 }
 
-/** The wire shape from `/api/marketdata/bars` (`BarSeriesResponse`), mapped to {@link BarSeries} for callers. */
-interface BarSeriesWire {
-  readonly venue: string;
-  readonly instrument: string;
-  readonly resolutionMinutes: number;
-  readonly bars: readonly BarPoint[];
-}
-
 /**
  * Reads OHLCV bars for a `(venue, instrument, resolution)` over a bounded `[from, to)` window (gh#644), through the
  * authenticated client (R-18 — never a raw `fetch`). The three degraded outcomes are distinct and the caller must
@@ -52,17 +44,5 @@ export function getBars(
     from,
     to,
   });
-  return request<BarSeriesWire>('GET', `/api/marketdata/bars?${query.toString()}`).then((result) =>
-    result.ok
-      ? {
-          ok: true,
-          data: {
-            venue: result.data.venue,
-            instrument: result.data.instrument,
-            resolution: result.data.resolutionMinutes,
-            points: result.data.bars,
-          },
-        }
-      : result,
-  );
+  return request<BarSeries>('GET', `/api/marketdata/bars?${query.toString()}`);
 }
