@@ -86,6 +86,7 @@ erDiagram
   Suggestion    ||--o| Suggestion             : supersedes
 
   Order         ||--o{ Fill                   : fills
+  Fill          |o--o| Trade                  : "closes (natural key)"
   Order         ||--o| StopPlan               : "protected by"
   Order         ||--o| BracketOCO             : brackets
   Order         ||--o| ConditionalOrder       : "pending as"

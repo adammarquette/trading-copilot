@@ -348,6 +348,12 @@ builder.Services.AddScoped<AccountEventIngestionService>();
 // behind it. Every exit route (manual flatten, the promoted stop firing, auto-flatten, kill-switch flatten-all)
 // reaches it the same way. Resolved per-event by AccountEventStreamHost.
 builder.Services.AddScoped<OcoExitService>();
+
+// The production Trade writer (gh#731, R-8/R-9): the same flat signal closes a round trip, which is journalled
+// with a signed tick-value-aware RealizedPnL. This is what makes DailyRealizedReader (gh#587) and the consistency
+// window read real money rather than the zero they returned while nothing wrote Trade. Resolved per-event by
+// AccountEventStreamHost, after the OCO retire.
+builder.Services.AddScoped<TradeJournalService>();
 builder.Services.AddHostedService<AccountEventStreamHost>();
 
 // Settlement-boundary position reconcile (R-13, ADR-0013, gh#193): reports positions from venue truth tagged

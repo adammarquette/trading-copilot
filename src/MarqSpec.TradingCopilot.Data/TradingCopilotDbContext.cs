@@ -388,6 +388,25 @@ public class TradingCopilotDbContext : TenantDbContext
                 .HasForeignKey(t => t.SuggestionId)
                 .OnDelete(DeleteBehavior.SetNull);
 
+            // The closing fill is the trade's natural key -- the writer's idempotency (gh#731). A replayed flat
+            // PositionEvent recomposes the same round trip and this index rejects the second insert, so a
+            // duplicate can never double-count into the daily governor. Filtered: many pre-writer rows are null,
+            // and Postgres treats NULLs as distinct anyway -- the filter makes that explicit and keeps the index
+            // to the rows the writer actually produces.
+            trade.HasIndex(t => t.ClosingFillId)
+                .IsUnique()
+                .HasFilter("\"ClosingFillId\" IS NOT NULL");
+
+            trade.HasOne<Fill>()
+                .WithMany()
+                .HasForeignKey(t => t.ClosingFillId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // The two live readers (DailyRealizedReader, ConsistencyWindowReader) filter AccountId + ClosedAt and
+            // require RealizedPnL -- only AccountId was indexed (gh#731 decision 7). Cover the composite so the
+            // day-realized read stays a range scan as the journal grows.
+            trade.HasIndex(t => new { t.AccountId, t.ClosedAt });
+
             // Mode is a journal fact (practice results never blend into live results) -- check-constrained,
             // but NOT trigger-guarded: a trade closes after placement, when the declaration may legitimately
             // have moved on. The placement-time guard lives on Orders and Suggestions.

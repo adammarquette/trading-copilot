@@ -99,6 +99,12 @@ public sealed class AccountEventStreamHost : BackgroundService
                 await scope.ServiceProvider
                     .GetRequiredService<OcoExitService>()
                     .ProcessExitAsync(exit, cancellationToken);
+
+                // The same flat signal closes a round trip, so journal it (gh#731) -- this is what makes
+                // DailyRealizedReader and the consistency window read real money instead of zero. Runs AFTER the
+                // protection retire (the safety action leads) and never blocks it: a journal failure is logged and
+                // swallowed, because a missing Trade row must not leave a dangling protective leg at the venue.
+                await JournalRoundTripSafelyAsync(scope.ServiceProvider, exit, cancellationToken);
             }
             else
             {
@@ -106,6 +112,30 @@ public sealed class AccountEventStreamHost : BackgroundService
                     .GetRequiredService<AccountEventIngestionService>()
                     .ProcessAsync(accountEvent, cancellationToken);
             }
+        }
+    }
+
+    // The journal is a SECONDARY write behind the safety action: a failure here loses a Trade row (the readers
+    // then under-report the day, which the operator can see) but must never abort the stream or prevent the next
+    // event's protection retire. Cancellation still propagates -- that is a clean shutdown, not a fault.
+    private async Task JournalRoundTripSafelyAsync(
+        IServiceProvider scope, PositionEvent exit, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await scope.GetRequiredService<TradeJournalService>().ProcessFlatAsync(exit, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error,
+                "Journalling the round trip that closed on {Contract} for account {Account} failed; the position's "
+                + "protection was still retired. The day's realized P&L will under-report until this is corrected.",
+                exit.Contract, exit.Account);
         }
     }
 }
