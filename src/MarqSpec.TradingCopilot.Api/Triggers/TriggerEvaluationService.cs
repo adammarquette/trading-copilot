@@ -10,6 +10,7 @@ using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using MarqSpec.TradingCopilot.Domain.Notifications;
+using MarqSpec.TradingCopilot.Domain.Risk;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Triggers;
 using MarqSpec.TradingCopilot.Domain.Venue;
@@ -63,6 +64,11 @@ public class TriggerEvaluationService
     private readonly TimeSpan _suggestionValidity;
     private readonly IAiSpendGovernor _governor;
     private readonly AiSpendBudget? _budget;
+    private readonly ISuggestionThrottle _throttle;
+    private readonly bool _throttleEnabled;
+    private readonly decimal _throttleThreshold;
+    private readonly int _throttleFullWindowCap;
+    private readonly int _throttleConvictionFloor;
     private readonly ISuggestionRealtimeNotifier _suggestionNotifier;
     private readonly ILogger<TriggerEvaluationService> _logger;
 
@@ -105,6 +111,11 @@ public class TriggerEvaluationService
     /// an issued / superseded row reaches the owning operator's live surfaces without a poll. Presentation-only — its
     /// failure never affects the write (enforcement lives below the model; this is below the write).
     /// </param>
+    /// <param name="throttle">
+    /// The R-4 suggestion throttle (gh#551): a pure, deterministic policy consulted BEFORE the reviewer wakes. Fed the
+    /// account's headroom as data — never a gate/venue dependency (the gh#402 gate-below-model discipline) — it
+    /// suppresses or caps issuance as daily-drawdown headroom depletes. Inert unless <see cref="SuggestionOptions.ThrottleEnabled"/>.
+    /// </param>
     /// <param name="logger">The logger.</param>
     public TriggerEvaluationService(
         TradingCopilotDbContext discovery,
@@ -120,6 +131,7 @@ public class TriggerEvaluationService
         IAiSpendGovernor governor,
         IOptions<GovernorOptions> governorOptions,
         ISuggestionRealtimeNotifier suggestionNotifier,
+        ISuggestionThrottle throttle,
         ILogger<TriggerEvaluationService> logger)
     {
         ArgumentNullException.ThrowIfNull(governorOptions);
@@ -138,6 +150,11 @@ public class TriggerEvaluationService
         _governor = governor;
         _budget = governorOptions.Value.ToBudget(); // null == inert (no cap configured); computed once per pass
         _suggestionNotifier = suggestionNotifier;
+        _throttle = throttle;
+        _throttleEnabled = suggestionOptions.Value.ThrottleEnabled;
+        _throttleThreshold = suggestionOptions.Value.ThrottleThresholdFraction;
+        _throttleFullWindowCap = suggestionOptions.Value.ThrottleFullWindowCap;
+        _throttleConvictionFloor = suggestionOptions.Value.ThrottleConvictionFloor;
         _logger = logger;
     }
 
@@ -464,6 +481,60 @@ public class TriggerEvaluationService
     /// suggestion (or an advisory) per the outcome, and journal the firing regardless. NOTHING here reaches execution
     /// — it persists a suggestion and at most queues an advisory (enforcement lives below the model).
     /// </summary>
+    // The inert throttle decision: Full, an uncapped window admitting every candidate — used when the throttle is off
+    // or the account declares no governor. Admits(...) is always true (cap = int.MaxValue) and IsSuppressed is false,
+    // so the scan behaves exactly as before opt-in.
+    private static readonly SuggestionThrottleDecision _fullThrottle = new(
+        SuggestionThrottleMode.Full, PerWindowCap: int.MaxValue, RequiredConfidence: 0,
+        SuggestionThrottleReason.None, "Suggestion throttle inert — proposing normally.");
+
+    /// <summary>
+    /// Decides the R-4 throttle for a fire's account (gh#551), fed the account's declared governor and its realized
+    /// day P&amp;L as DATA from this owner's own R-20-filtered context — never a gate / venue dependency (gh#402). Inert
+    /// (<see cref="_fullThrottle"/>) when the throttle is off, the trigger names no account, or no risk profile exists.
+    /// </summary>
+    private async Task<SuggestionThrottleDecision> DecideThrottleAsync(
+        TradingCopilotDbContext database, TriggerRecord trigger, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (!_throttleEnabled || trigger.AccountId is not { } accountId)
+        {
+            return _fullThrottle;
+        }
+
+        // No declared profile => no governor to throttle against: propose (inert), like an account that set no limit.
+        RiskProfileRecord? profile = await database.RiskProfiles
+            .FirstOrDefaultAsync(candidate => candidate.AccountId == accountId, cancellationToken);
+        if (profile is null)
+        {
+            return _fullThrottle;
+        }
+
+        decimal dayRealized = await database.TodayRealizedPnLForAccountAsync(accountId, now, cancellationToken);
+        decimal dayLoss = dayRealized < 0m ? -dayRealized : 0m; // the non-negative loss the headroom projection consumes
+        decimal dayProfit = dayRealized > 0m ? dayRealized : 0m;
+
+        decimal headroomFraction = DailyHeadroom
+            .Remaining(profile.DailyLossLimit, profile.DailyDrawdownGovernor, dayLoss)
+            .GovernorFractionRemaining(profile.DailyDrawdownGovernor);
+
+        // The RAW target-reached, NOT pre-ANDed with StopForDayAtProfitTarget: the policy applies that flag itself, so
+        // feeding the pre-ANDed bool would double-apply it — a green day past target with stand-down OFF must stay Full.
+        bool dailyTargetReached = profile.DailyProfitTarget is { } target && dayProfit >= target;
+
+        SuggestionThrottlePolicy policy = SuggestionThrottlePolicy.Declare(
+            _throttleThreshold, _throttleFullWindowCap, _throttleConvictionFloor, profile.StopForDayAtProfitTarget);
+
+        return _throttle.Decide(policy, new SuggestionThrottleContext(headroomFraction, dailyTargetReached));
+    }
+
+    // Maps the throttle's suppress reason to the review-outcome reason the scan's advisory switch renders. IsSuppressed
+    // implies one of these two, so the fall-through to GovernorReached is never reached for a non-suppressed decision.
+    private static SuppressReason ThrottleSuppress(SuggestionThrottleReason reason) => reason switch
+    {
+        SuggestionThrottleReason.DailyTargetStandDown => SuppressReason.DailyTargetStandDown,
+        _ => SuppressReason.GovernorReached,
+    };
+
     private async Task FireAgentReviewAsync(
         TradingCopilotDbContext database,
         TriggerRecord trigger,
@@ -492,8 +563,22 @@ public class TriggerEvaluationService
             observed,
             now);
 
+        // R-4 SUGGESTION THROTTLE (gh#551): decided BEFORE the reviewer, so a suppressed setup pays no LLM call and no
+        // spend. Inert (Full, admits everything) unless opted in with a declared governor. Advisory, ahead of the
+        // execution gate — a suggestion carries no risk, so this never substitutes for the take-time gate.
+        SuggestionThrottleDecision throttle = await DecideThrottleAsync(database, trigger, now, cancellationToken);
+
         AgentReview review;
-        if (governorPass is not null
+        if (throttle.IsSuppressed)
+        {
+            // The account's daily governor is reached, or its daily target is hit with stand-down on: no new entry. No
+            // LLM call is made (the point: cap WHETHER a call happens) and, with no costs, no AIUsage row is written. A
+            // fire is still a fire (journaled + arm advanced below), so the operator gets one "suggestions paused"
+            // advisory per arming edge, carrying the throttle's own reason -- the honest-inert posture.
+            review = new AgentReview(
+                new ReviewOutcome.Suppress(ThrottleSuppress(throttle.Reason), throttle.Explanation), Costs: []);
+        }
+        else if (governorPass is not null
             && _governor.Evaluate(governorPass.Budget, governorPass.SpentUsd) is { IsBlocked: true } blocked)
         {
             // AI-SPEND GOVERNOR (gh#448) -- BUDGET EXHAUSTED: short-circuit BEFORE the reviewer. No LLM call is made
@@ -593,7 +678,7 @@ public class TriggerEvaluationService
         {
             case ReviewOutcome.Suggest suggest:
                 await StageSuggestionAsync(
-                    database, trigger, owner, suggest, now, dedupKey, firingId, advisories, suggestionPushes, cancellationToken);
+                    database, trigger, owner, suggest, now, dedupKey, firingId, advisories, suggestionPushes, throttle, cancellationToken);
                 break;
 
             case ReviewOutcome.Suppress { Reason: SuppressReason.NoReviewerConfigured }:
@@ -624,6 +709,17 @@ public class TriggerEvaluationService
                     NotificationSeverity.Notify,
                     $"Setup needs review — {TitleFor(trigger)}",
                     "A setup fired but agent review is paused: the daily AI-spend budget is reached. Review it manually.",
+                    dedupKey));
+                break;
+
+            case ReviewOutcome.Suppress { Reason: SuppressReason.GovernorReached or SuppressReason.DailyTargetStandDown } throttled:
+                // R-4 THROTTLE (gh#551): a new entry was suppressed because the account's daily governor is reached or
+                // its target stand-down is on. Never silent -- the operator is told why suggestions paused, quoting the
+                // throttle's own explanation, so silence is never mistaken for "nothing is setting up". One per arming edge.
+                advisories.Add(new Notification(
+                    NotificationSeverity.Notify,
+                    $"Suggestions paused — {TitleFor(trigger)}",
+                    throttled.Detail,
                     dedupKey));
                 break;
 
@@ -694,6 +790,7 @@ public class TriggerEvaluationService
         Guid firingId,
         List<Notification> advisories,
         List<RealtimeSuggestion> suggestionPushes,
+        SuggestionThrottleDecision throttle,
         CancellationToken cancellationToken)
     {
         // The validity window (gh#544): the operator's configured span, clamped so the suggestion cannot outlive this
@@ -726,6 +823,28 @@ public class TriggerEvaluationService
                 "Agent-review trigger {Id} has no tradable account (missing or undeclared mode); no suggestion staged.",
                 trigger.Id);
             return;
+        }
+
+        // R-4 THROTTLE — the binding deterministic arm (gh#551). While throttled, the per-window cap (from headroom
+        // ALONE) and the conviction floor drop lower-conviction candidates; a Full / inert decision admits everything.
+        // Confidence is a FILTER only: it can drop a candidate below the floor, but it can NEVER lift the
+        // headroom-derived cap — the model cannot inflate its own number past the throttle. Checked HERE, before the
+        // supersede below, so a dropped candidate leaves the incumbent standing rather than voiding it for nothing.
+        // Counted over THIS account's Central trading day, the same window the headroom read uses; the Full path skips
+        // the count so opt-out stays a byte-for-byte no-op.
+        if (throttle.Mode != SuggestionThrottleMode.Full)
+        {
+            int issuedInWindow = await database.Suggestions
+                .Where(candidate => candidate.AccountId == trigger.AccountId && candidate.CreatedAt >= CentralDayStartUtc(now))
+                .CountAsync(cancellationToken);
+            if (!throttle.Admits(issuedInWindow, suggest.Confidence))
+            {
+                _logger.LogInformation(
+                    "R-4 throttle: agent-review trigger {Id} suggestion not admitted (issued {Issued} of cap {Cap}; "
+                    + "confidence {Confidence} vs floor {Floor}); not staged.",
+                    trigger.Id, issuedInWindow, throttle.PerWindowCap, suggest.Confidence, throttle.RequiredConfidence);
+                return;
+            }
         }
 
         // SUPERSEDE (gh#550, R-4, ADR-0013): a re-formed setup issues a NEW, superseding suggestion rather than

@@ -1,5 +1,6 @@
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Domain.Ai;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Triggers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -92,6 +93,11 @@ public static class AiRegistration
                 "Governor: DailyBudgetUsd must be null or positive; AlertThresholdFraction must be in (0, 1].")
             .ValidateOnStart();
         services.AddSingleton<IAiSpendGovernor, AiSpendGovernor>();
+
+        // The R-4 suggestion throttle (gh#551): a pure, stateless policy the scan consults per fire — like the
+        // AI-spend governor beside it, a singleton with no state of its own. Inert until SuggestionOptions.Throttle*
+        // opts an account in; the scan reads the account's headroom and decides Full / Throttled / Suppressed.
+        services.AddSingleton<ISuggestionThrottle, SuggestionThrottle>();
 
         return services;
     }

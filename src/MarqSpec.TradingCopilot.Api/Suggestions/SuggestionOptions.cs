@@ -46,4 +46,21 @@ public sealed class SuggestionOptions
     /// drift band the gh#546 consumer will read too.
     /// </remarks>
     public int DriftToleranceTicks { get; set; } = 8;
+
+    /// <summary>
+    /// Whether the R-4 <b>suggestion throttle</b> (gh#551) is active. <b>Off by default</b> — inert, so the scan
+    /// proposes exactly as before until an operator opts in, mirroring the AI-spend governor's inert default. When on,
+    /// as an account's daily-drawdown headroom depletes the scan issues fewer, higher-conviction suggestions, and at
+    /// the governor or the daily-target stand-down it suppresses new entries (advisory, ahead of the execution gate).
+    /// </summary>
+    public bool ThrottleEnabled { get; set; }
+
+    /// <summary>The headroom fraction at/above which issuance is <b>Full</b>; below it, throttling begins. In <c>(0, 1]</c> (gh#588).</summary>
+    public decimal ThrottleThresholdFraction { get; set; } = 0.5m;
+
+    /// <summary>The per-window issuance ceiling at Full — throttling only ever scales this <b>down</b>. Positive (gh#588).</summary>
+    public int ThrottleFullWindowCap { get; set; } = 8;
+
+    /// <summary>The minimum model confidence (0–100) a candidate needs while throttled — "higher-conviction only" (gh#588).</summary>
+    public int ThrottleConvictionFloor { get; set; } = 70;
 }
