@@ -181,7 +181,7 @@ export function MarketChart({
         <Overlay>
           <EmptyState
             title="No bars in this window"
-            description={`${instrument} has no ${resolution}-minute bars in the last few days.`}
+            description={`${instrument} has no ${resolution}-minute bars in the selected window.`}
             tag="R-10"
           />
         </Overlay>
