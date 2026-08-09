@@ -142,6 +142,15 @@ services:
       Backfill__ResolutionMinutes__0:
       Backfill__ResolutionMinutes__1:
       Backfill__ResolutionMinutes__2:
+      # The restart heal's window and session calendar (gh#696). SessionClose defaults to 16:00 CT (CME equity
+      # index); SessionHolidays is an enumerated list like the instruments above -- a fifth declared holiday
+      # needs another line.
+      Backfill__MaxHealWindowMinutes:
+      Backfill__SessionClose:
+      Backfill__SessionHolidays__0:
+      Backfill__SessionHolidays__1:
+      Backfill__SessionHolidays__2:
+      Backfill__SessionHolidays__3:
       # Indicator projections over that store (gh#310). No symbol list: the projection's work is whatever the bar
       # store holds, so bars can never exist without their indicators. Null pass-through -- the app defaults the
       # period to Wilder's 14, the band resolution to 1 minute, and the cadence to 60 s.
