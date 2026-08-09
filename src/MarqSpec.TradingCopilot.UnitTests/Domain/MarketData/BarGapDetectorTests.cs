@@ -9,9 +9,9 @@ namespace MarqSpec.TradingCopilot.UnitTests.Domain.MarketData;
 /// </summary>
 public class BarGapDetectorTests
 {
-    private static readonly TimeSpan OneMinute = TimeSpan.FromMinutes(1);
+    private static TimeSpan OneMinute => TimeSpan.FromMinutes(1);
 
-    private static readonly HashSet<DateOnly> NoHolidays = [];
+    private static HashSet<DateOnly> NoHolidays => [];
 
     /// <summary>The CME equity-index calendar — 4:00 pm CT close, maintenance to 5:00 pm, reopen 5:00 pm.</summary>
     private static BarSessionCalendar Calendar() => new(new(16, 0), NoHolidays);

@@ -263,7 +263,9 @@ process it. One polling framework **fans out** across many sources, of the same 
 (`TopstepX`, `Tradovate`), data-only providers (`Finnhub` — equities/indices quotes + alternative data; note historical candles are a paid tier), and
 data kinds (market/trade data, news, social). This dovetails with the venue
 abstraction (R-17) and the soft-signal sources (R-2), and keeps all processing uniform and in one place.
-**Implemented:** `BarBackfillService`/`BarBackfillHost` and `GapBackfillService` durably fill the bar store; the
+**Implemented:** `BarBackfillService`/`BarBackfillHost` and `GapBackfillService` durably fill the bar store, and
+`BarStoreHealService` heals it on restart (gh#696): one session-aware heal pass — `BarGapDetector` over
+`BarSessionCalendar` — runs before the poll loop, backfilling interior holes from retained venue history; the
 news pollers land as `NewsIngestionService`/`NewsIngestionHost` (see *News & soft-signal ingestion* below).
 
 ### Processor service(s) — process, persist, pre-compute (R-3, R-4, R-8/R-9, R-22)

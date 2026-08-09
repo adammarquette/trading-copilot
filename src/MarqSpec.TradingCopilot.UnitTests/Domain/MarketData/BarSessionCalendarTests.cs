@@ -18,13 +18,14 @@ namespace MarqSpec.TradingCopilot.UnitTests.Domain.MarketData;
 /// </remarks>
 public class BarSessionCalendarTests
 {
-    private static readonly TimeSpan OneMinute = TimeSpan.FromMinutes(1);
-    private static readonly TimeSpan FiveMinutes = TimeSpan.FromMinutes(5);
+    private static TimeSpan OneMinute => TimeSpan.FromMinutes(1);
+
+    private static TimeSpan FiveMinutes => TimeSpan.FromMinutes(5);
 
     /// <summary>The CME equity-index session close (wiki: market sessions) — 4:00 pm CT, reopen 5:00 pm.</summary>
-    private static readonly TimeOnly Close1600 = new(16, 0);
+    private static TimeOnly Close1600 => new(16, 0);
 
-    private static readonly HashSet<DateOnly> NoHolidays = [];
+    private static HashSet<DateOnly> NoHolidays => [];
 
     /// <summary>An instant at a Central wall-clock time, carrying the zone's real offset for that date.</summary>
     private static DateTimeOffset Market(int month, int day, int hour, int minute = 0)
