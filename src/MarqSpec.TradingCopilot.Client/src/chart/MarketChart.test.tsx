@@ -5,26 +5,48 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // Lightweight Charts is a canvas library jsdom cannot render, so mock it at its seam and assert on the calls the
 // component makes (the same posture as mocking @microsoft/signalr for the realtime client). __mock exposes the spies.
 const { chartMock } = vi.hoisted(() => {
-  const setData = vi.fn();
+  const setData = vi.fn(); // the candle series (kept for the gh#725 assertions)
+  const lineSetData = vi.fn(); // an indicator line series (gh#726)
   const remove = vi.fn();
+  const removeSeries = vi.fn();
   const fitContent = vi.fn();
   const applyOptions = vi.fn();
-  const addSeries = vi.fn(() => ({ setData }));
+  // addSeries returns a series whose setData is distinguishable by kind, so candle vs indicator data is assertable.
+  // A rest signature so a call carries all of (seriesType, options, paneIndex) — the pane index is asserted below.
+  const addSeries = vi.fn((...args: unknown[]) => ({
+    setData: args[0] === 'Candlestick' ? setData : lineSetData,
+  }));
   const createChart = vi.fn(() => ({
     addSeries,
+    removeSeries,
     remove,
     applyOptions,
     timeScale: () => ({ fitContent }),
   }));
-  return { chartMock: { setData, remove, fitContent, applyOptions, addSeries, createChart } };
+  return {
+    chartMock: {
+      setData,
+      lineSetData,
+      remove,
+      removeSeries,
+      fitContent,
+      applyOptions,
+      addSeries,
+      createChart,
+    },
+  };
 });
 vi.mock('lightweight-charts', () => ({
   createChart: chartMock.createChart,
   CandlestickSeries: 'Candlestick',
+  LineSeries: 'Line',
 }));
 
-const { getBarsMock } = vi.hoisted(() => ({ getBarsMock: vi.fn() }));
-vi.mock('../api/marketData', () => ({ getBars: getBarsMock }));
+const { getBarsMock, getIndicatorsMock } = vi.hoisted(() => ({
+  getBarsMock: vi.fn(),
+  getIndicatorsMock: vi.fn(),
+}));
+vi.mock('../api/marketData', () => ({ getBars: getBarsMock, getIndicators: getIndicatorsMock }));
 
 import { MarketChart } from './MarketChart';
 
@@ -187,5 +209,63 @@ describe('MarketChart', () => {
     unmount();
 
     expect(chartMock.remove).toHaveBeenCalledOnce();
+  });
+
+  it('renders a requested indicator in its own pane below the candles, from the pre-computed series (gh#726)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+    getIndicatorsMock.mockResolvedValue({
+      ok: true,
+      data: {
+        venue: 'topstepx',
+        instrument: 'ES',
+        resolutionMinutes: 1,
+        indicator: 'rsi',
+        period: 14,
+        points: [{ bucketStart: '2026-01-01T00:00:00Z', value: 61.2 }],
+      },
+    });
+
+    render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        indicators={[{ indicator: 'rsi', period: 14 }]}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(getIndicatorsMock).toHaveBeenCalledWith(
+        'topstepx',
+        'ES',
+        1,
+        'rsi',
+        14,
+        expect.any(String),
+        expect.any(String),
+      ),
+    );
+    await waitFor(() => expect(chartMock.lineSetData).toHaveBeenCalledOnce());
+
+    // The line series goes in pane 1 (pane 0 is the candles) — addSeries(LineSeries, options, paneIndex).
+    const lineCall = chartMock.addSeries.mock.calls.find((call) => call[0] === 'Line');
+    expect(lineCall?.[2]).toBe(1);
+    const lineData = chartMock.lineSetData.mock.calls[0][0] as Array<{
+      time: number;
+      value: number;
+    }>;
+    expect(lineData[0]).toMatchObject({
+      time: Math.floor(Date.parse('2026-01-01T00:00:00Z') / 1000),
+      value: 61.2,
+    });
+  });
+
+  it('does not fetch indicators when none are requested', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    render(<MarketChart venue="topstepx" instrument="ES" resolution={1} />);
+    await waitFor(() => expect(chartMock.setData).toHaveBeenCalled());
+
+    expect(getIndicatorsMock).not.toHaveBeenCalled();
   });
 });

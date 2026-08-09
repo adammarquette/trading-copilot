@@ -46,3 +46,49 @@ export function getBars(
   });
   return request<BarSeries>('GET', `/api/marketdata/bars?${query.toString()}`);
 }
+
+/** One value of a pre-computed indicator series (gh#644): the bucket's open time (ISO-8601 UTC) and the value. */
+export interface IndicatorPoint {
+  readonly bucketStart: string;
+  readonly value: number;
+}
+
+/**
+ * A bounded, ascending pre-computed indicator series for one `(venue, instrument, resolution, indicator, period)` —
+ * the `/api/marketdata/indicators` body (gh#644). R-22: the value is the server's single number, never re-derived.
+ */
+export interface IndicatorSeries {
+  readonly venue: string;
+  readonly instrument: string;
+  readonly resolutionMinutes: number;
+  readonly indicator: string;
+  readonly period: number;
+  readonly points: readonly IndicatorPoint[];
+}
+
+/**
+ * Reads a pre-computed indicator series over a bounded `[from, to)` window (gh#644), through the authenticated client
+ * (R-18). The server serves only the indicators the projection computes (`atr`, `rsi`); an unknown one or a
+ * non-positive `period` is a **refusal** (400 — a client mistake worth naming), a too-wide window a refusal, an
+ * unknown series a failure, and a known series with the indicator not yet computed a success with empty `points` (R-19).
+ */
+export function getIndicators(
+  venue: string,
+  instrument: string,
+  resolution: number,
+  indicator: string,
+  period: number,
+  from: string,
+  to: string,
+): Promise<ApiResult<IndicatorSeries>> {
+  const query = new URLSearchParams({
+    venue,
+    instrument,
+    resolution: String(resolution),
+    indicator,
+    period: String(period),
+    from,
+    to,
+  });
+  return request<IndicatorSeries>('GET', `/api/marketdata/indicators?${query.toString()}`);
+}
