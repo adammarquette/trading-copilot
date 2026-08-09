@@ -97,7 +97,11 @@ export function MarketChart({
         return;
       }
       if (result.ok) {
-        setState(result.data.bars.length === 0 ? { status: 'empty' } : { status: 'ready', series: result.data });
+        setState(
+          result.data.bars.length === 0
+            ? { status: 'empty' }
+            : { status: 'ready', series: result.data },
+        );
       } else {
         setState({
           status: 'error',
