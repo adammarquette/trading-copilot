@@ -205,8 +205,17 @@ builder.Services.AddOptions<SuggestionOptions>()
             && options.ValidityMinutes >= 1
             // A non-positive drift band would collapse the take-time re-check to "any move refuses" (or worse, a
             // negative band that never refuses); caught once at startup rather than at take time (gh#548).
-            && options.DriftToleranceTicks >= 1,
-        "Suggestions: require MaxPageSize >= 1, DefaultPageSize in [1, MaxPageSize], ValidityMinutes >= 1, and DriftToleranceTicks >= 1.")
+            && options.DriftToleranceTicks >= 1
+            // The three R-4 throttle knobs (gh#551) feed SuggestionThrottlePolicy.Declare on every agent-review fire,
+            // which THROWS on an out-of-range value; caught once here at startup rather than aborting an owner's scan
+            // pass per fire (validated even when the throttle is off, so turning it on can never surprise the host). The
+            // ranges mirror Declare's: threshold in (0, 1], a positive cap, a conviction floor in [0, 100].
+            && options.ThrottleThresholdFraction > 0m && options.ThrottleThresholdFraction <= 1m
+            && options.ThrottleFullWindowCap >= 1
+            && options.ThrottleConvictionFloor >= 0 && options.ThrottleConvictionFloor <= 100,
+        "Suggestions: require MaxPageSize >= 1, DefaultPageSize in [1, MaxPageSize], ValidityMinutes >= 1, "
+            + "DriftToleranceTicks >= 1, ThrottleThresholdFraction in (0, 1], ThrottleFullWindowCap >= 1, "
+            + "and ThrottleConvictionFloor in [0, 100].")
     .ValidateOnStart();
 
 // Indicator projections over that store (gh#310, R-1, ADR-0001: "indicators are projections… rebuild = replay").

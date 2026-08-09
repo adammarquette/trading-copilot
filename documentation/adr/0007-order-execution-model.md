@@ -173,6 +173,7 @@ for validating heading-order/index against the trail in CI rather than by hand �
 | 2026-08-03 | [take + conditional-fire serialize per account; Taking is counted and made recoverable (gh#589)](#update-2026-08-03--take--conditional-fire-serialize-per-account-taking-is-counted-and-made-recoverable-gh589) |
 | 2026-08-04 | [a typed venue-refusal outcome, so a definitive rejection auto-resolves (gh#629)](#update-2026-08-04--a-typed-venue-refusal-outcome-so-a-definitive-rejection-auto-resolves-gh629) |
 | 2026-08-05 | [the client no longer retries a place, so the definitive classification is sound (gh#673)](#update-2026-08-05--the-client-no-longer-retries-a-place-so-the-definitive-classification-is-sound-gh673) |
+| 2026-08-09 | [the R-4 suggestion throttle is wired into the scan (gh#551)](#update-2026-08-09--the-r-4-suggestion-throttle-is-wired-into-the-scan-gh551) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 
@@ -1163,6 +1164,27 @@ submodule pin is bumped to submodule `master` to adopt it — retiring the in-fl
 reach gh#642, and carrying the auth / WebSocket fixes on `master` besides. The classification above is now sound; no
 app code changes.
 
+## Update (2026-08-09) — the R-4 suggestion throttle is wired into the scan (gh#551)
+
+The last open R-4 piece from the governor follow-up below now lands. The deterministic trigger scan consults a **pure
+`SuggestionThrottle`** (gh#588) once per agent-review fire, fed the account's **daily-drawdown headroom** — the same
+`DailyHeadroom` the risk gate and the `/risk/headroom` read already share (gh#587), read as a *fraction of the
+governor* — plus the day's realized P&L and daily-target state from the fire's own R-20-scoped context. Three regimes
+carry this ADR's two-tier control one layer *earlier*: **Full** (healthy headroom — propose as before), **Throttled**
+(in-band — fewer, higher-conviction only: a per-window cap that scales with headroom **alone**, plus a conviction
+floor), and **Suppressed** (the governor is reached, or the daily profit target is hit with stand-down on — no new
+entries).
+
+Two properties keep it safe ahead of the execution gate. It is **advisory**: a suggestion carries no risk, so it
+never substitutes for the take-time gate — enforcement stays below the model. And it can only ever **reduce or
+suppress** issuance, never increase it — the per-window cap is a function of headroom, so a model-authored confidence
+can drop a candidate below the floor but can **never** lift the cap. A suppression is decided **before** the reviewer
+wakes, so a stood-down setup pays **no LLM call and no spend** — one layer cheaper than, and complementary to, the
+AI-spend governor of ADR-0008; the operator still gets one *"Suggestions paused"* advisory per arming edge, so
+silence is never mistaken for "nothing is setting up". **Inert until opted in** per account
+(`SuggestionOptions.ThrottleEnabled`) — the AI-spend governor's inert-default pattern — so the scan proposes exactly
+as before for any account that has not turned it on.
+
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the
 authoritative record — this list is kept only as a decision-provenance changelog.*
@@ -1178,8 +1200,9 @@ authoritative record — this list is kept only as a decision-provenance changel
 - ~~Define the **risk-gate interface** — inputs (live account state, layers, safety stop), outputs (size, binding
   layer, block / resize / acknowledge) — R-5.~~ **Landed** — `RiskGate` with the layered decision (see the risk-gate
   update above).
-- Wire the **governor → R-4** throttle policy (thresholds, throttle modes). *(The **daily/consistency governor** landed
-  (gh#380); the R-4 suggestion-**throttle** modes are still open.)*
+- ~~Wire the **governor → R-4** throttle policy (thresholds, throttle modes).~~ **Landed** — the **daily/consistency
+  governor** (gh#380), the pure throttle policy + its three modes (gh#588), the headroom-fraction bridge (gh#587), and
+  the scan wiring (gh#551); see the 2026-08-09 update above.
 - ~~Confirm **ProjectX** native bracket / OCO / stop-type capabilities (Q-1); the synthetic layer covers gaps (R-17).~~
   **Confirmed / built** — native bracket preserve + resize (gh#259/#292), practice-gated on staging.
 - ~~Stand up the **high-rigor test suites** for the risk gate, execution, staged stops, kill switch, and auto-flatten
