@@ -1,4 +1,4 @@
-import { cleanup, screen } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -19,6 +19,21 @@ vi.mock('../api/risk', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api/risk')>()),
   getRiskProfile: vi.fn(),
   getHeadroom: vi.fn(),
+}));
+
+// Stub the declare form: the toggle into and out of it is this component's job; the form's own behaviour
+// (fields, validation, save) is covered in RiskProfileForm.test.
+vi.mock('./RiskProfileForm', () => ({
+  RiskProfileForm: ({ onSaved, onCancel }: { onSaved: () => void; onCancel: () => void }) => (
+    <div data-testid="risk-form">
+      <button type="button" onClick={onSaved}>
+        form-saved
+      </button>
+      <button type="button" onClick={onCancel}>
+        form-cancel
+      </button>
+    </div>
+  ),
 }));
 
 const profileMock = vi.mocked(getRiskProfile);
@@ -121,5 +136,43 @@ describe('RiskSettings', () => {
     expect(await screen.findByTestId('risk-summary')).toBeTruthy();
     expect(screen.getByText(/headroom is unavailable/i)).toBeTruthy();
     expect(screen.queryByTestId('headroom')).toBeNull();
+  });
+});
+
+describe('RiskSettings — declaring and editing', () => {
+  it('opens the declare form from the undeclared state', async () => {
+    profileMock.mockResolvedValue({ ok: true, data: null });
+    headroomMock.mockResolvedValue({ ok: true, data: null });
+
+    renderWithProviders(<RiskSettings accountId="a1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Declare risk profile' }));
+
+    expect(screen.getByTestId('risk-form')).toBeTruthy();
+  });
+
+  it('opens the edit form from the declared state', async () => {
+    profileMock.mockResolvedValue({ ok: true, data: PROFILE });
+    headroomMock.mockResolvedValue({ ok: true, data: HEADROOM });
+
+    renderWithProviders(<RiskSettings accountId="a1" />);
+    await screen.findByTestId('risk-summary');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+
+    expect(screen.getByTestId('risk-form')).toBeTruthy();
+    expect(screen.queryByTestId('risk-summary')).toBeNull();
+  });
+
+  it('refetches and leaves the form after a successful save', async () => {
+    profileMock.mockResolvedValue({ ok: true, data: PROFILE });
+    headroomMock.mockResolvedValue({ ok: true, data: HEADROOM });
+
+    renderWithProviders(<RiskSettings accountId="a1" />);
+    await screen.findByTestId('risk-summary');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'form-saved' }));
+
+    await waitFor(() => expect(profileMock).toHaveBeenCalledTimes(2));
+    expect(await screen.findByTestId('risk-summary')).toBeTruthy();
+    expect(screen.queryByTestId('risk-form')).toBeNull();
   });
 });

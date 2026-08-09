@@ -9,6 +9,7 @@ import { type DailyHeadroom, getHeadroom, getRiskProfile, type RiskProfile } fro
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
 import { HeadroomPanel } from './HeadroomPanel';
+import { RiskProfileForm } from './RiskProfileForm';
 import { RiskProfileSummary } from './RiskProfileSummary';
 
 /**
@@ -36,6 +37,7 @@ type LoadState =
 
 export function RiskSettings({ accountId }: RiskSettingsProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
+  const [editing, setEditing] = useState(false);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -97,11 +99,30 @@ export function RiskSettings({ accountId }: RiskSettingsProps) {
     );
   }
 
+  if (editing) {
+    return (
+      <RiskProfileForm
+        accountId={accountId}
+        initial={state.profile}
+        onSaved={() => {
+          setEditing(false);
+          reload();
+        }}
+        onCancel={() => setEditing(false)}
+      />
+    );
+  }
+
   if (state.profile === null) {
     return (
       <EmptyState
         title="No risk profile declared"
         description="This account has no declared risk profile yet, so the gate has nothing to size or refuse against. Declare one to set the daily governor, loss floor and per-trade sizing."
+        action={
+          <Button variant="contained" size="small" onClick={() => setEditing(true)}>
+            Declare risk profile
+          </Button>
+        }
         tag="R-5"
       />
     );
@@ -109,11 +130,16 @@ export function RiskSettings({ accountId }: RiskSettingsProps) {
 
   return (
     <Stack spacing={2}>
-      <Alert severity="info" icon={false}>
-        These values <strong>declare</strong> what the risk gate enforces on the server. The gate is
-        what stops a trade — changing a value here changes what it sizes and refuses against, not
-        whether it fires.
-      </Alert>
+      <Stack direction="row" spacing={2} alignItems="flex-start" justifyContent="space-between">
+        <Alert severity="info" icon={false} sx={{ flex: 1 }}>
+          These values <strong>declare</strong> what the risk gate enforces on the server. The gate
+          is what stops a trade — changing a value here changes what it sizes and refuses against,
+          not whether it fires.
+        </Alert>
+        <Button variant="outlined" size="small" onClick={() => setEditing(true)}>
+          Edit
+        </Button>
+      </Stack>
       <Box
         sx={{
           display: 'grid',
