@@ -17,6 +17,17 @@ vi.mock('./realtime/connection', () => ({
   }),
 }));
 
+// The workspace's MarketChart mounts a real Lightweight-Charts canvas jsdom cannot render. Stub it at its seam too,
+// the same posture, so the shell tests stay about the shell; the chart's own behaviour is covered in `chart/`.
+vi.mock('lightweight-charts', () => ({
+  createChart: () => ({
+    addSeries: () => ({ setData: () => {} }),
+    remove: () => {},
+    timeScale: () => ({ fitContent: () => {} }),
+  }),
+  CandlestickSeries: 'Candlestick',
+}));
+
 /**
  * `App` brings its own theme provider and, since gh#652, its own session provider; only the router is
  * missing, because production supplies a `BrowserRouter` in `main.tsx` and a test wants a `MemoryRouter`.

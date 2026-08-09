@@ -38,16 +38,31 @@ describe('getBars', () => {
       instrument: 'ES',
       resolution: 1,
       points: [
-        { bucketStart: '2026-01-01T00:00:00Z', open: 5300, high: 5310, low: 5295, close: 5308, volume: 1200 },
+        {
+          bucketStart: '2026-01-01T00:00:00Z',
+          open: 5300,
+          high: 5310,
+          low: 5295,
+          close: 5308,
+          volume: 1200,
+        },
       ],
     };
     requestMock.mockResolvedValue({ ok: true, data: series });
 
-    await expect(getBars('topstepx', 'ES', 1, 'a', 'b')).resolves.toEqual({ ok: true, data: series });
+    await expect(getBars('topstepx', 'ES', 1, 'a', 'b')).resolves.toEqual({
+      ok: true,
+      data: series,
+    });
   });
 
   it('passes a refusal through unchanged (the window-too-wide bound is the gate answer, not an error)', async () => {
-    requestMock.mockResolvedValue({ ok: false, kind: 'refused', status: 400, reason: 'window too wide' });
+    requestMock.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 400,
+      reason: 'window too wide',
+    });
 
     await expect(getBars('topstepx', 'ES', 1, 'a', 'b')).resolves.toEqual({
       ok: false,

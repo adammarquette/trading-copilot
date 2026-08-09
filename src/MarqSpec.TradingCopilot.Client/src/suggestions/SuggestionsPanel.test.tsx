@@ -10,9 +10,8 @@ import {
   SuggestionState,
   takeSuggestion,
 } from '../api/suggestions';
-import type { Destination } from '../navigation/destinations';
 import { renderWithProviders } from '../testing/render';
-import { SuggestionsSurface } from './SuggestionsSurface';
+import { SuggestionsPanel } from './SuggestionsPanel';
 
 vi.mock('../accounts/AccountProvider', () => ({ useAccounts: vi.fn() }));
 
@@ -25,8 +24,6 @@ vi.mock('../api/suggestions', async (importOriginal) => ({
 
 const accountsMock = vi.mocked(useAccounts);
 const listMock = vi.mocked(listActionableSuggestions);
-
-const destination = { id: 'workspace', label: 'Workspace', path: '/' } as unknown as Destination;
 
 function suggestion(id: string, accountId: string): Suggestion {
   return {
@@ -82,7 +79,7 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe('SuggestionsSurface — account scoping (R-14, gh#713)', () => {
+describe('SuggestionsPanel — account scoping (R-14, gh#713)', () => {
   it('never lets a slow response for the account just left replace the current account list', async () => {
     // THE GUARD. A stale response landing last is the whole defect: the operator switches to a practice account,
     // the live account's slower request resolves afterwards, and its cards render WITH THEIR ACTIONS ENABLED.
@@ -99,11 +96,11 @@ describe('SuggestionsSurface — account scoping (R-14, gh#713)', () => {
       .mockImplementationOnce(() => practice.promise);
 
     accountsMock.mockReturnValue(ready('acc-live'));
-    const view = renderWithProviders(<SuggestionsSurface destination={destination} />);
+    const view = renderWithProviders(<SuggestionsPanel />);
 
     // The operator switches before the first response has arrived.
     accountsMock.mockReturnValue(ready('acc-practice'));
-    view.rerender(<SuggestionsSurface destination={destination} />);
+    view.rerender(<SuggestionsPanel />);
 
     practice.settle({ ok: true, data: [suggestion('s-practice', 'acc-practice')] });
     await act(async () => {});
@@ -123,11 +120,11 @@ describe('SuggestionsSurface — account scoping (R-14, gh#713)', () => {
     listMock.mockResolvedValue({ ok: true, data: [] });
 
     accountsMock.mockReturnValue(ready('acc-live'));
-    const view = renderWithProviders(<SuggestionsSurface destination={destination} />);
+    const view = renderWithProviders(<SuggestionsPanel />);
     await act(async () => {});
 
     accountsMock.mockReturnValue(ready('acc-practice'));
-    view.rerender(<SuggestionsSurface destination={destination} />);
+    view.rerender(<SuggestionsPanel />);
     await act(async () => {});
 
     expect(listMock.mock.calls.map(([accountId]) => accountId)).toEqual([

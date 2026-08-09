@@ -30,7 +30,10 @@ function bar(bucketStart: string, close: number) {
   return { bucketStart, open: close, high: close + 1, low: close - 1, close, volume: 10 };
 }
 function barsOk(points: ReturnType<typeof bar>[]) {
-  return { ok: true as const, data: { venue: 'topstepx', instrument: 'ES', resolution: 1, points } };
+  return {
+    ok: true as const,
+    data: { venue: 'topstepx', instrument: 'ES', resolution: 1, points },
+  };
 }
 
 describe('MarketChart', () => {
@@ -48,11 +51,21 @@ describe('MarketChart', () => {
       />,
     );
 
-    expect(getBarsMock).toHaveBeenCalledWith('topstepx', 'ES', 1, expect.any(String), '2026-01-02T00:00:00.000Z');
+    expect(getBarsMock).toHaveBeenCalledWith(
+      'topstepx',
+      'ES',
+      1,
+      expect.any(String),
+      '2026-01-02T00:00:00.000Z',
+    );
     expect(chartMock.createChart).toHaveBeenCalledOnce(); // created once, not per fetch
 
     await waitFor(() => expect(chartMock.setData).toHaveBeenCalledOnce());
-    const candles = chartMock.setData.mock.calls[0][0] as Array<{ time: number; open: number; close: number }>;
+    const candles = chartMock.setData.mock.calls[0][0] as Array<{
+      time: number;
+      open: number;
+      close: number;
+    }>;
     expect(candles).toHaveLength(2);
     expect(candles[0]).toMatchObject({
       time: Math.floor(Date.parse('2026-01-01T00:00:00Z') / 1000),
@@ -72,7 +85,12 @@ describe('MarketChart', () => {
   });
 
   it('shows the refusal reason instead of a blank chart (R-19)', async () => {
-    getBarsMock.mockResolvedValue({ ok: false, kind: 'refused', status: 400, reason: 'window too wide' });
+    getBarsMock.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 400,
+      reason: 'window too wide',
+    });
 
     render(<MarketChart venue="topstepx" instrument="ES" resolution={1} />);
 
@@ -82,7 +100,12 @@ describe('MarketChart', () => {
   });
 
   it('shows a failure message on a failed read (unknown series / network / 5xx)', async () => {
-    getBarsMock.mockResolvedValue({ ok: false, kind: 'failed', status: 500, error: 'The request failed (500).' });
+    getBarsMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      status: 500,
+      error: 'The request failed (500).',
+    });
 
     render(<MarketChart venue="topstepx" instrument="ES" resolution={1} />);
 
