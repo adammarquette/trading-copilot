@@ -36,10 +36,10 @@ afterEach(() => {
 function bar(bucketStart: string, close: number) {
   return { bucketStart, open: close, high: close + 1, low: close - 1, close, volume: 10 };
 }
-function barsOk(points: ReturnType<typeof bar>[]) {
+function barsOk(bars: ReturnType<typeof bar>[]) {
   return {
     ok: true as const,
-    data: { venue: 'topstepx', instrument: 'ES', resolution: 1, points },
+    data: { venue: 'topstepx', instrument: 'ES', resolutionMinutes: 1, bars },
   };
 }
 
