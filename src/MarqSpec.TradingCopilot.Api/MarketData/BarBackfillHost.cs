@@ -69,6 +69,8 @@ public sealed class BarBackfillHost : BackgroundService
             "Clean-historical backfill started for {Instruments} at {Resolutions}m, every {Interval}.",
             string.Join(", ", _options.Instruments), string.Join(", ", _options.ResolutionMinutes), interval);
 
+        await HealOnceAsync(stoppingToken);
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -106,6 +108,42 @@ public sealed class BarBackfillHost : BackgroundService
                 _logger.LogError(error, "Backfill pass failed; retrying after {Interval}.", interval);
                 await _delay(interval, stoppingToken);
             }
+        }
+    }
+
+    /// <summary>
+    /// The one-time restart heal (gh#696): before the periodic loop, recover the durable bar store from the
+    /// venue's retained history so an accumulated outage gap heals at startup instead of waiting for the narrow
+    /// lookback window to crawl back through it. Runs in its own scope, and <b>degrades to the poll loop</b> on
+    /// any failure — a heal that cannot run (venue down at startup, unparseable calendar) must not stop the
+    /// poller, which keeps covering new data regardless.
+    /// </summary>
+    private async Task HealOnceAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await using AsyncServiceScope scope = _services.CreateAsyncScope();
+            IProjectXVenueFactory factory = scope.ServiceProvider.GetRequiredService<IProjectXVenueFactory>();
+            ITradingVenue venue = factory.Create(FirmConventions.None);
+            BarStoreHealService heal = scope.ServiceProvider.GetRequiredService<BarStoreHealService>();
+
+            BarStoreHealOutcome outcome = await heal.HealAsync(venue, _now(), stoppingToken);
+            _logger.LogInformation(
+                "Restart heal pass finished: {Series} series evaluated, complete={Complete}.",
+                outcome.Series.Count, outcome.IsComplete);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Stopped before or mid-heal — a clean stop, nothing to recover.
+        }
+        catch (ObjectDisposedException)
+        {
+            // The root provider is being torn down.
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error, "Restart heal pass failed; continuing with the periodic backfill loop only.");
         }
     }
 }
