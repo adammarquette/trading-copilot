@@ -501,30 +501,69 @@ public class TriggerEvaluationService
             return _fullThrottle;
         }
 
-        // No declared profile => no governor to throttle against: propose (inert), like an account that set no limit.
-        RiskProfileRecord? profile = await database.RiskProfiles
-            .FirstOrDefaultAsync(candidate => candidate.AccountId == accountId, cancellationToken);
-        if (profile is null)
+        try
         {
+            (RiskProfileRecord? profile, decimal dayRealized) =
+                await ReadThrottleStateAsync(database, accountId, now, cancellationToken);
+
+            // No declared profile => no governor to throttle against: propose (inert), like an account that set no limit.
+            if (profile is null)
+            {
+                return _fullThrottle;
+            }
+
+            decimal dayLoss = dayRealized < 0m ? -dayRealized : 0m; // the non-negative loss the headroom projection consumes
+            decimal dayProfit = dayRealized > 0m ? dayRealized : 0m;
+
+            decimal headroomFraction = DailyHeadroom
+                .Remaining(profile.DailyLossLimit, profile.DailyDrawdownGovernor, dayLoss)
+                .GovernorFractionRemaining(profile.DailyDrawdownGovernor);
+
+            // The RAW target-reached, NOT pre-ANDed with StopForDayAtProfitTarget: the policy applies that flag itself, so
+            // feeding the pre-ANDed bool would double-apply it — a green day past target with stand-down OFF must stay Full.
+            bool dailyTargetReached = profile.DailyProfitTarget is { } target && dayProfit >= target;
+
+            SuggestionThrottlePolicy policy = SuggestionThrottlePolicy.Declare(
+                _throttleThreshold, _throttleFullWindowCap, _throttleConvictionFloor, profile.StopForDayAtProfitTarget);
+
+            return _throttle.Decide(policy, new SuggestionThrottleContext(headroomFraction, dailyTargetReached));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // FAIL-OPEN, mirroring the AI-spend governor's spend read (BuildGovernorPassAsync): a throttle-read fault —
+            // a DB blip, or (defensively) a policy value that slipped past startup validation — must NOT abort this
+            // owner's whole scan pass and take the co-located mechanical route down with it, which would re-send an
+            // already-sent mechanical alert next pass. The throttle is ADVISORY, ahead of the execution gate that
+            // enforces real risk below the model, and a suggestion carries no risk — so proposing un-throttled on a read
+            // fault is the safe direction, exactly as the governor proposes on a spend-read fault. DO NOT "fix" this to
+            // fail-closed (suppress): that would pause the co-pilot and emit spurious "Suggestions paused" advisories on
+            // a transient blip. The next pass re-reads fresh.
+            _logger.LogError(
+                error, "R-4 throttle state read faulted for account {Account}; proposing un-throttled this pass.", accountId);
             return _fullThrottle;
         }
+    }
 
-        decimal dayRealized = await database.TodayRealizedPnLForAccountAsync(accountId, now, cancellationToken);
-        decimal dayLoss = dayRealized < 0m ? -dayRealized : 0m; // the non-negative loss the headroom projection consumes
-        decimal dayProfit = dayRealized > 0m ? dayRealized : 0m;
-
-        decimal headroomFraction = DailyHeadroom
-            .Remaining(profile.DailyLossLimit, profile.DailyDrawdownGovernor, dayLoss)
-            .GovernorFractionRemaining(profile.DailyDrawdownGovernor);
-
-        // The RAW target-reached, NOT pre-ANDed with StopForDayAtProfitTarget: the policy applies that flag itself, so
-        // feeding the pre-ANDed bool would double-apply it — a green day past target with stand-down OFF must stay Full.
-        bool dailyTargetReached = profile.DailyProfitTarget is { } target && dayProfit >= target;
-
-        SuggestionThrottlePolicy policy = SuggestionThrottlePolicy.Declare(
-            _throttleThreshold, _throttleFullWindowCap, _throttleConvictionFloor, profile.StopForDayAtProfitTarget);
-
-        return _throttle.Decide(policy, new SuggestionThrottleContext(headroomFraction, dailyTargetReached));
+    /// <summary>
+    /// Reads the throttle's inputs for an account (gh#551): its <see cref="RiskProfileRecord"/> — <see langword="null"/>
+    /// when none is declared — and the day's <b>signed</b> realized P&amp;L over the Central trading day. A
+    /// <see langword="protected"/> <see langword="virtual"/> seam so a test can force the read to fault and prove
+    /// <see cref="DecideThrottleAsync"/>'s fail-open posture, mirroring <see cref="ReadWindowSpendAsync"/>. The P&amp;L
+    /// read is skipped when no profile exists (there is nothing to throttle against).
+    /// </summary>
+    protected virtual async Task<(RiskProfileRecord? Profile, decimal DayRealized)> ReadThrottleStateAsync(
+        TradingCopilotDbContext database, Guid accountId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        RiskProfileRecord? profile = await database.RiskProfiles
+            .FirstOrDefaultAsync(candidate => candidate.AccountId == accountId, cancellationToken);
+        decimal dayRealized = profile is null
+            ? 0m
+            : await database.TodayRealizedPnLForAccountAsync(accountId, now, cancellationToken);
+        return (profile, dayRealized);
     }
 
     // Maps the throttle's suppress reason to the review-outcome reason the scan's advisory switch renders. IsSuppressed
@@ -834,9 +873,25 @@ public class TriggerEvaluationService
         // the count so opt-out stays a byte-for-byte no-op.
         if (throttle.Mode != SuggestionThrottleMode.Full)
         {
+            DateTimeOffset dayStart = CentralDayStartUtc(now);
+
+            // Committed suggestions for this account today (the R-20-scoped store)...
             int issuedInWindow = await database.Suggestions
-                .Where(candidate => candidate.AccountId == trigger.AccountId && candidate.CreatedAt >= CentralDayStartUtc(now))
+                .Where(candidate => candidate.AccountId == trigger.AccountId && candidate.CreatedAt >= dayStart)
                 .CountAsync(cancellationToken);
+
+            // ...PLUS suggestions already STAGED earlier in THIS pass but not yet committed. The scan commits once at the
+            // end of the per-owner loop (the gh#455 shared transaction), so a committed-only count reads a stale total
+            // and several same-account agent-review fires in one pass would each slip under the cap — defeating "issue
+            // fewer" in the very depleting-headroom regime the throttle exists for. Counting the change-tracker's pending
+            // Added rows is the per-pass mirror of the AI-spend governor's within-pass tally, so the Nth fire this pass
+            // sees the N-1 already staged. ADDED only: a superseded incumbent is Modified and a loaded incumbent is
+            // Unchanged, so neither double-counts against the committed query above.
+            issuedInWindow += database.ChangeTracker.Entries<Suggestion>()
+                .Count(entry => entry.State == EntityState.Added
+                    && entry.Entity.AccountId == trigger.AccountId
+                    && entry.Entity.CreatedAt >= dayStart);
+
             if (!throttle.Admits(issuedInWindow, suggest.Confidence))
             {
                 _logger.LogInformation(

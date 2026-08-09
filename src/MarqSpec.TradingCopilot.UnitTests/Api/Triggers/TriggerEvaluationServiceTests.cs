@@ -1803,7 +1803,8 @@ public class TriggerEvaluationServiceTests
     public async Task ScanAsync_ShouldProposeNormally_WhenHeadroomIsHealthy()
     {
         Guid accountId = await SeedAccountAsync();
-        await SeedRiskProfileAsync(accountId, governor: 1_000m); // no seeded loss => dayLoss 0 => headroom 1.0
+        await SeedRiskProfileAsync(accountId, governor: 1_000m); // no seeded loss => dayLoss 0 => headroom 1.0 => Full
+        await SeedSuggestionAsync(accountId);                    // the window already holds one (would exceed a throttled cap of 1)
         await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
         ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
@@ -1811,7 +1812,10 @@ public class TriggerEvaluationServiceTests
         await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
 
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
-        (await Context().Suggestions.CountAsync()).Should().Be(1);
+        // Full SKIPS the cap count, so the new suggestion stages despite the window already holding one (2 total). Had
+        // healthy headroom been mis-decided as Throttled (FullWindowCap 1), the cap would have refused it, leaving 1 —
+        // so this distinguishes Full from a lenient Throttled, not merely "did not suppress".
+        (await Context().Suggestions.CountAsync()).Should().Be(2);
     }
 
     // (d) GOVERNOR REACHED -> SUPPRESS BEFORE SPEND: the day's realized loss equals the governor, so headroom is 0. The
@@ -1852,14 +1856,18 @@ public class TriggerEvaluationServiceTests
         Guid accountId = await SeedAccountAsync();
         await SeedRiskProfileAsync(accountId, governor: 1_000m, dailyProfitTarget: 500m, stopForDayAtProfitTarget: true);
         await SeedClosedTradeAsync(accountId, realizedPnL: 600m); // green day AND past the 500 target => stand down
-        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
         IndicatorReturns(25m);
         ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "must never be reached", 99));
 
         await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
 
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustNotHaveHappened();
-        (await Context().Suggestions.AnyAsync()).Should().BeFalse();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.AnyAsync()).Should().BeFalse();
+        (await reload.AiUsage.IgnoreQueryFilters().AnyAsync()).Should().BeFalse();          // no call => no spend row
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();    // a fire is still a fire
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
         A.CallTo(() => _notifications.SendAsync(
                 A<Notification>.That.Matches(n => n.Title.Contains("Suggestions paused") && n.Body.Contains("standing down")),
                 A<CancellationToken>._))
@@ -1946,6 +1954,61 @@ public class TriggerEvaluationServiceTests
         (await Context().Suggestions.CountAsync()).Should().Be(expectedIssued);
     }
 
+    // (j) THE WITHIN-PASS TALLY: the throttled cap must count suggestions STAGED earlier in the SAME pass, not only
+    // committed rows — the scan commits once at the end of the per-owner loop (gh#455), so a committed-only count would
+    // let several same-account fires in one pass each read a stale 0 and all slip under the cap. Cap 1, an EMPTY
+    // committed window, TWO agent-review triggers on one account fire this pass: the first stages; the second counts the
+    // first's tracked-but-uncommitted Added row and is refused. Exactly one issues (a committed-only count would give 2).
+    [Fact]
+    public async Task ScanAsync_ShouldCountSuggestionsStagedEarlierThisPass_WhenThrottled()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -950m); // headroom 0.05 -> Throttled, cap 1
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "in-band", 80)); // >= floor, for both fires
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        // Both fires REVIEW (Throttled runs the reviewer); the cap of 1 admits only the first. Had the count read only
+        // committed rows, both would have seen 0 and staged -> 2. The within-pass tally is what holds the cap here.
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedTwiceExactly();
+        (await Context().Suggestions.CountAsync()).Should().Be(1);
+    }
+
+    // (k) FAIL-OPEN on a throttle-read fault: a faulting throttle-state read must let the pass PROPOSE (the reviewer
+    // still wakes, the suggestion stages) and never abort the pass — the same posture as the AI-spend spend read, so a
+    // DB blip cannot pause the co-pilot or take the co-located mechanical route down with it. The seeded loss WOULD
+    // suppress had the read succeeded, so a fail-CLOSED bug would leave zero suggestions — this pins fail-open, not that.
+    [Fact]
+    public async Task ScanAsync_ShouldFailOpenAndStillPropose_WhenTheThrottleReadFaults()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -1_000m); // would SUPPRESS (governor reached) if the read succeeded
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        TriggerEvaluationService service = new ThrowingThrottleReadService(
+            Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, _llmMetrics, _deadlines,
+            Microsoft.Extensions.Options.Options.Create(ThrottleOptions()), new AiSpendGovernor(),
+            Microsoft.Extensions.Options.Options.Create(new GovernorOptions()),
+            _suggestionNotifier, new SuggestionThrottle(), NullLogger<TriggerEvaluationService>.Instance);
+
+        Func<Task> act = () => service.ScanAsync(Now, CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        // Fail-OPEN, not fail-closed: the reviewer runs and the suggestion stages, exactly as if un-throttled — even
+        // though the seeded loss would otherwise have suppressed. DO NOT change the production path to fail-closed.
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.CountAsync()).Should().Be(1);
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+    }
+
     /// <summary>
     /// The scan with its platform-wide spend read forced to FAULT — proves the governor is FAIL-OPEN: a spend-read
     /// blip lets the pass run un-gated (the reviewer still wakes), the deliberate INVERSE of the fail-closed risk gate.
@@ -1976,6 +2039,39 @@ public class TriggerEvaluationServiceTests
 
         protected override Task<decimal> ReadWindowSpendAsync(DateTimeOffset windowStart, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("simulated spend-read fault");
+    }
+
+    /// <summary>
+    /// The scan with its R-4 throttle-state read forced to FAULT (gh#551) — proves the throttle is FAIL-OPEN: a
+    /// throttle-read blip lets the pass propose un-throttled (the reviewer still wakes), never aborting the owner's pass.
+    /// Forwards all fifteen ctor args. DO NOT "fix" the production counterpart to fail-closed (suppress) — a transient
+    /// blip would then pause the co-pilot and emit spurious "Suggestions paused" advisories.
+    /// </summary>
+    private sealed class ThrowingThrottleReadService : TriggerEvaluationService
+    {
+        public ThrowingThrottleReadService(
+            TradingCopilotDbContext discovery,
+            DbContextOptions<TradingCopilotDbContext> options,
+            IIndicatorSource indicators,
+            INotificationChannel notifications,
+            ITriggerReviewer reviewer,
+            IReviewEnrichmentSource enrichmentSource,
+            IAiUsageLedger ledger,
+            ILlmMetrics metrics,
+            ISessionDeadlineSource deadlines,
+            IOptions<SuggestionOptions> suggestionOptions,
+            IAiSpendGovernor governor,
+            IOptions<GovernorOptions> governorOptions,
+            ISuggestionRealtimeNotifier suggestionNotifier,
+            ISuggestionThrottle throttle,
+            ILogger<TriggerEvaluationService> logger)
+            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, throttle, logger)
+        {
+        }
+
+        protected override Task<(RiskProfileRecord? Profile, decimal DayRealized)> ReadThrottleStateAsync(
+            TradingCopilotDbContext database, Guid accountId, DateTimeOffset now, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("simulated throttle-state read fault");
     }
 
     /// <summary>
