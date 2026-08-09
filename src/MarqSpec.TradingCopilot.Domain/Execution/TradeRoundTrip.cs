@@ -87,6 +87,33 @@ public static class TradeRoundTrip
             return false;
         }
 
+        // BALANCED TOTALS ARE NOT ENOUGH (gh#734 review). Buy 1, Sell 2, Buy 1 sums to 2-vs-2 and would compose as
+        // one size-2 long, but exposure went +1 -> -1 -> 0: a stop-and-reverse, two positions in opposite
+        // directions whose blended average entry and exit describe neither. Buy 1, Sell 1, Buy 1, Sell 1 balances
+        // just as cleanly and is two separate trades. Both would journal money that was never made.
+        //
+        // So walk the executions in time order and require exposure to reach flat EXACTLY ONCE, on the final fill.
+        // Touching zero earlier means the trip already closed; going past zero means it reversed. Either way this
+        // is not the single round trip this composer is contracted to form, and refusing is the safe answer -- the
+        // caller journals nothing and logs it.
+        int running = 0;
+        RoundTripFill[] ordered = [.. fills.OrderBy(fill => fill.ExecutedAt)];
+        for (int index = 0; index < ordered.Length; index++)
+        {
+            running += ordered[index].Side == entrySide ? ordered[index].Size : -ordered[index].Size;
+
+            bool isFinalFill = index == ordered.Length - 1;
+            if (running == 0 && !isFinalFill)
+            {
+                return false; // closed before the end -- a completed trip with more activity after it
+            }
+
+            if (running < 0)
+            {
+                return false; // crossed through flat -- a reversal, not a close
+            }
+        }
+
         roundTrip = new RoundTrip(
             entrySide,
             SizeWeightedAverage(entries, entrySize),

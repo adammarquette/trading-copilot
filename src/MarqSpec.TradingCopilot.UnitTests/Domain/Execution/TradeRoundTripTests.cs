@@ -24,6 +24,50 @@ public class TradeRoundTripTests
     }
 
     [Fact]
+    public void TryCompose_ShouldRefuse_WhenExposureCrossesThroughFlatIntoAReversal()
+    {
+        // gh#734 review. Equal TOTALS do not prove one enter -> exit -> flat trip. Buy 1, Sell 2, Buy 1 sums to
+        // 2 buys and 2 sells, so a totals-only balance check accepts it as a single size-2 long — but exposure went
+        // +1, then -1 (a SHORT), then 0. That is a stop-and-reverse: two positions in opposite directions, whose
+        // blended "average entry" and "average exit" describe neither. The money journalled from it would be
+        // fiction, and this composer's whole contract is to refuse anything that is not the simple trip.
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5_000m, 1),
+            Fill(OrderSide.Sell, 5_010m, 2, minute: 5),
+            Fill(OrderSide.Buy, 5_020m, 1, minute: 10),
+        ];
+
+        bool composed = TradeRoundTrip.TryCompose(fills, out RoundTrip? trip);
+
+        composed.Should().BeFalse(
+            "exposure reached flat and crossed into a short before the final fill — that is a reversal, not the "
+            + "single round trip this composes");
+        trip.Should().BeNull();
+    }
+
+    [Fact]
+    public void TryCompose_ShouldRefuse_WhenThePositionClosesAndReopensBeforeTheFinalFill()
+    {
+        // The gentler sibling of the reversal above, and the one a totals check is likeliest to wave through: a
+        // completed trip followed by a second entry that has not closed yet. Buy 1, Sell 1, Buy 1, Sell 1 balances
+        // 2-vs-2 and would compose as one size-2 long spanning both — blending two separate trades into a single
+        // journal row with an average that matches neither. Exposure must reach zero exactly ONCE, at the end.
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5_000m, 1),
+            Fill(OrderSide.Sell, 5_010m, 1, minute: 5),
+            Fill(OrderSide.Buy, 5_020m, 1, minute: 10),
+            Fill(OrderSide.Sell, 5_030m, 1, minute: 15),
+        ];
+
+        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeFalse(
+            "exposure returned to flat at the second fill, so these are TWO round trips — composing them as one "
+            + "would journal a blended entry and exit that neither trade actually had");
+        trip.Should().BeNull();
+    }
+
+    [Fact]
     public void TryCompose_ShouldSizeWeightTheAverages_WhenALegFillsInParts()
     {
         // Enter 3 @ 5000 and 1 @ 5008 -> size-weighted 5002; exit 2 @ 5020 and 2 @ 5010 -> 5015.

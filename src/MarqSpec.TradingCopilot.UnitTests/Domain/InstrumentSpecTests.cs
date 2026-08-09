@@ -68,6 +68,22 @@ public class InstrumentSpecTests
         Es().RealizedPnL(new Price(5_000m), new Price(5_010m), OrderSide.Buy, size: 2).Should().Be(1_000m);
 
     [Fact]
+    public void RealizedPnL_ShouldThrow_WhenTheSideIsNotAKnownValue()
+    {
+        // gh#734 review. The sign was chosen by a BLACKLIST -- `side == Buy ? 1 : -1` -- so every value that is not
+        // Buy took the short branch, including one that is not a real side at all. `Order.Side` carries no
+        // known-value database CHECK and an enum can arrive by cast or deserialization, so an unrecognised value
+        // silently produced INVERTED realized P&L: a winning long journalled as a loss, straight into
+        // DailyRealizedReader and the R-5 governor. Guards here are whitelists, not blacklists (ADR-0007) -- an
+        // unknown side must fail closed and loudly rather than pick a direction.
+        Action pnl = () => Es().RealizedPnL(new Price(5_000m), new Price(5_010m), (OrderSide)99, size: 1);
+
+        pnl.Should().Throw<ArgumentOutOfRangeException>(
+            "an unrecognised side has no direction, so signing the money by it is a guess — and the guess lands in "
+            + "the journal as real P&L");
+    }
+
+    [Fact]
     public void RealizedPnL_ShouldBeNegative_WhenALongExitsBelowEntry() =>
         Es().RealizedPnL(new Price(5_000m), new Price(4_995m), OrderSide.Buy, size: 1).Should().Be(-250m);
 

@@ -75,7 +75,19 @@ public sealed record InstrumentSpec
             throw new ArgumentOutOfRangeException(nameof(size), size, "Size must be positive.");
         }
 
-        int sideSign = side == OrderSide.Buy ? 1 : -1;
+        // WHITELIST, not `Buy ? 1 : -1` (gh#734 review). That blacklist gave every non-Buy value the short sign,
+        // including a value that is not a side at all -- and `Order.Side` carries no known-value database CHECK, so
+        // a cast or a deserialization can produce one. The result was INVERTED realized P&L: a winning long
+        // journalled as a loss, feeding DailyRealizedReader and the R-5 governor. An unknown side has no direction,
+        // so it fails closed here rather than picking one (ADR-0007's whitelist rule).
+        int sideSign = side switch
+        {
+            OrderSide.Buy => 1,
+            OrderSide.Sell => -1,
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(side), side, "Realized P&L cannot be signed by an unrecognised order side."),
+        };
+
         return (exit.Value - entry.Value) * sideSign * size * PointValue;
     }
 
