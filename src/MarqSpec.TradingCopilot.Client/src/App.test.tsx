@@ -23,6 +23,7 @@ vi.mock('lightweight-charts', () => ({
   createChart: () => ({
     addSeries: () => ({ setData: () => {} }),
     remove: () => {},
+    applyOptions: () => {},
     timeScale: () => ({ fitContent: () => {} }),
   }),
   CandlestickSeries: 'Candlestick',

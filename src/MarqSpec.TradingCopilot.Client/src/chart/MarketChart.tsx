@@ -9,8 +9,22 @@ import { getBars } from '../api/marketData';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
 
-/** How far back the initial window reaches, in minutes. A follow-up (gh#726/#727) adds paging + live tick updates. */
-const DEFAULT_LOOKBACK_MINUTES = 60 * 24 * 5;
+/**
+ * How many bars the default window aims for. Kept comfortably under the server's row cap
+ * (`MarketDataReadOptions.MaxRows` = 5000, which refuses a wider window outright rather than truncating), so the
+ * default view opens onto a chart, never a "window too wide" refusal. A follow-up (gh#726/#727) adds paging + live
+ * tick updates. (gh#725 review.)
+ */
+const DEFAULT_TARGET_BARS = 4000;
+
+/**
+ * The default lookback for a resolution, in minutes. Sized so the window holds at most {@link DEFAULT_TARGET_BARS}
+ * buckets — a window of `resolution × N` minutes yields at most `N` bars — so the implied bar count stays under the
+ * server cap at every resolution. A flat 5-day constant was ~7200 bars at 1-minute resolution and tripped the cap.
+ */
+function defaultLookbackMinutes(resolution: number): number {
+  return resolution * DEFAULT_TARGET_BARS;
+}
 
 type ChartState =
   | { readonly status: 'loading' }
@@ -55,9 +69,12 @@ export function MarketChart({
   venue,
   instrument,
   resolution,
-  lookbackMinutes = DEFAULT_LOOKBACK_MINUTES,
+  lookbackMinutes,
   now = Date.now,
 }: MarketChartProps): React.JSX.Element {
+  // Default the window from the resolution, not a flat constant, so it stays under the server's row cap whatever
+  // resolution the workspace opens on (gh#725 review).
+  const effectiveLookback = lookbackMinutes ?? defaultLookbackMinutes(resolution);
   const theme = useTheme();
   const [state, setState] = useState<ChartState>({ status: 'loading' });
 
@@ -73,7 +90,7 @@ export function MarketChart({
 
     const nowMs = now();
     const to = new Date(nowMs).toISOString();
-    const from = new Date(nowMs - lookbackMinutes * 60_000).toISOString();
+    const from = new Date(nowMs - effectiveLookback * 60_000).toISOString();
 
     void getBars(venue, instrument, resolution, from, to).then((result) => {
       if (!active) {
@@ -96,20 +113,20 @@ export function MarketChart({
     return () => {
       active = false;
     };
-  }, [venue, instrument, resolution, lookbackMinutes, now]);
+  }, [venue, instrument, resolution, effectiveLookback, now]);
 
-  // Create the chart once, tear it down on unmount. Kept out of the fetch effect so a re-fetch never re-creates it.
+  // Create the chart ONCE, tear it down on unmount. Kept out of the fetch effect so a re-fetch never re-creates it,
+  // and — deliberately — free of any theme dependency: a light/dark toggle must NOT recreate the chart, because that
+  // would destroy the loaded series and leave the freshly created one blank until the next unrelated fetch (the
+  // "confident blank" this component promises never to show). The palette-derived colours are set by the re-theme
+  // effect below, which runs on mount as well, so there is no unthemed frame.
   useEffect(() => {
     if (containerRef.current === null) {
       return;
     }
     const chart: IChartApi = createChart(containerRef.current, {
       autoSize: true,
-      layout: { background: { color: 'transparent' }, textColor: theme.palette.text.secondary },
-      grid: {
-        vertLines: { color: theme.palette.divider },
-        horzLines: { color: theme.palette.divider },
-      },
+      layout: { background: { color: 'transparent' } },
       timeScale: { timeVisible: true, secondsVisible: false },
     });
     chartRef.current = chart;
@@ -125,6 +142,19 @@ export function MarketChart({
       chartRef.current = null;
       seriesRef.current = null;
     };
+  }, []);
+
+  // Colour the chart from the theme, and RE-colour it in place on a light/dark toggle — recolour, never recreate.
+  // Running on mount too means the create effect above needs no theme dependency; running on every palette change is
+  // what keeps the loaded candles on screen across a toggle instead of blanking them.
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      layout: { textColor: theme.palette.text.secondary },
+      grid: {
+        vertLines: { color: theme.palette.divider },
+        horzLines: { color: theme.palette.divider },
+      },
+    });
   }, [theme.palette.text.secondary, theme.palette.divider]);
 
   // Push the candles onto the series whenever a ready window arrives.
