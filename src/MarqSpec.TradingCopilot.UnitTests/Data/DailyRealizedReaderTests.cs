@@ -30,7 +30,8 @@ public class DailyRealizedReaderTests
             new FixedUser(asUser ?? _operator));
 
     private async Task SeedTradeAsync(
-        decimal? realizedPnL, DateTimeOffset? closedAt, Guid? account = null, Guid? owner = null)
+        decimal? realizedPnL, DateTimeOffset? closedAt, Guid? account = null, Guid? owner = null,
+        TradingMode mode = TradingMode.Practice)
     {
         Guid ownerId = owner ?? _operator;
         await using TradingCopilotDbContext context = Context(ownerId);
@@ -45,16 +46,16 @@ public class DailyRealizedReaderTests
             EntryPrice = 5_300m,
             ExitPrice = closedAt is null ? null : 5_305m,
             RealizedPnL = realizedPnL,
-            Mode = TradingMode.Practice,
+            Mode = mode,
             ClosedAt = closedAt,
         });
         await context.SaveChangesAsync();
     }
 
-    private async Task<decimal> ReadAsync(Guid? asUser = null)
+    private async Task<decimal> ReadAsync(Guid? asUser = null, TradingMode mode = TradingMode.Practice)
     {
         await using TradingCopilotDbContext context = Context(asUser);
-        return await context.TodayRealizedPnLForAccountAsync(_account, _now, CancellationToken.None);
+        return await context.TodayRealizedPnLForAccountAsync(_account, mode, _now, CancellationToken.None);
     }
 
     [Fact]
@@ -112,5 +113,19 @@ public class DailyRealizedReaderTests
         await SeedTradeAsync(realizedPnL: -777m, closedAt: _now.AddHours(-1), owner: _other);
 
         (await ReadAsync(asUser: _operator)).Should().Be(0m);
+    }
+
+    [Fact]
+    public async Task TodayRealizedPnL_ShouldCountOnlyTheRequestedMode_WhenAnAccountChangedModes()
+    {
+        // R-14 (gh#746): the SAME account carries trades taken under different modes — it was Practice, it is now Live.
+        // A live-limit read must count ONLY the live trades: practice money was never at risk against the live limit,
+        // and folding it in is the exact blending R-14 exists to prevent (a practice loss must not eat live headroom,
+        // nor a practice win inflate it). Both trades are the same account, same Central day — only Mode separates them.
+        await SeedTradeAsync(realizedPnL: -500m, closedAt: _now.AddHours(-2), mode: TradingMode.Practice);
+        await SeedTradeAsync(realizedPnL: 100m, closedAt: _now.AddHours(-1), mode: TradingMode.Live);
+
+        (await ReadAsync(mode: TradingMode.Live)).Should().Be(100m, "only the live trade counts toward a live read");
+        (await ReadAsync(mode: TradingMode.Practice)).Should().Be(-500m, "only the practice trade counts toward a practice read");
     }
 }
