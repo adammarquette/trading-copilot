@@ -39,8 +39,11 @@ public class TradeJournalServiceTests
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = OurCredentialKey }),
         NullLogger<TradeJournalService>.Instance);
 
-    private PositionEvent Flat(string venueAccountKey, string contract = Contract) =>
-        new(VenueAccountId.Create(Projectx, venueAccountKey), _now,
+    // The flat event lands at or after the closing fill it reports -- the venue emits it BECAUSE net reached zero.
+    // Default it past every fill these tests seed (all within the first hour) so the exit.At bound (gh#734) takes in
+    // the whole round trip; a test exercising a LATE flat passes an explicit earlier `at`.
+    private PositionEvent Flat(string venueAccountKey, string contract = Contract, DateTimeOffset? at = null) =>
+        new(VenueAccountId.Create(Projectx, venueAccountKey), at ?? _now.AddHours(1),
             VenueContractId.Create(Projectx, contract), NetQuantity: 0, new Price(5_300m));
 
     private async Task<Guid> SeedAccountAsync(
@@ -258,6 +261,38 @@ public class TradeJournalServiceTests
         second.ExitPrice.Should().Be(5_030m);
         second.Size.Should().Be(1, "a stale entry fill leaking in would size this at 2");
         second.RealizedPnL.Should().Be(50m, "10 points * 1 contract * $5 point value");
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldJournalTheClosedTrip_WhenANewPositionReopenedBeforeTheFlatWasProcessed()
+    {
+        // gh#734 review. A flat event can be processed LATE -- after a new position has already reopened on the same
+        // contract. Trip A (long, closed at :05) must still journal from the fills up to the event's OWN time.
+        // Without an exit.At bound, CurrentCycleStart slices to the newer cycle that reopened at :06, hands the
+        // composer only the still-open Buy, and trip A -- a real, completed round trip -- is lost forever.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        // Trip A: enter long at :00, close it at :05.
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 5)], placedMinute: 5);
+        // A new position reopens at :06 -- BEFORE trip A's :05 flat event is processed.
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_020m, 1, 6)], placedMinute: 6);
+
+        // Trip A's flat carries trip A's close time (:05), not "now".
+        bool journalled = await Service().ProcessFlatAsync(
+            Flat("9001", at: _now.AddMinutes(5)), CancellationToken.None);
+
+        journalled.Should().BeTrue(
+            "the round trip that closed at :05 must journal even though a new position reopened at :06 before this "
+            + "flat event was processed -- the candidates are the fills up to the event's own time, not the newest cycle");
+        Trade trade = (await TradesAsync()).Should().ContainSingle().Subject;
+        trade.Side.Should().Be(OrderSide.Buy);
+        trade.EntryPrice.Should().Be(5_000m);
+        trade.ExitPrice.Should().Be(5_010m);
+        trade.Size.Should().Be(1, "a fill from the reopened position leaking in would resize or unbalance this");
+        trade.RealizedPnL.Should().Be(50m, "10 points * 1 contract * $5 point value");
+        trade.ClosedAt.Should().Be(_now.AddMinutes(5));
     }
 
     [Fact]

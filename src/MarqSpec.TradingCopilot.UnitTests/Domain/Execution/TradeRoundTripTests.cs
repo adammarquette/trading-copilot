@@ -187,6 +187,27 @@ public class TradeRoundTripTests
     }
 
     [Fact]
+    public void TryCompose_ShouldRefuse_WhenOppositeSideFillsShareTheEarliestTimestamp()
+    {
+        // gh#734 review. The entry side is the side of the EARLIEST execution. But when opposite-side fills tie on
+        // that earliest timestamp, there is no venue sequence here to say which opened first, and a stable OrderBy
+        // would silently let the CALLER'S collection order decide EntrySide -- flipping the signed P&L for the exact
+        // same executions. [Buy@t, Sell@t] and [Sell@t, Buy@t] must both refuse, not compose two opposite trips.
+        RoundTripFill[] buyFirst = [Fill(OrderSide.Buy, 5_000m, 1), Fill(OrderSide.Sell, 5_010m, 1)];
+        RoundTripFill[] sellFirst = [Fill(OrderSide.Sell, 5_010m, 1), Fill(OrderSide.Buy, 5_000m, 1)];
+
+        TradeRoundTrip.TryCompose(buyFirst, out RoundTrip? a).Should().BeFalse(
+            "opposite-side fills share the earliest timestamp -- the entry side is ambiguous with no sequence to break "
+            + "the tie, so the trip is refused rather than composed off collection order");
+        a.Should().BeNull();
+
+        TradeRoundTrip.TryCompose(sellFirst, out RoundTrip? b).Should().BeFalse(
+            "the SAME executions in reversed order must reach the SAME refusal -- otherwise input order silently flips "
+            + "which side is treated as the entry, and with it the sign of the realized P&L");
+        b.Should().BeNull();
+    }
+
+    [Fact]
     public void TryCompose_ShouldRefuse_WhenTheEarliestFillHasAnUnknownSide()
     {
         // The entry side is taken from the earliest execution; if THAT is an undefined value the trip cannot be

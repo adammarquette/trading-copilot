@@ -67,12 +67,23 @@ public static class TradeRoundTrip
             return false;
         }
 
-        // The entry side is whichever side traded FIRST; the opposite side closes it. Both legs must be a KNOWN
-        // side. `!= entrySide` was a blacklist, so an undefined OrderSide -- a bad cast or deserialize, and
-        // Order.Side carries no known-value DB check -- was bucketed as an exit and could balance into a journalled
-        // trade with a corrupt average that RealizedPnL (which validates only the entry side) would never catch
-        // (gh#734 review). Whitelist both legs and refuse anything else before composing.
-        OrderSide entrySide = fills.OrderBy(fill => fill.ExecutedAt).First().Side;
+        // The entry side is the side of the EARLIEST execution; the opposite side closes it. When opposite-side
+        // fills tie on that earliest timestamp there is no venue sequence here to say which opened first
+        // (RoundTripFill carries no ordinal), and a stable OrderBy would silently let the caller's collection order
+        // decide EntrySide -- flipping the signed P&L for the exact same executions (gh#734 review). Refuse the
+        // ambiguous group rather than guess a direction, consistent with this composer's refuse-don't-guess contract.
+        DateTimeOffset earliest = fills.Min(fill => fill.ExecutedAt);
+        HashSet<OrderSide> sidesAtEarliest = [.. fills.Where(fill => fill.ExecutedAt == earliest).Select(fill => fill.Side)];
+        if (sidesAtEarliest.Count != 1)
+        {
+            return false; // opposite-side fills share the earliest timestamp -- the entry side is not decidable here
+        }
+
+        // Both legs must be a KNOWN side. `!= entrySide` was a blacklist, so an undefined OrderSide -- a bad cast or
+        // deserialize, and Order.Side carries no known-value DB check -- was bucketed as an exit and could balance
+        // into a journalled trade with a corrupt average that RealizedPnL (which validates only the entry side)
+        // would never catch (gh#734 review). Whitelist both legs and refuse anything else before composing.
+        OrderSide entrySide = sidesAtEarliest.First();
         if (entrySide is not (OrderSide.Buy or OrderSide.Sell))
         {
             return false;

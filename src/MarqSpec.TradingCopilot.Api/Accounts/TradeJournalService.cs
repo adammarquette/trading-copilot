@@ -113,9 +113,16 @@ public sealed class TradeJournalService
             return false; // nothing of ours executed on this contract
         }
 
+        // Bounded at the flat event's own time (gh#734 review). A flat event can be processed LATE -- after a new
+        // position has already reopened on the same contract. Without this bound the query returns every fill,
+        // including the reopened cycle's, and CurrentCycleStart then slices to that newest cycle: the round trip THIS
+        // event closed is skipped and, because the boundary is fills-derived (no persisted watermark), never
+        // journalled at all -- gh#731's requirement to preserve the closed trip even when a new position has
+        // reopened. Restricting candidates to executions at or before `exit.At` composes the trip the event reports;
+        // it also bounds the downstream closing-fill and CurrentCycleStart reads, so all three read the same window.
         List<Guid> orderIds = [.. orders.Select(order => order.Id)];
         List<Fill> fills = await database.Fills
-            .Where(fill => orderIds.Contains(fill.OrderId))
+            .Where(fill => orderIds.Contains(fill.OrderId) && fill.ExecutedAt <= exit.At)
             .ToListAsync(cancellationToken);
         if (fills.Count == 0)
         {
