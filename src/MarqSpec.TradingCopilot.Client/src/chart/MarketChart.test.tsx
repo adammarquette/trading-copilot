@@ -268,4 +268,27 @@ describe('MarketChart', () => {
 
     expect(getIndicatorsMock).not.toHaveBeenCalled();
   });
+
+  it('surfaces an indicator whose read is refused / failed rather than a silently-absent pane (R-11 / R-19)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+    // A refusal (or failure) is an answer, not "not computed yet" — it must be shown, not swallowed.
+    getIndicatorsMock.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 400,
+      reason: 'window too wide',
+    });
+
+    render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        indicators={[{ indicator: 'atr', period: 14 }]}
+      />,
+    );
+
+    expect(await screen.findByText('ATR unavailable')).toBeTruthy();
+    expect(chartMock.lineSetData).not.toHaveBeenCalled(); // no pane is drawn for a broken read
+  });
 });

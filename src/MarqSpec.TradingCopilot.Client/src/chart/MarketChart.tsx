@@ -1,4 +1,5 @@
 import Box from '@mui/material/Box';
+import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import { CandlestickSeries, LineSeries, createChart } from 'lightweight-charts';
 import type {
@@ -47,6 +48,14 @@ export interface IndicatorSpec {
   readonly color?: string;
 }
 
+/**
+ * A stable empty default for {@link MarketChartProps.indicators}. Module-level so the reference is identical across
+ * renders — an inline `indicators = []` default is a *fresh* array each render, and with `indicators` in the pane
+ * effect's dependency list that re-runs the effect every render; once the effect clears `failedIndicators` on the
+ * no-indicators path, that becomes an infinite render loop. A single shared reference keeps the deps stable.
+ */
+const NO_INDICATORS: readonly IndicatorSpec[] = [];
+
 export interface MarketChartProps {
   readonly venue: string;
   readonly instrument: string;
@@ -94,13 +103,15 @@ export function MarketChart({
   resolution,
   lookbackMinutes,
   now = Date.now,
-  indicators = [],
+  indicators = NO_INDICATORS,
 }: MarketChartProps): React.JSX.Element {
   // Default the window from the resolution, not a flat constant, so it stays under the server's row cap whatever
   // resolution the workspace opens on (gh#725 review).
   const effectiveLookback = lookbackMinutes ?? defaultLookbackMinutes(resolution);
   const theme = useTheme();
   const [state, setState] = useState<ChartState>({ status: 'loading' });
+  // Indicators whose read came back refused/failed (R-11/R-19) — surfaced, not swallowed as a silently-absent pane.
+  const [failedIndicators, setFailedIndicators] = useState<readonly string[]>([]);
 
   // The `[from, to)` window, computed ONCE on mount (a useState initializer, not a render-time clock read) and shared
   // by the bars and every indicator series so they align on the same axis. The workspace keys this component on the
@@ -202,15 +213,21 @@ export function MarketChart({
 
   // Indicator panes (gh#726): one line series per indicator, each in its own pane BELOW the candles (pane 0), fed by
   // the pre-computed series (R-22 — never recomputed here). Added dynamically (not via the mount key) so toggling an
-  // indicator does not refetch the candles. `chart` is captured so a resolve/cleanup only touches series while THIS
-  // chart is still current — a theme-driven recreation already disposed the old one with its panes.
+  // indicator does not refetch the candles. `chart` is captured and re-checked against the ref on every resolve /
+  // cleanup, so a getIndicators call that lands AFTER unmount — the create-once effect having torn the chart down and
+  // cleared the ref — is dropped rather than adding a series to a disposed chart.
   useEffect(() => {
     const chart = chartRef.current;
     if (chart === null || indicators.length === 0) {
+      // Clear via a functional update that returns the SAME reference when already empty: React then bails out of the
+      // re-render, so this settles instead of looping on every render where there are no indicators (belt-and-suspenders
+      // against a caller passing an unstable array, on top of the stable NO_INDICATORS default).
+      setFailedIndicators((prev) => (prev.length === 0 ? prev : []));
       return;
     }
     let active = true;
     const added: ISeriesApi<'Line'>[] = [];
+    const failed: string[] = [];
 
     void Promise.all(
       indicators.map((spec, index) =>
@@ -223,7 +240,13 @@ export function MarketChart({
           chartWindow.from,
           chartWindow.to,
         ).then((result) => {
-          if (!active || chartRef.current !== chart || !result.ok) {
+          if (!active || chartRef.current !== chart) {
+            return;
+          }
+          if (!result.ok) {
+            // R-11 / R-19: a refused or failed indicator read is an ANSWER, not "not computed yet" (which is a
+            // successful EMPTY series). Collect it so the operator sees the pane is broken, never a silent absence.
+            failed.push(spec.indicator);
             return;
           }
           const line = chart.addSeries(
@@ -240,7 +263,11 @@ export function MarketChart({
           added.push(line);
         }),
       ),
-    );
+    ).then(() => {
+      if (active) {
+        setFailedIndicators(failed);
+      }
+    });
 
     return () => {
       active = false;
@@ -271,6 +298,26 @@ export function MarketChart({
         <Overlay>
           <EmptyState title="Market data unavailable" description={state.message} tag="R-19" />
         </Overlay>
+      ) : null}
+      {failedIndicators.length > 0 ? (
+        // A degraded indicator read is shown, not swallowed (R-11 / R-19) — an inline note, so the candles still show.
+        <Box
+          sx={{
+            position: 'absolute',
+            bottom: 8,
+            left: 8,
+            px: 1,
+            py: 0.25,
+            borderRadius: 1,
+            bgcolor: 'background.paper',
+            border: '1px solid',
+            borderColor: 'error.main',
+          }}
+        >
+          <Typography variant="caption" sx={{ color: 'error.main' }}>
+            {failedIndicators.map((indicator) => indicator.toUpperCase()).join(', ')} unavailable
+          </Typography>
+        </Box>
       ) : null}
     </Box>
   );
