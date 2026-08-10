@@ -40,10 +40,22 @@ public class RiskHeadroomTests
         decimal? dailyLossLimit = null,
         decimal? dailyProfitTarget = null,
         bool stopForDay = false,
-        Guid? owner = null)
+        Guid? owner = null,
+        TradingMode mode = TradingMode.Practice)
     {
         Guid ownerId = owner ?? _operator;
         await using TradingCopilotDbContext context = Context(ownerId);
+        // A profile FKs to its account, and the headroom is the CURRENT account's (R-14, gh#746) — the endpoint reads
+        // the account's mode to scope the day's realized P&L — so seed the account alongside the profile.
+        context.Accounts.Add(new Account
+        {
+            Id = _account,
+            UserId = ownerId,
+            ConnectionId = Guid.NewGuid(),
+            VenueAccountKey = "9001",
+            Name = "PRAC-50K",
+            Mode = mode,
+        });
         context.RiskProfiles.Add(new RiskProfileRecord
         {
             Id = Guid.NewGuid(),
@@ -66,7 +78,7 @@ public class RiskHeadroomTests
         await context.SaveChangesAsync();
     }
 
-    private async Task SeedTradeAsync(decimal realizedPnL, Guid? owner = null)
+    private async Task SeedTradeAsync(decimal realizedPnL, Guid? owner = null, TradingMode mode = TradingMode.Practice)
     {
         Guid ownerId = owner ?? _operator;
         await using TradingCopilotDbContext context = Context(ownerId);
@@ -81,7 +93,7 @@ public class RiskHeadroomTests
             EntryPrice = 5_300m,
             ExitPrice = 5_305m,
             RealizedPnL = realizedPnL,
-            Mode = TradingMode.Practice,
+            Mode = mode,
             ClosedAt = _now.AddHours(-1),
         });
         await context.SaveChangesAsync();
@@ -213,5 +225,21 @@ public class RiskHeadroomTests
         await SeedTradeAsync(realizedPnL: -500m, owner: _other);
 
         HeadroomOf(await ReadAsync(asUser: _operator)).DayLoss.Should().Be(0m);
+    }
+
+    [Fact]
+    public async Task GetHeadroom_ShouldCountOnlyTheAccountsCurrentMode_WhenItChangedModes()
+    {
+        // R-14 (gh#746): the account is now LIVE but its journal still holds a practice loss from when it was practice.
+        // The live headroom must reflect ONLY the live trade — the practice loss was never at risk against the live
+        // limit and must not eat live headroom. Proves the endpoint scopes the read to the account's CURRENT mode.
+        await SeedProfileAsync(governor: 600m, mode: TradingMode.Live);
+        await SeedTradeAsync(realizedPnL: -500m, mode: TradingMode.Practice); // a leftover practice loss — must NOT count
+        await SeedTradeAsync(realizedPnL: -200m, mode: TradingMode.Live);     // the only loss that counts against live
+
+        DailyHeadroomResponse headroom = HeadroomOf(await ReadAsync());
+
+        headroom.DayLoss.Should().Be(200m, "only the live trade reduces a live account's headroom");
+        headroom.UnderGovernor.Should().Be(400m);
     }
 }

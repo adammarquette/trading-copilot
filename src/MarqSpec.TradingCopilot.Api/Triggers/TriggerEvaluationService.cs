@@ -560,9 +560,21 @@ public class TriggerEvaluationService
     {
         RiskProfileRecord? profile = await database.RiskProfiles
             .FirstOrDefaultAsync(candidate => candidate.AccountId == accountId, cancellationToken);
-        decimal dayRealized = profile is null
+        if (profile is null)
+        {
+            return (null, 0m);
+        }
+
+        // R-14 (gh#746): count only trades taken under the account's CURRENT mode — a practice result must never feed
+        // a live account's throttle. Mode is read live from the account (a trade's stored mode is historical); a
+        // vanished account counts nothing (0), the inert direction that proposes un-throttled.
+        TradingMode? mode = await database.Accounts
+            .Where(account => account.Id == accountId)
+            .Select(account => (TradingMode?)account.Mode)
+            .FirstOrDefaultAsync(cancellationToken);
+        decimal dayRealized = mode is null
             ? 0m
-            : await database.TodayRealizedPnLForAccountAsync(accountId, now, cancellationToken);
+            : await database.TodayRealizedPnLForAccountAsync(accountId, mode.Value, now, cancellationToken);
         return (profile, dayRealized);
     }
 

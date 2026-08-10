@@ -197,7 +197,19 @@ public static class RiskEndpoints
             return Results.NotFound();
         }
 
-        decimal realized = await database.TodayRealizedPnLForAccountAsync(id, now, cancellationToken);
+        // R-14 (gh#746): the headroom is the CURRENT account's, so count only trades taken under its current mode — a
+        // practice result must never feed a live account's headroom. A profile FKs to its account, so this normally
+        // finds it; the NotFound guards the race where the account vanished after the profile read.
+        TradingMode? mode = await database.Accounts
+            .Where(account => account.Id == id)
+            .Select(account => (TradingMode?)account.Mode)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (mode is null)
+        {
+            return Results.NotFound();
+        }
+
+        decimal realized = await database.TodayRealizedPnLForAccountAsync(id, mode.Value, now, cancellationToken);
         decimal dayLoss = Math.Max(0m, -realized);
         decimal dayProfit = Math.Max(0m, realized);
 
