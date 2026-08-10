@@ -134,6 +134,7 @@ public class OpenApiDocumentIntegrationTests : IClassFixture<PostgresApiFactory>
         "Suggestions",
         "Orders",
         "Kill Switch",
+        "Flatten",
         "Positions",
         "Market data",
     ];

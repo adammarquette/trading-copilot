@@ -8,6 +8,8 @@ import { ErrorBoundary } from '../components/ErrorBoundary';
 import { ConnectionStatus } from '../health/ConnectionStatus';
 import { AccountSwitcher } from '../accounts/AccountSwitcher';
 import { AdaptiveNavigation, SecondaryDestinationLinks } from '../navigation/AdaptiveNavigation';
+import { KillSwitchControl } from '../safety/KillSwitchControl';
+import { TimeToFlat } from '../safety/TimeToFlat';
 import { AccountMenu } from './AccountMenu';
 import { SafetyRegion } from './SafetyRegion';
 import { ThemeModeToggle } from './ThemeModeToggle';
@@ -74,7 +76,11 @@ export function AppShell() {
           {/* Everything from here right is status and safety. The safety region is last-but-one so it
               lands in the same place at every size class -- muscle memory is a safety property. */}
           {!compact ? <ConnectionStatus /> : null}
-          <SafetyRegion dense={compact} />
+          <SafetyRegion
+            dense={compact}
+            timeToFlat={<TimeToFlat />}
+            killSwitch={<KillSwitchControl />}
+          />
           {compact ? <SecondaryDestinationLinks /> : null}
           <ThemeModeToggle />
           <AccountMenu />

@@ -535,6 +535,7 @@ app.MapNewsEndpoints();
 app.MapSuggestionEndpoints();
 app.MapOrderEndpoints();
 app.MapKillSwitchEndpoints();
+app.MapFlattenScheduleEndpoints();
 app.MapPositionEndpoints();
 app.MapWorkingOrderEndpoints();
 app.MapMarketDataEndpoints();
