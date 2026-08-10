@@ -147,8 +147,10 @@ isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-
   a missing quote from fabricating one.
   *Still open:* **restart-triggered venue reconcile** pairs with the
   settlement pass (gh#193) and the connection monitor (gh#209); **fill**-level reconcile needs the account-event
-  seam (gh#219); and the **cross-user-isolation-through-restart** proof (suggestions / orders / positions /
-  templates keep their owner) is the QA suite's.
+  seam (gh#219); and the **cross-user-isolation-through-restart** proof (positions / templates keep their owner)
+  is the QA suite's. *(**Delivered** for suggestions **and their dispositions** by
+  `SuggestionLifecycleRestartIntegrationTests`, gh#552 — owner preserved, a second operator gets `404` through the
+  restart — and for staged orders by gh#223; positions / templates remain.)*
 - **Reconnect / backfill** verification (R-1 gap detection) and **recovery event / audit** records (ADR-0001, §9).
 - Client **resume** edge cases (dedup, ordering) under the SignalR idempotent-resume pattern.
 
