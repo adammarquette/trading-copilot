@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Stub the chart (its own suite covers it, and it would open a real canvas) and the panel (its own suite covers the
 // R-14 scoping). The chart stub reflects its props as data-attributes so the composition + retargeting are assertable.
@@ -10,6 +10,8 @@ vi.mock('../chart/MarketChart', () => ({
     resolution: number;
     indicators?: readonly { indicator: string }[];
     levelTimeframes?: readonly number[];
+    suggestionZones?: readonly { id: string }[];
+    suggestionsStale?: boolean;
   }) => (
     <div
       data-testid="chart-stub"
@@ -18,12 +20,19 @@ vi.mock('../chart/MarketChart', () => ({
       data-resolution={props.resolution}
       data-indicators={(props.indicators ?? []).map((spec) => spec.indicator).join(',')}
       data-level-timeframes={(props.levelTimeframes ?? []).join(',')}
+      data-suggestion-zones={(props.suggestionZones ?? []).map((zone) => zone.id).join(',')}
+      data-suggestions-stale={String(props.suggestionsStale ?? false)}
     />
   ),
 }));
 vi.mock('../suggestions/SuggestionsPanel', () => ({
   SuggestionsPanel: () => <div data-testid="panel-stub" />,
 }));
+
+// The zone hook has its own suite (it wires accounts + realtime); here it is driven to assert the zones + stale flag
+// reach the chart.
+const { useSuggestionZonesMock } = vi.hoisted(() => ({ useSuggestionZonesMock: vi.fn() }));
+vi.mock('../chart/useSuggestionZones', () => ({ useSuggestionZones: useSuggestionZonesMock }));
 
 import type { Destination } from '../navigation/destinations';
 import { WorkspaceSurface } from './WorkspaceSurface';
@@ -33,6 +42,10 @@ const destination = { id: 'workspace', path: '/', label: 'Workspace' } as unknow
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+beforeEach(() => {
+  useSuggestionZonesMock.mockReturnValue({ zones: [], stale: false });
 });
 
 describe('WorkspaceSurface', () => {
@@ -95,5 +108,19 @@ describe('WorkspaceSurface', () => {
 
     fireEvent.change(screen.getByLabelText('Resolution'), { target: { value: '15' } });
     expect(timeframes()).toBe('15'); // follows the resolution while on
+  });
+
+  it('feeds the chart the active suggestion zones and their stale flag for the charted instrument (gh#727)', () => {
+    useSuggestionZonesMock.mockReturnValue({
+      zones: [{ id: 's1', entry: 5300, stop: 5290, target: 5320 }],
+      stale: true,
+    });
+
+    render(<WorkspaceSurface destination={destination} />);
+
+    expect(useSuggestionZonesMock).toHaveBeenCalledWith('ES'); // scoped to the charted instrument
+    const chart = screen.getByTestId('chart-stub');
+    expect(chart.dataset.suggestionZones).toBe('s1');
+    expect(chart.dataset.suggestionsStale).toBe('true');
   });
 });
