@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./client', () => ({ request: vi.fn() }));
 
 import { request } from './client';
-import { getBars, getIndicators } from './marketData';
+import { getBars, getIndicators, getLevels } from './marketData';
 
 const requestMock = vi.mocked(request);
 
@@ -140,6 +140,64 @@ describe('getIndicators', () => {
       kind: 'refused',
       status: 400,
       reason: "Unknown indicator 'macd'.",
+    });
+  });
+});
+
+describe('getLevels', () => {
+  it('reads the levels route with the venue/instrument + each timeframe as a repeated query param', async () => {
+    requestMock.mockResolvedValue({
+      ok: true,
+      data: { venue: 'projectx', instrument: 'ES', levels: [] },
+    });
+
+    await getLevels('projectx', 'ES', [1, 60]);
+
+    expect(requestMock).toHaveBeenCalledOnce();
+    const [method, path] = requestMock.mock.calls[0];
+    expect(method).toBe('GET');
+    const url = new URL(path, 'http://local');
+    expect(url.pathname).toBe('/api/marketdata/levels');
+    expect(url.searchParams.get('venue')).toBe('projectx');
+    expect(url.searchParams.get('instrument')).toBe('ES');
+    // The server binds `int[] timeframes` from a REPEATED param, not a comma list — one entry per timeframe.
+    expect(url.searchParams.getAll('timeframes')).toEqual(['1', '60']);
+  });
+
+  it('returns the active levels on success', async () => {
+    const levels = {
+      venue: 'projectx',
+      instrument: 'ES',
+      levels: [
+        {
+          timeframeMinutes: 60,
+          top: 5310,
+          bottom: 5308,
+          kind: 'Resistance',
+          significance: 0.82,
+          formedAtBucket: '2026-01-01T00:00:00Z',
+          touchCount: 3,
+        },
+      ],
+    };
+    requestMock.mockResolvedValue({ ok: true, data: levels });
+
+    await expect(getLevels('projectx', 'ES', [60])).resolves.toEqual({ ok: true, data: levels });
+  });
+
+  it('passes a refusal through unchanged (an empty/invalid timeframe set is the gate answer, not an error)', async () => {
+    requestMock.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 400,
+      reason: 'specify at least one positive timeframe (minutes).',
+    });
+
+    await expect(getLevels('projectx', 'ES', [])).resolves.toEqual({
+      ok: false,
+      kind: 'refused',
+      status: 400,
+      reason: 'specify at least one positive timeframe (minutes).',
     });
   });
 });

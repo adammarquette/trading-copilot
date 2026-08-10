@@ -11,11 +11,16 @@ const { chartMock } = vi.hoisted(() => {
   const removeSeries = vi.fn();
   const fitContent = vi.fn();
   const applyOptions = vi.fn();
+  const createPriceLine = vi.fn((options: unknown) => options); // a price-level overlay line (gh#727)
+  const removePriceLine = vi.fn();
   // addSeries returns a series whose setData is distinguishable by kind, so candle vs indicator data is assertable.
-  // A rest signature so a call carries all of (seriesType, options, paneIndex) — the pane index is asserted below.
-  const addSeries = vi.fn((...args: unknown[]) => ({
-    setData: args[0] === 'Candlestick' ? setData : lineSetData,
-  }));
+  // The candle series also carries the price-line API (gh#727) — the level overlays hang off it. A rest signature so
+  // a call carries all of (seriesType, options, paneIndex) — the pane index is asserted below.
+  const addSeries = vi.fn((...args: unknown[]) =>
+    args[0] === 'Candlestick'
+      ? { setData, createPriceLine, removePriceLine }
+      : { setData: lineSetData },
+  );
   const createChart = vi.fn(() => ({
     addSeries,
     removeSeries,
@@ -31,6 +36,8 @@ const { chartMock } = vi.hoisted(() => {
       removeSeries,
       fitContent,
       applyOptions,
+      createPriceLine,
+      removePriceLine,
       addSeries,
       createChart,
     },
@@ -40,13 +47,19 @@ vi.mock('lightweight-charts', () => ({
   createChart: chartMock.createChart,
   CandlestickSeries: 'Candlestick',
   LineSeries: 'Line',
+  LineStyle: { Solid: 0, Dashed: 2 },
 }));
 
-const { getBarsMock, getIndicatorsMock } = vi.hoisted(() => ({
+const { getBarsMock, getIndicatorsMock, getLevelsMock } = vi.hoisted(() => ({
   getBarsMock: vi.fn(),
   getIndicatorsMock: vi.fn(),
+  getLevelsMock: vi.fn(),
 }));
-vi.mock('../api/marketData', () => ({ getBars: getBarsMock, getIndicators: getIndicatorsMock }));
+vi.mock('../api/marketData', () => ({
+  getBars: getBarsMock,
+  getIndicators: getIndicatorsMock,
+  getLevels: getLevelsMock,
+}));
 
 import { MarketChart } from './MarketChart';
 
@@ -62,6 +75,23 @@ function barsOk(bars: ReturnType<typeof bar>[]) {
   return {
     ok: true as const,
     data: { venue: 'topstepx', instrument: 'ES', resolutionMinutes: 1, bars },
+  };
+}
+function levelsOk(
+  levels: ReadonlyArray<{ timeframeMinutes: number; top: number; bottom: number; kind: string }>,
+) {
+  return {
+    ok: true as const,
+    data: {
+      venue: 'topstepx',
+      instrument: 'ES',
+      levels: levels.map((level) => ({
+        significance: 0.5,
+        formedAtBucket: '2026-01-01T00:00:00Z',
+        touchCount: 1,
+        ...level,
+      })),
+    },
   };
 }
 
@@ -290,5 +320,48 @@ describe('MarketChart', () => {
 
     expect(await screen.findByText('ATR unavailable')).toBeTruthy();
     expect(chartMock.lineSetData).not.toHaveBeenCalled(); // no pane is drawn for a broken read
+  });
+
+  it('overlays active price levels as price lines on the candle series when timeframes are requested (gh#727)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+    getLevelsMock.mockResolvedValue(
+      levelsOk([{ timeframeMinutes: 60, top: 5310, bottom: 5308, kind: 'Resistance' }]),
+    );
+
+    render(<MarketChart venue="topstepx" instrument="ES" resolution={1} levelTimeframes={[60]} />);
+
+    // Levels are NOT windowed — the call carries only (venue, instrument, timeframes).
+    await waitFor(() => expect(getLevelsMock).toHaveBeenCalledWith('topstepx', 'ES', [60]));
+    // A band → two edges → two price lines on the candle series (pane 0), not an indicator pane.
+    await waitFor(() => expect(chartMock.createPriceLine).toHaveBeenCalledTimes(2));
+    const prices = chartMock.createPriceLine.mock.calls.map(
+      (call) => (call[0] as { price: number }).price,
+    );
+    expect(prices).toEqual([5310, 5308]);
+  });
+
+  it('does not fetch levels when no timeframes are requested', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    render(<MarketChart venue="topstepx" instrument="ES" resolution={1} />);
+    await waitFor(() => expect(chartMock.setData).toHaveBeenCalled());
+
+    expect(getLevelsMock).not.toHaveBeenCalled();
+    expect(chartMock.createPriceLine).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a refused / failed levels read rather than a silently-absent overlay (R-11 / R-19)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+    getLevelsMock.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 400,
+      reason: 'specify at least one positive timeframe (minutes).',
+    });
+
+    render(<MarketChart venue="topstepx" instrument="ES" resolution={1} levelTimeframes={[60]} />);
+
+    expect(await screen.findByText('LEVELS unavailable')).toBeTruthy();
+    expect(chartMock.createPriceLine).not.toHaveBeenCalled(); // no lines drawn for a broken read
   });
 });

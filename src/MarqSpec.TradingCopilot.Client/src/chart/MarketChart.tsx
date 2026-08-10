@@ -1,10 +1,11 @@
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
-import { CandlestickSeries, LineSeries, createChart } from 'lightweight-charts';
+import { CandlestickSeries, LineSeries, LineStyle, createChart } from 'lightweight-charts';
 import type {
   CandlestickData,
   IChartApi,
+  IPriceLine,
   ISeriesApi,
   LineData,
   UTCTimestamp,
@@ -12,9 +13,11 @@ import type {
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { BarPoint, BarSeries, IndicatorPoint } from '../api/marketData';
-import { getBars, getIndicators } from '../api/marketData';
+import { getBars, getIndicators, getLevels } from '../api/marketData';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
+import type { LevelPalette } from './overlays';
+import { levelsToPriceLines } from './overlays';
 
 /**
  * How many bars the default window aims for. Kept comfortably under the server's row cap
@@ -56,6 +59,16 @@ export interface IndicatorSpec {
  */
 const NO_INDICATORS: readonly IndicatorSpec[] = [];
 
+/** A stable empty default for {@link MarketChartProps.levelTimeframes} — module-level for the same reason as {@link NO_INDICATORS}. */
+const NO_TIMEFRAMES: readonly number[] = [];
+
+/**
+ * The colours the price-level overlay draws its two sides with (gh#727). Fixed rather than theme-derived so a
+ * light / dark toggle neither re-fetches nor redraws the levels: support green / resistance red mirror the candle
+ * up / down colours, the conventional support-below / resistance-above reading.
+ */
+const LEVEL_PALETTE: LevelPalette = { support: '#26a69a', resistance: '#ef5350' };
+
 export interface MarketChartProps {
   readonly venue: string;
   readonly instrument: string;
@@ -66,6 +79,11 @@ export interface MarketChartProps {
   readonly now?: () => number;
   /** Indicator panes to render below the candles (gh#726), each fed by `/api/marketdata/indicators` (R-22). */
   readonly indicators?: readonly IndicatorSpec[];
+  /**
+   * Timeframes (minutes) whose active price levels overlay the candles as horizontal price lines (gh#727), from
+   * `/api/marketdata/levels`. Empty (the default) draws no levels. Not windowed — levels are the currently-active set.
+   */
+  readonly levelTimeframes?: readonly number[];
 }
 
 /** Maps the server's OHLCV bars to Lightweight-Charts candles: `bucketStart` (ISO) → a UNIX-second `UTCTimestamp`. */
@@ -95,7 +113,8 @@ function toIndicatorLine(points: readonly IndicatorPoint[]): LineData<UTCTimesta
  * server's cap and an unknown series surface as an error, an in-range gap as "no bars", loading as a spinner — never
  * a chart drawn empty as though the market went silent. The chart instance is created once and torn down on unmount
  * (no leaked canvas / `ResizeObserver`). Indicator panes (gh#726) render below the candles from the pre-computed
- * series (R-22); live tick updates and the price overlays are their own cards (gh#649 / gh#727).
+ * series (R-22); price-level overlays (gh#727) draw as price lines from `/api/marketdata/levels`. Suggestion-zone
+ * and live position / order / fill overlays are gh#727 follow-ups; live tick updates are gh#649's.
  */
 export function MarketChart({
   venue,
@@ -104,6 +123,7 @@ export function MarketChart({
   lookbackMinutes,
   now = Date.now,
   indicators = NO_INDICATORS,
+  levelTimeframes = NO_TIMEFRAMES,
 }: MarketChartProps): React.JSX.Element {
   // Default the window from the resolution, not a flat constant, so it stays under the server's row cap whatever
   // resolution the workspace opens on (gh#725 review).
@@ -112,6 +132,8 @@ export function MarketChart({
   const [state, setState] = useState<ChartState>({ status: 'loading' });
   // Indicators whose read came back refused/failed (R-11/R-19) — surfaced, not swallowed as a silently-absent pane.
   const [failedIndicators, setFailedIndicators] = useState<readonly string[]>([]);
+  // Whether the price-level read came back refused/failed (R-11/R-19) — surfaced, not a silently-absent overlay.
+  const [levelsUnavailable, setLevelsUnavailable] = useState(false);
 
   // The `[from, to)` window, computed ONCE on mount (a useState initializer, not a render-time clock read) and shared
   // by the bars and every indicator series so they align on the same axis. The workspace keys this component on the
@@ -277,6 +299,60 @@ export function MarketChart({
     };
   }, [indicators, venue, instrument, resolution, chartWindow]);
 
+  // Price-level overlays (gh#727): active support / resistance levels drawn as horizontal price lines on the candle
+  // series, from `/api/marketdata/levels` (global / shared, R-22). Levels are NOT windowed, so this keys on
+  // (venue, instrument, timeframes) only — a resolution change remounts the whole chart anyway. The candle series is
+  // captured and re-checked against the ref on every resolve / cleanup, so a getLevels call landing after unmount is
+  // dropped rather than drawing onto a disposed chart (the gh#726 pattern).
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (series === null || levelTimeframes.length === 0) {
+      // Idempotent clear: returns the SAME value when already false, so React bails the re-render (no loop even if a
+      // caller passes an unstable array, on top of the stable NO_TIMEFRAMES default).
+      setLevelsUnavailable((prev) => (prev ? false : prev));
+      return;
+    }
+    let active = true;
+    const added: IPriceLine[] = [];
+
+    void getLevels(venue, instrument, levelTimeframes).then((result) => {
+      if (!active || seriesRef.current !== series) {
+        return;
+      }
+      if (!result.ok) {
+        // R-11 / R-19: a refused or failed levels read is an ANSWER, surfaced — not a silently-absent overlay.
+        setLevelsUnavailable(true);
+        return;
+      }
+      setLevelsUnavailable(false);
+      levelsToPriceLines(result.data.levels, LEVEL_PALETTE).forEach((spec) => {
+        added.push(
+          series.createPriceLine({
+            price: spec.price,
+            color: spec.color,
+            title: spec.title,
+            lineStyle: spec.style === 'dashed' ? LineStyle.Dashed : LineStyle.Solid,
+            lineWidth: 1,
+            axisLabelVisible: true,
+          }),
+        );
+      });
+    });
+
+    return () => {
+      active = false;
+      if (seriesRef.current === series) {
+        added.forEach((priceLine) => series.removePriceLine(priceLine));
+      }
+    };
+  }, [venue, instrument, levelTimeframes]);
+
+  // A degraded overlay read (an indicator pane or the price levels) is shown, not swallowed (R-11 / R-19).
+  const unavailableOverlays = [
+    ...failedIndicators.map((indicator) => indicator.toUpperCase()),
+    ...(levelsUnavailable ? ['LEVELS'] : []),
+  ];
+
   return (
     <Box data-testid="market-chart" sx={{ position: 'relative', height: '100%', minHeight: 240 }}>
       <Box ref={containerRef} sx={{ position: 'absolute', inset: 0 }} />
@@ -299,8 +375,8 @@ export function MarketChart({
           <EmptyState title="Market data unavailable" description={state.message} tag="R-19" />
         </Overlay>
       ) : null}
-      {failedIndicators.length > 0 ? (
-        // A degraded indicator read is shown, not swallowed (R-11 / R-19) — an inline note, so the candles still show.
+      {unavailableOverlays.length > 0 ? (
+        // An inline note beside the candles, so a broken overlay (a pane or the levels) is visible while price still shows.
         <Box
           sx={{
             position: 'absolute',
@@ -315,7 +391,7 @@ export function MarketChart({
           }}
         >
           <Typography variant="caption" sx={{ color: 'error.main' }}>
-            {failedIndicators.map((indicator) => indicator.toUpperCase()).join(', ')} unavailable
+            {unavailableOverlays.join(', ')} unavailable
           </Typography>
         </Box>
       ) : null}
