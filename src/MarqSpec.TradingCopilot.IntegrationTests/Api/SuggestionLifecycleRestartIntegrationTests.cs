@@ -79,6 +79,63 @@ public class SuggestionLifecycleRestartIntegrationTests : IClassFixture<Rehydrat
             ordersBefore, "nothing was auto-taken — no order is resurrected from the lapsed suggestion");
     }
 
+    [Fact]
+    public async Task Restart_ShouldBringAStillValidSuggestionBackActive_ButInert()
+    {
+        // The other side of the expire boundary: a suggestion still INSIDE its validity window survives the restart
+        // as Active — but Active is DATA, not a resumed action. The restart transmits nothing and creates no order;
+        // the take path re-gates it on any later operator action (R-12, covered by SuggestionTakeIntegrationTests).
+        // The restart edge here is that a survivor is neither wrongly voided nor silently taken.
+        (Guid accountId, string _) = await FreshAccountAsync();
+        Guid operatorId = await OperatorIdAsync();
+        Guid survivor = await SeedSuggestionAsync(
+            accountId, operatorId, SuggestionState.Active,
+            createdAt: DateTimeOffset.UtcNow.AddMinutes(-5),
+            expiresAt: DateTimeOffset.UtcNow.AddHours(1));
+        long ordersBefore = await OrderCountAsync();
+
+        await WithRestartAsync(async rebooted =>
+            (await GetKillSwitchAsync(rebooted)).Engaged.Should().BeFalse(
+                "a valid suggestion is a consistent surface — no fail-safe"));
+
+        (await SuggestionStateAsync(survivor)).Should().Be(
+            SuggestionState.Active,
+            "a suggestion still inside its window comes back Active — the recovery-expire pass voids only lapsed ones");
+        (await OrderCountAsync()).Should().Be(
+            ordersBefore, "coming back Active is data, not resumption — nothing was transmitted or taken");
+    }
+
+    [Fact]
+    public async Task Restart_ShouldKeepClosedLifecycleRows_NeverDeletingStaleOrExpiredVoid()
+    {
+        // "Nothing is ever deleted" (ADR-0013, R-8): a Stale or ExpiredVoid suggestion is the journal's record of a
+        // setup that scratched or lapsed. The restart's rehydration OBSERVES the surface; it never prunes it. Both
+        // rows come back present with their state intact — the Stale one sits inside its window, so the recovery
+        // expire leaves it (there is no Stale → Active un-drift either), and ExpiredVoid is terminal.
+        (Guid accountId, string _) = await FreshAccountAsync();
+        Guid operatorId = await OperatorIdAsync();
+        Guid stale = await SeedSuggestionAsync(
+            accountId, operatorId, SuggestionState.Stale,
+            createdAt: DateTimeOffset.UtcNow.AddMinutes(-10),
+            expiresAt: DateTimeOffset.UtcNow.AddHours(1));
+        Guid voided = await SeedSuggestionAsync(
+            accountId, operatorId, SuggestionState.ExpiredVoid,
+            createdAt: DateTimeOffset.UtcNow.AddHours(-2),
+            expiresAt: DateTimeOffset.UtcNow.AddMinutes(-30));
+
+        await WithRestartAsync(async rebooted =>
+            (await GetKillSwitchAsync(rebooted)).Engaged.Should().BeFalse(
+                "closed-lifecycle rows are not an inconsistency"));
+
+        (await SuggestionCountAsync()).Should().Be(
+            2, "neither row is pruned by rehydration — the journal keeps them");
+        (await SuggestionStateAsync(stale)).Should().Be(
+            SuggestionState.Stale,
+            "a Stale suggestion inside its window stays Stale — never chased back to Active, never deleted");
+        (await SuggestionStateAsync(voided)).Should().Be(
+            SuggestionState.ExpiredVoid, "an ExpiredVoid suggestion is terminal and kept");
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Harness — mirrors StateRehydrationIntegrationTests (gh#223): the container outlives the host, so CreateHost
     // re-runs StartupTasks against the same database, and that is the "restart".
@@ -215,6 +272,9 @@ public class SuggestionLifecycleRestartIntegrationTests : IClassFixture<Rehydrat
 
     private Task<int> ActiveSuggestionCountAsync() => QueryDbAsync(db =>
         db.Suggestions.IgnoreQueryFilters().CountAsync(s => s.State == SuggestionState.Active));
+
+    private Task<int> SuggestionCountAsync() => QueryDbAsync(db =>
+        db.Suggestions.IgnoreQueryFilters().CountAsync());
 
     private Task<long> OrderCountAsync() => QueryDbAsync(db => db.Orders.IgnoreQueryFilters().LongCountAsync());
 
