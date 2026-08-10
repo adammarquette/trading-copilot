@@ -312,13 +312,13 @@ public class RealizedReaderModeFilterIntegrationTests : IClassFixture<StubbedVen
         // EMPTY one: zero consumed, full headroom. Blended, the leftover practice loss would spend the governor of
         // an account that is not permitted to produce a single order.
         HttpClient client = await AuthenticatedClientAsync(_factory);
-        Guid accountId = await SetupPracticeAccountAsync(client);
+        Guid accountId = await SetupPracticeAccountAsync(client, classifyFunded: false);
 
         await SeedClosedTradeAsync(accountId, ClosedTodayCentral(), -700m, TradingMode.Practice);
         await DeclareRiskProfileAsync(client, accountId, dailyDrawdownGovernor: 1_000m);
 
-        // Funded is deliberately NOT among the firm's declared conventions (see SetupPracticeAccountAsync), so the
-        // override moves the effective stage to something the operator has never classified: mode -> Undeclared.
+        // Funded is deliberately left unclassified for this firm (classifyFunded: false), so the override moves the
+        // effective stage to something the operator has never classified: mode -> Undeclared.
         AccountResponse account = await SetStageAsync(client, accountId, AccountStage.Funded);
         account.Mode.Should().Be(
             TradingMode.Undeclared, "an unclassified effective stage resolves to Undeclared — silence is not consent");
@@ -458,20 +458,29 @@ public class RealizedReaderModeFilterIntegrationTests : IClassFixture<StubbedVen
     /// <b>No convention is declared for <see cref="AccountStage.Unknown"/></b> — undeclarable — and none for any
     /// stage beyond those three, which is what the undeclared case leans on.
     /// </summary>
-    private async Task<Guid> SetupPracticeAccountAsync(HttpClient client)
+    private async Task<Guid> SetupPracticeAccountAsync(HttpClient client, bool classifyFunded = true)
     {
         using HttpResponseMessage createFirm = await client.PostAsJsonAsync(
             "/firms", new CreateFirmRequest($"Topstep-ModeFilter-{Guid.NewGuid():N}", FirmType.PropFirm));
         FirmResponse? firm = await createFirm.Content.ReadFromJsonAsync<FirmResponse>(_jsonOptions);
         ArgumentNullException.ThrowIfNull(firm);
 
+        // Practice and Evaluation are always classified (non-capital → Practice mode); Funded is classified as
+        // capital-at-risk (→ Live) for the mode-change cases, but LEFT UNCLASSIFIED when classifyFunded is false —
+        // so moving an account's effective stage to Funded resolves to Undeclared (silence is not consent, R-14),
+        // which the undeclared-account case needs.
+        List<StageConventionDto> declared =
+        [
+            new StageConventionDto(AccountStage.Practice, CapitalAtRisk: false),
+            new StageConventionDto(AccountStage.Evaluation, CapitalAtRisk: false),
+        ];
+        if (classifyFunded)
+        {
+            declared.Add(new StageConventionDto(AccountStage.Funded, CapitalAtRisk: true));
+        }
+
         using HttpResponseMessage conventions = await client.PutAsJsonAsync(
-            $"/firms/{firm.Id}/conventions",
-            new DeclareConventionsRequest([
-                new StageConventionDto(AccountStage.Practice, CapitalAtRisk: false),
-                new StageConventionDto(AccountStage.Evaluation, CapitalAtRisk: false),
-                new StageConventionDto(AccountStage.Funded, CapitalAtRisk: true),
-            ]));
+            $"/firms/{firm.Id}/conventions", new DeclareConventionsRequest([.. declared]));
         conventions.EnsureSuccessStatusCode();
 
         using HttpResponseMessage createConnection = await client.PostAsJsonAsync(
