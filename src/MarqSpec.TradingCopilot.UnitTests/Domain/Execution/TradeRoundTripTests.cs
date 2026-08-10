@@ -164,4 +164,40 @@ public class TradeRoundTripTests
 
         act.Should().Throw<ArgumentNullException>();
     }
+
+    [Fact]
+    public void TryCompose_ShouldRefuse_WhenAFillHasAnUnknownSide()
+    {
+        // gh#734 review. `Side != entrySide` was a blacklist, so an undefined OrderSide (a bad cast or deserialize —
+        // and Order.Side carries no known-value DB check) was silently bucketed as an exit. Buy 2, (OrderSide)99
+        // size 1, Sell 1 then "balances" 2-vs-2 and journals an exit average containing the invalid fill;
+        // RealizedPnL only validates the known entry side and never catches it. Whitelist both legs and refuse
+        // anything else before composing.
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5_000m, 2),
+            Fill((OrderSide)99, 5_010m, 1, minute: 5),
+            Fill(OrderSide.Sell, 5_020m, 1, minute: 10),
+        ];
+
+        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeFalse(
+            "a fill whose side is neither leg cannot be classified, so the whole trip is refused rather than "
+            + "journalled with a corrupt average");
+        trip.Should().BeNull();
+    }
+
+    [Fact]
+    public void TryCompose_ShouldRefuse_WhenTheEarliestFillHasAnUnknownSide()
+    {
+        // The entry side is taken from the earliest execution; if THAT is an undefined value the trip cannot be
+        // composed at all, rather than defaulting to a side.
+        RoundTripFill[] fills =
+        [
+            Fill((OrderSide)99, 5_000m, 1),
+            Fill(OrderSide.Sell, 5_010m, 1, minute: 5),
+        ];
+
+        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeFalse();
+        trip.Should().BeNull();
+    }
 }

@@ -261,6 +261,38 @@ public class TradeJournalServiceTests
     }
 
     [Fact]
+    public async Task ProcessFlatAsync_ShouldJournalACleanTripAfterARefusedOne_NotWedgeOnItsFillsForever()
+    {
+        // gh#734 review. The round-trip boundary must advance past a REFUSED flat, not only a journalled one. A
+        // stop-and-reverse (Buy 1, Sell 2, Buy 1) ends flat but is refused — it crossed through flat into a short.
+        // If its fills stay in the candidate set, the next clean Buy 1 / Sell 1 is recomposed WITH them, reads as
+        // another reversal, and is refused too — journaling wedged for this account+contract for the rest of the
+        // session, starving DailyRealizedReader and the R-4 throttle, the very readers gh#731 exists to feed.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        // A stop-and-reverse that ends flat and is refused: +1, then -1 (short), then 0.
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)], placedMinute: 0);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 2, 5)], placedMinute: 5);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_020m, 1, 10)], placedMinute: 10);
+        await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+        (await TradesAsync()).Should().BeEmpty("the stop-and-reverse is refused — the fixture's precondition");
+
+        // A clean round trip afterwards, on the SAME account + contract.
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_030m, 1, 15)], placedMinute: 15);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_040m, 1, 20)], placedMinute: 20);
+
+        await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        Trade trade = (await TradesAsync()).Should().ContainSingle(
+            "the boundary advanced past the refused cycle, so the clean trip composes from its OWN fills").Subject;
+        trade.EntryPrice.Should().Be(5_030m);
+        trade.ExitPrice.Should().Be(5_040m);
+        trade.Size.Should().Be(1, "a leaked stop-and-reverse fill would unbalance or resize this");
+        trade.RealizedPnL.Should().Be(50m, "10 points * 1 * $5");
+    }
+
+    [Fact]
     public async Task ProcessFlatAsync_ShouldSignThePnLByTheEntrySide_WhenAShortClosesForAProfit()
     {
         Guid owner = Guid.NewGuid();

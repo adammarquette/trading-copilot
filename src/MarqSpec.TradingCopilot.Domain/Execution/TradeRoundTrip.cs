@@ -67,11 +67,25 @@ public static class TradeRoundTrip
             return false;
         }
 
-        // The entry side is whichever side traded FIRST; the opposite side closes it.
+        // The entry side is whichever side traded FIRST; the opposite side closes it. Both legs must be a KNOWN
+        // side. `!= entrySide` was a blacklist, so an undefined OrderSide -- a bad cast or deserialize, and
+        // Order.Side carries no known-value DB check -- was bucketed as an exit and could balance into a journalled
+        // trade with a corrupt average that RealizedPnL (which validates only the entry side) would never catch
+        // (gh#734 review). Whitelist both legs and refuse anything else before composing.
         OrderSide entrySide = fills.OrderBy(fill => fill.ExecutedAt).First().Side;
+        if (entrySide is not (OrderSide.Buy or OrderSide.Sell))
+        {
+            return false;
+        }
+
+        OrderSide exitSide = entrySide == OrderSide.Buy ? OrderSide.Sell : OrderSide.Buy;
+        if (fills.Any(fill => fill.Side != entrySide && fill.Side != exitSide))
+        {
+            return false; // a fill whose side is neither leg cannot be classified -- refuse the whole trip
+        }
 
         List<RoundTripFill> entries = [.. fills.Where(fill => fill.Side == entrySide)];
-        List<RoundTripFill> exits = [.. fills.Where(fill => fill.Side != entrySide)];
+        List<RoundTripFill> exits = [.. fills.Where(fill => fill.Side == exitSide)];
         if (exits.Count == 0)
         {
             return false; // never closed -- the position is still open
