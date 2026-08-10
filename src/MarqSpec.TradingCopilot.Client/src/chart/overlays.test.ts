@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PriceLevel } from '../api/marketData';
-import { levelToPriceLines, levelsToPriceLines } from './overlays';
+import {
+  levelToPriceLines,
+  levelsToPriceLines,
+  suggestionToPriceLines,
+  suggestionsToPriceLines,
+} from './overlays';
 
 const PALETTE = { support: '#26a69a', resistance: '#ef5350' } as const;
 
@@ -61,5 +66,41 @@ describe('levelsToPriceLines', () => {
 
   it('is empty for no levels', () => {
     expect(levelsToPriceLines([], PALETTE)).toEqual([]);
+  });
+});
+
+const SUGGESTION_PALETTE = { entry: '#4a90d9', stop: '#ef5350', target: '#26a69a' } as const;
+
+describe('suggestionToPriceLines', () => {
+  it('maps a suggestion zone to its entry, stop and target lines — each labelled and coloured by role', () => {
+    const lines = suggestionToPriceLines(
+      { id: 's1', entry: 5300, stop: 5290, target: 5320 },
+      SUGGESTION_PALETTE,
+    );
+
+    // Role, not direction, drives the colour: the stop is always the risk side, the target always the reward side,
+    // whether the setup is long or short — so a glance reads the geometry the same way every time.
+    expect(lines).toEqual([
+      { price: 5300, color: SUGGESTION_PALETTE.entry, title: 'Entry', style: 'solid' },
+      { price: 5290, color: SUGGESTION_PALETTE.stop, title: 'Stop', style: 'dashed' },
+      { price: 5320, color: SUGGESTION_PALETTE.target, title: 'Target', style: 'dashed' },
+    ]);
+  });
+});
+
+describe('suggestionsToPriceLines', () => {
+  it('flattens every zone to its three lines', () => {
+    const lines = suggestionsToPriceLines(
+      [
+        { id: 'a', entry: 10, stop: 9, target: 12 },
+        { id: 'b', entry: 20, stop: 21, target: 18 },
+      ],
+      SUGGESTION_PALETTE,
+    );
+    expect(lines.map((line) => line.price)).toEqual([10, 9, 12, 20, 21, 18]);
+  });
+
+  it('is empty for no zones', () => {
+    expect(suggestionsToPriceLines([], SUGGESTION_PALETTE)).toEqual([]);
   });
 });

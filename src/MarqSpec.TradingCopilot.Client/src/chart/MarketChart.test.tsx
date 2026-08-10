@@ -364,4 +364,51 @@ describe('MarketChart', () => {
     expect(await screen.findByText('LEVELS unavailable')).toBeTruthy();
     expect(chartMock.createPriceLine).not.toHaveBeenCalled(); // no lines drawn for a broken read
   });
+
+  it('overlays an active suggestion zone as entry / stop / target price lines (gh#727)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        suggestionZones={[{ id: 's1', entry: 5300, stop: 5290, target: 5320 }]}
+      />,
+    );
+
+    // No levels requested, so these price lines are the zone's three edges — entry, stop, target, in that order.
+    await waitFor(() => expect(chartMock.createPriceLine).toHaveBeenCalledTimes(3));
+    const prices = chartMock.createPriceLine.mock.calls.map(
+      (call) => (call[0] as { price: number }).price,
+    );
+    expect(prices).toEqual([5300, 5290, 5320]);
+  });
+
+  it('labels the suggestion zones stale when the socket is not live (R-19)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        suggestionZones={[{ id: 's1', entry: 5300, stop: 5290, target: 5320 }]}
+        suggestionsStale
+      />,
+    );
+
+    expect(await screen.findByText('Suggestion zones may be stale')).toBeTruthy();
+  });
+
+  it('draws no zones and shows no stale note when none are supplied', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    // `suggestionsStale` alone must NOT surface a note — the note is about drawn zones lagging, so no zones = nothing.
+    render(<MarketChart venue="topstepx" instrument="ES" resolution={1} suggestionsStale />);
+    await waitFor(() => expect(chartMock.setData).toHaveBeenCalled());
+
+    expect(chartMock.createPriceLine).not.toHaveBeenCalled();
+    expect(screen.queryByText('Suggestion zones may be stale')).toBeNull();
+  });
 });
