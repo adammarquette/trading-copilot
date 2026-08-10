@@ -119,6 +119,93 @@ public class FlattenScheduleReportTests
         winter.DeadlineUtc.Should().Be(new DateTimeOffset(2026, 1, 15, 20, 30, 0, TimeSpan.Zero));
     }
 
+    // ----------------------------------------------------------------------------------------------------
+    // DescribeNext -- the read behind the operator's countdown (gh#657, R-13).
+    //
+    // Describe resolves against the market date of `now` and stops there, which is right for a STARTUP report
+    // and wrong for a countdown: the moment today's deadline passes it reports an instant in the past, and a
+    // countdown fed from it runs negative for the rest of the day. The countdown needs the NEXT occurrence.
+    // ----------------------------------------------------------------------------------------------------
+
+    private static FlattenScheduleReport Next(FlattenOptions options, string symbol, DateTimeOffset now) =>
+        options.DescribeNext(now).Single(report => report.Instrument == InstrumentId.Parse(symbol));
+
+    [Fact]
+    public void DescribeNext_ShouldReportTodaysDeadline_WhenItHasNotYetPassed()
+    {
+        // 12:00 UTC on a summer day is 07:00 CT -- ES's 14:30 CT deadline is still ahead, so today's is next.
+        Next(new FlattenOptions(), "ES", _summerNoonUtc)
+            .DeadlineUtc.Should().Be(new DateTimeOffset(2026, 7, 15, 19, 30, 0, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void DescribeNext_ShouldStillReportTodaysDeadline_WhenNowIsExactlyOnIt()
+    {
+        // The boundary decides whether the countdown reads 00:00 or silently jumps a full day at the instant
+        // the operator is watching it hardest. At-or-after keeps today: the flatten fires AT the deadline, so
+        // the deadline has not passed until it is behind us.
+        DateTimeOffset onTheDeadline = new(2026, 7, 15, 19, 30, 0, TimeSpan.Zero);
+
+        Next(new FlattenOptions(), "ES", onTheDeadline).DeadlineUtc.Should().Be(onTheDeadline);
+    }
+
+    [Fact]
+    public void DescribeNext_ShouldRollToTheFollowingDay_WhenTodaysDeadlineHasPassed()
+    {
+        // 20:00 UTC is 15:00 CT -- half an hour past ES. Describe would still report 19:30 UTC, in the past.
+        DateTimeOffset afterTheDeadline = new(2026, 7, 15, 20, 0, 0, TimeSpan.Zero);
+
+        Next(new FlattenOptions(), "ES", afterTheDeadline)
+            .DeadlineUtc.Should().Be(new DateTimeOffset(2026, 7, 16, 19, 30, 0, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void DescribeNext_ShouldHoldTheWallClockDeadline_WhenTheRollCrossesDaylightSaving()
+    {
+        // The acceptance criterion, and the reason this is computed server-side at all. Rolling by adding 24h to
+        // the UTC instant is wrong exactly once a year: 2026-11-01 is when Central leaves CDT. The deadline is a
+        // WALL-CLOCK 14:30 CT, so it must be re-resolved against the new date's offset (UTC-6 -> 20:30 UTC), not
+        // carried forward as an instant (which would give 19:30 UTC = 13:30 CT, an hour EARLY -- the drift
+        // MarketClock exists to prevent, in the direction that fires before the operator expects).
+        DateTimeOffset afterSaturdaysDeadline = new(2026, 10, 31, 20, 0, 0, TimeSpan.Zero);
+
+        FlattenScheduleReport next = Next(new FlattenOptions(), "ES", afterSaturdaysDeadline);
+
+        next.Deadline.Should().Be(new TimeOnly(14, 30));
+        next.DeadlineUtc.Should().Be(new DateTimeOffset(2026, 11, 1, 20, 30, 0, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void DescribeNext_ShouldRollEachMarketIndependently_WhenOnlySomeDeadlinesHavePassed()
+    {
+        // The markets do not share a deadline, so they do not share a roll. 19:00 UTC is 14:00 CT: GC (12:15)
+        // and CL (13:15) are behind us, ES and NQ (14:30) are still ahead. A single date applied to all four
+        // would push two of them a day out and leave the operator watching a countdown 24 hours too long.
+        DateTimeOffset betweenDeadlines = new(2026, 7, 15, 19, 0, 0, TimeSpan.Zero);
+
+        IReadOnlyList<FlattenScheduleReport> reports = new FlattenOptions().DescribeNext(betweenDeadlines);
+
+        reports.Should().OnlyContain(report => report.DeadlineUtc >= betweenDeadlines);
+        Next(new FlattenOptions(), "ES", betweenDeadlines)
+            .DeadlineUtc.Should().Be(new DateTimeOffset(2026, 7, 15, 19, 30, 0, TimeSpan.Zero));
+        Next(new FlattenOptions(), "GC", betweenDeadlines)
+            .DeadlineUtc.Should().Be(new DateTimeOffset(2026, 7, 16, 17, 15, 0, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void DescribeNext_ShouldStillReportDisabledMarkets_WhenAutoFlattenIsTurnedOff()
+    {
+        // A market that will NOT be flattened must still reach the strip, so it can be shown as unarmed rather
+        // than omitted -- an absent row reads as "no deadline", which is indistinguishable from "not loaded yet"
+        // and is the opposite of the warning R-13 wants in front of the operator.
+        FlattenOptions options = new()
+        {
+            Instruments = [new FlattenScheduleOption { Symbol = "ES", Enabled = false }],
+        };
+
+        Next(options, "ES", _summerNoonUtc).Enabled.Should().BeFalse();
+    }
+
     [Fact]
     public void Report_ShouldLogOneRecordPerGovernedMarket_WhenTheScheduleIsReported()
     {

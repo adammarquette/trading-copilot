@@ -132,12 +132,7 @@ public sealed class FlattenOptions
     /// <exception cref="FormatException">A configured time is not <c>HH:mm</c>.</exception>
     public IReadOnlyList<FlattenScheduleReport> Describe(DateTimeOffset now)
     {
-        // Which markets configuration actually names -- the fact ToSchedules throws away. Compared on the same
-        // trimmed, upper-cased key the merge uses, so "es" and " ES " count as naming ES.
-        HashSet<string> configured = Instruments
-            .Select(option => option.Symbol.Trim().ToUpperInvariant())
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
+        HashSet<string> configured = ConfiguredSymbols();
         DateOnly marketDate = DateOnly.FromDateTime(MarketClock.ToMarketTime(now));
 
         return
@@ -150,6 +145,66 @@ public sealed class FlattenOptions
                 SourceOf(schedule.Instrument.Symbol, configured))),
         ];
     }
+
+    /// <summary>
+    /// Describes the effective schedule per market against the <b>next</b> occurrence of each deadline at or
+    /// after <paramref name="now"/> (gh#657, R-13) — the read behind the operator's always-visible countdown.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="Describe"/> resolves against the market date of <paramref name="now"/> and stops there, which is
+    /// right for a startup report and wrong for a countdown: the moment a deadline is behind us it keeps reporting
+    /// an instant in the past, and a countdown fed from it runs negative for the rest of the day.
+    /// </para>
+    /// <para>
+    /// The roll re-resolves the wall-clock deadline against the <i>next date</i> rather than adding 24 hours to
+    /// the instant. Those differ by an hour across a daylight-saving change, in the direction that would show the
+    /// operator a deadline an hour before the one the scheduler will actually act on.
+    /// </para>
+    /// <para>
+    /// It is a <b>calendar</b> day, not a trading day, and deliberately so: the enforcing path carries no trading
+    /// calendar either — it arms against whatever date it is asked about, and a non-trading day simply has no
+    /// position to close (<see cref="FlattenCheckIn"/>'s "trivially true on a holiday"). A holiday calendar
+    /// invented here would make the countdown disagree with the thing it is counting down to.
+    /// </para>
+    /// <para>
+    /// Each market rolls independently — they do not share a deadline, so they do not share a date.
+    /// </para>
+    /// </remarks>
+    /// <param name="now">The instant the next deadline is resolved relative to.</param>
+    /// <returns>One report per governed market, each carrying its next deadline.</returns>
+    /// <exception cref="FormatException">A configured time is not <c>HH:mm</c>.</exception>
+    public IReadOnlyList<FlattenScheduleReport> DescribeNext(DateTimeOffset now)
+    {
+        HashSet<string> configured = ConfiguredSymbols();
+        DateOnly marketDate = DateOnly.FromDateTime(MarketClock.ToMarketTime(now));
+
+        return
+        [
+            .. ToSchedules().Select(schedule => new FlattenScheduleReport(
+                schedule.Instrument,
+                schedule.Deadline,
+                NextOccurrence(marketDate, schedule.Deadline, now),
+                schedule.Enabled,
+                SourceOf(schedule.Instrument.Symbol, configured))),
+        ];
+    }
+
+    // At-or-after, not strictly after: the flatten fires AT the deadline, so the deadline has not passed until it
+    // is behind us. Rolling a moment early would jump the countdown a full day at 00:00 -- the instant the
+    // operator is watching it hardest.
+    private static DateTimeOffset NextOccurrence(DateOnly marketDate, TimeOnly deadline, DateTimeOffset now)
+    {
+        DateTimeOffset today = ToUtc(marketDate, deadline);
+
+        return today >= now ? today : ToUtc(marketDate.AddDays(1), deadline);
+    }
+
+    // Which markets configuration actually names -- the fact ToSchedules throws away. Compared on the same
+    // trimmed, upper-cased key the merge uses, so "es" and " ES " count as naming ES.
+    private HashSet<string> ConfiguredSymbols() => Instruments
+        .Select(option => option.Symbol.Trim().ToUpperInvariant())
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     private static FlattenScheduleSource SourceOf(string symbol, HashSet<string> configured)
     {
