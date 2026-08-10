@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -40,6 +41,7 @@ public class SuggestionLifecycleRestartIntegrationTests : IClassFixture<Rehydrat
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
     private sealed record LoginTokenResponse(string Token);
+    private sealed record IssueInvitationResponse(Guid Id, string Token, DateTimeOffset ExpiresUtc);
 
     public SuggestionLifecycleRestartIntegrationTests(RehydrationTestPostgresFactory factory)
     {
@@ -134,6 +136,37 @@ public class SuggestionLifecycleRestartIntegrationTests : IClassFixture<Rehydrat
             "a Stale suggestion inside its window stays Stale — never chased back to Active, never deleted");
         (await SuggestionStateAsync(voided)).Should().Be(
             SuggestionState.ExpiredVoid, "an ExpiredVoid suggestion is terminal and kept");
+    }
+
+    [Fact]
+    public async Task Restart_ShouldKeepSuggestionsAndDispositionsOwned_AndInvisibleToAnotherOperator()
+    {
+        // ADR-0013's NAMED QA item: the cross-user-isolation-through-restart proof. Owner A's suggestion and its
+        // disposition keep their owner across the restart (R-20), and a second operator can neither see nor act on
+        // them — the default-deny filter is re-applied to the REHYDRATED surface, not only the live one.
+        (Guid accountId, string _) = await FreshAccountAsync();
+        Guid ownerA = await OperatorIdAsync();
+        Guid suggestionId = await SeedSuggestionAsync(
+            accountId, ownerA, SuggestionState.Active,
+            createdAt: DateTimeOffset.UtcNow.AddMinutes(-5),
+            expiresAt: DateTimeOffset.UtcNow.AddHours(1));
+        Guid dispositionId = await SeedPassDispositionAsync(suggestionId, ownerA);
+        (string intruderEmail, string intruderPassword) = await CreateSecondOperatorAsync();
+
+        await using WebApplicationFactory<Program> restarted = _factory.CreateHost(DeploymentEnvironment.Staging);
+        HttpClient intruder = restarted.CreateClient();
+        intruder.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer", await LoginAsync(intruder, intruderEmail, intruderPassword));
+
+        using HttpResponseMessage view = await intruder.GetAsync($"/suggestions/{suggestionId}");
+        view.StatusCode.Should().Be(
+            HttpStatusCode.NotFound,
+            "R-20 holds through the restart — another operator cannot even see the owner's suggestion");
+
+        (await SuggestionOwnerAsync(suggestionId)).Should().Be(
+            ownerA, "the suggestion keeps its owner across the restart");
+        (await DispositionOwnerAsync(dispositionId)).Should().Be(
+            ownerA, "and so does its disposition — the journal's owner is never rewritten by rehydration");
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -255,6 +288,45 @@ public class SuggestionLifecycleRestartIntegrationTests : IClassFixture<Rehydrat
         return suggestionId;
     }
 
+    private async Task<Guid> SeedPassDispositionAsync(Guid suggestionId, Guid ownerId)
+    {
+        Guid dispositionId = Guid.NewGuid();
+        await ExecuteDbAsync(async db =>
+        {
+            db.SuggestionDispositions.Add(new SuggestionDisposition
+            {
+                Id = dispositionId,
+                UserId = ownerId,
+                SuggestionId = suggestionId,
+                Kind = SuggestionDispositionKind.Passed,
+                Reasons = SuggestionPassReason.None,
+                Deviations = SuggestionDeviation.None,
+                CreatedAt = DateTimeOffset.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        });
+        return dispositionId;
+    }
+
+    private async Task<(string Email, string Password)> CreateSecondOperatorAsync()
+    {
+        string email = $"intruder-{Guid.NewGuid():N}@example.com";
+        const string password = "Password123!";
+        HttpClient owner = await AuthenticatedClientAsync();
+
+        using HttpResponseMessage invite =
+            await owner.PostAsJsonAsync("/auth/invitations", new IssueInvitationRequest(email));
+        invite.EnsureSuccessStatusCode();
+        IssueInvitationResponse? issued =
+            await invite.Content.ReadFromJsonAsync<IssueInvitationResponse>(_jsonOptions);
+        ArgumentNullException.ThrowIfNull(issued);
+
+        using HttpResponseMessage accept = await _factory.CreateClient().PostAsJsonAsync(
+            "/auth/accept-invite", new AcceptInviteRequest(issued.Token, password, "Intruder"));
+        accept.EnsureSuccessStatusCode();
+        return (email, password);
+    }
+
     private async Task<KillSwitchStateResponse> GetKillSwitchAsync(HttpClient client)
     {
         using HttpResponseMessage response = await client.GetAsync("/kill-switch");
@@ -269,6 +341,12 @@ public class SuggestionLifecycleRestartIntegrationTests : IClassFixture<Rehydrat
 
     private Task<SuggestionState> SuggestionStateAsync(Guid id) => QueryDbAsync(db =>
         db.Suggestions.IgnoreQueryFilters().Where(s => s.Id == id).Select(s => s.State).SingleAsync());
+
+    private Task<Guid> SuggestionOwnerAsync(Guid id) => QueryDbAsync(db =>
+        db.Suggestions.IgnoreQueryFilters().Where(s => s.Id == id).Select(s => s.UserId).SingleAsync());
+
+    private Task<Guid> DispositionOwnerAsync(Guid id) => QueryDbAsync(db =>
+        db.SuggestionDispositions.IgnoreQueryFilters().Where(d => d.Id == id).Select(d => d.UserId).SingleAsync());
 
     private Task<int> ActiveSuggestionCountAsync() => QueryDbAsync(db =>
         db.Suggestions.IgnoreQueryFilters().CountAsync(s => s.State == SuggestionState.Active));
