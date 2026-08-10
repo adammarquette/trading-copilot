@@ -122,29 +122,22 @@ public sealed class TradeJournalService
             return false;
         }
 
-        // Already journalled? The boundary is TIME, not the closing fill id (gh#734 review).
-        //
-        // A written Trade records only its CLOSING fill, so excluding fills by `ClosingFillId` removes exactly ONE
-        // fill per journalled trade and leaves every earlier ENTRY fill in the candidate set indefinitely. The
-        // second round trip on a contract was then composed from {old entry, new entry, new exit} -- two entries
-        // against one exit, which cannot balance -- so it was refused and logged as a scale-in, and no trade after
-        // the first was ever written for that account+contract. For a day-trading account that is the common case,
-        // not an edge one, and it puts DailyRealizedReader and the R-4 throttle back to reading ~zero, which is the
-        // gap gh#731 exists to close.
-        //
-        // Round trips on one contract are sequential and non-overlapping -- the account is flat between them, which
-        // is what triggers this pass at all -- so the latest journalled close is a sound watermark. Strictly `>`:
-        // the closing fill of the previous trip sits exactly ON the boundary and is already spoken for.
-        DateTimeOffset? lastJournalledClose = await database.Trades
-            .Where(trade => trade.AccountId == account.AccountId
-                && trade.Instrument == exit.Contract.Key
-                && trade.ClosedAt != null)
-            .MaxAsync(trade => (DateTimeOffset?)trade.ClosedAt, cancellationToken);
-
         Dictionary<Guid, OrderSide> sideByOrder = orders.ToDictionary(order => order.Id, order => order.Side);
-        List<Fill> unjournalled = lastJournalledClose is null
-            ? fills
-            : [.. fills.Where(fill => fill.ExecutedAt > lastJournalledClose.Value)];
+
+        // The current round trip is the fills SINCE the position was last flat -- derived from the fills themselves,
+        // not from the last JOURNALLED close.
+        //
+        // A close-time watermark keyed on a written Trade advances only on SUCCESS, so the fills of a REFUSED flat
+        // (a stop-and-reverse, say) would stay in the candidate set forever: every later trip on the contract is
+        // recomposed with them, reads as another reversal, and is refused too -- journaling wedged for that
+        // account+contract, and DailyRealizedReader and the R-4 throttle starved of the rows gh#731 exists to feed
+        // (gh#734 review). The fills carry the boundary themselves: running exposure returns to flat at the end of
+        // each completed cycle, journalled or not, so slicing at the last such flat advances past a refused cycle
+        // exactly as it does a journalled one -- and past an earlier journalled trip's fills too, so a second round
+        // trip on the contract composes from only its own. No persisted watermark, and idempotency still holds: a
+        // replay recomposes the same latest cycle and the unique ClosingFillId index rejects the second write.
+        List<Fill> ordered = [.. fills.OrderBy(fill => fill.ExecutedAt)];
+        List<Fill> unjournalled = [.. ordered.Skip(CurrentCycleStart(ordered, sideByOrder))];
         if (unjournalled.Count == 0)
         {
             return false;
@@ -176,6 +169,17 @@ public sealed class TradeJournalService
             .Where(fill => sideByOrder[fill.OrderId] == exitSide)
             .OrderByDescending(fill => fill.ExecutedAt)
             .First();
+
+        // Idempotent: a replayed flat recomposes the same cycle down to the same closing fill. Skip if it is already
+        // journalled. The closing fill is the round trip's natural key -- with the boundary now derived from the
+        // fills (not a journalled-close watermark), a replay recomputes the same latest cycle, so this pre-check is
+        // the ordinary replay guard; the unique ClosingFillId index below stays the backstop for a concurrent writer.
+        bool alreadyJournalled = await database.Trades
+            .AnyAsync(trade => trade.ClosingFillId == closingFill.Id, cancellationToken);
+        if (alreadyJournalled)
+        {
+            return false;
+        }
 
         // The entry order is the one that actually produced this round trip's OPENING fill -- taken from the fills
         // that compose the trip, never re-picked from `orders` by side. `orders` is deliberately unfiltered by
@@ -246,6 +250,35 @@ public sealed class TradeJournalService
             "Journalled a {Side} round trip of {Size} on {Contract} for account {Account}: realized {Realized}.",
             roundTrip.EntrySide, roundTrip.Size, exit.Contract, exit.Account, realized);
         return true;
+    }
+
+    /// <summary>
+    /// The index at which the current round trip begins: one past the last fill that returned running exposure to
+    /// flat. Buy adds, Sell subtracts; a fill whose side is neither leaves exposure unchanged and is left for
+    /// <see cref="TradeRoundTrip"/> to refuse. <paramref name="ordered"/> must be in execution order.
+    /// </summary>
+    private static int CurrentCycleStart(
+        IReadOnlyList<Fill> ordered, IReadOnlyDictionary<Guid, OrderSide> sideByOrder)
+    {
+        int running = 0;
+        int start = 0;
+        for (int index = 0; index < ordered.Count; index++)
+        {
+            running += sideByOrder[ordered[index].OrderId] switch
+            {
+                OrderSide.Buy => ordered[index].Size,
+                OrderSide.Sell => -ordered[index].Size,
+                _ => 0,
+            };
+
+            // A return to flat before the final fill closes a prior cycle; the current trip starts after it.
+            if (running == 0 && index < ordered.Count - 1)
+            {
+                start = index + 1;
+            }
+        }
+
+        return start;
     }
 
     private async Task<JournalAccount?> ResolveAccountAsync(
