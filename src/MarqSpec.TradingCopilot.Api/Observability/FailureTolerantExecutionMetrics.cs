@@ -94,6 +94,10 @@ public sealed class FailureTolerantExecutionMetrics : IExecutionMetrics
     public void RecordBackfillShortfall(string contractKey, TimeSpan uncovered) =>
         Safely(() => _inner.RecordBackfillShortfall(contractKey, uncovered), nameof(RecordBackfillShortfall));
 
+    /// <inheritdoc />
+    public void RecordTradeJournalOutcome(string outcome) =>
+        Safely(() => _inner.RecordTradeJournalOutcome(outcome), nameof(RecordTradeJournalOutcome));
+
     // Absorbed, never rethrown -- but never silent either: a sink that has been failing for a week must be
     // discoverable, so each fault is logged at error with the measurement that was lost.
     private void Safely(Action record, string measurement)

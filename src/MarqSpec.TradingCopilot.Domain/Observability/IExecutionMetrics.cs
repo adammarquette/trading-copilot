@@ -102,6 +102,16 @@ public interface IExecutionMetrics
     /// <param name="contractKey">The venue contract whose window was not fully covered.</param>
     /// <param name="uncovered">How much of the window has no bars in the store.</param>
     void RecordBackfillShortfall(string contractKey, TimeSpan uncovered);
+
+    /// <summary>
+    /// Counts one processed <b>flat</b> event's round-trip journaling outcome (gh#731), dimensioned by
+    /// <paramref name="outcome"/>. Emitted for every flat that reached the composition stage — a journalled trip and
+    /// each way one is <b>refused</b> — so an account stuck permanently refusing is visible to an alert rather than
+    /// only to a log line. The daily governor and the R-4 throttle read the rows this writes; if it silently stops
+    /// producing them, their headroom silently drifts.
+    /// </summary>
+    /// <param name="outcome">One of the sink's trade-journal outcome constants (a closed set — never an id).</param>
+    void RecordTradeJournalOutcome(string outcome);
 }
 
 /// <summary>
@@ -168,6 +178,11 @@ public sealed class NullExecutionMetrics : IExecutionMetrics
 
     /// <inheritdoc />
     public void RecordBackfillShortfall(string contractKey, TimeSpan uncovered)
+    {
+    }
+
+    /// <inheritdoc />
+    public void RecordTradeJournalOutcome(string outcome)
     {
     }
 }

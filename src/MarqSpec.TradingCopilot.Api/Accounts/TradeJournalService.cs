@@ -1,9 +1,11 @@
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -53,17 +55,21 @@ public sealed class TradeJournalService
     private readonly TradingCopilotDbContext _discovery;
     private readonly DbContextOptions<TradingCopilotDbContext> _options;
     private readonly ProjectXConnectionOptions _projectX;
+    private readonly IExecutionMetrics _metrics;
     private readonly ILogger<TradeJournalService> _logger;
 
     /// <summary>Creates the service.</summary>
     /// <param name="discovery">The scoped context, used only to resolve the owning account (across owners).</param>
     /// <param name="options">The context options, used to build a per-owner (R-20-scoped) context for the work.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
+    /// <param name="metrics">The execution-SLI sink — every flat's journaling outcome is counted through it, so an
+    /// account stuck refusing is visible to an alert, not only to a log (gh#731, gh#734 review).</param>
     /// <param name="logger">The logger.</param>
     public TradeJournalService(
         TradingCopilotDbContext discovery,
         DbContextOptions<TradingCopilotDbContext> options,
         IOptions<ProjectXConnectionOptions> projectXOptions,
+        IExecutionMetrics metrics,
         ILogger<TradeJournalService> logger)
     {
         ArgumentNullException.ThrowIfNull(projectXOptions);
@@ -71,6 +77,7 @@ public sealed class TradeJournalService
         _discovery = discovery;
         _options = options;
         _projectX = projectXOptions.Value;
+        _metrics = metrics;
         _logger = logger;
     }
 
@@ -172,6 +179,7 @@ public sealed class TradeJournalService
                 "Flat {Contract} on account {Account}: {Fills} unjournalled fill(s) do not form a single balanced "
                 + "round trip (scale-in, partial exit, or reversal); no Trade written (gh#731 defers those).",
                 exit.Contract, exit.Account, unjournalled.Count);
+            _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalNotComposable);
             return false;
         }
 
@@ -198,6 +206,7 @@ public sealed class TradeJournalService
                 + "same-instant boundary hid the interior flat and would merge two trips into one blended P&L. Refusing "
                 + "rather than double-count into the daily governor (gh#734). Investigate the venue's fill ordering.",
                 exit.Contract, exit.Account);
+            _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalBoundaryMergeRefused);
             return false;
         }
 
@@ -221,6 +230,7 @@ public sealed class TradeJournalService
             .AnyAsync(trade => trade.ClosingFillId == closingFill.Id, cancellationToken);
         if (alreadyJournalled)
         {
+            _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalAlreadyJournalled);
             return false;
         }
 
@@ -248,6 +258,7 @@ public sealed class TradeJournalService
                 "Flat {Contract} on account {Account}: order {Order} snapshotted no point value; the round trip's "
                 + "realized P&L cannot be computed and no Trade was written. Investigate.",
                 exit.Contract, exit.Account, entryOrder.Id);
+            _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalNoPointValue);
             return false;
         }
 
@@ -287,9 +298,11 @@ public sealed class TradeJournalService
             _logger.LogInformation(
                 "Round trip closing on fill {Fill} is already journalled for account {Account}; idempotent skip.",
                 closingFill.Id, exit.Account);
+            _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalDuplicateRejected);
             return false;
         }
 
+        _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten);
         _logger.LogInformation(
             "Journalled a {Side} round trip of {Size} on {Contract} for account {Account}: realized {Realized}.",
             roundTrip.EntrySide, roundTrip.Size, exit.Contract, exit.Account, realized);
