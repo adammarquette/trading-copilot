@@ -35,6 +35,10 @@ const AVAILABLE_INDICATORS: readonly {
   { indicator: 'atr', period: 14, label: 'ATR', color: '#4a90d9' },
 ];
 
+/** A stable empty timeframe set for when the price-level overlay is off (gh#727) — a module const so the chart's
+ * level fetch is not re-run by an unrelated render passing a fresh `[]`. */
+const NO_TIMEFRAMES: readonly number[] = [];
+
 export interface WorkspaceSurfaceProps {
   readonly destination: Destination;
 }
@@ -50,6 +54,14 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
   const [resolution, setResolution] = useState(RESOLUTIONS[0].minutes);
   const [enabledIndicators, setEnabledIndicators] = useState<ReadonlySet<string>>(
     () => new Set(['rsi']),
+  );
+  const [showLevels, setShowLevels] = useState(false);
+
+  // The price-level overlay draws the chart's own timeframe (the current resolution). A STABLE reference when off, so
+  // toggling an indicator or retyping the instrument never re-runs the chart's level fetch. (gh#727)
+  const levelTimeframes = useMemo<readonly number[]>(
+    () => (showLevels ? [resolution] : NO_TIMEFRAMES),
+    [showLevels, resolution],
   );
 
   // A STABLE array so toggling an indicator (not the instrument/resolution) never re-runs the chart's bars fetch for
@@ -78,6 +90,8 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
     });
   }, []);
 
+  const toggleLevels = useCallback(() => setShowLevels((current) => !current), []);
+
   return (
     <Box
       data-testid="surface"
@@ -97,9 +111,11 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
           instrument={instrument}
           resolution={resolution}
           enabledIndicators={enabledIndicators}
+          showLevels={showLevels}
           onInstrument={setInstrument}
           onResolution={setResolution}
           onToggleIndicator={toggleIndicator}
+          onToggleLevels={toggleLevels}
         />
         <Box sx={{ flex: 1, minHeight: 0 }}>
           {/* Key on the series identity so a change remounts the chart (fresh loading + fetch, no in-effect setState).
@@ -110,6 +126,7 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
             instrument={instrument}
             resolution={resolution}
             indicators={indicators}
+            levelTimeframes={levelTimeframes}
           />
         </Box>
       </Box>
@@ -134,9 +151,11 @@ interface ChartControlsProps {
   readonly instrument: string;
   readonly resolution: number;
   readonly enabledIndicators: ReadonlySet<string>;
+  readonly showLevels: boolean;
   readonly onInstrument: (instrument: string) => void;
   readonly onResolution: (resolution: number) => void;
   readonly onToggleIndicator: (indicator: string) => void;
+  readonly onToggleLevels: () => void;
 }
 
 /**
@@ -147,9 +166,11 @@ function ChartControls({
   instrument,
   resolution,
   enabledIndicators,
+  showLevels,
   onInstrument,
   onResolution,
   onToggleIndicator,
+  onToggleLevels,
 }: ChartControlsProps): React.JSX.Element {
   const [draft, setDraft] = useState(instrument);
 
@@ -201,6 +222,10 @@ function ChartControls({
           label={option.label}
         />
       ))}
+      <FormControlLabel
+        control={<Checkbox size="small" checked={showLevels} onChange={onToggleLevels} />}
+        label="Levels"
+      />
     </Box>
   );
 }
