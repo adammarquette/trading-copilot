@@ -71,6 +71,30 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <summary>Whether the venue connection is up (1/0).</summary>
     public const string VenueConnected = "trading.venue.connected";
 
+    /// <summary>
+    /// Round-trip journaling outcomes, dimensioned by outcome (gh#731) — emitted for every flat that reached the
+    /// composition stage, so "journaling has stopped" is distinguishable from "no trips closed".
+    /// </summary>
+    public const string JournalOutcomes = "trading.journal.outcomes";
+
+    /// <summary>Outcome tag: the round trip was journalled.</summary>
+    public const string JournalWritten = "journalled";
+
+    /// <summary>Outcome tag: the fills do not form a single balanced round trip (scale-in, partial exit, reversal).</summary>
+    public const string JournalNotComposable = "not-composable";
+
+    /// <summary>Outcome tag: the composition spanned an already-journalled close (a same-instant boundary merge) and was refused.</summary>
+    public const string JournalBoundaryMergeRefused = "boundary-merge-refused";
+
+    /// <summary>Outcome tag: fail-closed — the entry order snapshotted no point value, so the P&amp;L is unknowable.</summary>
+    public const string JournalNoPointValue = "no-point-value";
+
+    /// <summary>Outcome tag: a replay recomposed an already-journalled trip; the idempotent pre-check skipped it.</summary>
+    public const string JournalAlreadyJournalled = "already-journalled";
+
+    /// <summary>Outcome tag: a concurrent writer had journalled it first; the unique index rejected this write.</summary>
+    public const string JournalDuplicateRejected = "duplicate-rejected";
+
     /// <summary>Outcome tag: the flatten closed the position.</summary>
     public const string FlattenExecuted = "executed";
 
@@ -114,6 +138,7 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     private readonly Counter<long> _retentionGaps;
     private readonly Histogram<double> _pipelineLag;
     private readonly Histogram<double> _backfillShortfall;
+    private readonly Counter<long> _journalOutcomes;
 
     private int _killSwitchEngaged;
     private int _orphanedStops;
@@ -154,6 +179,9 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
         _backfillShortfall = _meter.CreateHistogram<double>(
             BackfillShortfall, unit: "ms",
             description: "Blind-window duration the bar store could not cover on recovery, by contract.");
+
+        _journalOutcomes = _meter.CreateCounter<long>(
+            JournalOutcomes, unit: "{outcome}", description: "Round-trip journaling outcomes, by outcome.");
 
         // Observable: state, not events. A gauge read on scrape reports what is true NOW, which is what a
         // dashboard needs for "are we currently killed / currently degraded".
@@ -241,6 +269,10 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     public void RecordBackfillShortfall(string contractKey, TimeSpan uncovered) =>
         _backfillShortfall.Record(
             uncovered.TotalMilliseconds, new KeyValuePair<string, object?>("contract", contractKey));
+
+    /// <inheritdoc />
+    public void RecordTradeJournalOutcome(string outcome) =>
+        _journalOutcomes.Add(1, new KeyValuePair<string, object?>("outcome", outcome));
 
     /// <inheritdoc />
     public void Dispose() => _meter.Dispose();

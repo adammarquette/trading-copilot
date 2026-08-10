@@ -142,6 +142,11 @@ public sealed class FaultInjectingExecutionMetrics : IExecutionMetrics
     {
     }
 
+    /// <inheritdoc />
+    public void RecordTradeJournalOutcome(string outcome)
+    {
+    }
+
     private static void FailIf(bool armed)
     {
         if (armed)

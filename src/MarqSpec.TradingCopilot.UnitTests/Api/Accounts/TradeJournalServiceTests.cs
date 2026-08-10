@@ -1,10 +1,13 @@
+using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Accounts;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -33,10 +36,11 @@ public class TradeJournalServiceTests
 
     private TradingCopilotDbContext Context() => new(Options(), new FixedUser(Guid.Empty));
 
-    private TradeJournalService Service() => new(
+    private TradeJournalService Service(IExecutionMetrics? metrics = null) => new(
         Context(),
         Options(),
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = OurCredentialKey }),
+        metrics ?? NullExecutionMetrics.Instance,
         NullLogger<TradeJournalService>.Instance);
 
     // The flat event lands at or after the closing fill it reports -- the venue emits it BECAUSE net reached zero.
@@ -218,6 +222,44 @@ public class TradeJournalServiceTests
 
     private async Task<List<Trade>> TradesAsync() =>
         await Context().Trades.IgnoreQueryFilters().ToListAsync();
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldRecordTheJournalledOutcome_WhenATradeIsWritten()
+    {
+        // gh#734 review. Every flat's journaling outcome must be counted through IExecutionMetrics so an account
+        // stuck permanently refusing is visible to an alert, not only to a log line.
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 5)]);
+
+        await Service(metrics).ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldRecordTheRefusalOutcome_WhenTheFillsDoNotFormARoundTrip()
+    {
+        // A stop-and-reverse (Buy 1, Sell 2, Buy 1): net flat, but it crosses through flat into a short, so it is
+        // refused. That refusal must be countable — an account wedged on refusals is exactly what the metric exists
+        // to surface, and it must NOT read as a journalled trade.
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 2, 5)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_020m, 1, 10)]);
+
+        await Service(metrics).ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalNotComposable))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten))
+            .MustNotHaveHappened();
+    }
 
     [Fact]
     public async Task ProcessFlatAsync_ShouldPickADeterministicClosingFill_WhenTheExitLegHasFillsAtTheSameInstant()
