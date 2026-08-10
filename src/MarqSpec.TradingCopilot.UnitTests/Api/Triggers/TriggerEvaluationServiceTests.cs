@@ -1713,7 +1713,8 @@ public class TriggerEvaluationServiceTests
 
     // Seeds a CLOSED trade whose realized P&L feeds the day's loss/profit the headroom read consumes: positive = profit,
     // negative = loss. Closed at Now, so it lands in the same Central trading day the throttle counts issuance over.
-    private async Task SeedClosedTradeAsync(Guid accountId, decimal realizedPnL, Guid? owner = null)
+    private async Task SeedClosedTradeAsync(
+        Guid accountId, decimal realizedPnL, Guid? owner = null, TradingMode mode = TradingMode.Practice)
     {
         Guid ownerId = owner ?? _operator;
         await using TradingCopilotDbContext context = Context(ownerId);
@@ -1728,7 +1729,7 @@ public class TriggerEvaluationServiceTests
             EntryPrice = 100m,
             ExitPrice = 100m + realizedPnL,
             RealizedPnL = realizedPnL,
-            Mode = TradingMode.Practice,
+            Mode = mode,
             ClosedAt = Now,
         });
         await context.SaveChangesAsync();
@@ -2007,6 +2008,32 @@ public class TriggerEvaluationServiceTests
         await using TradingCopilotDbContext reload = Context();
         (await reload.Suggestions.CountAsync()).Should().Be(1);
         (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+    }
+
+    // (l) R-14 MODE FILTER at the throttle call site (gh#746 review). The account is Live with trades on BOTH sides
+    // of a mode change: a large PRACTICE loss (the old mode) that would suppress if it were counted, and a small LIVE
+    // loss (the current mode) that leaves ample headroom. The throttle reads the account's CURRENT mode, so it counts
+    // only the Live trade -- the pass stays un-throttled and the suggestion issues. A read that summed both (the
+    // pre-gh#746 blend, or a swapped mode argument) would see the governor reached and SUPPRESS. This is the one call
+    // site #746's criterion left unproven; without the filter, no test here goes red.
+    [Fact]
+    public async Task ScanAsync_ShouldThrottleOnlyTheCurrentModesRealizedPnL_WhenTheAccountChangedModes()
+    {
+        Guid accountId = await SeedAccountAsync(mode: TradingMode.Live);
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -950m, mode: TradingMode.Practice); // old mode -- would suppress
+        await SeedClosedTradeAsync(accountId, realizedPnL: -100m, mode: TradingMode.Live);      // current mode -- ample headroom
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "current-mode day", 80));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        // Live-only dayLoss is 100 of a 1000 governor -> Full -> un-throttled, so the suggestion issues. Summing the
+        // Practice loss too would read dayLoss 1050 >= governor -> SUPPRESSED, and the reviewer would never run.
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._))
+            .MustHaveHappenedOnceExactly();
+        (await Context().Suggestions.CountAsync()).Should().Be(1);
     }
 
     /// <summary>

@@ -46,6 +46,13 @@ public static class DailyRealizedReader
     /// <c>Mode</c> is a cheap residual over the handful of rows in one account's day, so no new index is warranted at
     /// single-operator volume.
     /// </para>
+    /// <para>
+    /// <b>Never pass <see cref="TradingMode.Undeclared"/> (gh#746 review).</b> <c>Trade.Mode</c> is check-constrained
+    /// never to be <c>Undeclared</c>, so filtering by it matches <b>zero rows for any account, permanently</b> — a
+    /// silent, always-empty read that would report full headroom on an account that really lost money under a prior
+    /// mode. An <c>Undeclared</c> account trades nowhere, so a caller must treat it as <b>inert (0)</b> explicitly
+    /// before calling this, not lean on that accidental empty result. The callers (headroom, R-4 throttle) do.
+    /// </para>
     /// </remarks>
     /// <param name="database">The scoped, R-20-filtered context.</param>
     /// <param name="accountId">The account whose day is summed.</param>

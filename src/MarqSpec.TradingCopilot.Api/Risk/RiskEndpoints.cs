@@ -204,7 +204,13 @@ public static class RiskEndpoints
             .Where(account => account.Id == id)
             .Select(account => (TradingMode?)account.Mode)
             .FirstOrDefaultAsync(cancellationToken);
-        if (mode is null)
+        // null: the account vanished after the profile read. Undeclared: a real account, but one that trades nowhere
+        // (TradingModePolicy refuses it everywhere), so it has no live limits to report headroom against. Both are
+        // "absence is the answer" -- the 404 this surface already documents for an undeclared account. Folding
+        // Undeclared in here is the gh#746 fix: without it, mode == Undeclared fell through to the reader, whose
+        // Trade.Mode == Undeclared filter matches zero rows (Trade.Mode is check-constrained never to be Undeclared)
+        // and silently returned a misleading FULL-headroom 200 on an account that really lost money under a prior mode.
+        if (mode is null or TradingMode.Undeclared)
         {
             return Results.NotFound();
         }
