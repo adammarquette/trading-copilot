@@ -143,7 +143,12 @@ public sealed class TradeJournalService
         // exactly as it does a journalled one -- and past an earlier journalled trip's fills too, so a second round
         // trip on the contract composes from only its own. No persisted watermark, and idempotency still holds: a
         // replay recomposes the same latest cycle and the unique ClosingFillId index rejects the second write.
-        List<Fill> ordered = [.. fills.OrderBy(fill => fill.ExecutedAt)];
+        // A DETERMINISTIC total order (gh#734 adversarial review). ExecutedAt alone leaves fills that share an
+        // instant in the query's arbitrary row order (no ORDER BY above, and Fill carries no venue ordinal), and a
+        // stable OrderBy preserves it -- so the boundary walk, the closing fill and the opening fill could each land
+        // differently on a replay. Breaking ties by Id (stable per fill across replays) makes every downstream pick
+        // reproducible: the same closing-fill natural key each time, so the unique index actually backstops a replay.
+        List<Fill> ordered = [.. fills.OrderBy(fill => fill.ExecutedAt).ThenBy(fill => fill.Id)];
         List<Fill> unjournalled = [.. ordered.Skip(CurrentCycleStart(ordered, sideByOrder))];
         if (unjournalled.Count == 0)
         {
@@ -170,11 +175,42 @@ public sealed class TradeJournalService
             return false;
         }
 
-        // The closing fill: the latest execution on the exit leg -- the natural key this write dedupes on.
+        // A composed trip must not SPAN an already-journalled close (gh#734 adversarial review). The boundary walk
+        // (CurrentCycleStart) derives cycles from running exposure, but two fills that share an instant have no
+        // venue ordinal to order them, so at a same-instant close-then-reopen the interior return-to-flat can be
+        // hidden and this composition silently MERGES the closed, already-journalled trip with the new one -- a
+        // blended size and average that describe neither, double-counting the earlier trip's P&L into the governor.
+        // The deterministic Id tie-break above makes the pick reproducible but not necessarily the boundary-correct
+        // order; a same-instant boundary is genuinely ambiguous with no ordinal. Fail closed: if a trip already
+        // journalled its close strictly inside this trip's window, the boundary was missed -- refuse, never journal
+        // fiction. (A REFUSED cycle wrote no Trade and so cannot trip this, preserving the fills-derived boundary.)
+        DateTimeOffset windowStart = unjournalled[0].ExecutedAt;
+        bool spansAJournalledClose = await database.Trades.AnyAsync(
+            trade => trade.AccountId == account.AccountId
+                && trade.Instrument == exit.Contract.Key
+                && trade.ClosedAt > windowStart
+                && trade.ClosedAt < roundTrip!.ClosedAt,
+            cancellationToken);
+        if (spansAJournalledClose)
+        {
+            _logger.LogWarning(
+                "Flat {Contract} on account {Account}: the composed round trip spans an already-journalled close -- a "
+                + "same-instant boundary hid the interior flat and would merge two trips into one blended P&L. Refusing "
+                + "rather than double-count into the daily governor (gh#734). Investigate the venue's fill ordering.",
+                exit.Contract, exit.Account);
+            return false;
+        }
+
+        // The closing fill: the latest execution on the exit leg -- the natural key this write dedupes on. The
+        // ThenByDescending(Id) breaks an ExecutedAt tie deterministically, so two exit fills sharing the latest
+        // instant (a market order sweeping the book) always yield the SAME closing fill -- otherwise a replay picks
+        // the other tied fill, the pre-check and unique ClosingFillId index both miss, and the trip double-journals
+        // into the daily governor (gh#734 adversarial review, blocking).
         OrderSide exitSide = roundTrip!.EntrySide == OrderSide.Buy ? OrderSide.Sell : OrderSide.Buy;
         Fill closingFill = unjournalled
             .Where(fill => sideByOrder[fill.OrderId] == exitSide)
             .OrderByDescending(fill => fill.ExecutedAt)
+            .ThenByDescending(fill => fill.Id)
             .First();
 
         // Idempotent: a replayed flat recomposes the same cycle down to the same closing fill. Skip if it is already
@@ -199,6 +235,7 @@ public sealed class TradeJournalService
         Fill openingFill = unjournalled
             .Where(fill => sideByOrder[fill.OrderId] == roundTrip.EntrySide)
             .OrderBy(fill => fill.ExecutedAt)
+            .ThenBy(fill => fill.Id)
             .First();
         Order entryOrder = orders.First(order => order.Id == openingFill.OrderId);
 
