@@ -171,8 +171,117 @@ public class TradeJournalServiceTests
         return orderId;
     }
 
+    /// <summary>
+    /// Seeds a filled order whose fills carry <b>explicit ids</b>, inserted in array order — so a test can pin the
+    /// deterministic (ExecutedAt, Id) tie-break and the DB insertion order that real Postgres leaves unspecified.
+    /// </summary>
+    private async Task SeedOrderWithFillIdsAsync(
+        Guid owner, Guid accountId, OrderSide side, (Guid Id, decimal Price, int Size, int Minute)[] fills,
+        OrderStatus status = OrderStatus.Filled, TradingMode mode = TradingMode.Practice, decimal pointValue = 5m)
+    {
+        Guid orderId = Guid.NewGuid();
+        await using TradingCopilotDbContext context = Context();
+        context.Orders.Add(new Order
+        {
+            Id = orderId,
+            UserId = owner,
+            AccountId = accountId,
+            Instrument = Contract,
+            Side = side,
+            Size = fills.Sum(fill => fill.Size),
+            Type = OrderType.Market,
+            EntryPrice = fills[0].Price,
+            WorkingStopPrice = 5_290m,
+            SafetyStopPrice = 5_280m,
+            PointValue = pointValue,
+            Status = status,
+            Mode = mode,
+            VenueOrderKey = $"venue-{orderId:N}",
+            PlacedAt = _now.AddMinutes(fills[0].Minute),
+        });
+        foreach ((Guid id, decimal price, int size, int minute) in fills)
+        {
+            context.Fills.Add(new Fill
+            {
+                Id = id,
+                UserId = owner,
+                OrderId = orderId,
+                VenueFillKey = Guid.NewGuid().ToString("N"),
+                Price = price,
+                Size = size,
+                ExecutedAt = _now.AddMinutes(minute),
+            });
+        }
+
+        await context.SaveChangesAsync();
+    }
+
     private async Task<List<Trade>> TradesAsync() =>
         await Context().Trades.IgnoreQueryFilters().ToListAsync();
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldPickADeterministicClosingFill_WhenTheExitLegHasFillsAtTheSameInstant()
+    {
+        // gh#734 adversarial review (BLOCKING). The exit leg has two fills at the SAME instant (a market order
+        // sweeping the book). The closing fill is the trade's natural key behind a unique index; picked by arbitrary
+        // DB row order, a replay that sees the rows differently picks a DIFFERENT key -- the pre-check and the unique
+        // index both miss and the round trip is journalled TWICE, double-counting into the daily governor. The pick
+        // must be a deterministic total order (ExecutedAt, then Id). The LESSER-id fill is inserted first, so a naive
+        // input-order pick chooses it; the deterministic pick must choose the greater-id fill regardless of row order.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 2, 0)]);
+
+        Guid lesser = new("00000000-0000-0000-0000-000000000001");
+        Guid greater = new("00000000-0000-0000-0000-0000000000ff");
+        await SeedOrderWithFillIdsAsync(
+            owner, accountId, OrderSide.Sell, [(lesser, 5_010m, 1, 5), (greater, 5_010m, 1, 5)]);
+
+        await Service().ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(5)), CancellationToken.None);
+
+        (await TradesAsync()).Should().ContainSingle().Subject.ClosingFillId.Should().Be(
+            greater,
+            "the closing fill must be chosen by a deterministic total order (ExecutedAt then Id), not by DB row "
+            + "order, so a replayed flat recomposes the SAME closing fill and the unique index catches the duplicate");
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldRefuseToMergeTwoTrips_WhenASameInstantBoundaryHidesTheInteriorFlat()
+    {
+        // gh#734 adversarial review. Trip 1 (Buy 1 -> Sell 1) is already journalled. Trip 2 reopens at the SAME
+        // instant Trip 1 closed. With no venue ordinal on Fill, the two same-instant fills can order with Trip 2's
+        // OPEN before Trip 1's CLOSE, hiding the interior return-to-flat from CurrentCycleStart; the composer then
+        // MERGES both trips into one blended size-2 Trade that double-counts Trip 1's P&L into the daily governor. A
+        // composed trip can never legitimately span an already-journalled close, so it must be refused.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        // Ids chosen so the deterministic (ExecutedAt, Id) order puts Trip 2's :10 OPEN before Trip 1's :10 CLOSE --
+        // the adverse boundary order real Postgres may also return (open id < close id).
+        Guid tripOneEntry = new("00000000-0000-0000-0000-000000000010");
+        Guid tripOneClose = new("00000000-0000-0000-0000-0000000000cc");
+        Guid tripTwoOpen = new("00000000-0000-0000-0000-0000000000aa");
+        Guid tripTwoClose = new("00000000-0000-0000-0000-0000000000dd");
+
+        // Trip 1 exists and journals first, from only its own two fills.
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Buy, [(tripOneEntry, 5_000m, 1, 0)]);
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Sell, [(tripOneClose, 5_010m, 1, 10)]);
+        await Service().ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(10)), CancellationToken.None);
+        (await TradesAsync()).Should().ContainSingle("trip 1 journals on its own flat -- the fixture precondition");
+
+        // Trip 2 reopens at the SAME :10 instant and closes at :15.
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Buy, [(tripTwoOpen, 5_010m, 1, 10)]);
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Sell, [(tripTwoClose, 5_020m, 1, 15)]);
+
+        await Service().ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(15)), CancellationToken.None);
+
+        List<Trade> trades = await TradesAsync();
+        trades.Should().ContainSingle(
+            "the second flat must not merge trip 2 with the already-journalled trip 1 into one blended size-2 trade -- "
+            + "with the interior boundary hidden by the same-instant tie, the composition spans trip 1's close and "
+            + "must be refused rather than journal a P&L that describes neither trade");
+        trades[0].Size.Should().Be(1, "the only journalled trade is trip 1 (size 1); a merged size-2 trade is the bug");
+    }
 
     [Fact]
     public async Task ProcessFlatAsync_ShouldJournalTheRoundTrip_WhenALongClosesForAProfit()
