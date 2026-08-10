@@ -572,7 +572,12 @@ public class TriggerEvaluationService
             .Where(account => account.Id == accountId)
             .Select(account => (TradingMode?)account.Mode)
             .FirstOrDefaultAsync(cancellationToken);
-        decimal dayRealized = mode is null
+
+        // Undeclared joins the vanished-account (null) inert path (gh#746 review). An Undeclared account trades
+        // nowhere (TradingModePolicy refuses it everywhere), so its throttle is moot; and Trade.Mode is
+        // check-constrained never to be Undeclared, so passing it to the reader would match zero rows and read as "no
+        // loss" by ACCIDENT. Make that inert 0 explicit and tested rather than a silent filter-miss.
+        decimal dayRealized = mode is null or TradingMode.Undeclared
             ? 0m
             : await database.TodayRealizedPnLForAccountAsync(accountId, mode.Value, now, cancellationToken);
         return (profile, dayRealized);

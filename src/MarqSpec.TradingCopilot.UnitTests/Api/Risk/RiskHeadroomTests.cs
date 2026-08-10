@@ -130,6 +130,20 @@ public class RiskHeadroomTests
     }
 
     [Fact]
+    public async Task GetHeadroom_ShouldReturnNotFound_WhenTheAccountIsUndeclared()
+    {
+        // gh#746 review. An account regressed to Undeclared (a reachable write path) still carries its prior-mode
+        // losses on the books, but Trade.Mode is check-constrained never to be Undeclared -- so filtering the reader
+        // by Undeclared matches ZERO rows and would report a misleading FULL headroom on an account that really lost
+        // money earlier the same day. An Undeclared account trades nowhere and has no live limits, so absence is the
+        // answer (404) -- as this surface documents -- never a silent full-headroom 200 hiding a real loss.
+        await SeedProfileAsync(governor: 600m, mode: TradingMode.Undeclared);
+        await SeedTradeAsync(realizedPnL: -400m, mode: TradingMode.Live); // a real Live loss still on the books
+
+        StatusOf(await ReadAsync()).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
     public async Task GetHeadroom_ShouldReadFullHeadroom_OnAQuietDay()
     {
         await SeedProfileAsync(governor: 600m);

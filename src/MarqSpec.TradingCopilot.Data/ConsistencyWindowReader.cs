@@ -31,6 +31,13 @@ public static class ConsistencyWindowReader
     /// measured on realized profit — counting unrealized would make the fraction move with the market rather
     /// than with what actually happened.
     /// </para>
+    /// <para>
+    /// <b>Never pass <see cref="TradingMode.Undeclared"/> (gh#746 review).</b> <c>Trade.Mode</c> is check-constrained
+    /// never to be <c>Undeclared</c>, so filtering by it always matches zero rows and returns
+    /// <see cref="ConsistencyWindow.Empty"/> by accident rather than by fact. An <c>Undeclared</c> account trades
+    /// nowhere; the send path's read (<c>OrderEndpoints.ComposeAsync</c>) reaches this only for a send that is
+    /// refused for being undeclared anyway, so the empty window is harmless there and no order is mis-sent.
+    /// </para>
     /// </remarks>
     /// <param name="database">The context.</param>
     /// <param name="accountId">The account whose evaluation window is read.</param>
