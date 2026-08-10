@@ -72,14 +72,23 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// </list>
 /// </para>
 /// <para>
-/// <b>Honest note on how the red was witnessed.</b> The authoring sandbox has no Docker daemon
-/// (<c>/var/run/docker.sock</c> absent), so the container tier could not be run locally at all and no assertion
-/// below has been observed to fail on this machine. The claim above is derived from source: on this base
-/// <c>DailyRealizedReader</c> / <c>ConsistencyWindowReader</c> filter on <c>AccountId</c>, <c>ClosedAt</c> and
-/// <c>RealizedPnL</c> only, and <c>RiskEndpoints.GetHeadroomAsync</c> reads no account mode — so a practice row
-/// on a now-live account is counted, which is what each expected-red case asserts against. The
-/// <c>integration tests (pre-merge)</c> job on this suite's PR is the authoritative signal; re-run it after #755
-/// merges and the six should flip to green with no edit to this file.
+/// <b>The red was witnessed — on CI, not locally.</b> The authoring sandbox has no Docker daemon
+/// (<c>/var/run/docker.sock</c> absent), so the container tier could not be run there at all; the
+/// <c>integration tests (pre-merge)</c> job on this suite's PR is the observation of record. Its first run
+/// reported <b>6 failed, 549 passed, 28 skipped</b> — the six above and nothing else in the whole integration
+/// project, so the red is this suite's own subject and not collateral. The two send-path cases failed on exactly
+/// the opposite verdicts they were built to separate (<c>422</c> where the mode-filtered window allows,
+/// <c>200</c> where it refuses), and the R-20 case answered <c>200</c> for an account it does not own.
+/// </para>
+/// <para>
+/// <b>That run also caught a defect in this suite, now fixed — and the fix is why one case is stricter than it
+/// looks.</b> The three "closed today" cases seeded a <c>DateTimeOffset</c> carrying a <b>Central</b> offset;
+/// Npgsql refuses a non-zero offset for <c>timestamp with time zone</c>, so they reddened on the <i>write</i>
+/// rather than on the mode filter, and <see cref="TheDatabase_ShouldRefuseATrade_WhoseModeIsUndeclared"/>
+/// <b>passed on the wrong exception</b> — a <c>DbUpdateException</c> that had nothing to do with the check
+/// constraint. <see cref="ClosedTodayCentral"/> now normalises to UTC, and that case now asserts the constraint
+/// <i>by name</i>. A guard that passes for a reason other than its subject is the failure mode this tier exists
+/// to avoid, so it is recorded here rather than quietly corrected.
 /// </para>
 /// <para>
 /// <b>Tier:</b> pre-merge, container-backed Postgres (<see cref="StubbedVenuePostgresFactory"/>, real migrations).
@@ -338,9 +347,15 @@ public class RealizedReaderModeFilterIntegrationTests : IClassFixture<StubbedVen
             await database.SaveChangesAsync();
         });
 
-        await insert.Should().ThrowAsync<DbUpdateException>(
+        // The exception TYPE alone is not enough, and this suite has the receipt: on its first CI run the seeded
+        // timestamp carried a Central offset, Npgsql refused the WRITE, and this case passed green on a
+        // DbUpdateException that had nothing to do with the constraint. Naming the constraint is what makes the
+        // pass mean what it claims.
+        (await insert.Should().ThrowAsync<DbUpdateException>(
             "the journal's check constraint refuses an Undeclared trade outright — 'practice never blends into "
-            + "live' starts by making the third mode unwritable");
+            + "live' starts by making the third mode unwritable"))
+            .Which.ToString().Should().Contain(
+                "CK_Trades_Mode_NotUndeclared", "the refusal must come from THAT constraint, not from any other write failure");
     }
 
     [Fact]
@@ -384,14 +399,26 @@ public class RealizedReaderModeFilterIntegrationTests : IClassFixture<StubbedVen
     /// <summary>An instant in 2026 given as UTC; 15:00 UTC is mid-morning Central, well clear of either midnight.</summary>
     private static DateTimeOffset Utc(int month, int day, int hour) => new(2026, month, day, hour, 0, 0, TimeSpan.Zero);
 
-    /// <summary>An instant safely inside TODAY's Central trading day, computed from the real Central "now" the
-    /// suite runs under — so the day-scoped cases hold regardless of run date or daylight saving.</summary>
+    /// <summary>
+    /// An instant safely inside TODAY's Central trading day, computed from the real Central "now" the suite runs
+    /// under — so the day-scoped cases hold regardless of run date or daylight saving.
+    /// </summary>
+    /// <remarks>
+    /// <b>Returned as UTC, and that matters.</b> The Central instant is built with a Central offset and then
+    /// normalised: Npgsql refuses to write a <c>DateTimeOffset</c> with a non-zero offset to a
+    /// <c>timestamp with time zone</c> column, so seeding the Central-offset value throws
+    /// <c>ArgumentException</c> ("only offset 0 (UTC) is supported") inside a <c>DbUpdateException</c> before any
+    /// assertion runs. That is a real-Postgres-only failure — an in-memory provider stores the value happily — and
+    /// it is exactly how the first CI run of this suite failed: three cases reddened on the write rather than on
+    /// the mode filter they guard, and the check-constraint case below <i>passed on the wrong exception</i>. The
+    /// instant is identical either way; only the wire representation changes.
+    /// </remarks>
     private static DateTimeOffset ClosedTodayCentral()
     {
         DateTimeOffset centralNow = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, MarketClock.CentralTime);
         DateTime centralMidnight = centralNow.Date;
         TimeSpan offset = MarketClock.CentralTime.GetUtcOffset(centralMidnight);
-        return new DateTimeOffset(centralMidnight, offset).AddHours(10);
+        return new DateTimeOffset(centralMidnight, offset).AddHours(10).ToUniversalTime();
     }
 
     private async Task<HttpClient> AuthenticatedClientAsync(WebApplicationFactory<Program> host)
