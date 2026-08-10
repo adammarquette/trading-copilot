@@ -92,3 +92,48 @@ export function getIndicators(
   });
   return request<IndicatorSeries>('GET', `/api/marketdata/indicators?${query.toString()}`);
 }
+
+/**
+ * One active price level for the chart (gh#644): a support / resistance *band* (`top`..`bottom`) at a timeframe, with
+ * its detector metadata. Prices arrive as JSON numbers (the server's `decimal`s) — fine to *draw*, never to size an
+ * order against.
+ */
+export interface PriceLevel {
+  readonly timeframeMinutes: number;
+  readonly top: number;
+  readonly bottom: number;
+  /** The side of price. The server serves `Support` or `Resistance`; `Unknown` is the refusable zero, never sent. */
+  readonly kind: string;
+  readonly significance: number;
+  readonly formedAtBucket: string;
+  readonly touchCount: number;
+}
+
+/**
+ * The active price levels for one `(venue, instrument)` across the requested timeframes — the `/api/marketdata/levels`
+ * body (gh#644). Unlike bars / indicators this read is NOT windowed: it is the set of currently-active levels, not a
+ * time series. The spec does not type this anonymous response, so it is named here (the `api/client` convention).
+ */
+export interface PriceLevels {
+  readonly venue: string;
+  readonly instrument: string;
+  readonly levels: readonly PriceLevel[];
+}
+
+/**
+ * Reads the active price levels for `(venue, instrument)` across one or more `timeframes` (minutes), through the
+ * authenticated client (R-18 — never a raw `fetch`). Derived market data is global / shared (R-22), so there is no
+ * owner filter. The degraded outcomes stay distinct (R-19): a missing / invalid venue or instrument, or an empty or
+ * non-positive `timeframes` set, is a **refusal** (400); an instrument unknown to the market-data store is a 404
+ * **failure**; a known instrument with no levels formed yet is a success with an **empty** `levels`. `timeframes`
+ * binds as a REPEATED query param (the server's `int[]`), never a comma-joined list.
+ */
+export function getLevels(
+  venue: string,
+  instrument: string,
+  timeframes: readonly number[],
+): Promise<ApiResult<PriceLevels>> {
+  const query = new URLSearchParams({ venue, instrument });
+  timeframes.forEach((timeframe) => query.append('timeframes', String(timeframe)));
+  return request<PriceLevels>('GET', `/api/marketdata/levels?${query.toString()}`);
+}
