@@ -7,6 +7,25 @@ import { ThemeModeProvider } from '../theme/ThemeModeProvider';
 import { ALL_WINDOW_SIZE_CLASSES, setWindowSizeClass } from '../testing/viewport';
 import { AppShell, CONTENT_REGION_TEST_ID } from './AppShell';
 
+// The safety controls read from the server on mount. This suite is about the SHELL -- that both controls are
+// present, at every size class, off the scrolling axis -- so the transport seam is stubbed rather than the
+// components: stubbing the components themselves would let the shell stop passing one in and still pass here.
+// Both reads refuse, which is the honest offline answer and the state each control renders as an explicit
+// "unavailable" rather than a fabricated one.
+vi.mock('../api/flatten', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api/flatten')>()),
+  getFlattenSchedule: vi.fn(() =>
+    Promise.resolve({ ok: false, kind: 'failed' as const, status: 503, error: 'not under test' }),
+  ),
+}));
+
+vi.mock('../api/killSwitch', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api/killSwitch')>()),
+  getKillSwitch: vi.fn(() =>
+    Promise.resolve({ ok: false, kind: 'failed' as const, status: 503, error: 'not under test' }),
+  ),
+}));
+
 /** Mounts the shell with a chosen surface underneath it, the way the real route table does. */
 function renderShell(surface: ReactNode) {
   return render(
@@ -55,9 +74,11 @@ describe('AppShell safety region', () => {
     expect(safetyRegion()).toBeTruthy();
   });
 
-  it.each(ALL_WINDOW_SIZE_CLASSES)('reserves both safety slots while empty at %s', (sizeClass) => {
-    // The contents are gh#25's. The frame has to exist first, or the controls appear one day and shift
-    // everything around them -- and an operator who has learned where the kill switch is finds it moved.
+  it.each(ALL_WINDOW_SIZE_CLASSES)('fills both safety slots at %s', (sizeClass) => {
+    // gh#657 filled the frame gh#23 reserved. This assertion used to read `data-filled === 'false'`, which was
+    // right while the contents were unbuilt and is now the regression that matters: the countdown (R-13) and the
+    // kill switch (R-11) are present at EVERY size class. A responsive layout that drops either on a phone --
+    // or a wiring change that quietly stops passing one in -- fails here.
     setWindowSizeClass(sizeClass);
 
     renderShell(<Surface />);
@@ -66,10 +87,10 @@ describe('AppShell safety region', () => {
     const timeToFlat = region.querySelector('[data-safety-slot="time-to-flat"]');
     const killSwitch = region.querySelector('[data-safety-slot="kill-switch"]');
 
-    expect(timeToFlat).toBeTruthy();
-    expect(killSwitch).toBeTruthy();
-    expect(timeToFlat?.getAttribute('data-filled')).toBe('false');
-    expect(killSwitch?.getAttribute('data-filled')).toBe('false');
+    expect(timeToFlat?.getAttribute('data-filled')).toBe('true');
+    expect(killSwitch?.getAttribute('data-filled')).toBe('true');
+    expect(timeToFlat?.querySelector('[data-testid="time-to-flat"]')).toBeTruthy();
+    expect(killSwitch?.querySelector('[data-testid="kill-switch"]')).toBeTruthy();
   });
 
   it.each(ALL_WINDOW_SIZE_CLASSES)(
