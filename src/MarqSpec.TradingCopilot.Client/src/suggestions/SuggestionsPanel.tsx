@@ -5,34 +5,22 @@ import Typography from '@mui/material/Typography';
 import { useAccounts } from '../accounts/AccountProvider';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
-import type { Destination } from '../navigation/destinations';
 import { SuggestionList } from './SuggestionList';
 
 /**
- * The workspace's suggestion surface — the actionable list, scoped to the **active account** (R-14).
+ * The workspace's suggestion panel — the actionable list, scoped to the **active account** (R-14). Extracted from
+ * the old surface (gh#654) so the workspace (gh#725) can place it *beside* the chart: it is a panel, not a route
+ * surface, so it carries no `data-surface` of its own — {@link WorkspaceSurface} owns the shell's surface contract.
  *
- * Scoping is not decoration: a suggestion belongs to one account, and `POST /take` arms against that account's
- * gate. So the account context is resolved *before* anything renders — there is no in-between where the operator
- * could act on a card without knowing which account an order would hit.
- *
- * The rest of R-10's workspace — the central chart, the order ticket, positions and fills — belongs to its own
- * cards. This surface holds the suggestion half and says so.
+ * Scoping is not decoration: a suggestion belongs to one account, and `POST /take` arms against that account's gate.
+ * So the account context is resolved *before* anything renders — there is no in-between where the operator could act
+ * on a card without knowing which account an order would hit.
  */
-
-export interface SuggestionsSurfaceProps {
-  readonly destination: Destination;
-}
-
-export function SuggestionsSurface({ destination }: SuggestionsSurfaceProps) {
+export function SuggestionsPanel(): React.JSX.Element {
   const accounts = useAccounts();
 
   return (
-    // The shell's surface contract: one element per route, tagged with the destination it is serving.
-    <Box
-      data-testid="surface"
-      data-surface={destination.id}
-      sx={{ height: '100%', overflowY: 'auto' }}
-    >
+    <Box sx={{ height: '100%', overflowY: 'auto' }}>
       <Box sx={{ px: 2, pt: 2 }}>
         <Typography variant="h6" component="h2" sx={{ fontWeight: 600 }}>
           Suggestions

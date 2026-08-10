@@ -8,7 +8,7 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import type { ComponentType } from 'react';
 
 import { SettingsSurface } from '../settings/SettingsSurface';
-import { SuggestionsSurface } from '../suggestions/SuggestionsSurface';
+import { WorkspaceSurface } from '../workspace/WorkspaceSurface';
 
 /**
  * Primary destinations are the ones the navigation offers directly at every window size class.
@@ -58,9 +58,9 @@ export const destinations: readonly Destination[] = [
     requirement: 'R-10',
     Icon: CandlestickChartIcon,
     tier: 'primary',
-    // The suggestion half of the workspace is built (gh#654); the chart, ticket and positions are still their
-    // own cards, so this surface holds what exists and does not mock up what does not.
-    Surface: SuggestionsSurface,
+    // The chart-central workspace (gh#725): the candlestick chart (gh#725) beside the suggestion panel (gh#654).
+    // The order ticket, live blotter and chart overlays are still their own cards (gh#655/#656/#727).
+    Surface: WorkspaceSurface,
   },
   {
     id: 'chat',
