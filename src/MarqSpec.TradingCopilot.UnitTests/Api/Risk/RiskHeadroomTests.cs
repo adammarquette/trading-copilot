@@ -41,21 +41,27 @@ public class RiskHeadroomTests
         decimal? dailyProfitTarget = null,
         bool stopForDay = false,
         Guid? owner = null,
-        TradingMode mode = TradingMode.Practice)
+        TradingMode mode = TradingMode.Practice,
+        bool seedAccount = true)
     {
         Guid ownerId = owner ?? _operator;
         await using TradingCopilotDbContext context = Context(ownerId);
         // A profile FKs to its account, and the headroom is the CURRENT account's (R-14, gh#746) — the endpoint reads
-        // the account's mode to scope the day's realized P&L — so seed the account alongside the profile.
-        context.Accounts.Add(new Account
+        // the account's mode to scope the day's realized P&L — so seed the account alongside the profile. The
+        // account-vanished race (seedAccount: false) exercises the defensive 404.
+        if (seedAccount)
         {
-            Id = _account,
-            UserId = ownerId,
-            ConnectionId = Guid.NewGuid(),
-            VenueAccountKey = "9001",
-            Name = "PRAC-50K",
-            Mode = mode,
-        });
+            context.Accounts.Add(new Account
+            {
+                Id = _account,
+                UserId = ownerId,
+                ConnectionId = Guid.NewGuid(),
+                VenueAccountKey = "9001",
+                Name = "PRAC-50K",
+                Mode = mode,
+            });
+        }
+
         context.RiskProfiles.Add(new RiskProfileRecord
         {
             Id = Guid.NewGuid(),
@@ -109,6 +115,17 @@ public class RiskHeadroomTests
     public async Task GetHeadroom_ShouldReturnNotFound_WhenNoProfileDeclared()
     {
         // No governor to project. Absence IS the answer, exactly as GET /risk -- distinct from a quiet day (below).
+        StatusOf(await ReadAsync()).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
+    public async Task GetHeadroom_ShouldReturnNotFound_WhenTheProfileHasNoAccountRow()
+    {
+        // Defensive (gh#746): a profile FKs to its account, so this cannot happen in production — but if the account
+        // row is gone, the read has no CURRENT mode to scope the day's realized P&L by, so it 404s rather than
+        // guessing a mode or blending. Distinct from a missing profile (also 404) and a quiet declared day (200, full).
+        await SeedProfileAsync(governor: 600m, seedAccount: false);
+
         StatusOf(await ReadAsync()).Should().Be(StatusCodes.Status404NotFound);
     }
 
