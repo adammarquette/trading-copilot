@@ -9,6 +9,7 @@ vi.mock('../chart/MarketChart', () => ({
     instrument: string;
     resolution: number;
     indicators?: readonly { indicator: string }[];
+    levelTimeframes?: readonly number[];
   }) => (
     <div
       data-testid="chart-stub"
@@ -16,6 +17,7 @@ vi.mock('../chart/MarketChart', () => ({
       data-instrument={props.instrument}
       data-resolution={props.resolution}
       data-indicators={(props.indicators ?? []).map((spec) => spec.indicator).join(',')}
+      data-level-timeframes={(props.levelTimeframes ?? []).join(',')}
     />
   ),
 }));
@@ -81,5 +83,17 @@ describe('WorkspaceSurface', () => {
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'ATR' }));
     expect(indicators()).toBe('atr'); // a second indicator toggled on
+  });
+
+  it('toggles the price-level overlay onto the chart at the current resolution (gh#727)', () => {
+    render(<WorkspaceSurface destination={destination} />);
+    const timeframes = () => screen.getByTestId('chart-stub').dataset.levelTimeframes;
+    expect(timeframes()).toBe(''); // off by default — no level fetch until the operator asks
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Levels' }));
+    expect(timeframes()).toBe('1'); // the chart's own timeframe (default 1m)
+
+    fireEvent.change(screen.getByLabelText('Resolution'), { target: { value: '15' } });
+    expect(timeframes()).toBe('15'); // follows the resolution while on
   });
 });
