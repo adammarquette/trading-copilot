@@ -83,22 +83,36 @@ export interface SuggestionPalette {
  * Maps one suggestion zone to its price lines — entry (solid), stop and target (dashed) — coloured by ROLE, not
  * direction: the stop is always the risk side and the target the reward side, long or short, so the geometry reads
  * the same every time.
+ *
+ * `ordinal` (1-based), when given, suffixes all three titles (`Entry #2`…) so the operator can tell which zone a
+ * line belongs to when several coexist; omit it for a lone zone to keep the labels clean.
  */
 export function suggestionToPriceLines(
   zone: SuggestionZone,
   palette: SuggestionPalette,
+  ordinal?: number,
 ): PriceLineSpec[] {
+  const suffix = ordinal === undefined ? '' : ` #${ordinal}`;
   return [
-    { price: zone.entry, color: palette.entry, title: 'Entry', style: 'solid' },
-    { price: zone.stop, color: palette.stop, title: 'Stop', style: 'dashed' },
-    { price: zone.target, color: palette.target, title: 'Target', style: 'dashed' },
+    { price: zone.entry, color: palette.entry, title: `Entry${suffix}`, style: 'solid' },
+    { price: zone.stop, color: palette.stop, title: `Stop${suffix}`, style: 'dashed' },
+    { price: zone.target, color: palette.target, title: `Target${suffix}`, style: 'dashed' },
   ];
 }
 
-/** Flattens a set of suggestion zones to the price lines to draw. */
+/**
+ * Flattens a set of suggestion zones to the price lines to draw. Supersession is keyed on
+ * (trigger, instrument, side), not the symbol (data dictionary §6), so several Active suggestions can share one
+ * instrument — and then six identically titled lines leave the operator unable to tell which stop protects which
+ * entry. So when more than one zone is present each zone's three lines carry a shared ordinal (`Entry #1` / `Stop #1`
+ * / `Target #1`, `Entry #2` / …), tying the trio together; a lone zone stays unsuffixed (gh#727 review).
+ */
 export function suggestionsToPriceLines(
   zones: readonly SuggestionZone[],
   palette: SuggestionPalette,
 ): PriceLineSpec[] {
-  return zones.flatMap((zone) => suggestionToPriceLines(zone, palette));
+  const disambiguate = zones.length > 1;
+  return zones.flatMap((zone, index) =>
+    suggestionToPriceLines(zone, palette, disambiguate ? index + 1 : undefined),
+  );
 }
