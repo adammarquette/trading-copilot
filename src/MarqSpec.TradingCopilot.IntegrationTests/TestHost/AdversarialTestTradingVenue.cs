@@ -22,6 +22,11 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private bool _venueUnreachable;
     private int _positionReads;
     private bool _bracketsUnsupported;
+    // Opt-in AccountStreaming (gh#779): OFF by default, unlike the opt-OUT flags above -- every existing suite's
+    // documented assumption ("the adversarial stub cannot push account events", OcoExitTestPostgresFactory /
+    // OcoCancelOnExitIntegrationTests) depends on the capability staying absent unless a suite explicitly asks for
+    // it, so this must never flip the shared default.
+    private bool _accountStreamingSupported;
     // Native working legs resting at the venue + the cancels the OCO-exit path issues against them (gh#184).
     private readonly List<(string AccountKey, WorkingOrder Order)> _workingOrders = [];
     private readonly List<(string AccountKey, string VenueOrderKey)> _cancelCalls = [];
@@ -120,6 +125,17 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
 
     /// <summary>Whether brackets are unsupported (see <see cref="MakeBracketsUnsupported"/>).</summary>
     internal bool BracketsUnsupported => _bracketsUnsupported;
+
+    /// <summary>
+    /// Grants <see cref="VenueCapability.AccountStreaming"/> (gh#779) — opt-in, so <c>AccountEventStreamHost</c>'s
+    /// <c>Capabilities.Require</c> passes and a suite can drive real events through the live host. Still feeds only
+    /// what the paired <c>IAccountEventStream</c> double is armed with; granting the capability decides nothing
+    /// about what streams.
+    /// </summary>
+    public void MakeAccountStreamingSupported() => _accountStreamingSupported = true;
+
+    /// <summary>Whether AccountStreaming is granted (see <see cref="MakeAccountStreamingSupported"/>).</summary>
+    internal bool AccountStreamingSupported => _accountStreamingSupported;
 
     /// <summary>Whether the venue read path should throw (see <see cref="MakeVenueUnreachable"/>).</summary>
     internal bool VenueUnreachable => _venueUnreachable;
@@ -435,6 +451,7 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _closeCalls.Clear();
         _venueUnreachable = false;
         _bracketsUnsupported = false;
+        _accountStreamingSupported = false;
         _workingOrders.Clear();
         _cancelCalls.Clear();
         _cancelThrowKeys.Clear();
@@ -557,6 +574,11 @@ internal class AdversarialTestTradingVenue : ITradingVenue
             if (!_factory.BracketsUnsupported)
             {
                 capabilities |= VenueCapability.BracketOrders;
+            }
+
+            if (_factory.AccountStreamingSupported)
+            {
+                capabilities |= VenueCapability.AccountStreaming;
             }
 
             return VenueCapabilities.Of(capabilities);
