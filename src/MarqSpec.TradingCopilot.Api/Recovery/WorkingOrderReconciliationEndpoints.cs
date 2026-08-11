@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Domain;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -29,17 +30,30 @@ public static class WorkingOrderReconciliationEndpoints
     {
         endpoints.MapGet("/accounts/{id:guid}/orders", ReadAsync).RequireAuthorization()
             .WithTags("Orders")
-            .WithSummary("Read the account's resting working orders from venue truth.");
+            .WithSummary("Read the account's resting working orders from venue truth, optionally scoped to one instrument.");
         return endpoints;
     }
 
     internal static async Task<IResult> ReadAsync(
         Guid id,
+        string? instrument,
         WorkingOrderReconciliationService reconciler,
         CancellationToken cancellationToken)
     {
+        // `?instrument=` scopes the read to a single contract for the chart's per-instrument execution overlay
+        // (gh#772). A malformed symbol is a client mistake worth naming (400), not an empty book.
+        InstrumentId? scoped = null;
+        if (instrument is not null)
+        {
+            if (!InstrumentId.TryParse(instrument, out InstrumentId parsed))
+            {
+                return Results.BadRequest(new { error = "instrument, when given, must be a valid instrument symbol." });
+            }
+            scoped = parsed;
+        }
+
         // The clock is read here, at the boundary, and passed in -- the session decision stays pure.
-        WorkingOrderReconciliation? result = await reconciler.ReconcileAsync(id, DateTimeOffset.UtcNow, cancellationToken);
+        WorkingOrderReconciliation? result = await reconciler.ReconcileAsync(id, scoped, DateTimeOffset.UtcNow, cancellationToken);
         if (result is null)
         {
             return Results.NotFound(); // not found or not owned by the caller (R-20)

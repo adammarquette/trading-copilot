@@ -2,6 +2,7 @@ using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -62,8 +63,30 @@ public sealed class PositionReconciliationService
     /// endpoint maps that to 404). A venue that cannot be reached yields a <see cref="PositionMarkBasis.Unknown"/>
     /// reconciliation with no positions — declared-unknown, never a stale live-looking view.
     /// </returns>
+    public Task<PositionReconciliation?> ReconcileAsync(
+        Guid accountId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+        => ReconcileAsync(accountId, instrument: null, now, cancellationToken);
+
+    /// <summary>
+    /// Reconciles the account's positions from venue truth, scoped to a single <paramref name="instrument"/> when one
+    /// is given (gh#772, for the chart's per-instrument execution overlay gh#727).
+    /// </summary>
+    /// <param name="accountId">The account to reconcile (R-20-scoped to the caller).</param>
+    /// <param name="instrument">
+    /// When set, only the position in <i>that</i> instrument's venue contract is returned — the venue resolves the
+    /// symbol to its contract. <see langword="null"/> returns every contract, unchanged. The filter never turns an
+    /// <see cref="PositionMarkBasis.Unknown"/> read into "flat on this instrument": a venue that cannot resolve the
+    /// contract is declared-unknown, exactly as an unreachable read of the whole book is — the resolve happens inside
+    /// the same try.
+    /// </param>
+    /// <param name="now">The current instant — the settlement window is judged against it in market time.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The reconciliation, or <see langword="null"/> if the account is not found / not owned (404).</returns>
     public async Task<PositionReconciliation?> ReconcileAsync(
         Guid accountId,
+        InstrumentId? instrument,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -97,6 +120,14 @@ public sealed class PositionReconciliationService
             }
 
             IReadOnlyList<PositionSnapshot> positions = await venue.GetPositionsAsync(venueAccount.Id, cancellationToken);
+            if (instrument is { } wanted)
+            {
+                // Resolve INSIDE the try: an unresolvable / unreachable venue is declared-unknown via the catch below,
+                // never an empty "flat on this instrument" (the same reason the whole-book read is Unknown, not flat).
+                ResolvedContract resolved = await venue.ResolveContractAsync(wanted, cancellationToken);
+                positions = [.. positions.Where(position => position.Contract == resolved.Contract)];
+            }
+
             PositionMarkBasis basis = BasisNow(now, venueReachable: true);
             return new PositionReconciliation(basis, positions);
         }

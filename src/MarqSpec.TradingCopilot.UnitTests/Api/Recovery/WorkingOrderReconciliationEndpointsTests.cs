@@ -47,9 +47,22 @@ public class WorkingOrderReconciliationEndpointsTests
         // R-20 default-deny at the boundary: another operator's account is indistinguishable from one that does
         // not exist. Anything other than 404 here would disclose existence.
         IResult result = await WorkingOrderReconciliationEndpoints.ReadAsync(
-            Guid.NewGuid(), Service(A.Fake<IProjectXVenueFactory>()), CancellationToken.None);
+            Guid.NewGuid(), instrument: null, Service(A.Fake<IProjectXVenueFactory>()), CancellationToken.None);
 
         result.Should().BeOfType<NotFound>();
+    }
+
+    [Fact]
+    public async Task ReadAsync_ShouldBe400_WhenTheInstrumentIsBlank()
+    {
+        // `?instrument=` scopes the read to one contract (gh#772); a blank symbol is a malformed request worth naming,
+        // rejected before the venue is asked. (A non-blank but unresolvable symbol is the venue's concern — that is a
+        // declared-unknown read, not a 400.)
+        IResult result = await WorkingOrderReconciliationEndpoints.ReadAsync(
+            Guid.NewGuid(), "   ", Service(A.Fake<IProjectXVenueFactory>()), CancellationToken.None);
+
+        result.Should().BeAssignableTo<IStatusCodeHttpResult>()
+            .Which.StatusCode.Should().Be(StatusCodes.Status400BadRequest);
     }
 
     [Fact]
