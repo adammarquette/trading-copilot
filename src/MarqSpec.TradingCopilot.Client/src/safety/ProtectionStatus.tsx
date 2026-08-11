@@ -22,8 +22,11 @@ import { useOptionalRealtime } from '../realtime/RealtimeProvider';
  *   others are still orphaned; the re-read decides, so a server still reporting orphans keeps it up.
  * - A missed event cannot desynchronise a count, because no count is accumulated client-side.
  *
- * **It fails toward the safe reading.** A failed read never resolves to "protected" — an unknown state leaves the
- * last known one standing rather than silently downgrading a live warning.
+ * **It fails toward the safe reading**, in both of the ways it can be pushed away from it. A failed read never
+ * resolves to "protected" — an unknown state leaves the last known one standing rather than silently downgrading a
+ * live warning. And reads are ordered by **generation**, not arrival: overlapping reads are routine here (the
+ * mount read races the first broadcast), and an older "protected" answer landing late would otherwise overwrite a
+ * newer "degraded" one — the same dangerous direction, reached by a client-side race instead of a missed replay.
  *
  * R-19 rides every rendering: degraded is **never** "unprotected". The native safety stop remains the physical
  * floor; it is the operator's *tighter* synthetic stop that is orphaned.
@@ -32,6 +35,8 @@ export function ProtectionStatus() {
   const [state, setState] = useState<ProtectionState | null>(null);
   const realtime = useOptionalRealtime();
   const mounted = useRef(true);
+  /** Monotonic read generation — only the newest in-flight read may write state. */
+  const latestRequest = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -41,10 +46,21 @@ export function ProtectionStatus() {
   }, []);
 
   const load = useCallback(() => {
+    // Ordering is by request GENERATION, not by arrival. Reads overlap readily here -- the mount read races the
+    // first broadcast, and a resync can fire while one is in flight -- and responses can land out of order under
+    // HTTP/2 multiplexing, a slow first connection, or a retry. Without this, an older "protected" answer
+    // resolving late would overwrite a newer "degraded" one and put the strip back into exactly the dangerous
+    // direction this component exists to prevent, reached by a client-side race instead of a missed replay.
+    // `mounted` guards post-unmount writes and says nothing about ordering (#777 review).
+    const generation = ++latestRequest.current;
+
     void getProtectionState().then((result) => {
+      if (!mounted.current || generation !== latestRequest.current) {
+        return;
+      }
       // A failure leaves the last known state standing. Reverting to "protected" on a transient 503 would take a
       // live warning off the strip precisely when the backend is already unhealthy.
-      if (mounted.current && result.ok) {
+      if (result.ok) {
         setState(result.data);
       }
     });
