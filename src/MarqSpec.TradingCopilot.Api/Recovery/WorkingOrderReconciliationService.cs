@@ -2,6 +2,7 @@ using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -72,8 +73,33 @@ public sealed class WorkingOrderReconciliationService
     /// maps that to 404). A venue that cannot be reached yields <see cref="PositionMarkBasis.Unknown"/> with no
     /// orders — declared-unknown, never an empty book.
     /// </returns>
+    public Task<WorkingOrderReconciliation?> ReconcileAsync(
+        Guid accountId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+        => ReconcileAsync(accountId, instrument: null, now, cancellationToken);
+
+    /// <summary>
+    /// Reads the account's resting orders from venue truth, scoped to a single <paramref name="instrument"/> when one
+    /// is given (gh#772, for the chart's per-instrument execution overlay gh#727).
+    /// </summary>
+    /// <param name="accountId">The account to read (R-20-scoped to the caller).</param>
+    /// <param name="instrument">
+    /// When set, only orders resting on <i>that</i> instrument's venue contract are returned — the venue resolves the
+    /// symbol to its contract, the same resolution the order path uses. <see langword="null"/> returns every contract,
+    /// unchanged. The filter never turns an <see cref="PositionMarkBasis.Unknown"/> read into "nothing resting on this
+    /// instrument": a venue that cannot resolve the contract is declared-unknown, exactly as an unreachable read of the
+    /// whole book is — the resolve happens inside the same try.
+    /// </param>
+    /// <param name="now">The current instant — the session basis is judged against it in market time.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>
+    /// The read, or <see langword="null"/> if the account is not found / not owned by the caller (the endpoint maps
+    /// that to 404). A venue that cannot be reached yields <see cref="PositionMarkBasis.Unknown"/> with no orders.
+    /// </returns>
     public async Task<WorkingOrderReconciliation?> ReconcileAsync(
         Guid accountId,
+        InstrumentId? instrument,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -107,6 +133,15 @@ public sealed class WorkingOrderReconciliationService
             }
 
             IReadOnlyList<WorkingOrder> orders = await venue.GetWorkingOrdersAsync(venueAccount.Id, cancellationToken);
+            if (instrument is { } wanted)
+            {
+                // Resolve INSIDE the try: a venue that cannot resolve the symbol to a contract is unobtainable truth,
+                // so it falls to declared-unknown via the catch below -- never an empty "nothing resting on this
+                // instrument" (the same reason an unreachable whole-book read is Unknown, not an empty book).
+                ResolvedContract resolved = await venue.ResolveContractAsync(wanted, cancellationToken);
+                orders = [.. orders.Where(order => order.Contract == resolved.Contract)];
+            }
+
             return new WorkingOrderReconciliation(BasisNow(now, venueReachable: true), orders);
         }
         catch (Exception error) when (error is not OperationCanceledException)

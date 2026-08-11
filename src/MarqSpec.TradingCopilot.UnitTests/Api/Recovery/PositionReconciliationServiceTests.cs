@@ -151,4 +151,67 @@ public class PositionReconciliationServiceTests
         result!.Basis.Should().Be(PositionMarkBasis.Unknown); // cannot reach this account's venue -> unobtainable
         result.Positions.Should().BeEmpty();
     }
+
+    private static InstrumentId Es => InstrumentId.Parse("ES");
+
+    private static VenueContractId EsContract => VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
+
+    private static VenueContractId NqContract => VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MNQ.U26");
+
+    [Fact]
+    public async Task Reconcile_ShouldReturnOnlyTheInstrumentsPosition_WhenScopedToAnInstrument()
+    {
+        // gh#772: the chart overlays ONE instrument, so the scoped read filters to that instrument's contract — a
+        // position in a different contract must not render on its chart.
+        Guid accountId = await SeedAccountAsync();
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>(
+            [
+                new PositionSnapshot(_venueAccount, EsContract, 2, new Price(5_300m)),
+                new PositionSnapshot(_venueAccount, NqContract, -1, new Price(19_900m)),
+            ]);
+        A.CallTo(() => _venue.ResolveContractAsync(Es, A<CancellationToken>._))
+            .Returns(new ResolvedContract(EsContract, Es));
+
+        PositionReconciliation? result = await Service()
+            .ReconcileAsync(accountId, Es, CentralTime(9, 0), CancellationToken.None);
+
+        result!.Positions.Should().ContainSingle().Which.Contract.Should().Be(EsContract);
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldReturnEveryContract_WhenNotScopedToAnInstrument()
+    {
+        // The unscoped overload — and the 3-arg one that delegates to it with null, which auto-flatten and the
+        // reconcile paths use — is unchanged: no resolve, every position.
+        Guid accountId = await SeedAccountAsync();
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>(
+            [
+                new PositionSnapshot(_venueAccount, EsContract, 2, new Price(5_300m)),
+                new PositionSnapshot(_venueAccount, NqContract, -1, new Price(19_900m)),
+            ]);
+
+        PositionReconciliation? result = await Service()
+            .ReconcileAsync(accountId, CentralTime(9, 0), CancellationToken.None);
+
+        result!.Positions.Should().HaveCount(2);
+        A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldDeclareUnknown_WhenTheInstrumentContractCannotBeResolved()
+    {
+        // The resolve is a venue call inside the SAME try: a venue that cannot resolve the contract is unobtainable
+        // truth, so the read is declared-unknown — never an empty "flat on this instrument".
+        Guid accountId = await SeedAccountAsync();
+        A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("venue down"));
+
+        PositionReconciliation? result = await Service()
+            .ReconcileAsync(accountId, Es, CentralTime(9, 0), CancellationToken.None);
+
+        result!.Basis.Should().Be(PositionMarkBasis.Unknown);
+        result.Positions.Should().BeEmpty();
+    }
 }
