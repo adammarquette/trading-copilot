@@ -457,6 +457,10 @@ public static class OrderEndpoints
             // it names the states safe to ignore (Staged / Filled / Cancelled / Rejected) and blocks EVERYTHING else --
             // Working, PartiallyFilled, Taking, Unknown, any status added later. Taking now counts (another in-flight or
             // stranded take is imminent / unknown exposure), safe because gh#589 makes a stranded Taking recoverable.
+            // gh#723 caveat: the Filled exclusion no longer proves a flat account -- a stranded take adopted Filled over
+            // a STILL-OPEN position (POST /orders/{id}/reconcile) is a Filled that is NOT flat. ComposeAsync's own fresh
+            // venue-position flatness refusal (called shortly below) is the backstop that blocks a stack on the adopted
+            // position; do not weaken it without revisiting this exclusion. (Same note on the send path's copy.)
             bool hasOutstandingEntry = await database.Orders.AnyAsync(
                 candidate => candidate.AccountId == order.AccountId
                     && candidate.Status != OrderStatus.Staged
