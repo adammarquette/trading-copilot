@@ -2114,6 +2114,14 @@ public static class OrderEndpoints
         AccountRiskState state = new(venueAccount.Balance, UnrealizedPnL: 0m, DayRealizedPnL: 0m);
         TrailingDrawdown drawdown = profile.ToTrailingDrawdown(Math.Max(profile.StartingBalance, state.Balance));
 
+        // An Undeclared account trades nowhere, and the consistency-window reader now refuses Undeclared outright
+        // (gh#746 review). Guard it to an empty window here: this composition is for a send that is refused for being
+        // undeclared regardless, so the window is moot -- and a Trade.Mode == Undeclared filter would have matched
+        // zero rows anyway, so this is non-behavioral, only fail-fast-safe against the reader's new guard.
+        ConsistencyWindow consistencyWindow = account.Mode == TradingMode.Undeclared
+            ? ConsistencyWindow.Empty
+            : await database.ConsistencyWindowForAccountAsync(account.Id, account.Mode, cancellationToken);
+
         RiskContext risk = new(
             venueAccount.Id,
             state,
@@ -2122,7 +2130,7 @@ public static class OrderEndpoints
             profile.ToRiskProfile(),
             profile.ToManualCaps(),
             executionOptions.Value.ToSanityCaps(),
-            await database.ConsistencyWindowForAccountAsync(account.Id, cancellationToken));
+            consistencyWindow);
 
         OrderExecutionService execution = new(
             new RiskGate(), venue, environment.Value, killSwitch, metrics ?? NullExecutionMetrics.Instance);
