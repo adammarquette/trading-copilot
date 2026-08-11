@@ -16,8 +16,8 @@ import type { BarPoint, BarSeries, IndicatorPoint } from '../api/marketData';
 import { getBars, getIndicators, getLevels } from '../api/marketData';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
-import type { LevelPalette } from './overlays';
-import { levelsToPriceLines } from './overlays';
+import type { LevelPalette, SuggestionPalette, SuggestionZone } from './overlays';
+import { levelsToPriceLines, suggestionsToPriceLines } from './overlays';
 
 /**
  * How many bars the default window aims for. Kept comfortably under the server's row cap
@@ -69,6 +69,16 @@ const NO_TIMEFRAMES: readonly number[] = [];
  */
 const LEVEL_PALETTE: LevelPalette = { support: '#26a69a', resistance: '#ef5350' };
 
+/** A stable empty default for {@link MarketChartProps.suggestionZones} — module-level, the gh#749 lesson. */
+const NO_ZONES: readonly SuggestionZone[] = [];
+
+/** The colours the suggestion overlay draws entry / stop (risk) / target (reward) with (gh#727 increment 2). */
+const SUGGESTION_PALETTE: SuggestionPalette = {
+  entry: '#4a90d9',
+  stop: '#ef5350',
+  target: '#26a69a',
+};
+
 export interface MarketChartProps {
   readonly venue: string;
   readonly instrument: string;
@@ -84,6 +94,10 @@ export interface MarketChartProps {
    * `/api/marketdata/levels`. Empty (the default) draws no levels. Not windowed — levels are the currently-active set.
    */
   readonly levelTimeframes?: readonly number[];
+  /** Active suggestion zones (entry / stop / target) to overlay as price lines (gh#727 increment 2). */
+  readonly suggestionZones?: readonly SuggestionZone[];
+  /** Whether the suggestion zones may lag the live feed — a dropped socket labels them stale (R-19). */
+  readonly suggestionsStale?: boolean;
 }
 
 /** Maps the server's OHLCV bars to Lightweight-Charts candles: `bucketStart` (ISO) → a UNIX-second `UTCTimestamp`. */
@@ -113,8 +127,9 @@ function toIndicatorLine(points: readonly IndicatorPoint[]): LineData<UTCTimesta
  * server's cap and an unknown series surface as an error, an in-range gap as "no bars", loading as a spinner — never
  * a chart drawn empty as though the market went silent. The chart instance is created once and torn down on unmount
  * (no leaked canvas / `ResizeObserver`). Indicator panes (gh#726) render below the candles from the pre-computed
- * series (R-22); price-level overlays (gh#727) draw as price lines from `/api/marketdata/levels`. Suggestion-zone
- * and live position / order / fill overlays are gh#727 follow-ups; live tick updates are gh#649's.
+ * series (R-22); price-level overlays (gh#727) draw as price lines from `/api/marketdata/levels`, and suggestion-zone
+ * overlays (gh#727) draw an active suggestion's entry / stop / target. The live position / order / fill overlay is a
+ * gh#727 follow-up; live tick updates are gh#649's.
  */
 export function MarketChart({
   venue,
@@ -124,6 +139,8 @@ export function MarketChart({
   now = Date.now,
   indicators = NO_INDICATORS,
   levelTimeframes = NO_TIMEFRAMES,
+  suggestionZones = NO_ZONES,
+  suggestionsStale = false,
 }: MarketChartProps): React.JSX.Element {
   // Default the window from the resolution, not a flat constant, so it stays under the server's row cap whatever
   // resolution the workspace opens on (gh#725 review).
@@ -347,6 +364,32 @@ export function MarketChart({
     };
   }, [venue, instrument, levelTimeframes]);
 
+  // Suggestion-zone overlays (gh#727 increment 2): entry / stop / target price lines for each active suggestion on
+  // this instrument, drawn on the candle series from zones the workspace supplies (it keeps them live + owner-scoped).
+  // Synchronous — the data arrives as a prop, so there is no fetch to guard; the series is still captured and
+  // re-checked so a teardown mid-life never touches a disposed chart.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (series === null || suggestionZones.length === 0) {
+      return;
+    }
+    const added = suggestionsToPriceLines(suggestionZones, SUGGESTION_PALETTE).map((spec) =>
+      series.createPriceLine({
+        price: spec.price,
+        color: spec.color,
+        title: spec.title,
+        lineStyle: spec.style === 'dashed' ? LineStyle.Dashed : LineStyle.Solid,
+        lineWidth: 1,
+        axisLabelVisible: true,
+      }),
+    );
+    return () => {
+      if (seriesRef.current === series) {
+        added.forEach((priceLine) => series.removePriceLine(priceLine));
+      }
+    };
+  }, [suggestionZones]);
+
   // A degraded overlay read (an indicator pane or the price levels) is shown, not swallowed (R-11 / R-19).
   const unavailableOverlays = [
     ...failedIndicators.map((indicator) => indicator.toUpperCase()),
@@ -392,6 +435,26 @@ export function MarketChart({
         >
           <Typography variant="caption" sx={{ color: 'error.main' }}>
             {unavailableOverlays.join(', ')} unavailable
+          </Typography>
+        </Box>
+      ) : null}
+      {suggestionsStale && suggestionZones.length > 0 ? (
+        // The socket is not live, so the drawn zones may lag a fresh issue / supersede — say so (R-19), don't hide it.
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 8,
+            left: 8,
+            px: 1,
+            py: 0.25,
+            borderRadius: 1,
+            bgcolor: 'background.paper',
+            border: '1px solid',
+            borderColor: 'warning.main',
+          }}
+        >
+          <Typography variant="caption" sx={{ color: 'warning.main' }}>
+            Suggestion zones may be stale
           </Typography>
         </Box>
       ) : null}
