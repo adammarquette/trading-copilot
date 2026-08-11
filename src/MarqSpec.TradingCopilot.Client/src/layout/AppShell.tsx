@@ -9,6 +9,7 @@ import { ConnectionStatus } from '../health/ConnectionStatus';
 import { AccountSwitcher } from '../accounts/AccountSwitcher';
 import { AdaptiveNavigation, SecondaryDestinationLinks } from '../navigation/AdaptiveNavigation';
 import { KillSwitchControl } from '../safety/KillSwitchControl';
+import { ProtectionStatus } from '../safety/ProtectionStatus';
 import { TimeToFlat } from '../safety/TimeToFlat';
 import { AccountMenu } from './AccountMenu';
 import { SafetyRegion } from './SafetyRegion';
@@ -78,6 +79,7 @@ export function AppShell() {
           {!compact ? <ConnectionStatus /> : null}
           <SafetyRegion
             dense={compact}
+            protection={<ProtectionStatus />}
             timeToFlat={<TimeToFlat />}
             killSwitch={<KillSwitchControl />}
           />
