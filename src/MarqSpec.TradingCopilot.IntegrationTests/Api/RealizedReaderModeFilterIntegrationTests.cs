@@ -59,7 +59,7 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// <see cref="SendPath_ShouldNotRescueALiveConsistencyBreach_WithPracticeDaysFromBeforeTheModeChange"/>,
 /// <see cref="Headroom_ShouldCountOnlyTheLiveLoss_OnAModeChangedAccount"/>,
 /// <see cref="Headroom_ShouldNotBeInflatedByAPracticeProfit_OnAModeChangedAccount"/>,
-/// <see cref="Headroom_ShouldCountNothing_ForAnUndeclaredAccountWithPracticeTradesToday"/>, and
+/// <see cref="Headroom_ShouldReturnNotFound_ForAnUndeclaredAccountWithPracticeTradesToday"/>, and
 /// <see cref="Headroom_ShouldNeverServeAnotherOperatorsAccountMode_WhenTheProfileIsVisibleButTheAccountIsNot"/>
 /// (which fails for a second reason on this base: with no account-mode read at all, the endpoint never consults
 /// the account, so it answers for one it does not own).</description></item>
@@ -304,13 +304,17 @@ public class RealizedReaderModeFilterIntegrationTests : IClassFixture<StubbedVen
     // -----------------------------------------------------------------------------------------------------------
 
     [Fact]
-    public async Task Headroom_ShouldCountNothing_ForAnUndeclaredAccountWithPracticeTradesToday()
+    public async Task Headroom_ShouldReturnNotFound_ForAnUndeclaredAccountWithPracticeTradesToday()
     {
         // An account whose effective stage the firm has not classified is Undeclared -- refused everywhere,
         // production included. Its journal still holds the practice trades it took before the reclassification, and
-        // no trade can ever carry Undeclared (see the check-constraint guard below), so the honest answer is the
-        // EMPTY one: zero consumed, full headroom. Blended, the leftover practice loss would spend the governor of
-        // an account that is not permitted to produce a single order.
+        // no trade can ever carry Undeclared (see the check-constraint guard below), so the per-mode read would match
+        // zero rows for the current (Undeclared) mode. The endpoint must not answer that as a misleading full-headroom
+        // 200 that hides the leftover practice loss under a mode the account no longer has: absence is the answer for
+        // an undeclared account -- a 404, distinct from a quiet declared day. That is the contract #755 settles on
+        // (`mode is null or Undeclared -> NotFound`), which RiskHeadroomTests' own doc already promised ("distinct
+        // from the 404 an undeclared account gets"). On this base, with no mode read at all, the endpoint instead
+        // blends the practice loss into a 200 -- so this case is RED here and goes green when #755 merges.
         HttpClient client = await AuthenticatedClientAsync(_factory);
         Guid accountId = await SetupPracticeAccountAsync(client, classifyFunded: false);
 
@@ -323,12 +327,12 @@ public class RealizedReaderModeFilterIntegrationTests : IClassFixture<StubbedVen
         account.Mode.Should().Be(
             TradingMode.Undeclared, "an unclassified effective stage resolves to Undeclared — silence is not consent");
 
-        DailyHeadroomResponse headroom = await GetHeadroomAsync(client, accountId);
+        using HttpResponseMessage response = await client.GetAsync($"/accounts/{accountId}/risk/headroom");
 
-        headroom.DayLoss.Should().Be(
-            0m, "no trade can be taken under Undeclared, so an undeclared account has no countable day");
-        headroom.UnderGovernor.Should().Be(
-            1_000m, "the leftover practice loss belongs to the mode it was taken under, not to this one");
+        response.StatusCode.Should().Be(
+            HttpStatusCode.NotFound,
+            "an undeclared account trades nowhere and has no live limits, so /risk/headroom must answer absence (404), "
+            + "never a full-headroom 200 that would hide the leftover practice loss under a mode the account no longer has");
     }
 
     [Fact]
@@ -453,11 +457,17 @@ public class RealizedReaderModeFilterIntegrationTests : IClassFixture<StubbedVen
 
     /// <summary>
     /// A discovered account explicitly declared <b>Practice</b> — the "before" side of every mode change here.
-    /// The firm classifies Practice and Evaluation (capital not at risk) and Funded (capital at risk); the stage
-    /// override is set rather than inferred so the starting mode is the test's, not the name-resolver's.
-    /// <b>No convention is declared for <see cref="AccountStage.Unknown"/></b> — undeclarable — and none for any
-    /// stage beyond those three, which is what the undeclared case leans on.
+    /// The firm <b>always</b> classifies Practice and Evaluation (capital not at risk → Practice mode); <b>Funded</b>
+    /// is classified capital-at-risk (→ Live) only when <paramref name="classifyFunded"/> is set. The stage override
+    /// is set rather than inferred so the starting mode is the test's, not the name-resolver's. No convention is
+    /// declared for <see cref="AccountStage.Unknown"/> — undeclarable — and, when <paramref name="classifyFunded"/>
+    /// is <see langword="false"/>, none for <see cref="AccountStage.Funded"/> either: that is what the undeclared
+    /// case leans on — moving the effective stage to an unclassified Funded resolves the mode to Undeclared.
     /// </summary>
+    /// <param name="classifyFunded">
+    /// Whether to declare <see cref="AccountStage.Funded"/> as capital-at-risk. Left <see langword="false"/> only by
+    /// the undeclared-account case, so that stage resolves to Undeclared.
+    /// </param>
     private async Task<Guid> SetupPracticeAccountAsync(HttpClient client, bool classifyFunded = true)
     {
         using HttpResponseMessage createFirm = await client.PostAsJsonAsync(
