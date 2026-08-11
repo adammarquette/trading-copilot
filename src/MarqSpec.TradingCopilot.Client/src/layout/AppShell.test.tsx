@@ -19,6 +19,13 @@ vi.mock('../api/flatten', async (importOriginal) => ({
   ),
 }));
 
+vi.mock('../api/protection', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api/protection')>()),
+  getProtectionState: vi.fn(() =>
+    Promise.resolve({ ok: false, kind: 'failed' as const, status: 503, error: 'not under test' }),
+  ),
+}));
+
 vi.mock('../api/killSwitch', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api/killSwitch')>()),
   getKillSwitch: vi.fn(() =>
@@ -92,6 +99,21 @@ describe('AppShell safety region', () => {
     expect(timeToFlat?.querySelector('[data-testid="time-to-flat"]')).toBeTruthy();
     expect(killSwitch?.querySelector('[data-testid="kill-switch"]')).toBeTruthy();
   });
+
+  it.each(ALL_WINDOW_SIZE_CLASSES)(
+    'carries the degraded-protection indicator at %s',
+    (sizeClass) => {
+      // gh#222. It sits ahead of the two slots and outside their chrome -- an alert, not a labelled control. Its
+      // presence at EVERY size class is the point: R-11's "alerted immediately" is not satisfied by a warning that
+      // a narrow viewport drops, and this is the one strip element that reports a position may be less protected
+      // than the operator believes.
+      setWindowSizeClass(sizeClass);
+
+      renderShell(<Surface />);
+
+      expect(safetyRegion().querySelector('[data-testid="protection-status"]')).toBeTruthy();
+    },
+  );
 
   it.each(ALL_WINDOW_SIZE_CLASSES)(
     'keeps the safety region off the scrolling axis at %s',

@@ -4,6 +4,7 @@ using FluentAssertions;
 using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.Kill;
 using MarqSpec.TradingCopilot.Api.Realtime;
+using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.MarketData;
 using Microsoft.AspNetCore.SignalR;
@@ -155,8 +156,23 @@ public class RealtimeEventCatalogTests
     [InlineData("flatten.executed")]
     [InlineData("flatten.warning")]
     [InlineData("flatten.watchdog.critical")]
+    // The degraded-protection pair (gh#222). Same class as the rest of the safety strip and on the same surface:
+    // operator-wide, event-log-backed, single-operator deployment. Routing it through the per-owner seam instead
+    // would make it the one strip signal travelling a different path -- and event-log rows are never IUserOwned.
+    [InlineData("protection.orphaned")]
+    [InlineData("protection.restored")]
     public void IsBroadcast_ShouldAllowTheMarketDataAndSafetyStripTypes(string type) =>
         RealtimeEventCatalog.IsBroadcast(type).Should().BeTrue();
+
+    [Fact]
+    public void IsBroadcast_ShouldAllowTheOrphanGuardsOwnConstants_SoTheCatalogCannotDriftFromTheProducer()
+    {
+        // Pinned against the producer's constants rather than string literals: the catalog and OrphanGuardService
+        // are edited in different files, and a renamed event type would otherwise leave the alert silently
+        // unbroadcast -- degraded protection that never reaches the operator, which is the failure this guards.
+        RealtimeEventCatalog.IsBroadcast(OrphanGuardService.OrphanedEventType).Should().BeTrue();
+        RealtimeEventCatalog.IsBroadcast(OrphanGuardService.RestoredEventType).Should().BeTrue();
+    }
 
     [Theory]
     [InlineData("order.filled")] // owner-scoped: reaches clients via the gh#683 per-owner seam, never this hub
@@ -168,8 +184,9 @@ public class RealtimeEventCatalogTests
 
     [Fact]
     public void BroadcastTypeCount_ShouldPinTheBoundary_SoAnAdditionIsADeliberateReviewedChange() =>
-        // Market quote + context-trade (2) + kill-switch (3) + flatten (6) + flatten-watchdog (3) = 14.
-        RealtimeEventCatalog.BroadcastTypeCount.Should().Be(14);
+        // Market quote + context-trade (2) + kill-switch (3) + flatten (6) + flatten-watchdog (3)
+        // + degraded protection (2, gh#222) = 16.
+        RealtimeEventCatalog.BroadcastTypeCount.Should().Be(16);
 }
 
 public class RealtimeEventTests
