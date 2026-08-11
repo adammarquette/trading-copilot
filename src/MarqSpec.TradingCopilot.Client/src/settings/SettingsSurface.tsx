@@ -3,6 +3,7 @@ import Button from '@mui/material/Button';
 import Typography from '@mui/material/Typography';
 
 import { useAccounts } from '../accounts/AccountProvider';
+import { FirmOnboarding } from '../accounts/FirmOnboarding';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
 import type { Destination } from '../navigation/destinations';
@@ -17,6 +18,10 @@ import { RiskSettings } from './RiskSettings';
  * against that account. So the account context is resolved before the risk section mounts, and the section is keyed
  * on the account id — switching accounts remounts it, so a slow load for the account just left can never resolve
  * into the new one's view.
+ *
+ * When there are **no accounts yet** this is also where a fresh deployment starts: the empty state is the
+ * {@link FirmOnboarding} walk (gh#653), because there is nothing to declare risk against until a firm and its
+ * accounts exist. Finishing it reloads the roster, so the surface re-resolves into the account-scoped view.
  */
 export interface SettingsSurfaceProps {
   readonly destination: Destination;
@@ -36,7 +41,9 @@ export function SettingsSurface({ destination }: SettingsSurfaceProps) {
           Settings
         </Typography>
         <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-          The risk inputs this account declares, and today&apos;s headroom against them.
+          {accounts.status === 'empty'
+            ? 'Set up a firm and the accounts under it to start.'
+            : "The risk inputs this account declares, and today's headroom against them."}
         </Typography>
       </Box>
 
@@ -56,11 +63,9 @@ export function SettingsSurface({ destination }: SettingsSurfaceProps) {
       ) : null}
 
       {accounts.status === 'empty' ? (
-        <EmptyState
-          title="No accounts yet"
-          description="Connect a trading account before declaring the risk it trades under."
-          tag="R-14"
-        />
+        <Box sx={{ p: 2 }}>
+          <FirmOnboarding onComplete={accounts.reload} />
+        </Box>
       ) : null}
 
       {accounts.status === 'ready' ? (
