@@ -1713,7 +1713,8 @@ public class TriggerEvaluationServiceTests
 
     // Seeds a CLOSED trade whose realized P&L feeds the day's loss/profit the headroom read consumes: positive = profit,
     // negative = loss. Closed at Now, so it lands in the same Central trading day the throttle counts issuance over.
-    private async Task SeedClosedTradeAsync(Guid accountId, decimal realizedPnL, Guid? owner = null)
+    private async Task SeedClosedTradeAsync(
+        Guid accountId, decimal realizedPnL, Guid? owner = null, TradingMode mode = TradingMode.Practice)
     {
         Guid ownerId = owner ?? _operator;
         await using TradingCopilotDbContext context = Context(ownerId);
@@ -1728,7 +1729,7 @@ public class TriggerEvaluationServiceTests
             EntryPrice = 100m,
             ExitPrice = 100m + realizedPnL,
             RealizedPnL = realizedPnL,
-            Mode = TradingMode.Practice,
+            Mode = mode,
             ClosedAt = Now,
         });
         await context.SaveChangesAsync();
@@ -2009,6 +2010,61 @@ public class TriggerEvaluationServiceTests
         (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
     }
 
+    // (l) R-14 MODE FILTER at the throttle call site (gh#746 review). The account is Live with trades on BOTH sides
+    // of a mode change: a large PRACTICE loss (the old mode) that would suppress if it were counted, and a small LIVE
+    // loss (the current mode) that leaves ample headroom. The throttle reads the account's CURRENT mode, so it counts
+    // only the Live trade -- the pass stays un-throttled and the suggestion issues. A read that summed both (the
+    // pre-gh#746 blend, or a swapped mode argument) would see the governor reached and SUPPRESS. This is the one call
+    // site #746's criterion left unproven; without the filter, no test here goes red.
+    [Fact]
+    public async Task ScanAsync_ShouldThrottleOnlyTheCurrentModesRealizedPnL_WhenTheAccountChangedModes()
+    {
+        Guid accountId = await SeedAccountAsync(mode: TradingMode.Live);
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -950m, mode: TradingMode.Practice); // old mode -- would suppress
+        await SeedClosedTradeAsync(accountId, realizedPnL: -100m, mode: TradingMode.Live);      // current mode -- ample headroom
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "current-mode day", 80));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        // Live-only dayLoss is 100 of a 1000 governor -> Full -> un-throttled, so the suggestion issues. Summing the
+        // Practice loss too would read dayLoss 1050 >= governor -> SUPPRESSED, and the reviewer would never run.
+        A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._))
+            .MustHaveHappenedOnceExactly();
+        (await Context().Suggestions.CountAsync()).Should().Be(1);
+    }
+
+    // (m) THE THROTTLE'S Undeclared BRANCH (gh#746 review). An account regressed to Undeclared with a real prior-mode
+    // (Live) loss on the books. The throttle folds Undeclared into the vanished-account inert-0 path -- an Undeclared
+    // account trades nowhere, so its throttle is moot. This asserts the read returns 0m directly, because end-to-end
+    // the Undeclared staging gate would mask a wrong throttle read (the existing Undeclared scan test seeds no trade
+    // and cannot tell the two apart). It is a genuine prove-red now that the reader REFUSES Undeclared: revert the
+    // `or TradingMode.Undeclared` and the read throws instead of returning 0m -- so this can fail on the exact defect.
+    [Fact]
+    public async Task ReadThrottleState_ShouldReadInertZero_WhenTheAccountIsUndeclared()
+    {
+        Guid accountId = await SeedAccountAsync(mode: TradingMode.Undeclared);
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -800m, mode: TradingMode.Live); // a real Live loss, still on the books
+
+        ThrottleStateProbe probe = new(
+            Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, _llmMetrics, _deadlines,
+            Microsoft.Extensions.Options.Options.Create(ThrottleOptions()), new AiSpendGovernor(),
+            Microsoft.Extensions.Options.Options.Create(new GovernorOptions()),
+            _suggestionNotifier, new SuggestionThrottle(), NullLogger<TriggerEvaluationService>.Instance);
+
+        (RiskProfileRecord? Profile, decimal DayRealized) state =
+            await probe.ProbeThrottleStateAsync(Context(), accountId, Now, CancellationToken.None);
+
+        state.Profile.Should().NotBeNull("the account has a declared profile");
+        state.DayRealized.Should().Be(
+            0m,
+            "an Undeclared account is inert -- its prior-mode loss is not projected into a current-mode governor, and "
+            + "the reader is never called with Undeclared (which now throws), so this is 0 by intent, not a filter miss");
+    }
+
     /// <summary>
     /// The scan with its platform-wide spend read forced to FAULT — proves the governor is FAIL-OPEN: a spend-read
     /// blip lets the pass run un-gated (the reviewer still wakes), the deliberate INVERSE of the fail-closed risk gate.
@@ -2072,6 +2128,35 @@ public class TriggerEvaluationServiceTests
         protected override Task<(RiskProfileRecord? Profile, decimal DayRealized)> ReadThrottleStateAsync(
             TradingCopilotDbContext database, Guid accountId, DateTimeOffset now, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("simulated throttle-state read fault");
+    }
+
+    // Exposes the real (base) throttle-state read so a test can inspect its (Profile, DayRealized) directly -- the
+    // only way to prove the Undeclared branch, since end-to-end the Undeclared staging gate would mask it (gh#746).
+    private sealed class ThrottleStateProbe : TriggerEvaluationService
+    {
+        public ThrottleStateProbe(
+            TradingCopilotDbContext discovery,
+            DbContextOptions<TradingCopilotDbContext> options,
+            IIndicatorSource indicators,
+            INotificationChannel notifications,
+            ITriggerReviewer reviewer,
+            IReviewEnrichmentSource enrichmentSource,
+            IAiUsageLedger ledger,
+            ILlmMetrics metrics,
+            ISessionDeadlineSource deadlines,
+            IOptions<SuggestionOptions> suggestionOptions,
+            IAiSpendGovernor governor,
+            IOptions<GovernorOptions> governorOptions,
+            ISuggestionRealtimeNotifier suggestionNotifier,
+            ISuggestionThrottle throttle,
+            ILogger<TriggerEvaluationService> logger)
+            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, throttle, logger)
+        {
+        }
+
+        public Task<(RiskProfileRecord? Profile, decimal DayRealized)> ProbeThrottleStateAsync(
+            TradingCopilotDbContext database, Guid accountId, DateTimeOffset now, CancellationToken cancellationToken) =>
+            ReadThrottleStateAsync(database, accountId, now, cancellationToken);
     }
 
     /// <summary>
