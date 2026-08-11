@@ -579,7 +579,7 @@ public class StagedOrderEndpointsTests
         // Taking and loud, needing manual intervention. NO StopPlan: the open position rides its native safety bracket
         // (venue-attached on fill), so a synthetic promotion plan would race a SECOND native stop over that leg.
         Guid accountId = await SeedAccountAsync();
-        await ArmAsync(accountId, SmallBuy());
+        await ArmAsync(accountId, SmallBuy(2)); // armed 2 contracts, but only 1 fills (a partial) -- so the adopted size is observable
         Guid orderId;
         await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
         await SetTakingAsync(orderId);
@@ -589,11 +589,11 @@ public class StagedOrderEndpointsTests
         VenueContractId contract = VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
         A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
             .Returns<IReadOnlyList<PositionSnapshot>>(
-                [new PositionSnapshot(_venueAccount, contract, NetQuantity: 1, new Price(5300m))]); // ...but a position IS open
+                [new PositionSnapshot(_venueAccount, contract, NetQuantity: 1, new Price(5300m))]); // ...but ONE contract IS open (the partial)
         A.CallTo(() => _venue.FindFilledOrderByTagAsync(
                 A<VenueAccountId>._, A<string>._, A<DateTimeOffset>._, A<CancellationToken>._))
             .ReturnsLazily((VenueAccountId _, string tag, DateTimeOffset _, CancellationToken _) =>
-                TaggedFillEvidence.Filled(tag, 1m, 5300m, "VENUE-KEY-OPEN")); // this take filled; the position is still open
+                TaggedFillEvidence.Filled(tag, 1m, 5300m, "VENUE-KEY-OPEN")); // this take filled 1 (of the armed 2); the position is still open
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
@@ -604,8 +604,46 @@ public class StagedOrderEndpointsTests
         Order adopted = await reload.Orders.FirstAsync(o => o.Id == orderId);
         adopted.Status.Should().Be(OrderStatus.Filled, "the take filled and the position is still open, so the row is adopted Filled and tracked");
         adopted.VenueOrderKey.Should().Be("VENUE-KEY-OPEN", "the venue key comes from fill history -- the position snapshot carries none");
+        adopted.Size.Should().Be(1, "the adopted size is the venue's executed fill (1 of the armed 2) -- venue truth, never what the app believed it sent");
         (await reload.StopPlans.AnyAsync(p => p.OrderId == orderId)).Should().BeFalse(
             "the open position rides its native safety bracket, so no synthetic promotion plan is written (as the round-tripped sibling does not)");
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldJournalTheTakenDisposition_WhenAdoptingAStillOpenFilledSuggestion()
+    {
+        // gh#723 / gh#549: a stranded SUGGESTION-armed take that filled and is still open is a TAKEN suggestion, so
+        // adopting it journals the disposition (the R-9 loop should see the take) -- as the adopt-live branch does, and
+        // unlike the round-tripped branch (a closed trade). The disposition is a separate save after the adopt, so it
+        // can never abort it (gh#455).
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        Guid suggestionId = await LinkStagedToSuggestionAsync(orderId); // aligned -> a clean Taken
+        await SetTakingAsync(orderId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]);
+        VenueContractId contract = VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>(
+                [new PositionSnapshot(_venueAccount, contract, NetQuantity: 1, new Price(5300m))]);
+        A.CallTo(() => _venue.FindFilledOrderByTagAsync(
+                A<VenueAccountId>._, A<string>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .ReturnsLazily((VenueAccountId _, string tag, DateTimeOffset _, CancellationToken _) =>
+                TaggedFillEvidence.Filled(tag, 1m, 5300m, "VENUE-KEY-OPEN"));
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), Fills(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.SingleAsync(o => o.Id == orderId)).Status.Should().Be(OrderStatus.Filled);
+        SuggestionDisposition disposition = await reload.SuggestionDispositions.SingleAsync();
+        disposition.SuggestionId.Should().Be(suggestionId, "adopting a confirmed still-open fill journals the take disposition (gh#549)");
+        disposition.Kind.Should().Be(SuggestionDispositionKind.Taken, "the adopted take's parameters match the suggestion");
     }
 
     [Fact]

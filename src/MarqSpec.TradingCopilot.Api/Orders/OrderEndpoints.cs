@@ -168,7 +168,11 @@ public static class OrderEndpoints
             // exhaustive status switch below is the same fail-closed shape). Safe to ignore:
             //   * Staged -- server-side only, unsent, no exposure, so a staged ticket never blocks a direct send;
             //   * Filled -- already realised into the balance ComposeAsync reads -- and Cancelled / Rejected -- never
-            //     rested -- so a send after a fully-resolved prior order behaves exactly as a first send.
+            //     rested -- so a send after a fully-resolved prior order behaves exactly as a first send. (gh#723
+            //     caveat: a stranded take adopted Filled over a STILL-OPEN position is the one Filled that is NOT flat,
+            //     so this exclusion no longer implies flatness on its own -- the backstop is ComposeAsync's own
+            //     venue-position flatness refusal, which blocks ANY entry on a non-flat account BEFORE this check runs.
+            //     Do not weaken that flatness refusal without revisiting this Filled exclusion.)
             // Everything else -- Working, PartiallyFilled, Taking, Unknown, and any status added later -- blocks.
             // Taking (a take in flight, held by the gh#530 durable claim) is imminent exposure and now COUNTS
             // (gh#589): it was excluded while a stranded Taking had no recovery -- counting it would then dead-lock
