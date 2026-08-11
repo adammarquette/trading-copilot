@@ -310,6 +310,10 @@ public sealed class ConditionalFiringService
         // Working / PartiallyFilled / Taking / Unknown / any future status all block). No self-exclusion: the
         // conditional is not an Order row, and a fire journals a NEW Order only on success. Leave it Pending and
         // re-decide next quote, exactly like a fire-time gate refusal -- nothing rests, so may-be-live stays false.
+        // gh#723 caveat: the Filled exclusion no longer proves a flat account -- a stranded take adopted Filled over a
+        // STILL-OPEN position (POST /orders/{id}/reconcile) is a Filled that is NOT flat. The fire's own ComposeAsync
+        // re-gate refuses any non-flat account, which is the backstop against firing onto the adopted position; do not
+        // weaken it without revisiting this exclusion. (Same note on the operator paths' copies.)
         bool hasOutstandingEntry = await database.Orders.AnyAsync(
             candidate => candidate.AccountId == record.AccountId
                 && candidate.Status != OrderStatus.Staged

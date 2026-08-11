@@ -51,6 +51,14 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private readonly List<(long Entered, long Left)> _placeSpans = [];
     private readonly object _placeSpanGate = new();
     private long _placeSequence;
+    // Venue FILL HISTORY (gh#769, the seam gh#723/gh#631 coverage needs): what GetWorkingOrdersAsync structurally
+    // cannot see, because a filled entry is no longer a working order. The stub FEEDS the venue's report -- a seeded
+    // execution, a reachable-but-empty history, or a read that faults -- and never the reconcile's decision about it.
+    private readonly List<(string AccountKey, string Tag, TaggedFillEvidence Evidence)> _taggedFills = [];
+    private readonly HashSet<string> _readableFillHistoryAccounts = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _unreadableFillHistoryAccounts = new(StringComparer.Ordinal);
+    private readonly List<(string AccountKey, string CustomTag, DateTimeOffset Since)> _fillHistoryQueries = [];
+    private Func<Task>? _onFillHistoryRead;
 
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
 
@@ -157,6 +165,127 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         {
             CustomTag = customTag,
         }));
+
+    /// <summary>
+    /// Seeds an <b>executed</b> venue record carrying <paramref name="tag"/> in the account's fill history (gh#769,
+    /// for gh#723 / gh#631), so <c>FindFilledOrderByTagAsync</c> reports <see cref="TaggedFillStatus.Filled"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this seam has to exist.</b> <see cref="SeedWorkingOrder"/> can only express an order still <i>resting</i>,
+    /// and <see cref="SeedPosition"/> only an open position with no handle on it. Neither can express "this tag
+    /// executed" — which is the single fact that separates a take that filled from one that never reached the market,
+    /// and therefore the only thing that lets the reconcile adopt rather than refuse. Without it the pre-merge tier
+    /// reaches only the refusal arms, and the adopt is provable nowhere but staging.
+    /// </para>
+    /// <para>
+    /// <b>Still adversarial.</b> It feeds the venue's <i>report</i> — an executed size, a price, the venue's own order
+    /// handle — and never the reconcile's answer. It deliberately does not filter on the caller's <c>since</c> window:
+    /// deciding what window covers the attempt is production's rule, so the stub records the window it was asked for
+    /// (<see cref="FillHistoryQueries"/>) and lets the test assert it, rather than silently enforcing it and hiding a
+    /// window that starts too late.
+    /// </para>
+    /// </remarks>
+    /// <param name="accountKey">The venue account whose history carries the execution.</param>
+    /// <param name="tag">The <c>customTag</c> the placing call stamped — the stranded row's own id (gh#589).</param>
+    /// <param name="filledSize">The executed quantity; must be greater than zero (a partial fill is a fill).</param>
+    /// <param name="filledPrice">The average fill price the venue reports, or <see langword="null"/>.</param>
+    /// <param name="venueOrderKey">The venue's own handle for the executed order — what an open position cannot carry.</param>
+    /// <param name="matchCount">
+    /// How many executed records carry this tag. Greater than one is the re-transmit ambiguity of PR #637: the
+    /// evidence then describes only the earliest and anything journaled from it understates the venue.
+    /// </param>
+    public void SeedTaggedFill(
+        string accountKey,
+        string tag,
+        decimal filledSize,
+        decimal? filledPrice = null,
+        string? venueOrderKey = null,
+        int matchCount = 1) =>
+        _taggedFills.Add((accountKey, tag, TaggedFillEvidence.Filled(
+            tag, filledSize, filledPrice, venueOrderKey, matchCount)));
+
+    /// <summary>
+    /// Declares the account's fill history <b>readable and empty</b> — the venue is reachable, does carry history, and
+    /// positively reports no execution under the tag (<see cref="TaggedFillStatus.NoFillFound"/>, gh#769).
+    /// </summary>
+    /// <remarks>
+    /// Distinct from seeding nothing at all, which leaves the venue answering
+    /// <see cref="TaggedFillStatus.Unsupported"/> — "this venue cannot answer that question". Collapsing the two is
+    /// exactly the confusion <see cref="TaggedFillEvidence"/> is four-valued to prevent, so the stub keeps them apart.
+    /// </remarks>
+    /// <param name="accountKey">The venue account whose history is readable.</param>
+    public void MakeFillHistoryEmpty(string accountKey) => _readableFillHistoryAccounts.Add(accountKey);
+
+    /// <summary>
+    /// Makes the fill-history read <b>fault</b> for an account (gh#769) — a venue that can answer but did not on this
+    /// attempt.
+    /// </summary>
+    /// <remarks>
+    /// It throws rather than returning <see cref="TaggedFillStatus.Unavailable"/> on purpose: mapping a failed read to
+    /// "unavailable, which is NOT 'did not fill'" is <c>FillReconciliationService</c>'s rule, and a stub that handed
+    /// the status back directly would be supplying the production-computed answer instead of the condition that
+    /// produces it. Takes precedence over any seeded fill, so a test can prove the veto is withheld on an unknown even
+    /// where an execution really exists.
+    /// </remarks>
+    /// <param name="accountKey">The venue account whose fill-history read should fault.</param>
+    public void MakeFillHistoryUnreadable(string accountKey) => _unreadableFillHistoryAccounts.Add(accountKey);
+
+    /// <summary>
+    /// Clears every armed fill-history fault, so the read answers again (gh#769) — the counterpart to
+    /// <see cref="ClearPlaceOrderFaults"/>, and what lets one case reconcile twice off a single fixture: once with the
+    /// read faulting, then once without, so the refusal is shown to have been caused by the fault and by nothing else.
+    /// </summary>
+    public void ClearFillHistoryFaults() => _unreadableFillHistoryAccounts.Clear();
+
+    /// <summary>
+    /// Every fill-history read the system issued — the account, the tag asked about, and the <c>since</c> window it
+    /// supplied (gh#769). The window is the load-bearing input: one that starts <b>after</b> the attempt would miss a
+    /// real fill and let a release proceed over it, and a stub that quietly filtered on it could never witness that.
+    /// </summary>
+    public IReadOnlyList<(string AccountKey, string CustomTag, DateTimeOffset Since)> FillHistoryQueries =>
+        _fillHistoryQueries.AsReadOnly();
+
+    /// <summary>
+    /// Runs <paramref name="effect"/> inside every <c>FindFilledOrderByTagAsync</c>, before it answers — the seam a
+    /// gh#769 test uses to launch a concurrent entry <b>while the reconcile is mid-flight and still holding the
+    /// per-account entry lock</b>. Passing <see langword="null"/> clears it.
+    /// </summary>
+    /// <remarks>
+    /// The reconcile transmits nothing, so <see cref="OnPlaceOrder"/> cannot reach inside it; the fill-history read is
+    /// the one venue call the adopt arm makes while the lock is held. As with <see cref="OnPlaceOrder"/>, the peer must
+    /// be <b>sampled, never awaited</b> here — awaiting it would deadlock on the very lock under test.
+    /// </remarks>
+    /// <param name="effect">The interleave to run, or <see langword="null"/> to clear it.</param>
+    public void OnFillHistoryRead(Func<Task>? effect) => _onFillHistoryRead = effect;
+
+    /// <summary>Runs the fill-history interleave (see <see cref="OnFillHistoryRead"/>); a no-op when none is armed.</summary>
+    internal Task InvokeFillHistorySideEffectAsync() => _onFillHistoryRead?.Invoke() ?? Task.CompletedTask;
+
+    /// <summary>
+    /// The venue's fill-history answer for a tag — resolution order: an unreadable account <b>faults</b> (even over a
+    /// seeded execution), then a seeded execution, then a readable-but-empty history, then "this venue cannot answer".
+    /// </summary>
+    internal TaggedFillEvidence FillHistoryFor(VenueAccountId account, string customTag, DateTimeOffset since)
+    {
+        _fillHistoryQueries.Add((account.Key, customTag, since));
+
+        if (_unreadableFillHistoryAccounts.Contains(account.Key))
+        {
+            throw new InvalidOperationException($"Venue fill history unreadable for {account.Key} (test).");
+        }
+
+        (string AccountKey, string Tag, TaggedFillEvidence Evidence) seeded = _taggedFills.FirstOrDefault(
+            entry => entry.AccountKey == account.Key && string.Equals(entry.Tag, customTag, StringComparison.Ordinal));
+        if (seeded.Evidence is not null)
+        {
+            return seeded.Evidence;
+        }
+
+        return _readableFillHistoryAccounts.Contains(account.Key)
+            ? TaggedFillEvidence.NoFillFound(customTag)
+            : TaggedFillEvidence.Unsupported(customTag);
+    }
 
     /// <summary>Makes <c>CancelOrderAsync</c> THROW for a venue order key — the "already gone" rejection the OCO-exit
     /// path must swallow without corrupting the record or retry-storming (gh#184).</summary>
@@ -318,6 +447,11 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _historicalBarsUnsupported = false;
         _getBarsThrows = false;
         _resolveContractThrowSymbols.Clear();
+        _taggedFills.Clear();
+        _readableFillHistoryAccounts.Clear();
+        _unreadableFillHistoryAccounts.Clear();
+        _fillHistoryQueries.Clear();
+        _onFillHistoryRead = null;
         ClearPlaceOrderFaults();
         lock (_placeSpanGate)
         {
@@ -535,6 +669,28 @@ internal class AdversarialTestTradingVenue : ITradingVenue
         _factory.IsUnreadable(account)
             ? throw new InvalidOperationException($"Venue truth unreadable for {account.Key} (test).")
             : Task.FromResult(_factory.WorkingOrdersFor(account));
+
+    /// <summary>
+    /// The venue's fill-history read (gh#769) — the seam that makes "this tag executed" expressible at the pre-merge
+    /// tier. Overrides the interface's <see cref="TaggedFillStatus.Unsupported"/> default so the reconcile paths that
+    /// consult fill history (gh#631's round-tripped branch, gh#723's adopt-still-open branch) can reach a positive
+    /// answer here instead of only on staging.
+    /// </summary>
+    /// <remarks>
+    /// The side effect runs <b>before</b> the answer, so a test can interleave a concurrent entry while the reconcile
+    /// is still inside the per-account entry lock. A faulting read <b>throws</b> rather than reporting
+    /// <see cref="TaggedFillStatus.Unavailable"/>: turning a failed read into that status is the caller's rule, not the
+    /// venue's, and the double must never hand back the production-computed answer.
+    /// </remarks>
+    public async Task<TaggedFillEvidence> FindFilledOrderByTagAsync(
+        VenueAccountId account,
+        string customTag,
+        DateTimeOffset since,
+        CancellationToken cancellationToken = default)
+    {
+        await _factory.InvokeFillHistorySideEffectAsync();
+        return _factory.FillHistoryFor(account, customTag, since);
+    }
 
     public Task CancelOrderAsync(VenueAccountId account, string venueOrderId, CancellationToken cancellationToken = default)
     {

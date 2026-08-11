@@ -7,6 +7,7 @@ import RuleIcon from '@mui/icons-material/Rule';
 import SettingsIcon from '@mui/icons-material/Settings';
 import type { ComponentType } from 'react';
 
+import { NewsSurface } from '../news/NewsSurface';
 import { SettingsSurface } from '../settings/SettingsSurface';
 import { WorkspaceSurface } from '../workspace/WorkspaceSurface';
 
@@ -97,6 +98,9 @@ export const destinations: readonly Destination[] = [
     requirement: 'R-2',
     Icon: NewspaperIcon,
     tier: 'primary',
+    // The relevance-config half is built (gh#742): the ticker↔instrument maps, with topics and the feed itself
+    // still their own increments, so the surface holds what exists and does not mock up what does not.
+    Surface: NewsSurface,
   },
   {
     id: 'settings',
