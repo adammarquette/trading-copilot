@@ -8,6 +8,7 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Venue;
+using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -200,13 +201,30 @@ public class PositionReconciliationServiceTests
     }
 
     [Fact]
-    public async Task Reconcile_ShouldDeclareUnknown_WhenTheInstrumentContractCannotBeResolved()
+    public async Task Reconcile_ShouldRaiseInstrumentNotResolvable_WhenTheVenueHasNoContractForTheInstrument()
     {
-        // The resolve is a venue call inside the SAME try: a venue that cannot resolve the contract is unobtainable
-        // truth, so the read is declared-unknown — never an empty "flat on this instrument".
+        // gh#772 acceptance: a well-formed symbol the venue has NO contract for is a CLIENT mistake, not unobtainable
+        // truth. The read reached the venue (roster + positions), so the resolve's not-found is the venue answering "no
+        // such contract" -- it must surface as a 400 (this exception, mapped at the endpoint), never Unknown (reserved
+        // for an unreachable venue) and never an empty "flat on this instrument".
         Guid accountId = await SeedAccountAsync();
         A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._))
-            .Throws(new InvalidOperationException("venue down"));
+            .Throws(new ProjectXVenueException("No ProjectX contract matches instrument 'ES'."));
+
+        Func<Task> read = () => Service().ReconcileAsync(accountId, Es, CentralTime(9, 0), CancellationToken.None);
+
+        (await read.Should().ThrowAsync<InstrumentNotResolvableException>())
+            .Which.Instrument.Should().Be(Es);
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldDeclareUnknown_WhenResolvingTheContractHitsATransportFault()
+    {
+        // A transport fault mid-resolve is NOT the venue's not-found type, so it is genuine unobtainable truth --
+        // exactly like an unreachable read: declared-unknown, never a spurious 400.
+        Guid accountId = await SeedAccountAsync();
+        A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("venue down mid-resolve"));
 
         PositionReconciliation? result = await Service()
             .ReconcileAsync(accountId, Es, CentralTime(9, 0), CancellationToken.None);
