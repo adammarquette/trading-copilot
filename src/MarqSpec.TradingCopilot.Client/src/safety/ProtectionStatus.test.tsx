@@ -212,6 +212,48 @@ describe('ProtectionStatus', () => {
     expect(shown().toLowerCase()).toContain('degraded');
   });
 
+  it('ignores a superseded read that lands after a newer one', async () => {
+    // #777 review. The dangerous direction, reached by a different path than a missed replay: the mount issues
+    // read A (protected); a stop orphans milliseconds later and the broadcast issues read B (degraded). If B
+    // lands first and A resolves late -- plausible under HTTP/2 multiplexing, a slow first connection, or a
+    // retry -- the older answer would overwrite the newer one and the strip would read PROTECTED while a stop is
+    // actually orphaned. Ordering is by request generation, not by arrival.
+    let resolveMount: (value: { ok: true; data: ProtectionState }) => void = () => {};
+    let resolveAfterEvent: (value: { ok: true; data: ProtectionState }) => void = () => {};
+
+    read.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveMount = resolve;
+      }),
+    );
+
+    const handlers = wireRealtime();
+    render(<ProtectionStatus />);
+    await act(async () => {});
+
+    read.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveAfterEvent = resolve;
+      }),
+    );
+
+    await act(async () => {
+      handlers.event.forEach((handler) => handler(event('protection.orphaned'), false));
+    });
+
+    // The newer read lands first and raises the alert.
+    await act(async () => {
+      resolveAfterEvent({ ok: true, data: DEGRADED });
+    });
+    expect(shown().toLowerCase()).toContain('degraded');
+
+    // The older read resolves late. It must not win.
+    await act(async () => {
+      resolveMount({ ok: true, data: PROTECTED });
+    });
+    expect(shown().toLowerCase()).toContain('degraded');
+  });
+
   it('renders without a realtime provider, so the shell can mount it before the socket exists', async () => {
     realtime.mockReturnValue(null);
     read.mockResolvedValue({ ok: true, data: DEGRADED });
