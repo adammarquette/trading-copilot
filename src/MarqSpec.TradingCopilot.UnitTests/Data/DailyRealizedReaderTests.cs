@@ -75,6 +75,20 @@ public class DailyRealizedReaderTests
     }
 
     [Fact]
+    public async Task TodayRealizedPnL_ShouldThrow_WhenTheModeIsUndeclared()
+    {
+        // gh#746 review. Trade.Mode is check-constrained never to be Undeclared, so filtering by it matches zero rows
+        // for any account -- a SILENT "no loss" that would report full headroom on an account that really lost money.
+        // No caller should pass Undeclared; the reader refuses it loudly rather than return that accidental 0. A real
+        // Live loss is on the books to make the point: were this to silently return 0, that loss would be hidden.
+        await SeedTradeAsync(realizedPnL: -400m, closedAt: _now.AddHours(-1), mode: TradingMode.Live);
+
+        Func<Task> act = () => ReadAsync(mode: TradingMode.Undeclared);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
     public async Task TodayRealizedPnL_ShouldExcludeAPriorTradingDay_OnTheCentralBoundary()
     {
         // Central midnight for 08-03 is 05:00 UTC. A trade at 04:00 UTC on 08-03 is still the PREVIOUS Central day

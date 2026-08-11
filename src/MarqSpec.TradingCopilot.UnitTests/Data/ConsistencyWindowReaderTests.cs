@@ -62,6 +62,17 @@ public class ConsistencyWindowReaderTests
     }
 
     [Fact]
+    public async Task ConsistencyWindow_ShouldThrow_WhenTheModeIsUndeclared()
+    {
+        // gh#746 review. Trade.Mode is check-constrained never to be Undeclared, so filtering by it always matches
+        // zero rows and would return Empty by accident. The reader refuses Undeclared loudly; the send-path caller
+        // guards it to an empty window before this (an undeclared send is refused anyway).
+        Func<Task> act = () => ReadAsync(mode: TradingMode.Undeclared);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
     public async Task ConsistencyWindow_ShouldSumAcrossDaysAndTakeTheBestDay()
     {
         await SeedTradeAsync(realizedPnL: 100m, closedAt: _dayA);
