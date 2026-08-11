@@ -404,7 +404,10 @@ public class TradingCopilotDbContext : TenantDbContext
 
             // The two live readers (DailyRealizedReader, ConsistencyWindowReader) filter AccountId + ClosedAt and
             // require RealizedPnL -- only AccountId was indexed (gh#731 decision 7). Cover the composite so the
-            // day-realized read stays a range scan as the journal grows.
+            // day-realized read stays a range scan as the journal grows. They also filter Mode (R-14, gh#746) so a
+            // practice result never counts toward a live limit; Mode is left OUT of the index deliberately -- it is a
+            // cheap residual over the few rows in one account's day, and adding it would not change the range-seek at
+            // single-operator volume.
             trade.HasIndex(t => new { t.AccountId, t.ClosedAt });
 
             // Mode is a journal fact (practice results never blend into live results) -- check-constrained,

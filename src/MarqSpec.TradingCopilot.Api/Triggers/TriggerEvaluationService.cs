@@ -560,9 +560,26 @@ public class TriggerEvaluationService
     {
         RiskProfileRecord? profile = await database.RiskProfiles
             .FirstOrDefaultAsync(candidate => candidate.AccountId == accountId, cancellationToken);
-        decimal dayRealized = profile is null
+        if (profile is null)
+        {
+            return (null, 0m);
+        }
+
+        // R-14 (gh#746): count only trades taken under the account's CURRENT mode — a practice result must never feed
+        // a live account's throttle. Mode is read live from the account (a trade's stored mode is historical); a
+        // vanished account counts nothing (0), the inert direction that proposes un-throttled.
+        TradingMode? mode = await database.Accounts
+            .Where(account => account.Id == accountId)
+            .Select(account => (TradingMode?)account.Mode)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        // Undeclared joins the vanished-account (null) inert path (gh#746 review). An Undeclared account trades
+        // nowhere (TradingModePolicy refuses it everywhere), so its throttle is moot; and Trade.Mode is
+        // check-constrained never to be Undeclared, so passing it to the reader would match zero rows and read as "no
+        // loss" by ACCIDENT. Make that inert 0 explicit and tested rather than a silent filter-miss.
+        decimal dayRealized = mode is null or TradingMode.Undeclared
             ? 0m
-            : await database.TodayRealizedPnLForAccountAsync(accountId, now, cancellationToken);
+            : await database.TodayRealizedPnLForAccountAsync(accountId, mode.Value, now, cancellationToken);
         return (profile, dayRealized);
     }
 

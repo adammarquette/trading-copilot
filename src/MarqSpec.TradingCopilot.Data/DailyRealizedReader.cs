@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Domain.Flatten;
+using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 
 namespace MarqSpec.TradingCopilot.Data;
@@ -11,7 +12,8 @@ namespace MarqSpec.TradingCopilot.Data;
 public static class DailyRealizedReader
 {
     /// <summary>
-    /// Sums the account's realized P&amp;L for the <b>CME/Central trading day</b> containing <paramref name="now"/>.
+    /// Sums the account's realized P&amp;L for the <b>CME/Central trading day</b> containing <paramref name="now"/>,
+    /// counting <b>only</b> trades taken under <paramref name="mode"/> (R-14, gh#746).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -35,25 +37,59 @@ public static class DailyRealizedReader
     /// Owner-scoped by the R-20 query filter (<see cref="Entities.Trade"/> is <c>IUserOwned</c>): a request read, so
     /// it sees only the caller's trades and takes no <c>IgnoreQueryFilters</c>.
     /// </para>
+    /// <para>
+    /// <b>Mode-scoped (R-14, gh#746).</b> Only trades whose <see cref="Entities.Trade.Mode"/> equals
+    /// <paramref name="mode"/> are summed. <c>Trade.Mode</c> is the mode at <b>placement</b> and is never rewritten, so
+    /// an account that moved Practice → Live still carries its practice rows here; passing the account's <i>current</i>
+    /// mode keeps practice money out of a live limit and vice-versa — the exact blending R-14 exists to prevent,
+    /// enforced one layer above the gate. The existing <c>(AccountId, ClosedAt)</c> index still range-seeks the day;
+    /// <c>Mode</c> is a cheap residual over the handful of rows in one account's day, so no new index is warranted at
+    /// single-operator volume.
+    /// </para>
+    /// <para>
+    /// <b>Never pass <see cref="TradingMode.Undeclared"/> (gh#746 review).</b> <c>Trade.Mode</c> is check-constrained
+    /// never to be <c>Undeclared</c>, so filtering by it matches <b>zero rows for any account, permanently</b> — a
+    /// silent, always-empty read that would report full headroom on an account that really lost money under a prior
+    /// mode. An <c>Undeclared</c> account trades nowhere, so this <b>throws</b> on <c>Undeclared</c> rather than
+    /// return that accidental 0; a caller must treat an Undeclared account as inert <i>before</i> calling (the
+    /// headroom read 404s, the R-4 throttle reads 0).
+    /// </para>
     /// </remarks>
     /// <param name="database">The scoped, R-20-filtered context.</param>
     /// <param name="accountId">The account whose day is summed.</param>
+    /// <param name="mode">
+    /// The account's <b>current</b> declared mode — the read counts only trades taken under it (R-14). The journal is
+    /// historical, so a practice trade on a now-live account must never count toward a live limit; the caller passes
+    /// the account's mode <b>now</b>, not any trade's stored mode.
+    /// </param>
     /// <param name="now">The current time, supplied by the caller — the trading-day boundary is derived from it.</param>
     /// <param name="cancellationToken">Cancels the read.</param>
     /// <returns>The signed realized P&amp;L for today (positive net profit, negative net loss); <c>0</c> when nothing closed today.</returns>
     public static async Task<decimal> TodayRealizedPnLForAccountAsync(
         this TradingCopilotDbContext database,
         Guid accountId,
+        TradingMode mode,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(database);
 
+        // Refuse Undeclared loudly (gh#746 review). Trade.Mode is check-constrained never to be Undeclared, so a
+        // Trade.Mode == Undeclared filter matches zero rows for ANY account and would silently read as "no realized
+        // P&L" -- reporting full headroom on an account that really lost money. No caller should pass it (an
+        // Undeclared account trades nowhere); the callers treat it as inert, and this enforces that contract so a
+        // future one that forgets fails fast rather than silently misleading a risk surface.
+        if (mode == TradingMode.Undeclared)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(mode), "Undeclared is not a journalable trading mode; treat an Undeclared account as inert.");
+        }
+
         DateTime today = MarketClock.ToMarketTime(now).Date;
         DateTimeOffset floor = now.AddDays(-2); // coarse bound; the in-memory Central-date match below is authoritative
 
         List<(DateTimeOffset ClosedAt, decimal RealizedPnL)> recent = await database.Trades
-            .Where(trade => trade.AccountId == accountId
+            .Where(trade => trade.AccountId == accountId && trade.Mode == mode
                 && trade.ClosedAt != null && trade.ClosedAt >= floor && trade.RealizedPnL != null)
             .Select(trade => new ValueTuple<DateTimeOffset, decimal>(trade.ClosedAt!.Value, trade.RealizedPnL!.Value))
             .ToListAsync(cancellationToken);
