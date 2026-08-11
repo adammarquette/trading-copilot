@@ -40,13 +40,18 @@ import { ModeChip } from './ModeChip';
  *   Practice as not-at-risk rather than leaving discovered practice accounts stranded.
  * - **The credential key is a name, not a secret** — it names the server-side env entry the login lives under, so
  *   no credential is ever entered into or held by the browser (ADR-0015).
+ *
+ * Scope: **prop firms only** for now (gh#780). A brokerage's accounts cannot yet resolve to a mode — the per-stage
+ * convention model has no stage to classify them (a brokerage account resolves to `AccountStage.Unknown`, which
+ * cannot be declared) and no brokerage platform is wired — so the type toggle offers Brokerage as *not yet
+ * supported* rather than completing a walk that would strand every discovered account as `Undeclared`.
  */
 export interface FirmOnboardingProps {
   /** Called when the operator finishes — the surface reloads the roster so every dependent view re-scopes. */
   readonly onComplete: () => void;
 }
 
-/** The ordered steps. A brokerage has no staged programmes, so it never shows the conventions step. */
+/** The ordered steps of the walk. */
 type Phase = 'firm' | 'conventions' | 'connection' | 'discover';
 
 type ApiFailure =
@@ -82,12 +87,9 @@ export function FirmOnboarding({ onComplete }: FirmOnboardingProps) {
   // Step 3 — the login. The key NAMES a server-side env entry; it is never the secret.
   const [credentialKey, setCredentialKey] = useState('');
 
-  // The type is chosen at step 1, then fixed by the created firm — either way it decides whether conventions show.
-  const effectiveType = firm?.type ?? firmType;
-  const steps: readonly Phase[] =
-    effectiveType === FirmType.PropFirm
-      ? ['firm', 'conventions', 'connection', 'discover']
-      : ['firm', 'connection', 'discover'];
+  // Prop-firm-only for now (gh#780): a brokerage account has no mode-resolution path yet, so Brokerage is offered
+  // as not-yet-supported and can never be selected — the walk is always these four steps.
+  const steps: readonly Phase[] = ['firm', 'conventions', 'connection', 'discover'];
   const activeStep = Math.max(0, steps.indexOf(phase));
 
   const showFailure = (result: ApiFailure) =>
@@ -107,7 +109,7 @@ export function FirmOnboarding({ onComplete }: FirmOnboardingProps) {
       return;
     }
     setFirm(result.data);
-    setPhase(result.data.type === FirmType.PropFirm ? 'conventions' : 'connection');
+    setPhase('conventions');
   }
 
   async function submitConventions(event: FormEvent) {
@@ -210,14 +212,22 @@ export function FirmOnboarding({ onComplete }: FirmOnboardingProps) {
                     sx={{ mb: 1 }}
                   >
                     <ToggleButton value={FirmType.PropFirm}>Prop firm</ToggleButton>
-                    <ToggleButton value={FirmType.Brokerage}>Brokerage</ToggleButton>
+                    <ToggleButton
+                      value={FirmType.Brokerage}
+                      disabled
+                      title="Not yet supported — see gh#780"
+                    >
+                      Brokerage
+                    </ToggleButton>
                   </ToggleButtonGroup>
                   <Typography
                     variant="caption"
                     sx={{ color: 'text.secondary', display: 'block', mb: 2 }}
                   >
-                    A prop firm has staged programmes (evaluation, funded); a brokerage&apos;s
-                    accounts are simply live or paper, so it skips the conventions step.
+                    A prop firm has staged programmes (evaluation, funded), and its accounts&apos;
+                    mode comes from the conventions you declare next. Brokerage support isn&apos;t
+                    built yet — a brokerage account has no mode-resolution path, so it would be left
+                    untradeable (gh#780).
                   </Typography>
                   <Button
                     type="submit"
