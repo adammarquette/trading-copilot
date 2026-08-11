@@ -18,6 +18,15 @@ const deleteMock = vi.mocked(deleteMap);
 
 const MAP: TickerMap = { ticker: 'SPY', instrument: 'ES' };
 
+/** A promise whose resolution we drive by hand, so we can assert the UI mid-request. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
 function fillPair(ticker: string, instrument: string) {
   fireEvent.change(screen.getByLabelText(/ticker/i, { exact: false }), {
     target: { value: ticker },
@@ -104,6 +113,52 @@ describe('RelevanceMaps', () => {
 
     await waitFor(() => expect(deleteMock).toHaveBeenCalledWith('SPY', 'ES'));
     expect(listMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('guards Add while a create is in flight, so a double-click cannot fire two POSTs', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [] });
+    const pending = deferred<Awaited<ReturnType<typeof createMap>>>();
+    createMock.mockReturnValue(pending.promise);
+
+    renderWithProviders(<RelevanceMaps />);
+    await screen.findByText(/no maps yet/i);
+
+    fillPair('SPY', 'ES');
+    const add = screen.getByRole('button', { name: 'Add' }) as HTMLButtonElement;
+    fireEvent.click(add);
+
+    // While the POST is outstanding the button is disabled and re-labelled, so a second click is
+    // swallowed rather than firing a duplicate create that comes back 409 on its own success.
+    expect(add.disabled).toBe(true);
+    expect(add.textContent).toMatch(/adding/i);
+    fireEvent.click(add);
+    expect(createMock).toHaveBeenCalledTimes(1);
+
+    pending.resolve({ ok: true, data: MAP });
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2)); // reload after the create settles
+  });
+
+  it('guards a row delete while its DELETE is in flight, so a double-click cannot fire twice', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [MAP] });
+    const pending = deferred<Awaited<ReturnType<typeof deleteMap>>>();
+    deleteMock.mockReturnValue(pending.promise);
+
+    renderWithProviders(<RelevanceMaps />);
+    await screen.findByText('SPY → ES');
+
+    const del = screen.getByRole('button', {
+      name: /delete the SPY to ES map/i,
+    }) as HTMLButtonElement;
+    fireEvent.click(del);
+
+    // The row's own button disables while its DELETE is outstanding, so the second click can't fire a
+    // duplicate that 404s server-side (the row is already gone) and surfaces a spurious failure.
+    expect(del.disabled).toBe(true);
+    fireEvent.click(del);
+    expect(deleteMock).toHaveBeenCalledTimes(1);
+
+    pending.resolve({ ok: true, data: undefined });
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2));
   });
 
   it('keeps the Add action disabled until both halves are filled', async () => {

@@ -24,11 +24,19 @@ type LoadState =
   | { readonly kind: 'error'; readonly message: string }
   | { readonly kind: 'loaded'; readonly maps: readonly TickerMap[] };
 
+/** The pair is a map's identity, so it doubles as the in-flight key for a row's delete. */
+const mapKey = (map: TickerMap) => `${map.ticker}→${map.instrument}`;
+
 export function RelevanceMaps() {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const [ticker, setTicker] = useState('');
   const [instrument, setInstrument] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
+  // In-flight guards: a slow POST/DELETE must not stay clickable, or a double-click fires a duplicate that
+  // 409s (create) or 404s (delete) on its own success and surfaces a spurious warning. Mirrors the 'saving'
+  // guard in RiskProfileForm. Delete is tracked per pair so one row's request never disables another's.
+  const [adding, setAdding] = useState(false);
+  const [deleting, setDeleting] = useState<ReadonlySet<string>>(() => new Set());
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -71,10 +79,12 @@ export function RelevanceMaps() {
       if (pair.ticker === '' || pair.instrument === '') {
         return;
       }
+      setAdding(true);
       void createMap(pair).then((result) => {
         if (!mounted.current) {
           return;
         }
+        setAdding(false);
         if (result.ok) {
           setTicker('');
           setInstrument('');
@@ -90,10 +100,17 @@ export function RelevanceMaps() {
 
   const remove = useCallback(
     (map: TickerMap) => {
+      const key = mapKey(map);
+      setDeleting((current) => new Set(current).add(key));
       void deleteMap(map.ticker, map.instrument).then((result) => {
         if (!mounted.current) {
           return;
         }
+        setDeleting((current) => {
+          const next = new Set(current);
+          next.delete(key);
+          return next;
+        });
         if (result.ok) {
           setActionError(null);
           reload();
@@ -132,9 +149,9 @@ export function RelevanceMaps() {
           <Button
             type="submit"
             variant="contained"
-            disabled={ticker.trim() === '' || instrument.trim() === ''}
+            disabled={adding || ticker.trim() === '' || instrument.trim() === ''}
           >
-            Add
+            {adding ? 'Adding…' : 'Add'}
           </Button>
         </Stack>
       </Box>
@@ -187,6 +204,7 @@ export function RelevanceMaps() {
                 size="small"
                 aria-label={`Delete the ${map.ticker} to ${map.instrument} map`}
                 onClick={() => remove(map)}
+                disabled={deleting.has(mapKey(map))}
               >
                 <DeleteOutlineIcon fontSize="small" />
               </IconButton>
