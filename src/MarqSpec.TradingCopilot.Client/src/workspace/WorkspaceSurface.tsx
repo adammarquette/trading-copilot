@@ -6,6 +6,7 @@ import { useCallback, useMemo, useState } from 'react';
 
 import { MarketChart } from '../chart/MarketChart';
 import type { IndicatorSpec } from '../chart/MarketChart';
+import { useSuggestionZones } from '../chart/useSuggestionZones';
 import type { Destination } from '../navigation/destinations';
 import { SuggestionsPanel } from '../suggestions/SuggestionsPanel';
 
@@ -63,6 +64,9 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
     () => (showLevels ? [resolution] : NO_TIMEFRAMES),
     [showLevels, resolution],
   );
+
+  // The active suggestion's entry / stop / target overlay the chart, kept fresh + owner-scoped by the hook (gh#727).
+  const { zones: suggestionZones, stale: suggestionsStale } = useSuggestionZones(instrument);
 
   // A STABLE array so toggling an indicator (not the instrument/resolution) never re-runs the chart's bars fetch for
   // no reason; the chart adds/removes the pane in place rather than remounting.
@@ -127,6 +131,8 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
             resolution={resolution}
             indicators={indicators}
             levelTimeframes={levelTimeframes}
+            suggestionZones={suggestionZones}
+            suggestionsStale={suggestionsStale}
           />
         </Box>
       </Box>
