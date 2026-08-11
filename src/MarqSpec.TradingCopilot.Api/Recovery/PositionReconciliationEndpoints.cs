@@ -30,7 +30,9 @@ public static class PositionReconciliationEndpoints
         CancellationToken cancellationToken)
     {
         // `?instrument=` scopes the read to a single contract for the chart's per-instrument execution overlay
-        // (gh#772). A malformed symbol is a client mistake worth naming (400), not a flat account.
+        // (gh#772). Two distinct client mistakes are 400s, never a flat account: a syntactically malformed symbol
+        // (caught here), and a well-formed one the venue has no contract for (caught below, from the service). A
+        // genuinely unreachable venue is neither -- it comes back Unknown with a 200.
         InstrumentId? scoped = null;
         if (instrument is not null)
         {
@@ -42,7 +44,16 @@ public static class PositionReconciliationEndpoints
         }
 
         // The clock is read here, at the boundary, and passed in -- the settlement decision stays pure.
-        PositionReconciliation? result = await reconciler.ReconcileAsync(id, scoped, DateTimeOffset.UtcNow, cancellationToken);
+        PositionReconciliation? result;
+        try
+        {
+            result = await reconciler.ReconcileAsync(id, scoped, DateTimeOffset.UtcNow, cancellationToken);
+        }
+        catch (InstrumentNotResolvableException unresolvable)
+        {
+            return Results.BadRequest(new { error = unresolvable.Message });
+        }
+
         if (result is null)
         {
             return Results.NotFound(); // not found or not owned by the caller (R-20)

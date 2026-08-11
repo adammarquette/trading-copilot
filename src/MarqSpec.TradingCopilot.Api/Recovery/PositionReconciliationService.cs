@@ -5,6 +5,7 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Venue;
+using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -76,10 +77,10 @@ public sealed class PositionReconciliationService
     /// <param name="accountId">The account to reconcile (R-20-scoped to the caller).</param>
     /// <param name="instrument">
     /// When set, only the position in <i>that</i> instrument's venue contract is returned — the venue resolves the
-    /// symbol to its contract. <see langword="null"/> returns every contract, unchanged. The filter never turns an
-    /// <see cref="PositionMarkBasis.Unknown"/> read into "flat on this instrument": a venue that cannot resolve the
-    /// contract is declared-unknown, exactly as an unreachable read of the whole book is — the resolve happens inside
-    /// the same try.
+    /// symbol to its contract. <see langword="null"/> returns every contract, unchanged. A well-formed symbol that
+    /// resolves to <b>no</b> contract is a client mistake, so it raises
+    /// <see cref="InstrumentNotResolvableException"/> (the endpoint maps it to a 400) — never an empty "flat on this
+    /// instrument", and never <see cref="PositionMarkBasis.Unknown"/>, which stays reserved for an unreachable venue.
     /// </param>
     /// <param name="now">The current instant — the settlement window is judged against it in market time.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
@@ -122,16 +123,28 @@ public sealed class PositionReconciliationService
             IReadOnlyList<PositionSnapshot> positions = await venue.GetPositionsAsync(venueAccount.Id, cancellationToken);
             if (instrument is { } wanted)
             {
-                // Resolve INSIDE the try: an unresolvable / unreachable venue is declared-unknown via the catch below,
-                // never an empty "flat on this instrument" (the same reason the whole-book read is Unknown, not flat).
-                ResolvedContract resolved = await venue.ResolveContractAsync(wanted, cancellationToken);
+                // The read reached the venue (roster + positions above), so a resolve failure here is the venue saying
+                // "no such contract" -- a CLIENT mistake (a typo'd / delisted symbol), which surfaces as a 400. It must
+                // not become an empty "flat on this instrument", and must not become Unknown, which is reserved
+                // (ADR-0013) for "the venue could not be reached". A transport fault mid-resolve is NOT the venue's
+                // not-found type, so it falls through to the broad catch below and correctly stays Unknown.
+                ResolvedContract resolved;
+                try
+                {
+                    resolved = await venue.ResolveContractAsync(wanted, cancellationToken);
+                }
+                catch (ProjectXVenueException notFound)
+                {
+                    throw new InstrumentNotResolvableException(wanted, notFound);
+                }
+
                 positions = [.. positions.Where(position => position.Contract == resolved.Contract)];
             }
 
             PositionMarkBasis basis = BasisNow(now, venueReachable: true);
             return new PositionReconciliation(basis, positions);
         }
-        catch (Exception error) when (error is not OperationCanceledException)
+        catch (Exception error) when (error is not OperationCanceledException and not InstrumentNotResolvableException)
         {
             // Venue unreachable across the reconcile: fail-safe to declared-unknown rather than surface stale state.
             _logger.LogWarning(error, "Position reconcile for account {AccountId} could not reach venue truth.", accountId);
