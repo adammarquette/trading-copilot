@@ -29,7 +29,6 @@ const createConnectionMock = vi.mocked(createConnection);
 const discoverMock = vi.mocked(discoverAccounts);
 
 const PROP_FIRM: Firm = { id: 'f1', name: 'Topstep', type: FirmType.PropFirm, conventions: [] };
-const BROKERAGE: Firm = { id: 'f2', name: 'Ironbeam', type: FirmType.Brokerage, conventions: [] };
 const CONNECTION: Connection = {
   id: 'c1',
   firmId: 'f1',
@@ -116,24 +115,22 @@ describe('FirmOnboarding', () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
-  it('skips the conventions step for a brokerage — it has no stages', async () => {
-    createFirmMock.mockResolvedValue({ ok: true, data: BROKERAGE });
-
+  it('offers Brokerage as not-yet-supported, so a walk can never strand accounts as Undeclared (gh#780)', () => {
     renderWithProviders(<FirmOnboarding onComplete={vi.fn()} />);
 
-    fireEvent.change(screen.getByLabelText(/firm name/i, { exact: false }), {
-      target: { value: 'Ironbeam' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /brokerage/i }));
-    fireEvent.click(screen.getByRole('button', { name: /create firm/i }));
+    // A brokerage account has no mode-resolution path yet — the per-stage convention model can't classify it and
+    // no brokerage platform is wired — so completing a brokerage walk would leave every discovered account
+    // Undeclared (untradeable everywhere). The type is therefore disabled rather than silently leading there.
+    const brokerage = screen.getByRole('button', { name: /brokerage/i }) as HTMLButtonElement;
+    expect(brokerage.disabled).toBe(true);
 
-    await waitFor(() =>
-      expect(createFirmMock).toHaveBeenCalledWith({ name: 'Ironbeam', type: FirmType.Brokerage }),
+    // It cannot be selected: clicking the disabled option is a no-op and prop firm stays the type, so no firm is
+    // ever created without the conventions step that gives its accounts a mode.
+    fireEvent.click(brokerage);
+    expect(createFirmMock).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /prop firm/i }).getAttribute('aria-pressed')).toBe(
+      'true',
     );
-
-    // Straight to the connection step — no conventions to declare.
-    expect(await screen.findByLabelText(/credential key/i, { exact: false })).toBeTruthy();
-    expect(declareMock).not.toHaveBeenCalled();
   });
 
   it('surfaces a refused firm create and stays on the first step', async () => {
@@ -157,15 +154,17 @@ describe('FirmOnboarding', () => {
   });
 
   it('makes clear the credential key is a name, not the secret itself', async () => {
-    createFirmMock.mockResolvedValue({ ok: true, data: BROKERAGE });
+    createFirmMock.mockResolvedValue({ ok: true, data: PROP_FIRM });
+    declareMock.mockResolvedValue({ ok: true, data: PROP_FIRM });
 
     renderWithProviders(<FirmOnboarding onComplete={vi.fn()} />);
 
+    // Walk to the connection step: name the firm, then accept the default conventions.
     fireEvent.change(screen.getByLabelText(/firm name/i, { exact: false }), {
-      target: { value: 'Ironbeam' },
+      target: { value: 'Topstep' },
     });
-    fireEvent.click(screen.getByRole('button', { name: /brokerage/i }));
     fireEvent.click(screen.getByRole('button', { name: /create firm/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /declare conventions/i }));
 
     await screen.findByLabelText(/credential key/i, { exact: false });
     expect(screen.getByText(/not the credentials/i)).toBeTruthy();
