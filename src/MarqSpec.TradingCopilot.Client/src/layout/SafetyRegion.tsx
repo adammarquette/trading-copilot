@@ -17,14 +17,18 @@ import type { ReactNode } from 'react';
  *     them, so the layout does not shift -- and the operator does not learn a control's position -- the
  *     day gh#25 fills them.
  *
- * The contents belong to gh#25. This reserves the frame only; a countdown that renders zeros or a kill
- * button that does nothing would be worse than an obviously empty slot.
+ * The two slots were filled by gh#657. The degraded-protection indicator (gh#222) sits AHEAD of them and
+ * deliberately outside the slot chrome: it is an alert, not a labelled control, so it carries no caption and no
+ * dashed reservation -- a permanent "PROTECTION" frame beside a healthy system is noise, and the indicator
+ * reserves its own footprint while quiet so nothing shifts the moment a drop happens.
  */
 export interface SafetyRegionProps {
-  /** The R-13 time-to-flat countdown. gh#25. */
+  /** The R-13 time-to-flat countdown. gh#657. */
   readonly timeToFlat?: ReactNode;
-  /** The kill switch. gh#25. */
+  /** The kill switch. gh#657. */
   readonly killSwitch?: ReactNode;
+  /** The degraded-protection indicator (gh#222) — rendered ahead of the slots, without slot chrome. */
+  readonly protection?: ReactNode;
   /** Compact drops the slot captions; the controls themselves stay at full size. */
   readonly dense?: boolean;
 }
@@ -78,7 +82,12 @@ function SafetySlot({ name, caption, minWidth, dense, children }: SafetySlotProp
   );
 }
 
-export function SafetyRegion({ timeToFlat, killSwitch, dense = false }: SafetyRegionProps) {
+export function SafetyRegion({
+  timeToFlat,
+  killSwitch,
+  protection,
+  dense = false,
+}: SafetyRegionProps) {
   return (
     <Box
       // A landmark, not a decoration: at any breakpoint, on any surface, an assistive-technology user
@@ -88,6 +97,7 @@ export function SafetyRegion({ timeToFlat, killSwitch, dense = false }: SafetyRe
       data-testid="safety-region"
       sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flex: 'none' }}
     >
+      {protection}
       <SafetySlot name="time-to-flat" caption="TO FLAT" minWidth={dense ? 62 : 84} dense={dense}>
         {timeToFlat}
       </SafetySlot>
