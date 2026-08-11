@@ -8,6 +8,7 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Venue;
+using MarqSpec.TradingCopilot.Integration.ProjectX;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -198,6 +199,91 @@ public class WorkingOrderReconciliationServiceTests
             .ReconcileAsync(accountId, Midday, CancellationToken.None);
 
         result!.Basis.Should().Be(PositionMarkBasis.Live);
+        result.Orders.Should().BeEmpty();
+    }
+
+    private static InstrumentId Es => InstrumentId.Parse("ES");
+
+    private static VenueContractId EsContract => VenueContractId.Create(Venue, "CON.F.US.MES.U26");
+
+    private static VenueContractId NqContract => VenueContractId.Create(Venue, "CON.F.US.MNQ.U26");
+
+    private static WorkingOrder EsStop => new("ORD-ES", EsContract, new Price(4_990m), null, 2);
+
+    private static WorkingOrder NqStop => new("ORD-NQ", NqContract, new Price(19_900m), null, 1);
+
+    [Fact]
+    public async Task ReconcileAsync_ShouldReturnOnlyTheInstrumentsOrders_WhenScopedToAnInstrument()
+    {
+        // gh#772: the chart overlays ONE instrument, so the scoped read filters to that instrument's contract — an
+        // order resting on a different contract must not bleed onto its chart.
+        Guid accountId = await SeedAccountAsync();
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([EsStop, NqStop]);
+        A.CallTo(() => _venue.ResolveContractAsync(Es, A<CancellationToken>._))
+            .Returns(new ResolvedContract(EsContract, Es));
+        await using TradingCopilotDbContext context = Context();
+
+        WorkingOrderReconciliation? result = await Service(context)
+            .ReconcileAsync(accountId, Es, Midday, CancellationToken.None);
+
+        result!.Orders.Should().ContainSingle();
+        result.Orders[0].VenueOrderKey.Should().Be("ORD-ES");
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ShouldReturnEveryContract_WhenNotScopedToAnInstrument()
+    {
+        // The unscoped overload — and the 3-arg one that delegates to it with null — is unchanged: no resolve, every
+        // order. This is what the safety-critical callers (auto-flatten, the reconcile paths) keep getting.
+        Guid accountId = await SeedAccountAsync();
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([EsStop, NqStop]);
+        await using TradingCopilotDbContext context = Context();
+
+        WorkingOrderReconciliation? result = await Service(context)
+            .ReconcileAsync(accountId, Midday, CancellationToken.None);
+
+        result!.Orders.Should().HaveCount(2);
+        A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ShouldRaiseInstrumentNotResolvable_WhenTheVenueHasNoContractForTheInstrument()
+    {
+        // gh#772 acceptance: a well-formed symbol the venue has NO contract for is a CLIENT mistake, not unobtainable
+        // truth. The read reached the venue (roster + book), so the resolve's not-found is the venue answering "no such
+        // contract" -- it must surface as a 400 (this exception, mapped at the endpoint), never Unknown (reserved for an
+        // unreachable venue) and never an empty "nothing resting on this instrument".
+        Guid accountId = await SeedAccountAsync();
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([EsStop]);
+        A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._))
+            .Throws(new ProjectXVenueException("No ProjectX contract matches instrument 'ES'."));
+        await using TradingCopilotDbContext context = Context();
+
+        Func<Task> read = () => Service(context).ReconcileAsync(accountId, Es, Midday, CancellationToken.None);
+
+        (await read.Should().ThrowAsync<InstrumentNotResolvableException>())
+            .Which.Instrument.Should().Be(Es);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ShouldDeclareUnknown_WhenResolvingTheContractHitsATransportFault()
+    {
+        // A transport fault mid-resolve is NOT the venue's not-found type, so it is genuine unobtainable truth --
+        // exactly like an unreachable book read: declared-unknown, never a spurious 400.
+        Guid accountId = await SeedAccountAsync();
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([EsStop]);
+        A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("venue unreachable mid-resolve"));
+        await using TradingCopilotDbContext context = Context();
+
+        WorkingOrderReconciliation? result = await Service(context)
+            .ReconcileAsync(accountId, Es, Midday, CancellationToken.None);
+
+        result!.Basis.Should().Be(PositionMarkBasis.Unknown);
         result.Orders.Should().BeEmpty();
     }
 
