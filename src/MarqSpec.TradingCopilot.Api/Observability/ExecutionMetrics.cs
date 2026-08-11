@@ -95,6 +95,13 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <summary>Outcome tag: a concurrent writer had journalled it first; the unique index rejected this write.</summary>
     public const string JournalDuplicateRejected = "duplicate-rejected";
 
+    /// <summary>
+    /// Outcome tag: the write FAILED on a non-idempotent fault (a CHECK / FK violation, a serialization failure, a
+    /// lost connection) — a real, non-dupe error the writer now surfaces rather than swallowing as a benign skip
+    /// (gh#747). An account showing this is losing Trade rows: the day's realized P&amp;L under-reports until corrected.
+    /// </summary>
+    public const string JournalWriteFailed = "write-failed";
+
     /// <summary>Outcome tag: the flatten closed the position.</summary>
     public const string FlattenExecuted = "executed";
 
