@@ -100,6 +100,35 @@ describe('suggestionsToPriceLines', () => {
     expect(lines.map((line) => line.price)).toEqual([10, 9, 12, 20, 21, 18]);
   });
 
+  it('leaves a lone zone unsuffixed — no ordinal noise when there is nothing to disambiguate', () => {
+    const lines = suggestionsToPriceLines(
+      [{ id: 'a', entry: 10, stop: 9, target: 12 }],
+      SUGGESTION_PALETTE,
+    );
+    expect(lines.map((line) => line.title)).toEqual(['Entry', 'Stop', 'Target']);
+  });
+
+  it('disambiguates coexisting zones with a shared per-zone ordinal, so a stop pairs with its own entry', () => {
+    // Supersession is keyed on (trigger, instrument, side), not the symbol (data dictionary §6), so two Active
+    // suggestions can draw on one instrument at once. Six identically titled lines leave the operator unable to tell
+    // which stop protects which entry — the ordinal ties each zone's three lines together (gh#727 review).
+    const lines = suggestionsToPriceLines(
+      [
+        { id: 'a', entry: 10, stop: 9, target: 12 },
+        { id: 'b', entry: 20, stop: 21, target: 18 },
+      ],
+      SUGGESTION_PALETTE,
+    );
+    expect(lines.map((line) => line.title)).toEqual([
+      'Entry #1',
+      'Stop #1',
+      'Target #1',
+      'Entry #2',
+      'Stop #2',
+      'Target #2',
+    ]);
+  });
+
   it('is empty for no zones', () => {
     expect(suggestionsToPriceLines([], SUGGESTION_PALETTE)).toEqual([]);
   });
