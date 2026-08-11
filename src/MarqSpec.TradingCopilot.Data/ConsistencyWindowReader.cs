@@ -33,10 +33,11 @@ public static class ConsistencyWindowReader
     /// </para>
     /// <para>
     /// <b>Never pass <see cref="TradingMode.Undeclared"/> (gh#746 review).</b> <c>Trade.Mode</c> is check-constrained
-    /// never to be <c>Undeclared</c>, so filtering by it always matches zero rows and returns
-    /// <see cref="ConsistencyWindow.Empty"/> by accident rather than by fact. An <c>Undeclared</c> account trades
-    /// nowhere; the send path's read (<c>OrderEndpoints.ComposeAsync</c>) reaches this only for a send that is
-    /// refused for being undeclared anyway, so the empty window is harmless there and no order is mis-sent.
+    /// never to be <c>Undeclared</c>, so filtering by it always matches zero rows and would return
+    /// <see cref="ConsistencyWindow.Empty"/> by accident rather than by fact — so this <b>throws</b> on
+    /// <c>Undeclared</c>. An <c>Undeclared</c> account trades nowhere; the send path's read
+    /// (<c>OrderEndpoints.ComposeAsync</c>) guards Undeclared to an empty window before this, since that send is
+    /// refused for being undeclared anyway, so no order is mis-sent.
     /// </para>
     /// </remarks>
     /// <param name="database">The context.</param>
@@ -56,6 +57,16 @@ public static class ConsistencyWindowReader
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(database);
+
+        // Refuse Undeclared loudly (gh#746 review). Trade.Mode is check-constrained never to be Undeclared, so a
+        // Trade.Mode == Undeclared filter always matches zero rows and would return Empty by accident rather than by
+        // fact. No caller should pass it; the send-path caller (OrderEndpoints.ComposeAsync) guards it to Empty before
+        // this, since an undeclared send is refused anyway.
+        if (mode == TradingMode.Undeclared)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(mode), "Undeclared is not a journalable trading mode; treat an Undeclared account as inert.");
+        }
 
         List<(DateTimeOffset ClosedAt, decimal RealizedPnL)> closed = await database.Trades
             .Where(trade => trade.AccountId == accountId && trade.Mode == mode

@@ -50,8 +50,9 @@ public static class DailyRealizedReader
     /// <b>Never pass <see cref="TradingMode.Undeclared"/> (gh#746 review).</b> <c>Trade.Mode</c> is check-constrained
     /// never to be <c>Undeclared</c>, so filtering by it matches <b>zero rows for any account, permanently</b> — a
     /// silent, always-empty read that would report full headroom on an account that really lost money under a prior
-    /// mode. An <c>Undeclared</c> account trades nowhere, so a caller must treat it as <b>inert (0)</b> explicitly
-    /// before calling this, not lean on that accidental empty result. The callers (headroom, R-4 throttle) do.
+    /// mode. An <c>Undeclared</c> account trades nowhere, so this <b>throws</b> on <c>Undeclared</c> rather than
+    /// return that accidental 0; a caller must treat an Undeclared account as inert <i>before</i> calling (the
+    /// headroom read 404s, the R-4 throttle reads 0).
     /// </para>
     /// </remarks>
     /// <param name="database">The scoped, R-20-filtered context.</param>
@@ -72,6 +73,17 @@ public static class DailyRealizedReader
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(database);
+
+        // Refuse Undeclared loudly (gh#746 review). Trade.Mode is check-constrained never to be Undeclared, so a
+        // Trade.Mode == Undeclared filter matches zero rows for ANY account and would silently read as "no realized
+        // P&L" -- reporting full headroom on an account that really lost money. No caller should pass it (an
+        // Undeclared account trades nowhere); the callers treat it as inert, and this enforces that contract so a
+        // future one that forgets fails fast rather than silently misleading a risk surface.
+        if (mode == TradingMode.Undeclared)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(mode), "Undeclared is not a journalable trading mode; treat an Undeclared account as inert.");
+        }
 
         DateTime today = MarketClock.ToMarketTime(now).Date;
         DateTimeOffset floor = now.AddDays(-2); // coarse bound; the in-memory Central-date match below is authoritative
