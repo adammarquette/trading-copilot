@@ -570,12 +570,14 @@ public class StagedOrderEndpointsTests
     }
 
     [Fact]
-    public async Task Reconcile_ShouldRefuseAndLeaveTaking_WhenNothingRestsButAPositionIsOpen()
+    public async Task Reconcile_ShouldAdoptAsFilled_WhenThisTakeFilledAndThePositionIsStillOpen()
     {
-        // gh#589 round-2: "no working order under the tag" is NOT "nothing live" -- a stranded take may have FILLED
-        // before the reconcile (a filled entry is no longer a working order; its bracket legs carry no tag). Releasing
-        // then would strand an untracked open position. So a reachable venue with nothing under the tag but an OPEN
-        // position refuses: the row stays Taking, and the operator resolves the position first.
+        // gh#723 -- the likeliest strand: a take that faulted at the seam AFTER the venue had already filled it, with
+        // the position STILL OPEN. Nothing rests under the tag (a fill is no longer a working order; its bracket legs
+        // carry no tag), but venue fill history positively confirms THIS tag filled and a position is open. Adopt the
+        // fill onto the row as Filled -- tracked, journaled, the account unblocked -- rather than leaving it stuck
+        // Taking and loud, needing manual intervention. NO StopPlan: the open position rides its native safety bracket
+        // (venue-attached on fill), so a synthetic promotion plan would race a SECOND native stop over that leg.
         Guid accountId = await SeedAccountAsync();
         await ArmAsync(accountId, SmallBuy());
         Guid orderId;
@@ -583,11 +585,50 @@ public class StagedOrderEndpointsTests
         await SetTakingAsync(orderId);
 
         A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
-            .Returns<IReadOnlyList<WorkingOrder>>([]); // nothing resting under the tag...
+            .Returns<IReadOnlyList<WorkingOrder>>([]); // nothing rests -- a filled entry is no longer a working order
         VenueContractId contract = VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
         A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
             .Returns<IReadOnlyList<PositionSnapshot>>(
                 [new PositionSnapshot(_venueAccount, contract, NetQuantity: 1, new Price(5300m))]); // ...but a position IS open
+        A.CallTo(() => _venue.FindFilledOrderByTagAsync(
+                A<VenueAccountId>._, A<string>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .ReturnsLazily((VenueAccountId _, string tag, DateTimeOffset _, CancellationToken _) =>
+                TaggedFillEvidence.Filled(tag, 1m, 5300m, "VENUE-KEY-OPEN")); // this take filled; the position is still open
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), Fills(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        await using TradingCopilotDbContext reload = Context();
+        Order adopted = await reload.Orders.FirstAsync(o => o.Id == orderId);
+        adopted.Status.Should().Be(OrderStatus.Filled, "the take filled and the position is still open, so the row is adopted Filled and tracked");
+        adopted.VenueOrderKey.Should().Be("VENUE-KEY-OPEN", "the venue key comes from fill history -- the position snapshot carries none");
+        (await reload.StopPlans.AnyAsync(p => p.OrderId == orderId)).Should().BeFalse(
+            "the open position rides its native safety bracket, so no synthetic promotion plan is written (as the round-tripped sibling does not)");
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldLeaveTaking_WhenAPositionIsOpenButFillHistoryIsUnavailable()
+    {
+        // gh#723 + gh#381: an open position means the take MAY have filled, but if fill history cannot be read we cannot
+        // confirm the open position is THIS take's -- adopting on an unknown could stamp a wrong venue key onto the row.
+        // "We could not ask" is never "it filled": leave the row Taking, loud, protected by its native bracket meanwhile.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SetTakingAsync(orderId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]);
+        VenueContractId contract = VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>(
+                [new PositionSnapshot(_venueAccount, contract, NetQuantity: 1, new Price(5300m))]);
+        A.CallTo(() => _venue.FindFilledOrderByTagAsync(
+                A<VenueAccountId>._, A<string>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .ThrowsAsync(new InvalidOperationException("gateway order-history read failed")); // -> TaggedFillStatus.Unavailable
 
         await using TradingCopilotDbContext context = Context();
         IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
@@ -596,7 +637,42 @@ public class StagedOrderEndpointsTests
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
         await using TradingCopilotDbContext reload = Context();
         (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
-            OrderStatus.Taking, "a possibly-filled take is never released over an open position — the row stays Taking (gh#589)");
+            OrderStatus.Taking, "an open position with unreadable fill history cannot be safely adopted -- the row stays Taking");
+        (await reload.StopPlans.AnyAsync(p => p.OrderId == orderId)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldLeaveTaking_WhenAPositionIsOpenButNoFillIsAttributableToThisTake()
+    {
+        // gh#723: a reachable venue with fill history that positively reports NO fill under this tag, yet a position is
+        // open. The open position is therefore NOT this take's (the no-stacking guard means at most one entry in
+        // flight), so it cannot be adopted onto this row -- and a possibly-untracked open position is never released
+        // over. Leave the row Taking, loud. NoFillFound authorises nothing (a negative existence claim over an external
+        // index), so it can only ever leave the pre-gh#723 refusal in place -- gh#723 ADDS adoption only for a Filled.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SetTakingAsync(orderId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]);
+        VenueContractId contract = VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>(
+                [new PositionSnapshot(_venueAccount, contract, NetQuantity: 1, new Price(5300m))]);
+        A.CallTo(() => _venue.FindFilledOrderByTagAsync(
+                A<VenueAccountId>._, A<string>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .ReturnsLazily((VenueAccountId _, string tag, DateTimeOffset _, CancellationToken _) => TaggedFillEvidence.NoFillFound(tag));
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), Fills(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Taking, "a fill positively not attributable to this take, over an open position, is never adopted or released");
     }
 
     [Fact]
