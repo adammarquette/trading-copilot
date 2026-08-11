@@ -168,7 +168,11 @@ public static class OrderEndpoints
             // exhaustive status switch below is the same fail-closed shape). Safe to ignore:
             //   * Staged -- server-side only, unsent, no exposure, so a staged ticket never blocks a direct send;
             //   * Filled -- already realised into the balance ComposeAsync reads -- and Cancelled / Rejected -- never
-            //     rested -- so a send after a fully-resolved prior order behaves exactly as a first send.
+            //     rested -- so a send after a fully-resolved prior order behaves exactly as a first send. (gh#723
+            //     caveat: a stranded take adopted Filled over a STILL-OPEN position is the one Filled that is NOT flat,
+            //     so this exclusion no longer implies flatness on its own -- the backstop is ComposeAsync's own
+            //     venue-position flatness refusal, which blocks ANY entry on a non-flat account BEFORE this check runs.
+            //     Do not weaken that flatness refusal without revisiting this Filled exclusion.)
             // Everything else -- Working, PartiallyFilled, Taking, Unknown, and any status added later -- blocks.
             // Taking (a take in flight, held by the gh#530 durable claim) is imminent exposure and now COUNTS
             // (gh#589): it was excluded while a stranded Taking had no recovery -- counting it would then dead-lock
@@ -453,6 +457,10 @@ public static class OrderEndpoints
             // it names the states safe to ignore (Staged / Filled / Cancelled / Rejected) and blocks EVERYTHING else --
             // Working, PartiallyFilled, Taking, Unknown, any status added later. Taking now counts (another in-flight or
             // stranded take is imminent / unknown exposure), safe because gh#589 makes a stranded Taking recoverable.
+            // gh#723 caveat: the Filled exclusion no longer proves a flat account -- a stranded take adopted Filled over
+            // a STILL-OPEN position (POST /orders/{id}/reconcile) is a Filled that is NOT flat. ComposeAsync's own fresh
+            // venue-position flatness refusal (called shortly below) is the backstop that blocks a stack on the adopted
+            // position; do not weaken it without revisiting this exclusion. (Same note on the send path's copy.)
             bool hasOutstandingEntry = await database.Orders.AnyAsync(
                 candidate => candidate.AccountId == order.AccountId
                     && candidate.Status != OrderStatus.Staged
@@ -726,18 +734,72 @@ public static class OrderEndpoints
 
             if (positionTruth.Positions.Any(position => !position.IsFlat))
             {
-                // An open position may be this take's fill. Do NOT release over it -- leave the row Taking + loud; the
-                // operator reconciles the position first (it is protected by its native bracket + auto-flatten
-                // meanwhile). Adopting the FILLED position onto this row (there is no working order to match) is
-                // deferred (gh#631 covers the round-tripped case; adopting a still-OPEN position is not yet built).
+                // An open position means the take MAY have filled (a fill is no longer a working order, and its bracket
+                // legs carry no customTag). Never release over it. Consult fill history for THIS row's tag: it both
+                // confirms the position is this take's and carries the venue key the position snapshot cannot (gh#723).
+                TaggedFillEvidence? openFill = await fills.FindFillAsync(
+                    order.AccountId, id.ToString(), order.PlacedAt, cancellationToken);
+                if (openFill is null)
+                {
+                    return Results.NotFound(); // account not found / not owned (R-20)
+                }
+
+                if (openFill.VetoesRelease)
+                {
+                    // Venue fill history POSITIVELY confirms this take filled, and the position is still open -- adopt
+                    // it onto the row as Filled so it is tracked, journaled and the account unblocked, rather than left
+                    // stuck Taking and loud (gh#723 -- the likeliest strand). Size + key come from venue truth (the
+                    // fill), never from what the app believes it sent. NO StopPlan: the open position rides the NATIVE
+                    // safety bracket the venue attached on fill (a position is never opened unprotected, gh#589), so a
+                    // synthetic promotion plan would place a SECOND native stop over that leg -- the round-tripped
+                    // sibling below writes none for the analogous reason (there nothing is left to protect; here the
+                    // venue already protects it). The account is not flat, but the open position blocks a concurrent
+                    // take through the send path's own flatness refusal, and this whole method holds the entry lock, so
+                    // adoption opens no stacking window (gh#531/#589).
+                    int submittedSize = order.Size; // operator-armed size, captured BEFORE venue truth overwrites it below
+                    order.Status = OrderStatus.Filled;
+                    order.VenueOrderKey = openFill.VenueOrderKey;
+                    order.PlacedAt = DateTimeOffset.UtcNow;
+                    order.Size = (int)openFill.FilledSize;
+                    await database.SaveChangesAsync(cancellationToken);
+
+                    // A confirmed fill IS a taken suggestion (gh#549): journal the disposition, as the adopt-live branch
+                    // does, in its OWN save AFTER the adopt so it can never abort it (gh#455). Unlike the round-tripped
+                    // branch (a closed trade), the position here is LIVE, so the disposition belongs with it (R-9).
+                    await RecordTakeDispositionAsync(
+                        database, order, submittedSize, loggerFactory.CreateLogger(nameof(OrderEndpoints)), cancellationToken);
+
+                    loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogWarning(
+                        "Reconciled stranded take {OrderId} on account {AccountId}: nothing rests, but venue fill history "
+                        + "shows this tag FILLED {FilledSize} with an OPEN position -- the take executed and is adopted "
+                        + "Filled (the native bracket protects the position; no synthetic stop is written) (gh#723).",
+                        order.Id, order.AccountId, openFill.FilledSize);
+                    return Results.Ok(new
+                    {
+                        order.Id,
+                        status = order.Status.ToString(),
+                        adopted = true,
+                        filled = true,
+                        positionOpen = true,
+                        venueOrderKey = order.VenueOrderKey,
+                    });
+                }
+
+                // The position is open but fill history does NOT positively attribute it to this take (Unavailable --
+                // "we could not ask"; NoFillFound -- a negative existence claim that authorises nothing; Unsupported --
+                // this venue cannot answer). None may adopt (stamping a possibly-wrong venue key) and none may release
+                // (over a possibly-live position), so the pre-gh#723 refusal stands: leave the row Taking, loud, for the
+                // operator to resolve the position first (protected by its native bracket meanwhile). gh#723 only ADDS
+                // the positive-fill adoption above; every other answer keeps the gh#589 round-2 behaviour.
                 loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogError(
                     "Reconcile of stranded take {OrderId} on account {AccountId} found nothing resting under its tag but "
-                    + "an OPEN position on the account -- the take may have filled. The row is left Taking (not released); "
-                    + "resolve the position before reconciling the ticket (gh#589).",
-                    order.Id, order.AccountId);
+                    + "an OPEN position; fill history ({FillStatus}) does not positively attribute it to this take, so the "
+                    + "row is left Taking (not adopted, not released) (gh#723).",
+                    order.Id, order.AccountId, openFill.Status);
                 return Results.Conflict(new
                 {
-                    error = "Nothing rests under this order's tag, but the account has an open position — the take may have filled. Resolve the position before reconciling this ticket.",
+                    error = "Nothing rests under this order's tag, but the account has an open position that could not be "
+                        + "confirmed as this take's fill. Resolve the position before reconciling this ticket.",
                 });
             }
 

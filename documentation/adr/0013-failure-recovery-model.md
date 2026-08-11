@@ -279,4 +279,33 @@ it, which is the same posture §9 already takes toward an unreachable venue: not
 and here the safe state is "leave it stranded", not "assume it never happened".
 
 Adopting a fill whose position is **still open** remains deferred; both paths still refuse loudly there, with the
-position protected by its native bracket and the auto-flatten meanwhile.
+position protected by its native bracket and the auto-flatten meanwhile. *(The **take** path now adopts this case —
+see the 2026-08-10 update below, gh#723; the conditional-fire sibling stays deferred.)*
+
+## Update (2026-08-10) — the take reconcile adopts a still-open fill (gh#723)
+
+The last strand the runtime reconcile could not clear now clears for the **take** path. When `POST
+/orders/{id}/reconcile` finds nothing resting under the row's `customTag` but an **open position**, it no longer only
+refuses: it consults the same fill-history read (gh#631) for that tag and, on a **positively reported fill**, adopts
+the take onto the row as **`Filled`** — sized to the fill, keyed by the venue's own order id (the position snapshot
+carries none) — rather than leaving it stuck `Taking` and loud for manual intervention. This was the *likeliest*
+strand: a take that faulted at the seam **after** the venue had already filled it.
+
+Two properties keep it inside the model. First, **the veto stays a veto**: only `TaggedFillStatus.Filled` adopts;
+`Unavailable`, `NoFillFound` and `Unsupported` all keep the pre-gh#723 refusal (leave it `Taking`, loud), because a
+non-fill answer over an open position cannot confirm the position is *this* take's, and this model never adopts — any
+more than it releases — on an unknown. Second, **no synthetic stop is written**: the open position rides the **native
+safety bracket** the venue attached on fill (a position is never opened unprotected, gh#589 / [ADR-0007](0007-order-execution-model.md)),
+so reconstructing a Hidden promotion plan would only race a *second* native stop over the venue's existing leg — the
+round-tripped branch writes none for the analogous reason. The disposition (gh#549) *is* journaled, as the adopt-live
+branch does, because a confirmed fill is a taken suggestion the R-9 loop should see; it is written in its own save
+after the adopt so it can never abort it (gh#455). Adoption opens no stacking window: the send path already refuses a
+take while a position is open, and the whole reconcile holds the per-account entry lock (gh#531).
+
+**Still deferred:** the **conditional-fire** sibling (`POST /conditionals/{id}/reconcile`) still refuses on a
+still-open fill — its adoption is a distinct path (it mints a new `Order` rather than flipping an existing `Taking`
+row) and belongs with the rest of #619. And a limitation this inherits from the round-tripped branch: the adopted
+`Filled` order lands in the **order journal**, but the eventual close does **not** yet compose a realized-PnL `Trade`
+— the entry `Fill` rows streamed in while the row carried no venue key and were dropped, and the native bracket's
+exit leg is untracked — closing that needs the bracket legs journaled as orders (gh#731's remit), tracked as a
+follow-up.
