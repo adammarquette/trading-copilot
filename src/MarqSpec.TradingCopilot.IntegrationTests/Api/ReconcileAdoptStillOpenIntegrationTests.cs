@@ -54,7 +54,8 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// <para>
 /// <b>The red these guard.</b> On the base this suite branched from, <c>POST /orders/{id}/reconcile</c> answers an
 /// open position with a flat refusal and never consults fill history at all — so the adopt case is red there for
-/// exactly the defect it names, and every case reaches green only once gh#723 lands. The two veto cases would
+/// exactly the defect it names, and every <i>gh#723</i> case reaches green only once #768 lands (the gh#631 case
+/// below is deliberately the exception — it exercises behaviour that already ships). The two veto cases would
 /// otherwise agree with that blanket refusal for the wrong reason, which is a test that cannot fail on its subject:
 /// each therefore reconciles the <b>same fixture twice</b>, once with the venue's answer withheld and once with it
 /// supplied, so the refusal is shown to turn on the answer rather than on the account merely being non-flat. The
