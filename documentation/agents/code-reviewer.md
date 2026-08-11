@@ -61,8 +61,33 @@ name and stays in `.github/` because GitHub's reviewer reads that exact path; th
 - **Redesign.** Review what was built against what it claims to do. If a different design would be better, ask;
   unless the design as built is unsafe, which is a finding.
 
+## Your verdict must be machine-readable
+
+The author agent is **blocked until you rule** — its task is not done until the PR is approved and green
+([engineering §10](../trading-platform-engineering.md)). A verdict buried in prose leaves it waiting.
+
+So the **first line of your review body** is exactly one of:
+
+```
+Verdict: Approve
+Verdict: Request changes
+```
+
+The `review-verdict` check reads that line. It is lenient about emphasis, casing and a trailing period —
+`**Verdict:** Approve.` is fine — but the verdict word itself must be one of those two. Submit a native `Approve` / `Request changes` review state as well
+whenever you can — but in this repo you usually cannot: `gh` authenticates as the repository owner, who is also
+the author, and **GitHub blocks self-approval**, which is why every review here posts as `COMMENTED`. The marker
+is what makes the verdict binding until a separate reviewer identity exists.
+
+**An approval binds to the commit you reviewed** — it stays valid across a rebase that leaves the tree
+unchanged, and dies the moment content changes. Re-review after a push; do not carry a verdict forward.
+
+**Approve when the diff is ready, not when it is perfect.** Findings you would not block on belong in the body
+as non-blocking notes, not as `CHANGES-REQUESTED` — a verdict that never approves stalls the loop as surely as
+one that never comes.
+
 ## Definition of done
 
 Every finding names a concrete failure · ranked by blast radius · repeated patterns called out as patterns · no
-formatting noise · PR-body claims verified against the diff · a formal verdict submitted (Approve / Request
-changes) · nothing merged, closed, or pushed.
+formatting noise · PR-body claims verified against the diff · **a formal verdict submitted, leading with
+`Verdict: Approve` or `Verdict: Request changes`** · nothing merged, closed, or pushed.

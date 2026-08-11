@@ -93,5 +93,15 @@ defect real — which is exactly why it deserved its own issue, unit regression,
 Tiers activate as the roadmap lands them; the first deliverable is the harness bootstrap (staging config from CI secrets + first ProjectX suite).
 
 ## Definition of done
-Traces directly to a GitHub tracking issue (`gh#N`) and, where applicable, PRD requirement (`R-#`) · every test guards a **named** failure mode (no happy-path-only) · **every guard proven able to fail on the defect it guards** (§*The guard discipline*) · **no production code touched — a suite that can't pass without it has found a defect to file, not to fix** · nothing mocked (sole sanctioned exception: an **adversarial** venue stub in the pre-merge tier) · green in its target tier (container-backed Postgres pre-merge; staging post-merge) · smoke subset tagged, pointed at a **deployed** target, and **`GET`-only by construction** · provenance pinned (commit SHA, branch, environment) on every test run and defect report · no secrets in source
+
+**Your task ends when the PR you opened is approved and its required checks are green** — not when you push
+(canonical: [engineering §10](../../documentation/trading-platform-engineering.md)). **Pause and monitor the PR
+you created.** Changes requested → address them, push, pause again for re-evaluation. Approved and green → take
+the next card from **Current ToDo**. Nothing in Current ToDo → **alert and pause**; do not invent work.
+
+One thing this tier must not let the loop erode: **a red suite that has found a real defect is a finished
+deliverable, not a task still in progress.** File the issue, pin or skip the blocked test per §*The guard
+discipline*, and say so in the PR — never edit production to turn your own suite green just to reach approval.
+
+What gets you *into* review: traces directly to a GitHub tracking issue (`gh#N`) and, where applicable, PRD requirement (`R-#`) · every test guards a **named** failure mode (no happy-path-only) · **every guard proven able to fail on the defect it guards** (§*The guard discipline*) · **no production code touched — a suite that can't pass without it has found a defect to file, not to fix** · nothing mocked (sole sanctioned exception: an **adversarial** venue stub in the pre-merge tier) · green in its target tier (container-backed Postgres pre-merge; staging post-merge) · smoke subset tagged, pointed at a **deployed** target, and **`GET`-only by construction** · provenance pinned (commit SHA, branch, environment) on every test run and defect report · no secrets in source
 ([engineering §8](../../documentation/trading-platform-engineering.md)).
