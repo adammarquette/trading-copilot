@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Domain;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -18,17 +19,41 @@ public static class PositionReconciliationEndpoints
     {
         endpoints.MapGet("/accounts/{id:guid}/positions", ReconcileAsync).RequireAuthorization()
             .WithTags("Positions")
-            .WithSummary("Reconcile and read the account's open positions against venue truth.");
+            .WithSummary("Reconcile and read the account's open positions against venue truth, optionally scoped to one instrument.");
         return endpoints;
     }
 
     internal static async Task<IResult> ReconcileAsync(
         Guid id,
+        string? instrument,
         PositionReconciliationService reconciler,
         CancellationToken cancellationToken)
     {
+        // `?instrument=` scopes the read to a single contract for the chart's per-instrument execution overlay
+        // (gh#772). Two distinct client mistakes are 400s, never a flat account: a syntactically malformed symbol
+        // (caught here), and a well-formed one the venue has no contract for (caught below, from the service). A
+        // genuinely unreachable venue is neither -- it comes back Unknown with a 200.
+        InstrumentId? scoped = null;
+        if (instrument is not null)
+        {
+            if (!InstrumentId.TryParse(instrument, out InstrumentId parsed))
+            {
+                return Results.BadRequest(new { error = "instrument, when given, must be a valid instrument symbol." });
+            }
+            scoped = parsed;
+        }
+
         // The clock is read here, at the boundary, and passed in -- the settlement decision stays pure.
-        PositionReconciliation? result = await reconciler.ReconcileAsync(id, DateTimeOffset.UtcNow, cancellationToken);
+        PositionReconciliation? result;
+        try
+        {
+            result = await reconciler.ReconcileAsync(id, scoped, DateTimeOffset.UtcNow, cancellationToken);
+        }
+        catch (InstrumentNotResolvableException unresolvable)
+        {
+            return Results.BadRequest(new { error = unresolvable.Message });
+        }
+
         if (result is null)
         {
             return Results.NotFound(); // not found or not owned by the caller (R-20)
