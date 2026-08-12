@@ -49,8 +49,10 @@ before starting, and add dated entries only when nothing formal fits.
 - **Practice accounts only outside production.** dev/staging connect to ProjectX practice accounts; a live
   real-money account is production-only. A **third** mode exists: an `undeclared` account is refused
   **everywhere, production included** — it produces no orders at all.
-- **Test-first is the Definition of Done.** No new public method without a failing test written first;
-  the safety-critical paths (risk gate, execution, auto-flatten, kill switch) carry high-rigor suites.
+- **Test-first, and done means an approved PR.** No new public method without a failing test written first;
+  the safety-critical paths (risk gate, execution, auto-flatten, kill switch) carry high-rigor suites. Your
+  task ends when the PR you opened is **approved and green** — so pause and monitor it, fix what review
+  returns, and only then take the next card. (Engineering §10 owns the loop.)
 - **Wear a hat, open its contract** — before you start, not after.
 
 ## Working rules

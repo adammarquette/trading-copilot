@@ -23,11 +23,17 @@ Work flows through a **six-column funnel** — a wide intake reservoir narrowing
 | **Planning** | Being prepared — needs review, sub-task breakdown, or a design decision | Maintainer / product owner |
 | **Current ToDo** | Ready and tagged — anyone (agent or teammate) may pick it up | Whoever picks it up |
 | **In Progress** | Actively being worked | The worker |
-| **Review** | Work complete, PR open and linked | Maintainer (on merge) |
-| **Done** | Merged and satisfies the Definition of Done | — (terminal) |
+| **Review** | PR open and linked — **the author agent is paused here, monitoring it** | The author, until approved |
+| **Done** | **Approved, checks green**, and merged | — (terminal) |
 
 Flow is left-to-right, with **one sanctioned backward move**: an item kicks back to **Planning** (from Current
 ToDo or In Progress) when it turns out to be underspecified — see *Kickback*.
+
+**Review is not a parking space.** The agent that opened the PR owns the card while it sits here: it waits for
+the verdict, and on `CHANGES-REQUESTED` it pushes fixes and waits again — the loop repeats until approved and
+green. The card leaves for **Done** only then; a merged PR whose issue still has scope stays open and goes back
+to a working column, not to Done (canonical:
+[engineering §10](trading-platform-engineering.md)).
 
 `Backlog → Planning → Current ToDo` is the funnel: the reservoir feeds active preparation, which feeds the ready
 queue. The gate between each is the **maintainer's / product owner's** judgment.
