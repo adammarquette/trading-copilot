@@ -3,10 +3,11 @@ import Typography from '@mui/material/Typography';
 
 import type { Destination } from '../navigation/destinations';
 import { RelevanceMaps } from './RelevanceMaps';
+import { RelevanceTopics } from './RelevanceTopics';
 
 /**
  * The News surface (gh#25 U3, R-2). Its first half is the **relevance configuration** — the ticker↔instrument maps
- * and (a later increment) the topics that decide which news attaches to which instrument. This config is
+ * and the topics (gh#658) that decide which news attaches to which instrument, and how loudly. This config is
  * **deployment-global**, not account-scoped, so — unlike the settings surface — nothing here resolves the active
  * account. The relevance-ranked feed itself and the star / mute feedback on its items are their own increments.
  */
@@ -33,6 +34,7 @@ export function NewsSurface({ destination }: NewsSurfaceProps) {
 
       <Box sx={{ p: 2 }}>
         <RelevanceMaps />
+        <RelevanceTopics />
       </Box>
     </Box>
   );
