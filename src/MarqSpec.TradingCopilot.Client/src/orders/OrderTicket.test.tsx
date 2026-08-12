@@ -409,7 +409,11 @@ describe('OrderTicket — send when conditions met (gh#655)', () => {
 
     await click(/send on trigger/i);
 
-    expect(createConditional.mock.calls[0][1].expiresAt).toContain('2026-08-13');
+    // The datetime-local wall-clock is converted to a UTC instant the same way the component does, so this is
+    // timezone-robust (a bare date substring would shift in positive-offset zones).
+    expect(createConditional.mock.calls[0][1].expiresAt).toBe(
+      new Date('2026-08-13T00:00').toISOString(),
+    );
   });
 
   it('will not create a conditional that could never fire — no trigger price, no send', async () => {
@@ -471,5 +475,79 @@ describe('OrderTicket — send when conditions met (gh#655)', () => {
     await act(async () => {
       release(pendingConditional());
     });
+  });
+
+  it('locks the mode while an arm is in flight, so a mid-round-trip toggle cannot orphan the staged order', async () => {
+    // The blocker the adversarial review found: staged/conditional are only set when a request RESOLVES, so if the
+    // mode could flip during the in-flight window, the arm's result would land in the conditional branch — the
+    // staged order rendering with no Send/Cancel and no way back. The checkbox must lock on `pending` too.
+    let release: (value: Awaited<ReturnType<typeof armOrder>>) => void = () => {};
+    arm.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    await renderTicket();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /arm/i }));
+    });
+
+    expect(
+      (screen.getByRole('checkbox', { name: /send when conditions met/i }) as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      release(staged());
+    });
+  });
+
+  it('locks the mode while a conditional create is in flight, so no immediate order stacks on it', async () => {
+    // The reverse of the same blocker: untick mid-create and the create's result would land with the Arm button
+    // live over a pending conditional — an immediate order on top of the on-trigger one, a genuine double entry.
+    let release: (value: Awaited<ReturnType<typeof createConditionalOrder>>) => void = () => {};
+    createConditional.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    await renderTicket();
+    await armTheTrigger('5010');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /send on trigger/i }));
+    });
+
+    expect(
+      (screen.getByRole('checkbox', { name: /send when conditions met/i }) as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      release(pendingConditional());
+    });
+  });
+
+  it('will not send a non-numeric cancel band — it fails closed rather than silently dropping it', async () => {
+    // A NaN cancel band would JSON-serialize to null, silently discarding the operator's stale-cancel intent. The
+    // create control stays disabled until the band is a real number or cleared, so it is never lost in flight.
+    await renderTicket();
+    await armTheTrigger('5010');
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/cancel band/i), { target: { value: '49o0' } });
+    });
+
+    expect(
+      (screen.getByRole('button', { name: /send on trigger/i }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    // Clearing the bad value re-enables the create — the trigger itself is still fireable.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/cancel band/i), { target: { value: '' } });
+    });
+    expect(
+      (screen.getByRole('button', { name: /send on trigger/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 });
