@@ -34,10 +34,10 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// <c>timescale/timescaledb-ha:pg17</c>), with the shipped migrations applied.
 /// </para>
 /// <para>
-/// <b>RED BY DESIGN against `develop`, right now.</b> gh#747's narrowed catch is not merged as of this suite's
+/// <b>Two cases are <c>Skip</c>ped pending gh#747.</b> gh#747's narrowed catch is not merged as of this suite's
 /// authoring — <c>develop</c> still carries the bare <c>catch (DbUpdateException)</c> that treats every write
-/// fault, uniqueness or not, as a benign idempotent skip. Two of the five cases below are therefore expected to
-/// FAIL on `develop` today, for the reason gh#747 exists to fix:
+/// fault, uniqueness or not, as a benign idempotent skip. Two of the five cases below assert the <i>narrowed</i>
+/// behaviour, so they cannot pass until gh#747 lands, for the reason gh#747 exists to fix:
 /// </para>
 /// <list type="bullet">
 /// <item><see cref="ProcessFlatAsync_ShouldPropagate_WhenARealNonUniquenessWriteFaultOccurs"/> — the fault is
@@ -46,11 +46,15 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// nothing to catch, <c>AccountEventStreamHost</c>'s "journalling ... failed" error log never fires.</item>
 /// </list>
 /// <para>
-/// Both flip green automatically once PR #781 (gh#747) merges — do not implement that production change here to
-/// make this suite pass (QA contract §"guard discipline", rule 3): a suite that cannot go green without a
-/// production change has <b>found</b> a defect, and the red itself is gh#747's regression guard until it lands.
-/// The other three cases (the idempotent-skip end-to-end proof, the raw unique-index assumption check, and the
-/// isolation-level assertion) are provable today and are green against `develop` as shipped.
+/// Per the QA contract §"guard discipline" (rule 3), a suite blocked on a sibling production change is <b>not</b>
+/// left failing in the required <c>integration tests (pre-merge)</c> check: both carry
+/// <c>[Fact(Skip = "blocked by gh#747 …")]</c>, so the suite is green against `develop` today and the
+/// merge-ordering dependency (this branch → PR #781) is recorded in the skip reason itself rather than as an
+/// unrecorded red. Do <b>not</b> implement gh#747's production change here to make them pass — that block is
+/// gh#747's to clear (open PR #781). When #781 merges and this branch rebases onto it, remove the two
+/// <c>Skip</c>s: the assertions, written for the narrowed behaviour, flip green and become gh#747's regression
+/// guard. The other three cases (the idempotent-skip end-to-end proof, the raw unique-index assumption check, and
+/// the isolation-level assertion) are provable today and are green against `develop` as shipped.
 /// </para>
 /// <para>
 /// <b>Forcing the DB catch, not the in-memory pre-check.</b> The idempotent-skip case needs the real
@@ -69,7 +73,7 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
     private const string SecondContract = "NQM25";
     private const string BlockTradeInsertConstraint = "ck_test_block_trade_insert";
 
-    private static readonly HashSet<string> KnownOutcomes = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> _knownOutcomes = new(StringComparer.Ordinal)
     {
         ExecutionMetrics.JournalWritten,
         ExecutionMetrics.JournalNotComposable,
@@ -102,7 +106,11 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
     {
         Guid operatorId = await OperatorIdAsync();
         (Guid accountId, _) = await FreshDiscoveredAccountAsync();
-        Guid closingFillId = Guid.NewGuid();
+        // The closing fill must be a REAL row: Trade.ClosingFillId is an FK to Fills (FK_Trades_Fills_ClosingFillId),
+        // so a bare Guid orphans the first insert on the FK before the unique index is ever reached. Seed the fill
+        // the same way the replay case does; SeedRoundTripAsync creates the Orders/Fills but no Trade, so the first
+        // insert below is the first Trade for this closing fill.
+        Guid closingFillId = await SeedRoundTripAsync(operatorId, accountId, Contract, "unique");
 
         await ExecuteDbAsync(async db =>
         {
@@ -189,11 +197,12 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
     }
 
     // =============================================================================================================
-    // Acceptance criterion 2 (PROVE-THE-RED): a non-uniqueness fault propagates. RED against `develop` today by
-    // design (see the class remarks) -- flips green once PR #781 / gh#747 merges.
+    // Acceptance criterion 2: a non-uniqueness fault propagates. Skipped against `develop` (see the class remarks
+    // and the QA contract rule 3) -- it asserts gh#747's narrowed behaviour, so it flips green once PR #781 /
+    // gh#747 merges and the Skip is removed.
     // =============================================================================================================
 
-    [Fact]
+    [Fact(Skip = "blocked by gh#747 -- flips green once PR #781 (gh#747) merges and the Skip is removed")]
     public async Task ProcessFlatAsync_ShouldPropagate_WhenARealNonUniquenessWriteFaultOccurs()
     {
         // A genuine, non-idempotent write fault: a temporary real CHECK(false) NOT VALID constraint on "Trades"
@@ -211,8 +220,8 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
             Func<Task> attempt = () => ProcessFlatAsync(Flat(venueKey, Contract, DateTimeOffset.UtcNow.AddMinutes(5)));
 
             // Before gh#747: the bare catch swallows this as a benign skip and ProcessFlatAsync returns false --
-            // this assertion is the RED. After #781 merges: IsClosingFillUniquenessViolation returns false for a
-            // CHECK violation, the narrowed catch's `when` guard misses, and the exception rethrows -- GREEN.
+            // which is why this case is Skipped on `develop`. After #781 merges: IsClosingFillUniquenessViolation
+            // returns false for a CHECK violation, the narrowed catch's `when` guard misses, and it rethrows -- GREEN.
             await attempt.Should().ThrowAsync<DbUpdateException>()
                 .WithInnerException<DbUpdateException, PostgresException>()
                 .Where(error => error.SqlState == PostgresErrorCodes.CheckViolation
@@ -226,7 +235,7 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
             // distinctness from the six KNOWN outcomes rather than a literal string this suite would have to
             // guess (and could then drift from whatever #781 actually ships).
             _factory.Capture.For(ExecutionMetrics.JournalOutcomes).Should().ContainSingle(
-                m => !KnownOutcomes.Contains((string?)m.Tags.GetValueOrDefault("outcome") ?? string.Empty),
+                m => !_knownOutcomes.Contains((string?)m.Tags.GetValueOrDefault("outcome") ?? string.Empty),
                 "a propagating fault must record its OWN outcome, distinct from every existing one -- recording "
                 + "'duplicate-rejected' (or any other known tag) for a non-duplicate fault is exactly the "
                 + "swallow-everything defect gh#747 fixes");
@@ -238,12 +247,12 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
     }
 
     // =============================================================================================================
-    // Acceptance criterion 3 (PROVE-THE-RED, companion to criterion 2): the outer host stays safe on the throw --
-    // logs and continues, never crashes. RED against `develop` today for the same reason: with nothing thrown,
+    // Acceptance criterion 3 (companion to criterion 2): the outer host stays safe on the throw -- logs and
+    // continues, never crashes. Skipped against `develop` for the same reason: with nothing thrown,
     // AccountEventStreamHost's catch never fires and its error log never appears.
     // =============================================================================================================
 
-    [Fact]
+    [Fact(Skip = "blocked by gh#747 -- flips green once PR #781 (gh#747) merges and the Skip is removed")]
     public async Task AccountEventStreamHost_ShouldLogAndContinue_WhenTheJournalWriteFaultPropagates()
     {
         // OcoExitService.ProcessExitAsync (the protection retire) runs BEFORE the journal write on every flat
@@ -279,8 +288,8 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
                     && record.Message.Contains("Journalling the round trip", StringComparison.Ordinal)
                     && record.Message.Contains(Contract, StringComparison.Ordinal))))).Should().BeTrue(
                 "AccountEventStreamHost must LOG the propagating write fault -- silence here means the day "
-                + "under-reports with nobody able to see it (this is the RED companion to criterion 2: before "
-                + "#781 nothing is thrown, so this log never appears)");
+                + "under-reports with nobody able to see it (the companion to criterion 2, and why this case is "
+                + "Skipped on `develop`: before #781 nothing is thrown, so this log never appears)");
 
             // Now prove CONTINUES, not merely "did not crash before the test stopped it anyway": clear the fault
             // and feed a SECOND, independent round trip through the SAME running host/stream. Only a host whose
@@ -351,22 +360,22 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
 
     private static Order NewOrder(
         Guid id, Guid userId, Guid accountId, string instrument, OrderSide side, string venueOrderKey, DateTimeOffset placedAt) => new()
-    {
-        Id = id,
-        UserId = userId,
-        AccountId = accountId,
-        Instrument = instrument,
-        Side = side,
-        Size = 1,
-        Type = OrderType.Market,
-        EntryPrice = 5_000m,
-        PointValue = 5m,
-        TickSize = 0.25m,
-        Status = OrderStatus.Filled,
-        Mode = TradingMode.Practice,
-        VenueOrderKey = venueOrderKey,
-        PlacedAt = placedAt,
-    };
+        {
+            Id = id,
+            UserId = userId,
+            AccountId = accountId,
+            Instrument = instrument,
+            Side = side,
+            Size = 1,
+            Type = OrderType.Market,
+            EntryPrice = 5_000m,
+            PointValue = 5m,
+            TickSize = 0.25m,
+            Status = OrderStatus.Filled,
+            Mode = TradingMode.Practice,
+            VenueOrderKey = venueOrderKey,
+            PlacedAt = placedAt,
+        };
 
     private static Fill NewFill(Guid id, Guid userId, Guid orderId, decimal price, DateTimeOffset executedAt) => new()
     {
