@@ -268,34 +268,44 @@ configuration that lives only in a provider console is otherwise invisible to an
    > first symptom is a real order on real money. Verify the account for each non-prod environment **at the
    > broker** after setting it, not from the value you believe you pasted.
 
-### Automated code review — a ruleset, not a workflow
-**Copilot code review is not a GitHub Actions job** and cannot be invoked from `ci.yml`. It is a **branch
-ruleset** rule, so it lives in repository settings rather than in this repo — recorded here because
-configuration that exists only in the GitHub UI is otherwise invisible to anyone reading the pipeline.
+### Automated code review — one workflow, one dormant ruleset
+Two mechanisms have carried this name. Only the first is live.
 
-| Ruleset | Target | Rule | Settings |
+**1. The `reviewer` workflow (`.github/workflows/reviewer.yml`, gh#802) — live.** On every non-draft PR it runs
+the [code-reviewer contract](agents/code-reviewer.md) over the diff and posts the result **as
+`trading-copilot-reviewer[bot]`** through [`.github/scripts/reviewer-review.sh`](../.github/scripts/reviewer-review.sh)
+(gh#141) — a distinct App identity, because GitHub blocks self-review and `gh` here authenticates as the PR's own
+author.
+
+It is **advisory by construction**: it posts `COMMENT`, and it prepends a fixed header so the first line of what
+it posts can never be a `**Verdict: …**` marker. That matters because `review-verdict` (gh#783) reads that marker
+**regardless of the review's state** — emitting one would let the bot satisfy the human-review gate by itself.
+`VERDICT_MODE` in the workflow is the single switch; promoting it is a reviewable change, and the thing to watch
+before promoting is its **block rate**, not its throughput. A reviewer that approves everything converts the gate
+into a rubber stamp.
+
+| Secret | Purpose | Set |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | Runs the reviewer. **Not yet set** — until it is, the job skips with a notice rather than failing the PR. | ☐ |
+| `REVIEWER_APP_ID` · `REVIEWER_APP_INSTALLATION_ID` · `REVIEWER_APP_PRIVATE_KEY` | Mint the App token the review is posted under (setup below). | ☑ 2026-07-24 |
+
+**2. `copilot-review-develop` — present but `enforcement: disabled`.** The rule still exists in repository
+settings and therefore still shows up in `gh api repos/<owner>/<repo>/rulesets`, but a disabled ruleset gates
+nothing: PRs into `develop` merge without Copilot responding. Verified live 2026-08-12.
+
+| Ruleset | Target | Rule | Enforcement |
 | --- | --- | --- | --- |
-| `copilot-review-develop` (**active**) | `refs/heads/develop` | `copilot_code_review` | `review_on_push: true` · `review_draft_pull_requests: false` |
+| `copilot-review-develop` | `refs/heads/develop` | `copilot_code_review` (`review_on_push: true`, drafts excluded) | **disabled** |
 
-Every feature PR targets `develop`, so the first ruleset covers the whole review surface. `review_on_push` means
-each new commit on an open PR is reviewed, not just the PR's opening. Drafts are excluded so a branch can churn
-without triggering a review per commit.
+Read that state before concluding anything from a "stuck" PR — `enforcement` is the field that decides, not the
+rule's presence. **Were it re-enabled**, the historical failure mode returns and is worth knowing: a ruleset rule
+is **not a status check**, so while it is outstanding the PR reads `mergeStateStatus: BLOCKED` with every check
+green, 0 required approvals, and nothing in the checks tab to point at — a merge click silently does not take.
+Quota exhaustion delayed that but never deadlocked it: Copilot still replied with a `COMMENTED` review saying it
+had hit its quota, and the reply satisfied the rule (observed on PR #195 and PR #237). The ruleset carries **no
+bypass actors**, so a genuine deadlock could only be cleared by editing it in repo settings.
 
-**This rule gates the merge — it is not advisory.** Copilot's *findings* are advisory (no finding blocks
-anything), but the **rule itself is a ruleset requirement**: a PR into `develop` cannot merge until Copilot has
-**responded**. What makes it confusing is that a ruleset rule is **not a status check** — it never appears in the
-checks tab, so while it is outstanding the PR reads `mergeStateStatus: BLOCKED` with every check green, 0
-required approvals, and **nothing to point at**. A merge click silently does not take.
-
-**Quota exhaustion delays it; it does not deadlock it.** When Copilot cannot review, it still replies — a
-`COMMENTED` review reading *"unable to review this pull request because the user who requested the review has
-reached their quota limit"* — and **that reply satisfies the rule**; the PR goes `CLEAN` and merges. Observed on
-both PR #195 and PR #237. So a PR that looks permanently stuck is usually just waiting on the bot to answer:
-re-check before escalating.
-
-Diagnose with `gh pr view <n> --json mergeStateStatus,reviewDecision,latestReviews` — the reviews array shows
-whether Copilot has responded at all. The ruleset carries **no bypass actors**, so if it ever genuinely does
-deadlock, only editing the ruleset in repo settings clears it.
+Diagnose either mechanism with `gh pr view <n> --json mergeStateStatus,reviewDecision,latestReviews`.
 
 The other **blocking** gates are the required status checks enforced by the branch-protection rulesets below
 (gh#45): `build & unit tests`, `commit-hygiene`, the pre-merge integration suite (gh#121), and `ladder` on the
