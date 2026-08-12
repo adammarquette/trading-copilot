@@ -48,6 +48,14 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// key can go wrong — a re-pairing double-count, a sign flip on a tie.
 /// </para>
 /// <para>
+/// <b>One case pins a defect rather than guarding.</b> Section 5's two same-instant cases run the SAME executions in
+/// the two possible fill-id orders, and only one is refused: with the tied sell sorting first,
+/// <c>TradeJournalService.CurrentCycleStart</c> resolves the cycle boundary by that arbitrary order <i>before</i>
+/// <c>TradeRoundTrip.TryCompose</c>'s ambiguity gate is consulted, so the tie never reaches the gate and a row is
+/// written. Filed as <b>gh#809</b> (<c>work:code</c>, <c>safety-critical</c>) and <b>pinned</b> per the QA contract's
+/// guard-discipline rule 2 — not fixed here, and not silently loosened.
+/// </para>
+/// <para>
 /// <b>Base.</b> This branch is cut from <c>feat/759_journal-pairing-policy</c> (PR #800), not from <c>develop</c>:
 /// <c>Trade.OpeningFillId</c> and the <c>AddTradeOpeningFillKey</c> migration exist only there, so a suite based on
 /// <c>develop</c> would fail to <i>compile</i> rather than report a behaviour difference — and a QA project that
@@ -546,26 +554,82 @@ public class TradeFifoPairingIntegrationTests : IClassFixture<TradeFifoPairingPo
     // 5. Same-instant opposite-side ambiguity (gh#799 bullet 7).
     // =================================================================================================================
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task ProcessFlatAsync_ShouldWriteNoRow_WhenABuyAndASellShareTheExactExecutedAt(bool sellSortsFirst)
-    {
-        // A trip-1 close and a trip-2 open at ONE instant. Ordered by (ExecutedAt, Id) the FillId is the only thing
-        // separating them, and it is an arbitrary venue handle: one order makes the window look like a closed trip
-        // followed by a reopen, the other like a scale-in that never returned to flat -- opposite SIGNS for the same
-        // executions. There is no correct answer to pick, so the only safe behaviour is to write nothing.
-        //
-        // The parameter is what makes this a guard rather than a coincidence: BOTH orders are exercised, so a
-        // tie-break that silently resolved the ambiguity would pass one case and fail the other. Asserting a single
-        // ordering would pass with and against the defect half the time.
-        //
-        // PROVE-RED: replace the refusal with a FillId tie-break and one of the two cases journals a row -- with a
-        // sign that depends on nothing but which Guid the venue happened to mint first.
-        int block = sellSortsFirst ? 12 : 13;
-        string venueKey = sellSortsFirst ? "7112" : "7113";
+    // Both cases seed the SAME four executions: a trip-1 close and a trip-2 open at ONE instant. Ordered by
+    // (ExecutedAt, Id) the FillId is the only thing separating the tied pair, and it is an arbitrary venue handle:
+    // one order makes the window look like a closed trip followed by a reopen, the other like a scale-in that never
+    // returned to flat -- opposite readings of the same executions. There is no correct answer to pick, so per
+    // ADR-0022 ("opposite-side fills tied at the boundary timestamp ... still write no row") the only safe behaviour
+    // is to write nothing, in EITHER order.
+    //
+    // Running BOTH orders is what makes this a guard rather than a coincidence, and it is what found gh#809: a single
+    // ordering would pass with and against the defect half the time. They are two named cases rather than one
+    // [Theory] because they no longer assert the same thing -- one is the guard, the other pins the gap.
 
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldWriteNoRow_WhenABuyAndASellShareTheExactExecutedAtInsideTheCycle()
+    {
+        // The tied BUY sorts first, so running exposure never returns to flat at the tie: CurrentCycleStart keeps the
+        // whole window, TryCompose's same-instant opposite-side gate sees the tie, and the flat is refused. This is
+        // the gate working as documented.
+        //
+        // PROVE-RED: remove the GroupBy(ExecutedAt) refusal in TradeRoundTrip.TryCompose and the FillId tie-break
+        // composes a trip here -- a row with a side, an entry and an exit chosen by nothing but Guid order.
         Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedTiedWindowAsync(owner, venueKey: "7113", block: 13, sellSortsFirst: false);
+
+        bool journalled = await JournalAsync(FlatAt("7113", At(2)));
+
+        journalled.Should().BeFalse("an ambiguous window has no single right answer — refuse, never guess");
+        (await TradesAsync(accountId)).Should().BeEmpty(
+            "a row written here would carry a side, an entry and an exit chosen by nothing but Guid order, and its "
+            + "P&L would enter the daily governor with a sign that could just as easily have been the other one "
+            + "(R-4 / R-5)");
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_JournalsAGuidOrderedRow_WhenTheSameInstantTieFallsOnTheCycleBoundary()
+    {
+        // DEFECT gh#809 (work:code, safety-critical): the identical executions, with only the tied pair's Guids
+        // swapped, are NOT refused. With the tied SELL sorting first, TradeJournalService.CurrentCycleStart walks the
+        // fills in the same arbitrary (ExecutedAt, Id) order, sees exposure return to flat AT the tie, and slices the
+        // window there -- so the window TradeRoundTrip.TryCompose receives no longer contains the tie at all and its
+        // ambiguity gate never fires. The gate is real but runs one step too late: the boundary is guessed before it
+        // is consulted. ADR-0022 names exactly this case ("opposite-side fills tied at the BOUNDARY timestamp") as one
+        // that writes no row.
+        //
+        // Pins the OBSERVED behaviour per the QA contract's guard-discipline rule 2 -- documenting reality without
+        // blessing it, rather than leaving the suite red or skipping the case and losing the witness. When gh#809
+        // lands, these three assertions flip to `BeFalse()` / `BeEmpty()` (the sibling case above, verbatim) and this
+        // becomes gh#809's regression guard.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedTiedWindowAsync(owner, venueKey: "7112", block: 12, sellSortsFirst: true);
+
+        bool journalled = await JournalAsync(FlatAt("7112", At(2)));
+
+        journalled.Should().BeTrue(
+            "DEFECT gh#809 — OBSERVED, not intended: the tied sell's Guid sorting first makes CurrentCycleStart treat "
+            + "the tie as a return to flat, so the ambiguity never reaches the gate and a row is written");
+
+        List<Trade> written = await TradesAsync(accountId);
+
+        written.Should().ContainSingle(
+            "DEFECT gh#809 — the guessed boundary journals only the post-tie leg; the pre-tie cycle's realized P&L is "
+            + "dropped with no watermark and no later flat event that could re-derive it")
+            .Which.RealizedPnL.Should().Be(
+                50m,
+                "DEFECT gh#809 — this figure (buy 5010 → sell 5020, 10 points at a point value of 5) enters the R-4 / "
+                + "R-5 daily governor for no reason but which Guid the venue happened to mint first: the sibling case "
+                + "above seeds the SAME executions with the tied pair's Guids swapped and correctly writes nothing");
+    }
+
+    /// <summary>
+    /// Seeds the ambiguous window both same-instant cases share — a buy at <c>At(0)</c>, an opposite-side pair both at
+    /// <c>At(1)</c>, and a sell at <c>At(2)</c>. <paramref name="sellSortsFirst"/> swaps ONLY the tied pair's fill
+    /// ids, so the <c>(ExecutedAt, Id)</c> order is the single variable between the two cases;
+    /// <paramref name="block"/> keeps their fill ids in separate id spaces, since the container is shared by the class.
+    /// </summary>
+    private async Task<Guid> SeedTiedWindowAsync(Guid owner, string venueKey, int block, bool sellSortsFirst)
+    {
         Guid accountId = await SeedAccountAsync(owner, venueKey);
 
         Guid entry = FillId(block, 0x01);
@@ -580,13 +644,7 @@ public class TradeFifoPairingIntegrationTests : IClassFixture<TradeFifoPairingPo
         await SeedOrderAsync(owner, accountId, OrderSide.Buy, $"tied-buy-{venueKey}", [(tiedBuy, 5_010m, 1, tie)]);
         await SeedOrderAsync(owner, accountId, OrderSide.Sell, $"exit-{venueKey}", [(finalExit, 5_020m, 1, At(2))]);
 
-        bool journalled = await JournalAsync(FlatAt(venueKey, At(2)));
-
-        journalled.Should().BeFalse("an ambiguous window has no single right answer — refuse, never guess");
-        (await TradesAsync(accountId)).Should().BeEmpty(
-            "a row written here would carry a side, an entry and an exit chosen by nothing but Guid order, and its "
-            + "P&L would enter the daily governor with a sign that could just as easily have been the other one "
-            + "(R-4 / R-5)");
+        return accountId;
     }
 
     // =================================================================================================================
@@ -725,23 +783,49 @@ public class TradeFifoPairingIntegrationTests : IClassFixture<TradeFifoPairingPo
             await database.SaveChangesAsync();
         });
 
+    /// <summary>
+    /// One discoverable practice account for <paramref name="owner"/>, under that operator's <b>single</b> firm and
+    /// its <b>single</b> projectx connection — created on the first call for an owner and REUSED on every later one.
+    /// </summary>
+    /// <remarks>
+    /// A second call for the same owner must not mint a second firm or connection: <c>IX_Firms_UserId_Name</c>
+    /// (unique on <c>UserId, Name</c>) and <c>IX_Connections_UserId_FirmId_Platform</c> both refuse it, and the
+    /// governor-equality case needs exactly the shape they refuse — <b>two accounts under one operator</b>. Reusing is
+    /// not a workaround for the constraints; it is what a real operator's second account looks like (ADR-0016: one
+    /// login per firm × platform, exposing many accounts), and <c>IX_Accounts_ConnectionId_VenueAccountKey</c> is what
+    /// keeps the two apart. <c>ResolveAccountAsync</c> matches on <c>VenueAccountKey</c> + <c>CredentialKey</c>, so
+    /// both accounts stay independently resolvable from the shared connection.
+    /// </remarks>
     private async Task<Guid> SeedAccountAsync(Guid owner, string venueAccountKey)
     {
-        Guid firmId = Guid.NewGuid();
-        Guid connectionId = Guid.NewGuid();
         Guid accountId = Guid.NewGuid();
 
         await ExecuteDbAsync(async database =>
         {
-            database.Firms.Add(new Firm { Id = firmId, UserId = owner, Name = "Topstep", Type = FirmType.PropFirm });
-            database.Connections.Add(new Connection
+            // IgnoreQueryFilters: the DI-scoped context carries no current user, so the R-20 filter would hide the
+            // connection this owner already has and every second seed would try to insert a duplicate firm.
+            Connection? existing = await database.Connections
+                .IgnoreQueryFilters()
+                .FirstOrDefaultAsync(connection => connection.UserId == owner
+                    && connection.Platform == "projectx"
+                    && connection.CredentialKey == OurCredentialKey);
+
+            Guid connectionId = existing?.Id ?? Guid.NewGuid();
+
+            if (existing is null)
             {
-                Id = connectionId,
-                UserId = owner,
-                FirmId = firmId,
-                Platform = "projectx",
-                CredentialKey = OurCredentialKey,
-            });
+                Guid firmId = Guid.NewGuid();
+                database.Firms.Add(new Firm { Id = firmId, UserId = owner, Name = "Topstep", Type = FirmType.PropFirm });
+                database.Connections.Add(new Connection
+                {
+                    Id = connectionId,
+                    UserId = owner,
+                    FirmId = firmId,
+                    Platform = "projectx",
+                    CredentialKey = OurCredentialKey,
+                });
+            }
+
             database.Accounts.Add(new Account
             {
                 Id = accountId,
