@@ -10,6 +10,7 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Npgsql;
 
 namespace MarqSpec.TradingCopilot.Api.Accounts;
 
@@ -291,15 +292,38 @@ public sealed class TradeJournalService
         {
             await database.SaveChangesAsync(cancellationToken);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception) when (IsClosingFillUniquenessViolation(exception))
         {
-            // The unique ClosingFillId index rejected a replay -- idempotent by construction, not by an inspecting
-            // branch. A concurrent writer already journalled this exact round trip.
+            // The unique ClosingFillId index rejected a replay -- idempotent by construction, NARROWED to that one
+            // violation (gh#747): the filter matches only the closing-fill uniqueness fault a concurrent writer's prior
+            // insert causes, so any OTHER write fault falls through to the catch below rather than being mistaken for a
+            // benign replay. A concurrent writer already journalled this exact round trip.
             _logger.LogInformation(
                 "Round trip closing on fill {Fill} is already journalled for account {Account}; idempotent skip.",
                 closingFill.Id, exit.Account);
             _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalDuplicateRejected);
             return false;
+        }
+        catch (DbUpdateException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // NOT the idempotent dupe -- a REAL write fault (a CHECK / FK violation, a serialization failure, a lost
+            // connection). Before gh#747 the bare catch above swallowed this too as a benign "idempotent skip": the
+            // Trade was silently lost, the outer host never learned, and the day's realized P&L under-reported into the
+            // daily governor with nothing to see. Record the distinct outcome and RETHROW -- the host's
+            // JournalRoundTripSafelyAsync logs it (the protection retire already happened) and the stream continues, so
+            // the failure is loud in both the metric and the log rather than invisible. Idempotency is unaffected:
+            // only the true dupe is skipped above.
+            //
+            // The `when (!IsCancellationRequested)` guard excludes a SHUTDOWN cancellation that Npgsql can surface as a
+            // wrapped DbUpdateException (SqlState 57014) rather than a raw OperationCanceledException (gh#747 review):
+            // recording that as a write failure would inflate the JournalWriteFailed METRIC on every graceful stop, so
+            // this guard keeps the metric honest. It does NOT silence the host's log: JournalRoundTripSafelyAsync's own
+            // cancellation branch only matches OperationCanceledException, so this wrapped DbUpdateException still falls
+            // into its generic catch and logs the "P&L will under-report" ERROR on an ordinary shutdown too -- a known
+            // gap this comment does not claim to close. A genuine fault is never masked: the token is only set when the
+            // operator tears the stream down.
+            _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWriteFailed);
+            throw;
         }
 
         _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten);
@@ -307,6 +331,36 @@ public sealed class TradeJournalService
             "Journalled a {Side} round trip of {Size} on {Contract} for account {Account}: realized {Realized}.",
             roundTrip.EntrySide, roundTrip.Size, exit.Contract, exit.Account, realized);
         return true;
+    }
+
+    /// <summary>
+    /// The unique index on <see cref="Trade.ClosingFillId"/> — the round trip's natural key, and the <b>only</b>
+    /// constraint whose violation is the idempotent replay this writer expects (a concurrent writer journalled the same
+    /// trip first). This literal must equal the index's real database name (set by EF's default convention in
+    /// <c>TradingCopilotDbContext</c> and emitted by the migration); a model-metadata unit test pins it so a rename or
+    /// an added <c>HasDatabaseName</c> cannot silently break the match and demote the catch-side backstop (gh#747 review).
+    /// </summary>
+    internal const string ClosingFillUniqueIndex = "IX_Trades_ClosingFillId";
+
+    /// <summary>
+    /// Whether a <see cref="DbUpdateException"/> is the idempotent <see cref="ClosingFillUniqueIndex"/> unique-violation
+    /// — and <b>only</b> that (gh#747). PostgreSQL surfaces the error as a <see cref="PostgresException"/> inner with
+    /// <c>SqlState</c> <see cref="PostgresErrorCodes.UniqueViolation"/> and the offending <c>ConstraintName</c>; a
+    /// violation of any OTHER constraint (a CHECK, an FK), or any other write fault, is a <b>real</b> failure this
+    /// writer must not swallow as a benign skip — a silently-dropped Trade under-reports the day's realized P&amp;L into
+    /// the daily governor. The EF in-memory provider throws a bare <see cref="DbUpdateException"/> with no
+    /// <see cref="PostgresException"/> inner, so it never matches here (in-memory idempotency is the pre-check above).
+    /// </summary>
+    /// <param name="exception">The write fault <c>SaveChanges</c> raised.</param>
+    /// <returns><see langword="true"/> only for the closing-fill unique violation.</returns>
+    internal static bool IsClosingFillUniquenessViolation(DbUpdateException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.UniqueViolation,
+            ConstraintName: ClosingFillUniqueIndex,
+        };
     }
 
     /// <summary>

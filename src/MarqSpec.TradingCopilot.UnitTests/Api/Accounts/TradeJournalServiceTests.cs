@@ -11,7 +11,9 @@ using MarqSpec.TradingCopilot.Domain.Observability;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Accounts;
 
@@ -689,5 +691,210 @@ public class TradeJournalServiceTests
         Func<Task> act = () => Service().ProcessFlatAsync(null!, CancellationToken.None);
 
         await act.Should().ThrowAsync<ArgumentNullException>();
+    }
+
+    // ----- gh#747: the write-fault narrowing predicate -----
+    // The idempotent skip must fire for the IX_Trades_ClosingFillId unique violation ONLY. Any other write fault -- a
+    // CHECK, an FK, a serialization failure, a lost connection -- is a real failure that must PROPAGATE (the outer host
+    // logs it), never be swallowed as a benign replay: a silently-dropped Trade under-reports the day's realized P&L
+    // into the daily governor. The in-memory provider never throws a PostgresException, so the narrowed filter is
+    // exercised here on the pure predicate against constructed faults; the end-to-end propagation on real Postgres is
+    // QA's remit (a container-tier test that induces a genuine non-uniqueness fault and asserts it surfaces).
+
+    // Npgsql surfaces a PostgreSQL error as the inner exception of the DbUpdateException EF wraps its SaveChanges in.
+    private static DbUpdateException PostgresWriteFault(string sqlState, string? constraintName) =>
+        new("saving the round trip failed", new PostgresException(
+            messageText: "write rejected", severity: "ERROR", invariantSeverity: "ERROR", sqlState: sqlState,
+            constraintName: constraintName));
+
+    [Fact]
+    public void IsClosingFillUniquenessViolation_ShouldBeTrue_ForTheClosingFillUniqueViolation() =>
+        TradeJournalService.IsClosingFillUniquenessViolation(
+            PostgresWriteFault(PostgresErrorCodes.UniqueViolation, TradeJournalService.ClosingFillUniqueIndex))
+            .Should().BeTrue("the closing-fill unique violation IS the idempotent replay this writer expects");
+
+    [Fact]
+    public void IsClosingFillUniquenessViolation_ShouldBeFalse_ForAnotherIndexsUniqueViolation() =>
+        // A unique violation on some OTHER index is not this writer's idempotent replay -- it must propagate.
+        TradeJournalService.IsClosingFillUniquenessViolation(
+            PostgresWriteFault(PostgresErrorCodes.UniqueViolation, "IX_Trades_Some_Other_Unique"))
+            .Should().BeFalse("only the ClosingFillId index's violation is the expected dupe");
+
+    [Fact]
+    public void IsClosingFillUniquenessViolation_ShouldBeFalse_ForAUniqueViolationWithNoConstraintName() =>
+        // A 23505 whose ConstraintName is null cannot be attributed to OUR index -- fail safe: propagate, don't skip.
+        TradeJournalService.IsClosingFillUniquenessViolation(
+            PostgresWriteFault(PostgresErrorCodes.UniqueViolation, constraintName: null))
+            .Should().BeFalse("a unique violation with no constraint name is not identifiably the closing-fill dupe");
+
+    [Fact]
+    public void IsClosingFillUniquenessViolation_ShouldBeFalse_ForANonUniqueWriteFault() =>
+        // A CHECK violation is a REAL failure, not the idempotent dupe -- it must propagate, not be swallowed.
+        TradeJournalService.IsClosingFillUniquenessViolation(
+            PostgresWriteFault(PostgresErrorCodes.CheckViolation, "CK_Trades_Size_Positive"))
+            .Should().BeFalse("a CHECK violation is a real write failure the writer must not skip");
+
+    [Fact]
+    public void IsClosingFillUniquenessViolation_ShouldBeFalse_ForAForeignKeyViolation() =>
+        TradeJournalService.IsClosingFillUniquenessViolation(
+            PostgresWriteFault(PostgresErrorCodes.ForeignKeyViolation, "FK_Trades_Accounts_AccountId"))
+            .Should().BeFalse("an FK violation is a real write failure, not the idempotent dupe");
+
+    [Fact]
+    public void IsClosingFillUniquenessViolation_ShouldBeFalse_WhenTheInnerIsNotAPostgresException() =>
+        // A provider/transport fault that is not a PostgresException (and the in-memory provider's bare
+        // DbUpdateException) is never the dupe.
+        TradeJournalService.IsClosingFillUniquenessViolation(
+            new DbUpdateException("save failed", new InvalidOperationException("not a postgres error")))
+            .Should().BeFalse();
+
+    [Fact]
+    public void IsClosingFillUniquenessViolation_ShouldBeFalse_WhenThereIsNoInnerException() =>
+        TradeJournalService.IsClosingFillUniquenessViolation(new DbUpdateException("save failed"))
+            .Should().BeFalse();
+
+    // ----- gh#747: the narrowed catch, wired end-to-end (in-memory) -----
+    // The pure predicate above is only half the fix; these prove the CATCH that consumes it, so a mutation that keeps
+    // the predicate but reverts the catch to swallow-all is caught here (gh#747 review). The writer news its own
+    // context from the injected options, leaving no SaveChanges seam to mock -- but an EF interceptor on those options
+    // can fault the writer's Trade insert (and ONLY that, so seeding still saves), which drives both catch arms
+    // in-memory. The real-Postgres equivalent (a genuine venue fault vs a genuine unique race) is QA's remit.
+
+    /// <summary>
+    /// Faults the first <c>SaveChanges</c> that stages a new <see cref="Trade"/> with <paramref name="fault"/> — so an
+    /// account/order/fill seed still saves, but the writer's own insert throws exactly the fault under test.
+    /// <paramref name="beforeThrow"/>, when given, runs immediately before the throw — late enough that any earlier
+    /// cancellation check EF performs on the way into this callback has already passed, so a test can cancel the
+    /// token from inside it and be certain the catch's <c>when</c> filter is what observes the cancellation, not some
+    /// earlier EF Core check aborting the save before the fault-under-test is ever thrown.
+    /// </summary>
+    private sealed class ThrowOnTradeInsertInterceptor(Exception fault, Action? beforeThrow = null) : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            bool insertingTrade = eventData.Context!.ChangeTracker
+                .Entries<Trade>().Any(entry => entry.State == EntityState.Added);
+            if (!insertingTrade)
+            {
+                return base.SavingChangesAsync(eventData, result, cancellationToken);
+            }
+
+            beforeThrow?.Invoke();
+            throw fault;
+        }
+    }
+
+    private TradeJournalService ServiceWhoseTradeInsertFaultsWith(
+        Exception fault, IExecutionMetrics metrics, Action? beforeThrow = null) => new(
+        Context(),
+        new DbContextOptionsBuilder<TradingCopilotDbContext>()
+            .UseInMemoryDatabase(_database)
+            .AddInterceptors(new ThrowOnTradeInsertInterceptor(fault, beforeThrow))
+            .Options,
+        Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = OurCredentialKey }),
+        metrics,
+        NullLogger<TradeJournalService>.Instance);
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldRecordTheWriteFailureAndRethrow_WhenTheInsertFaultsForANonDuplicateReason()
+    {
+        // The whole safety point of gh#747: a REAL write fault (here a CHECK violation) must NOT be swallowed as a
+        // benign idempotent skip. It records JournalWriteFailed and PROPAGATES, so the host logs it and the day's P&L
+        // under-reports VISIBLY rather than a Trade vanishing silently. Before gh#747 the bare catch returned false here.
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 5)]);
+
+        DbUpdateException realFault = PostgresWriteFault(PostgresErrorCodes.CheckViolation, "CK_Trades_Size_Positive");
+        Func<Task> act = () => ServiceWhoseTradeInsertFaultsWith(realFault, metrics)
+            .ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        (await act.Should().ThrowAsync<DbUpdateException>())
+            .Which.Should().BeSameAs(realFault, "the real fault propagates unchanged, not swallowed as a skip");
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWriteFailed))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldPropagateWithoutRecordingTheWriteFailure_WhenTheTokenIsAlreadyCancelled()
+    {
+        // The `when (!IsCancellationRequested)` guard on the write-fault catch (gh#747 review): a shutdown-flavored
+        // cancellation that Npgsql can surface as a wrapped DbUpdateException (57014) must not inflate the
+        // JournalWriteFailed metric on an ordinary graceful stop. The SAME fault type as the sibling test above
+        // proves the guard's only variable is cancellation, not the fault itself -- the token is cancelled from
+        // INSIDE the interceptor, at the instant the fault is thrown, so SaveChanges itself starts uncancelled and
+        // only becomes cancelled exactly where the guard reads it. The fault still propagates uncaught either way;
+        // this guard narrows only the metric, not the propagation (the host's own log behavior on this path is a
+        // separate, documented gap -- see the guard's comment in TradeJournalService.cs).
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 5)]);
+
+        DbUpdateException shutdownFault = PostgresWriteFault(PostgresErrorCodes.CheckViolation, "CK_Trades_Size_Positive");
+        using CancellationTokenSource cancelOnFault = new();
+        Func<Task> act = () => ServiceWhoseTradeInsertFaultsWith(shutdownFault, metrics, beforeThrow: cancelOnFault.Cancel)
+            .ProcessFlatAsync(Flat("9001"), cancelOnFault.Token);
+
+        (await act.Should().ThrowAsync<DbUpdateException>())
+            .Which.Should().BeSameAs(shutdownFault, "the fault still propagates -- cancellation only suppresses the metric");
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWriteFailed)).MustNotHaveHappened();
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldSkipIdempotently_WhenTheInsertHitsTheClosingFillUniqueViolation()
+    {
+        // The other catch arm: a concurrent writer that journalled this exact round trip first makes our insert hit
+        // the IX_Trades_ClosingFillId unique index. That -- and only that -- is the benign replay: return false, record
+        // JournalDuplicateRejected, do NOT rethrow. This drives the CATCH, which the in-memory alreadyJournalled
+        // pre-check cannot (no Trade row exists in this fresh context).
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 5)]);
+
+        DbUpdateException dupe = PostgresWriteFault(
+            PostgresErrorCodes.UniqueViolation, TradeJournalService.ClosingFillUniqueIndex);
+        bool journalled = await ServiceWhoseTradeInsertFaultsWith(dupe, metrics)
+            .ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        journalled.Should().BeFalse("the concurrent winner already journalled this round trip");
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalDuplicateRejected))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWriteFailed)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public void ClosingFillUniqueIndex_ShouldMatchTheModelsRealIndexName_SoTheNarrowedCatchNeverSilentlyStopsMatching()
+    {
+        // gh#747 review. The predicate keys its idempotent-skip filter on the literal index name -- a third copy of a
+        // name EF derives by CONVENTION (the DbContext sets no HasDatabaseName) and the migration emits, with nothing
+        // linking the three at compile time. A rename, or an added HasDatabaseName, would silently stop the filter
+        // matching, demoting the catch-side idempotency backstop and firing a false "under-report" alarm on every
+        // concurrent replay. Pin the constant to the model's real relational name -- InMemory ignores indexes, so build
+        // the model against Npgsql (offline, never connecting; UseVector so the model builds, as the schema tests do).
+        using TradingCopilotDbContext relational = new(
+            new DbContextOptionsBuilder<TradingCopilotDbContext>()
+                .UseNpgsql("Host=not-connected;Database=model-only", npgsql => npgsql.UseVector())
+                .Options,
+            new FixedUser(Guid.Empty));
+
+        string indexName = relational.Model.FindEntityType(typeof(Trade))!
+            .GetIndexes()
+            .Single(index => index.Properties.Select(property => property.Name)
+                .SequenceEqual([nameof(Trade.ClosingFillId)]))
+            .GetDatabaseName()!;
+
+        indexName.Should().Be(
+            TradeJournalService.ClosingFillUniqueIndex,
+            "IsClosingFillUniquenessViolation matches on this exact name; if the model's index name drifts from the "
+            + "constant, the narrowed catch stops recognising the idempotent replay");
     }
 }
