@@ -126,6 +126,12 @@ export interface MarketChartProps {
   readonly execution?: ExecutionOverlay;
   /** Whether the execution overlay may lag the live feed — a dropped socket labels it stale (R-19). */
   readonly executionStale?: boolean;
+  /**
+   * Whether the venue-truth read behind the execution overlay is unavailable — an `Unknown` (venue-unreachable) or a
+   * refused / failed read (gh#772). Draws an "ORDERS / POSITION unavailable" note, so an empty overlay is never
+   * misread as a confirmed flat book (R-13 / R-19).
+   */
+  readonly executionUnavailable?: boolean;
 }
 
 /** Maps the server's OHLCV bars to Lightweight-Charts candles: `bucketStart` (ISO) → a UNIX-second `UTCTimestamp`. */
@@ -172,6 +178,7 @@ export function MarketChart({
   suggestionsStale = false,
   execution = EMPTY_EXECUTION,
   executionStale = false,
+  executionUnavailable = false,
 }: MarketChartProps): React.JSX.Element {
   // Default the window from the resolution, not a flat constant, so it stays under the server's row cap whatever
   // resolution the workspace opens on (gh#725 review).
@@ -451,6 +458,7 @@ export function MarketChart({
   const unavailableOverlays = [
     ...failedIndicators.map((indicator) => indicator.toUpperCase()),
     ...(levelsUnavailable ? ['LEVELS'] : []),
+    ...(executionUnavailable ? ['ORDERS / POSITION'] : []),
   ];
 
   return (

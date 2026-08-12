@@ -344,8 +344,8 @@ price levels — authenticated (R-18), bounded, and global (not operator-owned).
 (gh#727 — active support / resistance, toggled), **suggestion-zone overlays** (gh#727 — an active suggestion's entry /
 stop / target, owner-scoped, stale-labelled on a dropped socket) and **execution overlays** (gh#727 — the operator's
 live working orders + net position from the instrument-scoped venue-truth reads, gh#772, refreshed on each order / fill
-push and stale-labelled on a dropped socket) rendering over a reusable overlay contract; live **fill markers** are the
-remaining gh#727 follow-up. The **realtime** half is a single
+push and honest-state-labelled — stale off the socket, unavailable when the venue-truth read is `Unknown`) rendering
+over a reusable overlay contract; live **fill markers** are the remaining gh#727 follow-up. The **realtime** half is a single
 JWT-authenticated SignalR connection (gh#649, [ADR-0021](adr/0021-realtime-hub-contract.md)): it resumes from its
 last-applied `sequence` on reconnect and dedupes by that cursor, so a drop-and-reconnect is gap-free and
 double-free, and its connection state is **always visible** — a degraded socket is shown degraded, never rendered
