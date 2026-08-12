@@ -2048,7 +2048,8 @@
 
   <section class="onb">
     <div class="cap"><h2>Connection &amp; account onboarding — add a firm login</h2><span class="bp">R-17 · R-18</span>
-      <span class="muted">one login per firm · credentials stay <b>server-side</b> · the login discovers its own accounts</span></div>
+      <span class="muted">one login per firm · credentials stay <b>server-side</b> · the login discovers its own accounts</span>
+      <div class="muted" style="margin-top:6px"><b>Built · gh#653:</b> the <b>firm → conventions → connection → discover</b> walk, shown in the Settings empty state for a fresh deployment, over the existing <span class="mono">/firms</span>, <span class="mono">/firms/{id}/conventions</span>, <span class="mono">/connections</span> and <span class="mono">/connections/{id}/accounts/discover</span> endpoints; finishing reloads the roster so every surface re-scopes. <b>Divergence:</b> the credential step collects the non-secret <b>credential key that names a server-side env entry</b> (ADR-0015), not the username / API key typed into the browser as drawn, and the platform is fixed to the one <b>wired</b> adapter (ProjectX). Per-firm platform choice, the branded ProjectX host, and adapter-shaped credential forms are follow-ups.</div></div>
     <div class="flow-grid">
       <div class="flow-step">
         <div class="step-h"><span class="step-n">1</span>Firm<span class="tag" style="margin-left:auto">from your firms</span></div>
@@ -2076,7 +2077,8 @@
 
   <section class="onb">
     <div class="cap"><h2>Firms — define a firm before you can connect to it</h2><span class="bp">R-14 · R-17 · gh#60</span>
-      <span class="muted">a firm offers <b>one or more platforms</b> · conventions belong to the <b>firm</b>, not the platform · an undeclared stage cannot be traded</span></div>
+      <span class="muted">a firm offers <b>one or more platforms</b> · conventions belong to the <b>firm</b>, not the platform · an undeclared stage cannot be traded</span>
+      <div class="muted" style="margin-top:6px"><b>Built · gh#653:</b> the firm <b>name + type</b> and the per-stage <b>practice / at-risk conventions</b> are the first two steps of the onboarding walk above. The walk always declares <b>Practice as not-at-risk</b> so a discovered practice account resolves to Practice, not Undeclared. <b>Prop firms only for now</b> — Brokerage is shown as <b>not yet supported</b>: a brokerage account has no mode-resolution path (the per-stage convention model can't classify it, and no brokerage platform is wired), so completing that walk would leave every account Undeclared (gh#780). <b>Not built:</b> the &ldquo;platforms it offers&rdquo; matrix and per-firm endpoint — a firm is <span class="mono">{name, type}</span> today and the platform lives on the connection.</div></div>
     <div class="flow-grid">
       <div class="flow-step">
         <div class="step-h"><span class="step-n">1</span>The firm<span class="chip ghost" style="margin-left:auto">Apex</span></div>

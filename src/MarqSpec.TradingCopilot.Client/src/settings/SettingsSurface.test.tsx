@@ -17,6 +17,16 @@ vi.mock('./RiskSettings', () => ({
   ),
 }));
 
+// Stub the onboarding walk for the same reason: the surface's job is to mount it in the empty branch and wire
+// finishing to the roster reload — the walk itself is covered in FirmOnboarding.test.
+vi.mock('../accounts/FirmOnboarding', () => ({
+  FirmOnboarding: ({ onComplete }: { onComplete: () => void }) => (
+    <button type="button" data-testid="firm-onboarding" onClick={onComplete}>
+      onboarding
+    </button>
+  ),
+}));
+
 const accountsMock = vi.mocked(useAccounts);
 
 const destination = {
@@ -95,11 +105,19 @@ describe('SettingsSurface', () => {
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
   });
 
-  it('explains when there are no accounts to declare against', () => {
-    accountsMock.mockReturnValue({ status: 'empty', reload: vi.fn() });
+  it('starts a fresh operator on the onboarding walk when there are no accounts', () => {
+    const reload = vi.fn();
+    accountsMock.mockReturnValue({ status: 'empty', reload });
 
     renderWithProviders(<SettingsSurface destination={destination} />);
 
-    expect(screen.getByText('No accounts yet')).toBeTruthy();
+    // No account to declare risk against yet, so the empty branch is the firm → … → discover walk, and
+    // finishing it reloads the roster so the surface re-scopes into the account-scoped view.
+    const onboarding = screen.getByTestId('firm-onboarding');
+    expect(onboarding).toBeTruthy();
+    expect(screen.queryByTestId('risk-settings')).toBeNull();
+
+    onboarding.click();
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 });
