@@ -18,6 +18,9 @@ vi.mock('../chart/MarketChart', () => ({
     };
     executionStale?: boolean;
     executionUnavailable?: boolean;
+    fills?: readonly { id: string }[];
+    fillsStale?: boolean;
+    fillsUnavailable?: boolean;
   }) => (
     <div
       data-testid="chart-stub"
@@ -34,6 +37,9 @@ vi.mock('../chart/MarketChart', () => ({
       }
       data-execution-stale={String(props.executionStale ?? false)}
       data-execution-unavailable={String(props.executionUnavailable ?? false)}
+      data-fills={(props.fills ?? []).map((fill) => fill.id).join(',')}
+      data-fills-stale={String(props.fillsStale ?? false)}
+      data-fills-unavailable={String(props.fillsUnavailable ?? false)}
     />
   ),
 }));
@@ -53,6 +59,11 @@ vi.mock('../chart/useExecutionOverlays', () => ({
   useExecutionOverlays: useExecutionOverlaysMock,
 }));
 
+// The fill-marker hook has its own suite (accounts + realtime); here it is driven to assert the marks + flags reach
+// the chart (gh#727).
+const { useFillMarkersMock } = vi.hoisted(() => ({ useFillMarkersMock: vi.fn() }));
+vi.mock('../chart/useFillMarkers', () => ({ useFillMarkers: useFillMarkersMock }));
+
 import type { Destination } from '../navigation/destinations';
 import { WorkspaceSurface } from './WorkspaceSurface';
 
@@ -70,6 +81,7 @@ beforeEach(() => {
     stale: false,
     unavailable: false,
   });
+  useFillMarkersMock.mockReturnValue({ fills: [], stale: false, unavailable: false });
 });
 
 describe('WorkspaceSurface', () => {
@@ -166,5 +178,21 @@ describe('WorkspaceSurface', () => {
     expect(chart.dataset.executionPosition).toBe('2');
     expect(chart.dataset.executionStale).toBe('true');
     expect(chart.dataset.executionUnavailable).toBe('true');
+  });
+
+  it('feeds the chart the operator fill markers and their flags for the charted instrument (gh#727)', () => {
+    useFillMarkersMock.mockReturnValue({
+      fills: [{ id: 'f1', time: 1_800_000_000, side: 'Buy', size: 2 }],
+      stale: true,
+      unavailable: true,
+    });
+
+    render(<WorkspaceSurface destination={destination} />);
+
+    expect(useFillMarkersMock).toHaveBeenCalledWith('ES'); // scoped to the charted instrument
+    const chart = screen.getByTestId('chart-stub');
+    expect(chart.dataset.fills).toBe('f1');
+    expect(chart.dataset.fillsStale).toBe('true');
+    expect(chart.dataset.fillsUnavailable).toBe('true');
   });
 });

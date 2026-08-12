@@ -7,6 +7,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { MarketChart } from '../chart/MarketChart';
 import type { IndicatorSpec } from '../chart/MarketChart';
 import { useExecutionOverlays } from '../chart/useExecutionOverlays';
+import { useFillMarkers } from '../chart/useFillMarkers';
 import { useSuggestionZones } from '../chart/useSuggestionZones';
 import type { Destination } from '../navigation/destinations';
 import { SuggestionsPanel } from '../suggestions/SuggestionsPanel';
@@ -77,6 +78,10 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
     unavailable: executionUnavailable,
   } = useExecutionOverlays(instrument);
 
+  // The operator's recent fills mark the chart, kept fresh on every fill push and owner-scoped by the hook (gh#727,
+  // from the gh#792 journal read).
+  const { fills, stale: fillsStale, unavailable: fillsUnavailable } = useFillMarkers(instrument);
+
   // A STABLE array so toggling an indicator (not the instrument/resolution) never re-runs the chart's bars fetch for
   // no reason; the chart adds/removes the pane in place rather than remounting.
   const indicators = useMemo<readonly IndicatorSpec[]>(
@@ -145,6 +150,9 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
             execution={execution}
             executionStale={executionStale}
             executionUnavailable={executionUnavailable}
+            fills={fills}
+            fillsStale={fillsStale}
+            fillsUnavailable={fillsUnavailable}
           />
         </Box>
       </Box>

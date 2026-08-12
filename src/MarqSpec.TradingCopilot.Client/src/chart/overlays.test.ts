@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PriceLevel } from '../api/marketData';
-import type { ExecutionOverlay } from './overlays';
+import type { ExecutionOverlay, FillMark } from './overlays';
 import {
   executionToPriceLines,
+  fillToMarker,
+  fillsToMarkers,
   levelToPriceLines,
   levelsToPriceLines,
   positionToPriceLine,
@@ -198,5 +200,61 @@ describe('executionToPriceLines', () => {
 
   it('draws nothing for no orders and no position', () => {
     expect(executionToPriceLines({ orders: [], position: null }, EXECUTION_PALETTE)).toEqual([]);
+  });
+});
+
+const FILL_PALETTE = { buy: '#26a69a', sell: '#ef5350' } as const;
+
+function fill(overrides: Partial<FillMark>): FillMark {
+  return { id: 'f1', time: 1_800_000_000, side: 'Buy', size: 1, ...overrides };
+}
+
+describe('fillToMarker', () => {
+  it('maps a buy to an up-arrow below the bar in the buy colour, labelled B + size', () => {
+    expect(fillToMarker(fill({ side: 'Buy', size: 2 }), FILL_PALETTE)).toEqual({
+      time: 1_800_000_000,
+      position: 'belowBar',
+      shape: 'arrowUp',
+      color: FILL_PALETTE.buy,
+      text: 'B 2',
+    });
+  });
+
+  it('maps a sell to a down-arrow above the bar in the sell colour, labelled S + size', () => {
+    expect(fillToMarker(fill({ side: 'Sell', size: 1 }), FILL_PALETTE)).toEqual({
+      time: 1_800_000_000,
+      position: 'aboveBar',
+      shape: 'arrowDown',
+      color: FILL_PALETTE.sell,
+      text: 'S 1',
+    });
+  });
+});
+
+describe('fillsToMarkers', () => {
+  it('maps every fill and orders the marks ascending by time (a series-marker precondition)', () => {
+    const marks = fillsToMarkers(
+      [
+        fill({ id: 'late', time: 1_800_000_300, side: 'Sell', size: 1 }),
+        fill({ id: 'early', time: 1_800_000_000, side: 'Buy', size: 2 }),
+      ],
+      FILL_PALETTE,
+    );
+
+    expect(marks.map((mark) => mark.time)).toEqual([1_800_000_000, 1_800_000_300]);
+    expect(marks.map((mark) => mark.text)).toEqual(['B 2', 'S 1']);
+  });
+
+  it('does not mutate the caller array while sorting', () => {
+    const fills = [
+      fill({ id: 'late', time: 1_800_000_300 }),
+      fill({ id: 'early', time: 1_800_000_000 }),
+    ];
+    fillsToMarkers(fills, FILL_PALETTE);
+    expect(fills.map((each) => each.id)).toEqual(['late', 'early']);
+  });
+
+  it('draws nothing for no fills', () => {
+    expect(fillsToMarkers([], FILL_PALETTE)).toEqual([]);
   });
 });
