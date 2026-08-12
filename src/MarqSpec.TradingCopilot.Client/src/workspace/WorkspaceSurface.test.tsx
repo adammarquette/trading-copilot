@@ -17,6 +17,7 @@ vi.mock('../chart/MarketChart', () => ({
       position: { netQuantity: number } | null;
     };
     executionStale?: boolean;
+    executionUnavailable?: boolean;
   }) => (
     <div
       data-testid="chart-stub"
@@ -32,6 +33,7 @@ vi.mock('../chart/MarketChart', () => ({
         props.execution?.position ? String(props.execution.position.netQuantity) : ''
       }
       data-execution-stale={String(props.executionStale ?? false)}
+      data-execution-unavailable={String(props.executionUnavailable ?? false)}
     />
   ),
 }));
@@ -66,6 +68,7 @@ beforeEach(() => {
   useExecutionOverlaysMock.mockReturnValue({
     overlay: { orders: [], position: null },
     stale: false,
+    unavailable: false,
   });
 });
 
@@ -152,6 +155,7 @@ describe('WorkspaceSurface', () => {
         position: { averagePrice: 5300, netQuantity: 2 },
       },
       stale: true,
+      unavailable: true,
     });
 
     render(<WorkspaceSurface destination={destination} />);
@@ -161,5 +165,6 @@ describe('WorkspaceSurface', () => {
     expect(chart.dataset.executionOrders).toBe('o1:stop');
     expect(chart.dataset.executionPosition).toBe('2');
     expect(chart.dataset.executionStale).toBe('true');
+    expect(chart.dataset.executionUnavailable).toBe('true');
   });
 });

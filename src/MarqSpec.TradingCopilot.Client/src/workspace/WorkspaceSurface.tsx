@@ -71,7 +71,11 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
 
   // The operator's live working orders + net position overlay the chart, kept fresh on every order-state / fill push
   // and owner-scoped by the hook (gh#727 increment 3, from the gh#772 venue-truth reads).
-  const { overlay: execution, stale: executionStale } = useExecutionOverlays(instrument);
+  const {
+    overlay: execution,
+    stale: executionStale,
+    unavailable: executionUnavailable,
+  } = useExecutionOverlays(instrument);
 
   // A STABLE array so toggling an indicator (not the instrument/resolution) never re-runs the chart's bars fetch for
   // no reason; the chart adds/removes the pane in place rather than remounting.
@@ -140,6 +144,7 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
             suggestionsStale={suggestionsStale}
             execution={execution}
             executionStale={executionStale}
+            executionUnavailable={executionUnavailable}
           />
         </Box>
       </Box>
