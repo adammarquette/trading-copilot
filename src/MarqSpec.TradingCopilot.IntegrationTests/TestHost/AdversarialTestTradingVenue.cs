@@ -211,15 +211,29 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     /// How many executed records carry this tag. Greater than one is the re-transmit ambiguity of PR #637: the
     /// evidence then describes only the earliest and anything journaled from it understates the venue.
     /// </param>
+    /// <param name="legs">
+    /// The venue's own executed fills behind this answer (gh#770/gh#793) — what
+    /// <c>BackfillEntryFillsAsync</c> journals as entry <see cref="MarqSpec.TradingCopilot.Data.Entities.Fill"/>
+    /// rows. Each must carry the venue's OWN key (never synthesized, see <see cref="TaggedFillEvidence.WithLegs"/>);
+    /// <see langword="null"/> or empty leaves the evidence exactly as before this parameter existed.
+    /// </param>
     public void SeedTaggedFill(
         string accountKey,
         string tag,
         decimal filledSize,
         decimal? filledPrice = null,
         string? venueOrderKey = null,
-        int matchCount = 1) =>
-        _taggedFills.Add((accountKey, tag, TaggedFillEvidence.Filled(
-            tag, filledSize, filledPrice, venueOrderKey, matchCount)));
+        int matchCount = 1,
+        IReadOnlyList<TaggedFillLeg>? legs = null)
+    {
+        TaggedFillEvidence evidence = TaggedFillEvidence.Filled(tag, filledSize, filledPrice, venueOrderKey, matchCount);
+        if (legs is { Count: > 0 })
+        {
+            evidence = evidence.WithLegs(legs);
+        }
+
+        _taggedFills.Add((accountKey, tag, evidence));
+    }
 
     /// <summary>
     /// Declares the account's fill history <b>readable and empty</b> — the venue is reachable, does carry history, and
