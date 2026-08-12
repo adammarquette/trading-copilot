@@ -5,10 +5,13 @@ import type { Destination } from '../navigation/destinations';
 import { renderWithProviders } from '../testing/render';
 import { NewsSurface } from './NewsSurface';
 
-// The maps panel is a data-fetching component covered in RelevanceMaps.test; this suite is about the surface
-// shell and its shell contract, so the panel is stubbed.
+// The maps and topics panels are data-fetching components covered in their own tests; this suite is about the
+// surface shell and its shell contract, so both are stubbed.
 vi.mock('./RelevanceMaps', () => ({
   RelevanceMaps: () => <div data-testid="relevance-maps-stub" />,
+}));
+vi.mock('./RelevanceTopics', () => ({
+  RelevanceTopics: () => <div data-testid="relevance-topics-stub" />,
 }));
 
 const destination = { id: 'news', label: 'News', path: '/news' } as unknown as Destination;
@@ -21,6 +24,7 @@ describe('NewsSurface', () => {
 
     expect(screen.getByTestId('surface').dataset.surface).toBe('news');
     expect(screen.getByTestId('relevance-maps-stub')).toBeTruthy();
+    expect(screen.getByTestId('relevance-topics-stub')).toBeTruthy();
   });
 
   it('says the configuration is deployment-wide, not account-scoped', () => {
