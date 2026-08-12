@@ -694,6 +694,103 @@ public class ProjectXVenueTests
         evidence.VenueOrderKey.Should().Be("77");
     }
 
+    private static ClientModels.HalfTrade Trade(
+        long id, long orderId, int size, decimal price = 5_301.25m, bool voided = false) =>
+        new()
+        {
+            Id = id,
+            OrderId = orderId,
+            AccountId = 9001,
+            Size = size,
+            Price = price,
+            Fees = 1.24m,
+            Voided = voided,
+            CreationTimestamp = new DateTime(2026, 8, 3, 12, 0, 5, DateTimeKind.Utc),
+        };
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldCarryTheVenuesOwnFillKeys_WhenTradeHistoryIsReadable()
+    {
+        // gh#770. The legs let an adopt backfill the entry Fill rows that were dropped while the row was stranded
+        // -- and they carry the venue's OWN keys, so those rows are byte-identical to what the account-event
+        // stream would write and a later replay is an idempotent no-op against { OrderId, VenueFillKey }.
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Order>>([HistoryOrder(77, "the-tag", 2, 5_301.25m)]);
+        A.CallTo(() => _api.GetTradesAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.HalfTrade>>([Trade(501, 77, 1), Trade(502, 77, 1)]);
+
+        TaggedFillEvidence evidence = await _venue.FindFilledOrderByTagAsync(
+            Account, "the-tag", DateTimeOffset.UtcNow.AddHours(-1), CancellationToken.None);
+
+        evidence.Legs.Select(leg => leg.VenueFillKey).Should().Equal("501", "502");
+        evidence.Legs.Sum(leg => leg.Size).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldIgnoreTradesOfOtherOrders_WhenTheWindowCarriesThem()
+    {
+        // The trade search is account-and-window scoped, so it returns everything that executed in the window.
+        // Attaching another order's fills would backfill this order with executions it never made.
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Order>>([HistoryOrder(77, "the-tag", 2, 5_301.25m)]);
+        A.CallTo(() => _api.GetTradesAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.HalfTrade>>([Trade(501, 77, 2), Trade(999, 12, 4)]);
+
+        TaggedFillEvidence evidence = await _venue.FindFilledOrderByTagAsync(
+            Account, "the-tag", DateTimeOffset.UtcNow.AddHours(-1), CancellationToken.None);
+
+        evidence.Legs.Select(leg => leg.VenueFillKey).Should().Equal("501");
+    }
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldSkipAVoidedTrade_SoARetractedExecutionIsNeverJournalled()
+    {
+        // The ingestion path skips voided fills; a backfill that did not would journal an execution the venue has
+        // retracted -- inventing P&L rather than recovering it.
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Order>>([HistoryOrder(77, "the-tag", 2, 5_301.25m)]);
+        A.CallTo(() => _api.GetTradesAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.HalfTrade>>([Trade(501, 77, 2), Trade(502, 77, 2, voided: true)]);
+
+        TaggedFillEvidence evidence = await _venue.FindFilledOrderByTagAsync(
+            Account, "the-tag", DateTimeOffset.UtcNow.AddHours(-1), CancellationToken.None);
+
+        evidence.Legs.Select(leg => leg.VenueFillKey).Should().Equal("501");
+    }
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldStillVeto_WhenTheTradeSearchFails()
+    {
+        // The asymmetry that keeps the safety property intact: the veto protects a LIVE account and must not
+        // regress because a second, journalling-only read failed. A trade-search fault costs the backfill, never
+        // the veto -- degrading to exactly the pre-gh#770 answer.
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Order>>([HistoryOrder(77, "the-tag", 2, 5_301.25m)]);
+        A.CallTo(() => _api.GetTradesAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("trade search unavailable"));
+
+        TaggedFillEvidence evidence = await _venue.FindFilledOrderByTagAsync(
+            Account, "the-tag", DateTimeOffset.UtcNow.AddHours(-1), CancellationToken.None);
+
+        evidence.Status.Should().Be(TaggedFillStatus.Filled);
+        evidence.VetoesRelease.Should().BeTrue();
+        evidence.Legs.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task FindFilledOrderByTagAsync_ShouldNotReadTradeHistory_WhenNothingCarriesTheTag()
+    {
+        // No fill to journal, so no reason to spend a second venue call.
+        A.CallTo(() => _api.GetOrdersAsync(9001, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Order>>([HistoryOrder(1, "someone-else", 3)]);
+
+        await _venue.FindFilledOrderByTagAsync(
+            Account, "the-tag", DateTimeOffset.UtcNow.AddHours(-1), CancellationToken.None);
+
+        A.CallTo(() => _api.GetTradesAsync(A<int>._, A<DateTime?>._, A<DateTime?>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
     [Fact]
     public async Task FindFilledOrderByTagAsync_ShouldReportNoFillFound_WhenNoRecordCarriesTheTag()
     {

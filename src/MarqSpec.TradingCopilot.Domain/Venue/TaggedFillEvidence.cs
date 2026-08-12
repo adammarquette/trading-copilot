@@ -43,6 +43,35 @@ public enum TaggedFillStatus
 }
 
 /// <summary>
+/// One executed fill behind a <see cref="TaggedFillEvidence"/> (gh#770) — enough to journal a <c>Fill</c> row for
+/// an entry whose real fill events were dropped while the order was stranded without a venue key.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b><paramref name="VenueFillKey"/> is the venue's own key, never a synthesized one</b>, and that is the entire
+/// point. <c>Fill</c>'s uniqueness is <c>(OrderId, VenueFillKey)</c>, so a row backfilled under the venue's key is
+/// the <i>same row</i> the account-event stream would write — a later delivery or replay collides with it and is
+/// an idempotent no-op <b>by construction</b>. A synthesized key would not collide, and the entry would be counted
+/// twice: the mirror of the under-counting gh#770 exists to fix, and just as wrong for the R-5 daily governor.
+/// </para>
+/// <para>
+/// A voided fill is never a leg — the ingestion path skips voided fills, and a backfill that did not would journal
+/// an execution the venue has retracted.
+/// </para>
+/// </remarks>
+/// <param name="VenueFillKey">The venue's identifier for this execution. Required, and never invented.</param>
+/// <param name="Price">The execution price. <c>decimal</c> — a price is money.</param>
+/// <param name="Size">The executed quantity; always greater than zero.</param>
+/// <param name="Fees">The fees the venue charged on this execution.</param>
+/// <param name="ExecutedAt">When it executed, as the venue reports it.</param>
+public sealed record TaggedFillLeg(
+    string VenueFillKey,
+    decimal Price,
+    int Size,
+    decimal Fees,
+    DateTimeOffset ExecutedAt);
+
+/// <summary>
 /// The venue's answer to "did the order stamped <paramref name="CustomTag"/> ever fill?" (gh#631).
 /// </summary>
 /// <remarks>
@@ -93,6 +122,41 @@ public sealed record TaggedFillEvidence(
     /// only the earliest of them and the journal is knowingly incomplete.
     /// </summary>
     public bool IsAmbiguous => Status == TaggedFillStatus.Filled && MatchCount > 1;
+
+    /// <summary>
+    /// The executed fills behind this answer (gh#770), when the venue could enumerate them — empty, never
+    /// <see langword="null"/>, and empty is a perfectly ordinary answer.
+    /// </summary>
+    /// <remarks>
+    /// <b>Additive, never load-bearing for the veto.</b> A venue that can report "it filled" but cannot list the
+    /// fills still vetoes exactly as before; only the ability to <i>backfill the journal</i> is lost. That
+    /// asymmetry is deliberate: the veto protects a live account, so it must not regress because a second,
+    /// journalling-only read failed.
+    /// </remarks>
+    public IReadOnlyList<TaggedFillLeg> Legs { get; init; } = [];
+
+    /// <summary>
+    /// Returns this evidence carrying <paramref name="legs"/> — the executions to journal.
+    /// </summary>
+    /// <param name="legs">The venue's executions. Each must carry the venue's own key and a positive size.</param>
+    /// <returns>A copy carrying the legs.</returns>
+    /// <exception cref="ArgumentException">A leg carries no venue fill key.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A leg's size is not greater than zero.</exception>
+    public TaggedFillEvidence WithLegs(IEnumerable<TaggedFillLeg> legs)
+    {
+        ArgumentNullException.ThrowIfNull(legs);
+
+        TaggedFillLeg[] validated = [.. legs];
+        foreach (TaggedFillLeg leg in validated)
+        {
+            // Refused at the boundary rather than written and discovered later as a duplicate: a keyless leg is
+            // precisely the synthesized-key backfill this design exists to rule out.
+            ArgumentException.ThrowIfNullOrWhiteSpace(leg.VenueFillKey, nameof(legs));
+            ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(leg.Size, 0, nameof(legs));
+        }
+
+        return this with { Legs = validated };
+    }
 
     /// <summary>
     /// Whether this evidence <b>vetoes</b> a release or re-arm — true only for a positively reported fill.
