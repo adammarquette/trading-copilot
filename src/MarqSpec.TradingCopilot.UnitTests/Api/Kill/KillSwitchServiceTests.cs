@@ -1,10 +1,12 @@
 using FakeItEasy;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Kill;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Observability;
@@ -31,12 +33,18 @@ public class KillSwitchServiceTests
     private readonly string _database = Guid.NewGuid().ToString();
     private readonly KillSwitch _killSwitch = new(NullExecutionMetrics.Instance);
     private readonly IEventLog _log = A.Fake<IEventLog>();
+    private readonly IAuditLog _auditLog = A.Fake<IAuditLog>();
+    private readonly List<AuditRecord> _audited = [];
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
     public KillSwitchServiceTests()
     {
+        // Capture every immutable audit row the service writes, in order, so the append-only history is assertable.
+        A.CallTo(() => _auditLog.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .Invokes((IReadOnlyCollection<AuditRecord> records, CancellationToken _) => _audited.AddRange(records));
+
         A.CallTo(() => _venue.Id).Returns(Projectx);
         A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
             [new VenueAccount(Account, "PRAC-50K", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Practice)]);
@@ -58,7 +66,7 @@ public class KillSwitchServiceTests
         IProjectXVenueFactory factory = A.Fake<IProjectXVenueFactory>();
         A.CallTo(() => factory.Create(A<FirmConventions>._)).Returns(_venue);
         return new KillSwitchService(
-            database, factory, _log, _killSwitch,
+            database, factory, _log, _auditLog, new FixedUser(_operator), _killSwitch,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
             NullLogger<KillSwitchService>.Instance);
     }
@@ -281,5 +289,125 @@ public class KillSwitchServiceTests
         A.CallTo(() => _log.AppendAsync(
                 A<EventDraft>.That.Matches(d => d.Type == KillSwitchService.DisengagedEventType), A<CancellationToken>._))
             .MustHaveHappened();
+    }
+
+    // --- Immutable §9 audit (gh#765) ---
+
+    [Fact]
+    public async Task EngageAsync_ShouldWriteAnImmutableAuditRecord_CarryingTheSourceModeAndReason()
+    {
+        await SeedAsync();
+
+        await Service(Db()).EngageAsync(KillSwitchMode.FlattenAll, "abort", Now, CancellationToken.None);
+
+        AuditRecord record = _audited.Should().ContainSingle().Subject;
+        record.Action.Should().Be(AuditAction.KillSwitchEngaged);
+        record.Source.Should().Be(AuditSource.Operator, "the operator engaged it — the only trigger wired today");
+        record.Placement.Should().Be(AuditPlacement.None, "a kill-switch action rests on no single protective leg");
+        record.UserId.Should().Be(_operator, "the audit is owned by the operator who acted (R-20)");
+        record.After.Should().Contain("FlattenAll", "the mode belongs in the durable record");
+        record.Detail.Should().Contain("abort", "so does the reason");
+        record.RecordedAt.Should().Be(Now);
+    }
+
+    [Fact]
+    public async Task DisengageAsync_ShouldWriteAnImmutableAuditRecord()
+    {
+        await SeedAsync();
+        KillSwitchService service = Service(Db());
+        await service.EngageAsync(KillSwitchMode.FlattenAll, null, Now, CancellationToken.None);
+        _audited.Clear(); // isolate the disengage's own record from the engage's above
+
+        await service.DisengageAsync(Now, CancellationToken.None);
+
+        AuditRecord record = _audited.Should().ContainSingle().Subject;
+        record.Action.Should().Be(AuditAction.KillSwitchDisengaged);
+        record.Source.Should().Be(AuditSource.Operator);
+        record.After.Should().Be("Disengaged");
+    }
+
+    [Fact]
+    public async Task EngageDisengageEngage_ShouldWriteThreeImmutableAuditRecordsInOrder()
+    {
+        // The acceptance criterion (gh#765). Before this the single KillSwitchState row was overwritten in place, so
+        // after a second engage the first transition was gone. Three transitions must leave three durable records, in
+        // order, each carrying its trigger source — the history the incident review reads.
+        await SeedAsync();
+        KillSwitchService service = Service(Db());
+
+        await service.EngageAsync(KillSwitchMode.FlattenAll, "first", Now, CancellationToken.None);
+        await service.DisengageAsync(Now, CancellationToken.None);
+        await service.EngageAsync(KillSwitchMode.HaltOnly, "again", Now, CancellationToken.None);
+
+        _audited.Select(record => record.Action).Should().Equal(
+            AuditAction.KillSwitchEngaged, AuditAction.KillSwitchDisengaged, AuditAction.KillSwitchEngaged);
+        _audited.Should().OnlyContain(record => record.Source == AuditSource.Operator);
+        _audited.Should().OnlyContain(record => record.Placement == AuditPlacement.None);
+        // Each engage's own reason rides into its own record (the per-record "reason" half of the acceptance criterion).
+        _audited[0].Detail.Should().Contain("first");
+        _audited[2].Detail.Should().Contain("again");
+    }
+
+    [Fact]
+    public async Task EngageAsync_ShouldCarryTheProvidedSource_WhenSomethingOtherThanTheOperatorTripsIt()
+    {
+        // The Source is a first-class field, not hardcoded to Operator: a future guardrail or dead-man's-switch trip
+        // records ITS trigger, so an incident review can tell an operator engage from an automatic one (gh#765).
+        await SeedAsync();
+
+        await Service(Db()).EngageAsync(
+            KillSwitchMode.FlattenAll, null, Now, CancellationToken.None, AuditSource.Guardrail);
+
+        _audited.Should().ContainSingle().Subject.Source.Should().Be(AuditSource.Guardrail);
+    }
+
+    [Fact]
+    public async Task EngageAsync_ShouldNotThrowNorLoseTheEngage_WhenTheAuditWriteFails()
+    {
+        // The audit is a SECONDARY write: a failure loses a history row but must never abort the kill switch the
+        // operator reached for (the IAuditLog contract). The engage still flips the flag and journals.
+        await SeedAsync();
+        A.CallTo(() => _auditLog.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("audit store down"));
+
+        Func<Task> engage = () => Service(Db()).EngageAsync(KillSwitchMode.FlattenAll, null, Now, CancellationToken.None);
+
+        await engage.Should().NotThrowAsync();
+        _killSwitch.IsEngaged.Should().BeTrue("the safety action completed even though its audit row did not");
+        A.CallTo(() => _log.AppendAsync(
+                A<EventDraft>.That.Matches(d => d.Type == KillSwitchService.EngagedEventType), A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task EngageAsync_ShouldRecordTheEscalation_WhenAFlattenAllCannotConfirmFlat()
+    {
+        // gh#765 review. A FlattenAll that cannot confirm flat is the worst kill outcome, and it returns normally --
+        // so without surfacing it, the audit row is byte-identical to a clean kill that closed nothing. The immutable
+        // trail must be reconstructable alone: the escalation belongs in the row, not only the event log.
+        await SeedAsync();
+        OpenPosition();
+        A.CallTo(() => _venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
+            .ReturnsLazily((VenueAccountId a, VenueContractId c, CancellationToken _) =>
+                Task.FromResult(new PositionSnapshot(a, c, 2, new Price(5_000m)))); // never goes flat
+
+        await Service(Db()).EngageAsync(KillSwitchMode.FlattenAll, null, Now, CancellationToken.None);
+
+        AuditRecord record = _audited.Should().ContainSingle().Subject;
+        record.After.Should().Contain("escalated", "an escalated kill must be distinguishable in the audit table");
+        record.Detail.Should().Contain("ESCALATED", "with the still-open count reconstructable from the row alone");
+    }
+
+    [Fact]
+    public async Task EngageAsync_ShouldBoundTheAuditDetail_ToTheColumnWidth()
+    {
+        // The operator reason is unbounded, but AuditRecord.Detail is varchar(512); an over-long reason would fail the
+        // real-Postgres write (silently, since the audit is failure-tolerant). The writer truncates to fit (gh#765).
+        await SeedAsync();
+        string hugeReason = new('x', 2_000);
+
+        await Service(Db()).EngageAsync(KillSwitchMode.HaltOnly, hugeReason, Now, CancellationToken.None);
+
+        _audited.Should().ContainSingle().Subject.Detail.Length.Should().BeLessThanOrEqualTo(512);
     }
 }

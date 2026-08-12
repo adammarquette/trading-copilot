@@ -1,7 +1,10 @@
 using System.Text.Json;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Flatten;
@@ -41,9 +44,14 @@ public sealed class KillSwitchService
 
     private const int MaxFlattenAttempts = 3;
 
+    /// <summary>The audit <c>Detail</c> column's width (data dictionary §12); a longer summary is truncated to fit.</summary>
+    private const int MaxDetail = 512;
+
     private readonly TradingCopilotDbContext _database;
     private readonly IProjectXVenueFactory _venueFactory;
     private readonly IEventLog _eventLog;
+    private readonly IAuditLog _auditLog;
+    private readonly ICurrentUser _currentUser;
     private readonly KillSwitch _killSwitch;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly ILogger<KillSwitchService> _logger;
@@ -52,6 +60,8 @@ public sealed class KillSwitchService
     /// <param name="database">The request-scoped database (R-20 — the operator's own rows).</param>
     /// <param name="venueFactory">Builds a venue for a connection's firm conventions.</param>
     /// <param name="eventLog">The append-only journal every transition is recorded on (R-8).</param>
+    /// <param name="auditLog">The immutable audit trail (§9, gh#765) — every engage/disengage lands one row.</param>
+    /// <param name="currentUser">The authenticated operator — the owner every audit row is stamped with (R-20).</param>
     /// <param name="killSwitch">The runtime kill-switch state this service flips.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
     /// <param name="logger">The logger.</param>
@@ -59,6 +69,8 @@ public sealed class KillSwitchService
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
         IEventLog eventLog,
+        IAuditLog auditLog,
+        ICurrentUser currentUser,
         KillSwitch killSwitch,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         ILogger<KillSwitchService> logger)
@@ -68,6 +80,8 @@ public sealed class KillSwitchService
         _database = database;
         _venueFactory = venueFactory;
         _eventLog = eventLog;
+        _auditLog = auditLog;
+        _currentUser = currentUser;
         _killSwitch = killSwitch;
         _projectX = projectXOptions.Value;
         _logger = logger;
@@ -81,10 +95,20 @@ public sealed class KillSwitchService
     /// <param name="reason">The operator's reason, if given.</param>
     /// <param name="now">The instant of the action — the caller's clock read.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <param name="source">What tripped the engage — the operator by default, the only trigger wired today; a
+    /// guardrail or the dead-man's switch pass their own when those seams land (gh#765).</param>
     /// <returns>What the engage did — how many orders were cancelled and positions flattened.</returns>
     public async Task<KillSwitchReport> EngageAsync(
-        KillSwitchMode mode, string? reason, DateTimeOffset now, CancellationToken cancellationToken)
+        KillSwitchMode mode,
+        string? reason,
+        DateTimeOffset now,
+        CancellationToken cancellationToken,
+        AuditSource source = AuditSource.Operator)
     {
+        // The prior runtime state, captured before the flip, so the audit's Before reflects the real transition
+        // (a re-engage records Engaged -> Engaged, not a fictional Disengaged).
+        bool wasEngaged = _killSwitch.IsEngaged;
+
         // Block outbound FIRST -- flip the runtime flag and persist the lock -- so no new order can slip out while
         // we cancel and flatten. The durable row is what a restart rehydrates (the operator's lock persists).
         _killSwitch.Engage(mode, now, reason);
@@ -92,6 +116,7 @@ public sealed class KillSwitchService
 
         int cancelled = 0;
         int flattened = 0;
+        int stillOpen = 0; // positions a FlattenAll could not confirm closed -- the escalation the audit must record
         List<string> failedAccounts = [];
 
         List<Account> accounts = await _database.Accounts.ToListAsync(cancellationToken);
@@ -137,7 +162,9 @@ public sealed class KillSwitchService
                     // Halt-only leaves open positions on their native safety stops (ADR-0007); only flatten-all closes them.
                     if (mode == KillSwitchMode.FlattenAll)
                     {
-                        flattened += await FlattenAllAsync(venueAccount.Id, venue, cancellationToken);
+                        (int flat, int remaining) = await FlattenAllAsync(venueAccount.Id, venue, cancellationToken);
+                        flattened += flat;
+                        stillOpen += remaining;
                     }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -170,12 +197,28 @@ public sealed class KillSwitchService
         _logger.LogWarning(
             "Kill switch ENGAGED ({Mode}): {Cancelled} working order(s) cancelled, {Flattened} position(s) flattened.{Failures}",
             mode, cancelled, flattened, failureNote);
-        await JournalAsync(
-            EngagedEventType,
+
+        // A FlattenAll that could not confirm every position flat ESCALATED -- the worst kill outcome. It returns
+        // normally (never throws), so without this it is invisible to failureNote and the audit row would read
+        // byte-identical to "nothing was open" (gh#765 review). Record it so the trail is reconstructable alone.
+        string escalationNote = stillOpen == 0
+            ? string.Empty
+            : $" ESCALATED — {stillOpen} position(s) still open, manual intervention needed.";
+        string detail =
             $"Kill switch engaged ({mode}): {cancelled} working order(s) cancelled, {flattened} position(s) flattened."
             + failureNote
-            + (reason is null ? string.Empty : $" Reason: {reason}"),
-            now, cancellationToken);
+            + escalationNote
+            + (reason is null ? string.Empty : $" Reason: {reason}");
+        await JournalAsync(EngagedEventType, detail, now, cancellationToken);
+
+        // The immutable §9 history row (gh#765), written beside the mutable KillSwitchState the read path uses so a
+        // re-engage no longer overwrites and loses the prior transition. `After` marks an escalated kill distinctly so
+        // an incident review can scan for it without parsing Detail.
+        await WriteAuditAsync(
+            AuditAction.KillSwitchEngaged, source,
+            before: wasEngaged ? "Engaged" : "Disengaged",
+            after: stillOpen == 0 ? $"Engaged ({mode})" : $"Engaged ({mode}, escalated)",
+            detail, now, cancellationToken);
 
         return new KillSwitchReport(mode, cancelled, flattened);
     }
@@ -183,13 +226,22 @@ public sealed class KillSwitchService
     /// <summary>Disengages the kill switch — outbound orders are allowed again.</summary>
     /// <param name="now">The instant of the action.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    public async Task DisengageAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    /// <param name="source">What tripped the disengage — the operator by default (gh#765).</param>
+    public async Task DisengageAsync(
+        DateTimeOffset now, CancellationToken cancellationToken, AuditSource source = AuditSource.Operator)
     {
+        bool wasEngaged = _killSwitch.IsEngaged;
+
         _killSwitch.Disengage();
         await PersistAsync(engaged: false, KillSwitchMode.FlattenAll, now, reason: null, cancellationToken);
 
         _logger.LogWarning("Kill switch DISENGAGED — outbound orders are enabled again.");
-        await JournalAsync(DisengagedEventType, "Kill switch disengaged — outbound orders re-enabled.", now, cancellationToken);
+        const string detail = "Kill switch disengaged — outbound orders re-enabled.";
+        await JournalAsync(DisengagedEventType, detail, now, cancellationToken);
+        await WriteAuditAsync(
+            AuditAction.KillSwitchDisengaged, source,
+            before: wasEngaged ? "Engaged" : "Disengaged", after: "Disengaged",
+            detail, now, cancellationToken);
     }
 
     private async Task<int> CancelWorkingOrdersAsync(
@@ -226,7 +278,10 @@ public sealed class KillSwitchService
         return cancelled;
     }
 
-    private async Task<int> FlattenAllAsync(VenueAccountId account, ITradingVenue venue, CancellationToken cancellationToken)
+    /// <summary>Closes every open position on the account. Returns how many closed and how many remain open after
+    /// escalation, so the engage audit can record a kill that could <b>not</b> confirm flat (gh#765).</summary>
+    private async Task<(int Closed, int StillOpen)> FlattenAllAsync(
+        VenueAccountId account, ITradingVenue venue, CancellationToken cancellationToken)
     {
         // Close every open position now -- no deadline, unlike auto-flatten -- reconciling against venue truth and
         // retrying to the cap. This only ever reduces exposure.
@@ -234,7 +289,7 @@ public sealed class KillSwitchService
             [.. (await venue.GetPositionsAsync(account, cancellationToken)).Where(position => !position.IsFlat)];
         if (outstanding.Count == 0)
         {
-            return 0;
+            return (0, 0);
         }
 
         int attempts = 0;
@@ -279,7 +334,7 @@ public sealed class KillSwitchService
             FlattenVerdict verdict = FlattenVerification.Verify(postClose, attempts, MaxFlattenAttempts);
             if (verdict == FlattenVerdict.Flat)
             {
-                return closed;
+                return (closed, 0);
             }
 
             if (verdict == FlattenVerdict.Escalate)
@@ -300,7 +355,7 @@ public sealed class KillSwitchService
                 _logger.LogError(
                     "Kill switch could not confirm {Account} flat after {Attempts} attempt(s) — {Remaining} position(s) remain.",
                     account, attempts, remaining);
-                return closed;
+                return (closed, remaining);
             }
 
             outstanding = [.. postClose.Where(position => !position.IsFlat)];
@@ -330,6 +385,56 @@ public sealed class KillSwitchService
     {
         string payload = JsonSerializer.Serialize(new { reason });
         return _eventLog.AppendAsync(new EventDraft(type, EventSource, occurredAt, payload), cancellationToken);
+    }
+
+    /// <summary>
+    /// Writes the immutable §9 audit row for a kill-switch transition (gh#765) — a <b>secondary</b> write behind the
+    /// safety action: the engage/disengage already committed, so a failure here loses a history row but must never
+    /// abort the kill (the <see cref="IAuditLog"/> contract). A kill/flatten rests on no single protective leg, so its
+    /// <c>Placement</c> is <see cref="AuditPlacement.None"/> and it carries no synthetic-risk flag; the owner is the
+    /// authenticated operator (R-20). <paramref name="detail"/> is bounded to the column width.
+    /// </summary>
+    private async Task WriteAuditAsync(
+        AuditAction action,
+        AuditSource source,
+        string before,
+        string after,
+        string detail,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            AuditRecord record = new()
+            {
+                Id = Guid.NewGuid(),
+
+                // Owner = the authenticated operator (R-20). The only caller today is the operator endpoint, so this
+                // is always populated. A FUTURE background trigger (the guardrail / dead-man's-switch `source` values
+                // this anticipates) has no ambient user, so it must supply the owner -- as the auto-flatten path does
+                // from the account -- rather than rely on this: a Guid.Empty owner would hide the row under the R-20
+                // read filter, losing a safety record precisely when an automatic kill fired (gh#765 review).
+                UserId = _currentUser.UserId,
+                Action = action,
+                Placement = AuditPlacement.None,
+                Source = source,
+                SyntheticRisk = false,
+                Before = before,
+                After = after,
+                Detail = detail.Length > MaxDetail ? detail[..MaxDetail] : detail,
+                RecordedAt = now,
+            };
+            await _auditLog.WriteAsync([record], cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw; // a real shutdown still stops the host
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error, "Could not write the kill-switch audit record ({Action}); the transition itself is unaffected.", action);
+        }
     }
 }
 

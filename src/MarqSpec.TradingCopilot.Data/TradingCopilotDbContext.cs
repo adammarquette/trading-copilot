@@ -848,6 +848,18 @@ public class TradingCopilotDbContext : TenantDbContext
                 // never stored, so a row can never read as an audited event that did not happen.
                 table.HasCheckConstraint("CK_AuditRecords_Action_NotUnknown", "\"Action\" <> 0");
                 table.HasCheckConstraint("CK_AuditRecords_Placement_NotUnknown", "\"Placement\" <> 0");
+
+                // Source is nullable (the stop-plan actions carry none), but a PRESENT source is never the
+                // refusable zero (gh#765) — same fail-closed convention, guarded for null.
+                table.HasCheckConstraint("CK_AuditRecords_Source_NotUnknown", "\"Source\" IS NULL OR \"Source\" <> 0");
+
+                // Source ↔ Action correlation, enforced below the model (gh#765 review — a core tenet): a safety
+                // action (kill-switch engage / disengage = 5 / 6, auto-flatten = 7) MUST carry a trigger source, and
+                // the stop-plan lifecycle actions (1–4) MUST leave it null. A future write site that forgets to stamp
+                // the source on a kill row is refused here, not left recording a safety action with an unknowable
+                // trigger — the exact defeat-the-column bug the unit tests (in-memory, no CHECK) cannot catch.
+                table.HasCheckConstraint(
+                    "CK_AuditRecords_Source_MatchesAction", "(\"Action\" IN (5, 6, 7)) = (\"Source\" IS NOT NULL)");
             });
         });
     }

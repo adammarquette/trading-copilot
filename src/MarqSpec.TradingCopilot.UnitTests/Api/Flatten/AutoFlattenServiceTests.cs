@@ -1,4 +1,5 @@
 using FakeItEasy;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Venues;
@@ -6,6 +7,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Notifications;
@@ -29,14 +31,23 @@ public class AutoFlattenServiceTests
 
     private static VenueAccountId Account => VenueAccountId.Create(Projectx, "9001");
 
+    // The account owner the caller threads in (gh#765) — stable across the test so the audit owner is assertable.
+    private static Guid Owner { get; } = Guid.NewGuid();
+
     // A summer date -> CDT (UTC-5), so 14:30 CT == 19:30 UTC. Pins the tests off a DST boundary; the DST maths of
     // the deadline itself is #69's FlattenSchedule concern, covered there.
     private static DateTimeOffset Utc(int hour, int minute) => new(2026, 7, 15, hour, minute, 0, TimeSpan.Zero);
 
     private readonly IEventLog _log = A.Fake<IEventLog>();
+    private readonly IAuditLog _auditLog = A.Fake<IAuditLog>();
+    private readonly List<AuditRecord> _audited = [];
 
     public AutoFlattenServiceTests()
     {
+        // Capture every immutable audit row the flatten writes, so the durable "what closed / outcome" is assertable.
+        A.CallTo(() => _auditLog.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .Invokes((IReadOnlyCollection<AuditRecord> records, CancellationToken _) => _audited.AddRange(records));
+
         A.CallTo(() => _log.AppendAsync(A<EventDraft>._, A<CancellationToken>._))
             .ReturnsLazily((EventDraft d, CancellationToken _) => Task.FromResult(
                 new EventEnvelope(d.Id ?? Guid.NewGuid(), 1, d.Type, d.Source, d.OccurredAt, d.OccurredAt, d.Payload, d.TraceParent)));
@@ -56,6 +67,7 @@ public class AutoFlattenServiceTests
             database ?? Db(Guid.NewGuid().ToString(), Guid.Empty),
             factory ?? A.Fake<IProjectXVenueFactory>(),
             _log,
+            _auditLog,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
             Options.Create(options ?? new FlattenOptions()),
             _notifications,
@@ -128,7 +140,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2)); // never goes flat
 
         await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
 
         // gh#455 changed HOW this reaches the operator, not whether: the page is enlisted into the flatten's own
         // transaction instead of sent through a commit of its own. The guarantee is strictly stronger.
@@ -145,7 +157,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
 
         await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
 
         A.CallTo(() => _notifications.ResolveAsync(A<string>._, A<CancellationToken>._)).MustHaveHappened();
     }
@@ -165,7 +177,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([]); // nothing open at all
 
         await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
 
         A.CallTo(() => _notifications.ResolveAsync(
                 A<string>.That.Contains("ES"), A<CancellationToken>._))
@@ -181,7 +193,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.GC.Q26", 2)]);
 
         await Service().FlattenAccountAsync(
-            Account, venue,
+            Account, Owner, venue,
             [Schedule("ES", new TimeOnly(14, 30)), Schedule("GC", new TimeOnly(12, 15))],
             Utc(19, 45), maxAttempts: 3, CancellationToken.None);
 
@@ -199,7 +211,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2)); // never goes flat
 
         await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
 
         A.CallTo(() => _notifications.ResolveAsync(A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
@@ -216,7 +228,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2)); // never goes flat
 
         await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
 
         A.CallTo(() => _enlister.EnlistAsync(
                 A<Notification>.That.Matches(n => n.Severity == NotificationSeverity.Page), A<CancellationToken>._))
@@ -236,7 +248,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2));
 
         await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
 
         A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
@@ -249,7 +261,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2));
 
         await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(21, 0), maxAttempts: 1, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(21, 0), maxAttempts: 1, CancellationToken.None);
 
         A.CallTo(() => _enlister.EnlistAsync(A<Notification>._, A<CancellationToken>._))
             .MustHaveHappened()
@@ -269,7 +281,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2));
 
         Func<Task> act = () => Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
 
         await act.Should().NotThrowAsync();
         AssertAppended(AutoFlattenService.EscalatedEventType);
@@ -282,7 +294,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
 
         await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(17, 0), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(17, 0), maxAttempts: 3, CancellationToken.None);
 
         A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
@@ -301,9 +313,82 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]); // closes cleanly, so the flatten resolves
 
         Func<Task> act = () => Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
 
         await act.Should().NotThrowAsync();
+        A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    // --- Immutable §9 audit (gh#765) ---
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldWriteAnImmutableAuditRecord_WhenTheFlattenExecutes()
+    {
+        // The safety-critical close ran and confirmed flat — the durable "what closed, and did it work" §9 requires,
+        // owned by the account the caller threads in (this host has no ambient user). Before gh#765 the flatten wrote none.
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]); // closes flat by default
+
+        await Service().FlattenAccountAsync(
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+
+        AuditRecord record = _audited.Should().ContainSingle().Subject;
+        record.Action.Should().Be(AuditAction.AutoFlatten);
+        record.Source.Should().Be(AuditSource.Scheduler, "the scheduler fired the deadline close");
+        record.Placement.Should().Be(AuditPlacement.None, "a flatten acts on the position, not a single protective leg");
+        record.UserId.Should().Be(Owner, "the audit is stamped with the account's owner (R-20, background plumbing)");
+        record.After.Should().Be("Flat", "the outcome the close confirmed");
+        record.Detail.Should().Contain("ES", "what it closed belongs in the durable record");
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldRecordTheEscalatedOutcome_WhenTheCloseDoesNotConfirmFlat()
+    {
+        // The outcome that matters most: the close did not confirm flat, exposure remains. It must be as durable as a
+        // success — an incident review has to tell "flattened" from "tried and could not".
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => Pos(c.Key, 2)); // never goes flat
+
+        await Service().FlattenAccountAsync(
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 1, CancellationToken.None);
+
+        AuditRecord record = _audited.Should().ContainSingle().Subject;
+        record.Action.Should().Be(AuditAction.AutoFlatten);
+        record.After.Should().Be("Escalated");
+        record.Source.Should().Be(AuditSource.Scheduler);
+        record.UserId.Should().Be(Owner);
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldRecordAMissedDeadline_AsAnImmutableAuditRow()
+    {
+        // The most incident-worthy outcome: the deadline and its firing window passed with exposure still open and NO
+        // close fired. It belongs in the immutable trail beside executed/escalated, not only the event log (gh#765 review).
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
+
+        await Service().FlattenAccountAsync(
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(21, 0), maxAttempts: 1, CancellationToken.None);
+
+        AuditRecord record = _audited.Should().ContainSingle().Subject;
+        record.Action.Should().Be(AuditAction.AutoFlatten);
+        record.After.Should().Be("Missed", "a missed deadline is the worst outcome and must be reconstructable from the row");
+        record.UserId.Should().Be(Owner);
+        record.Detail.Should().Contain("ES");
+    }
+
+    [Fact]
+    public async Task FlattenAccountAsync_ShouldNotFailTheFlatten_WhenTheAuditWriteThrows()
+    {
+        // The audit is a SECONDARY write: a failure loses a history row but must never abort the flatten, the one
+        // action the system takes without confirmation (the IAuditLog contract, ADR-0019 self-inflicted-wound rule).
+        A.CallTo(() => _auditLog.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("audit store down"));
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
+
+        Func<Task> flatten = () => Service().FlattenAccountAsync(
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+
+        await flatten.Should().NotThrowAsync();
+        // The position still closed even though its audit row did not persist.
         A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
             .MustHaveHappened();
     }
@@ -316,7 +401,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
 
         int closed = await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
 
         closed.Should().Be(1);
         A.CallTo(() => venue.ClosePositionAsync(
@@ -332,7 +417,7 @@ public class AutoFlattenServiceTests
 
         // 12:00 CT, two and a half hours before the 14:30 deadline: nothing to do yet.
         int closed = await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(17, 0), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(17, 0), maxAttempts: 3, CancellationToken.None);
 
         closed.Should().Be(0);
         A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
@@ -347,7 +432,7 @@ public class AutoFlattenServiceTests
         // Disabled with a live position past the deadline is the dangerous case: it must stay VISIBLE, never a
         // silent no-op (R-13 "cannot be silently disabled").
         int closed = await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30), enabled: false)], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30), enabled: false)], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
 
         closed.Should().Be(0);
         A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
@@ -363,6 +448,7 @@ public class AutoFlattenServiceTests
 
         int closed = await Service().FlattenAccountAsync(
             Account,
+            Owner,
             venue,
             [Schedule("GC", new TimeOnly(12, 15)), Schedule("ES", new TimeOnly(14, 30))],
             Utc(17, 20),
@@ -386,7 +472,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
 
         await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
 
         // Auto-flatten closes; it never opens. The single order action taken without confirmation must reduce only.
         A.CallTo(() => venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
@@ -402,7 +488,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)], onClose: c => new PositionSnapshot(Account, c, 2, new Price(5_000m)));
 
         int closed = await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 2, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 2, CancellationToken.None);
 
         closed.Should().Be(0);
         A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
@@ -418,7 +504,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
 
         await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
 
         A.CallTo(() => _log.AppendAsync(
                 A<EventDraft>.That.Matches(d =>
@@ -439,7 +525,7 @@ public class AutoFlattenServiceTests
 
         // 14:15 CT -- fifteen minutes before the 14:30 deadline: warn, do not yet close.
         int closed = await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 15), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 15), maxAttempts: 3, CancellationToken.None);
 
         closed.Should().Be(0);
         A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
@@ -457,7 +543,7 @@ public class AutoFlattenServiceTests
         // 16:00 CT -- ninety minutes past 14:30, beyond the one-hour firing window. Firing blind into the
         // settlement window is worse than escalating; it must not close, and must not be silent (ADR-0013).
         int closed = await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(21, 0), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(21, 0), maxAttempts: 3, CancellationToken.None);
 
         closed.Should().Be(0);
         A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
@@ -475,7 +561,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([Pos("CON.F.US.CL.M25", -1)]);
 
         int closed = await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
 
         closed.Should().Be(0);
         A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
@@ -489,7 +575,7 @@ public class AutoFlattenServiceTests
         ITradingVenue venue = Venue([]);
 
         int closed = await Service().FlattenAccountAsync(
-            Account, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
+            Account, Owner, venue, [Schedule("ES", new TimeOnly(14, 30))], Utc(19, 45), maxAttempts: 3, CancellationToken.None);
 
         closed.Should().Be(0);
         A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
