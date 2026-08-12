@@ -316,9 +316,12 @@ public sealed class TradeJournalService
             //
             // The `when (!IsCancellationRequested)` guard excludes a SHUTDOWN cancellation that Npgsql can surface as a
             // wrapped DbUpdateException (SqlState 57014) rather than a raw OperationCanceledException (gh#747 review):
-            // recording that as a write failure would fire a spurious alert on every graceful stop. On cancellation the
-            // fault propagates uncounted -- the host logs and continues without crashing, and no false JournalWriteFailed
-            // is emitted. A genuine fault is never masked: the token is only set when the operator tears the stream down.
+            // recording that as a write failure would inflate the JournalWriteFailed METRIC on every graceful stop, so
+            // this guard keeps the metric honest. It does NOT silence the host's log: JournalRoundTripSafelyAsync's own
+            // cancellation branch only matches OperationCanceledException, so this wrapped DbUpdateException still falls
+            // into its generic catch and logs the "P&L will under-report" ERROR on an ordinary shutdown too -- a known
+            // gap this comment does not claim to close. A genuine fault is never masked: the token is only set when the
+            // operator tears the stream down.
             _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWriteFailed);
             throw;
         }

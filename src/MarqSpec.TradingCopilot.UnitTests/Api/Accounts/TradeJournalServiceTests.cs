@@ -763,25 +763,34 @@ public class TradeJournalServiceTests
     /// <summary>
     /// Faults the first <c>SaveChanges</c> that stages a new <see cref="Trade"/> with <paramref name="fault"/> — so an
     /// account/order/fill seed still saves, but the writer's own insert throws exactly the fault under test.
+    /// <paramref name="beforeThrow"/>, when given, runs immediately before the throw — late enough that any earlier
+    /// cancellation check EF performs on the way into this callback has already passed, so a test can cancel the
+    /// token from inside it and be certain the catch's <c>when</c> filter is what observes the cancellation, not some
+    /// earlier EF Core check aborting the save before the fault-under-test is ever thrown.
     /// </summary>
-    private sealed class ThrowOnTradeInsertInterceptor(Exception fault) : SaveChangesInterceptor
+    private sealed class ThrowOnTradeInsertInterceptor(Exception fault, Action? beforeThrow = null) : SaveChangesInterceptor
     {
         public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
             DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
             bool insertingTrade = eventData.Context!.ChangeTracker
                 .Entries<Trade>().Any(entry => entry.State == EntityState.Added);
-            return insertingTrade
-                ? throw fault
-                : base.SavingChangesAsync(eventData, result, cancellationToken);
+            if (!insertingTrade)
+            {
+                return base.SavingChangesAsync(eventData, result, cancellationToken);
+            }
+
+            beforeThrow?.Invoke();
+            throw fault;
         }
     }
 
-    private TradeJournalService ServiceWhoseTradeInsertFaultsWith(Exception fault, IExecutionMetrics metrics) => new(
+    private TradeJournalService ServiceWhoseTradeInsertFaultsWith(
+        Exception fault, IExecutionMetrics metrics, Action? beforeThrow = null) => new(
         Context(),
         new DbContextOptionsBuilder<TradingCopilotDbContext>()
             .UseInMemoryDatabase(_database)
-            .AddInterceptors(new ThrowOnTradeInsertInterceptor(fault))
+            .AddInterceptors(new ThrowOnTradeInsertInterceptor(fault, beforeThrow))
             .Options,
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = OurCredentialKey }),
         metrics,
@@ -807,6 +816,34 @@ public class TradeJournalServiceTests
             .Which.Should().BeSameAs(realFault, "the real fault propagates unchanged, not swallowed as a skip");
         A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWriteFailed))
             .MustHaveHappenedOnceExactly();
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldPropagateWithoutRecordingTheWriteFailure_WhenTheTokenIsAlreadyCancelled()
+    {
+        // The `when (!IsCancellationRequested)` guard on the write-fault catch (gh#747 review): a shutdown-flavored
+        // cancellation that Npgsql can surface as a wrapped DbUpdateException (57014) must not inflate the
+        // JournalWriteFailed metric on an ordinary graceful stop. The SAME fault type as the sibling test above
+        // proves the guard's only variable is cancellation, not the fault itself -- the token is cancelled from
+        // INSIDE the interceptor, at the instant the fault is thrown, so SaveChanges itself starts uncancelled and
+        // only becomes cancelled exactly where the guard reads it. The fault still propagates uncaught either way;
+        // this guard narrows only the metric, not the propagation (the host's own log behavior on this path is a
+        // separate, documented gap -- see the guard's comment in TradeJournalService.cs).
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 5)]);
+
+        DbUpdateException shutdownFault = PostgresWriteFault(PostgresErrorCodes.CheckViolation, "CK_Trades_Size_Positive");
+        using CancellationTokenSource cancelOnFault = new();
+        Func<Task> act = () => ServiceWhoseTradeInsertFaultsWith(shutdownFault, metrics, beforeThrow: cancelOnFault.Cancel)
+            .ProcessFlatAsync(Flat("9001"), cancelOnFault.Token);
+
+        (await act.Should().ThrowAsync<DbUpdateException>())
+            .Which.Should().BeSameAs(shutdownFault, "the fault still propagates -- cancellation only suppresses the metric");
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWriteFailed)).MustNotHaveHappened();
         A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten)).MustNotHaveHappened();
     }
 
