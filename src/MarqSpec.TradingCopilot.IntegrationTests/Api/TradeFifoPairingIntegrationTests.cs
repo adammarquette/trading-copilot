@@ -457,7 +457,7 @@ public class TradeFifoPairingIntegrationTests : IClassFixture<TradeFifoPairingPo
     {
         // A flat is processed before every fill has arrived, so the writer journals what it can see: one leg,
         // (exit @ t3, entry @ t0). Two executions then land LATE and OUT OF ORDER, both timed BEFORE that journalled
-        // close. FIFO now re-pairs the very same fills into different legs -- (t2 exit, t0 entry) and (t3 exit, t2
+        // close. FIFO now re-pairs the very same fills into different legs -- (t2 exit, t0 entry) and (t3 exit, t1
         // entry) -- neither of which is the key already on disk. The exact-pair dedup cannot recognise them, so
         // writing them would ADD their P&L on top of the row already counted: a double-count into the daily
         // governor, in the dangerous direction. The writer must refuse and keep the one under-reported row.
