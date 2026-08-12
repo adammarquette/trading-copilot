@@ -579,6 +579,58 @@ public class TradeJournalServiceTests
     }
 
     [Fact]
+    public async Task ProcessFlatAsync_ShouldSkipIdempotently_WhenReplayingAPreMigrationLegacyRow()
+    {
+        // gh#759 review (BLOCKING). A Trade journalled BEFORE this PR has OpeningFillId = NULL (the column did not
+        // exist). Replaying its flat must be the ORDINARY idempotent skip -- recognized by the old ClosingFillId-alone
+        // key -- NOT a false "re-pairing" refusal that pollutes JournalBoundaryMergeRefused, the metric this PR built
+        // to be a trustworthy signal for GENUINE re-pairing. The legacy row (and its RealizedPnL) is untouched.
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        Guid entryFill = new("00000000-0000-0000-0000-0000000000e1");
+        Guid closeFill = new("00000000-0000-0000-0000-0000000000c1");
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Buy, [(entryFill, 5_000m, 1, 0)]);
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Sell, [(closeFill, 5_010m, 1, 5)]);
+
+        // The pre-migration row: ClosingFillId set, OpeningFillId NULL -- the old single-key format.
+        await SeedLegacyTradeAsync(owner, accountId, closeFill, realized: 50m);
+
+        bool journalled = await Service(metrics)
+            .ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(5)), CancellationToken.None);
+
+        journalled.Should().BeFalse("a replay of the legacy trip writes nothing new");
+        (await TradesAsync()).Should().ContainSingle("the legacy row is recognized as already journalled, not re-paired");
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalAlreadyJournalled)).MustHaveHappened();
+        // A legacy row is the old-format version of the same trip, not a re-pairing.
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalBoundaryMergeRefused))
+            .MustNotHaveHappened();
+    }
+
+    // A pre-#759 Trade row: the natural key is ClosingFillId alone and OpeningFillId is NULL (the column did not exist).
+    private async Task SeedLegacyTradeAsync(Guid owner, Guid accountId, Guid closingFillId, decimal realized)
+    {
+        await using TradingCopilotDbContext context = Context();
+        context.Trades.Add(new Trade
+        {
+            Id = Guid.NewGuid(),
+            UserId = owner,
+            AccountId = accountId,
+            Instrument = Contract,
+            Side = OrderSide.Buy,
+            Size = 1,
+            EntryPrice = 5_000m,
+            ExitPrice = 5_010m,
+            RealizedPnL = realized,
+            Mode = TradingMode.Practice,
+            ClosedAt = _now.AddMinutes(5),
+            ClosingFillId = closingFillId,
+            // OpeningFillId deliberately left NULL -- the pre-#759 single-key format.
+        });
+        await context.SaveChangesAsync();
+    }
+
+    [Fact]
     public async Task ProcessFlatAsync_ShouldSignThePnLByTheEntrySide_WhenAShortClosesForAProfit()
     {
         Guid owner = Guid.NewGuid();

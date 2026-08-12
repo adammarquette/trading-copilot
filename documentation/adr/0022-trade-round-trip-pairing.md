@@ -69,7 +69,11 @@ nothing new — it is the property that stops a re-delivered flat double-countin
   already-journalled close makes FIFO re-pair the same fills into different-keyed legs the per-leg dedup cannot
   recognise as the old row. A **pre-write guard** fails closed — a window fill already journalled under a *different*
   pairing refuses the flat rather than double-count into the governor (the safe, under-reporting direction).
-  Reconciling the orphaned row is a settlement-reconcile concern (gh#193).
+  Reconciling the orphaned row is a settlement-reconcile concern (gh#193). A **pre-#759 row** carries only the old
+  single-column closing key (null `OpeningFillId`); the guard and the per-leg pre-check recognise it by `ClosingFillId`
+  **alone** as the already-journalled version of the same trip, so replaying a legacy flat is the ordinary idempotent
+  skip — **not** a false re-pairing that would pollute `JournalBoundaryMergeRefused` (pre-#759 windows were only ever
+  balanced single trips, so a legacy `ClosingFillId` belongs to exactly one recomposed leg).
 - **The idempotency backstop moves to the composite key:** the pre-check `AnyAsync`, the narrowed
   `DbUpdateException` catch, the pinned index-name constant, and the metadata test that pins it all follow the
   index rename.
