@@ -1,7 +1,13 @@
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
-import { CandlestickSeries, LineSeries, LineStyle, createChart } from 'lightweight-charts';
+import {
+  CandlestickSeries,
+  LineSeries,
+  LineStyle,
+  createChart,
+  createSeriesMarkers,
+} from 'lightweight-charts';
 import type {
   CandlestickData,
   IChartApi,
@@ -19,11 +25,18 @@ import { LoadingState } from '../components/LoadingState';
 import type {
   ExecutionOverlay,
   ExecutionPalette,
+  FillMark,
+  FillPalette,
   LevelPalette,
   SuggestionPalette,
   SuggestionZone,
 } from './overlays';
-import { executionToPriceLines, levelsToPriceLines, suggestionsToPriceLines } from './overlays';
+import {
+  executionToPriceLines,
+  fillsToMarkers,
+  levelsToPriceLines,
+  suggestionsToPriceLines,
+} from './overlays';
 
 /**
  * How many bars the default window aims for. Kept comfortably under the server's row cap
@@ -99,6 +112,12 @@ const EXECUTION_PALETTE: ExecutionPalette = {
   position: '#ab47bc',
 };
 
+/** A stable empty default for {@link MarketChartProps.fills} — module-level, the gh#749 lesson. */
+const NO_FILLS: readonly FillMark[] = [];
+
+/** The colours the fill overlay marks buys / sells with (gh#727): the conventional buy-green / sell-red glyphs. */
+const FILL_PALETTE: FillPalette = { buy: '#26a69a', sell: '#ef5350' };
+
 export interface MarketChartProps {
   readonly venue: string;
   readonly instrument: string;
@@ -132,6 +151,15 @@ export interface MarketChartProps {
    * misread as a confirmed flat book (R-13 / R-19).
    */
   readonly executionUnavailable?: boolean;
+  /**
+   * The operator's recent fills on this instrument, overlaid as buy / sell **markers** on the candles (gh#727) from
+   * the journal read (gh#792). The workspace keeps them fresh + owner-scoped. Absent (the default) draws no markers.
+   */
+  readonly fills?: readonly FillMark[];
+  /** Whether the fill markers may lag the live feed — a dropped socket labels them stale (R-19). */
+  readonly fillsStale?: boolean;
+  /** Whether the fills read was unavailable (refused / failed) — draws a "FILLS unavailable" note, never a silent gap. */
+  readonly fillsUnavailable?: boolean;
 }
 
 /** Maps the server's OHLCV bars to Lightweight-Charts candles: `bucketStart` (ISO) → a UNIX-second `UTCTimestamp`. */
@@ -163,8 +191,8 @@ function toIndicatorLine(points: readonly IndicatorPoint[]): LineData<UTCTimesta
  * (no leaked canvas / `ResizeObserver`). Indicator panes (gh#726) render below the candles from the pre-computed
  * series (R-22); price-level overlays (gh#727) draw as price lines from `/api/marketdata/levels`, suggestion-zone
  * overlays (gh#727) draw an active suggestion's entry / stop / target, and execution overlays (gh#727 increment 3)
- * draw the operator's working orders + net position from venue truth (gh#772). Fill *markers* are a gh#727 follow-up
- * (a marker primitive; the fill push carries no instrument); live tick updates are gh#649's.
+ * draw the operator's working orders + net position from venue truth (gh#772), and fill-marker overlays (gh#727) mark
+ * the operator's recent buys / sells from the journal read (gh#792). Live tick updates are gh#649's.
  */
 export function MarketChart({
   venue,
@@ -179,6 +207,9 @@ export function MarketChart({
   execution = EMPTY_EXECUTION,
   executionStale = false,
   executionUnavailable = false,
+  fills = NO_FILLS,
+  fillsStale = false,
+  fillsUnavailable = false,
 }: MarketChartProps): React.JSX.Element {
   // Default the window from the resolution, not a flat constant, so it stays under the server's row cap whatever
   // resolution the workspace opens on (gh#725 review).
@@ -454,11 +485,40 @@ export function MarketChart({
     };
   }, [execution]);
 
+  // Fill-marker overlay (gh#727): the operator's recent buy / sell fills on this instrument, drawn as series markers
+  // on the candles from the journal read (gh#792) the workspace keeps live + owner-scoped. Synchronous like the
+  // price-line overlays — the data arrives as a prop; the series is captured + re-checked so a teardown mid-life never
+  // touches a disposed chart. `createSeriesMarkers` returns a plugin handle detached on cleanup.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (series === null) {
+      return;
+    }
+    const markers = createSeriesMarkers(
+      series,
+      fillsToMarkers(fills, FILL_PALETTE).map((spec) => ({
+        time: spec.time as UTCTimestamp,
+        position: spec.position,
+        color: spec.color,
+        shape: spec.shape,
+        text: spec.text,
+      })),
+    );
+    return () => {
+      // Only detach if the series is still live: on unmount the create effect's cleanup runs first (top-to-bottom),
+      // calling `chart.remove()` and nulling the ref, so a bare detach here would touch an already-disposed chart.
+      if (seriesRef.current === series) {
+        markers.detach();
+      }
+    };
+  }, [fills]);
+
   // A degraded overlay read (an indicator pane or the price levels) is shown, not swallowed (R-11 / R-19).
   const unavailableOverlays = [
     ...failedIndicators.map((indicator) => indicator.toUpperCase()),
     ...(levelsUnavailable ? ['LEVELS'] : []),
     ...(executionUnavailable ? ['ORDERS / POSITION'] : []),
+    ...(fillsUnavailable ? ['FILLS'] : []),
   ];
 
   return (
@@ -540,6 +600,26 @@ export function MarketChart({
         >
           <Typography variant="caption" sx={{ color: 'warning.main' }}>
             Orders / position may be stale
+          </Typography>
+        </Box>
+      ) : null}
+      {fillsStale && fills.length > 0 ? (
+        // The socket is not live, so a fresh fill may not have refreshed the markers — say so (R-19), don't hide it.
+        <Box
+          sx={{
+            position: 'absolute',
+            bottom: 8,
+            right: 8,
+            px: 1,
+            py: 0.25,
+            borderRadius: 1,
+            bgcolor: 'background.paper',
+            border: '1px solid',
+            borderColor: 'warning.main',
+          }}
+        >
+          <Typography variant="caption" sx={{ color: 'warning.main' }}>
+            Fills may be stale
           </Typography>
         </Box>
       ) : null}
