@@ -4,7 +4,7 @@ import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 import {
   OrderType,
@@ -16,6 +16,7 @@ import {
   takeStagedOrder,
 } from '../api/orders';
 import { GateDecisionPanel } from './GateDecisionPanel';
+import { describeSizing } from './gateDecision';
 
 /**
  * The order ticket (gh#655, R-11 / R-12, ADR-0007) — the surface that sends real orders.
@@ -56,44 +57,78 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
   const [sent, setSent] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [type, setType] = useState<OrderType>(proposal.type);
+  const [pending, setPending] = useState(false);
+  /**
+   * The re-entrancy guard, a REF rather than the `pending` state above. State updates are not applied until the
+   * next render, so two clicks dispatched in the same tick would both read the old value and both fire; a ref is
+   * written synchronously and so actually excludes the second. `pending` exists to disable the controls -- that
+   * is the visible half, this is the correct half.
+   *
+   * It matters most on Send: order transmission is not idempotent (ProjectX ADR-0002 -- "a retried timeout can
+   * place a second live order"), so a double-click could put the gate-approved size on the account twice.
+   */
+  const inFlight = useRef(false);
+
+  const begin = useCallback(() => {
+    if (inFlight.current) {
+      return false;
+    }
+    inFlight.current = true;
+    setPending(true);
+    return true;
+  }, []);
+
+  const finish = useCallback(() => {
+    inFlight.current = false;
+    setPending(false);
+  }, []);
 
   const handleArm = useCallback(() => {
+    if (!begin()) {
+      return; // a second arm would stage a SECOND order and orphan whichever row resolved first
+    }
     setRefusal(null);
     const { accountId, ...order } = proposal;
-    void armOrder(accountId, { ...order, type }).then((result) => {
-      if (!result.ok) {
-        setRefusal(refusalText(result));
-        return;
-      }
-      setStaged(result.data);
-    });
-  }, [proposal, type]);
+    void armOrder(accountId, { ...order, type })
+      .then((result) => {
+        if (!result.ok) {
+          setRefusal(refusalText(result));
+          return;
+        }
+        setStaged(result.data);
+      })
+      .finally(finish);
+  }, [begin, finish, proposal, type]);
 
   const handleSend = useCallback(() => {
-    if (staged === null) {
-      return;
+    if (staged === null || !begin()) {
+      return; // never a second transmission of the same staged order
     }
     setRefusal(null);
-    void takeStagedOrder(staged.orderId).then((result) => {
-      if (!result.ok) {
-        // The staged row survives a refused send, so the ticket stays armed and the reason stays on screen.
-        setRefusal(refusalText(result));
-        return;
-      }
-      setSent(`Sent ${result.data.approvedQuantity} — ${result.data.reason}`);
-      setStaged(null);
-    });
-  }, [staged]);
+    void takeStagedOrder(staged.orderId)
+      .then((result) => {
+        if (!result.ok) {
+          // The staged row survives a refused send, so the ticket stays armed and the reason stays on screen.
+          setRefusal(refusalText(result));
+          return;
+        }
+        setSent(`Sent ${result.data.approvedQuantity} — ${result.data.reason}`);
+        setStaged(null);
+      })
+      .finally(finish);
+  }, [begin, finish, staged]);
 
   const handleCancel = useCallback(() => {
-    if (staged === null) {
+    if (staged === null || !begin()) {
       return;
     }
-    void cancelOrder(staged.orderId).then(() => {
-      setStaged(null);
-      setRefusal(null);
-    });
-  }, [staged]);
+    void cancelOrder(staged.orderId)
+      .then(() => {
+        setStaged(null);
+        setRefusal(null);
+      })
+      .finally(finish);
+  }, [begin, finish, staged]);
 
   return (
     <Box
@@ -143,31 +178,24 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
 
       <Stack direction="row" spacing={1}>
         {staged === null ? (
-          <Button variant="contained" onClick={handleArm}>
+          <Button variant="contained" onClick={handleArm} disabled={pending}>
             Arm
           </Button>
         ) : (
           <>
-            {isSendable(staged) ? (
-              <Button variant="contained" color="primary" onClick={handleSend}>
+            {describeSizing(proposal.quantity, staged).sendable ? (
+              <Button variant="contained" color="primary" onClick={handleSend} disabled={pending}>
                 Send
               </Button>
             ) : null}
-            <Button onClick={handleCancel}>Cancel</Button>
+            <Button onClick={handleCancel} disabled={pending}>
+              Cancel
+            </Button>
           </>
         )}
       </Stack>
     </Box>
   );
-}
-
-/**
- * Whether a staged decision may be sent. Mirrors `GateDecisionPanel`'s verdict: a pre-gate refusal never sized
- * anything, and a zero approval is "no trade" rather than an order of nothing.
- */
-function isSendable(order: StagedOrderResponse): boolean {
-  const evaluated = order.outcome === 'Allowed' || order.outcome === 'Resized';
-  return evaluated && order.approvedQuantity > 0;
 }
 
 function refusalText(result: {

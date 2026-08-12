@@ -220,6 +220,70 @@ describe('OrderTicket', () => {
     expect(screen.queryByRole('button', { name: /^send$/i })).toBeNull();
   });
 
+  it('does not send twice when Send is clicked again before the first resolves', async () => {
+    // #797 review. The worst thing this ticket can do. Order transmission is not idempotent (ProjectX ADR-0002:
+    // "a retried timeout can place a second live order"), so a double-click while the network is slow could put
+    // the gate-approved size on the account TWICE. `staged` has not changed yet, so without a guard the button is
+    // still live and the handler re-enters.
+    let release: (value: Awaited<ReturnType<typeof takeStagedOrder>>) => void = () => {};
+    take.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    await renderTicket();
+    await click(/arm/i);
+
+    // Both clicks land BEFORE the first request settles -- the race the guard exists for.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^send$/i }));
+      fireEvent.click(screen.getByRole('button', { name: /^send$/i }));
+    });
+
+    expect(take).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release({
+        ok: true,
+        data: {
+          outcome: 'Allowed',
+          orderId: 'o1',
+          venueOrderKey: 'v1',
+          approvedQuantity: 5,
+          bindingLayer: null,
+          reason: 'ok',
+          advisories: [],
+        },
+      });
+    });
+  });
+
+  it('does not arm twice when Arm is clicked again before the first resolves', async () => {
+    // Milder but still wrong: a second arm stages a SECOND order server-side, and whichever response resolves
+    // last silently overwrites `staged` -- orphaning the first staged row where this ticket can neither show nor
+    // cancel it.
+    let release: (value: Awaited<ReturnType<typeof armOrder>>) => void = () => {};
+    arm.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    await renderTicket();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /arm/i }));
+      fireEvent.click(screen.getByRole('button', { name: /arm/i }));
+    });
+
+    expect(arm).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release(staged());
+    });
+  });
+
   it('reports what was actually sent once it goes', async () => {
     await renderTicket();
     await click(/arm/i);

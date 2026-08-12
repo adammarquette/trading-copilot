@@ -2,7 +2,12 @@ import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 
-import { type GateDecisionView, describeSizing, riskLayerName } from './gateDecision';
+import {
+  type GateDecisionView,
+  describeSizing,
+  isGateDecision,
+  riskLayerName,
+} from './gateDecision';
 
 /**
  * What the risk gate decided, rendered before the send control (gh#655, R-5 / R-11, ADR-0007).
@@ -52,13 +57,13 @@ const REFUSALS: Readonly<Record<string, string>> = {
   RefusedByKillSwitch: 'Refused: the kill switch is engaged, so no order can be transmitted.',
 };
 
-const GATE_OUTCOMES: ReadonlySet<string> = new Set(['Allowed', 'Resized', 'Blocked']);
-
 export function GateDecisionPanel({ requested, decision }: GateDecisionPanelProps) {
-  const evaluated = GATE_OUTCOMES.has(decision.outcome);
+  // `Blocked` IS a gate decision for rendering (it has a layer and a reason) even though it is not sendable.
+  const evaluated = isGateDecision(decision.outcome) || decision.outcome === 'Blocked';
   const sizing = describeSizing(requested, decision);
-  // A pre-gate refusal never reached sizing, so it is never sendable whatever the quantities say.
-  const sendable = evaluated && sizing.sendable;
+  // describeSizing owns this now -- it already refuses anything that is not a gate decision, so a pre-gate
+  // refusal is unsendable whatever its quantities say, without a second whitelist here.
+  const sendable = sizing.sendable;
 
   return (
     <Box

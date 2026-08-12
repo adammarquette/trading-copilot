@@ -88,6 +88,25 @@ export function describeSizing(requested: number, decision: GateDecisionView): S
     willSend,
     resized: willSend !== requested,
     noTrade,
-    sendable: !noTrade && decision.outcome !== 'Blocked',
+    sendable: !noTrade && isGateDecision(decision.outcome),
   };
+}
+
+/**
+ * The outcomes where the gate actually sized the order. Anything else is a **pre-gate refusal** — it never
+ * reached sizing, so its zero quantity means "not evaluated", not "zero contracts allowed".
+ */
+const GATE_OUTCOMES: ReadonlySet<string> = new Set(['Allowed', 'Resized']);
+
+/**
+ * Whether an outcome came from the gate at all. `Blocked` is deliberately absent: the gate evaluated it and said
+ * no, so it is never sendable either.
+ *
+ * **The single owner of "may this be sent".** It lives here rather than in a component because both the decision
+ * panel and the ticket's send control need it, and two independently-maintained copies of a safety-relevant
+ * whitelist will eventually disagree — a new pre-gate refusal added in one place and not the other would leave a
+ * Send button visible over a decision the panel is rendering as a refusal (#797 review).
+ */
+export function isGateDecision(outcome: string): boolean {
+  return GATE_OUTCOMES.has(outcome);
 }
