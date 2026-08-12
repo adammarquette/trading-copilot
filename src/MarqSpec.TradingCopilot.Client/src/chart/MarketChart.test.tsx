@@ -473,4 +473,22 @@ describe('MarketChart', () => {
     expect(chartMock.createPriceLine).not.toHaveBeenCalled();
     expect(screen.queryByText('Orders / position may be stale')).toBeNull();
   });
+
+  it('shows an ORDERS / POSITION unavailable note when the venue-truth read is unavailable (R-13 / R-19)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    // An empty overlay flagged unavailable (an Unknown / failed venue-truth read) must NOT read as a flat book — it is
+    // labelled, distinct from the socket-stale note.
+    render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        execution={{ orders: [], position: null }}
+        executionUnavailable
+      />,
+    );
+
+    expect(await screen.findByText('ORDERS / POSITION unavailable')).toBeTruthy();
+  });
 });

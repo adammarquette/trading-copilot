@@ -100,6 +100,7 @@ describe('useExecutionOverlays', () => {
       { id: 'o2:limit', price: 5320, kind: 'limit', size: 2 },
     ]);
     expect(result.current.overlay.position).toEqual({ averagePrice: 5300, netQuantity: 2 });
+    expect(result.current.unavailable).toBe(false); // a confirmed Live read — the overlay is trustworthy
     // Owner-scoped by the active account AND instrument-scoped server-side (gh#772).
     expect(getWorkingOrdersMock).toHaveBeenCalledWith('acc-1', 'ES');
     expect(getPositionsMock).toHaveBeenCalledWith('acc-1', 'ES');
@@ -152,7 +153,7 @@ describe('useExecutionOverlays', () => {
     await waitFor(() => expect(result.current.stale).toBe(true));
   });
 
-  it('leaves the overlay empty when a read is refused / fails — the chart draws no stale marks', async () => {
+  it('leaves the overlay empty AND flags it unavailable when a read is refused / fails (not a flat book)', async () => {
     getWorkingOrdersMock.mockResolvedValue({
       ok: false,
       kind: 'refused',
@@ -163,7 +164,112 @@ describe('useExecutionOverlays', () => {
 
     const { result } = renderHook(() => useExecutionOverlays('ES'));
 
-    await waitFor(() => expect(getWorkingOrdersMock).toHaveBeenCalled());
+    // A refused / failed read did not obtain venue truth, so the empty overlay is declared-unknown, not a flat book.
+    await waitFor(() => expect(result.current.unavailable).toBe(true));
     expect(result.current.overlay).toEqual({ orders: [], position: null });
+  });
+
+  it('flags the overlay unavailable when the venue-truth basis is Unknown, never a confirmed flat (R-13)', async () => {
+    // An unreachable venue is a 200 with markBasis 'Unknown' and empty data (gh#772). The overlay is empty, but that
+    // is declared-unknown — the chart labels it rather than letting it read as flat. `stale` (the socket) does not
+    // cover it: the socket is live here.
+    getWorkingOrdersMock.mockResolvedValue({
+      ok: true,
+      data: { markBasis: 'Unknown', orders: [] },
+    });
+    getPositionsMock.mockResolvedValue({ ok: true, data: { markBasis: 'Unknown', positions: [] } });
+
+    const { result } = renderHook(() => useExecutionOverlays('ES'));
+
+    await waitFor(() => expect(result.current.unavailable).toBe(true));
+    expect(result.current.stale).toBe(false); // socket is live — unavailability is the venue read, not the socket
+    expect(result.current.overlay).toEqual({ orders: [], position: null });
+  });
+
+  it('coalesces a burst of order-state / fill pushes into a single re-read (bounds broker reads)', async () => {
+    renderHook(() => useExecutionOverlays('ES'));
+    await waitFor(() => expect(getWorkingOrdersMock).toHaveBeenCalledTimes(1)); // the immediate initial load
+
+    // A partial-fill flurry in one tick — several pushes before any re-read completes.
+    act(() => {
+      orderStateHandler?.();
+      fillHandler?.();
+      fillHandler?.();
+      orderStateHandler?.();
+    });
+
+    // The whole burst collapses to ONE additional pair of reads, not four.
+    await waitFor(() => expect(getWorkingOrdersMock).toHaveBeenCalledTimes(2));
+    expect(getPositionsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops a slow response for the instrument just left (R-14 token guard)', async () => {
+    // ES's read resolves LATE, after a switch to NQ — the stale ES response must never overwrite NQ's overlay.
+    let resolveEs: (value: unknown) => void = () => {};
+    getWorkingOrdersMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveEs = resolve;
+        }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ instrument }: { instrument: string }) => useExecutionOverlays(instrument),
+      { initialProps: { instrument: 'ES' } },
+    );
+    await waitFor(() => expect(getWorkingOrdersMock).toHaveBeenCalledWith('acc-1', 'ES'));
+
+    // Switch to NQ; its read resolves immediately with one order.
+    getWorkingOrdersMock.mockResolvedValue({
+      ok: true,
+      data: {
+        markBasis: 'Live',
+        orders: [
+          {
+            venueOrderKey: 'nq',
+            contract: 'C',
+            stopPrice: 100,
+            limitPrice: null,
+            size: 1,
+            isProtective: true,
+          },
+        ],
+      },
+    });
+    rerender({ instrument: 'NQ' });
+    await waitFor(() => expect(result.current.overlay.orders).toHaveLength(1));
+    expect(result.current.overlay.orders[0].id).toBe('nq:stop');
+
+    // The stale ES read resolves now, with DIFFERENT data — the token guard must drop it.
+    await act(async () => {
+      resolveEs({
+        ok: true,
+        data: {
+          markBasis: 'Live',
+          orders: [
+            {
+              venueOrderKey: 'es1',
+              contract: 'C',
+              stopPrice: 1,
+              limitPrice: null,
+              size: 1,
+              isProtective: true,
+            },
+            {
+              venueOrderKey: 'es2',
+              contract: 'C',
+              stopPrice: 2,
+              limitPrice: null,
+              size: 1,
+              isProtective: true,
+            },
+          ],
+        },
+      });
+    });
+
+    // Still NQ's single order — the late ES response was dropped, never rendered on NQ's chart.
+    expect(result.current.overlay.orders).toHaveLength(1);
+    expect(result.current.overlay.orders[0].id).toBe('nq:stop');
   });
 });

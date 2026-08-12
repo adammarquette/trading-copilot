@@ -3,8 +3,9 @@ import type { PriceLevel } from '../api/marketData';
 /**
  * The chart's overlay contract (gh#727, ADR-0004) — the reusable primitives an overlay renders onto the candlestick
  * chart from pre-computed data. Increment 1 establishes the <b>price-line</b> primitive, which the price-level overlay
- * draws with; the suggestion-zone overlay (entry / stop / target) maps onto the same primitive, and the live
- * position / order / fill overlay adds a marker primitive beside it — so a fourth overlay is additive, not a rewrite.
+ * draws with; the suggestion-zone overlay (entry / stop / target) and the execution overlay (working orders + net
+ * position) map onto the same primitive, and the live <b>fill</b> overlay adds a marker primitive beside it — so a
+ * further overlay is additive, not a rewrite.
  *
  * These are plain data (no charting-library import) so the mapping is unit-tested without a canvas; the
  * {@link MarketChart} translates a {@link PriceLineSpec} into the library's price-line at the one seam that touches it.
