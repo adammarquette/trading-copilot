@@ -341,9 +341,11 @@ underlying data reaches the client over HTTP (gh#644): `/api/marketdata/bars`, `
 OHLCV, the **pre-computed** indicator series (R-22's single number, never re-derived in the browser) and the active
 price levels — authenticated (R-18), bounded, and global (not operator-owned). The **indicator panes** are built
 (gh#726 — RSI / ATR, each in its own pane below the candles, toggled by the operator), with **price-level overlays**
-(gh#727 — active support / resistance, toggled) and **suggestion-zone overlays** (gh#727 — an active suggestion's
-entry / stop / target, owner-scoped, stale-labelled on a dropped socket) rendering over a reusable overlay contract;
-the live position / order / fill markers are the remaining gh#727 follow-up. The **realtime** half is a single
+(gh#727 — active support / resistance, toggled), **suggestion-zone overlays** (gh#727 — an active suggestion's entry /
+stop / target, owner-scoped, stale-labelled on a dropped socket) and **execution overlays** (gh#727 — the operator's
+live working orders + net position from the instrument-scoped venue-truth reads, gh#772, refreshed on each order / fill
+push and stale-labelled on a dropped socket) rendering over a reusable overlay contract; live **fill markers** are the
+remaining gh#727 follow-up. The **realtime** half is a single
 JWT-authenticated SignalR connection (gh#649, [ADR-0021](adr/0021-realtime-hub-contract.md)): it resumes from its
 last-applied `sequence` on reconnect and dedupes by that cursor, so a drop-and-reconnect is gap-free and
 double-free, and its connection state is **always visible** — a degraded socket is shown degraded, never rendered

@@ -12,6 +12,11 @@ vi.mock('../chart/MarketChart', () => ({
     levelTimeframes?: readonly number[];
     suggestionZones?: readonly { id: string }[];
     suggestionsStale?: boolean;
+    execution?: {
+      orders: readonly { id: string }[];
+      position: { netQuantity: number } | null;
+    };
+    executionStale?: boolean;
   }) => (
     <div
       data-testid="chart-stub"
@@ -22,6 +27,11 @@ vi.mock('../chart/MarketChart', () => ({
       data-level-timeframes={(props.levelTimeframes ?? []).join(',')}
       data-suggestion-zones={(props.suggestionZones ?? []).map((zone) => zone.id).join(',')}
       data-suggestions-stale={String(props.suggestionsStale ?? false)}
+      data-execution-orders={(props.execution?.orders ?? []).map((order) => order.id).join(',')}
+      data-execution-position={
+        props.execution?.position ? String(props.execution.position.netQuantity) : ''
+      }
+      data-execution-stale={String(props.executionStale ?? false)}
     />
   ),
 }));
@@ -33,6 +43,13 @@ vi.mock('../suggestions/SuggestionsPanel', () => ({
 // reach the chart.
 const { useSuggestionZonesMock } = vi.hoisted(() => ({ useSuggestionZonesMock: vi.fn() }));
 vi.mock('../chart/useSuggestionZones', () => ({ useSuggestionZones: useSuggestionZonesMock }));
+
+// The execution-overlay hook has its own suite (accounts + realtime); here it is driven to assert the overlay + stale
+// flag reach the chart (gh#727 increment 3).
+const { useExecutionOverlaysMock } = vi.hoisted(() => ({ useExecutionOverlaysMock: vi.fn() }));
+vi.mock('../chart/useExecutionOverlays', () => ({
+  useExecutionOverlays: useExecutionOverlaysMock,
+}));
 
 import type { Destination } from '../navigation/destinations';
 import { WorkspaceSurface } from './WorkspaceSurface';
@@ -46,6 +63,10 @@ afterEach(() => {
 
 beforeEach(() => {
   useSuggestionZonesMock.mockReturnValue({ zones: [], stale: false });
+  useExecutionOverlaysMock.mockReturnValue({
+    overlay: { orders: [], position: null },
+    stale: false,
+  });
 });
 
 describe('WorkspaceSurface', () => {
@@ -122,5 +143,23 @@ describe('WorkspaceSurface', () => {
     const chart = screen.getByTestId('chart-stub');
     expect(chart.dataset.suggestionZones).toBe('s1');
     expect(chart.dataset.suggestionsStale).toBe('true');
+  });
+
+  it('feeds the chart the operator execution overlay and its stale flag for the charted instrument (gh#727 increment 3)', () => {
+    useExecutionOverlaysMock.mockReturnValue({
+      overlay: {
+        orders: [{ id: 'o1:stop', price: 5290, kind: 'stop', size: 2 }],
+        position: { averagePrice: 5300, netQuantity: 2 },
+      },
+      stale: true,
+    });
+
+    render(<WorkspaceSurface destination={destination} />);
+
+    expect(useExecutionOverlaysMock).toHaveBeenCalledWith('ES'); // scoped to the charted instrument
+    const chart = screen.getByTestId('chart-stub');
+    expect(chart.dataset.executionOrders).toBe('o1:stop');
+    expect(chart.dataset.executionPosition).toBe('2');
+    expect(chart.dataset.executionStale).toBe('true');
   });
 });
