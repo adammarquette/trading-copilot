@@ -372,6 +372,11 @@ builder.Services.AddScoped<WorkingOrderReconciliationService>();
 // Scoped like its siblings: it takes the request-scoped DbContext, so the R-20 filter applies.
 builder.Services.AddScoped<FillReconciliationService>();
 
+// The journaled-fills read (gh#792) for the gh#727 chart fill-marker overlay: the operator's fills on an account +
+// instrument over a window, read from the durable journal (Fill joined to Order), NOT venue truth. Scoped so the
+// R-20 filter applies to both sides of the join.
+builder.Services.AddScoped<FillJournalReadService>();
+
 // Auto-flatten (R-13, gh#185, ADR-0013): the PRIMARY scheduler that closes open positions at each instrument's
 // per-market deadline on the DST-aware market clock. On by default and cannot be silently disabled -- so it
 // ALWAYS runs; a market is turned off per-instrument in the Flatten config, not by omitting the host. The
@@ -539,6 +544,7 @@ app.MapProtectionEndpoints();
 app.MapFlattenScheduleEndpoints();
 app.MapPositionEndpoints();
 app.MapWorkingOrderEndpoints();
+app.MapFillEndpoints();
 app.MapMarketDataEndpoints();
 
 // The realtime hub (gh#645, R-10 / R-18). A literal path so it is a concrete authenticated route ahead of the SPA
