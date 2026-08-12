@@ -403,14 +403,79 @@ public sealed class ProjectXVenue : ITradingVenue
         // that the caller treats the two identically for the purpose of releasing a row -- neither authorises
         // anything (see TaggedFillEvidence) -- so being wrong in this direction cannot place a second order. Any
         // failure of this call surfaces as an exception and is mapped to Unavailable by the calling service.
-        return filled is null
-            ? TaggedFillEvidence.NoFillFound(customTag)
-            : TaggedFillEvidence.Filled(
-                customTag,
-                filled.FillVolume,
-                filled.FilledPrice,
-                filled.Id.ToString(CultureInfo.InvariantCulture),
-                matches.Count);
+        if (filled is null)
+        {
+            return TaggedFillEvidence.NoFillFound(customTag);
+        }
+
+        TaggedFillEvidence evidence = TaggedFillEvidence.Filled(
+            customTag,
+            filled.FillVolume,
+            filled.FilledPrice,
+            filled.Id.ToString(CultureInfo.InvariantCulture),
+            matches.Count);
+
+        return evidence.WithLegs(await ReadFillLegsAsync(account, filled.Id, since, cancellationToken));
+    }
+
+    /// <summary>
+    /// The executed fills behind a matched order (gh#770), so an adopt can backfill the <c>Fill</c> rows that were
+    /// dropped while the row was stranded without a venue key.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A <b>second, journalling-only</b> read, and it is deliberately best-effort: the veto above protects a live
+    /// account, so it must never regress because this failed. A fault here costs the backfill and returns no legs,
+    /// leaving exactly the pre-gh#770 answer — the caller still refuses to release the row.
+    /// </para>
+    /// <para>
+    /// Each leg carries the venue's <b>own</b> fill id, which is the same key the account-event stream writes. The
+    /// backfilled rows are therefore indistinguishable from streamed ones, and <c>Fill</c>'s
+    /// <c>(OrderId, VenueFillKey)</c> unique index makes a later delivery or replay an idempotent no-op by
+    /// construction rather than a double-counted entry.
+    /// </para>
+    /// </remarks>
+    private async Task<IReadOnlyList<TaggedFillLeg>> ReadFillLegsAsync(
+        VenueAccountId account,
+        long venueOrderId,
+        DateTimeOffset since,
+        CancellationToken cancellationToken)
+    {
+        IEnumerable<ClientModels.HalfTrade> trades;
+        try
+        {
+            trades = await _api.GetTradesAsync(
+                ProjectXMapping.ToAccountId(account, Id), since.UtcDateTime, endTime: null, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // Swallowed, and the EMPTY leg list is the signal. This venue carries no logger by design, and the
+            // established split in this file is that FillReconciliationService -- which does -- raises what the
+            // evidence carries (the same way it raises the MatchCount ambiguity above). Reporting here would
+            // duplicate that, and throwing would turn a journalling-only fault into a lost veto.
+            return [];
+        }
+
+        // Scoped to THIS order: the search is account-and-window wide, so another order's executions are in the
+        // response too, and attaching them would journal fills this order never made. Voided trades are skipped
+        // exactly as the ingestion path skips them -- a retracted execution must never reach the journal.
+        return
+        [
+            .. trades
+                .Where(trade => trade.OrderId == venueOrderId && !trade.Voided && trade.Size > 0)
+                .OrderBy(trade => trade.CreationTimestamp)
+                .ThenBy(trade => trade.Id)
+                .Select(trade => new TaggedFillLeg(
+                    trade.Id.ToString(CultureInfo.InvariantCulture),
+                    trade.Price,
+                    trade.Size,
+                    trade.Fees,
+                    new DateTimeOffset(DateTime.SpecifyKind(trade.CreationTimestamp, DateTimeKind.Utc)))),
+        ];
     }
 
     private async IAsyncEnumerable<Quote> ReadQuotesAsync(
