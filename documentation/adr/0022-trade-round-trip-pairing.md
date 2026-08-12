@@ -77,6 +77,17 @@ nothing new — it is the property that stops a re-delivered flat double-countin
 - **The idempotency backstop moves to the composite key:** the pre-check `AnyAsync`, the narrowed
   `DbUpdateException` catch, the pinned index-name constant, and the metadata test that pins it all follow the
   index rename.
+- **The composite index is filtered to both keys non-null, so legacy null-`OpeningFillId` rows lose DB-level
+  uniqueness — deliberately, and safely.** `IX_Trades_ClosingFillId_OpeningFillId` is
+  `WHERE "ClosingFillId" IS NOT NULL AND "OpeningFillId" IS NOT NULL`, so two rows that share a `ClosingFillId`
+  but both carry a null `OpeningFillId` (every pre-#759 legacy row) are **not** caught at the DB level as the
+  dropped single-column `IX_Trades_ClosingFillId` caught them unconditionally. This narrowing is safe on both
+  fronts: no post-#759 code path writes a null-`OpeningFillId` row (`fe30ff8` populates the opening key on every
+  new leg), so no *new* null-keyed duplicate can arise; and the pre-existing legacy rows were already unique
+  under the old index at migration time, so no duplicate can arise *among* them either. A new write whose
+  `ClosingFillId` matches a legacy row is still caught app-side by the `ClosingFillId`-alone pre-check above. The
+  two real-Postgres write-fault tests that exercised the old single-column collision were re-pointed at the
+  composite invariant to match.
 - **`Down` may legitimately fail on real data** (composite → single can collide), documented in the migration, as
   the outbox-dedup narrowing already is.
 - **Real-Postgres coverage** — the composite-key uniqueness, idempotent replay, and the governor equality across

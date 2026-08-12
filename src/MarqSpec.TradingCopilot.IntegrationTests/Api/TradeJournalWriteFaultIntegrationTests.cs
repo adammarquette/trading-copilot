@@ -396,21 +396,21 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
 
     private static Trade NewTrade(
         Guid id, Guid userId, Guid accountId, Guid closingFillId, Guid? openingFillId = null) => new()
-    {
-        Id = id,
-        UserId = userId,
-        AccountId = accountId,
-        Instrument = Contract,
-        Side = OrderSide.Buy,
-        Size = 1,
-        EntryPrice = 5_000m,
-        ExitPrice = 5_010m,
-        RealizedPnL = 50m,
-        Mode = TradingMode.Practice,
-        ClosedAt = DateTimeOffset.UtcNow,
-        ClosingFillId = closingFillId,
-        OpeningFillId = openingFillId,
-    };
+        {
+            Id = id,
+            UserId = userId,
+            AccountId = accountId,
+            Instrument = Contract,
+            Side = OrderSide.Buy,
+            Size = 1,
+            EntryPrice = 5_000m,
+            ExitPrice = 5_010m,
+            RealizedPnL = 50m,
+            Mode = TradingMode.Practice,
+            ClosedAt = DateTimeOffset.UtcNow,
+            ClosingFillId = closingFillId,
+            OpeningFillId = openingFillId,
+        };
 
     private Task BlockTradeInsertsAsync() => ExecuteDbAsync(db =>
         db.Database.ExecuteSqlRawAsync(
