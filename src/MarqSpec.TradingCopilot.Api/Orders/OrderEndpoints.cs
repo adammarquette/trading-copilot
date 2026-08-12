@@ -663,53 +663,76 @@ public static class OrderEndpoints
             return;
         }
 
-        try
+        // ONE LEG PER SaveChangesAsync, mirroring AccountEventIngestionService.ProcessFillAsync -- the stream path
+        // this design keys off. Batching them made a partial collision total: the adopt above sets the
+        // VenueOrderKey that makes this order matchable, so an at-least-once redelivery of ONE of these fills can
+        // land on the stream first; the unique-index violation then rolled back every leg, losing ones that were
+        // never duplicates and leaving the journal as incomplete as before the fix (#791 review).
+        int journalled = 0;
+        foreach (TaggedFillLeg leg in evidence.Legs)
         {
-            foreach (TaggedFillLeg leg in evidence.Legs)
+            Fill row = new()
             {
-                database.Fills.Add(new Fill
-                {
-                    Id = Guid.NewGuid(),
-                    UserId = order.UserId,
-                    OrderId = order.Id,
-                    VenueFillKey = leg.VenueFillKey,
-                    Price = leg.Price,
-                    Size = leg.Size,
-                    Fees = leg.Fees,
-                    ExecutedAt = leg.ExecutedAt,
-                });
-            }
+                Id = Guid.NewGuid(),
+                UserId = order.UserId,
+                OrderId = order.Id,
+                VenueFillKey = leg.VenueFillKey,
+                Price = leg.Price,
+                Size = leg.Size,
+                Fees = leg.Fees,
+                ExecutedAt = leg.ExecutedAt,
+            };
 
-            await database.SaveChangesAsync(cancellationToken);
-
-            if (evidence.IsAmbiguous)
+            database.Fills.Add(row);
+            try
             {
-                // MatchCount > 1: the evidence describes only the EARLIEST execution under this tag, so what was
-                // just journalled is knowingly PARTIAL. Said out loud rather than left to read as completeness.
-                logger.LogWarning(
-                    "Backfilled {Count} entry fill(s) for adopted order {OrderId}, but the venue reported MORE THAN "
-                    + "ONE executed record under its tag — the journal describes only the earliest and therefore "
-                    + "UNDERSTATES the venue (gh#770).",
-                    evidence.Legs.Count, order.Id);
-                return;
+                await database.SaveChangesAsync(cancellationToken);
+                journalled++;
             }
+            catch (DbUpdateException)
+            {
+                // The { OrderId, VenueFillKey } index rejected a leg the stream already recorded -- idempotent by
+                // construction, which is the whole point of carrying the venue's own keys. Detach the rejected row
+                // so the failed insert cannot be retried by the next leg's save, and carry on.
+                database.Entry(row).State = EntityState.Detached;
+                logger.LogInformation(
+                    "Entry fill {Fill} was already recorded for adopted order {OrderId}; idempotent skip (gh#770).",
+                    leg.VenueFillKey, order.Id);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                // One leg failing for any other reason must not cost the rest: each is an independent journal row.
+                database.Entry(row).State = EntityState.Detached;
+                logger.LogError(
+                    error,
+                    "Entry-fill backfill failed for fill {Fill} on adopted order {OrderId}; the adopt still stands, "
+                    + "but this execution will not reach the journal (gh#770).",
+                    leg.VenueFillKey, order.Id);
+            }
+        }
 
-            logger.LogInformation(
-                "Backfilled {Count} entry fill(s) for adopted order {OrderId} from venue fill history (gh#770).",
-                evidence.Legs.Count, order.Id);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        if (evidence.IsAmbiguous)
         {
-            throw;
+            // MatchCount > 1: the evidence describes only the EARLIEST execution under this tag, so what was just
+            // journalled is knowingly PARTIAL. Said out loud rather than left to read as completeness.
+            logger.LogWarning(
+                "Backfilled {Journalled} of {Count} entry fill(s) for adopted order {OrderId}, but the venue "
+                + "reported MORE THAN ONE executed record under its tag — the journal describes only the earliest "
+                + "and therefore UNDERSTATES the venue (gh#770).",
+                journalled, evidence.Legs.Count, order.Id);
+            return;
         }
-        catch (Exception error)
-        {
-            logger.LogError(
-                error,
-                "Entry-fill backfill failed for adopted order {OrderId}; the adopt still stands, but this trade's "
-                + "realized P&L will not reach the journal (gh#770).",
-                order.Id);
-        }
+
+        // Journalled vs offered, not just a total: the gap is a leg the stream had already recorded (an idempotent
+        // skip) or one that genuinely failed, and both are worth being able to see in the log after the fact.
+        logger.LogInformation(
+            "Backfilled {Journalled} of {Count} entry fill(s) for adopted order {OrderId} from venue fill history "
+            + "(gh#770).",
+            journalled, evidence.Legs.Count, order.Id);
     }
 
     internal static async Task<IResult> ReconcileTakingOrderAsync(
