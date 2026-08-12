@@ -61,33 +61,32 @@ name and stays in `.github/` because GitHub's reviewer reads that exact path; th
 - **Redesign.** Review what was built against what it claims to do. If a different design would be better, ask;
   unless the design as built is unsafe, which is a finding.
 
-## Your verdict must be machine-readable
+## Your verdict is now a gate, not a note
 
-The author agent is **blocked until you rule** — its task is not done until the PR is approved and green
-([engineering §10](../trading-platform-engineering.md)). A verdict buried in prose leaves it waiting.
+The verdict line above is no longer only a convention: the **`review-verdict`** check reads it, and the author
+agent is **blocked until you rule** — its task is not done until the PR is approved and green
+([engineering §10](../trading-platform-engineering.md)). Three consequences.
 
-So the **first line of your review body** is exactly one of:
+**Spell it exactly as above.** `**Verdict: Approve**` or `**Verdict: Request changes**`, on the **first line**
+of the review body. The check is deliberately forgiving — emphasis, casing and a trailing period are all
+tolerated, and trailing text is fine (`**Verdict: Approve** — nice catch on the lock`) — but the verdict word
+itself must be `Approve` or `Request changes`. Anything else reads as *no verdict at all* and the PR stays
+blocked.
 
-```
-Verdict: Approve
-Verdict: Request changes
-```
+**You have about 30 minutes.** `review-verdict` runs *after* the build and test jobs — nobody is asked to
+rule on a diff that does not compile — and then **polls for 30 minutes** waiting for your verdict. A PR
+with no verdict is not failed on the spot; it waits. *Request changes* ends the wait immediately, since
+only a push can resolve it. A **stale** approval keeps waiting, so re-reviewing after a rebase is enough.
 
-The `review-verdict` check reads that line. It is lenient about emphasis, casing and a trailing period —
-`**Verdict:** Approve.` is fine — but the verdict word itself must be one of those two. Submit a native `Approve` / `Request changes` review state as well
-whenever you can — but in this repo you usually cannot: `gh` authenticates as the repository owner, who is also
-the author, and **GitHub blocks self-approval**, which is why every review here posts as `COMMENTED`. The marker
-is what makes the verdict binding until a separate reviewer identity exists.
-
-**An approval binds to the commit you reviewed** — it stays valid across a rebase that leaves the tree
-unchanged, and dies the moment content changes. Re-review after a push; do not carry a verdict forward.
+**An approval binds to the commit you reviewed.** It survives a rebase that leaves the tree unchanged, and dies
+the moment content changes. Re-review after a push; never carry a verdict forward.
 
 **Approve when the diff is ready, not when it is perfect.** Findings you would not block on belong in the body
-as non-blocking notes, not as `CHANGES-REQUESTED` — a verdict that never approves stalls the loop as surely as
+as non-blocking notes, not as *Request changes* — a verdict that never approves stalls the loop as surely as
 one that never comes.
 
 ## Definition of done
 
 Every finding names a concrete failure · ranked by blast radius · repeated patterns called out as patterns · no
-formatting noise · PR-body claims verified against the diff · **a formal verdict submitted, leading with
-`Verdict: Approve` or `Verdict: Request changes`** · nothing merged, closed, or pushed.
+formatting noise · PR-body claims verified against the diff · **a formal verdict submitted, first line
+`**Verdict: Approve**` or `**Verdict: Request changes**`** · nothing merged, closed, or pushed.
