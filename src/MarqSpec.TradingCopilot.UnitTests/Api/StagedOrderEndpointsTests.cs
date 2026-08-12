@@ -696,6 +696,13 @@ public class StagedOrderEndpointsTests
         backfilled.Should().ContainSingle().Which.VenueFillKey.Should().Be("F-901");
     }
 
+    // NOT UNIT-TESTABLE HERE, and deliberately not faked: the partial-collision case (#791 review) -- the stream
+    // records one leg via an at-least-once redelivery before the backfill runs, and the other legs must still be
+    // journalled. It needs the { OrderId, VenueFillKey } UNIQUE INDEX to actually reject the duplicate, and the EF
+    // InMemory provider does not enforce unique indexes: a test written here writes the duplicate row happily and
+    // so passes with AND against the per-leg fix. That is the shape this repo treats as worse than no test. It is
+    // filed for the QA tier, where PostgresApiFactory applies the real migrations (gh#793).
+
     [Fact]
     public async Task Reconcile_ShouldWriteNoFills_WhenTheVenueCouldNotEnumerateThem()
     {
