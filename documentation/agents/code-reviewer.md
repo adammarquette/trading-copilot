@@ -78,8 +78,11 @@ rule on a diff that does not compile — and then **polls for 30 minutes** waiti
 with no verdict is not failed on the spot; it waits. *Request changes* ends the wait immediately, since
 only a push can resolve it. A **stale** approval keeps waiting, so re-reviewing after a rebase is enough.
 
-**An approval binds to the commit you reviewed.** It survives a rebase that leaves the tree unchanged, and dies
-the moment content changes. Re-review after a push; never carry a verdict forward.
+**An approval binds to what you reviewed — the PR's own contribution, not the commit id.** It survives the
+branch being rebased or synced with its target: those change the commit and the tree, but not a line of what
+the PR itself adds, and `protect-develop` is strict enough that every merge into `develop` forces that update
+on every open PR. It dies on anything you did *not* see — a new commit, and equally a conflict **resolution**
+made while merging, which is a human edit no one has reviewed. Re-review then; never carry a verdict forward.
 
 **Approve when the diff is ready, not when it is perfect.** Findings you would not block on belong in the body
 as non-blocking notes, not as *Request changes* — a verdict that never approves stalls the loop as surely as

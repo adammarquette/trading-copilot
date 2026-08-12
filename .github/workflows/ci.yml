@@ -209,16 +209,42 @@ jobs:
       pull-requests: read
       contents: read
     steps:
+      # Real history, because the verdict test below compares the PR's own contribution at two different
+      # commits and has to resolve each against its merge base. `submodules` is deliberately OFF: this job
+      # compiles nothing, so cloning `external/` would be pure cost.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
       - name: Wait for a binding review verdict
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           DEADLINE_MINUTES: "30"
           POLL_SECONDS: "60"
         run: |
           set -uo pipefail
+
+          # The target branch moves under a long-lived PR; the merge bases below are meaningless without it.
+          git fetch --quiet --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF" || true
+
+          # The PR's OWN contribution at $1: everything that commit adds on top of wherever it forked from
+          # the target branch, hashed with `patch-id --stable` so pure line-number drift is not a change.
+          # Prints nothing when the commit cannot be resolved -- a rebase can orphan the approved one -- and
+          # the caller then falls back rather than guessing.
+          pr_patch_id() {
+            # `local` matters: the review-reading loop below also uses `sha`.
+            local sha="$1" mb
+            git cat-file -e "${sha}^{commit}" 2>/dev/null \
+              || git fetch --quiet --no-tags origin "$sha" 2>/dev/null \
+              || return 0
+            mb=$(git merge-base "origin/$BASE_REF" "$sha" 2>/dev/null) || return 0
+            git diff "$mb" "$sha" 2>/dev/null | git patch-id --stable 2>/dev/null | cut -d' ' -f1
+          }
 
           deadline=$(( $(date +%s) + DEADLINE_MINUTES * 60 ))
           attempt=0
@@ -267,21 +293,43 @@ jobs:
             fi
 
             # An approval binds to WHAT WAS APPROVED. But `protect-develop` is strict, so every merge into
-            # develop forces open PRs to update -- pinning to the SHA alone would invalidate every approval
-            # on every unrelated merge. Comparing TREES lets a pure rebase keep its verdict while any
-            # content change loses it. Same idiom §10 uses to prove a linearisation moved history only.
-            head_tree=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq .commit.tree.sha 2>/dev/null || echo "")
-            rev_tree=$(gh api "repos/$REPO/commits/$vsha"     --jq .commit.tree.sha 2>/dev/null || echo "")
+            # $BASE_REF forces open PRs to update, and pinning to the SHA alone would invalidate every
+            # approval on every unrelated merge.
+            #
+            # COMPARING TREES DOES NOT FIX THAT, which is what the first cut got wrong: a sync merge always
+            # changes the tree, so the escape hatch never fired and gh#782, gh#787 and gh#791 each sat
+            # through the full 30-minute wait on an approval that was still perfectly good.
+            #
+            # The question is not "did the tree change" but "did the PR's OWN CONTRIBUTION change". Diff each
+            # commit against its own merge base and compare patch ids: a sync merge leaves that patch
+            # identical, while anything the author actually decided changes it. That deliberately INCLUDES a
+            # conflict RESOLUTION made while merging -- resolving a conflict is a human edit the reviewer
+            # never saw, so it costs the approval exactly as a fresh commit would.
+            approved_patch=$(pr_patch_id "$vsha")
+            head_patch=$(pr_patch_id "$HEAD_SHA")
 
-            if [ -n "$head_tree" ] && [ "$head_tree" = "$rev_tree" ]; then
-              echo "Approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} is a rebase with an identical tree."
+            if [ -n "$head_patch" ] && [ "$head_patch" = "$approved_patch" ]; then
+              echo "Approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} carries the identical contribution" \
+                   "(patch ${head_patch:0:12}) -- the only change since is a merge from $BASE_REF."
               exit 0
+            fi
+
+            # Fallback for the one case git cannot answer locally: a rebase can orphan the approved commit so
+            # it is fetchable from no ref, while the API still knows its tree. An identical tree there is the
+            # same proof of "history moved, content did not".
+            if [ -z "$approved_patch" ]; then
+              head_tree=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq .commit.tree.sha 2>/dev/null || echo "")
+              rev_tree=$(gh api "repos/$REPO/commits/$vsha"     --jq .commit.tree.sha 2>/dev/null || echo "")
+              if [ -n "$head_tree" ] && [ "$head_tree" = "$rev_tree" ]; then
+                echo "Approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} is a rebase with an identical tree."
+                exit 0
+              fi
             fi
 
             # A stale approval is not a rejection -- it is "not yet re-reviewed", so it KEEPS WAITING.
             # gh#782 is the case: an approval landed, the branch was then updated for `strict`, and the
             # first cut failed instantly instead of giving the reviewer a chance to re-rule.
-            state="an approval on ${vsha:0:7} is stale (head ${HEAD_SHA:0:7}, trees differ)"
+            state="an approval on ${vsha:0:7} is stale (head ${HEAD_SHA:0:7}, the contribution changed)"
           else
             state="no verdict yet"
           fi
