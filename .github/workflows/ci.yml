@@ -171,6 +171,95 @@ jobs:
   # It does NOT push and takes no packages:write. That is the whole of publish-image's "a PR must not
   # publish" rationale -- a fork PR cannot hold that scope -- and none of it argues against BUILDING.
   #
+  review-verdict:
+    name: review-verdict
+    # A task is done when its PR is APPROVED and green -- not when the branch is pushed (engineering §10).
+    # This job is what makes that binding rather than a norm.
+    #
+    # WHY A MARKER AND NOT THE NATIVE REVIEW STATE: `gh` authenticates as the repository owner, who is also
+    # the PR author, and GitHub BLOCKS SELF-APPROVAL -- every review in this repo's history is COMMENTED,
+    # the Copilot reviewer's included. So the reviewer records its verdict as the first line of the review
+    # body. A native APPROVED state is honoured too, for the day a separate reviewer identity exists.
+    #
+    # NOT `pull_request_review`-triggered: a required check must run on the PR's own event, and a job that
+    # only fires on review would never report on a PR with no review at all -- which is exactly the state
+    # this exists to block. Re-running it after a review is the operator's re-run button.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      contents: read
+    steps:
+      - name: Read the latest verdict, and check it still binds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+
+          # state | commit reviewed | first line of the body. Reviews come back oldest-first, so the last
+          # row carrying a verdict is the one in force.
+          verdict=""; vsha=""
+          while IFS=$'\t' read -r state sha first; do
+            # Lenient by design: markdown emphasis, casing and a trailing period are all things a reviewer
+            # writes without thinking. A gate that reds on "**Verdict:** Approve." teaches people to
+            # distrust it, and a distrusted gate gets worked around rather than fixed.
+            norm=$(printf '%s' "$first" | tr -d '\r*_`' | tr '[:upper:]' '[:lower:]' \
+                     | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//; s/\.$//')
+            # Request-changes is tested FIRST: "verdict: request changes" must never be mistaken for an
+            # approval by a looser pattern. Trailing text after the verdict word is allowed -- reviewers
+            # write "Verdict: Approve -- nice catch on the lock" and mean it.
+            case "$norm" in
+              "verdict: request changes"*|"verdict: requests changes"*|"verdict: changes requested"*)
+                verdict="CHANGES-REQUESTED"; vsha="$sha" ;;
+              "verdict: approve"*)
+                verdict="APPROVED";          vsha="$sha" ;;
+              *)
+                # A native review state still counts where the identity allows one.
+                [ "$state" = "APPROVED" ]          && { verdict="APPROVED";          vsha="$sha"; }
+                [ "$state" = "CHANGES_REQUESTED" ] && { verdict="CHANGES-REQUESTED"; vsha="$sha"; }
+                ;;
+            esac
+          done < <(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
+                     --jq '.[] | [.state, .commit_id, ((.body // "") | split("\n")[0])] | @tsv')
+
+          if [ -z "$verdict" ]; then
+            echo "::error::No review verdict on this PR. The reviewer records one as the first line of a" \
+                 "review body: 'Verdict: Approve' or 'Verdict: Request changes'." \
+                 "See documentation/agents/code-reviewer.md."
+            exit 1
+          fi
+
+          if [ "$verdict" = "CHANGES-REQUESTED" ]; then
+            echo "::error::Review requested changes (on ${vsha:0:7}). Address the feedback, push, and ask" \
+                 "for re-review -- the task is not done until the verdict is APPROVED and checks are green."
+            exit 1
+          fi
+
+          if [ "$vsha" = "$HEAD_SHA" ]; then
+            echo "Approved at head ${HEAD_SHA:0:7}."
+            exit 0
+          fi
+
+          # An approval binds to WHAT WAS APPROVED. But `protect-develop` is strict, so every merge into
+          # develop forces open PRs to update -- pinning to the SHA alone would invalidate every approval on
+          # every unrelated merge. Comparing TREES lets a pure rebase keep its verdict while any content
+          # change loses it. Same idiom engineering §10 uses to prove a linearisation moved history only.
+          head_tree=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq .commit.tree.sha 2>/dev/null || echo "")
+          rev_tree=$(gh api "repos/$REPO/commits/$vsha"     --jq .commit.tree.sha 2>/dev/null || echo "")
+
+          if [ -n "$head_tree" ] && [ "$head_tree" = "$rev_tree" ]; then
+            echo "Approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} is a rebase with an identical tree ($head_tree)."
+            exit 0
+          fi
+
+          echo "::error::The approval is stale. It was given on ${vsha:0:7}, the head is now" \
+               "${HEAD_SHA:0:7}, and the trees differ -- so the approved content is not the content that" \
+               "would merge. Ask for re-review."
+          exit 1
+
   # Deliberately NOT path-filtered. gh#691's break was introduced by a PR that never touched the Dockerfile:
   # `.npmrc` arrived with the client scaffold and only became load-bearing later. A filter keyed on
   # Dockerfile/client paths would have skipped that PR and missed the defect it shipped, which is the exact

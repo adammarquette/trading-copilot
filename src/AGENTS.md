@@ -36,6 +36,11 @@ the model; integrate brokers only through the venue abstraction (R-17); data via
   FluentAssertions `[6.12.0,8.0.0)`).
 
 ## Definition of done
-Failing-test-first now green · every public method covered · standards + `dotnet format --verify-no-changes`
-clean · traces to the task's issue and a PRD requirement (`R-#`) · no secrets · safety-critical paths carry
-their suites (§5, §9).
+**Your task ends when the PR you opened is approved and its required checks are green** — not when you push
+(canonical: [engineering §10](../documentation/trading-platform-engineering.md)). So: **pause and monitor the
+PR you created.** Changes requested → address them, push, pause again for re-evaluation. Approved and green →
+take the next card from **Current ToDo**. Nothing in Current ToDo → **alert and pause**; do not invent work.
+
+What gets you *into* review: failing-test-first now green · every public method covered · standards +
+`dotnet format --verify-no-changes` clean · traces to the task's issue and a PRD requirement (`R-#`) · no
+secrets · safety-critical paths carry their suites (§5, §9).
