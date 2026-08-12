@@ -116,3 +116,86 @@ export function suggestionsToPriceLines(
     suggestionToPriceLines(zone, palette, disambiguate ? index + 1 : undefined),
   );
 }
+
+/**
+ * A resting working order to mark on the price axis (gh#727 increment 3): where it rests and which leg it is. The
+ * workspace maps a venue-truth `RestingOrder` (gh#772) onto this, so the chart never imports the account API — the
+ * same chart-agnostic split as {@link SuggestionZone}.
+ */
+export interface WorkingOrderMark {
+  readonly id: string;
+  readonly price: number;
+  /** A protective / stop leg (the risk line), or a working limit / take-profit leg. */
+  readonly kind: 'stop' | 'limit';
+  readonly size: number;
+}
+
+/** The operator's net position on the charted instrument, to mark as an average-entry line (gh#727 increment 3). */
+export interface PositionMark {
+  readonly averagePrice: number;
+  /** Signed net quantity: positive long, negative short. A flat position (0) draws no line. */
+  readonly netQuantity: number;
+}
+
+/** The operator's live execution state on one instrument — the working orders and the net position — to overlay. */
+export interface ExecutionOverlay {
+  readonly orders: readonly WorkingOrderMark[];
+  readonly position: PositionMark | null;
+}
+
+/** The colours the execution overlay draws with — a protective stop, a working limit, and the position entry. */
+export interface ExecutionPalette {
+  readonly stop: string;
+  readonly limit: string;
+  readonly position: string;
+}
+
+/**
+ * Maps one working order to its price line: a stop leg on the stop colour, a limit leg on the limit colour, both
+ * dashed (a resting order is a line price has not reached), labelled with the leg and its size.
+ */
+export function workingOrderToPriceLine(
+  order: WorkingOrderMark,
+  palette: ExecutionPalette,
+): PriceLineSpec {
+  const isStop = order.kind === 'stop';
+  return {
+    price: order.price,
+    color: isStop ? palette.stop : palette.limit,
+    title: `${isStop ? 'Stop' : 'Limit'} ${order.size}`,
+    style: 'dashed',
+  };
+}
+
+/**
+ * Maps the net position to its average-entry price line — solid (a realized level, not a resting one), on the
+ * position colour and labelled with side + size, so a `Long 2` reads apart from its protective `Stop 2`.
+ */
+export function positionToPriceLine(
+  position: PositionMark,
+  palette: ExecutionPalette,
+): PriceLineSpec {
+  const isLong = position.netQuantity > 0;
+  return {
+    price: position.averagePrice,
+    color: palette.position,
+    title: `${isLong ? 'Long' : 'Short'} ${Math.abs(position.netQuantity)}`,
+    style: 'solid',
+  };
+}
+
+/**
+ * Flattens the operator's execution state on one instrument to the price lines to draw (gh#727 increment 3): a line
+ * per working order, plus the average-entry line when a position is open. A flat position (netQuantity 0, or null)
+ * contributes no line — a flat book draws as nothing, never a spurious line at price 0.
+ */
+export function executionToPriceLines(
+  overlay: ExecutionOverlay,
+  palette: ExecutionPalette,
+): PriceLineSpec[] {
+  const lines = overlay.orders.map((order) => workingOrderToPriceLine(order, palette));
+  if (overlay.position !== null && overlay.position.netQuantity !== 0) {
+    lines.push(positionToPriceLine(overlay.position, palette));
+  }
+  return lines;
+}
