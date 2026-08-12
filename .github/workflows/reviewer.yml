@@ -1,0 +1,172 @@
+name: reviewer
+
+# Runs the code-reviewer contract over every PR and posts the result AS
+# `trading-copilot-reviewer[bot]` via .github/scripts/reviewer-review.sh (gh#141).
+#
+# WHY A BOT IDENTITY AND NOT GITHUB_TOKEN: GitHub blocks self-review, and `gh` in this repo
+# authenticates as the maintainer -- who is also the PR author. A distinct App identity is not the
+# author, so its verdict is accepted. That script and its three secrets have existed since
+# 2026-07-24; until now nothing invoked them (gh#802).
+#
+# IT IS ADVISORY ON PURPOSE. It posts COMMENT, never APPROVE/REQUEST_CHANGES, and the body it posts
+# must never BEGIN with a `**Verdict: ...**` line -- `review-verdict` reads that marker regardless of
+# the review's state (gh#783), so emitting one would let the bot satisfy the human-review gate by
+# itself on day one. `VERDICT_MODE` below is the single switch; promoting it is a reviewable change,
+# not a config toggle, and should wait until this reviewer's BLOCK rate has been watched on real PRs.
+# A reviewer that approves everything turns the gate into a rubber stamp.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Read-only. The review must not be able to push, edit the tree, or comment as github-actions --
+# everything it posts goes through the App token minted inside the script.
+permissions:
+  contents: read
+
+# A force-push mid-review should cancel the stale run rather than post a review of a diff that no
+# longer exists.
+concurrency:
+  group: reviewer-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: reviewer
+    # Drafts churn per commit; reviewing each one wastes tokens and buries the real review.
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # ANTHROPIC_API_KEY is NOT yet a repo secret. Skip cleanly rather than redden every PR --
+      # a red check nobody can fix teaches people to ignore red checks.
+      - name: Check the reviewer is provisioned
+        id: creds
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REVIEWER_APP_ID: ${{ secrets.REVIEWER_APP_ID }}
+          REVIEWER_APP_INSTALLATION_ID: ${{ secrets.REVIEWER_APP_INSTALLATION_ID }}
+          REVIEWER_APP_PRIVATE_KEY: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+        run: |
+          set -uo pipefail
+          missing=""
+          [ -z "$ANTHROPIC_API_KEY" ]              && missing="$missing ANTHROPIC_API_KEY"
+          [ -z "$REVIEWER_APP_ID" ]                && missing="$missing REVIEWER_APP_ID"
+          [ -z "$REVIEWER_APP_INSTALLATION_ID" ]   && missing="$missing REVIEWER_APP_INSTALLATION_ID"
+          [ -z "$REVIEWER_APP_PRIVATE_KEY" ]       && missing="$missing REVIEWER_APP_PRIVATE_KEY"
+          if [ -n "$missing" ]; then
+            echo "::notice::reviewer is not provisioned (missing:$missing) -- skipping. See the deployment runbook, Automated code review."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.ready == 'true'
+        with:
+          # Full history so the merge base resolves; submodules off because the reviewer reads this
+          # repo's diff and never builds -- cloning external/ would be pure cost.
+          fetch-depth: 0
+          submodules: false
+
+      - uses: actions/setup-node@v4
+        if: steps.creds.outputs.ready == 'true'
+        with:
+          node-version: '22'
+
+      - name: Install the reviewer
+        if: steps.creds.outputs.ready == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      # The PR's own contribution, capped. A cap that silently truncates would let a reviewer report
+      # "no findings" on a diff it never saw, so the cap is announced in the log AND in the posted body.
+      - name: Collect the diff
+        if: steps.creds.outputs.ready == 'true'
+        id: diff
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MAX_DIFF_LINES: '4000'
+        run: |
+          set -uo pipefail
+          git fetch --quiet --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF" || true
+          git diff --merge-base "origin/$BASE_REF" HEAD > /tmp/pr.diff || true
+          total=$(wc -l < /tmp/pr.diff)
+          echo "diff is $total lines"
+          if [ "$total" -gt "$MAX_DIFF_LINES" ]; then
+            head -n "$MAX_DIFF_LINES" /tmp/pr.diff > /tmp/pr.diff.capped
+            mv /tmp/pr.diff.capped /tmp/pr.diff
+            echo "::warning::diff truncated to $MAX_DIFF_LINES of $total lines -- the review covers only the first part."
+            echo "truncated=$total" >> "$GITHUB_OUTPUT"
+          else
+            echo "truncated=" >> "$GITHUB_OUTPUT"
+          fi
+          git diff --merge-base "origin/$BASE_REF" HEAD --stat | tail -1
+
+      - name: Review
+        if: steps.creds.outputs.ready == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+          TRUNCATED: ${{ steps.diff.outputs.truncated }}
+        run: |
+          set -uo pipefail
+
+          # `--bare` is what makes this deterministic: it skips auto-discovery of hooks, plugins, MCP
+          # servers, auto memory and CLAUDE.md, so a stray file in a runner's home directory cannot
+          # change the review. The contract is therefore passed EXPLICITLY rather than relied on to
+          # auto-load -- which is also how a human reviewer is meant to load it (root AGENTS.md).
+          #
+          # Read-only by construction: no Write, no Edit, and Bash is narrowed to three git reads.
+          # The space before `*` is load-bearing -- `Bash(git diff*)` would also match `git diff-index`.
+          # The prompt lives in .github/reviewer-prompt.md rather than inline: it is the thing most
+          # worth reviewing when this bot misbehaves, and a heredoc inside a YAML block scalar has to
+          # sit at column 0, which silently ends the scalar.
+          set +e
+          claude --bare -p "$(cat .github/reviewer-prompt.md)" \
+            --append-system-prompt-file documentation/agents/code-reviewer.md \
+            --model claude-opus-5 \
+            --permission-mode dontAsk \
+            --allowedTools "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *)" \
+            --output-format json \
+            < /tmp/pr.diff > /tmp/review.json
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::the reviewer exited $rc"
+            head -c 2000 /tmp/review.json || true
+            exit "$rc"
+          fi
+
+          # Cost per run, so "what is this costing" is answerable from the log rather than the dashboard.
+          echo "cost: \$$(jq -r '.total_cost_usd // "unknown"' /tmp/review.json)"
+
+          # The advisory header is prepended UNCONDITIONALLY. That is the guarantee, not the prompt
+          # instruction above: whatever the model wrote, line 1 of what we post is this header, so it
+          # can never be a `**Verdict: ...**` marker that review-verdict would honour.
+          {
+            echo "🤖 **Automated pre-review** — advisory, not a verdict. A human review still gates this PR."
+            echo
+            if [ -n "${TRUNCATED:-}" ]; then
+              echo "> ⚠️ The diff was truncated to 4000 of $TRUNCATED lines; this review covers only the first part."
+              echo
+            fi
+            echo "---"
+            echo
+            jq -r '.result' /tmp/review.json
+          } > /tmp/review.md
+
+          echo "review body: $(wc -c < /tmp/review.md) bytes"
+
+      - name: Post as trading-copilot-reviewer[bot]
+        if: steps.creds.outputs.ready == 'true'
+        env:
+          REVIEWER_APP_ID: ${{ secrets.REVIEWER_APP_ID }}
+          REVIEWER_APP_INSTALLATION_ID: ${{ secrets.REVIEWER_APP_INSTALLATION_ID }}
+          REVIEWER_APP_PRIVATE_KEY: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+          REVIEWER_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          # COMMENT is the whole point of the advisory phase -- see the header comment before
+          # changing this to APPROVE / REQUEST_CHANGES.
+          VERDICT_MODE: COMMENT
+        run: ./.github/scripts/reviewer-review.sh review "$PR" "$VERDICT_MODE" /tmp/review.md
