@@ -609,6 +609,125 @@ public class StagedOrderEndpointsTests
             "the open position rides its native safety bracket, so no synthetic promotion plan is written (as the round-tripped sibling does not)");
     }
 
+    // gh#770 -- the entry fills an adopt used to drop.
+    //
+    // While the row was stranded Taking it carried NO venue key, so the real fill events streamed in and were
+    // discarded by AccountEventIngestionService (it matches on the venue key alone -- no buffer, no backfill).
+    // Adopting later did not retroactively create them, so ProcessFlatAsync had no entry fill to balance and
+    // composed NO Trade: the realized P&L never reached the R-5 governor, the R-9 window or the R-4 throttle,
+    // and an unjournalled real loss reads to them as FREE HEADROOM.
+    //
+    // The backfill writes those rows from the venue's own fill legs. Their keys are the SAME keys the stream
+    // would have written, so Fill's { OrderId, VenueFillKey } unique index makes a later delivery or replay an
+    // idempotent no-op by construction -- rather than a second row and a double-counted entry, which would be
+    // the same harm pointed the other way.
+
+    private static TaggedFillEvidence FilledWithLegs(string tag, string venueOrderKey, params (string Key, int Size)[] legs) =>
+        TaggedFillEvidence
+            .Filled(tag, legs.Sum(leg => leg.Size), 5_300m, venueOrderKey)
+            .WithLegs(legs.Select(leg => new TaggedFillLeg(
+                leg.Key, 5_300m, leg.Size, 1.24m, new DateTimeOffset(2026, 8, 11, 14, 30, 0, TimeSpan.Zero))));
+
+    private async Task<List<Fill>> FillsOfAsync(Guid orderId)
+    {
+        await using TradingCopilotDbContext reload = Context();
+        return await reload.Fills.Where(fill => fill.OrderId == orderId).OrderBy(fill => fill.VenueFillKey).ToListAsync();
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldBackfillTheEntryFills_WhenAdoptingAStillOpenFilledTake()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SetTakingAsync(orderId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]);
+        VenueContractId contract = VenueContractId.Create(VenueId.Parse("projectx"), "CON.F.US.MES.U26");
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>(
+                [new PositionSnapshot(_venueAccount, contract, NetQuantity: 2, new Price(5_300m))]);
+        A.CallTo(() => _venue.FindFilledOrderByTagAsync(
+                A<VenueAccountId>._, A<string>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .ReturnsLazily((VenueAccountId _, string tag, DateTimeOffset _, CancellationToken _) =>
+                FilledWithLegs(tag, "VENUE-KEY-OPEN", ("F-501", 1), ("F-502", 1)));
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), Fills(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        List<Fill> backfilled = await FillsOfAsync(orderId);
+        // The venue's OWN keys -- so the stream replaying these fills collides on { OrderId, VenueFillKey } and
+        // skips, rather than appending a second row and double-counting the entry.
+        backfilled.Select(fill => fill.VenueFillKey).Should().Equal(["F-501", "F-502"]);
+        backfilled.Sum(fill => fill.Size).Should().Be(2);
+        backfilled.Should().OnlyContain(fill => fill.Price == 5_300m);
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldBackfillTheEntryFills_WhenAdoptingARoundTrippedTake()
+    {
+        // The gh#631 sibling: flat and nothing resting, but fill history says it executed and round-tripped. The
+        // trade is CLOSED, so this is exactly the case whose realized P&L the journal was silently discarding.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SetTakingAsync(orderId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]);
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>([]); // flat
+        A.CallTo(() => _venue.FindFilledOrderByTagAsync(
+                A<VenueAccountId>._, A<string>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .ReturnsLazily((VenueAccountId _, string tag, DateTimeOffset _, CancellationToken _) =>
+                FilledWithLegs(tag, "VENUE-KEY-RT", ("F-901", 2)));
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), Fills(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        List<Fill> backfilled = await FillsOfAsync(orderId);
+        backfilled.Should().ContainSingle().Which.VenueFillKey.Should().Be("F-901");
+    }
+
+    [Fact]
+    public async Task Reconcile_ShouldWriteNoFills_WhenTheVenueCouldNotEnumerateThem()
+    {
+        // A venue that can say "it filled" but cannot list the fills leaves the adopt exactly as it was. Inventing
+        // a keyless row here is the one thing that must not happen: it would not collide with the streamed fill and
+        // the entry would be counted twice.
+        Guid accountId = await SeedAccountAsync();
+        await ArmAsync(accountId, SmallBuy());
+        Guid orderId;
+        await using (TradingCopilotDbContext read = Context()) { orderId = (await read.Orders.SingleAsync()).Id; }
+        await SetTakingAsync(orderId);
+
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>([]);
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<PositionSnapshot>>([]);
+        A.CallTo(() => _venue.FindFilledOrderByTagAsync(
+                A<VenueAccountId>._, A<string>._, A<DateTimeOffset>._, A<CancellationToken>._))
+            .ReturnsLazily((VenueAccountId _, string tag, DateTimeOffset _, CancellationToken _) =>
+                TaggedFillEvidence.Filled(tag, 2m, 5_300m, "VENUE-KEY-RT")); // no legs
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.ReconcileTakingOrderAsync(
+            orderId, new FixedUser(_operator), context, RestingOrders(), Positions(), Fills(), ExecOptions(), Claim(context), PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        (await FillsOfAsync(orderId)).Should().BeEmpty();
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Orders.FirstAsync(o => o.Id == orderId)).Status.Should().Be(
+            OrderStatus.Filled, "the adopt still stands -- only the journal backfill is lost");
+    }
+
     [Fact]
     public async Task Reconcile_ShouldJournalTheTakenDisposition_WhenAdoptingAStillOpenFilledSuggestion()
     {

@@ -309,3 +309,16 @@ row) and belongs with the rest of #619. And a limitation this inherits from the 
 — the entry `Fill` rows streamed in while the row carried no venue key and were dropped, and the native bracket's
 exit leg is untracked — closing that needs the bracket legs journaled as orders (gh#731's remit), tracked as a
 follow-up.
+
+**Update (2026-08-11, gh#770) — the entry half of that limitation is closed; the exit half is not.** Both adopt
+branches now **backfill the entry `Fill` rows** from venue fill history, so the side the strand dropped is
+recovered. The safety of that rests on one property: `TaggedFillEvidence` carries the venue's **own** fill keys
+(read from the gateway's trade search), so a backfilled row is indistinguishable from a streamed one and `Fill`'s
+`(OrderId, VenueFillKey)` unique index makes a later delivery or replay an **idempotent no-op by construction**. A
+synthesized key would not collide, and the entry would be counted **twice** — the mirror of the under-counting this
+fixes, and equally wrong for the R-5 governor. A venue that cannot enumerate its fills supplies no legs and nothing
+is written; the fill **veto** never regresses, because the trade read is a second, journalling-only call.
+
+**A `Trade` still does not compose**, so the realized P&L still does not reach the gh#746 readers: the native
+bracket's **exit** legs remain untracked (venue-spawned, no `Order` row), and `ProcessFlatAsync` cannot balance a
+round trip from an entry alone. gh#770 therefore stays open, blocked on **gh#731**'s bracket-leg tracking.
