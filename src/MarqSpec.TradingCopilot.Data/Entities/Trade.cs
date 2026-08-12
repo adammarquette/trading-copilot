@@ -53,11 +53,20 @@ public class Trade : IUserOwned
     public DateTimeOffset? ClosedAt { get; set; }
 
     /// <summary>
-    /// The <see cref="Fill"/> that closed the round trip — the trade's <b>natural key</b> (gh#731). A unique
-    /// index over it makes the journal writer idempotent: a replayed flat <c>PositionEvent</c> recomposes the
-    /// same round trip, whose closing fill is the same row, and the second insert is rejected rather than
-    /// double-counting the day's realized P&amp;L into the daily governor. Null for rows journaled before the
-    /// production writer existed (and for any future writer that does not compose from fills).
+    /// The <b>final</b> <see cref="Fill"/> that retired this leg — with <see cref="OpeningFillId"/>, half the trade's
+    /// <b>natural key</b> (gh#731, gh#759). A unique index over the pair makes the journal writer idempotent: a
+    /// replayed flat <c>PositionEvent</c> recomposes the same legs, whose keys are the same rows, and the second insert
+    /// is rejected rather than double-counting the day's realized P&amp;L into the daily governor. Null for rows
+    /// journaled before the production writer existed (and for any future writer that does not compose from fills).
     /// </summary>
     public Guid? ClosingFillId { get; set; }
+
+    /// <summary>
+    /// The <see cref="Fill"/> that <b>opened</b> this leg — the other half of the natural key (gh#759, ADR-0022). A
+    /// leg is one opening fill and the closing fills that retire it, so a single closing fill can retire two legs
+    /// (a spanning exit) and <see cref="ClosingFillId"/> alone is no longer unique; the pair
+    /// <c>(ClosingFillId, OpeningFillId)</c> is. Null for rows journaled before this column existed (they carry only
+    /// the old single-column closing key).
+    /// </summary>
+    public Guid? OpeningFillId { get; set; }
 }
