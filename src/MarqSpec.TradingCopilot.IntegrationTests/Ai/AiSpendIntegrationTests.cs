@@ -128,7 +128,7 @@ public class AiSpendIntegrationTests : IClassFixture<AiSpendTestPostgresFactory>
         // Every ledger row falls OUTSIDE today's window: a prior trading day's spend at 3× the budget. The window
         // read must EXCLUDE it (return 0), never sum it — and excluding it leaves an empty set, whose SUM is the SQL
         // NULL the (decimal?) cast exists to absorb.
-        await SeedUsageAsync(userId, AiSpendTestPostgresFactory.DailyBudgetUsd * 3m, YesterdayUtc);
+        await SeedUsageAsync(userId, AiSpendTestPostgresFactory.DailyBudgetUsd * 3m, _yesterdayUtc);
 
         // Each fire prices at $6.00 (1M input + 1M output at the pinned triage rates $1 / $5 per million) — over the
         // $5 budget on its own. So the FIRST fire empties the budget and the SECOND must be blocked before it reaches
@@ -159,9 +159,9 @@ public class AiSpendIntegrationTests : IClassFixture<AiSpendTestPostgresFactory>
         // every owner (ADR-0008: one shared account funds all). Seeding the operator, a stranger, AND the SystemOwner
         // embed-sentinel proves ReadWindowSpendAsync's IgnoreQueryFilters really crosses the R-20 default-deny: with
         // only the operator's third ($2 < $5) counted, the fire would NOT block, so this also guards the cross-owner sum.
-        await SeedUsageAsync(userId, 2.00m, TodayInWindowUtc);
-        await SeedUsageAsync(Guid.NewGuid(), 2.00m, TodayInWindowUtc);   // a different operator
-        await SeedUsageAsync(SystemOwner.Id, 2.00m, TodayInWindowUtc);   // deployment embed spend
+        await SeedUsageAsync(userId, 2.00m, _todayInWindowUtc);
+        await SeedUsageAsync(Guid.NewGuid(), 2.00m, _todayInWindowUtc);   // a different operator
+        await SeedUsageAsync(SystemOwner.Id, 2.00m, _todayInWindowUtc);   // deployment embed spend
         // $6.00 seeded > the $5.00 budget.
         _factory.Llm.ReturnsSuggestion("long", 5_000m, 4_990m, 5_020m);
 
@@ -189,7 +189,7 @@ public class AiSpendIntegrationTests : IClassFixture<AiSpendTestPostgresFactory>
         // trading day opens (00:00 CDT = 05:00Z for 2026-07-29). It belongs to YESTERDAY's trading day. The window
         // must exclude it, so the governor reads 0 and the fire proceeds. Were the window keyed on UTC midnight the
         // row would be inside it, spend would read $6 > $5, and the fire would be wrongly blocked — the prove-red.
-        await SeedUsageAsync(userId, AiSpendTestPostgresFactory.DailyBudgetUsd + 1.00m, PreCentralDayUtc);
+        await SeedUsageAsync(userId, AiSpendTestPostgresFactory.DailyBudgetUsd + 1.00m, _preCentralDayUtc);
         _factory.Llm.ReturnsSuggestion("long", 5_000m, 4_990m, 5_020m);
 
         int fires = await _fixture.ScanAsync();
@@ -251,14 +251,14 @@ public class AiSpendIntegrationTests : IClassFixture<AiSpendTestPostgresFactory>
 
     // Well before the Central-day window start for AgentReviewFixture.Now (2026-07-29 15:00Z): a prior trading day,
     // so a row stamped here is unambiguously OUTSIDE today's window. The exact boundary is case 3's subject.
-    private static readonly DateTimeOffset YesterdayUtc = new(2026, 7, 28, 12, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _yesterdayUtc = new(2026, 7, 28, 12, 0, 0, TimeSpan.Zero);
 
     // Squarely inside today's Central window (after 05:00Z open, before the 15:00Z scan).
-    private static readonly DateTimeOffset TodayInWindowUtc = new(2026, 7, 29, 12, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _todayInWindowUtc = new(2026, 7, 29, 12, 0, 0, TimeSpan.Zero);
 
     // The boundary case (case 3): 02:00Z is AFTER UTC midnight but BEFORE the Central open (05:00Z), so it belongs to
     // yesterday's trading day. A UTC-midnight window would wrongly count it; the Central window must not.
-    private static readonly DateTimeOffset PreCentralDayUtc = new(2026, 7, 29, 2, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _preCentralDayUtc = new(2026, 7, 29, 2, 0, 0, TimeSpan.Zero);
 
     private async Task ResetAsync()
     {
