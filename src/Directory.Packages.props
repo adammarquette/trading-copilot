@@ -35,6 +35,11 @@
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.4" />
     <!-- Real-Postgres pre-merge integration tier (gh#121): throwaway containers on the compose DB image. MIT. -->
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.13.0" />
+    <!-- Transitive pin (CentralPackageTransitivePinningEnabled, above). Testcontainers 4.13.0 floors SSH.NET at
+         2025.1.0, which carries a HIGH advisory (GHSA-q939-rpr3-3284: a malicious SCP server can path-traverse a
+         recursive download outside the target directory; fixed in 2026.0.0). NuGetAudit fails restore (NU1903) on
+         it, correctly, so we override the transitive to the patched version (gh#807). -->
+    <PackageVersion Include="SSH.NET" Version="2026.0.0" />
   </ItemGroup>
 
   <ItemGroup>
