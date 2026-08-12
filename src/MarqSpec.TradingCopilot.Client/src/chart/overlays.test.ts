@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PriceLevel } from '../api/marketData';
+import type { ExecutionOverlay } from './overlays';
 import {
+  executionToPriceLines,
   levelToPriceLines,
   levelsToPriceLines,
+  positionToPriceLine,
   suggestionToPriceLines,
   suggestionsToPriceLines,
+  workingOrderToPriceLine,
 } from './overlays';
 
 const PALETTE = { support: '#26a69a', resistance: '#ef5350' } as const;
@@ -131,5 +135,68 @@ describe('suggestionsToPriceLines', () => {
 
   it('is empty for no zones', () => {
     expect(suggestionsToPriceLines([], SUGGESTION_PALETTE)).toEqual([]);
+  });
+});
+
+const EXECUTION_PALETTE = { stop: '#ffa726', limit: '#26c6da', position: '#ab47bc' } as const;
+
+describe('workingOrderToPriceLine', () => {
+  it('draws a stop leg dashed on the stop colour, labelled with its size', () => {
+    expect(
+      workingOrderToPriceLine({ id: 'o1', price: 5290, kind: 'stop', size: 2 }, EXECUTION_PALETTE),
+    ).toEqual({ price: 5290, color: EXECUTION_PALETTE.stop, title: 'Stop 2', style: 'dashed' });
+  });
+
+  it('draws a limit leg dashed on the limit colour', () => {
+    expect(
+      workingOrderToPriceLine({ id: 'o2', price: 5320, kind: 'limit', size: 1 }, EXECUTION_PALETTE),
+    ).toEqual({ price: 5320, color: EXECUTION_PALETTE.limit, title: 'Limit 1', style: 'dashed' });
+  });
+});
+
+describe('positionToPriceLine', () => {
+  it('draws a long position solid on the position colour, labelled side + size', () => {
+    expect(positionToPriceLine({ averagePrice: 5300, netQuantity: 2 }, EXECUTION_PALETTE)).toEqual({
+      price: 5300,
+      color: EXECUTION_PALETTE.position,
+      title: 'Long 2',
+      style: 'solid',
+    });
+  });
+
+  it('labels a short with the absolute size, not the signed quantity', () => {
+    expect(
+      positionToPriceLine({ averagePrice: 19900, netQuantity: -3 }, EXECUTION_PALETTE),
+    ).toMatchObject({ title: 'Short 3' });
+  });
+});
+
+describe('executionToPriceLines', () => {
+  it('draws a line per working order plus the average-entry line when a position is open', () => {
+    const overlay: ExecutionOverlay = {
+      orders: [
+        { id: 'o1', price: 5290, kind: 'stop', size: 2 },
+        { id: 'o2', price: 5320, kind: 'limit', size: 2 },
+      ],
+      position: { averagePrice: 5300, netQuantity: 2 },
+    };
+    const lines = executionToPriceLines(overlay, EXECUTION_PALETTE);
+    expect(lines.map((line) => line.title)).toEqual(['Stop 2', 'Limit 2', 'Long 2']);
+    expect(lines.map((line) => line.price)).toEqual([5290, 5320, 5300]);
+  });
+
+  it('draws no position line for a flat book — a flat position is nothing, never a line at 0', () => {
+    const lines = executionToPriceLines(
+      {
+        orders: [{ id: 'o1', price: 5290, kind: 'stop', size: 1 }],
+        position: { averagePrice: 0, netQuantity: 0 },
+      },
+      EXECUTION_PALETTE,
+    );
+    expect(lines.map((line) => line.title)).toEqual(['Stop 1']);
+  });
+
+  it('draws nothing for no orders and no position', () => {
+    expect(executionToPriceLines({ orders: [], position: null }, EXECUTION_PALETTE)).toEqual([]);
   });
 });

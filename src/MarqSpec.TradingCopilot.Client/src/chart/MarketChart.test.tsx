@@ -411,4 +411,66 @@ describe('MarketChart', () => {
     expect(chartMock.createPriceLine).not.toHaveBeenCalled();
     expect(screen.queryByText('Suggestion zones may be stale')).toBeNull();
   });
+
+  it('overlays the operator working orders and net position as price lines (gh#727 increment 3)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        execution={{
+          orders: [
+            { id: 'o1:stop', price: 5290, kind: 'stop', size: 2 },
+            { id: 'o2:limit', price: 5320, kind: 'limit', size: 2 },
+          ],
+          position: { averagePrice: 5300, netQuantity: 2 },
+        }}
+      />,
+    );
+
+    // No levels / suggestions requested, so these price lines are the execution overlay: the two working orders, then
+    // the average-entry line, in that order.
+    await waitFor(() => expect(chartMock.createPriceLine).toHaveBeenCalledTimes(3));
+    const prices = chartMock.createPriceLine.mock.calls.map(
+      (call) => (call[0] as { price: number }).price,
+    );
+    expect(prices).toEqual([5290, 5320, 5300]);
+  });
+
+  it('labels the execution overlay stale when the socket is not live (R-19)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        execution={{ orders: [], position: { averagePrice: 5300, netQuantity: 2 } }}
+        executionStale
+      />,
+    );
+
+    expect(await screen.findByText('Orders / position may be stale')).toBeTruthy();
+  });
+
+  it('draws no execution lines and shows no stale note when the overlay is empty', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    // `executionStale` alone must NOT surface a note — the note is about drawn orders / position lagging the feed.
+    render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        execution={{ orders: [], position: null }}
+        executionStale
+      />,
+    );
+    await waitFor(() => expect(chartMock.setData).toHaveBeenCalled());
+
+    expect(chartMock.createPriceLine).not.toHaveBeenCalled();
+    expect(screen.queryByText('Orders / position may be stale')).toBeNull();
+  });
 });

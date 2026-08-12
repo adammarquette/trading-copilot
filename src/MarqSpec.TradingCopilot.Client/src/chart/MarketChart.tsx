@@ -16,8 +16,14 @@ import type { BarPoint, BarSeries, IndicatorPoint } from '../api/marketData';
 import { getBars, getIndicators, getLevels } from '../api/marketData';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
-import type { LevelPalette, SuggestionPalette, SuggestionZone } from './overlays';
-import { levelsToPriceLines, suggestionsToPriceLines } from './overlays';
+import type {
+  ExecutionOverlay,
+  ExecutionPalette,
+  LevelPalette,
+  SuggestionPalette,
+  SuggestionZone,
+} from './overlays';
+import { executionToPriceLines, levelsToPriceLines, suggestionsToPriceLines } from './overlays';
 
 /**
  * How many bars the default window aims for. Kept comfortably under the server's row cap
@@ -79,6 +85,20 @@ const SUGGESTION_PALETTE: SuggestionPalette = {
   target: '#26a69a',
 };
 
+/** A stable empty default for {@link MarketChartProps.execution} — module-level, the gh#749 lesson. */
+const EMPTY_EXECUTION: ExecutionOverlay = { orders: [], position: null };
+
+/**
+ * The colours the execution overlay draws with (gh#727 increment 3): a working protective stop amber, a working limit
+ * cyan, and the net-position average-entry line purple — all distinct from the level (green / red) and suggestion
+ * (blue / red / green) palettes, so an order line never reads as a level or a suggestion.
+ */
+const EXECUTION_PALETTE: ExecutionPalette = {
+  stop: '#ffa726',
+  limit: '#26c6da',
+  position: '#ab47bc',
+};
+
 export interface MarketChartProps {
   readonly venue: string;
   readonly instrument: string;
@@ -98,6 +118,14 @@ export interface MarketChartProps {
   readonly suggestionZones?: readonly SuggestionZone[];
   /** Whether the suggestion zones may lag the live feed — a dropped socket labels them stale (R-19). */
   readonly suggestionsStale?: boolean;
+  /**
+   * The operator's live working orders + net position on this instrument, overlaid as price lines (gh#727 increment 3)
+   * from the venue-truth reads (gh#772). The workspace keeps it fresh + owner-scoped. Absent (the default) draws no
+   * execution overlay. Fill *markers* are a follow-up (a marker primitive; the fill push carries no instrument).
+   */
+  readonly execution?: ExecutionOverlay;
+  /** Whether the execution overlay may lag the live feed — a dropped socket labels it stale (R-19). */
+  readonly executionStale?: boolean;
 }
 
 /** Maps the server's OHLCV bars to Lightweight-Charts candles: `bucketStart` (ISO) → a UNIX-second `UTCTimestamp`. */
@@ -127,9 +155,10 @@ function toIndicatorLine(points: readonly IndicatorPoint[]): LineData<UTCTimesta
  * server's cap and an unknown series surface as an error, an in-range gap as "no bars", loading as a spinner — never
  * a chart drawn empty as though the market went silent. The chart instance is created once and torn down on unmount
  * (no leaked canvas / `ResizeObserver`). Indicator panes (gh#726) render below the candles from the pre-computed
- * series (R-22); price-level overlays (gh#727) draw as price lines from `/api/marketdata/levels`, and suggestion-zone
- * overlays (gh#727) draw an active suggestion's entry / stop / target. The live position / order / fill overlay is a
- * gh#727 follow-up; live tick updates are gh#649's.
+ * series (R-22); price-level overlays (gh#727) draw as price lines from `/api/marketdata/levels`, suggestion-zone
+ * overlays (gh#727) draw an active suggestion's entry / stop / target, and execution overlays (gh#727 increment 3)
+ * draw the operator's working orders + net position from venue truth (gh#772). Fill *markers* are a gh#727 follow-up
+ * (a marker primitive; the fill push carries no instrument); live tick updates are gh#649's.
  */
 export function MarketChart({
   venue,
@@ -141,6 +170,8 @@ export function MarketChart({
   levelTimeframes = NO_TIMEFRAMES,
   suggestionZones = NO_ZONES,
   suggestionsStale = false,
+  execution = EMPTY_EXECUTION,
+  executionStale = false,
 }: MarketChartProps): React.JSX.Element {
   // Default the window from the resolution, not a flat constant, so it stays under the server's row cap whatever
   // resolution the workspace opens on (gh#725 review).
@@ -390,6 +421,32 @@ export function MarketChart({
     };
   }, [suggestionZones]);
 
+  // Execution overlays (gh#727 increment 3): the operator's working orders (stop / limit lines) and net position
+  // (average-entry line) on this instrument, drawn on the candle series from the venue-truth reads (gh#772) the
+  // workspace keeps live + owner-scoped. Synchronous like the suggestion effect — the data arrives as a prop; the
+  // series is captured + re-checked so a teardown mid-life never touches a disposed chart.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (series === null) {
+      return;
+    }
+    const added = executionToPriceLines(execution, EXECUTION_PALETTE).map((spec) =>
+      series.createPriceLine({
+        price: spec.price,
+        color: spec.color,
+        title: spec.title,
+        lineStyle: spec.style === 'dashed' ? LineStyle.Dashed : LineStyle.Solid,
+        lineWidth: 1,
+        axisLabelVisible: true,
+      }),
+    );
+    return () => {
+      if (seriesRef.current === series) {
+        added.forEach((priceLine) => series.removePriceLine(priceLine));
+      }
+    };
+  }, [execution]);
+
   // A degraded overlay read (an indicator pane or the price levels) is shown, not swallowed (R-11 / R-19).
   const unavailableOverlays = [
     ...failedIndicators.map((indicator) => indicator.toUpperCase()),
@@ -455,6 +512,26 @@ export function MarketChart({
         >
           <Typography variant="caption" sx={{ color: 'warning.main' }}>
             Suggestion zones may be stale
+          </Typography>
+        </Box>
+      ) : null}
+      {executionStale && (execution.orders.length > 0 || execution.position !== null) ? (
+        // The socket is not live, so the drawn orders / position may lag a fill or a cancel — say so (R-19), not hide it.
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 8,
+            right: 8,
+            px: 1,
+            py: 0.25,
+            borderRadius: 1,
+            bgcolor: 'background.paper',
+            border: '1px solid',
+            borderColor: 'warning.main',
+          }}
+        >
+          <Typography variant="caption" sx={{ color: 'warning.main' }}>
+            Orders / position may be stale
           </Typography>
         </Box>
       ) : null}
