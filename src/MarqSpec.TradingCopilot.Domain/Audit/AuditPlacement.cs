@@ -21,4 +21,12 @@ public enum AuditPlacement
     /// depends on the connection being live. An orphan risk on a drop; this is what <c>synthetic_risk</c> flags.
     /// </summary>
     Synthetic = 2,
+
+    /// <summary>
+    /// The record concerns <b>no single protection placement</b> — an account- or system-level safety action, not a
+    /// stop plan (gh#765): a kill-switch transition or an auto-flatten run. Distinct from <see cref="Unknown"/>,
+    /// which is the never-persisted refusable zero; <see cref="None"/> is a real, deliberate value that says "this
+    /// event is not about where a protective leg rests".
+    /// </summary>
+    None = 3,
 }

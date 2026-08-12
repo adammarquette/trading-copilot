@@ -6,9 +6,10 @@ namespace MarqSpec.TradingCopilot.Domain.Audit;
 /// <remarks>
 /// <see cref="Unknown"/> is the refusable zero (the fail-closed-zero convention, gh#60): an uninitialised action
 /// must never masquerade as a real audited event. This records the <see cref="ConnectionLoss"/> event (gh#220), the
-/// <see cref="PositionExit"/> retirement (gh#183), an operator <see cref="OrderCancelled"/> (gh#250), and an
-/// operator <see cref="OrderModified"/> reprice (gh#259); the remaining guardrail / kill / flatten actions the
-/// audit will carry are named in the data dictionary and land as those write sites are wired.
+/// <see cref="PositionExit"/> retirement (gh#183), an operator <see cref="OrderCancelled"/> (gh#250), an
+/// operator <see cref="OrderModified"/> reprice (gh#259), the kill switch's <see cref="KillSwitchEngaged"/> /
+/// <see cref="KillSwitchDisengaged"/> transitions and the <see cref="AutoFlatten"/> run (gh#765) — the two
+/// safety-critical write sites §9 named as deferred until they were wired.
 /// </remarks>
 public enum AuditAction
 {
@@ -46,4 +47,28 @@ public enum AuditAction
     /// live position rested on the reprice, and the always-native safety stop is untouched.
     /// </summary>
     OrderModified = 4,
+
+    /// <summary>
+    /// The kill switch was <b>engaged</b> (ADR-0007, R-11, gh#189/gh#765): outbound orders disabled, working orders
+    /// cancelled, and — per the mode — open positions flattened or halted. The <c>Source</c> records what tripped it
+    /// (operator, a guardrail, or the dead-man's switch); <c>Before</c>/<c>After</c> carry the engaged transition and
+    /// <c>Detail</c> the mode, counts, and reason. An account/system-level action, so its <c>Placement</c> is
+    /// <see cref="AuditPlacement.None"/> and it carries no <c>synthetic_risk</c>.
+    /// </summary>
+    KillSwitchEngaged = 5,
+
+    /// <summary>
+    /// The kill switch was <b>disengaged</b> (gh#189/gh#765): outbound orders re-enabled. Recorded so the history
+    /// survives — a re-engage no longer overwrites the single <c>KillSwitchState</c> row and loses the prior
+    /// transition. Its <c>Placement</c> is <see cref="AuditPlacement.None"/>.
+    /// </summary>
+    KillSwitchDisengaged = 6,
+
+    /// <summary>
+    /// The auto-flatten fired against a position at its deadline (R-13, ADR-0013, gh#185/gh#765): the safety-critical
+    /// close before the CME session ends. <c>After</c> carries the outcome (flat, or escalated with exposure still
+    /// open) and <c>Detail</c> what it closed; <c>Source</c> is <see cref="AuditSource.Scheduler"/>. Its
+    /// <c>Placement</c> is <see cref="AuditPlacement.None"/> — it acts on the position, not a single protective leg.
+    /// </summary>
+    AutoFlatten = 7,
 }

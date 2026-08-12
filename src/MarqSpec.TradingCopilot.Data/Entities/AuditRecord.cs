@@ -5,9 +5,11 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 
 /// <summary>
 /// One immutable audit entry (data dictionary §12, engineering §9, ADR-0007): a safety-relevant transition,
-/// recorded so the exposure is reconstructable from the table alone. This increment writes the connection-loss
-/// lifecycle of a synthetic stop — orphaned on a drop, re-armed or retired on reconnect (gh#209/gh#220) — each
-/// row flagged <see cref="SyntheticRisk"/> when a live position was resting on platform-held protection.
+/// recorded so the exposure is reconstructable from the table alone. It writes the connection-loss lifecycle of a
+/// synthetic stop — orphaned on a drop, re-armed or retired on reconnect (gh#209/gh#220), each row flagged
+/// <see cref="SyntheticRisk"/> when a live position rested on platform-held protection — <b>and</b> the two
+/// safety-critical account/system actions (gh#765): every kill-switch engage/disengage and every auto-flatten,
+/// carrying the <see cref="Source"/> that tripped them so the history survives beyond the mutable current-state row.
 /// </summary>
 /// <remarks>
 /// <b>Append-only.</b> Rows are written once and never updated or deleted — the audit is the durable record of
@@ -15,7 +17,8 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// reference (no FK): it preserves the affected stop's id as a permanent historical fact even after that stop row
 /// is gone, so the trail stays reconstructable from the table alone — the opposite of the <c>GateDecisionRecord</c>
 /// set-null link, which tolerates losing its order. <b>Operator-owned (R-20):</b> a row is stamped with the
-/// affected stop's owner and is invisible to any other operator, exactly like the stop it concerns.
+/// affected entity's owner (the stop's owner, or the account's for a kill/flatten action) and is invisible to any
+/// other operator, exactly like what it concerns.
 /// </remarks>
 public class AuditRecord : IUserOwned
 {
@@ -28,8 +31,17 @@ public class AuditRecord : IUserOwned
     /// <summary>What happened. <c>required</c>: the zero value (<c>Unknown</c>) is refused by a DB check.</summary>
     public required AuditAction Action { get; set; }
 
-    /// <summary>Where the protection rested. <c>required</c>: <c>Unknown</c> is refused by a DB check.</summary>
+    /// <summary>Where the protection rested. <c>required</c>: <c>Unknown</c> is refused by a DB check. An
+    /// account/system-level action (kill switch, auto-flatten) rests on no single protection and carries
+    /// <see cref="AuditPlacement.None"/>.</summary>
     public required AuditPlacement Placement { get; set; }
+
+    /// <summary>
+    /// What tripped the action, for the safety-action rows (kill switch, auto-flatten) — operator, guardrail,
+    /// dead-man's switch, or the scheduler (gh#765). <see langword="null"/> for the stop-plan lifecycle actions,
+    /// which concern no external trigger; a DB check refuses a persisted <c>Unknown</c>.
+    /// </summary>
+    public AuditSource? Source { get; set; }
 
     /// <summary>
     /// True when a live position was resting on platform-held (synthetic) protection at the moment of the event —

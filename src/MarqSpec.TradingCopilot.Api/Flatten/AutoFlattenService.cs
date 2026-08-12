@@ -1,10 +1,12 @@
 using System.Diagnostics;
 using System.Text.Json;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Notifications;
@@ -58,9 +60,13 @@ public sealed class AutoFlattenService
     /// <summary>An open position in a product with no configured deadline — a gap that must not stay silent.</summary>
     public const string UnconfiguredEventType = "flatten.unconfigured";
 
+    /// <summary>The audit <c>Detail</c> column's width (data dictionary §12); a longer summary is truncated to fit.</summary>
+    private const int MaxDetail = 512;
+
     private readonly TradingCopilotDbContext _database;
     private readonly IProjectXVenueFactory _venueFactory;
     private readonly IEventLog _eventLog;
+    private readonly IAuditLog _auditLog;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly FlattenOptions _options;
     private readonly INotificationChannel _notifications;
@@ -72,6 +78,7 @@ public sealed class AutoFlattenService
     /// <param name="database">The scoped database.</param>
     /// <param name="venueFactory">Builds a venue for a connection's firm conventions.</param>
     /// <param name="eventLog">The append-only journal every flatten action is recorded on (R-13).</param>
+    /// <param name="auditLog">The immutable audit trail (§9, gh#765) — an executed or escalated flatten lands one row.</param>
     /// <param name="projectXOptions">Carries the credential key this process serves (ADR-0015).</param>
     /// <param name="flattenOptions">The per-instrument schedule and attempt cap.</param>
     /// <param name="notifications">Reaches the operator away from the desk (gh#243, ADR-0019).</param>
@@ -82,6 +89,7 @@ public sealed class AutoFlattenService
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
         IEventLog eventLog,
+        IAuditLog auditLog,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IOptions<FlattenOptions> flattenOptions,
         INotificationChannel notifications,
@@ -95,6 +103,7 @@ public sealed class AutoFlattenService
         _database = database;
         _venueFactory = venueFactory;
         _eventLog = eventLog;
+        _auditLog = auditLog;
         _projectX = projectXOptions.Value;
         _options = flattenOptions.Value;
         _notifications = notifications;
@@ -166,7 +175,10 @@ public sealed class AutoFlattenService
                     continue;
                 }
 
-                await FlattenAccountAsync(venueAccount.Id, venue, schedules, now, maxAttempts, cancellationToken);
+                // The owner is threaded from the loaded account (gh#765 review) -- an exact match, not a second
+                // under-scoped lookup by the non-unique VenueAccountKey.
+                await FlattenAccountAsync(
+                    venueAccount.Id, account.UserId, venue, schedules, now, maxAttempts, cancellationToken);
             }
         }
     }
@@ -176,6 +188,8 @@ public sealed class AutoFlattenService
     /// each to its instrument's schedule, and acts on the domain decision. The per-account safety core.
     /// </summary>
     /// <param name="account">The venue account to evaluate.</param>
+    /// <param name="ownerUserId">The account's owner — every audit row this flatten writes is stamped with it (R-20,
+    /// gh#765); the host has no ambient user, so the caller supplies it from the loaded account.</param>
     /// <param name="venue">The venue to read positions from and close through.</param>
     /// <param name="schedules">The per-instrument schedules in force.</param>
     /// <param name="now">The instant to evaluate against.</param>
@@ -184,6 +198,7 @@ public sealed class AutoFlattenService
     /// <returns>How many instruments were closed and verified flat.</returns>
     internal async Task<int> FlattenAccountAsync(
         VenueAccountId account,
+        Guid ownerUserId,
         ITradingVenue venue,
         IReadOnlyList<FlattenSchedule> schedules,
         DateTimeOffset now,
@@ -270,7 +285,8 @@ public sealed class AutoFlattenService
                 case FlattenAction.Flatten:
                     {
                         long startedTicks = Stopwatch.GetTimestamp();
-                        bool flat = await CloseGroupAsync(account, venue, schedule, [.. group], maxAttempts, decision, now, cancellationToken);
+                        bool flat = await CloseGroupAsync(
+                            account, ownerUserId, venue, schedule, [.. group], maxAttempts, decision, now, cancellationToken);
                         if (flat)
                         {
                             closed++;
@@ -308,6 +324,16 @@ public sealed class AutoFlattenService
                         cancellationToken);
 
                     await JournalAsync(MissedEventType, account, contract, decision.Reason, now, cancellationToken);
+
+                    // The most incident-worthy auto-flatten outcome: the deadline passed with exposure still open and
+                    // NO close fired (gh#765 review). It belongs in the immutable trail beside the executed/escalated
+                    // rows, not only the event log + page. (Disabled / Unconfigured are operator-config states — the
+                    // position may be deliberately live — and stay in the event log.)
+                    await WriteFlattenAuditAsync(
+                        ownerUserId, after: "Missed",
+                        $"Auto-flatten MISSED: {schedule.Instrument} on {account.Key} — deadline passed with exposure "
+                        + $"still open, no close fired. {decision.Reason}",
+                        now, cancellationToken);
                     _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenMissed);
                     break;
 
@@ -331,6 +357,7 @@ public sealed class AutoFlattenService
     /// </summary>
     private async Task<bool> CloseGroupAsync(
         VenueAccountId account,
+        Guid ownerUserId,
         ITradingVenue venue,
         FlattenSchedule schedule,
         IReadOnlyList<PositionSnapshot> group,
@@ -361,6 +388,13 @@ public sealed class AutoFlattenService
                 case FlattenVerdict.Flat:
                     await JournalAsync(ExecutedEventType, account, group[0].Contract,
                         $"{decision.Reason} Flat after {attempts} attempt(s).", now, cancellationToken);
+
+                    // The immutable §9 history row (gh#765): the safety-critical close ran and confirmed flat. Beside
+                    // the event-log append above, this is the durable "what closed, and did it work" an incident reads.
+                    await WriteFlattenAuditAsync(
+                        ownerUserId, after: "Flat",
+                        $"Auto-flatten closed {schedule.Instrument} on {account.Key} — flat after {attempts} attempt(s).",
+                        now, cancellationToken);
 
                     // The incident is over. Cancels any page still nagging from an earlier pass and re-arms the
                     // key, so a LATER failure today is reported as the new incident it is (gh#243).
@@ -399,6 +433,14 @@ public sealed class AutoFlattenService
 
                     await JournalAsync(EscalatedEventType, account, group[0].Contract,
                         $"ESCALATE: {schedule.Instrument} still exposed after {attempts} close attempt(s) — {decision.Reason}",
+                        now, cancellationToken);
+
+                    // The immutable §9 record of the outcome that matters most: the close did NOT confirm flat and
+                    // exposure remains (gh#765) — "auto-flatten ran, and here is what it could not close".
+                    await WriteFlattenAuditAsync(
+                        ownerUserId, after: "Escalated",
+                        $"Auto-flatten ESCALATED: {schedule.Instrument} on {account.Key} still exposed after "
+                        + $"{attempts} attempt(s) — manual intervention needed.",
                         now, cancellationToken);
                     return false;
             }
@@ -478,6 +520,43 @@ public sealed class AutoFlattenService
         });
 
         return _eventLog.AppendAsync(new EventDraft(type, EventSource, occurredAt, payload), cancellationToken);
+    }
+
+    /// <summary>
+    /// Writes the immutable §9 audit row for an auto-flatten outcome (gh#765) — a <b>secondary</b> write behind the
+    /// close, so a failure loses a history row but must never fail or abort the flatten, the one action taken without
+    /// confirmation (the <see cref="IAuditLog"/> contract). The owner is the account's (this host has no ambient
+    /// user); an auto-flatten rests on no single protective leg, so its <c>Placement</c> is
+    /// <see cref="AuditPlacement.None"/> and it carries no synthetic-risk flag. <paramref name="detail"/> is bounded
+    /// to the column width.
+    /// </summary>
+    private async Task WriteFlattenAuditAsync(
+        Guid ownerUserId, string after, string detail, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        try
+        {
+            AuditRecord record = new()
+            {
+                Id = Guid.NewGuid(),
+                UserId = ownerUserId,
+                Action = AuditAction.AutoFlatten,
+                Placement = AuditPlacement.None,
+                Source = AuditSource.Scheduler,
+                SyntheticRisk = false,
+                After = after,
+                Detail = detail.Length > MaxDetail ? detail[..MaxDetail] : detail,
+                RecordedAt = now,
+            };
+            await _auditLog.WriteAsync([record], cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw; // a real shutdown still stops the host
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(error, "Could not write the auto-flatten audit record; the flatten itself is unaffected.");
+        }
     }
 
     // The product root shared by every month of a contract (F.US.EP for ES). Single-venue today (ProjectX); when a

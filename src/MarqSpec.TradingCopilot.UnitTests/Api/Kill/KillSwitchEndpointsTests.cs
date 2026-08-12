@@ -1,4 +1,5 @@
 using FakeItEasy;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Kill;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
@@ -33,7 +34,7 @@ public class KillSwitchEndpointsTests
     {
         IProjectXVenueFactory factory = A.Fake<IProjectXVenueFactory>();
         return new KillSwitchService(
-            Db(), factory, A.Fake<IEventLog>(), _killSwitch,
+            Db(), factory, A.Fake<IEventLog>(), A.Fake<IAuditLog>(), new FixedUser(_operator), _killSwitch,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
             NullLogger<KillSwitchService>.Instance);
     }

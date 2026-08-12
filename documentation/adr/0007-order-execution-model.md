@@ -434,9 +434,13 @@ orphaned** (unverifiable) transitions to nothing and records nothing.
 The audit is a **secondary write, subordinate to the safety action**: the guard commits the staging change *first*,
 then writes the audit in its own unit of work through an `IAuditLog` seam; a failure there is **logged and
 swallowed, never propagated** — a covering test makes the audit write throw and asserts the orphan / re-arm still
-completes. This is the general rule for the coming order / guardrail / kill / flatten write sites too: the record of
-a safety action must never be able to *prevent* it. *Still deferred within the audit:* those broader write sites, and
-the **real-time operator alert** (gh#222) — the high-severity log remains the interim alert.
+completes. This is the general rule for the order / guardrail / kill / flatten write sites too: the record of a
+safety action must never be able to *prevent* it. The **order** sites landed (gh#183 position-exit, gh#250
+order-cancel, gh#259 / gh#292 order-modify), and the **kill-switch and auto-flatten** sites landed too (gh#765 —
+each engage / disengage and each executed / escalated / missed flatten writes an immutable row carrying its trigger
+`Source`, following exactly this secondary-write-that-cannot-abort-the-action discipline). *Still deferred within
+the audit:* the **guardrail** write site (the trigger lands with it), and the **real-time operator alert** (gh#222)
+— the high-severity log remains the interim alert.
 
 ## Update (2026-07-25) — the send-as-is fast path (gh#181)
 The opt-in **`Send as-is`** from R-11(b) — the Approve split-button's menu item — now exists as
