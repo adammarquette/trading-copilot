@@ -203,12 +203,21 @@ public sealed class TradeJournalService
         List<Guid?> windowFillIds = [.. fillById.Keys.Select(id => (Guid?)id)];
         HashSet<(Guid? Closing, Guid? Opening)> composedKeys =
             [.. trips.Select(trip => ((Guid?)trip.ClosingFillId, (Guid?)trip.OpeningFillId))];
+        HashSet<Guid?> composedClosingFillIds = [.. trips.Select(trip => (Guid?)trip.ClosingFillId)];
         var overlapping = await database.Trades
             .Where(trade => trade.AccountId == account.AccountId && trade.Instrument == exit.Contract.Key
                 && (windowFillIds.Contains(trade.ClosingFillId) || windowFillIds.Contains(trade.OpeningFillId)))
             .Select(trade => new { trade.ClosingFillId, trade.OpeningFillId })
             .ToListAsync(cancellationToken);
-        if (overlapping.Any(row => !composedKeys.Contains((row.ClosingFillId, row.OpeningFillId))))
+        // A row is EXPLAINED by this composition -- so NOT a re-pairing -- if its full (Closing, Opening) key is one of
+        // the legs we are about to write, OR it is a pre-#759 LEGACY row (null OpeningFillId) whose ClosingFillId
+        // matches a composed trip: the old single-key format of the same trip, journalled before this column existed.
+        // Without that legacy exception an ordinary replay of ANY pre-migration flat would false-fire this guard and
+        // pollute JournalBoundaryMergeRefused (gh#759 review). Pre-migration windows were only ever balanced single
+        // trips (scale-in / reverse were refused), so a legacy ClosingFillId belongs to exactly one recomposed leg.
+        if (overlapping.Any(row =>
+            !composedKeys.Contains((row.ClosingFillId, row.OpeningFillId))
+            && !(row.OpeningFillId == null && composedClosingFillIds.Contains(row.ClosingFillId))))
         {
             _logger.LogWarning(
                 "Flat {Contract} on account {Account}: a fill in this window is already journalled under a DIFFERENT "
@@ -245,9 +254,13 @@ public sealed class TradeJournalService
     {
         // Idempotent: a replayed flat recomposes the same legs down to the same natural key. The COMPOSITE key is
         // required because one closing fill can retire two legs (a spanning exit), so ClosingFillId alone is no longer
-        // unique (ADR-0022). The unique index below stays the backstop for a concurrent writer.
+        // unique (ADR-0022). A pre-#759 LEGACY row (null OpeningFillId) is recognized by ClosingFillId ALONE -- its old
+        // single-key format is the already-journalled version of this leg, so a replay of a pre-migration flat is the
+        // ordinary idempotent skip, not a re-pairing (gh#759 review). Post-migration rows always carry a non-null
+        // OpeningFillId, so the null branch matches only genuine legacy rows. The unique index below is the backstop.
         bool alreadyJournalled = await database.Trades.AnyAsync(
-            trade => trade.ClosingFillId == trip.ClosingFillId && trade.OpeningFillId == trip.OpeningFillId,
+            trade => trade.ClosingFillId == trip.ClosingFillId
+                && (trade.OpeningFillId == trip.OpeningFillId || trade.OpeningFillId == null),
             cancellationToken);
         if (alreadyJournalled)
         {
