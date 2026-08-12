@@ -623,6 +623,95 @@ public static class OrderEndpoints
         }, cancellationToken);
     }
 
+    /// <summary>
+    /// Writes the entry <see cref="Fill"/> rows an adopt would otherwise lose (gh#770).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why they are missing at all.</b> While the row was stranded <c>Taking</c> it carried no
+    /// <c>VenueOrderKey</c>, and <c>AccountEventIngestionService</c> matches fills to orders by that key alone —
+    /// no buffer, no backfill — so the real fill events streamed in and were discarded. Adopting later does not
+    /// retroactively create them, so <c>ProcessFlatAsync</c> finds no entry fill to balance and composes no
+    /// <c>Trade</c>: the realized P&amp;L never reaches the R-5 daily governor, the R-9 window or the R-4
+    /// throttle, and an unjournalled real loss reads to them as <b>free headroom</b>.
+    /// </para>
+    /// <para>
+    /// <b>Why this cannot double-count.</b> Every leg carries the venue's <b>own</b> fill key, which is the same
+    /// key the stream writes, so these rows are indistinguishable from streamed ones and <c>Fill</c>'s
+    /// <c>(OrderId, VenueFillKey)</c> unique index turns a later delivery or replay into an idempotent no-op —
+    /// by construction, with no adopt-awareness in the ingestion path. A venue that could not enumerate its fills
+    /// supplies no legs and nothing is written: a synthesized key would <i>not</i> collide, and the entry would be
+    /// counted twice, which is the same harm this fix exists to remove, pointed the other way.
+    /// </para>
+    /// <para>
+    /// <b>Secondary, exactly like the disposition write.</b> The adopt has already committed and its loud log
+    /// stands, so a failure here is logged and swallowed — it must never undo the adopt (the gh#455 rule). Only a
+    /// cooperative cancellation propagates.
+    /// </para>
+    /// </remarks>
+    private static async Task BackfillEntryFillsAsync(
+        TradingCopilotDbContext database,
+        Order order,
+        TaggedFillEvidence evidence,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (evidence.Legs.Count == 0)
+        {
+            // The venue vetoed the release but could not enumerate the fills. Nothing is invented — the adopt
+            // stands and only the journal backfill is lost, which the caller's own warning already covers.
+            return;
+        }
+
+        try
+        {
+            foreach (TaggedFillLeg leg in evidence.Legs)
+            {
+                database.Fills.Add(new Fill
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = order.UserId,
+                    OrderId = order.Id,
+                    VenueFillKey = leg.VenueFillKey,
+                    Price = leg.Price,
+                    Size = leg.Size,
+                    Fees = leg.Fees,
+                    ExecutedAt = leg.ExecutedAt,
+                });
+            }
+
+            await database.SaveChangesAsync(cancellationToken);
+
+            if (evidence.IsAmbiguous)
+            {
+                // MatchCount > 1: the evidence describes only the EARLIEST execution under this tag, so what was
+                // just journalled is knowingly PARTIAL. Said out loud rather than left to read as completeness.
+                logger.LogWarning(
+                    "Backfilled {Count} entry fill(s) for adopted order {OrderId}, but the venue reported MORE THAN "
+                    + "ONE executed record under its tag — the journal describes only the earliest and therefore "
+                    + "UNDERSTATES the venue (gh#770).",
+                    evidence.Legs.Count, order.Id);
+                return;
+            }
+
+            logger.LogInformation(
+                "Backfilled {Count} entry fill(s) for adopted order {OrderId} from venue fill history (gh#770).",
+                evidence.Legs.Count, order.Id);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            logger.LogError(
+                error,
+                "Entry-fill backfill failed for adopted order {OrderId}; the adopt still stands, but this trade's "
+                + "realized P&L will not reach the journal (gh#770).",
+                order.Id);
+        }
+    }
+
     internal static async Task<IResult> ReconcileTakingOrderAsync(
         Guid id,
         ICurrentUser currentUser,
@@ -763,6 +852,11 @@ public static class OrderEndpoints
                     order.Size = (int)openFill.FilledSize;
                     await database.SaveChangesAsync(cancellationToken);
 
+                    // Backfill the entry fills the strand dropped (gh#770) -- see BackfillEntryFillsAsync. Its own
+                    // save AFTER the adopt, on the gh#455 discipline the disposition below already follows.
+                    await BackfillEntryFillsAsync(
+                        database, order, openFill, loggerFactory.CreateLogger(nameof(OrderEndpoints)), cancellationToken);
+
                     // A confirmed fill IS a taken suggestion (gh#549): journal the disposition, as the adopt-live branch
                     // does, in its OWN save AFTER the adopt so it can never abort it (gh#455). Unlike the round-tripped
                     // branch (a closed trade), the position here is LIVE, so the disposition belongs with it (R-9).
@@ -827,6 +921,12 @@ public static class OrderEndpoints
                 order.PlacedAt = DateTimeOffset.UtcNow;
                 order.Size = (int)takeFill.FilledSize;
                 await database.SaveChangesAsync(cancellationToken);
+
+                // The round-tripped sibling of the backfill above (gh#770). This is the case whose realized P&L the
+                // journal was silently discarding: the trade is already CLOSED, so without its entry fills nothing
+                // ever composes a Trade and the loss never reaches the R-5 governor.
+                await BackfillEntryFillsAsync(
+                    database, order, takeFill, loggerFactory.CreateLogger(nameof(OrderEndpoints)), cancellationToken);
 
                 loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogWarning(
                     "Reconciled stranded take {OrderId} on account {AccountId}: nothing rests and the account is flat, "
