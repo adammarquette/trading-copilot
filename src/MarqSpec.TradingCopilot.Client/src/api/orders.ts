@@ -108,3 +108,65 @@ export function takeStagedOrder(orderId: string): Promise<ApiResult<SendOrderRes
 export function cancelOrder(orderId: string): Promise<ApiResult<void>> {
   return request<void>('DELETE', `/orders/${orderId}`);
 }
+
+/**
+ * Which way price must cross the trigger for a conditional entry to fire (ADR-0007, gh#176). Serialized as its
+ * integer — the values must match the domain enum exactly. {@link ConditionalCrossDirection.Unknown} is the
+ * **refusable zero**: the unset value never fires, so a conditional must declare a real direction or it would rest
+ * forever.
+ */
+export const ConditionalCrossDirection = { Unknown: 0, RisesTo: 1, FallsTo: 2 } as const;
+export type ConditionalCrossDirection =
+  (typeof ConditionalCrossDirection)[keyof typeof ConditionalCrossDirection];
+
+/**
+ * The request to create a **synthetic conditional** entry (gh#176, ADR-0007) — the "send when conditions met" mode.
+ * The proposal rides an ordinary {@link SendOrderRequest}; the conditional part is the trigger and its optional
+ * cancel band / expiry. Nothing transmits — the order is held local and fired by a watcher when the trigger crosses.
+ */
+export interface CreateConditionalOrderRequest {
+  readonly order: SendOrderRequest;
+  /** The price at which the order fires. */
+  readonly triggerPrice: number;
+  /** Which way price must cross the trigger to fire. Travels as its integer; {@link ConditionalCrossDirection.Unknown} is refused. */
+  readonly triggerDirection: ConditionalCrossDirection;
+  /** The optional cancel band — the stale-side price past which the setup is abandoned. */
+  readonly cancelDrift?: number | null;
+  /** The optional validity deadline (ISO-8601); past it, a still-pending order cancels. */
+  readonly expiresAt?: string | null;
+}
+
+/**
+ * A created, **pending** conditional and the gate's decision *at creation time*.
+ *
+ * The decision (`outcome` / `approvedQuantity` / `bindingLayer` / `reason`) is a **preview**, not a commitment: the
+ * authoritative gate re-runs at fire time (R-12), so this can only ever be indicative. `status` is `Pending` and
+ * `triggerDirection` comes back as a **name** (`RisesTo` / `FallsTo`), the same asymmetry as `outcome`.
+ */
+export interface ConditionalOrderResponse {
+  readonly conditionalOrderId: string;
+  readonly status: string;
+  readonly triggerPrice: number;
+  readonly triggerDirection: string;
+  /** The preview outcome at creation — re-decided when the trigger fires. */
+  readonly outcome: string;
+  readonly approvedQuantity: number;
+  readonly bindingLayer: number | null;
+  readonly reason: string;
+}
+
+/**
+ * Creates a "send when conditions met" order — held local, off the book, fired by a watcher when the trigger
+ * crosses. **Transmits nothing now**; the gate re-runs at fire time (R-12). A pre-gate refusal comes back as a
+ * failed result to render, not an error to swallow.
+ */
+export function createConditionalOrder(
+  accountId: string,
+  request_: CreateConditionalOrderRequest,
+): Promise<ApiResult<ConditionalOrderResponse>> {
+  return request<ConditionalOrderResponse>(
+    'POST',
+    `/accounts/${accountId}/orders/conditional`,
+    request_,
+  );
+}
