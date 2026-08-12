@@ -179,25 +179,52 @@ jobs:
     # WHY A MARKER AND NOT THE NATIVE REVIEW STATE: `gh` authenticates as the repository owner, who is also
     # the PR author, and GitHub BLOCKS SELF-APPROVAL -- every review in this repo's history is COMMENTED,
     # the Copilot reviewer's included. So the reviewer records its verdict as the first line of the review
-    # body. A native APPROVED state is honoured too, for the day a separate reviewer identity exists.
+    # body -- the `**Verdict: Approve**` line the reviewer contract already established (gh#141), in use
+    # across gh#761/#768/#773/#781. This job turns that convention into a gate. A native APPROVED state is
+    # honoured too: that is what the reviewer GitHub App (.github/scripts/reviewer-review.sh) emits once
+    # provisioned, and nothing here has to change on that day.
     #
     # NOT `pull_request_review`-triggered: a required check must run on the PR's own event, and a job that
     # only fires on review would never report on a PR with no review at all -- which is exactly the state
-    # this exists to block. Re-running it after a review is the operator's re-run button.
+    # this exists to block.
+    #
+    # IT RUNS LAST, AND IT WAITS. The first cut did neither, and gh#782 is what that looks like: the job
+    # started 4 seconds into the run and failed before any reviewer could have looked at the diff. Two
+    # fixes, both necessary:
+    #   * `needs` the other quality jobs, so a reviewer is never asked to rule on a diff that does not
+    #     build, and the verdict is the LAST thing the PR waits on rather than the first thing it fails.
+    #   * poll instead of judging once. A verdict is a human-paced event; a single read at t=0 measures
+    #     nothing but how fast CI starts.
+    #
+    # WHEN THIS IS PROMOTED TO A REQUIRED CHECK, CHECK THE SKIP SEMANTICS FIRST: `needs` means a failure
+    # upstream leaves this job SKIPPED, and a skipped required check is the deadlock the platform contract
+    # warns about for `stale-base`. It is deliberately not required yet.
+    needs: [build-test, client, integration-test, build-image]
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Backstop above the in-script deadline, so the script reports the timeout rather than the runner
+    # killing it with no explanation.
+    timeout-minutes: 35
     permissions:
       pull-requests: read
       contents: read
     steps:
-      - name: Read the latest verdict, and check it still binds
+      - name: Wait for a binding review verdict
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DEADLINE_MINUTES: "30"
+          POLL_SECONDS: "60"
         run: |
           set -uo pipefail
+
+          deadline=$(( $(date +%s) + DEADLINE_MINUTES * 60 ))
+          attempt=0
+
+          while :; do
+          attempt=$(( attempt + 1 ))
 
           # state | commit reviewed | first line of the body. Reviews come back oldest-first, so the last
           # row carrying a verdict is the one in force.
@@ -225,40 +252,55 @@ jobs:
           done < <(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
                      --jq '.[] | [.state, .commit_id, ((.body // "") | split("\n")[0])] | @tsv')
 
-          if [ -z "$verdict" ]; then
-            echo "::error::No review verdict on this PR. The reviewer records one as the first line of a" \
-                 "review body: 'Verdict: Approve' or 'Verdict: Request changes'." \
-                 "See documentation/agents/code-reviewer.md."
-            exit 1
-          fi
-
+          # CHANGES-REQUESTED ends the wait immediately. Polling on it would burn 30 minutes waiting for
+          # something only a PUSH can resolve -- and a push starts a fresh run anyway.
           if [ "$verdict" = "CHANGES-REQUESTED" ]; then
             echo "::error::Review requested changes (on ${vsha:0:7}). Address the feedback, push, and ask" \
-                 "for re-review -- the task is not done until the verdict is APPROVED and checks are green."
+                 "for re-review -- the task is not done until the verdict is Approve and checks are green."
             exit 1
           fi
 
-          if [ "$vsha" = "$HEAD_SHA" ]; then
-            echo "Approved at head ${HEAD_SHA:0:7}."
-            exit 0
+          if [ "$verdict" = "APPROVED" ]; then
+            if [ "$vsha" = "$HEAD_SHA" ]; then
+              echo "Approved at head ${HEAD_SHA:0:7}."
+              exit 0
+            fi
+
+            # An approval binds to WHAT WAS APPROVED. But `protect-develop` is strict, so every merge into
+            # develop forces open PRs to update -- pinning to the SHA alone would invalidate every approval
+            # on every unrelated merge. Comparing TREES lets a pure rebase keep its verdict while any
+            # content change loses it. Same idiom §10 uses to prove a linearisation moved history only.
+            head_tree=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq .commit.tree.sha 2>/dev/null || echo "")
+            rev_tree=$(gh api "repos/$REPO/commits/$vsha"     --jq .commit.tree.sha 2>/dev/null || echo "")
+
+            if [ -n "$head_tree" ] && [ "$head_tree" = "$rev_tree" ]; then
+              echo "Approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} is a rebase with an identical tree."
+              exit 0
+            fi
+
+            # A stale approval is not a rejection -- it is "not yet re-reviewed", so it KEEPS WAITING.
+            # gh#782 is the case: an approval landed, the branch was then updated for `strict`, and the
+            # first cut failed instantly instead of giving the reviewer a chance to re-rule.
+            state="an approval on ${vsha:0:7} is stale (head ${HEAD_SHA:0:7}, trees differ)"
+          else
+            state="no verdict yet"
           fi
 
-          # An approval binds to WHAT WAS APPROVED. But `protect-develop` is strict, so every merge into
-          # develop forces open PRs to update -- pinning to the SHA alone would invalidate every approval on
-          # every unrelated merge. Comparing TREES lets a pure rebase keep its verdict while any content
-          # change loses it. Same idiom engineering §10 uses to prove a linearisation moved history only.
-          head_tree=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq .commit.tree.sha 2>/dev/null || echo "")
-          rev_tree=$(gh api "repos/$REPO/commits/$vsha"     --jq .commit.tree.sha 2>/dev/null || echo "")
-
-          if [ -n "$head_tree" ] && [ "$head_tree" = "$rev_tree" ]; then
-            echo "Approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} is a rebase with an identical tree ($head_tree)."
-            exit 0
+          now=$(date +%s)
+          if [ "$now" -ge "$deadline" ]; then
+            echo "::error::Timed out after ${DEADLINE_MINUTES}m waiting for a review verdict -- $state." \
+                 "The reviewer records one as the FIRST LINE of a review body:" \
+                 "'**Verdict: Approve**' or '**Verdict: Request changes**'" \
+                 "(documentation/agents/code-reviewer.md). Re-run this job once the review is in."
+            exit 1
           fi
 
-          echo "::error::The approval is stale. It was given on ${vsha:0:7}, the head is now" \
-               "${HEAD_SHA:0:7}, and the trees differ -- so the approved content is not the content that" \
-               "would merge. Ask for re-review."
-          exit 1
+          # One line per poll is 30 lines over the whole wait -- readable, and it makes "how long did the
+          # reviewer take" answerable from the log afterwards.
+          printf 'attempt %d: %s -- waiting %ss (%dm left)\n' \
+            "$attempt" "$state" "$POLL_SECONDS" "$(( (deadline - now) / 60 ))"
+          sleep "$POLL_SECONDS"
+          done
 
   # Deliberately NOT path-filtered. gh#691's break was introduced by a PR that never touched the Dockerfile:
   # `.npmrc` arrived with the client scaffold and only became load-bearing later. A filter keyed on
