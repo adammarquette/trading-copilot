@@ -45,6 +45,15 @@ opening fill.**
   **open-from-flat whose direction is not decidable** (opposite-side fills tied at the boundary timestamp, with no
   venue sequence to order them — guessing would flip the sign of the realized P&L); or a window that does **not**
   reconcile to flat. These still write no row.
+  - **Where the boundary-tie gate is enforced (gh#809).** The refusal lives in the **composer**
+    (`TradeRoundTrip.TryCompose` — one gate, over the window it is given). But the **writer** first slices the fills
+    to the current flat-to-flat cycle (`TradeJournalService.CurrentCycleStart`), and that slice walks fills in an
+    arbitrary `(ExecutedAt, Fill.Id)` order. A boundary tie of opposite sides could make running exposure return to
+    flat *at the tie* under one `Fill.Id` order and not another, so the slicer would split the tie apart and the
+    composer's gate would never see it — the refusal decided by which Guid the venue minted first. The slicer
+    therefore **must not advance the cycle across a mixed-side same-instant tie**: it leaves the tie in the window so
+    the composer's single gate refuses it, in every `Fill.Id` order. The gate stays one place; the slicer's job is
+    only to not hide the tie from it.
 
 ### The structural cost — a new natural key
 `ClosingFillId` is today a **unique filtered** index (`IX_Trades_ClosingFillId`) and the writer's idempotency key
