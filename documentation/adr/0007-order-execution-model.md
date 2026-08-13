@@ -1205,11 +1205,16 @@ cancel (gh#250), and the operator-facing counterpart to the watcher's own cancel
   and refused; a **`Firing`** conditional is refused too — it is a **maybe-live** entry the venue may already hold
   (gh#577), resolved against venue truth via `POST /conditionals/{id}/reconcile`, **never blind-cancelled**, or the
   cancel would abandon tracking of a live order.
-- **The flip runs under the per-account entry lock (gh#589) and re-checks `Pending` after a reload.** The fire
-  watcher commits `Pending → Firing` under that **same** lock before it touches the venue, so without it a cancel
-  could read `Pending`, the watcher could fire and place a live order, and the cancel would then write `Cancelled`
-  over a conditional that is actually live at the venue. Blocking is correct here (an operator request, unlike the
-  watcher, which try-locks so it never waits); the re-check refuses if the watcher moved it since the read.
+- **The flip runs under the per-account entry lock (gh#589) and re-checks `Pending` after a reload — and the fire
+  watcher now does the same, so the race is closed in *both* directions.** The watcher commits `Pending → Firing`
+  under that **same** lock, so a cancel arriving *while the watcher holds it* blocks, then reloads and sees
+  `Firing`/`Fired` and refuses. The other direction needed a matching fix: the watcher reads `Pending` **before** it
+  takes the lock, so a cancel that commits in that pre-lock window would otherwise be **overwritten** by the durable
+  `Pending → Firing` UPDATE-by-PK — a real order placed after a 200 *"withdrawn"*, with the row ending `Fired` and no
+  trace of the withdrawal (there is no concurrency token). So `ConditionalFiringService.FireAsync` **reloads the
+  record under the lock and bails unless it is still `Pending`** (the symmetric guard, gh#655 review) — a withdrawn
+  conditional makes the flip a no-op rather than being overwritten by it. Blocking is correct for the cancel (an
+  operator request, unlike the watcher, which try-locks so it never waits).
 - The `OrderTicket` surface (gh#655) offers **Withdraw** on a pending conditional and keeps the pending panel up on a
   refused withdrawal — the conditional is still live, so the surface must not imply it is gone.
 
