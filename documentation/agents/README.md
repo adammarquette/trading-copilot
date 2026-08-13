@@ -8,7 +8,7 @@ right moment.
 |---|---|---|
 | **Coding Agent** — production code + unit tests, test-first | [`src/AGENTS.md`](../../src/AGENTS.md) | **automatically**, editing `src/` |
 | **QA Agent** — integration + smoke tests, written independently | [`src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md`](../../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) | **automatically**, in that project |
-| **Code Reviewer** — reviewing changes anywhere | [`code-reviewer.md`](code-reviewer.md) | **on demand** — open it when you take the hat |
+| **Code Reviewer** — reviewing changes anywhere | [`code-reviewer.md`](code-reviewer.md) | **on demand** — open it when you take the hat; also **passed explicitly** to the reviewer an author agent spawns once its PR is green (gh#815) |
 | **Platform Agent** — CI/CD, image, compose, deploy | [`platform.md`](platform.md) | **on demand** (a stub sits in `.github/workflows/`) |
 
 Universal rules that bind all four: the root [`AGENTS.md`](../../AGENTS.md).

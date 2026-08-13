@@ -52,8 +52,9 @@ before starting, and add dated entries only when nothing formal fits.
   **everywhere, production included** — it produces no orders at all.
 - **Test-first, and done means an approved PR.** No new public method without a failing test written first;
   the safety-critical paths (risk gate, execution, auto-flatten, kill switch) carry high-rigor suites. Your
-  task ends when the PR you opened is **approved and green** — so pause and monitor it, fix what review
-  returns, and only then take the next card. (Engineering §10 owns the loop.)
+  task ends when the PR you opened is **approved and green**, and you wait for that **in this session** with
+  a command, not a habit: `scripts/watch-verdict.sh checks <pr>` → **spawn a reviewer** → `watch-verdict.sh
+  verdict <pr>` → fix what it returns. (Engineering §10 owns the loop; its exit statuses are the steps.)
 - **Wear a hat, open its contract** — before you start, not after.
 
 ## Working rules

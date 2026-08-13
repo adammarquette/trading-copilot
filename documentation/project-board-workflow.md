@@ -29,11 +29,11 @@ Work flows through a **six-column funnel** — a wide intake reservoir narrowing
 Flow is left-to-right, with **one sanctioned backward move**: an item kicks back to **Planning** (from Current
 ToDo or In Progress) when it turns out to be underspecified — see *Kickback*.
 
-**Review is not a parking space.** The agent that opened the PR owns the card while it sits here: it waits for
-the verdict, and on `CHANGES-REQUESTED` it pushes fixes and waits again — the loop repeats until approved and
-green. The card leaves for **Done** only then; a merged PR whose issue still has scope stays open and goes back
-to a working column, not to Done (canonical:
-[engineering §10](trading-platform-engineering.md)).
+**Review is not a parking space.** The agent that opened the PR owns the card while it sits here: it spawns the
+reviewer, then **blocks on `scripts/watch-verdict.sh verdict <pr>`**, and on `CHANGES-REQUESTED` it pushes fixes
+and waits again — the loop repeats until approved and green. The card leaves for **Done** only then; a merged PR
+whose issue still has scope stays open and goes back to a working column, not to Done (canonical:
+[engineering §10](trading-platform-engineering.md), which owns the loop and the exit statuses).
 
 `Backlog → Planning → Current ToDo` is the funnel: the reservoir feeds active preparation, which feeds the ready
 queue. The gate between each is the **maintainer's / product owner's** judgment.
@@ -119,6 +119,10 @@ Work complete and a **PR is open**. Move here when the PR exists.
 - Review is the **Code Reviewer Agent's** arena: it leaves findings as review comments and submits a formal
   verdict — **Approve** or **Request changes** (per its [contract](agents/code-reviewer.md)) — but does **not merge,
   close, or move the card**. The author addresses findings and resolves threads; the maintainer merges.
+- **Who starts it:** the author agent spawns that reviewer itself once the PR's checks are green, handing over the
+  PR number and nothing else — the independence rules that keep this honest are the
+  [contract's](agents/code-reviewer.md), and the loop is
+  [engineering §10](trading-platform-engineering.md)'s (`gh#815`).
 
 ### Done
 Merged, and satisfying the **Definition of Done** (engineering §10: test-first, build green, docs updated in the

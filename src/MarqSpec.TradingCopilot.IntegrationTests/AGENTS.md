@@ -95,9 +95,12 @@ Tiers activate as the roadmap lands them; the first deliverable is the harness b
 ## Definition of done
 
 **Your task ends when the PR you opened is approved and its required checks are green** — not when you push
-(canonical: [engineering §10](../../documentation/trading-platform-engineering.md)). **Pause and monitor the PR
-you created.** Changes requested → address them, push, pause again for re-evaluation. Approved and green → take
-the next card from **Current ToDo**. Nothing in Current ToDo → **alert and pause**; do not invent work.
+(canonical: [engineering §10](../../documentation/trading-platform-engineering.md), which owns the loop and every
+exit status below). In the session that wrote the suite: `scripts/watch-verdict.sh checks <pr>` → **spawn the
+reviewer** → `scripts/watch-verdict.sh verdict <pr>`. Changes requested → the findings are printed for you;
+address them here, push, and start again at `checks`. Stale approval → spawn the reviewer again. Approved and
+green → take the next card from **Current ToDo**. Nothing in Current ToDo → **alert and pause**; do not invent
+work.
 
 One thing this tier must not let the loop erode: **a red suite that has found a real defect is a finished
 deliverable, not a task still in progress.** File the issue, pin or skip the blocked test per §*The guard
