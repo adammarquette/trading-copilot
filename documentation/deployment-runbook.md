@@ -286,8 +286,15 @@ into a rubber stamp.
 
 | Secret | Purpose | Set |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | Runs the reviewer. **Not yet set** — until it is, the job skips with a notice rather than failing the PR. | ☐ |
+| `ANTHROPIC_API_KEY` | Runs the reviewer. **Not yet set** — until it is, the job skips with a notice rather than failing the PR (gh#811). | ☐ |
 | `REVIEWER_APP_ID` · `REVIEWER_APP_INSTALLATION_ID` · `REVIEWER_APP_PRIVATE_KEY` | Mint the App token the review is posted under (setup below). | ☑ 2026-07-24 |
+
+**Neither of these is what supplies a binding verdict today.** That is the reviewer an **author agent spawns**
+locally once its PR is green (`gh#815`) — same contract, same `reviewer-review.sh` identity below, but its verdict
+line *is* binding, and the author blocks on it with `scripts/watch-verdict.sh` instead of ending its turn (loop:
+[engineering §10](trading-platform-engineering.md)). So the unset key above costs the *pre-review*, not the gate:
+`review-verdict` still clears, because someone is now watching for it. It is still worth setting — an independent
+second opinion on every push is exactly what a single-operator repo is short of.
 
 **2. `copilot-review-develop` — present but `enforcement: disabled`.** The rule still exists in repository
 settings and therefore still shows up in `gh api repos/<owner>/<repo>/rulesets`, but a disabled ruleset gates
@@ -460,7 +467,10 @@ nor token is ever printed.
 **Until the App exists**, an agent review falls back to a comment whose **first line is the verdict**
 (`**Verdict: Request changes**` / `**Verdict: Approve**`) so the signal is unambiguous even without a formal
 state. Once the App is live, this fallback is retired and (with `gh#45`) its approval can become a required
-check.
+check. The App's secrets are set **in CI**; a reviewer spawned in a local session reads them from the operator's
+environment, so **that** is where the fallback still fires — which is why
+[`.github/reviewer-prompt-verdict.md`](../.github/reviewer-prompt-verdict.md) carries both paths and the spawned
+reviewer tries the App first.
 
 ## Observability stack (local, opt-in)
 
