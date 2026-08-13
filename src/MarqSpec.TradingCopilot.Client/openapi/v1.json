@@ -1240,6 +1240,29 @@
         "security": [{}]
       }
     },
+    "/conditionals/{id}": {
+      "delete": {
+        "tags": ["Orders"],
+        "summary": "Cancel a pending conditional (send-when-conditions-met) order — an operator withdrawal.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [{}]
+      }
+    },
     "/kill-switch": {
       "post": {
         "tags": ["Kill Switch"],

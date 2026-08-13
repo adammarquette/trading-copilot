@@ -7,6 +7,7 @@ import {
   OrderType,
   type SendOrderRequest,
   armOrder,
+  cancelConditionalOrder,
   cancelOrder,
   createConditionalOrder,
   repriceOrder,
@@ -308,5 +309,32 @@ describe('repriceOrder', () => {
     stubFetch(() => Promise.resolve(response(422, { error: 'would breach the drawdown floor' })));
 
     expect((await repriceOrder('o1', { entryPrice: 5010 })).ok).toBe(false);
+  });
+});
+
+describe('cancelConditionalOrder', () => {
+  it('deletes the conditional by its own id — the operator withdrawal', async () => {
+    const fetchMock = stubFetch(() => Promise.resolve(response(200, { status: 'Cancelled' })));
+
+    await cancelConditionalOrder('c1');
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/conditionals/c1');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('DELETE');
+  });
+
+  it('surfaces a refusal — a mid-fire conditional cannot be withdrawn', async () => {
+    // Only a Pending conditional is cancellable; a Firing one is a maybe-live entry the server refuses (409). The
+    // refusal is an ordinary result to render, not an error to swallow.
+    stubFetch(() =>
+      Promise.resolve(
+        response(409, {
+          error: 'Only a pending conditional can be cancelled — this one is Firing.',
+        }),
+      ),
+    );
+
+    const result = await cancelConditionalOrder('c1');
+
+    expect(result.ok).toBe(false);
   });
 });

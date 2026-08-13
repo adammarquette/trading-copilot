@@ -195,3 +195,13 @@ export function createConditionalOrder(
     request_,
   );
 }
+
+/**
+ * Withdraws a **pending** conditional — the operator's cancel of a "send when conditions met" entry (gh#655). It is
+ * held local (off the book), so this is a plain server-side delete; nothing reaches the venue. Only a Pending
+ * conditional can be withdrawn — a mid-fire one is a maybe-live entry the server refuses (409), which comes back as
+ * an ordinary result to render, not an error to swallow.
+ */
+export function cancelConditionalOrder(conditionalOrderId: string): Promise<ApiResult<void>> {
+  return request<void>('DELETE', `/conditionals/${conditionalOrderId}`);
+}

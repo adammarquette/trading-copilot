@@ -305,6 +305,23 @@ public sealed class ConditionalFiringService
         Action<bool> onMayBeLiveAtVenue,
         CancellationToken cancellationToken)
     {
+        // Re-read the status under the lock before doing anything (gh#655). The operator withdrawal
+        // (DELETE /conditionals/{id}) is a SECOND writer that moves a conditional out of Pending, and it commits under
+        // THIS same account lock. The Pending read that reached here happened BEFORE the lock (discovery in
+        // ProcessQuoteAsync, then the re-read in ProcessRecordAsync), so a withdrawal that committed in that pre-lock
+        // window is not yet reflected in `record`; without this re-check the durable `Pending -> Firing` flip below
+        // would UPDATE-by-PK straight over the withdrawn `Cancelled` and place a real order after a 200 "withdrawn".
+        // Bail if it is no longer Pending -- the symmetric guard the withdrawal endpoint runs (reload + re-check under
+        // the lock), and the reconcile path's discipline. One extra read on the fire path (per fire, not per quote).
+        await database.Entry(record).ReloadAsync(cancellationToken);
+        if (record.Status != ConditionalStatus.Pending)
+        {
+            _logger.LogInformation(
+                "Conditional order {Id} on {Contract} was resolved ({Status}) before its fire took the account lock "
+                + "(an operator withdrawal, or a peer); not firing.", record.Id, contractKey, record.Status);
+            return FiringOutcome.Unchanged;
+        }
+
         // No-stacking (gh#589), identical to the operator paths' check: refuse to fire if the account already holds an
         // outstanding entry -- everything except Staged / Filled / Cancelled / Rejected (an allow-list, fail closed, so
         // Working / PartiallyFilled / Taking / Unknown / any future status all block). No self-exclusion: the
