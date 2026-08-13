@@ -124,29 +124,60 @@ pr_patch_id() {
 #
 # Anything else is IGNORED rather than obeyed, and counted so the answer can say so -- a verdict that
 # is visible on the PR but does not bind is exactly the confusion this script exists to end.
+#
+# WHAT THIS FILTER RESTS ON, stated because the filter is only worth what its own integrity is worth:
+# `review-verdict` runs THIS FILE OUT OF THE PR'S OWN CHECKOUT, and a `pull_request` event runs the PR's
+# own workflow definition too -- so a pull request supplies both the ruling logic and the ruling. Nothing
+# here can fix that from the inside. What bounds it is the same thing that makes a spawned reviewer safe
+# to run: every PR comes from a branch in this repository, pushed by the operator's own agents, because
+# the claim IS the pushed branch (CONTRIBUTING.md) -- plus the fact that `review-verdict` is deliberately
+# not a required check yet. Promoting it to required, or accepting PRs from forks, is the moment this
+# assumption has to be replaced with something structural -- a workflow pinned to the base ref, or the
+# ruling moved off the PR's own tree (PR #821 review; engineering §10 owns the gate).
 TRUSTED_ASSOCIATIONS="${VERDICT_TRUSTED_ASSOCIATIONS:-OWNER MEMBER COLLABORATOR}"
 TRUSTED_LOGINS="${VERDICT_TRUSTED_LOGINS:-trading-copilot-reviewer[bot]}"
 
 # Both lists are compared as WHOLE TOKENS with string equality, so `OWNER` cannot match `NONE` and a
 # login cannot match a longer one containing it.
 #
-# `=` rather than a `case` glob, deliberately. The glob version worked -- quoting the needle inside the
-# pattern forces a literal match, so `trading-copilot-reviewer[bot]` compared as itself rather than as a
-# character class -- but a reviewer of PR #818's follow-up read it as broken, and was right to: the
-# safety of every App login here would have rested on one pair of quotes surviving every future edit.
-# An `=` comparison cannot be broken that way by anyone who has not noticed the problem.
+# `[bot]` IS A GLOB, and this predicate has now been got wrong twice in two different ways -- both times
+# by the same suffix, which is why the guard is spelled out rather than assumed:
+#
+#   * a `case` pattern reads `[bot]` as a character class UNLESS the needle is quoted. The quoted version
+#     was correct, but it left the standing of every App identity resting on one pair of quotes surviving
+#     an edit, in a construct where deleting them looks like tidying up (PR #821 review).
+#   * splitting an unquoted `$TRUSTED_LOGINS` into words -- which is how you get whole tokens for `=` --
+#     also subjects each word to PATHNAME EXPANSION. A file named `trading-copilot-reviewerb` sitting in
+#     the working directory would rewrite the token to that filename, and the App's standing would depend
+#     on what happens to be on disk. Splitting is wanted here; globbing never is.
+#
+# So: `=` for the comparison, and `set -f` around the splitting. Saved and restored rather than set for
+# the whole script, so nothing else silently changes meaning.
 is_trusted() {
-  local assoc="$1" login="$2" t
-  for t in $TRUSTED_ASSOCIATIONS; do [ "$assoc" = "$t" ] && return 0; done
-  for t in $TRUSTED_LOGINS;       do [ "$login" = "$t" ] && return 0; done
-  return 1
+  local assoc="$1" login="$2" t rc=1 reglob=""
+  case "$-" in *f*) ;; *) reglob="yes" ;; esac
+  set -f
+  for t in $TRUSTED_ASSOCIATIONS; do [ "$assoc" = "$t" ] && { rc=0; break; }; done
+  if [ "$rc" -ne 0 ]; then
+    for t in $TRUSTED_LOGINS; do [ "$login" = "$t" ] && { rc=0; break; }; done
+  fi
+  [ -n "$reglob" ] && set +f
+  return "$rc"
 }
 
 # state | commit reviewed | id | association | login | first line of the body. Reviews come back
 # oldest-first, so the last row carrying a verdict is the one in force. The body's first line stays
 # LAST: `read` collects the remainder into it, so nothing it contains can shift an earlier field.
+#
+# PIPE-SEPARATED ON THE WAY IN TOO, for the reason the output side already carries: a tab is IFS
+# whitespace, so `IFS=$'\t' read` COLLAPSES a run of tabs and every later field shifts left. That was
+# harmless while no field could be empty, and stopped being harmless the moment `login` joined them --
+# a review whose author account was deleted comes back with an empty login, `first` would land in
+# `login`, and the verdict would be dropped without a word. Fail-closed and rare is still wrong when the
+# fix is one the file already made once (PR #821 review). No field before the last can contain a pipe,
+# and one inside the body's first line cannot shift anything because `read` collects the remainder.
 verdict=""; vsha=""; vid=""; rounds=0; ignored=0
-while IFS=$'\t' read -r state sha vrid assoc login first; do
+while IFS='|' read -r state sha vrid assoc login first; do
   # Lenient by design: markdown emphasis, casing and a trailing period are all things a reviewer
   # writes without thinking. A gate that reds on "**Verdict:** Approve." teaches people to
   # distrust it, and a distrusted gate gets worked around rather than fixed.
@@ -177,8 +208,8 @@ while IFS=$'\t' read -r state sha vrid assoc login first; do
       ;;
   esac
 done < <(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-           --jq '.[] | [.state, .commit_id, .id, .author_association,
-                        (.user.login // ""), ((.body // "") | split("\n")[0])] | @tsv')
+           --jq '.[] | [(.state // ""), (.commit_id // ""), (.id | tostring), (.author_association // ""),
+                        (.user.login // ""), ((.body // "") | split("\n")[0])] | join("|")')
 
 answer() { printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$rounds" "$vid" "$3"; exit 0; }
 
