@@ -120,6 +120,13 @@ export interface RepriceRequest {
   readonly entryPrice?: number;
   readonly workingStopPrice?: number;
   readonly size?: number;
+  /**
+   * The caller's current market reference the fat-finger band re-measures a new **entry** against (R-16) —
+   * **required by the server when `entryPrice` is present**, and there is no server-side quote read on this path
+   * (as on every order path, the client supplies the price it can see). A move that does not touch the entry (a
+   * working-stop re-stage or a pure resize) does not need it.
+   */
+  readonly referencePrice?: number;
 }
 
 /**
