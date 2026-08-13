@@ -212,12 +212,31 @@ body_dir=$(cd "$(dirname "$BODY_FILE")" 2>/dev/null && pwd -P) \
   || die "cannot resolve the body file's directory: $BODY_FILE"
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 [ -n "$repo_root" ] && repo_root=$(cd "$repo_root" && pwd -P)
-tmp_root=$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P || echo "/tmp")
-case "$body_dir" in
-  "${repo_root:-///nonexistent}"|"${repo_root:-///nonexistent}"/*) ;;
-  "$tmp_root"|"$tmp_root"/*)                                      ;;
-  *) die "the body file must sit in the checkout or in ${tmp_root} (got ${body_dir}) -- see WHERE THE BODY MAY COME FROM" ;;
-esac
+
+# MORE THAN ONE TEMP DIRECTORY, because macOS has more than one and they do not resolve to each other:
+# `$TMPDIR` there is a per-user `/var/folders/...`, while `/tmp` is a symlink whose `pwd -P` is
+# `/private/tmp`. Honouring only `$TMPDIR` would refuse `/tmp/review.md` -- the obvious place to put it,
+# and what reviewer.yml already uses -- on the platform this script has now been fixed twice for
+# (PR #821 review). Each candidate is resolved the same way `body_dir` was, so the comparison is between
+# two physical paths rather than between a path and a symlink.
+allowed_dirs=""
+for cand in "${TMPDIR:-}" /tmp /private/tmp "$repo_root"; do
+  [ -n "$cand" ] || continue
+  cand=$(cd "$cand" 2>/dev/null && pwd -P) || continue
+  allowed_dirs="${allowed_dirs}${cand}"$'\n'
+done
+
+contained=""
+while IFS= read -r allowed; do
+  [ -n "$allowed" ] || continue
+  case "$body_dir" in
+    "$allowed"|"$allowed"/*) contained="yes"; break ;;
+  esac
+done <<<"$allowed_dirs"
+
+if [ -z "$contained" ]; then
+  die "the body file must sit in the checkout or a temp directory (got ${body_dir}) -- see WHERE THE BODY MAY COME FROM"
+fi
 
 # The reader is LENIENT on purpose -- verdict-state.sh forgives emphasis, casing, a trailing period -- because a
 # gate that reds on "**Verdict:** Approve." teaches people to distrust it. A WRITER has no such excuse, and
