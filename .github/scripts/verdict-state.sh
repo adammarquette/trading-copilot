@@ -3,7 +3,12 @@
 # verdict-state.sh — answer ONE question about a PR: what review verdict is in force right now, and does it
 # bind to the commit under test? Prints a single line and exits; it never sleeps and never polls.
 #
-#   STATE <TAB> SHA <TAB> ROUNDS <TAB> REVIEW_ID <TAB> DETAIL
+#   STATE|SHA|ROUNDS|REVIEW_ID|DETAIL
+#
+# PIPE-SEPARATED, NOT TAB, and that is a bug fix rather than a preference: a tab is an IFS *whitespace*
+# character, so `IFS=$'\t' read -r a b c d e` COLLAPSES a run of tabs into one delimiter. On the NONE line --
+# where SHA and REVIEW_ID are both empty -- every later field then shifts left, and the caller silently reads
+# "no verdict yet" as the round count. A non-whitespace separator preserves empty fields positionally.
 #
 #   APPROVED           the verdict binds to the head under test (same commit, or the same contribution)
 #   CHANGES-REQUESTED  the last verdict asked for changes; only a push can resolve it
@@ -17,7 +22,8 @@
 # (see below). A caller that re-derives either would be the second parser this script exists to prevent.
 #
 # DETAIL is a human sentence explaining the ruling, so callers can print it rather than reconstruct it. It is
-# LAST because a caller reading the fields with `read` collects the remainder into its final variable.
+# LAST because a caller reading the fields with `read` collects the remainder into its final variable — which
+# is also why a separator character appearing inside DETAIL cannot shift anything.
 #
 # WHY THIS IS A SCRIPT AND NOT A CI STEP (gh#815)
 # ----------------------------------------------
@@ -118,7 +124,7 @@ while IFS=$'\t' read -r state sha vrid first; do
 done < <(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
            --jq '.[] | [.state, .commit_id, .id, ((.body // "") | split("\n")[0])] | @tsv')
 
-answer() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$rounds" "$vid" "$3"; exit 0; }
+answer() { printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$rounds" "$vid" "$3"; exit 0; }
 
 if [ "$verdict" = "CHANGES-REQUESTED" ]; then
   answer CHANGES-REQUESTED "$vsha" "changes were requested on ${vsha:0:7}; only a push can resolve it"

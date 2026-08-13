@@ -197,7 +197,9 @@ while :; do
   verdict=""; vsha=""; rounds=0; vid=""
   detail="the verdict could not be read (transient API failure?)"
   if line=$(bash "$VERDICT_STATE" "$PR" --repo "$REPO"); then
-    IFS=$'\t' read -r verdict vsha rounds vid detail <<<"$line"
+    # `|`, not a tab: a tab is IFS whitespace, so a run of them collapses and the empty fields on the NONE
+    # line would shift every later field left (verdict-state.sh's header has the full account).
+    IFS='|' read -r verdict vsha rounds vid detail <<<"$line"
   fi
 
   case "$verdict" in

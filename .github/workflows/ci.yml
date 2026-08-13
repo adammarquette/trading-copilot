@@ -246,8 +246,9 @@ jobs:
           detail="the verdict could not be read (transient API failure?)"
           if line=$(./.github/scripts/verdict-state.sh "$PR" \
                       --head "$HEAD_SHA" --base "$BASE_REF" --repo "$REPO"); then
-            # DETAIL is the last field precisely so this `read` cannot split it (verdict-state.sh's header).
-            IFS=$'\t' read -r verdict vsha rounds vid detail <<<"$line"
+            # `|`, not a tab -- a tab is IFS whitespace, so a run of them collapses and the empty fields on a
+            # NONE line shift every later field left. DETAIL is last so it cannot be split either way.
+            IFS='|' read -r verdict vsha rounds vid detail <<<"$line"
           else
             echo "::warning::verdict-state.sh could not answer -- treating this poll as 'no verdict yet'."
           fi
