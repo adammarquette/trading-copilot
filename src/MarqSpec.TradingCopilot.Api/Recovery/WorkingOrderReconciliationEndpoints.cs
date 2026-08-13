@@ -1,7 +1,10 @@
+using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Execution;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.EntityFrameworkCore;
 
 namespace MarqSpec.TradingCopilot.Api.Recovery;
 
@@ -38,6 +41,7 @@ public static class WorkingOrderReconciliationEndpoints
         Guid id,
         string? instrument,
         WorkingOrderReconciliationService reconciler,
+        TradingCopilotDbContext database,
         CancellationToken cancellationToken)
     {
         // `?instrument=` scopes the read to a single contract for the chart's per-instrument execution overlay
@@ -70,10 +74,27 @@ public static class WorkingOrderReconciliationEndpoints
             return Results.NotFound(); // not found or not owned by the caller (R-20)
         }
 
+        // Match each venue order to the journaled Order.Id the write endpoints key on. The venue-truth read carries
+        // the venue's own handle (VenueOrderKey); DELETE /orders/{id} and PATCH /orders/{id}/price route on {id:guid}
+        // — the app Order.Id — so without this a caller cannot act on what it lists (it holds the venue key, not the
+        // GUID the route needs). Owner-scoped by the DbContext query filter, and restricted to Working rows so a
+        // terminal order that once held the key is never matched. A venue-spawned protective LEG has no Order row
+        // (ADR-0007 — every protective leg the venue spawns is unjournaled), so it stays null and is not actionable
+        // through /orders/{id}; the caller renders it accordingly rather than offering a control that cannot route.
+        List<string> venueKeys = [.. result.Orders.Select(order => order.VenueOrderKey)];
+        Dictionary<string, Guid> journaledIds = await database.Orders
+            .Where(order => order.AccountId == id
+                && order.Status == OrderStatus.Working
+                && order.VenueOrderKey != null
+                && venueKeys.Contains(order.VenueOrderKey))
+            .Select(order => new { Key = order.VenueOrderKey!, order.Id })
+            .ToDictionaryAsync(row => row.Key, row => row.Id, cancellationToken);
+
         return Results.Ok(new RestingOrdersResponse(
             result.Basis.ToString(),
             [.. result.Orders.Select(order => new RestingOrder(
                 order.VenueOrderKey,
+                journaledIds.TryGetValue(order.VenueOrderKey, out Guid orderId) ? orderId : null,
                 order.Contract.Key,
                 order.StopPrice?.Value,
                 order.LimitPrice?.Value,
@@ -92,6 +113,12 @@ public sealed record RestingOrdersResponse(string MarkBasis, IReadOnlyList<Resti
 
 /// <summary>One order resting at the venue.</summary>
 /// <param name="VenueOrderKey">The venue's own order handle.</param>
+/// <param name="OrderId">
+/// The journaled <c>Order.Id</c> the write endpoints (<c>DELETE /orders/{id}</c>, <c>PATCH /orders/{id}/price</c>)
+/// key on, matched to this venue order by <see cref="VenueOrderKey"/> (gh#656). <see langword="null"/> for a
+/// venue-spawned protective leg, which carries no <c>Order</c> row (ADR-0007) and so is not actionable through
+/// <c>/orders/{id}</c> — the caller must not offer a cancel/modify control that cannot route.
+/// </param>
 /// <param name="Contract">The venue contract key.</param>
 /// <param name="StopPrice">The stop trigger, when the order carries one.</param>
 /// <param name="LimitPrice">The limit price, when the order carries one.</param>
@@ -105,6 +132,7 @@ public sealed record RestingOrdersResponse(string MarkBasis, IReadOnlyList<Resti
 /// </param>
 public sealed record RestingOrder(
     string VenueOrderKey,
+    Guid? OrderId,
     string Contract,
     decimal? StopPrice,
     decimal? LimitPrice,

@@ -110,6 +110,31 @@ export function cancelOrder(orderId: string): Promise<ApiResult<void>> {
 }
 
 /**
+ * What a reprice may move. **Partial by design** — send only what the operator changed; naming a field is a
+ * request to move it, so filling the rest with nulls would read as a request to clear them.
+ *
+ * The **safety stop is not here**, and cannot be: it stays invariant on every reprice path server-side, so the
+ * R-5 catastrophic floor is untouched by anything this surface can do.
+ */
+export interface RepriceRequest {
+  readonly entryPrice?: number;
+  readonly workingStopPrice?: number;
+  readonly size?: number;
+}
+
+/**
+ * Moves a resting working order in place (gh#259/#267/#278/#292) — keeping its queue position and its attached
+ * protective bracket, rather than cancel-and-replace.
+ *
+ * Unlike a cancel, a reprice **can add risk** (a wider stop, an entry likelier to fill), so the server runs the
+ * full send ladder and **re-gates** it before touching the venue. A refusal is the gate's answer, not an error to
+ * swallow — it reaches the operator.
+ */
+export function repriceOrder(orderId: string, change: RepriceRequest): Promise<ApiResult<void>> {
+  return request<void>('PATCH', `/orders/${orderId}/price`, change);
+}
+
+/**
  * Which way price must cross the trigger for a conditional entry to fire (ADR-0007, gh#176). Serialized as its
  * integer — the values must match the domain enum exactly. {@link ConditionalCrossDirection.Unknown} is the
  * **refusable zero**: the unset value never fires, so a conditional must declare a real direction or it would rest
