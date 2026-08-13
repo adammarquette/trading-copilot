@@ -243,7 +243,7 @@ jobs:
           # WAITING and the wording; the head and base come from the event payload, so the ruling is about
           # the commit this run actually tested rather than whatever is at the tip now.
           verdict=""; vsha=""; rounds=0; vid=""
-          detail="the verdict could not be read (transient API failure?)"
+          detail="The verdict could not be read (transient API failure?)"
           if line=$(./.github/scripts/verdict-state.sh "$PR" \
                       --head "$HEAD_SHA" --base "$BASE_REF" --repo "$REPO"); then
             # `|`, not a tab -- a tab is IFS whitespace, so a run of them collapses and the empty fields on a
@@ -265,7 +265,11 @@ jobs:
           fi
 
           if [ "$verdict" = "APPROVED" ]; then
-            echo "${detail^}."
+            # $detail is printed verbatim: it arrives sentence-cased from verdict-state.sh, which is where
+            # that casing belongs. `${detail^}` here was Bash 4 -- harmless on this runner, fatal under the
+            # Bash 3.2 macOS ships, and the same line existed in scripts/watch-verdict.sh where it ran on
+            # exactly such a host (PR #818 review). One idiom, no host it cannot run on.
+            echo "$detail."
             exit 0
           fi
 

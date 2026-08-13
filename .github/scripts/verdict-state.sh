@@ -25,6 +25,13 @@
 # LAST because a caller reading the fields with `read` collects the remainder into its final variable — which
 # is also why a separator character appearing inside DETAIL cannot shift anything.
 #
+# It arrives SENTENCE-CASED, ready to print verbatim, and that is deliberate rather than cosmetic: both callers
+# used to capitalize it themselves with `${detail^}`, a Bash 4 expansion that is a *fatal* bad substitution on
+# the Bash 3.2 still shipped as /bin/bash on macOS. It sat in the STALE and APPROVED paths of
+# scripts/watch-verdict.sh, so the shell aborted before `exit 3` / `exit 0` — a formatting nicety was able to
+# destroy the exit status that is that script's whole interface (PR #818 review). Casing the sentence where the
+# sentence is written costs nothing and leaves no caller a reason to reach for the expansion again.
+#
 # WHY THIS IS A SCRIPT AND NOT A CI STEP (gh#815)
 # ----------------------------------------------
 # Two callers need this answer and must never disagree about it: the `review-verdict` job in ci.yml, which
@@ -127,12 +134,12 @@ done < <(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
 answer() { printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$rounds" "$vid" "$3"; exit 0; }
 
 if [ "$verdict" = "CHANGES-REQUESTED" ]; then
-  answer CHANGES-REQUESTED "$vsha" "changes were requested on ${vsha:0:7}; only a push can resolve it"
+  answer CHANGES-REQUESTED "$vsha" "Changes were requested on ${vsha:0:7}; only a push can resolve it"
 fi
 
 if [ "$verdict" = "APPROVED" ]; then
   if [ "$vsha" = "$HEAD_SHA" ]; then
-    answer APPROVED "$vsha" "approved at head ${HEAD_SHA:0:7}"
+    answer APPROVED "$vsha" "Approved at head ${HEAD_SHA:0:7}"
   fi
 
   # An approval binds to WHAT WAS APPROVED. But `protect-develop` is strict, so every merge into
@@ -153,7 +160,7 @@ if [ "$verdict" = "APPROVED" ]; then
 
   if [ -n "$head_patch" ] && [ "$head_patch" = "$approved_patch" ]; then
     answer APPROVED "$vsha" \
-      "approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} carries the identical contribution (patch ${head_patch:0:12}) -- the only change since is a merge from $BASE_REF"
+      "Approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} carries the identical contribution (patch ${head_patch:0:12}) -- the only change since is a merge from $BASE_REF"
   fi
 
   # Fallback for the one case git cannot answer locally: a rebase can orphan the approved commit so
@@ -163,14 +170,14 @@ if [ "$verdict" = "APPROVED" ]; then
     head_tree=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq .commit.tree.sha 2>/dev/null || echo "")
     rev_tree=$(gh api "repos/$REPO/commits/$vsha"     --jq .commit.tree.sha 2>/dev/null || echo "")
     if [ -n "$head_tree" ] && [ "$head_tree" = "$rev_tree" ]; then
-      answer APPROVED "$vsha" "approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} is a rebase with an identical tree"
+      answer APPROVED "$vsha" "Approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} is a rebase with an identical tree"
     fi
   fi
 
   # A stale approval is not a rejection -- it is "not yet re-reviewed". Both callers keep waiting on
   # it rather than failing: gh#782 is the case where failing instantly gave the reviewer no chance
   # to re-rule after the branch was updated for `strict`.
-  answer STALE "$vsha" "an approval on ${vsha:0:7} is stale (head ${HEAD_SHA:0:7}, the contribution changed)"
+  answer STALE "$vsha" "An approval on ${vsha:0:7} is stale (head ${HEAD_SHA:0:7}, the contribution changed)"
 fi
 
-answer NONE "" "no verdict yet"
+answer NONE "" "No verdict yet"
