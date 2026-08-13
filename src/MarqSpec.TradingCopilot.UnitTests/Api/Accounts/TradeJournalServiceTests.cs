@@ -323,65 +323,90 @@ public class TradeJournalServiceTests
         trades[0].Size.Should().Be(1, "no blended size-2 double-count of trip 1's P&L");
     }
 
-    [Fact]
-    public async Task ProcessFlatAsync_ShouldRefuse_WhenABoundaryTieHasTheSellSortingFirst()
+    [Theory]
+    [InlineData(true)]   // the tied SELL's Guid sorts first -- the gh#809 defect ordering
+    [InlineData(false)]  // the tied BUY's Guid sorts first -- refused even before the fix
+    public async Task ProcessFlatAsync_ShouldRefuse_WhenAnOppositeSideTieFallsMidWindow(bool tiedSellSortsFirst)
     {
-        // gh#809 regression (the DEFECT order). Four fills form a same-instant buy/sell tie at :1 -- entry Buy, then
-        // a tied Sell and a tied Buy at the same instant, then the final Sell. When the tied SELL's Guid sorts first,
-        // the fills-derived cycle slice (CurrentCycleStart) saw running exposure hit zero AT the tie and sliced there,
-        // splitting the tied pair so the surviving window [tied Buy, final Sell] carried no tie and journalled a
-        // guessed Buy 5010 -> 5020 (+50) row -- the pre-boundary cycle's P&L silently dropped and the daily governor
-        // fed an order-dependent figure. The slice must NOT cross a mixed-side tie; the whole window then reaches
-        // TryCompose's gate, which refuses it. No row, either Guid order.
+        // gh#809 (safety-critical): a buy and a sell share the EXACT ExecutedAt mid-window, so which side opened is
+        // decidable only by the arbitrary (ExecutedAt, Fill.Id) order. Before the fix, the tied-sell-first ordering
+        // made CurrentCycleStart see exposure return to flat AT the tie and slice the window there, and the
+        // sliced-away window no longer carried the tie for TradeRoundTrip.TryCompose's opposite-side gate to refuse --
+        // a Guid-ordered row was journalled into the R-4 / R-5 daily governor. The SAME four executions must be
+        // REFUSED (no row, and countably so) in EITHER Guid order (ADR-0022).
         IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
         Guid owner = Guid.NewGuid();
         Guid accountId = await SeedAccountAsync(owner, "9001");
 
-        Guid entry = new("00000000-0000-0000-0000-000000000001");
-        Guid tiedSell = new("00000000-0000-0000-0000-0000000000a0"); // sorts BEFORE the tied buy at :1
-        Guid tiedBuy = new("00000000-0000-0000-0000-0000000000b0");
+        Guid lesser = new("00000000-0000-0000-0000-000000000010");
+        Guid greater = new("00000000-0000-0000-0000-000000000020");
+        Guid entry = new("00000000-0000-0000-0000-0000000000e0");
         Guid final = new("00000000-0000-0000-0000-0000000000f0");
+        Guid tiedSell = tiedSellSortsFirst ? lesser : greater;
+        Guid tiedBuy = tiedSellSortsFirst ? greater : lesser;
 
+        // The entry Buy @:0 and the tied Buy @:1 are the buy side; the tied Sell @:1 and the final Sell @:2 are the
+        // sell side. The two @:1 fills are the tie whose Guid order is the only variable between the two cases.
         await SeedOrderWithFillIdsAsync(
             owner, accountId, OrderSide.Buy, [(entry, 5_000m, 1, 0), (tiedBuy, 5_010m, 1, 1)]);
         await SeedOrderWithFillIdsAsync(
             owner, accountId, OrderSide.Sell, [(tiedSell, 5_010m, 1, 1), (final, 5_020m, 1, 2)]);
 
-        bool journalled = await Service(metrics).ProcessFlatAsync(
-            Flat("9001", at: _now.AddMinutes(2)), CancellationToken.None);
+        bool journalled = await Service(metrics).ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(2)), CancellationToken.None);
 
-        journalled.Should().BeFalse("the mixed-side tie at the cycle boundary is refused, not guessed by Fill.Id order");
-        (await TradesAsync()).Should().BeEmpty("no Trade row -- the whole window reaches the ambiguity gate and is refused");
+        journalled.Should().BeFalse(
+            "an opposite-side tie is decidable only by an arbitrary venue Guid -- refuse in EITHER order rather than "
+            + "let Fill.Id decide whether the day's realized P&L reaches the governor (gh#809)");
+        (await TradesAsync()).Should().BeEmpty(
+            "the same four executions must journal nothing whichever tied fill's Guid the venue happened to mint first");
+        // The LOUD half (gh#809 review): the window is REFUSED for a reason, not silently written-nothing -- the
+        // metric that surfaces an account wedged on ambiguity must fire, and JournalWritten must not.
         A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalNotComposable))
             .MustHaveHappenedOnceExactly();
         A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten)).MustNotHaveHappened();
     }
 
-    [Fact]
-    public async Task ProcessFlatAsync_ShouldRefuse_WhenABoundaryTieHasTheBuySortingFirst()
+    [Theory]
+    [InlineData(true)]   // the tied SELL's Guid sorts first
+    [InlineData(false)]  // the tied BUY's Guid sorts first
+    public async Task ProcessFlatAsync_ShouldRefuseTheWholeWindow_WhenAMixedSideTieNetsFlatBeforeACleanCycle(bool tiedSellSortsFirst)
     {
-        // gh#809, the sibling Guid order. The SAME four executions with the tied BUY sorting first already refused
-        // (running never returns to zero at the tie in this order), and must keep refusing after the fix: the outcome
-        // cannot depend on which Guid the venue minted first. This is the invariance the fix guarantees, paired with
-        // the case above so a regression in either direction fails.
+        // gh#809 review (BLOCKING). The subtler half: a mixed-side tie that nets flat at its OWN instant's clean end,
+        // FOLLOWED by an unambiguous cycle. A "clean end" check ALONE (the next fill is strictly later) advances past
+        // the tie here -- running hits 0 on the second fill of the tied group, the next fill is a later instant, so the
+        // window is sliced to just the clean cycle. TradeRoundTrip then sees no tie, journals the clean cycle, and the
+        // tied pair's ±10 (sign undecidable) is silently DROPPED rather than refused. The fix also declines to advance
+        // across a MIXED-side instant, so the tie stays in the window and the whole flat is refused (ADR-0022). No row,
+        // countably, in EITHER Guid order.
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
         Guid owner = Guid.NewGuid();
         Guid accountId = await SeedAccountAsync(owner, "9001");
 
-        Guid entry = new("00000000-0000-0000-0000-000000000001");
-        Guid tiedBuy = new("00000000-0000-0000-0000-0000000000a0"); // sorts BEFORE the tied sell at :1
-        Guid tiedSell = new("00000000-0000-0000-0000-0000000000b0");
-        Guid final = new("00000000-0000-0000-0000-0000000000f0");
+        Guid lesser = new("00000000-0000-0000-0000-000000000010");
+        Guid greater = new("00000000-0000-0000-0000-000000000020");
+        Guid cleanBuy = new("00000000-0000-0000-0000-0000000000b2");
+        Guid cleanSell = new("00000000-0000-0000-0000-0000000000d3");
+        Guid tiedSell = tiedSellSortsFirst ? lesser : greater;
+        Guid tiedBuy = tiedSellSortsFirst ? greater : lesser;
 
+        // A buy and a sell TIED at :1 (nets flat, undecidable sign), then a clean Buy :2 -> Sell :3 cycle. Buy side
+        // carries the tied buy and the clean buy; sell side the tied sell and the clean sell.
         await SeedOrderWithFillIdsAsync(
-            owner, accountId, OrderSide.Buy, [(entry, 5_000m, 1, 0), (tiedBuy, 5_010m, 1, 1)]);
+            owner, accountId, OrderSide.Buy, [(tiedBuy, 5_000m, 1, 1), (cleanBuy, 5_030m, 1, 2)]);
         await SeedOrderWithFillIdsAsync(
-            owner, accountId, OrderSide.Sell, [(tiedSell, 5_010m, 1, 1), (final, 5_020m, 1, 2)]);
+            owner, accountId, OrderSide.Sell, [(tiedSell, 5_010m, 1, 1), (cleanSell, 5_040m, 1, 3)]);
 
-        bool journalled = await Service().ProcessFlatAsync(
-            Flat("9001", at: _now.AddMinutes(2)), CancellationToken.None);
+        bool journalled = await Service(metrics).ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(3)), CancellationToken.None);
 
-        journalled.Should().BeFalse("same executions, same outcome -- the boundary tie is refused regardless of Fill.Id order");
-        (await TradesAsync()).Should().BeEmpty();
+        journalled.Should().BeFalse(
+            "a mixed-side tie that nets flat is ADR-0022's undecidable case -- advancing past it to journal the later "
+            + "clean cycle would silently drop the tie's realized P&L instead of refusing it (gh#809 review)");
+        (await TradesAsync()).Should().BeEmpty(
+            "the mixed-side instant must keep the whole window refused; the clean cycle is under-reported (the safe "
+            + "direction) until the ambiguity clears, never a row beside a silently-dropped tie");
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalNotComposable))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten)).MustNotHaveHappened();
     }
 
     [Theory]
@@ -390,12 +415,15 @@ public class TradeJournalServiceTests
     public async Task ProcessFlatAsync_ShouldJournalBothLegsIdentically_WhenASameSideExitOvershootsFlatAtOneInstant(
         bool bigPartialFirst)
     {
-        // gh#809 (#823 review). A SINGLE-sided instant group can still be Guid-order-dependent: a long 3 reversed by a
+        // gh#809 regression, pinning the CLEAN-END half of the merged slicer rule (which the mixed-side coverage above
+        // does not exercise). A SINGLE-sided instant group can still be Fill.Id-order-dependent: a long 3 reversed by a
         // sell filling 2,1,1 vs 1,1,2 at ONE instant passes running exposure through zero mid-group in one order but
-        // not the other. The mixed-side guard does not fire (all sells), so slicing at that zero would journal only
-        // the post-tie short and DROP the long cycle's P&L in one order while composing BOTH legs in the other -- the
-        // same order-dependence gh#809 is about. Only slicing at a group's CLEAN END (order-independent net) fixes it:
-        // the whole window composes deterministically into the long leg AND the short leg, identically either order.
+        // not the other. The mixed-side guard never fires (all sells), so slicing at that mid-group zero would journal
+        // only the post-tie short and DROP the long cycle's P&L in one order while composing BOTH legs in the other --
+        // the same order-dependence gh#809 is about. Only slicing at a group's CLEAN END (an order-independent net)
+        // fixes it: the whole window composes deterministically into the long leg AND the short leg, identically either
+        // order. Swapping the clean-end clause on develop back for a mixed-side-only check reopens exactly this and
+        // this theory goes red -- so it guards a rule no other test on develop pins.
         Guid owner = Guid.NewGuid();
         Guid accountId = await SeedAccountAsync(owner, "9001");
 

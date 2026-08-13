@@ -44,24 +44,13 @@ opening fill.**
 - **Refuse-don't-guess is kept only for genuine ambiguity:** a fill whose side is neither leg; an
   **open-from-flat whose direction is not decidable** (opposite-side fills tied at the boundary timestamp, with no
   venue sequence to order them — guessing would flip the sign of the realized P&L); or a window that does **not**
-  reconcile to flat. These still write no row.
-  - **Where the boundary-tie gate is enforced (gh#809).** The refusal lives in the **composer**
-    (`TradeRoundTrip.TryCompose` — one gate, over the window it is given). But the **writer** first slices the fills
-    to the current flat-to-flat cycle (`TradeJournalService.CurrentCycleStart`), walking them in an arbitrary
-    `(ExecutedAt, Fill.Id)` order — and a slice is trustworthy only when it does not depend on that order. Two things
-    make it so, and the slicer needs **both**:
-    - **Slice only at a group's clean end** (the next fill is at a later instant). `running`'s *partial* sums inside a
-      same-instant group are Guid-ordered, but the group's *net* (reached at its last fill) is order-independent. A
-      single-sided reversing exit filling `2,1,1` vs `1,1,2` at one instant passes through zero mid-group in one order
-      and not the other — slicing there journals the post-tie leg and silently drops the pre-boundary cycle in one
-      order only. Slicing at instant boundaries rests the decision on order-independent group nets.
-    - **Never slice across a mixed-side instant.** That is the ADR-0022 boundary tie itself: even when the group nets
-      flat at a clean end, which fill opened/closed/reversed is Guid-decided and would flip a leg's sign. Leaving it
-      in the window hands it to the composer's single gate to refuse (the clean-end rule alone would slice past a
-      mixed tie that nets flat and hide it from that gate).
-
-    The gate stays one place; the slicer's job is only to present the whole flat-to-flat window without letting an
-    arbitrary intra-instant order decide where it begins.
+  reconcile to flat. These still write no row. **Enforced in two places (gh#809):** the single ambiguity gate lives
+  in `TradeRoundTrip.TryCompose` (a same-instant opposite-side group in its window is refused), **and**
+  `TradeJournalService.CurrentCycleStart` must not slice the flat-to-flat window *across* such a tie — a boundary
+  reading that split the tied pair apart would hide it from that gate, and the arbitrary `(ExecutedAt, Id)` order
+  would silently decide whether the day's P&L reaches the governor. So the writer only advances the cycle boundary at
+  the **clean end of a single-sided instant** (the next fill is strictly later, and that instant carries one side); a
+  mixed-side tie — or a zero *inside* an instant — stays in the window for the gate to judge.
 
 ### The structural cost — a new natural key
 `ClosingFillId` is today a **unique filtered** index (`IX_Trades_ClosingFillId`) and the writer's idempotency key
