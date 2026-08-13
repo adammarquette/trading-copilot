@@ -402,14 +402,40 @@ public sealed class TradeJournalService
                 _ => 0,
             };
 
-            // A return to flat before the final fill closes a prior cycle; the current trip starts after it.
-            if (running == 0 && index < ordered.Count - 1)
+            // A return to flat before the final fill closes a prior cycle; the current trip starts after it -- UNLESS
+            // that flat lands inside a same-instant group carrying MIXED sides (gh#809). There the (ExecutedAt, Id)
+            // order that put `running` at zero exactly here is decided by an arbitrary venue Guid, not by real
+            // sequence: a different Guid order would slice the tied pair differently, or not at all. Slicing across it
+            // would GUESS the boundary -- the sign-flipping ambiguity ADR-0022 refuses -- and, worse, silently drop
+            // the pre-boundary cycle's realized P&L (there is no persisted watermark to revisit it). So leave the tie
+            // in the window and let TradeRoundTrip.TryCompose's same-instant opposite-side gate be the ONE place that
+            // refuses it; the gate is symmetric, so it refuses regardless of which Guid the venue happened to mint
+            // first. A same-instant SAME-side flat (a book-sweeping exit) is unambiguous and still advances the cycle.
+            if (running == 0 && index < ordered.Count - 1 && !FlatFallsInsideAMixedInstant(ordered, sideByOrder, index))
             {
                 start = index + 1;
             }
         }
 
         return start;
+    }
+
+    /// <summary>
+    /// Whether the return-to-flat at <paramref name="index"/> lands inside a group of fills sharing its exact
+    /// <see cref="Fill.ExecutedAt"/> that carries more than one side (gh#809). When it does, the cycle boundary the
+    /// arbitrary <c>(ExecutedAt, Id)</c> order produced here is not trustworthy — a different order of the tied fills
+    /// would move (or erase) it — so the slice must not cross it. Mirrors <see cref="TradeRoundTrip"/>'s own
+    /// same-instant opposite-side gate, so the slicer and the composer agree on exactly which ties are ambiguous.
+    /// </summary>
+    private static bool FlatFallsInsideAMixedInstant(
+        IReadOnlyList<Fill> ordered, IReadOnlyDictionary<Guid, OrderSide> sideByOrder, int index)
+    {
+        DateTimeOffset instant = ordered[index].ExecutedAt;
+        return ordered
+            .Where(fill => fill.ExecutedAt == instant)
+            .Select(fill => sideByOrder[fill.OrderId])
+            .Distinct()
+            .Count() > 1;
     }
 
     private async Task<JournalAccount?> ResolveAccountAsync(

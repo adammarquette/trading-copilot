@@ -97,6 +97,9 @@ public static class TradeRoundTrip
         // (refuse-don't-guess). This is the ONE ambiguity gate -- checked up front over the whole window, not only at
         // an open-from-flat, so a mid-cycle reversal tie is caught too. Same-INSTANT same-SIDE ties are safe (FIFO
         // pairing preserves both sign and total), and distinct-instant fills (the norm) are unaffected.
+        // It only refuses a tie it can SEE: the caller must present the whole flat-to-flat window and never slice a
+        // cycle boundary across such a tie, or the gate never receives it (the gh#809 seam --
+        // TradeJournalService.CurrentCycleStart preserves the tie for exactly this reason).
         if (fills.GroupBy(fill => fill.ExecutedAt).Any(group => group.Select(fill => fill.Side).Distinct().Count() > 1))
         {
             return false;

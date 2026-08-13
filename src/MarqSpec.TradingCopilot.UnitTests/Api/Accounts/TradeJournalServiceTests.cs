@@ -324,6 +324,67 @@ public class TradeJournalServiceTests
     }
 
     [Fact]
+    public async Task ProcessFlatAsync_ShouldRefuse_WhenABoundaryTieHasTheSellSortingFirst()
+    {
+        // gh#809 regression (the DEFECT order). Four fills form a same-instant buy/sell tie at :1 -- entry Buy, then
+        // a tied Sell and a tied Buy at the same instant, then the final Sell. When the tied SELL's Guid sorts first,
+        // the fills-derived cycle slice (CurrentCycleStart) saw running exposure hit zero AT the tie and sliced there,
+        // splitting the tied pair so the surviving window [tied Buy, final Sell] carried no tie and journalled a
+        // guessed Buy 5010 -> 5020 (+50) row -- the pre-boundary cycle's P&L silently dropped and the daily governor
+        // fed an order-dependent figure. The slice must NOT cross a mixed-side tie; the whole window then reaches
+        // TryCompose's gate, which refuses it. No row, either Guid order.
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        Guid entry = new("00000000-0000-0000-0000-000000000001");
+        Guid tiedSell = new("00000000-0000-0000-0000-0000000000a0"); // sorts BEFORE the tied buy at :1
+        Guid tiedBuy = new("00000000-0000-0000-0000-0000000000b0");
+        Guid final = new("00000000-0000-0000-0000-0000000000f0");
+
+        await SeedOrderWithFillIdsAsync(
+            owner, accountId, OrderSide.Buy, [(entry, 5_000m, 1, 0), (tiedBuy, 5_010m, 1, 1)]);
+        await SeedOrderWithFillIdsAsync(
+            owner, accountId, OrderSide.Sell, [(tiedSell, 5_010m, 1, 1), (final, 5_020m, 1, 2)]);
+
+        bool journalled = await Service(metrics).ProcessFlatAsync(
+            Flat("9001", at: _now.AddMinutes(2)), CancellationToken.None);
+
+        journalled.Should().BeFalse("the mixed-side tie at the cycle boundary is refused, not guessed by Fill.Id order");
+        (await TradesAsync()).Should().BeEmpty("no Trade row -- the whole window reaches the ambiguity gate and is refused");
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalNotComposable))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldRefuse_WhenABoundaryTieHasTheBuySortingFirst()
+    {
+        // gh#809, the sibling Guid order. The SAME four executions with the tied BUY sorting first already refused
+        // (running never returns to zero at the tie in this order), and must keep refusing after the fix: the outcome
+        // cannot depend on which Guid the venue minted first. This is the invariance the fix guarantees, paired with
+        // the case above so a regression in either direction fails.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        Guid entry = new("00000000-0000-0000-0000-000000000001");
+        Guid tiedBuy = new("00000000-0000-0000-0000-0000000000a0"); // sorts BEFORE the tied sell at :1
+        Guid tiedSell = new("00000000-0000-0000-0000-0000000000b0");
+        Guid final = new("00000000-0000-0000-0000-0000000000f0");
+
+        await SeedOrderWithFillIdsAsync(
+            owner, accountId, OrderSide.Buy, [(entry, 5_000m, 1, 0), (tiedBuy, 5_010m, 1, 1)]);
+        await SeedOrderWithFillIdsAsync(
+            owner, accountId, OrderSide.Sell, [(tiedSell, 5_010m, 1, 1), (final, 5_020m, 1, 2)]);
+
+        bool journalled = await Service().ProcessFlatAsync(
+            Flat("9001", at: _now.AddMinutes(2)), CancellationToken.None);
+
+        journalled.Should().BeFalse("same executions, same outcome -- the boundary tie is refused regardless of Fill.Id order");
+        (await TradesAsync()).Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task ProcessFlatAsync_ShouldRefuse_WhenALateInterleavedFillRepairsAnAlreadyJournalledTrade()
     {
         // gh#759 review (BLOCKING). A flat processed before all fills are ingested journals a partial trade; if a
