@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { RiskLayer } from '../orders/gateDecision';
 import {
+  ConditionalCrossDirection,
   OrderSide,
   OrderType,
   type SendOrderRequest,
   armOrder,
   cancelOrder,
+  createConditionalOrder,
   sendOrder,
   takeStagedOrder,
 } from './orders';
@@ -192,5 +194,87 @@ describe('cancelOrder', () => {
 
     expect(String(fetchMock.mock.calls[0][0])).toContain('/orders/o1');
     expect(fetchMock.mock.calls[0][1]?.method).toBe('DELETE');
+  });
+});
+
+function pending(body: Record<string, unknown> = {}): Response {
+  return response(200, {
+    conditionalOrderId: 'c1',
+    status: 'Pending',
+    triggerPrice: 5010,
+    triggerDirection: 'RisesTo',
+    outcome: 'Allowed',
+    approvedQuantity: 5,
+    bindingLayer: null,
+    reason: 'Within every layer at creation.',
+    ...body,
+  });
+}
+
+describe('ConditionalCrossDirection', () => {
+  it('matches the server enum — Unknown is the refusable zero that never fires', () => {
+    // The direction travels as its INTEGER (there is no JsonStringEnumConverter server-side), so the values must
+    // match the domain enum exactly: a positional slip would fire a breakout as a pullback. Unknown=0 never fires.
+    expect(ConditionalCrossDirection.Unknown).toBe(0);
+    expect(ConditionalCrossDirection.RisesTo).toBe(1);
+    expect(ConditionalCrossDirection.FallsTo).toBe(2);
+  });
+});
+
+describe('createConditionalOrder', () => {
+  it('posts the proposal plus the trigger to the account-scoped conditional route', async () => {
+    const fetchMock = stubFetch(() => Promise.resolve(pending()));
+
+    const result = await createConditionalOrder('a1', {
+      order: TICKET,
+      triggerPrice: 5010,
+      triggerDirection: ConditionalCrossDirection.RisesTo,
+    });
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/accounts/a1/orders/conditional');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.triggerPrice).toBe(5010);
+    expect(body.triggerDirection).toBe(ConditionalCrossDirection.RisesTo); // 1 — the integer, not the name
+    expect(body.order.symbol).toBe('MES');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.status).toBe('Pending');
+      expect(result.data.triggerDirection).toBe('RisesTo'); // a NAME on the way back, like every outcome
+    }
+  });
+
+  it('carries the optional cancel band and expiry when the operator sets them', async () => {
+    const fetchMock = stubFetch(() => Promise.resolve(pending()));
+
+    await createConditionalOrder('a1', {
+      order: TICKET,
+      triggerPrice: 5010,
+      triggerDirection: ConditionalCrossDirection.RisesTo,
+      cancelDrift: 4990,
+      expiresAt: '2026-08-13T00:00:00Z',
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.cancelDrift).toBe(4990);
+    expect(body.expiresAt).toBe('2026-08-13T00:00:00Z');
+  });
+
+  it('surfaces a refusal rather than a pending conditional', async () => {
+    // A pre-gate refusal (mode, mismatch, wrong-side target) means there is nothing coherent to hold, so the create
+    // comes back 4xx — an ordinary result to render, not a pending order to show.
+    stubFetch(() =>
+      Promise.resolve(
+        response(409, { error: 'this environment will not trade that account mode' }),
+      ),
+    );
+
+    const result = await createConditionalOrder('a1', {
+      order: TICKET,
+      triggerPrice: 5010,
+      triggerDirection: ConditionalCrossDirection.RisesTo,
+    });
+
+    expect(result.ok).toBe(false);
   });
 });
