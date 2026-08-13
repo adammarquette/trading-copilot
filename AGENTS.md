@@ -26,7 +26,8 @@ A human-in-the-loop decision-support **and** execution system in C# / .NET; the 
 `MarqSpec.Client.ProjectX`. Solution `src/MarqSpec.TradingCopilot.slnx` (namespace `MarqSpec.TradingCopilot.*`):
 `Domain`, `Data` (EF Core), `Api` (BFF), the adapters `Integration.ProjectX` / `.Finnhub` / `.Tiingo`, plus
 `UnitTests` and `IntegrationTests`. Build with `dotnet build src/MarqSpec.TradingCopilot.slnx`; before a PR,
-`dotnet format --verify-no-changes` and unit tests green.
+`dotnet format --verify-no-changes --exclude external/` (the vendored `external/` clients keep their own style)
+and unit tests green.
 
 ## Source of truth
 
@@ -87,29 +88,24 @@ belongs in its contract, and anything with a formal home belongs there rather th
 
 ## Cursor Cloud specific instructions
 
-The startup update script already runs `git submodule update --init`, `dotnet restore
-src/MarqSpec.TradingCopilot.slnx`, and `npm ci` in the client. .NET 10 SDK, Node 22, and Docker are
-pre-installed. Standard build/test/lint commands live in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-and the root `AGENTS.md` above — use those; the notes below are only the non-obvious caveats.
+The environment — SDKs, submodule checkout, dependency restore — is provisioned from the Cursor dashboard, not
+this tree (there is no `.cursor/` here to keep it true), so **bootstrap defensively rather than assume a prior
+run**: if `external/` is empty, `git submodule update --init` (the build needs the `external/MarqSpec.Client.*`
+projects); if `dotnet`, Node or Docker is missing, install it. Standard commands and the full config surface
+already have homes — README "Run it locally", [`.env.example`](.env.example),
+[`ci.yml`](.github/workflows/ci.yml), ADR-0012, ADR-0020 — so the notes below are only the non-obvious caveats
+with none.
 
-- **Docker is not auto-started** (no systemd/init in the VM). Before Postgres, `docker compose`, or the
-  Testcontainers integration tests, start the daemon yourself, e.g. `sudo dockerd` in a background/tmux
-  session, then wait for `docker info` to succeed. The `ubuntu` user is already in the `docker` group.
-- **Postgres for local runs:** `docker compose up -d db` (TimescaleDB + pgvector on `localhost:5432`,
-  creds `copilot`/`copilot`, db `tradingcopilot`). The integration-test project starts its *own* throwaway
-  Postgres via Testcontainers, so it only needs the Docker daemon up, not the compose `db`.
-- **Running the API in dev** (`dotnet run` in `src/MarqSpec.TradingCopilot.Api`) requires, at minimum,
-  `ConnectionStrings__Default` (point at the compose `db`), `Jwt__SigningKey` (≥32 bytes — the app *throws at
-  startup* without it), and `Bootstrap__Email`/`Bootstrap__Password` to seed the operator (defaults
-  `operator@local` / `changeme-local`). Set `ASPNETCORE_ENVIRONMENT=Development`. See
-  [`.env.example`](.env.example) for the full config surface. Missing broker creds are fine locally — a
-  background host logs a ProjectX "API key is required" warn/retry loop; it is expected, not a failure.
-- **The SPA is served same-origin by the BFF from `wwwroot`** (ADR-0020). `npm run dev` (Vite, `:5173`) only
-  proxies `/health` to the BFF — it does **not** proxy the REST/SignalR routes, so sign-in and other API
-  calls do not work through the Vite dev server alone. To drive the full UI against the live API, run
-  `npm run build` in the client and copy `dist/*` into `src/MarqSpec.TradingCopilot.Api/wwwroot`, then hit the
-  BFF at `:8080`. `wwwroot` must exist **before** the API starts — the static-file provider binds at startup,
-  so restart the API after populating it. (That `wwwroot` copy is a build artifact — do not commit it.)
-- **Lint must exclude the vendored submodules:** `dotnet format src/MarqSpec.TradingCopilot.slnx
-  --verify-no-changes --exclude external/`. Without `--exclude external/`, the `external/MarqSpec.Client.*`
-  clients report formatting errors that are not this repo's to fix (CI runs it with the exclude).
+- **Docker is not auto-started** (no init in the VM): if `docker info` fails, start it (`sudo dockerd` in a
+  background/tmux session; `ubuntu` needs the `docker` group or `sudo`) before Postgres, `docker compose`, or
+  the Testcontainers integration suite — that suite needs only the daemon up, not the compose `db`.
+- **`dotnet run` seeds no operator on its own.** `Bootstrap__Email` / `Bootstrap__Password` are *compose*
+  interpolation defaults (`operator@local` / `changeme-local`) the API process never reads; set both explicitly
+  on the `dotnet run` path, or `StartupTasks.BootstrapOperatorAsync` returns at its first guard and every
+  sign-in 401s with nothing logged. Separately, `Jwt__SigningKey` throws at *startup* only when absent — a
+  present-but-short key (<32 bytes for HS256) boots clean and throws `IDX10653` on the first `POST /auth/login`.
+- **The Vite dev server never proxies the API.** `npm run dev` (`:5173`) proxies `/health` only, and only when
+  `VITE_BFF_ORIGIN` is set (otherwise nothing) — never the REST/SignalR routes, so sign-in fails through Vite
+  alone. To drive the full UI against the live API, `npm run build` and copy `dist/*` into the API's `wwwroot`,
+  then use the BFF at `:8080`. `wwwroot` must exist *before* the API starts (`UseStaticFiles` binds its provider
+  when the host is built), so restart after populating it; that copy is a build artifact — do not commit it.
