@@ -49,7 +49,8 @@ opening fill.**
   `TradeJournalService.CurrentCycleStart` must not slice the flat-to-flat window *across* such a tie — a boundary
   reading that split the tied pair apart would hide it from that gate, and the arbitrary `(ExecutedAt, Id)` order
   would silently decide whether the day's P&L reaches the governor. So the writer only advances the cycle boundary at
-  a **clean instant boundary** (the next fill is strictly later); a tie stays in the window for the gate to judge.
+  the **clean end of a single-sided instant** (the next fill is strictly later, and that instant carries one side); a
+  mixed-side tie — or a zero *inside* an instant — stays in the window for the gate to judge.
 
 ### The structural cost — a new natural key
 `ClosingFillId` is today a **unique filtered** index (`IX_Trades_ClosingFillId`) and the writer's idempotency key
