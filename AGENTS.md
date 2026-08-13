@@ -84,3 +84,32 @@ before starting, and add dated entries only when nothing formal fits.
 
 *Every line here is paid by every agent in every session. Keep it small: anything role- or subtree-specific
 belongs in its contract, and anything with a formal home belongs there rather than restated here.*
+
+## Cursor Cloud specific instructions
+
+The startup update script already runs `git submodule update --init`, `dotnet restore
+src/MarqSpec.TradingCopilot.slnx`, and `npm ci` in the client. .NET 10 SDK, Node 22, and Docker are
+pre-installed. Standard build/test/lint commands live in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+and the root `AGENTS.md` above — use those; the notes below are only the non-obvious caveats.
+
+- **Docker is not auto-started** (no systemd/init in the VM). Before Postgres, `docker compose`, or the
+  Testcontainers integration tests, start the daemon yourself, e.g. `sudo dockerd` in a background/tmux
+  session, then wait for `docker info` to succeed. The `ubuntu` user is already in the `docker` group.
+- **Postgres for local runs:** `docker compose up -d db` (TimescaleDB + pgvector on `localhost:5432`,
+  creds `copilot`/`copilot`, db `tradingcopilot`). The integration-test project starts its *own* throwaway
+  Postgres via Testcontainers, so it only needs the Docker daemon up, not the compose `db`.
+- **Running the API in dev** (`dotnet run` in `src/MarqSpec.TradingCopilot.Api`) requires, at minimum,
+  `ConnectionStrings__Default` (point at the compose `db`), `Jwt__SigningKey` (≥32 bytes — the app *throws at
+  startup* without it), and `Bootstrap__Email`/`Bootstrap__Password` to seed the operator (defaults
+  `operator@local` / `changeme-local`). Set `ASPNETCORE_ENVIRONMENT=Development`. See
+  [`.env.example`](.env.example) for the full config surface. Missing broker creds are fine locally — a
+  background host logs a ProjectX "API key is required" warn/retry loop; it is expected, not a failure.
+- **The SPA is served same-origin by the BFF from `wwwroot`** (ADR-0020). `npm run dev` (Vite, `:5173`) only
+  proxies `/health` to the BFF — it does **not** proxy the REST/SignalR routes, so sign-in and other API
+  calls do not work through the Vite dev server alone. To drive the full UI against the live API, run
+  `npm run build` in the client and copy `dist/*` into `src/MarqSpec.TradingCopilot.Api/wwwroot`, then hit the
+  BFF at `:8080`. `wwwroot` must exist **before** the API starts — the static-file provider binds at startup,
+  so restart the API after populating it. (That `wwwroot` copy is a build artifact — do not commit it.)
+- **Lint must exclude the vendored submodules:** `dotnet format src/MarqSpec.TradingCopilot.slnx
+  --verify-no-changes --exclude external/`. Without `--exclude external/`, the `external/MarqSpec.Client.*`
+  clients report formatting errors that are not this repo's to fix (CI runs it with the exclude).
