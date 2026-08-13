@@ -190,6 +190,35 @@ fi
 [ -f "$BODY_FILE" ] || die "body file not found: $BODY_FILE"
 [ -s "$BODY_FILE" ] || die "the body file is empty: $BODY_FILE"
 
+# WHERE THE BODY MAY COME FROM (PR #818 security review)
+# -----------------------------------------------------
+# This script publishes a file, so the path it is handed is worth being dull about: a reviewer session acting on
+# instructions it should not have trusted could aim it at `~/.ssh/id_rsa` or a `.env`, and the review body is a
+# public place to land one. Two guards, and it is worth being clear which is doing the work:
+#
+#   * the MARKER CHECK below is the real barrier -- a secret does not begin with `**Verdict: Approve**`, so an
+#     arbitrary file is refused before anything is posted, whatever its path;
+#   * this containment is defence in depth. The body belongs either in the checkout (a reviewer writing beside
+#     the code it read) or in the temp directory (the usual scratch), so anything else is refused. It is NOT a
+#     boundary that stops an attacker who can already write files -- they would simply write inside the repo --
+#     which is exactly why the marker check is not delegated to it.
+#
+# A symlink is refused outright rather than resolved: a link inside the checkout pointing at a key elsewhere is
+# the one shape that satisfies containment while defeating its purpose.
+if [ -L "$BODY_FILE" ]; then
+  die "the body file is a symlink, which this refuses to follow: $BODY_FILE"
+fi
+body_dir=$(cd "$(dirname "$BODY_FILE")" 2>/dev/null && pwd -P) \
+  || die "cannot resolve the body file's directory: $BODY_FILE"
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+[ -n "$repo_root" ] && repo_root=$(cd "$repo_root" && pwd -P)
+tmp_root=$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P || echo "/tmp")
+case "$body_dir" in
+  "${repo_root:-///nonexistent}"|"${repo_root:-///nonexistent}"/*) ;;
+  "$tmp_root"|"$tmp_root"/*)                                      ;;
+  *) die "the body file must sit in the checkout or in ${tmp_root} (got ${body_dir}) -- see WHERE THE BODY MAY COME FROM" ;;
+esac
+
 # The reader is LENIENT on purpose -- verdict-state.sh forgives emphasis, casing, a trailing period -- because a
 # gate that reds on "**Verdict:** Approve." teaches people to distrust it. A WRITER has no such excuse, and
 # being stricter than the reader is safe by construction: everything accepted here the reader also accepts.
