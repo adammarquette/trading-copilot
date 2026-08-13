@@ -65,6 +65,15 @@ die()  { printf 'post-verdict: %s\n' "$*" >&2; exit 64; }
 note() { printf '%s\n' "$*"; }
 loud() { printf '%s\n' "$*" >&2; }
 
+# gh api with MSYS path conversion disabled, and endpoints written WITHOUT a leading slash. Both, because
+# either alone is enough and this script must not be the one that gets it wrong: under Git Bash a `/repos/...`
+# argument is rewritten into a Windows filesystem path before gh ever sees it, so the request goes nowhere.
+# The failure is quiet and points the wrong way -- `preflight` would report no identity, and the fallback
+# would refuse to post, on a host holding perfectly good `pull_requests: write` (PR #818 review). The sibling
+# reviewer-review.sh carries the same wrapper for the same reason; verdict-state.sh omits the slash. Scoped to
+# gh rather than exported: other tools want conversion left on.
+ghapi() { MSYS_NO_PATHCONV=1 gh api "$@"; }
+
 CMD="${1:-}"
 case "$CMD" in
   preflight|review) ;;
@@ -131,7 +140,7 @@ have_app() {
 # review -- which carries no verdict, so the gate passes over it. The body says what it is, for the same reason.
 gh_can_review() {
   local status
-  status=$(gh api "/repos/${REPO}/pulls/${PR}/reviews" -X POST \
+  status=$(ghapi "repos/${REPO}/pulls/${PR}/reviews" -X POST \
              -f event=VERDICT_PREFLIGHT_PROBE \
              -f body="post-verdict.sh preflight probe -- deliberately invalid, expected to be rejected." \
              --include 2>&1 \
@@ -215,7 +224,7 @@ if [ -z "$posted" ]; then
   # authored (gh#141), and in this repo the author usually IS the `gh` identity. The state is cosmetic anyway --
   # what binds is the first line, which was checked above.
   body=$(cat "$BODY_FILE")
-  if posted=$(gh api "/repos/${REPO}/pulls/${PR}/reviews" -X POST \
+  if posted=$(ghapi "repos/${REPO}/pulls/${PR}/reviews" -X POST \
                 -f event=COMMENT -f body="$body" \
                 --jq '"review " + (.id|tostring) + " posted as " + .user.login + " -- state " + .state' 2>&1); then
     note "$posted"
