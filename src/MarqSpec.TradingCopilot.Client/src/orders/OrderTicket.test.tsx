@@ -1,7 +1,15 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { OrderSide, OrderType, armOrder, cancelOrder, takeStagedOrder } from '../api/orders';
+import {
+  ConditionalCrossDirection,
+  OrderSide,
+  OrderType,
+  armOrder,
+  cancelOrder,
+  createConditionalOrder,
+  takeStagedOrder,
+} from '../api/orders';
 import { RiskLayer } from './gateDecision';
 import { OrderTicket } from './OrderTicket';
 
@@ -12,11 +20,13 @@ vi.mock('../api/orders', async (importOriginal) => ({
   armOrder: vi.fn(),
   takeStagedOrder: vi.fn(),
   cancelOrder: vi.fn(),
+  createConditionalOrder: vi.fn(),
 }));
 
 const arm = vi.mocked(armOrder);
 const take = vi.mocked(takeStagedOrder);
 const cancel = vi.mocked(cancelOrder);
+const createConditional = vi.mocked(createConditionalOrder);
 
 const PROPOSAL = {
   accountId: 'a1',
@@ -49,6 +59,33 @@ function staged(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function pendingConditional(overrides: Record<string, unknown> = {}) {
+  return {
+    ok: true as const,
+    data: {
+      conditionalOrderId: 'c1',
+      status: 'Pending',
+      triggerPrice: 5010,
+      triggerDirection: 'RisesTo',
+      outcome: 'Allowed',
+      approvedQuantity: 5,
+      bindingLayer: null,
+      reason: 'Within every layer at creation.',
+      ...overrides,
+    },
+  };
+}
+
+/** Enters conditional mode and sets a fireable trigger (a positive price; direction defaults to Rises to). */
+async function armTheTrigger(price = '5010') {
+  await act(async () => {
+    fireEvent.click(screen.getByRole('checkbox', { name: /send when conditions met/i }));
+  });
+  await act(async () => {
+    fireEvent.change(screen.getByLabelText(/trigger price/i), { target: { value: price } });
+  });
+}
+
 async function click(name: RegExp) {
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name }));
@@ -76,6 +113,7 @@ beforeEach(() => {
     },
   });
   cancel.mockResolvedValue({ ok: true, data: undefined });
+  createConditional.mockResolvedValue(pendingConditional());
 });
 
 afterEach(() => {
@@ -290,5 +328,226 @@ describe('OrderTicket', () => {
     await click(/^send$/i);
 
     expect(screen.getByTestId('order-ticket').textContent?.toLowerCase()).toContain('sent');
+  });
+});
+
+describe('OrderTicket — send when conditions met (gh#655)', () => {
+  it('hides the trigger until the operator opts into the conditional mode', async () => {
+    // "Send now" is the default; the on-trigger inputs appear only when asked for, so the common path stays the
+    // three-step arm → review → send.
+    await renderTicket();
+
+    expect(screen.queryByLabelText(/trigger price/i)).toBeNull();
+    expect(screen.getByRole('button', { name: /arm/i })).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('checkbox', { name: /send when conditions met/i }));
+    });
+
+    expect(screen.getByLabelText(/trigger price/i)).toBeTruthy();
+    // The immediate-send flow is replaced, not shown alongside — the two are mutually exclusive.
+    expect(screen.queryByRole('button', { name: /arm/i })).toBeNull();
+  });
+
+  it('creates the conditional from the proposal and the trigger, transmitting nothing', async () => {
+    await renderTicket();
+    await armTheTrigger('5010');
+
+    await click(/send on trigger/i);
+
+    expect(createConditional).toHaveBeenCalledTimes(1);
+    const [account, request_] = createConditional.mock.calls[0];
+    expect(account).toBe('a1');
+    expect(request_.order.symbol).toBe('MES');
+    expect(request_.triggerPrice).toBe(5010);
+    expect(request_.triggerDirection).toBe(ConditionalCrossDirection.RisesTo); // the default direction
+    // Nothing about a conditional reaches the venue now — no arm, no take.
+    expect(arm).not.toHaveBeenCalled();
+    expect(take).not.toHaveBeenCalled();
+  });
+
+  it('shows the pending state as off-book and re-gated at fire time — never as armed or sent', async () => {
+    await renderTicket();
+    await armTheTrigger('5010');
+    await click(/send on trigger/i);
+
+    const panel = screen.getByTestId('conditional-pending');
+    const text = panel.textContent ?? '';
+    expect(text).toContain('rises to 5010'); // the trigger, phrased from the server's direction name
+    expect(text.toLowerCase()).toContain('off the book'); // held local — no order anticipation
+    expect(text.toLowerCase()).toContain('not a placed order'); // the honesty line: it is not armed
+    expect(text.toLowerCase()).toContain('re-checked'); // the gate re-runs at fire time (R-12)
+    // It is a pending conditional, not a staged order and not a transmitted one.
+    expect(screen.queryByTestId('gate-decision')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^send$/i })).toBeNull();
+  });
+
+  it('passes the chosen direction — a pullback falls to its trigger', async () => {
+    await renderTicket();
+    await armTheTrigger('4990');
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/direction/i), {
+        target: { value: String(ConditionalCrossDirection.FallsTo) },
+      });
+    });
+
+    await click(/send on trigger/i);
+
+    expect(createConditional.mock.calls[0][1].triggerDirection).toBe(
+      ConditionalCrossDirection.FallsTo,
+    );
+  });
+
+  it('carries an optional expiry through to the request when the operator sets one', async () => {
+    await renderTicket();
+    await armTheTrigger('5010');
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/expiry/i), {
+        target: { value: '2026-08-13T00:00' },
+      });
+    });
+
+    await click(/send on trigger/i);
+
+    // The datetime-local wall-clock is converted to a UTC instant the same way the component does, so this is
+    // timezone-robust (a bare date substring would shift in positive-offset zones).
+    expect(createConditional.mock.calls[0][1].expiresAt).toBe(
+      new Date('2026-08-13T00:00').toISOString(),
+    );
+  });
+
+  it('will not create a conditional that could never fire — no trigger price, no send', async () => {
+    await renderTicket();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('checkbox', { name: /send when conditions met/i }));
+    });
+
+    // A missing (or non-positive) trigger price is not fireable — the control is disabled, not merely ignored.
+    const button = screen.getByRole('button', { name: /send on trigger/i }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/trigger price/i), { target: { value: '5010' } });
+    });
+    expect(
+      (screen.getByRole('button', { name: /send on trigger/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('surfaces a refused conditional create rather than a pending order', async () => {
+    createConditional.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      status: 409,
+      error: 'this environment will not trade that account mode',
+    });
+
+    await renderTicket();
+    await armTheTrigger('5010');
+    await click(/send on trigger/i);
+
+    expect(screen.getByTestId('order-ticket').textContent?.toLowerCase()).toContain(
+      'will not trade',
+    );
+    expect(screen.queryByTestId('conditional-pending')).toBeNull();
+  });
+
+  it('does not create twice when Send on trigger is clicked again before the first resolves', async () => {
+    // The same non-idempotence guard the arm/send paths carry: a double-click while the network is slow must not
+    // create two pending conditionals.
+    let release: (value: Awaited<ReturnType<typeof createConditionalOrder>>) => void = () => {};
+    createConditional.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    await renderTicket();
+    await armTheTrigger('5010');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /send on trigger/i }));
+      fireEvent.click(screen.getByRole('button', { name: /send on trigger/i }));
+    });
+
+    expect(createConditional).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release(pendingConditional());
+    });
+  });
+
+  it('locks the mode while an arm is in flight, so a mid-round-trip toggle cannot orphan the staged order', async () => {
+    // The blocker the adversarial review found: staged/conditional are only set when a request RESOLVES, so if the
+    // mode could flip during the in-flight window, the arm's result would land in the conditional branch — the
+    // staged order rendering with no Send/Cancel and no way back. The checkbox must lock on `pending` too.
+    let release: (value: Awaited<ReturnType<typeof armOrder>>) => void = () => {};
+    arm.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    await renderTicket();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /arm/i }));
+    });
+
+    expect(
+      (screen.getByRole('checkbox', { name: /send when conditions met/i }) as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      release(staged());
+    });
+  });
+
+  it('locks the mode while a conditional create is in flight, so no immediate order stacks on it', async () => {
+    // The reverse of the same blocker: untick mid-create and the create's result would land with the Arm button
+    // live over a pending conditional — an immediate order on top of the on-trigger one, a genuine double entry.
+    let release: (value: Awaited<ReturnType<typeof createConditionalOrder>>) => void = () => {};
+    createConditional.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    await renderTicket();
+    await armTheTrigger('5010');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /send on trigger/i }));
+    });
+
+    expect(
+      (screen.getByRole('checkbox', { name: /send when conditions met/i }) as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      release(pendingConditional());
+    });
+  });
+
+  it('will not send a non-numeric cancel band — it fails closed rather than silently dropping it', async () => {
+    // A NaN cancel band would JSON-serialize to null, silently discarding the operator's stale-cancel intent. The
+    // create control stays disabled until the band is a real number or cleared, so it is never lost in flight.
+    await renderTicket();
+    await armTheTrigger('5010');
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/cancel band/i), { target: { value: '49o0' } });
+    });
+
+    expect(
+      (screen.getByRole('button', { name: /send on trigger/i }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    // Clearing the bad value re-enables the create — the trigger itself is still fireable.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/cancel band/i), { target: { value: '' } });
+    });
+    expect(
+      (screen.getByRole('button', { name: /send on trigger/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 });

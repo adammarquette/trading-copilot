@@ -1,20 +1,28 @@
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
+import Checkbox from '@mui/material/Checkbox';
+import FormControlLabel from '@mui/material/FormControlLabel';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useCallback, useRef, useState } from 'react';
 
 import {
+  ConditionalCrossDirection,
+  type ConditionalOrderResponse,
+  type CreateConditionalOrderRequest,
   OrderType,
   SELECTABLE_ORDER_TYPES,
   type SendOrderRequest,
   type StagedOrderResponse,
   armOrder,
   cancelOrder,
+  createConditionalOrder,
   takeStagedOrder,
 } from '../api/orders';
+import { ConditionalPending } from './ConditionalPending';
+import { SELECTABLE_DIRECTIONS, directionLabel, isTriggerFireable } from './conditional';
 import { GateDecisionPanel } from './GateDecisionPanel';
 import { describeSizing } from './gateDecision';
 
@@ -58,6 +66,24 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
   const [refusal, setRefusal] = useState<string | null>(null);
   const [type, setType] = useState<OrderType>(proposal.type);
   const [pending, setPending] = useState(false);
+
+  // "Send when conditions met" (gh#655, R-11 / R-12): the opt-in on-trigger mode. Off by default, so the common
+  // path stays the three-step arm → review → send. The trigger is drafted as text and parsed on submit; the
+  // direction defaults to a breakout (rises to), and the cancel band / expiry are optional.
+  const [whenConditionsMet, setWhenConditionsMet] = useState(false);
+  const [conditional, setConditional] = useState<ConditionalOrderResponse | null>(null);
+  const [triggerDraft, setTriggerDraft] = useState('');
+  const [direction, setDirection] = useState<ConditionalCrossDirection>(
+    ConditionalCrossDirection.RisesTo,
+  );
+  const [expiryDraft, setExpiryDraft] = useState('');
+  const [cancelDraft, setCancelDraft] = useState('');
+  const triggerPrice = Number(triggerDraft);
+  // A blank cancel band is fine — it is optional. A non-blank one that is not a finite number is NOT: `Number('5,0')`
+  // is `NaN`, which `JSON.stringify` serializes to `null`, silently discarding the operator's stale-cancel intent
+  // with no error. Fail closed instead — the create control stays disabled until it is a real number or cleared.
+  const cancelBandValid = cancelDraft.trim() === '' || Number.isFinite(Number(cancelDraft));
+  const canCreateConditional = isTriggerFireable(triggerPrice, direction) && cancelBandValid;
   /**
    * The re-entrancy guard, a REF rather than the `pending` state above. State updates are not applied until the
    * next render, so two clicks dispatched in the same tick would both read the old value and both fire; a ref is
@@ -83,11 +109,21 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
     setPending(false);
   }, []);
 
+  // Switching modes clears any stale alert, so a prior "Sent …" success or a refusal from the other flow never
+  // lingers beside the mode the operator just moved to. Only reachable pre-flight — the toggle is locked while a
+  // request is in flight and once either flow has produced a staged order or a pending conditional.
+  const handleToggleMode = useCallback((checked: boolean) => {
+    setWhenConditionsMet(checked);
+    setRefusal(null);
+    setSent(null);
+  }, []);
+
   const handleArm = useCallback(() => {
     if (!begin()) {
       return; // a second arm would stage a SECOND order and orphan whichever row resolved first
     }
     setRefusal(null);
+    setSent(null);
     const { accountId, ...order } = proposal;
     void armOrder(accountId, { ...order, type })
       .then((result) => {
@@ -130,6 +166,51 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
       .finally(finish);
   }, [begin, finish, staged]);
 
+  const handleCreateConditional = useCallback(() => {
+    // Fail closed on an unfireable trigger or an invalid cancel band even though the control is disabled for them —
+    // a conditional that could never fire would rest forever, and a NaN cancel band would silently serialize to null.
+    if (!isTriggerFireable(triggerPrice, direction) || !cancelBandValid) {
+      return;
+    }
+    const { accountId, ...order } = proposal;
+    // Build the request BEFORE begin(). Every conversion here is synchronous, and a throw (an Invalid Date from a
+    // malformed expiry) must happen before the re-entrancy guard is set — otherwise `finish` never runs and the
+    // ticket wedges disabled. begin() is the last thing before the transmit-nothing round-trip.
+    const request: CreateConditionalOrderRequest = {
+      order: { ...order, type },
+      triggerPrice,
+      triggerDirection: direction,
+      cancelDrift: cancelDraft.trim() === '' ? undefined : Number(cancelDraft),
+      expiresAt: expiryDraft.trim() === '' ? undefined : new Date(expiryDraft).toISOString(),
+    };
+    if (!begin()) {
+      return; // never a second pending conditional for the same proposal
+    }
+    setRefusal(null);
+    setSent(null);
+    void createConditionalOrder(accountId, request)
+      .then((result) => {
+        if (!result.ok) {
+          // A pre-gate refusal (mode / mismatch / wrong-side) means nothing coherent was held — show it, do not
+          // pretend a conditional is pending.
+          setRefusal(refusalText(result));
+          return;
+        }
+        setConditional(result.data);
+      })
+      .finally(finish);
+  }, [
+    begin,
+    finish,
+    proposal,
+    type,
+    triggerPrice,
+    direction,
+    cancelBandValid,
+    cancelDraft,
+    expiryDraft,
+  ]);
+
   return (
     <Box
       data-testid="order-ticket"
@@ -152,7 +233,7 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
         value={type}
         onChange={(event) => setType(Number(event.target.value) as OrderType)}
         slotProps={{ select: { native: true } }}
-        disabled={staged !== null}
+        disabled={pending || staged !== null || conditional !== null}
       >
         {SELECTABLE_ORDER_TYPES.map((selectable) => (
           <option key={selectable} value={selectable}>
@@ -160,6 +241,64 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
           </option>
         ))}
       </TextField>
+
+      {/* The opt-in on-trigger mode (R-11 / R-12). Locked while a request is in flight AND once either flow has
+          produced a staged order or a created conditional — so a mid-round-trip toggle cannot land an arm's result
+          in the conditional branch (orphaning the staged row) or an immediate order on top of a pending conditional. */}
+      <FormControlLabel
+        control={
+          <Checkbox
+            size="small"
+            checked={whenConditionsMet}
+            onChange={(event) => handleToggleMode(event.target.checked)}
+            disabled={pending || staged !== null || conditional !== null}
+          />
+        }
+        label="Send when conditions met"
+      />
+
+      {whenConditionsMet && conditional === null ? (
+        <>
+          <TextField
+            size="small"
+            label="Trigger price"
+            value={triggerDraft}
+            onChange={(event) => setTriggerDraft(event.target.value)}
+            inputMode="decimal"
+          />
+          <TextField
+            select
+            size="small"
+            label="Direction"
+            value={direction}
+            onChange={(event) =>
+              setDirection(Number(event.target.value) as ConditionalCrossDirection)
+            }
+            slotProps={{ select: { native: true } }}
+          >
+            {SELECTABLE_DIRECTIONS.map((selectable) => (
+              <option key={selectable} value={selectable}>
+                {directionLabel(selectable)}
+              </option>
+            ))}
+          </TextField>
+          <TextField
+            size="small"
+            type="datetime-local"
+            label="Expiry (optional)"
+            value={expiryDraft}
+            onChange={(event) => setExpiryDraft(event.target.value)}
+            slotProps={{ inputLabel: { shrink: true } }}
+          />
+          <TextField
+            size="small"
+            label="Cancel band (optional)"
+            value={cancelDraft}
+            onChange={(event) => setCancelDraft(event.target.value)}
+            inputMode="decimal"
+          />
+        </>
+      ) : null}
 
       {staged !== null ? (
         <GateDecisionPanel
@@ -173,11 +312,23 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
         />
       ) : null}
 
+      {conditional !== null ? <ConditionalPending conditional={conditional} /> : null}
+
       {refusal !== null ? <Alert severity="error">{refusal}</Alert> : null}
       {sent !== null ? <Alert severity="success">{sent}</Alert> : null}
 
       <Stack direction="row" spacing={1}>
-        {staged === null ? (
+        {whenConditionsMet ? (
+          conditional === null ? (
+            <Button
+              variant="contained"
+              onClick={handleCreateConditional}
+              disabled={pending || !canCreateConditional}
+            >
+              Send on trigger
+            </Button>
+          ) : null
+        ) : staged === null ? (
           <Button variant="contained" onClick={handleArm} disabled={pending}>
             Arm
           </Button>
