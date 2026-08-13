@@ -380,6 +380,15 @@ and would have deadlocked every merge if enabled — was deleted at the same tim
   the web UI** and is not done by this repo's code. Until it is, a red `build image` is *visible* on the PR but
   does not *block* the merge. Add it, and add it to `protect-staging` / `protect-main` alongside their existing
   sets, to make the gate binding.
+- **`submodule-guard` CAN and SHOULD be required — on `protect-develop` ONLY** (gh#774). It fails a PR that
+  moves an `external/**` pin without declaring it, and always fails a backward move — the exact failure PR #690
+  slipped through, silently reverting a merged fix for five days. It is guarded
+  `if: github.event_name == 'pull_request' && github.base_ref == 'develop'`, so it **only runs on PRs into
+  `develop`** (feature work lands there; a promotion PR re-carries an already-vetted bump). That scoping is
+  exactly why it must **not** be added to `protect-staging` / `protect-main`: it is skipped on their PRs, and a
+  required check that never runs deadlocks the merge — the same trap as `stale-base` above.
+  **Maintainer action, not yet applied:** add `submodule-guard` to `protect-develop`'s required set in the web
+  UI. Until it is, a red guard is *visible* on the PR but does not *block* the merge.
 ### Combining-PR protection on `develop` — `strict`, because the merge queue is unavailable (gh#357, gh#575)
 
 > **The merge queue cannot be enabled on this repository.** Adding the `merge_queue` rule to `protect-develop`
