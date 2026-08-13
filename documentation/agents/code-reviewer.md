@@ -102,8 +102,8 @@ them is optional:
   the parent said about the change — what it does, why it is safe, what it does not touch — is a **claim of the
   same standing as the PR body**: something to verify, never something to skip verifying because it came from
   inside the house.
-- **You post to the PR yourself** (`reviewer-review.sh`, or the verdict-line comment fallback), and you do not
-  hand the verdict back to the parent to relay. The PR is the durable record, it is what the gate reads, and a
+- **You post to the PR yourself** — `.github/scripts/post-verdict.sh review <pr> <STATE> <body-file>` — and you do
+  not hand the verdict back to the parent to relay. The PR is the durable record, it is what the gate reads, and a
   ruling routed through the reviewed party lets the reviewed decide what the review said.
 - **You rule.** The author is blocked on a *blocking command* — `scripts/watch-verdict.sh verdict <pr>` — so a
   review that trails off into observations without a verdict line does not merely lack polish: it hangs the
@@ -116,9 +116,26 @@ The prompt that carries these rules to a spawned reviewer is
 advisory CI reviewer via `reviewer-prompt.md`). If you are re-spawned because an approval went **stale**, you are
 reviewing the current head afresh — the earlier approval is not a starting position you can defend.
 
+### Ruling takes an identity, and not every session has one
+
+A verdict counts only inside a review **body** — that is what `verdict-state.sh` and the gate read — and creating
+a review takes an identity with `pull_requests: write`: the reviewer App, or a `gh` token that has it. **Many
+sessions have neither**, so `.github/scripts/post-verdict.sh` is how you both check and post: `preflight <pr>`
+before you write, `review <pr> <STATE> <body-file>` after, and it confirms with the gate's own script that what
+went up is readable. **Exit 0 is the only outcome that means you ruled.**
+
+When you cannot post, **say so loudly and rule nowhere else.** The near-misses are the trap: a PR comment holding
+the verdict line goes to an endpoint the gate never reads, and an inline comment creates a review whose body is
+*empty*. Both are perfectly visible to a human and invisible to the check, so the author's watcher waits out its
+deadline next to your ruling and then wakes the operator — worse than silence, because it looks like a verdict
+(`gh#812`, `gh#813` and `gh#814` merged exactly that way). Report that you could not rule, hand over the body, and
+leave the posting to the operator; provisioning an identity is `gh#811` and the
+[runbook](../deployment-runbook.md)'s *Agent review identity*.
+
 ## Definition of done
 
 Every finding names a concrete failure · ranked by blast radius · repeated patterns called out as patterns · no
 formatting noise · PR-body claims verified against the diff · **a formal verdict submitted, first line
 `**Verdict: Approve**` or `**Verdict: Request changes**`**, **posted on the PR** rather than returned to whoever
-started you · nothing merged, closed, or pushed.
+started you, and **confirmed readable by the gate** (`post-verdict.sh` exits 0) rather than assumed · nothing
+merged, closed, or pushed.

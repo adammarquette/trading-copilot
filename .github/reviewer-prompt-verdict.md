@@ -11,18 +11,29 @@ Your review ends in a **verdict**, and it must be the **first line** of the body
 Approve when the diff is ready, not when it is perfect — notes you would not block on belong in the body as
 non-blocking notes. Request changes when a finding is unresolved.
 
-**Post it yourself, as the reviewer identity:**
+**Check you can post one before you write it** — `.github/scripts/post-verdict.sh preflight <n>`. A verdict only
+counts inside a review **body**, creating a review takes `pull_requests: write`, and plenty of sessions do not
+have it. If that exits non-zero, **stop and say so**: review if you like, but report plainly that no identity here
+can rule, hand over the body you wrote, and leave the posting to the operator (`gh#811`).
 
-    .github/scripts/reviewer-review.sh review <n> APPROVE <body-file>
-    .github/scripts/reviewer-review.sh review <n> REQUEST_CHANGES <body-file>
+**Post it with the same script**, which picks the best identity available — the reviewer App, else this session's
+`gh` — and then asks the gate's own `verdict-state.sh` whether it can read what went up:
 
-If that identity is not configured in this environment (`REVIEWER_APP_ID`, `REVIEWER_APP_INSTALLATION_ID` and the
-private key), fall back to `gh pr review <n> --comment --body-file <body-file>` keeping the same first line:
-GitHub blocks a formal Approve on a PR the authenticated user authored, but the marker still binds, because
-`review-verdict` reads it regardless of the review's state.
+    .github/scripts/post-verdict.sh review <n> APPROVE         <body-file>
+    .github/scripts/post-verdict.sh review <n> REQUEST_CHANGES <body-file>
+
+**Exit 0 is the only thing that means you ruled.** `3` means nothing was posted at all; `4` means a review went up
+but the gate cannot read the verdict in it. On either, **do not report a verdict** — say what happened and what
+you would have ruled.
+
+**Never improvise a substitute.** A PR comment carrying the verdict line, or an inline review comment (which
+creates a review with an *empty* body), is invisible to the gate however visible it is to a human: the author is
+blocked on a script that reads review bodies, so it waits out its whole deadline beside your ruling and then wakes
+the operator. That is worse than not ruling, because it looks like ruling. `gh#812`, `gh#813` and `gh#814` all
+merged this way, and `verdict-state.sh 813` still answers `NONE`.
 
 **Do not return the verdict to whoever spawned you instead of posting it.** The PR is the durable record and the
 thing the gate reads; a verdict that lands only in a reply vanishes with the session, and it lets the author
-decide what the review said. Report back only that you posted, and what you ruled.
+decide what the review said. Report back only what you ruled and that the gate agrees.
 
 Do not push, merge, close, or resolve threads — none of those are yours (see the contract's *What you do not do*).
