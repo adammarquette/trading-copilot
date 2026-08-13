@@ -1250,20 +1250,39 @@ public class StagedOrderEndpointsTests
     }
 
     [Fact]
-    public async Task CancelConditional_ShouldSerializeUnderTheAccountEntryLock_AgainstTheFireWatcher()
+    public async Task CancelConditional_ShouldFlipTheStatusInsideTheAccountEntryLock_NotBeforeIt()
     {
         // The race the lock closes (gh#589): without it a cancel could read Pending, the fire watcher could commit
         // Pending -> Firing and place a live order under the same account lock, and the cancel would then write
-        // Cancelled over a conditional that is actually live at the venue. So the flip runs INSIDE the account entry
-        // lock, keyed on the conditional's account -- the same lock the watcher's fire acquires.
+        // Cancelled over a conditional that is actually live at the venue. So the flip must run INSIDE the account
+        // entry lock, keyed on the conditional's account -- the same lock the watcher's fire acquires. This observes
+        // the DB at lock-entry and asserts the row is STILL Pending then: the Pending -> Cancelled write happens
+        // inside the callback, so an implementation that flipped BEFORE taking the guard would fail here (a
+        // wiring-only assertion that RunExclusiveAsync was called would pass it, which is why this reads state).
         Guid accountId = await SeedAccountAsync();
         Guid conditionalId = await SeedFiringConditionalAsync(accountId, ConditionalStatus.Pending);
 
-        IAccountEntryGuard guard = PassthroughGuard();
+        ConditionalStatus? statusAtLockEntry = null;
+        IAccountEntryGuard guard = A.Fake<IAccountEntryGuard>();
+        A.CallTo(() => guard.RunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .ReturnsLazily(async (TradingCopilotDbContext _, Guid _, Func<Task<IResult>> body, CancellationToken _) =>
+            {
+                await using (TradingCopilotDbContext observe = Context())
+                {
+                    statusAtLockEntry = (await observe.ConditionalOrders.SingleAsync(c => c.Id == conditionalId)).Status;
+                }
+
+                return await body();
+            });
+
         await using TradingCopilotDbContext context = Context();
-        await OrderEndpoints.CancelConditionalOrderAsync(
+        IResult result = await OrderEndpoints.CancelConditionalOrderAsync(
             conditionalId, context, guard, NullLoggerFactory.Instance, CancellationToken.None);
 
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        statusAtLockEntry.Should().Be(
+            ConditionalStatus.Pending, "the Pending -> Cancelled flip happens inside the lock, not before the guard is entered");
         A.CallTo(() => guard.RunExclusiveAsync<IResult>(
                 A<TradingCopilotDbContext>._, accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
