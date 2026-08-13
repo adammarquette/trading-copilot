@@ -209,8 +209,8 @@ jobs:
       pull-requests: read
       contents: read
     steps:
-      # Real history, because the verdict test below compares the PR's own contribution at two different
-      # commits and has to resolve each against its merge base. `submodules` is deliberately OFF: this job
+      # Real history, because verdict-state.sh compares the PR's own contribution at two different commits
+      # and has to resolve each against its merge base. `submodules` is deliberately OFF: this job
       # compiles nothing, so cloning `external/` would be pure cost.
       - uses: actions/checkout@v4
         with:
@@ -229,114 +229,48 @@ jobs:
         run: |
           set -uo pipefail
 
-          # The target branch moves under a long-lived PR; the merge bases below are meaningless without it.
-          git fetch --quiet --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF" || true
-
-          # The PR's OWN contribution at $1: everything that commit adds on top of wherever it forked from
-          # the target branch, hashed with `patch-id --stable` so pure line-number drift is not a change.
-          # Prints nothing when the commit cannot be resolved -- a rebase can orphan the approved one -- and
-          # the caller then falls back rather than guessing.
-          pr_patch_id() {
-            # `local` matters: the review-reading loop below also uses `sha`.
-            local sha="$1" mb
-            git cat-file -e "${sha}^{commit}" 2>/dev/null \
-              || git fetch --quiet --no-tags origin "$sha" 2>/dev/null \
-              || return 0
-            mb=$(git merge-base "origin/$BASE_REF" "$sha" 2>/dev/null) || return 0
-            git diff "$mb" "$sha" 2>/dev/null | git patch-id --stable 2>/dev/null | cut -d' ' -f1
-          }
-
           deadline=$(( $(date +%s) + DEADLINE_MINUTES * 60 ))
           attempt=0
 
           while :; do
           attempt=$(( attempt + 1 ))
 
-          # state | commit reviewed | first line of the body. Reviews come back oldest-first, so the last
-          # row carrying a verdict is the one in force.
-          verdict=""; vsha=""
-          while IFS=$'\t' read -r state sha first; do
-            # Lenient by design: markdown emphasis, casing and a trailing period are all things a reviewer
-            # writes without thinking. A gate that reds on "**Verdict:** Approve." teaches people to
-            # distrust it, and a distrusted gate gets worked around rather than fixed.
-            norm=$(printf '%s' "$first" | tr -d '\r*_`' | tr '[:upper:]' '[:lower:]' \
-                     | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//; s/\.$//')
-            # Request-changes is tested FIRST: "verdict: request changes" must never be mistaken for an
-            # approval by a looser pattern. Trailing text after the verdict word is allowed -- reviewers
-            # write "Verdict: Approve -- nice catch on the lock" and mean it.
-            case "$norm" in
-              "verdict: request changes"*|"verdict: requests changes"*|"verdict: changes requested"*)
-                verdict="CHANGES-REQUESTED"; vsha="$sha" ;;
-              "verdict: approve"*)
-                verdict="APPROVED";          vsha="$sha" ;;
-              *)
-                # A native review state still counts where the identity allows one.
-                [ "$state" = "APPROVED" ]          && { verdict="APPROVED";          vsha="$sha"; }
-                [ "$state" = "CHANGES_REQUESTED" ] && { verdict="CHANGES-REQUESTED"; vsha="$sha"; }
-                ;;
-            esac
-          done < <(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-                     --jq '.[] | [.state, .commit_id, ((.body // "") | split("\n")[0])] | @tsv')
+          # THE RULING IS NOT THIS JOB'S -- it belongs to .github/scripts/verdict-state.sh, which owns the
+          # lenient first-line parsing, the contribution comparison that lets an approval survive a sync
+          # merge, and the orphaned-rebase fallback. scripts/watch-verdict.sh calls the SAME script, because
+          # that is the author agent's side of this same wait (gh#815): two copies of the logic would drift
+          # into the gate and the author disagreeing about whether a PR is approved. This job owns the
+          # WAITING and the wording; the head and base come from the event payload, so the ruling is about
+          # the commit this run actually tested rather than whatever is at the tip now.
+          verdict=""; vsha=""; rounds=0; vid=""
+          detail="the verdict could not be read (transient API failure?)"
+          if line=$(./.github/scripts/verdict-state.sh "$PR" \
+                      --head "$HEAD_SHA" --base "$BASE_REF" --repo "$REPO"); then
+            # DETAIL is the last field precisely so this `read` cannot split it (verdict-state.sh's header).
+            IFS=$'\t' read -r verdict vsha rounds vid detail <<<"$line"
+          else
+            echo "::warning::verdict-state.sh could not answer -- treating this poll as 'no verdict yet'."
+          fi
 
           # CHANGES-REQUESTED ends the wait immediately. Polling on it would burn 30 minutes waiting for
           # something only a PUSH can resolve -- and a push starts a fresh run anyway.
           if [ "$verdict" = "CHANGES-REQUESTED" ]; then
-            echo "::error::Review requested changes (on ${vsha:0:7}). Address the feedback, push, and ask" \
-                 "for re-review -- the task is not done until the verdict is Approve and checks are green."
+            echo "::error::Review requested changes (round $rounds):" \
+                 "https://github.com/$REPO/pull/$PR#pullrequestreview-$vid --" \
+                 "on ${vsha:0:7}. Address the feedback, push, and ask for re-review; the task is not done until" \
+                 "the verdict is Approve and checks are green. The author agent waits on this with" \
+                 "scripts/watch-verdict.sh (engineering §10)."
             exit 1
           fi
 
           if [ "$verdict" = "APPROVED" ]; then
-            if [ "$vsha" = "$HEAD_SHA" ]; then
-              echo "Approved at head ${HEAD_SHA:0:7}."
-              exit 0
-            fi
-
-            # An approval binds to WHAT WAS APPROVED. But `protect-develop` is strict, so every merge into
-            # $BASE_REF forces open PRs to update, and pinning to the SHA alone would invalidate every
-            # approval on every unrelated merge.
-            #
-            # COMPARING TREES DOES NOT FIX THAT, which is what the first cut got wrong: a sync merge always
-            # changes the tree, so the escape hatch never fired and gh#782, gh#787 and gh#791 each sat
-            # through the full 30-minute wait on an approval that was still perfectly good.
-            #
-            # The question is not "did the tree change" but "did the PR's OWN CONTRIBUTION change". Diff each
-            # commit against its own merge base and compare patch ids: a sync merge leaves that patch
-            # identical, while anything the author actually decided changes it. That deliberately INCLUDES a
-            # conflict RESOLUTION made while merging -- resolving a conflict is a human edit the reviewer
-            # never saw, so it costs the approval exactly as a fresh commit would.
-            approved_patch=$(pr_patch_id "$vsha")
-            head_patch=$(pr_patch_id "$HEAD_SHA")
-
-            if [ -n "$head_patch" ] && [ "$head_patch" = "$approved_patch" ]; then
-              echo "Approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} carries the identical contribution" \
-                   "(patch ${head_patch:0:12}) -- the only change since is a merge from $BASE_REF."
-              exit 0
-            fi
-
-            # Fallback for the one case git cannot answer locally: a rebase can orphan the approved commit so
-            # it is fetchable from no ref, while the API still knows its tree. An identical tree there is the
-            # same proof of "history moved, content did not".
-            if [ -z "$approved_patch" ]; then
-              head_tree=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq .commit.tree.sha 2>/dev/null || echo "")
-              rev_tree=$(gh api "repos/$REPO/commits/$vsha"     --jq .commit.tree.sha 2>/dev/null || echo "")
-              if [ -n "$head_tree" ] && [ "$head_tree" = "$rev_tree" ]; then
-                echo "Approved at ${vsha:0:7}; head ${HEAD_SHA:0:7} is a rebase with an identical tree."
-                exit 0
-              fi
-            fi
-
-            # A stale approval is not a rejection -- it is "not yet re-reviewed", so it KEEPS WAITING.
-            # gh#782 is the case: an approval landed, the branch was then updated for `strict`, and the
-            # first cut failed instantly instead of giving the reviewer a chance to re-rule.
-            state="an approval on ${vsha:0:7} is stale (head ${HEAD_SHA:0:7}, the contribution changed)"
-          else
-            state="no verdict yet"
+            echo "${detail^}."
+            exit 0
           fi
 
           now=$(date +%s)
           if [ "$now" -ge "$deadline" ]; then
-            echo "::error::Timed out after ${DEADLINE_MINUTES}m waiting for a review verdict -- $state." \
+            echo "::error::Timed out after ${DEADLINE_MINUTES}m waiting for a review verdict -- $detail." \
                  "The reviewer records one as the FIRST LINE of a review body:" \
                  "'**Verdict: Approve**' or '**Verdict: Request changes**'" \
                  "(documentation/agents/code-reviewer.md). Re-run this job once the review is in."
@@ -346,7 +280,7 @@ jobs:
           # One line per poll is 30 lines over the whole wait -- readable, and it makes "how long did the
           # reviewer take" answerable from the log afterwards.
           printf 'attempt %d: %s -- waiting %ss (%dm left)\n' \
-            "$attempt" "$state" "$POLL_SECONDS" "$(( (deadline - now) / 60 ))"
+            "$attempt" "$detail" "$POLL_SECONDS" "$(( (deadline - now) / 60 ))"
           sleep "$POLL_SECONDS"
           done
 
