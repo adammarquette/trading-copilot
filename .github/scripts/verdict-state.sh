@@ -127,12 +127,18 @@ pr_patch_id() {
 TRUSTED_ASSOCIATIONS="${VERDICT_TRUSTED_ASSOCIATIONS:-OWNER MEMBER COLLABORATOR}"
 TRUSTED_LOGINS="${VERDICT_TRUSTED_LOGINS:-trading-copilot-reviewer[bot]}"
 
-# Both lists are matched WHOLE-WORD against a space-padded haystack, so `OWNER` cannot match `NONE`
-# and a login cannot match a longer one that contains it.
+# Both lists are compared as WHOLE TOKENS with string equality, so `OWNER` cannot match `NONE` and a
+# login cannot match a longer one containing it.
+#
+# `=` rather than a `case` glob, deliberately. The glob version worked -- quoting the needle inside the
+# pattern forces a literal match, so `trading-copilot-reviewer[bot]` compared as itself rather than as a
+# character class -- but a reviewer of PR #818's follow-up read it as broken, and was right to: the
+# safety of every App login here would have rested on one pair of quotes surviving every future edit.
+# An `=` comparison cannot be broken that way by anyone who has not noticed the problem.
 is_trusted() {
-  local assoc="$1" login="$2"
-  case " $TRUSTED_ASSOCIATIONS " in *" $assoc "*) return 0 ;; esac
-  case " $TRUSTED_LOGINS "       in *" $login "*) return 0 ;; esac
+  local assoc="$1" login="$2" t
+  for t in $TRUSTED_ASSOCIATIONS; do [ "$assoc" = "$t" ] && return 0; done
+  for t in $TRUSTED_LOGINS;       do [ "$login" = "$t" ] && return 0; done
   return 1
 }
 
