@@ -303,6 +303,17 @@ describe('repriceOrder', () => {
     expect(body).toEqual({ workingStopPrice: 4996 });
   });
 
+  it('carries the reference price on an entry move — the fat-finger band re-measures against it', async () => {
+    // An entry reprice re-gates (R-16), and the server has no quote read on this path, so the caller supplies the
+    // current market price. It must travel with the entry, or the server refuses the move for want of it.
+    const fetchMock = stubFetch(() => Promise.resolve(response(200, { orderId: 'o1' })));
+
+    await repriceOrder('o1', { entryPrice: 5010, referencePrice: 5008 });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as Record<string, unknown>;
+    expect(body).toEqual({ entryPrice: 5010, referencePrice: 5008 });
+  });
+
   it('surfaces a refusal rather than reporting a move', async () => {
     // A reprice CAN add risk (a wider stop, an entry likelier to fill), so it runs the full send ladder and is
     // re-gated. A refusal is the gate's answer and must reach the operator.

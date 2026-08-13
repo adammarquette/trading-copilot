@@ -6,6 +6,7 @@ import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
+import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -16,8 +17,31 @@ import {
   getPositions,
   getRestingOrders,
 } from '../api/blotter';
-import { cancelOrder } from '../api/orders';
+import { cancelOrder, repriceOrder } from '../api/orders';
 import { useOptionalRealtime } from '../realtime/RealtimeProvider';
+
+/**
+ * Reads an operator-typed price strictly. A reprice reaches a risk calculation (R-16), so a mistyped price must
+ * not be read leniently — `Number.parseFloat('52ab')` is `52`, and that is the one input here that must not slip.
+ */
+function parsePrice(text: string): number | null {
+  const trimmed = text.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(trimmed)) {
+    return null;
+  }
+  const value = Number(trimmed);
+  return value > 0 ? value : null;
+}
+
+function refusalText(result: {
+  readonly kind: string;
+  readonly reason?: string;
+  readonly error?: string;
+}): string {
+  return result.kind === 'refused'
+    ? (result.reason ?? 'Refused.')
+    : (result.error ?? 'The request failed.');
+}
 
 /**
  * The live blotter (gh#656, R-11 / R-3, ADR-0013) — positions and resting orders from **venue truth**.
@@ -46,11 +70,19 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   const [orderView, setOrderView] = useState<VenueView<BlotterRestingOrder> | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [confirming, setConfirming] = useState<BlotterRestingOrder | null>(null);
+  // The reprice sheet: the order being repriced, the operator's new entry, and the current market price the R-16
+  // fat-finger band re-measures against (there is no server-side quote read, so the operator supplies it — the same
+  // posture the suggestion card takes). A refusal from the re-gate stays on the sheet rather than closing it.
+  const [repricing, setRepricing] = useState<BlotterRestingOrder | null>(null);
+  const [newEntryDraft, setNewEntryDraft] = useState('');
+  const [marketDraft, setMarketDraft] = useState('');
+  const [repriceRefusal, setRepriceRefusal] = useState<string | null>(null);
   const realtime = useOptionalRealtime();
   const mounted = useRef(true);
   const latest = useRef(0);
   /** Synchronous re-entrancy guard -- a `pending` state would not exclude two clicks in one tick. */
   const cancelling = useRef(false);
+  const repricingInFlight = useRef(false);
 
   useEffect(() => {
     mounted.current = true;
@@ -111,6 +143,55 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
         cancelling.current = false;
       });
   }, [confirming, load]);
+
+  const openReprice = useCallback((order: BlotterRestingOrder) => {
+    setRepricing(order);
+    setRepriceRefusal(null);
+    // Seed the new entry with the order's current resting price so the field is a nudge, not a blank; the market
+    // price stays empty — it must be a fresh operator observation, never defaulted (that would disable the R-16
+    // drift re-check, the exact mistake the suggestion card's reference input avoids).
+    setNewEntryDraft(String(order.limitPrice ?? order.stopPrice ?? ''));
+    setMarketDraft('');
+  }, []);
+
+  const closeReprice = useCallback(() => {
+    setRepricing(null);
+    setRepriceRefusal(null);
+  }, []);
+
+  const newEntry = parsePrice(newEntryDraft);
+  const market = parsePrice(marketDraft);
+  // An entry move re-gates and REQUIRES a reference price server-side (R-16), so the action stays disabled until
+  // both are real positive numbers -- fail closed rather than let the server refuse for a missing/mistyped field.
+  const canReprice = newEntry !== null && market !== null;
+
+  const confirmReprice = useCallback(() => {
+    if (repricing === null || repricing.orderId === null || repricingInFlight.current) {
+      return; // never a second reprice of the same order
+    }
+    if (newEntry === null || market === null) {
+      return; // fail closed on an unparseable price even though the control is disabled for it
+    }
+    repricingInFlight.current = true;
+    setRepriceRefusal(null);
+    const orderId = repricing.orderId;
+
+    void repriceOrder(orderId, { entryPrice: newEntry, referencePrice: market })
+      .then((result) => {
+        if (!result.ok) {
+          // The re-gate's answer (a breach, a fat-finger band) stays on the sheet -- the order did not move, and
+          // the operator needs the reason to decide, exactly as the order ticket keeps a refusal on screen.
+          setRepriceRefusal(refusalText(result));
+          return;
+        }
+        setRepricing(null);
+        // Re-read rather than assume the new price took: venue truth decides what is resting, not this click.
+        load();
+      })
+      .finally(() => {
+        repricingInFlight.current = false;
+      });
+  }, [repricing, newEntry, market, load]);
 
   const protectionOf = useCallback(
     (position: BlotterPosition): Protection => {
@@ -206,9 +287,14 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
                   bracket leg — manage via its position
                 </Typography>
               ) : (
-                <Button size="small" color="error" onClick={() => setConfirming(order)}>
-                  Cancel
-                </Button>
+                <>
+                  <Button size="small" onClick={() => openReprice(order)}>
+                    Reprice
+                  </Button>
+                  <Button size="small" color="error" onClick={() => setConfirming(order)}>
+                    Cancel
+                  </Button>
+                </>
               )}
             </Box>
           ))
@@ -238,6 +324,60 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
           <Button onClick={() => setConfirming(null)}>Keep it</Button>
           <Button color="error" variant="contained" onClick={confirmCancel}>
             Cancel this order
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={repricing !== null} onClose={closeReprice}>
+        <DialogTitle>Reprice this order?</DialogTitle>
+        <DialogContent>
+          {repricing !== null ? (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, pt: 0.5 }}>
+              {/* Names the SPECIFIC order and its current resting price, like the cancel dialog — the same blotter
+                  carries several at once, and repricing the wrong one is the same class of mistake. */}
+              <Typography variant="body2">
+                <strong>{repricing.contract}</strong> · {repricing.size} contract
+                {repricing.size === 1 ? '' : 's'} · now at{' '}
+                {repricing.limitPrice ?? repricing.stopPrice}
+              </Typography>
+              <TextField
+                size="small"
+                label="New entry price"
+                value={newEntryDraft}
+                onChange={(event) => setNewEntryDraft(event.target.value)}
+                slotProps={{
+                  htmlInput: { inputMode: 'decimal', 'data-testid': 'new-entry-price' },
+                }}
+              />
+              <TextField
+                size="small"
+                label="Market price now"
+                required
+                value={marketDraft}
+                onChange={(event) => setMarketDraft(event.target.value)}
+                slotProps={{
+                  htmlInput: { inputMode: 'decimal', 'data-testid': 'reprice-reference' },
+                }}
+                helperText="The move re-gates against this (R-16) — enter the price you can see; it is not fetched."
+              />
+              {/* The promise the modify sheet makes: the safety stop never moves here, so the R-5 floor holds, and
+                  a breach at the new terms is blocked or resized by the gate below the model — never a warning. */}
+              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                The safety stop is unchanged. The move is re-checked by the risk gate before the
+                venue sees it — a breach is blocked or resized, not just flagged.
+              </Typography>
+              {repriceRefusal !== null ? (
+                <Alert severity="error" data-testid="reprice-refusal">
+                  {repriceRefusal}
+                </Alert>
+              ) : null}
+            </Box>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeReprice}>Keep it</Button>
+          <Button variant="contained" onClick={confirmReprice} disabled={!canReprice}>
+            Reprice this order
           </Button>
         </DialogActions>
       </Dialog>
