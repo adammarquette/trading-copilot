@@ -562,8 +562,9 @@ public class TradeFifoPairingIntegrationTests : IClassFixture<TradeFifoPairingPo
     // is to write nothing, in EITHER order.
     //
     // Running BOTH orders is what makes this a guard rather than a coincidence, and it is what found gh#809: a single
-    // ordering would pass with and against the defect half the time. They are two named cases rather than one
-    // [Theory] because they no longer assert the same thing -- one is the guard, the other pins the gap.
+    // ordering would pass with and against the defect half the time. They stay two named cases rather than one
+    // [Theory] because each names a distinct Guid order of the tie; since gh#809 landed they assert the SAME outcome
+    // (no row), and together they are the regression guard proving the outcome cannot depend on Fill.Id order.
 
     [Fact]
     public async Task ProcessFlatAsync_ShouldWriteNoRow_WhenABuyAndASellShareTheExactExecutedAtInsideTheCycle()
@@ -587,39 +588,27 @@ public class TradeFifoPairingIntegrationTests : IClassFixture<TradeFifoPairingPo
     }
 
     [Fact]
-    public async Task ProcessFlatAsync_JournalsAGuidOrderedRow_WhenTheSameInstantTieFallsOnTheCycleBoundary()
+    public async Task ProcessFlatAsync_ShouldWriteNoRow_WhenABuyAndASellShareTheExactExecutedAtOnTheCycleBoundary()
     {
-        // DEFECT gh#809 (work:code, safety-critical): the identical executions, with only the tied pair's Guids
-        // swapped, are NOT refused. With the tied SELL sorting first, TradeJournalService.CurrentCycleStart walks the
-        // fills in the same arbitrary (ExecutedAt, Id) order, sees exposure return to flat AT the tie, and slices the
-        // window there -- so the window TradeRoundTrip.TryCompose receives no longer contains the tie at all and its
-        // ambiguity gate never fires. The gate is real but runs one step too late: the boundary is guessed before it
-        // is consulted. ADR-0022 names exactly this case ("opposite-side fills tied at the BOUNDARY timestamp") as one
-        // that writes no row.
-        //
-        // Pins the OBSERVED behaviour per the QA contract's guard-discipline rule 2 -- documenting reality without
-        // blessing it, rather than leaving the suite red or skipping the case and losing the witness. When gh#809
-        // lands, these three assertions flip to `BeFalse()` / `BeEmpty()` (the sibling case above, verbatim) and this
-        // becomes gh#809's regression guard.
+        // gh#809 regression guard (was the pinned DEFECT case). The identical executions, with only the tied pair's
+        // Guids swapped so the tied SELL sorts first. Before the fix, TradeJournalService.CurrentCycleStart walked the
+        // fills in that arbitrary (ExecutedAt, Id) order, saw exposure return to flat AT the tie, and sliced the
+        // window there -- so the window TradeRoundTrip.TryCompose received no longer contained the tie and its
+        // ambiguity gate never fired; a guessed Buy 5010 -> 5020 (+50) row was journalled and its sibling below,
+        // seeded with the SAME executions, wrote nothing. The fix teaches the slicer not to cross a mixed-side
+        // same-instant tie, so the whole window reaches the gate and is refused -- the same outcome as the sibling,
+        // regardless of which Guid the venue minted first (ADR-0022: opposite-side fills tied at the BOUNDARY
+        // timestamp write no row). Assertions are now its sibling's, verbatim.
         Guid owner = Guid.NewGuid();
         Guid accountId = await SeedTiedWindowAsync(owner, venueKey: "7112", block: 12, sellSortsFirst: true);
 
         bool journalled = await JournalAsync(FlatAt("7112", At(2)));
 
-        journalled.Should().BeTrue(
-            "DEFECT gh#809 — OBSERVED, not intended: the tied sell's Guid sorting first makes CurrentCycleStart treat "
-            + "the tie as a return to flat, so the ambiguity never reaches the gate and a row is written");
-
-        List<Trade> written = await TradesAsync(accountId);
-
-        written.Should().ContainSingle(
-            "DEFECT gh#809 — the guessed boundary journals only the post-tie leg; the pre-tie cycle's realized P&L is "
-            + "dropped with no watermark and no later flat event that could re-derive it")
-            .Which.RealizedPnL.Should().Be(
-                50m,
-                "DEFECT gh#809 — this figure (buy 5010 → sell 5020, 10 points at a point value of 5) enters the R-4 / "
-                + "R-5 daily governor for no reason but which Guid the venue happened to mint first: the sibling case "
-                + "above seeds the SAME executions with the tied pair's Guids swapped and correctly writes nothing");
+        journalled.Should().BeFalse("an ambiguous window has no single right answer — refuse, never guess");
+        (await TradesAsync(accountId)).Should().BeEmpty(
+            "a row written here would carry a side, an entry and an exit chosen by nothing but Guid order, and its "
+            + "P&L would enter the daily governor with a sign that could just as easily have been the other one "
+            + "(R-4 / R-5)");
     }
 
     /// <summary>
