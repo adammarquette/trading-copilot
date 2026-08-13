@@ -158,37 +158,13 @@ public sealed class SuggestionDriftService
                 // REALTIME PUSH (gh#718): the Stale write has committed, so signal each owning operator that their
                 // suggestion greyed out -- per-owner (R-20, Clients.User), best-effort, AFTER the write. A hub fault
                 // must never fail or roll back the transition (it already committed inside MarkDriftedStaleAsync); the
-                // card surface reconciles against the REST read model regardless.
-                foreach (SuggestionTransition transition in transitioned)
-                {
-                    await NotifySafelyAsync(transition, SuggestionState.Stale, now, cancellationToken);
-                }
+                // card surface reconciles against the REST read model regardless. The best-effort policy is shared
+                // with the expire sweep so the two cannot drift apart (SuggestionRealtimePush).
+                await _notifier.PushTransitionsSafelyAsync(
+                    transitioned, SuggestionState.Stale, now, _logger, cancellationToken);
             }
         }
         return stale;
-    }
-
-    private async Task NotifySafelyAsync(
-        SuggestionTransition transition, SuggestionState state, DateTimeOffset now, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await _notifier.SuggestionChangedAsync(
-                transition.UserId,
-                new RealtimeSuggestion(transition.SuggestionId, state.ToString(), now),
-                cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception error)
-        {
-            _logger.LogError(
-                error,
-                "Realtime drift push for suggestion {SuggestionId} failed for owner {Owner}; the transition is committed regardless.",
-                transition.SuggestionId, transition.UserId);
-        }
     }
 
     // One resolved instrument: the neutral symbol its suggestions are keyed by, and the price-distance drift band.

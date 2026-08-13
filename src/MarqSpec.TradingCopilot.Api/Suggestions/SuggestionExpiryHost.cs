@@ -107,28 +107,10 @@ public sealed class SuggestionExpiryHost : BackgroundService
         CancellationToken cancellationToken)
     {
         IReadOnlyList<SuggestionTransition> expired = await expiry.ExpireDueAsync(now, cancellationToken);
-        foreach (SuggestionTransition transition in expired)
-        {
-            try
-            {
-                await notifier.SuggestionChangedAsync(
-                    transition.UserId,
-                    new RealtimeSuggestion(transition.SuggestionId, SuggestionState.ExpiredVoid.ToString(), now),
-                    cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception error)
-            {
-                logger.LogError(
-                    error,
-                    "Realtime expiry push for suggestion {SuggestionId} failed for owner {Owner}; the void is committed regardless.",
-                    transition.SuggestionId, transition.UserId);
-            }
-        }
-
+        // The best-effort push policy is shared with the drift watcher (SuggestionRealtimePush) so the two cannot
+        // drift apart: log, swallow a hub fault, keep going, and let a caller cancellation propagate.
+        await notifier.PushTransitionsSafelyAsync(
+            expired, SuggestionState.ExpiredVoid, now, logger, cancellationToken);
         return expired.Count;
     }
 }
