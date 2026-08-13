@@ -92,8 +92,12 @@ public class SuggestionThrottleIntegrationTests : IClassFixture<SuggestionThrott
     /// <summary>07:00 CT on 2026-07-29 (12:00Z) — squarely inside today's Central day, before the 10:00 CT scan.</summary>
     private static readonly DateTimeOffset _todayMidMorningUtc = new(2026, 7, 29, 12, 0, 0, TimeSpan.Zero);
 
-    /// <summary>11:00pm CT on 2026-07-28 (04:00Z on 07-29) — AFTER UTC midnight but BEFORE the Central open; yesterday's day.</summary>
-    private static readonly DateTimeOffset _suggestionYesterdayUtc = new(2026, 7, 29, 4, 0, 0, TimeSpan.Zero);
+    /// <summary>
+    /// 11:00pm CT on 2026-07-28 (04:00Z on 07-29) — AFTER UTC midnight but BEFORE the 05:00Z Central open, so the
+    /// PRIOR Central trading day. This is the ONE band that discriminates a Central-day reading from a plain UTC-date
+    /// one: a UTC-date reader buckets 04:00Z under 07-29 (today); the Central reader attributes it to yesterday.
+    /// </summary>
+    private static readonly DateTimeOffset _beforeCentralOpenUtc = new(2026, 7, 29, 4, 0, 0, TimeSpan.Zero);
 
     /// <summary>00:30 CT on 2026-07-29 (05:30Z) — just past the Central open; today's day.</summary>
     private static readonly DateTimeOffset _suggestionTodayUtc = new(2026, 7, 29, 5, 30, 0, TimeSpan.Zero);
@@ -112,10 +116,9 @@ public class SuggestionThrottleIntegrationTests : IClassFixture<SuggestionThrott
         TradingMode mode = await _fixture.AccountModeAsync(accountId);
 
         // A full-governor loss taken at 6pm CT last night. The venue's session already rolled to a new day at ~5pm CT,
-        // but the reader attributes by CENTRAL CALENDAR day, so this belongs to 2026-07-28 and must not deplete
-        // today's headroom (the gh#11 reader-vs-venue divergence, made explicit). It sits inside the reader's coarse
-        // two-day SQL floor, so real PG PULLS it and the in-memory Central-date match is what EXCLUDES it — precisely
-        // the step an in-memory provider skips.
+        // but the reader attributes by CENTRAL CALENDAR day, so this belongs to 2026-07-28 and must not deplete today's
+        // headroom (the gh#11 reader-vs-venue divergence #745 asks be made explicit). It sits inside the reader's coarse
+        // two-day SQL floor, so real PG PULLS it and the in-memory Central-date match is what EXCLUDES it.
         await SeedClosedTradeAsync(userId, accountId, mode, _lastEveningUtc, realized: -1_000m);
 
         await _fixture.SeedTriggerAsync(userId, accountId);
@@ -125,13 +128,45 @@ public class SuggestionThrottleIntegrationTests : IClassFixture<SuggestionThrott
         int fires = await _fixture.ScanAsync();
 
         fires.Should().Be(1, "the arming edge fired");
-        // Were last night's loss wrongly counted toward today (a UTC-date window, or no in-memory match), headroom
-        // would read 0, the throttle would SUPPRESS, and this would be 0 with a "Suggestions paused" advisory. A
-        // proposal is staged precisely because yesterday's loss stayed in yesterday's day.
+        // This instant is yesterday under BOTH a Central-day and a plain UTC-date reading (UTC date 07-28 ≠ 07-29), so
+        // it does NOT discriminate the two — the post-UTC-midnight case below does. What it uniquely guards is that the
+        // in-memory Central-date MATCH runs at all: drop it and the coarse two-day SQL floor alone would PULL this loss
+        // into today, read headroom 0, and SUPPRESS. A proposal is staged because the match kept yesterday in yesterday.
         (await _fixture.SuggestionCountAsync()).Should().Be(
             1, "an evening loss from the prior Central day leaves today's headroom full — the engine proposes normally");
         _factory.Llm.CallCount.Should().Be(1, "Full headroom wakes the reviewer");
         (await PausedAdvisoryCountAsync()).Should().Be(0, "nothing is suppressed, so the operator is never told suggestions paused");
+    }
+
+    [Fact]
+    public async Task Scan_ShouldProposeNormally_WhenALossFallsInThePostUtcMidnightPreCentralOpenBand()
+    {
+        await ResetAsync();
+        (Guid userId, Guid accountId) = await _fixture.SetupOperatorAndAccountAsync();
+        await DeclareRiskProfileAsync(accountId, governor: 1_000m);
+        TradingMode mode = await _fixture.AccountModeAsync(accountId);
+
+        // THE boundary discriminator (per the #812 review): 04:00Z on 2026-07-29 is after UTC midnight but before the
+        // 05:00Z Central open — 23:00 CT on 2026-07-28, the PRIOR Central trading day. A UTC-DATE reader buckets it
+        // under 07-29 (today) and would count this full-governor loss, driving headroom to 0 and SUPPRESSING the fire;
+        // the Central reader attributes it to yesterday and leaves today's headroom full. So a proposal staged here is
+        // the boundary prove-red the evening case above cannot give — that instant is yesterday under both readings,
+        // whereas this one parts them. (It also still guards the in-memory match: dropping it lets the two-day floor
+        // pull this loss into today and suppress.)
+        await SeedClosedTradeAsync(userId, accountId, mode, _beforeCentralOpenUtc, realized: -1_000m);
+
+        await _fixture.SeedTriggerAsync(userId, accountId);
+        await _fixture.SeedIndicatorAsync(75m);
+        _factory.Llm.ReturnsSuggestion("long", entry: 5_000m, stop: 4_990m, target: 5_020m);
+
+        int fires = await _fixture.ScanAsync();
+
+        fires.Should().Be(1, "the arming edge fired");
+        (await _fixture.SuggestionCountAsync()).Should().Be(
+            1, "a loss in the post-UTC-midnight, pre-Central-open band belongs to yesterday's Central day — today's headroom stays full");
+        _factory.Llm.CallCount.Should().Be(1, "Full headroom wakes the reviewer");
+        (await PausedAdvisoryCountAsync()).Should().Be(
+            0, "the Central reader keeps yesterday's loss in yesterday; a UTC-date reader would suppress here — that is the boundary");
     }
 
     [Fact]
@@ -142,10 +177,12 @@ public class SuggestionThrottleIntegrationTests : IClassFixture<SuggestionThrott
         await DeclareRiskProfileAsync(accountId, governor: 1_000m);
         TradingMode mode = await _fixture.AccountModeAsync(accountId);
 
-        // A loss closed one minute AFTER Central midnight belongs to today, and it exactly reaches the 1,000 governor
-        // (headroom fraction 0 → Suppressed, GovernorReached). Were the boundary drawn a few hours later (UTC
-        // midnight, 19:00 CT the prior day), this same instant would fall in yesterday and the fire would proceed —
-        // the mirror prove-red of the evening case above.
+        // A loss closed one minute after the Central open belongs to today, and it exactly reaches the 1,000 governor
+        // (headroom fraction 0 → Suppressed, GovernorReached). This instant is today under BOTH readings — a UTC day
+        // for 07-29 opens at 00:00Z (19:00 CT the prior day), EARLIER than the 05:00Z Central open, so it is NOT a
+        // UTC-vs-Central discriminator (the 04:00Z case above is that). It still guards inclusion just inside the
+        // Central open and that a timestamptz round-trip does not shift the instant back across it; its primary job
+        // here is the suppress-before-spend path below.
         await SeedClosedTradeAsync(userId, accountId, mode, _justAfterCentralMidnightUtc, realized: -1_000m);
 
         await _fixture.SeedTriggerAsync(userId, accountId);
@@ -212,10 +249,11 @@ public class SuggestionThrottleIntegrationTests : IClassFixture<SuggestionThrott
         TradingMode mode = await _fixture.AccountModeAsync(accountId);
         await SeedClosedTradeAsync(userId, accountId, mode, _todayMidMorningUtc, realized: -900m);
 
-        // One suggestion already issued on this account YESTERDAY (before today's Central open). It must NOT count
-        // against today's cap of 1 — were the count keyed on a coarser/UTC window it would, and today's fire would be
-        // dropped. A distinct instrument, so the supersede path never touches it.
-        await SeedSuggestionAsync(userId, accountId, mode, instrument: "NQ", _suggestionYesterdayUtc, confidence: 80);
+        // One suggestion already issued on this account YESTERDAY (04:00Z — after UTC midnight but before today's
+        // 05:00Z Central open). It must NOT count against today's cap of 1: keyed on a UTC-date window it WOULD (04:00Z
+        // buckets under 07-29), and today's fire would be wrongly dropped. A distinct instrument, so the supersede path
+        // never touches it.
+        await SeedSuggestionAsync(userId, accountId, mode, instrument: "NQ", _beforeCentralOpenUtc, confidence: 80);
 
         await _fixture.SeedTriggerAsync(userId, accountId);
         await _fixture.SeedIndicatorAsync(75m);
