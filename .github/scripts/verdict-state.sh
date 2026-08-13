@@ -13,7 +13,8 @@
 #   APPROVED           the verdict binds to the head under test (same commit, or the same contribution)
 #   CHANGES-REQUESTED  the last verdict asked for changes; only a push can resolve it
 #   STALE              an approval exists but the PR's own contribution has changed since it was given
-#   NONE               no verdict has been recorded yet (SHA and REVIEW_ID are empty)
+#   NONE               no verdict has been recorded yet (SHA and REVIEW_ID are empty). A ruling from a reviewer
+#                      without write standing reads as NONE and says so in DETAIL — see WHOSE VERDICT COUNTS.
 #
 # ROUNDS is how many changes-requested verdicts this PR has collected in total — the round counter
 # scripts/watch-verdict.sh escalates on. REVIEW_ID identifies the review that ruled, which is how that script
@@ -105,15 +106,56 @@ pr_patch_id() {
   git diff "$mb" "$sha" 2>/dev/null | git patch-id --stable 2>/dev/null | cut -d' ' -f1
 }
 
-# state | commit reviewed | first line of the body. Reviews come back oldest-first, so the last
-# row carrying a verdict is the one in force.
-verdict=""; vsha=""; vid=""; rounds=0
-while IFS=$'\t' read -r state sha vrid first; do
+# WHOSE VERDICT COUNTS (PR #818 security review)
+# ----------------------------------------------
+# Lenient about WORDING, strict about WHO. This repository is public, and **read access is enough to
+# submit a review** -- so before this filter, any passer-by could satisfy the merge gate by opening a
+# review whose first line said `**Verdict: Approve**`. The marker convention exists because GitHub
+# blocks self-approval (gh#141), not because anyone's word should bind.
+#
+# A verdict therefore counts only from a reviewer with STANDING, which is one of:
+#
+#   * `author_association` in $TRUSTED_ASSOCIATIONS -- OWNER, MEMBER or COLLABORATOR, i.e. someone with
+#     write access. This is the same line GitHub itself draws when counting required approvals, and it
+#     is what every verdict in this repo's history has been (all OWNER: gh#761/#768/#773/#781/#782).
+#   * a login in $TRUSTED_LOGINS -- because a GitHub App is `NONE` however trusted it is. The reviewer
+#     App (.github/scripts/reviewer-review.sh, runbook) is one; nothing else is, by default. Adding a
+#     bot here is an operator decision and belongs in the runbook, not in a passing session.
+#
+# Anything else is IGNORED rather than obeyed, and counted so the answer can say so -- a verdict that
+# is visible on the PR but does not bind is exactly the confusion this script exists to end.
+TRUSTED_ASSOCIATIONS="${VERDICT_TRUSTED_ASSOCIATIONS:-OWNER MEMBER COLLABORATOR}"
+TRUSTED_LOGINS="${VERDICT_TRUSTED_LOGINS:-trading-copilot-reviewer[bot]}"
+
+# Both lists are matched WHOLE-WORD against a space-padded haystack, so `OWNER` cannot match `NONE`
+# and a login cannot match a longer one that contains it.
+is_trusted() {
+  local assoc="$1" login="$2"
+  case " $TRUSTED_ASSOCIATIONS " in *" $assoc "*) return 0 ;; esac
+  case " $TRUSTED_LOGINS "       in *" $login "*) return 0 ;; esac
+  return 1
+}
+
+# state | commit reviewed | id | association | login | first line of the body. Reviews come back
+# oldest-first, so the last row carrying a verdict is the one in force. The body's first line stays
+# LAST: `read` collects the remainder into it, so nothing it contains can shift an earlier field.
+verdict=""; vsha=""; vid=""; rounds=0; ignored=0
+while IFS=$'\t' read -r state sha vrid assoc login first; do
   # Lenient by design: markdown emphasis, casing and a trailing period are all things a reviewer
   # writes without thinking. A gate that reds on "**Verdict:** Approve." teaches people to
   # distrust it, and a distrusted gate gets worked around rather than fixed.
   norm=$(printf '%s' "$first" | tr -d '\r*_`' | tr '[:upper:]' '[:lower:]' \
            | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//; s/\.$//')
+
+  if ! is_trusted "$assoc" "$login"; then
+    # Counted only when it LOOKED like a ruling, so the tally means "a verdict was ignored" rather
+    # than "somebody commented". Advisory bot reviews are the normal case here and are not a problem.
+    case "$norm" in
+      "verdict: "*) ignored=$(( ignored + 1 )) ;;
+      *) [ "$state" = "APPROVED" ] || [ "$state" = "CHANGES_REQUESTED" ] && ignored=$(( ignored + 1 )) ;;
+    esac
+    continue
+  fi
   # Request-changes is tested FIRST: "verdict: request changes" must never be mistaken for an
   # approval by a looser pattern. Trailing text after the verdict word is allowed -- reviewers
   # write "Verdict: Approve -- nice catch on the lock" and mean it.
@@ -129,7 +171,8 @@ while IFS=$'\t' read -r state sha vrid first; do
       ;;
   esac
 done < <(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-           --jq '.[] | [.state, .commit_id, .id, ((.body // "") | split("\n")[0])] | @tsv')
+           --jq '.[] | [.state, .commit_id, .id, .author_association,
+                        (.user.login // ""), ((.body // "") | split("\n")[0])] | @tsv')
 
 answer() { printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$rounds" "$vid" "$3"; exit 0; }
 
@@ -178,6 +221,10 @@ if [ "$verdict" = "APPROVED" ]; then
   # it rather than failing: gh#782 is the case where failing instantly gave the reviewer no chance
   # to re-rule after the branch was updated for `strict`.
   answer STALE "$vsha" "An approval on ${vsha:0:7} is stale (head ${HEAD_SHA:0:7}, the contribution changed)"
+fi
+
+if [ "$ignored" -gt 0 ]; then
+  answer NONE "" "No verdict yet ($ignored ruling(s) ignored -- not from a reviewer with write standing)"
 fi
 
 answer NONE "" "No verdict yet"
