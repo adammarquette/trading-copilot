@@ -1,6 +1,9 @@
+using System.Linq.Expressions;
 using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace MarqSpec.TradingCopilot.Api.Suggestions;
 
@@ -39,8 +42,12 @@ public interface ISuggestionExpiry
     /// </summary>
     /// <param name="now">The current time, supplied by the caller — the decision never reads a clock.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>How many suggestions this call expired.</returns>
-    Task<int> ExpireDueAsync(DateTimeOffset now, CancellationToken cancellationToken);
+    /// <returns>
+    /// The <c>(SuggestionId, UserId)</c> of every suggestion this call expired — so the caller can push a per-owner
+    /// realtime signal (gh#718). Empty when none were due; the count is its
+    /// <see cref="System.Collections.Generic.IReadOnlyCollection{T}.Count"/>.
+    /// </returns>
+    Task<IReadOnlyList<SuggestionTransition>> ExpireDueAsync(DateTimeOffset now, CancellationToken cancellationToken);
 }
 
 /// <summary>The database-evaluated expire transition — a single guarded conditional UPDATE (gh#545).</summary>
@@ -53,15 +60,43 @@ public sealed class SuggestionExpiry : ISuggestionExpiry
     public SuggestionExpiry(TradingCopilotDbContext database) => _database = database;
 
     /// <inheritdoc />
-    public Task<int> ExpireDueAsync(DateTimeOffset now, CancellationToken cancellationToken) =>
-        _database.Suggestions
+    public async Task<IReadOnlyList<SuggestionTransition>> ExpireDueAsync(
+        DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // A live suggestion past its window (WHERE State IN (Active, Stale) AND ExpiresAt <= now). One expression,
+        // applied to BOTH the id read and the update, so they cannot diverge.
+        Expression<Func<Suggestion, bool>> due = suggestion =>
+            (suggestion.State == SuggestionState.Active || suggestion.State == SuggestionState.Stale)
+            && suggestion.ExpiresAt <= now;
+
+        // Recover the (SuggestionId, UserId) of the rows this transition moves so the caller can push a per-owner
+        // realtime signal (gh#718) -- ExecuteUpdate returns only a count. Read-then-update in ONE transaction: the read
+        // captures the ids under the expiry predicate, and the update re-applies the SAME predicate so the write stays
+        // the monotonic, prior-state-guarded compare-and-swap it was (Active/Stale-only), with StateChangedAt still
+        // stamped in the single UPDATE. Atomicity under real concurrency is proven on Postgres by QA (gh#552); the
+        // in-memory provider runs neither ExecuteUpdate nor a transaction, which is why the seam is faked in unit
+        // tests (gh#530).
+        await using IDbContextTransaction transaction = await _database.Database.BeginTransactionAsync(cancellationToken);
+
+        List<SuggestionTransition> transitioned = await _database.Suggestions
             .IgnoreQueryFilters()
-            .Where(suggestion =>
-                (suggestion.State == SuggestionState.Active || suggestion.State == SuggestionState.Stale)
-                && suggestion.ExpiresAt <= now)
-            .ExecuteUpdateAsync(
-                setters => setters
-                    .SetProperty(suggestion => suggestion.State, SuggestionState.ExpiredVoid)
-                    .SetProperty(suggestion => suggestion.StateChangedAt, now),
-                cancellationToken);
+            .Where(due)
+            .Select(suggestion => new SuggestionTransition(suggestion.Id, suggestion.UserId))
+            .ToListAsync(cancellationToken);
+
+        if (transitioned.Count > 0)
+        {
+            await _database.Suggestions
+                .IgnoreQueryFilters()
+                .Where(due)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(suggestion => suggestion.State, SuggestionState.ExpiredVoid)
+                        .SetProperty(suggestion => suggestion.StateChangedAt, now),
+                    cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return transitioned;
+    }
 }
