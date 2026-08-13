@@ -26,7 +26,8 @@ A human-in-the-loop decision-support **and** execution system in C# / .NET; the 
 `MarqSpec.Client.ProjectX`. Solution `src/MarqSpec.TradingCopilot.slnx` (namespace `MarqSpec.TradingCopilot.*`):
 `Domain`, `Data` (EF Core), `Api` (BFF), the adapters `Integration.ProjectX` / `.Finnhub` / `.Tiingo`, plus
 `UnitTests` and `IntegrationTests`. Build with `dotnet build src/MarqSpec.TradingCopilot.slnx`; before a PR,
-`dotnet format --verify-no-changes` and unit tests green.
+`dotnet format --verify-no-changes --exclude external/` (the vendored `external/` clients keep their own style)
+and unit tests green.
 
 ## Source of truth
 
@@ -84,3 +85,27 @@ before starting, and add dated entries only when nothing formal fits.
 
 *Every line here is paid by every agent in every session. Keep it small: anything role- or subtree-specific
 belongs in its contract, and anything with a formal home belongs there rather than restated here.*
+
+## Cursor Cloud specific instructions
+
+The environment — SDKs, submodule checkout, dependency restore — is provisioned from the Cursor dashboard, not
+this tree (there is no `.cursor/` here to keep it true), so **bootstrap defensively rather than assume a prior
+run**: if `external/` is empty, `git submodule update --init` (the build needs the `external/MarqSpec.Client.*`
+projects); if `dotnet`, Node or Docker is missing, install it. Standard commands and the full config surface
+already have homes — README "Run it locally", [`.env.example`](.env.example),
+[`ci.yml`](.github/workflows/ci.yml), ADR-0012, ADR-0020 — so the notes below are only the non-obvious caveats
+with none.
+
+- **Docker is not auto-started** (no init in the VM): if `docker info` fails, start it (`sudo dockerd` in a
+  background/tmux session; `ubuntu` needs the `docker` group or `sudo`) before Postgres, `docker compose`, or
+  the Testcontainers integration suite — that suite needs only the daemon up, not the compose `db`.
+- **`dotnet run` seeds no operator on its own.** `Bootstrap__Email` / `Bootstrap__Password` are *compose*
+  interpolation defaults (`operator@local` / `changeme-local`) the API process never reads; set both explicitly
+  on the `dotnet run` path, or `StartupTasks.BootstrapOperatorAsync` returns at its first guard and every
+  sign-in 401s with nothing logged. Separately, `Jwt__SigningKey` throws at *startup* only when absent — a
+  present-but-short key (<32 bytes for HS256) boots clean and throws `IDX10653` on the first `POST /auth/login`.
+- **The Vite dev server never proxies the API.** `npm run dev` (`:5173`) proxies `/health` only, and only when
+  `VITE_BFF_ORIGIN` is set (otherwise nothing) — never the REST/SignalR routes, so sign-in fails through Vite
+  alone. To drive the full UI against the live API, `npm run build` and copy `dist/*` into the API's `wwwroot`,
+  then use the BFF at `:8080`. `wwwroot` must exist *before* the API starts (`UseStaticFiles` binds its provider
+  when the host is built), so restart after populating it; that copy is a build artifact — do not commit it.
