@@ -174,6 +174,7 @@ for validating heading-order/index against the trail in CI rather than by hand �
 | 2026-08-04 | [a typed venue-refusal outcome, so a definitive rejection auto-resolves (gh#629)](#update-2026-08-04--a-typed-venue-refusal-outcome-so-a-definitive-rejection-auto-resolves-gh629) |
 | 2026-08-05 | [the client no longer retries a place, so the definitive classification is sound (gh#673)](#update-2026-08-05--the-client-no-longer-retries-a-place-so-the-definitive-classification-is-sound-gh673) |
 | 2026-08-09 | [the R-4 suggestion throttle is wired into the scan (gh#551)](#update-2026-08-09--the-r-4-suggestion-throttle-is-wired-into-the-scan-gh551) |
+| 2026-08-13 | [withdraw a pending conditional via the order API (gh#655)](#update-2026-08-13--withdraw-a-pending-conditional-via-the-order-api-gh655) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 
@@ -1188,6 +1189,29 @@ AI-spend governor of ADR-0008; the operator still gets one *"Suggestions paused"
 silence is never mistaken for "nothing is setting up". **Inert until opted in** per account
 (`SuggestionOptions.ThrottleEnabled`) — the AI-spend governor's inert-default pattern — so the scan proposes exactly
 as before for any account that has not turned it on.
+
+## Update (2026-08-13) — withdraw a pending conditional via the order API (gh#655)
+
+The conditional engine has always self-cancelled a pending order on adverse drift or expiry (the watcher's
+`Cancelled` / `Expired` transitions), but an operator who created a *"send when conditions met"* entry and changed
+their mind had **no way to pull it back** — the entry would rest until it fired, drifted, or expired, and firing
+places a **real order** (R-12). `DELETE /conditionals/{id}` closes that gap — the sibling of the working-order
+cancel (gh#250), and the operator-facing counterpart to the watcher's own cancel:
+
+- **Only `Pending` is cancellable.** A pending conditional is held **local — off the book**, so withdrawing it is a
+  plain server-side status flip (`Pending → Cancelled`); nothing rests at the venue, so there is **no venue call**,
+  and — as with the working-order cancel — no risk profile, no flat-account check, no kill-switch gate (a withdrawal
+  is risk-reducing). It keeps only the R-20 scope (the query filter). `Fired` / `Cancelled` / `Expired` are terminal
+  and refused; a **`Firing`** conditional is refused too — it is a **maybe-live** entry the venue may already hold
+  (gh#577), resolved against venue truth via `POST /conditionals/{id}/reconcile`, **never blind-cancelled**, or the
+  cancel would abandon tracking of a live order.
+- **The flip runs under the per-account entry lock (gh#589) and re-checks `Pending` after a reload.** The fire
+  watcher commits `Pending → Firing` under that **same** lock before it touches the venue, so without it a cancel
+  could read `Pending`, the watcher could fire and place a live order, and the cancel would then write `Cancelled`
+  over a conditional that is actually live at the venue. Blocking is correct here (an operator request, unlike the
+  watcher, which try-locks so it never waits); the re-check refuses if the watcher moved it since the read.
+- The `OrderTicket` surface (gh#655) offers **Withdraw** on a pending conditional and keeps the pending panel up on a
+  refused withdrawal — the conditional is still live, so the surface must not imply it is gone.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the
