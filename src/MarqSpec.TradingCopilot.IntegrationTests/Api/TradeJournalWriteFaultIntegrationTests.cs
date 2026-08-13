@@ -102,36 +102,37 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
     // =============================================================================================================
 
     [Fact]
-    public async Task Persistence_ShouldRejectASecondClosingFill_WithARealUniqueViolation_CarryingTheIndexName()
+    public async Task Persistence_ShouldRejectADuplicateTradeNaturalKey_WithARealUniqueViolation_CarryingTheIndexName()
     {
         Guid operatorId = await OperatorIdAsync();
         (Guid accountId, _) = await FreshDiscoveredAccountAsync();
-        // The closing fill must be a REAL row: Trade.ClosingFillId is an FK to Fills (FK_Trades_Fills_ClosingFillId),
-        // so a bare Guid orphans the first insert on the FK before the unique index is ever reached. Seed the fill
-        // the same way the replay case does; SeedRoundTripAsync creates the Orders/Fills but no Trade, so the first
-        // insert below is the first Trade for this closing fill.
-        Guid closingFillId = await SeedRoundTripAsync(operatorId, accountId, Contract, "unique");
+        // Both fills must be REAL rows: Trade.ClosingFillId AND Trade.OpeningFillId are FKs to Fills, so a bare Guid
+        // orphans the first insert on the FK before the unique index is ever reached. SeedRoundTripAsync creates the
+        // Orders/Fills but no Trade, and returns BOTH halves of the post-#759 composite natural key (gh#759).
+        (Guid openingFillId, Guid closingFillId) = await SeedRoundTripAsync(operatorId, accountId, Contract, "unique");
 
         await ExecuteDbAsync(async db =>
         {
-            db.Trades.Add(NewTrade(Guid.NewGuid(), operatorId, accountId, closingFillId));
+            db.Trades.Add(NewTrade(Guid.NewGuid(), operatorId, accountId, closingFillId, openingFillId));
             await db.SaveChangesAsync();
         });
 
         await ExecuteDbAsync(async db =>
         {
-            db.Trades.Add(NewTrade(Guid.NewGuid(), operatorId, accountId, closingFillId));
+            // The SAME (ClosingFillId, OpeningFillId) pair -- the composite unique index rejects the duplicate. (Two
+            // rows sharing only ClosingFillId are now ALLOWED: that is the spanning-exit split gh#759 adds.)
+            db.Trades.Add(NewTrade(Guid.NewGuid(), operatorId, accountId, closingFillId, openingFillId));
 
             Func<Task> save = () => db.SaveChangesAsync();
 
             await save.Should().ThrowAsync<DbUpdateException>()
                 .WithInnerException<DbUpdateException, PostgresException>()
                 .Where(error => error.SqlState == PostgresErrorCodes.UniqueViolation
-                    && (error.ConstraintName == "IX_Trades_ClosingFillId"
-                        || error.MessageText.Contains("IX_Trades_ClosingFillId", StringComparison.Ordinal)),
-                    "the predicate IsClosingFillUniquenessViolation keys on this constraint name — if PG/Npgsql "
+                    && (error.ConstraintName == "IX_Trades_ClosingFillId_OpeningFillId"
+                        || error.MessageText.Contains("IX_Trades_ClosingFillId_OpeningFillId", StringComparison.Ordinal)),
+                    "the predicate IsTradeNaturalKeyViolation keys on this constraint name — if PG/Npgsql "
                     + "ever stops reporting the INDEX's own name here, the predicate's assumption breaks silently "
-                    + "unless this test is watching it (gh#779)");
+                    + "unless this test is watching it (gh#779, gh#759)");
         });
     }
 
@@ -167,13 +168,14 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
     {
         Guid operatorId = await OperatorIdAsync();
         (Guid accountId, string venueKey) = await FreshDiscoveredAccountAsync();
-        Guid closingFillId = await SeedRoundTripAsync(operatorId, accountId, Contract, "replay");
+        (Guid openingFillId, Guid closingFillId) = await SeedRoundTripAsync(operatorId, accountId, Contract, "replay");
 
-        // The phantom row: a DIFFERENT owner, the SAME closing fill. The R-20 filter hides it from the real
-        // operator's pre-check; the unique index does not care whose row it is.
+        // The phantom row: a DIFFERENT owner, the SAME composite natural key (ClosingFillId, OpeningFillId) the real
+        // writer will compose. The R-20 filter hides it from the real operator's pre-check; the unique index does not
+        // care whose row it is.
         await ExecuteDbAsync(async db =>
         {
-            db.Trades.Add(NewTrade(Guid.NewGuid(), Guid.NewGuid(), accountId, closingFillId));
+            db.Trades.Add(NewTrade(Guid.NewGuid(), Guid.NewGuid(), accountId, closingFillId, openingFillId));
             await db.SaveChangesAsync();
         });
 
@@ -182,18 +184,18 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
         bool journalled = await ProcessFlatAsync(Flat(venueKey, Contract, DateTimeOffset.UtcNow.AddMinutes(5)));
 
         journalled.Should().BeFalse(
-            "the closing fill is already journalled -- a real writer must skip a replay, never double-count it");
+            "the leg is already journalled -- a real writer must skip a replay, never double-count it");
 
         int rowsForThisClosingFill = await QueryDbAsync(db =>
             db.Trades.IgnoreQueryFilters().CountAsync(t => t.ClosingFillId == closingFillId));
         rowsForThisClosingFill.Should().Be(
-            1, "the unique index rejected the real writer's insert attempt -- only the pre-seeded phantom row "
-               + "survives, proving the write never landed a second time");
+            1, "the composite unique index rejected the real writer's insert attempt -- only the pre-seeded phantom "
+               + "row survives, proving the write never landed a second time");
 
         _factory.Capture.For(ExecutionMetrics.JournalOutcomes).Should().ContainSingle(
             m => (string?)m.Tags.GetValueOrDefault("outcome") == ExecutionMetrics.JournalDuplicateRejected,
-            "the real PostgresException on IX_Trades_ClosingFillId is what the writer's catch narrows on, and it "
-            + "must still record the duplicate-rejected outcome the daily governor and R-4 throttle read");
+            "the real PostgresException on IX_Trades_ClosingFillId_OpeningFillId is what the writer's catch narrows "
+            + "on, and it must still record the duplicate-rejected outcome the daily governor and R-4 throttle read");
     }
 
     // =============================================================================================================
@@ -209,7 +211,7 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
         // (the same sanctioned real-Postgres-fault shape OrphanGuardEventLogIntegrationTests uses on "Events"),
         // dropped in a finally. NOT VALID means no existing row is scanned, so a shared container's prior rows
         // are untouched -- only inserts made while the constraint stands are rejected, with a REAL SqlState 23514
-        // that is definitively not a uniqueness violation on IX_Trades_ClosingFillId.
+        // that is definitively not a uniqueness violation on IX_Trades_ClosingFillId_OpeningFillId.
         Guid operatorId = await OperatorIdAsync();
         (Guid accountId, string venueKey) = await FreshDiscoveredAccountAsync();
         await SeedRoundTripAsync(operatorId, accountId, Contract, "fault");
@@ -339,23 +341,27 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
     /// Seeds a balanced 1-lot round trip (Buy entry, Sell exit) that composes cleanly under
     /// <c>TradeRoundTrip.TryCompose</c>. Returns the deterministic CLOSING fill's id -- the writer's natural key.
     /// </summary>
-    private async Task<Guid> SeedRoundTripAsync(Guid operatorId, Guid accountId, string instrument, string tag)
+    private async Task<(Guid Opening, Guid Closing)> SeedRoundTripAsync(
+        Guid operatorId, Guid accountId, string instrument, string tag)
     {
         DateTimeOffset t0 = DateTimeOffset.UtcNow;
         Guid entryOrderId = Guid.NewGuid();
         Guid exitOrderId = Guid.NewGuid();
+        Guid entryFillId = Guid.NewGuid();
         Guid closingFillId = Guid.NewGuid();
 
         await ExecuteDbAsync(async db =>
         {
             db.Orders.Add(NewOrder(entryOrderId, operatorId, accountId, instrument, OrderSide.Buy, $"entry-{tag}", t0));
             db.Orders.Add(NewOrder(exitOrderId, operatorId, accountId, instrument, OrderSide.Sell, $"exit-{tag}", t0.AddMinutes(1)));
-            db.Fills.Add(NewFill(Guid.NewGuid(), operatorId, entryOrderId, 5_000m, t0.AddSeconds(10)));
+            db.Fills.Add(NewFill(entryFillId, operatorId, entryOrderId, 5_000m, t0.AddSeconds(10)));
             db.Fills.Add(NewFill(closingFillId, operatorId, exitOrderId, 5_010m, t0.AddSeconds(20)));
             await db.SaveChangesAsync();
         });
 
-        return closingFillId;
+        // The writer composes the leg (ClosingFillId, OpeningFillId) from these two fills -- both halves of the
+        // post-#759 composite natural key (gh#759, ADR-0022).
+        return (entryFillId, closingFillId);
     }
 
     private static Order NewOrder(
@@ -388,21 +394,23 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
         ExecutedAt = executedAt,
     };
 
-    private static Trade NewTrade(Guid id, Guid userId, Guid accountId, Guid closingFillId) => new()
-    {
-        Id = id,
-        UserId = userId,
-        AccountId = accountId,
-        Instrument = Contract,
-        Side = OrderSide.Buy,
-        Size = 1,
-        EntryPrice = 5_000m,
-        ExitPrice = 5_010m,
-        RealizedPnL = 50m,
-        Mode = TradingMode.Practice,
-        ClosedAt = DateTimeOffset.UtcNow,
-        ClosingFillId = closingFillId,
-    };
+    private static Trade NewTrade(
+        Guid id, Guid userId, Guid accountId, Guid closingFillId, Guid? openingFillId = null) => new()
+        {
+            Id = id,
+            UserId = userId,
+            AccountId = accountId,
+            Instrument = Contract,
+            Side = OrderSide.Buy,
+            Size = 1,
+            EntryPrice = 5_000m,
+            ExitPrice = 5_010m,
+            RealizedPnL = 50m,
+            Mode = TradingMode.Practice,
+            ClosedAt = DateTimeOffset.UtcNow,
+            ClosingFillId = closingFillId,
+            OpeningFillId = openingFillId,
+        };
 
     private Task BlockTradeInsertsAsync() => ExecuteDbAsync(db =>
         db.Database.ExecuteSqlRawAsync(

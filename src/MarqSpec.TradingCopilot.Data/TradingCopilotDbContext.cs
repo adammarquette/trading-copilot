@@ -388,18 +388,24 @@ public class TradingCopilotDbContext : TenantDbContext
                 .HasForeignKey(t => t.SuggestionId)
                 .OnDelete(DeleteBehavior.SetNull);
 
-            // The closing fill is the trade's natural key -- the writer's idempotency (gh#731). A replayed flat
-            // PositionEvent recomposes the same round trip and this index rejects the second insert, so a
-            // duplicate can never double-count into the daily governor. Filtered: many pre-writer rows are null,
-            // and Postgres treats NULLs as distinct anyway -- the filter makes that explicit and keeps the index
-            // to the rows the writer actually produces.
-            trade.HasIndex(t => t.ClosingFillId)
+            // (ClosingFillId, OpeningFillId) is the trade LEG's natural key -- the writer's idempotency (gh#731,
+            // gh#759, ADR-0022). A leg is one opening fill and the closing fills that retire it, so a single closing
+            // fill can retire two legs (a spanning exit) and ClosingFillId ALONE stopped being unique; the pair is.
+            // A replayed flat PositionEvent recomposes the same legs and this index rejects the second insert, so a
+            // duplicate can never double-count into the daily governor. Filtered on BOTH non-null: pre-#759 rows carry
+            // a closing key but no opening one and are historical, not re-journalled, so they stay out of the index.
+            trade.HasIndex(t => new { t.ClosingFillId, t.OpeningFillId })
                 .IsUnique()
-                .HasFilter("\"ClosingFillId\" IS NOT NULL");
+                .HasFilter("\"ClosingFillId\" IS NOT NULL AND \"OpeningFillId\" IS NOT NULL");
 
             trade.HasOne<Fill>()
                 .WithMany()
                 .HasForeignKey(t => t.ClosingFillId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            trade.HasOne<Fill>()
+                .WithMany()
+                .HasForeignKey(t => t.OpeningFillId)
                 .OnDelete(DeleteBehavior.SetNull);
 
             // The two live readers (DailyRealizedReader, ConsistencyWindowReader) filter AccountId + ClosedAt and

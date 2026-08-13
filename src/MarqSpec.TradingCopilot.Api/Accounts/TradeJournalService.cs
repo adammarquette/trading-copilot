@@ -39,15 +39,16 @@ namespace MarqSpec.TradingCopilot.Api.Accounts;
 /// have moved on, and practice results must never blend into live results (R-14).
 /// </para>
 /// <para>
-/// <b>Idempotent by construction.</b> The closing fill is the trade's natural key, behind a unique index — a
+/// <b>Idempotent by construction.</b> Each leg's <c>(ClosingFillId, OpeningFillId)</c> pair is its natural key, behind a unique index — a
 /// replayed flat event recomposes the same round trip and the second insert is rejected, exactly as the fill
 /// consumer dedupes on <c>{ OrderId, VenueFillKey }</c>. This matters more than tidiness: a double-written trade
 /// would double-count the day's realized P&amp;L into the daily governor and mis-state the operator's headroom.
 /// </para>
 /// <para>
-/// <b>Foundational scope.</b> Only the balanced single <b>enter → exit → flat</b> round trip is journalled;
-/// scale-in with a partial exit and stop-and-reverse are refused by <see cref="TradeRoundTrip"/> and left for a
-/// documented follow-up. Refusing writes nothing, which is the honest outcome — a wrong <c>RealizedPnL</c> feeding
+/// <b>Per-leg composition (gh#759, ADR-0022).</b> No longer only the balanced single <b>enter → exit → flat</b> round trip is journalled;
+/// scale-in with a partial exit and stop-and-reverse now <b>journal</b> per opening leg (a spanning exit is split
+/// across the legs it retires), their realized P&amp;L reaching the governor. Only genuine ambiguity writes nothing,
+/// the honest outcome — a wrong <c>RealizedPnL</c> feeding
 /// the governor is worse than a missing one, which is visibly zero.
 /// </para>
 /// </remarks>
@@ -163,98 +164,122 @@ public sealed class TradeJournalService
             return false;
         }
 
+        // Each candidate carries its Fill.Id: a composed leg's opening and closing fill ids are the trade's natural
+        // key (gh#759, ADR-0022).
         RoundTripFill[] candidates =
         [
             .. unjournalled.Select(fill => new RoundTripFill(
-                sideByOrder[fill.OrderId], fill.Price, fill.Size, fill.ExecutedAt)
+                fill.Id, sideByOrder[fill.OrderId], fill.Price, fill.Size, fill.ExecutedAt)
             {
                 Fees = fill.Fees,
             }),
         ];
 
-        if (!TradeRoundTrip.TryCompose(candidates, out RoundTrip? roundTrip))
+        if (!TradeRoundTrip.TryCompose(candidates, out IReadOnlyList<RoundTrip> trips))
         {
-            // Unbalanced (scale-in / partial exit / reversal) or never closed. Deliberately silent about writing
-            // anything, but loud enough to investigate: a position went flat and produced no journal row.
+            // Never closed, or genuinely ambiguous (an unclassifiable fill side, an open-from-flat whose direction is
+            // not decidable, or a window that does not reconcile to flat). Deliberately silent about writing anything,
+            // but loud enough to investigate: a position went flat and produced no journal row.
             _logger.LogInformation(
-                "Flat {Contract} on account {Account}: {Fills} unjournalled fill(s) do not form a single balanced "
-                + "round trip (scale-in, partial exit, or reversal); no Trade written (gh#731 defers those).",
+                "Flat {Contract} on account {Account}: {Fills} unjournalled fill(s) do not form completed round "
+                + "trips (still open, or genuinely ambiguous); no Trade written (gh#759 refuse-don't-guess).",
                 exit.Contract, exit.Account, unjournalled.Count);
             _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalNotComposable);
             return false;
         }
 
-        // A composed trip must not SPAN an already-journalled close (gh#734 adversarial review). The boundary walk
-        // (CurrentCycleStart) derives cycles from running exposure, but two fills that share an instant have no
-        // venue ordinal to order them, so at a same-instant close-then-reopen the interior return-to-flat can be
-        // hidden and this composition silently MERGES the closed, already-journalled trip with the new one -- a
-        // blended size and average that describe neither, double-counting the earlier trip's P&L into the governor.
-        // The deterministic Id tie-break above makes the pick reproducible but not necessarily the boundary-correct
-        // order; a same-instant boundary is genuinely ambiguous with no ordinal. Fail closed: if a trip already
-        // journalled its close strictly inside this trip's window, the boundary was missed -- refuse, never journal
-        // fiction. (A REFUSED cycle wrote no Trade and so cannot trip this, preserving the fills-derived boundary.)
-        DateTimeOffset windowStart = unjournalled[0].ExecutedAt;
-        bool spansAJournalledClose = await database.Trades.AnyAsync(
-            trade => trade.AccountId == account.AccountId
-                && trade.Instrument == exit.Contract.Key
-                && trade.ClosedAt > windowStart
-                && trade.ClosedAt < roundTrip!.ClosedAt,
-            cancellationToken);
-        if (spansAJournalledClose)
+        // FIFO composition separates every leg of the window: a scale-in, a partial exit, and a stop-and-reverse each
+        // become their own per-leg trip (gh#759, ADR-0022). A STABLE or APPEND-ONLY replay recomposes the SAME
+        // (ClosingFillId, OpeningFillId) key per leg, so the per-trip dedup below skips it and re-processing cannot
+        // double-count. A RE-PAIRED fill set does not: a late, out-of-order fill (arrival order is arbitrary -- why the
+        // fills are ExecutedAt-sorted, not delivery-ordered) landing BEFORE an already-journalled close makes FIFO
+        // split the same fills into DIFFERENT legs with different keys, and the exact-pair dedup cannot tell the old
+        // row is now orphaned -- writing the new legs would DOUBLE-COUNT the overlap into the daily governor (gh#759
+        // review, blocking; gh#734's spans-a-journalled-close guard used to be the net). Fail closed: if any journalled
+        // trade references a fill in THIS window but is not one of the legs we are about to write, the pairing changed
+        // -- refuse the whole flat rather than double-count. A stable replay never trips this (those rows ARE among
+        // `trips`, so `composedKeys` contains them); only a genuine re-pairing does.
+        Dictionary<Guid, Fill> fillById = unjournalled.ToDictionary(fill => fill.Id);
+        List<Guid?> windowFillIds = [.. fillById.Keys.Select(id => (Guid?)id)];
+        HashSet<(Guid? Closing, Guid? Opening)> composedKeys =
+            [.. trips.Select(trip => ((Guid?)trip.ClosingFillId, (Guid?)trip.OpeningFillId))];
+        HashSet<Guid?> composedClosingFillIds = [.. trips.Select(trip => (Guid?)trip.ClosingFillId)];
+        var overlapping = await database.Trades
+            .Where(trade => trade.AccountId == account.AccountId && trade.Instrument == exit.Contract.Key
+                && (windowFillIds.Contains(trade.ClosingFillId) || windowFillIds.Contains(trade.OpeningFillId)))
+            .Select(trade => new { trade.ClosingFillId, trade.OpeningFillId })
+            .ToListAsync(cancellationToken);
+        // A row is EXPLAINED by this composition -- so NOT a re-pairing -- if its full (Closing, Opening) key is one of
+        // the legs we are about to write, OR it is a pre-#759 LEGACY row (null OpeningFillId) whose ClosingFillId
+        // matches a composed trip: the old single-key format of the same trip, journalled before this column existed.
+        // Without that legacy exception an ordinary replay of ANY pre-migration flat would false-fire this guard and
+        // pollute JournalBoundaryMergeRefused (gh#759 review). Pre-migration windows were only ever balanced single
+        // trips (scale-in / reverse were refused), so a legacy ClosingFillId belongs to exactly one recomposed leg.
+        if (overlapping.Any(row =>
+            !composedKeys.Contains((row.ClosingFillId, row.OpeningFillId))
+            && !(row.OpeningFillId == null && composedClosingFillIds.Contains(row.ClosingFillId))))
         {
             _logger.LogWarning(
-                "Flat {Contract} on account {Account}: the composed round trip spans an already-journalled close -- a "
-                + "same-instant boundary hid the interior flat and would merge two trips into one blended P&L. Refusing "
-                + "rather than double-count into the daily governor (gh#734). Investigate the venue's fill ordering.",
+                "Flat {Contract} on account {Account}: a fill in this window is already journalled under a DIFFERENT "
+                + "pairing -- the fill set re-paired (a late, out-of-order fill). Refusing rather than double-count into "
+                + "the daily governor (gh#759). Investigate the venue's fill delivery / reconcile the affected trades.",
                 exit.Contract, exit.Account);
             _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalBoundaryMergeRefused);
             return false;
         }
 
-        // The closing fill: the latest execution on the exit leg -- the natural key this write dedupes on. The
-        // ThenByDescending(Id) breaks an ExecutedAt tie deterministically, so two exit fills sharing the latest
-        // instant (a market order sweeping the book) always yield the SAME closing fill -- otherwise a replay picks
-        // the other tied fill, the pre-check and unique ClosingFillId index both miss, and the trip double-journals
-        // into the daily governor (gh#734 adversarial review, blocking).
-        OrderSide exitSide = roundTrip!.EntrySide == OrderSide.Buy ? OrderSide.Sell : OrderSide.Buy;
-        Fill closingFill = unjournalled
-            .Where(fill => sideByOrder[fill.OrderId] == exitSide)
-            .OrderByDescending(fill => fill.ExecutedAt)
-            .ThenByDescending(fill => fill.Id)
-            .First();
+        bool anyWritten = false;
+        foreach (RoundTrip trip in trips)
+        {
+            anyWritten |= await JournalTripAsync(database, account, exit, orders, fillById, trip, cancellationToken);
+        }
 
-        // Idempotent: a replayed flat recomposes the same cycle down to the same closing fill. Skip if it is already
-        // journalled. The closing fill is the round trip's natural key -- with the boundary now derived from the
-        // fills (not a journalled-close watermark), a replay recomputes the same latest cycle, so this pre-check is
-        // the ordinary replay guard; the unique ClosingFillId index below stays the backstop for a concurrent writer.
-        bool alreadyJournalled = await database.Trades
-            .AnyAsync(trade => trade.ClosingFillId == closingFill.Id, cancellationToken);
+        return anyWritten;
+    }
+
+    /// <summary>
+    /// Journals one composed leg (gh#759, ADR-0022): idempotent on the <c>(ClosingFillId, OpeningFillId)</c> natural
+    /// key, with placement-time truth taken from the leg's <b>opening</b> fill's own order (R-14). One
+    /// <c>SaveChanges</c> per leg, so one leg's concurrent-writer race or write fault cannot roll back the others.
+    /// </summary>
+    /// <returns><see langword="true"/> when this leg wrote a row.</returns>
+    private async Task<bool> JournalTripAsync(
+        TradingCopilotDbContext database,
+        JournalAccount account,
+        PositionEvent exit,
+        IReadOnlyList<Order> orders,
+        IReadOnlyDictionary<Guid, Fill> fillById,
+        RoundTrip trip,
+        CancellationToken cancellationToken)
+    {
+        // Idempotent: a replayed flat recomposes the same legs down to the same natural key. The COMPOSITE key is
+        // required because one closing fill can retire two legs (a spanning exit), so ClosingFillId alone is no longer
+        // unique (ADR-0022). A pre-#759 LEGACY row (null OpeningFillId) is recognized by ClosingFillId ALONE -- its old
+        // single-key format is the already-journalled version of this leg, so a replay of a pre-migration flat is the
+        // ordinary idempotent skip, not a re-pairing (gh#759 review). Post-migration rows always carry a non-null
+        // OpeningFillId, so the null branch matches only genuine legacy rows. The unique index below is the backstop.
+        bool alreadyJournalled = await database.Trades.AnyAsync(
+            trade => trade.ClosingFillId == trip.ClosingFillId
+                && (trade.OpeningFillId == trip.OpeningFillId || trade.OpeningFillId == null),
+            cancellationToken);
         if (alreadyJournalled)
         {
             _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalAlreadyJournalled);
             return false;
         }
 
-        // The entry order is the one that actually produced this round trip's OPENING fill -- taken from the fills
-        // that compose the trip, never re-picked from `orders` by side. `orders` is deliberately unfiltered by
-        // status for venue truth (above), so it also holds zero-fill Rejected/Cancelled orders on the entry side --
-        // a risk-gate rejection, or a resting order cancelled before any execution. Selecting the earliest of THOSE
-        // by PlacedAt could land on an order that never traded, and the trade would inherit its Mode / SuggestionId /
-        // PointValue: a Live round trip journalled under an earlier rejected order's Practice is exactly the R-14
-        // blending this writer copies placement-time Mode to avoid (gh#734 review). The opening fill's own order is
-        // the placement whose facts this trade inherits; a zero-fill order has no fill here and cannot be it.
-        Fill openingFill = unjournalled
-            .Where(fill => sideByOrder[fill.OrderId] == roundTrip.EntrySide)
-            .OrderBy(fill => fill.ExecutedAt)
-            .ThenBy(fill => fill.Id)
-            .First();
-        Order entryOrder = orders.First(order => order.Id == openingFill.OrderId);
+        // The entry order is the one that produced THIS leg's opening fill -- the placement whose facts the trade
+        // inherits (Mode / SuggestionId / PointValue), never re-picked from `orders` by side (a zero-fill
+        // Rejected/Cancelled order on the entry side would blend the wrong Mode into the trip, the R-14 hazard this
+        // writer exists to avoid, gh#734 review). On a reversal the opening fill is the reversing fill itself, so the
+        // short leg correctly inherits the reversing order's placement.
+        Order entryOrder = orders.First(order => order.Id == fillById[trip.OpeningFillId].OrderId);
 
         decimal pointValue = entryOrder.PointValue;
         if (pointValue <= 0m)
         {
             // Fail closed: without a point value the money is unknowable, and a wrong RealizedPnL feeds the daily
-            // governor. Leave the round trip unjournalled and say so.
+            // governor. Leave this leg unjournalled and say so.
             _logger.LogError(
                 "Flat {Contract} on account {Account}: order {Order} snapshotted no point value; the round trip's "
                 + "realized P&L cannot be computed and no Trade was written. Investigate.",
@@ -269,59 +294,53 @@ public sealed class TradeJournalService
             pointValue);
 
         decimal realized = spec.RealizedPnL(
-            new Price(roundTrip.EntryPrice), new Price(roundTrip.ExitPrice), roundTrip.EntrySide, roundTrip.Size);
+            new Price(trip.EntryPrice), new Price(trip.ExitPrice), trip.EntrySide, trip.Size);
 
-        database.Trades.Add(new Trade
+        Trade record = new()
         {
             Id = Guid.NewGuid(),
             UserId = account.UserId,
             AccountId = account.AccountId,
             SuggestionId = entryOrder.SuggestionId,
             Instrument = entryOrder.Instrument,
-            Side = roundTrip.EntrySide,
-            Size = roundTrip.Size,
-            EntryPrice = roundTrip.EntryPrice,
-            ExitPrice = roundTrip.ExitPrice,
+            Side = trip.EntrySide,
+            Size = trip.Size,
+            EntryPrice = trip.EntryPrice,
+            ExitPrice = trip.ExitPrice,
             RealizedPnL = realized,
             Mode = entryOrder.Mode, // placement-time truth, never the account's current declaration (R-14)
-            ClosedAt = roundTrip.ClosedAt,
-            ClosingFillId = closingFill.Id,
-        });
+            ClosedAt = trip.ClosedAt,
+            OpeningFillId = trip.OpeningFillId,
+            ClosingFillId = trip.ClosingFillId,
+        };
+        database.Trades.Add(record);
 
         try
         {
             await database.SaveChangesAsync(cancellationToken);
         }
-        catch (DbUpdateException exception) when (IsClosingFillUniquenessViolation(exception))
+        catch (DbUpdateException exception) when (IsTradeNaturalKeyViolation(exception))
         {
-            // The unique ClosingFillId index rejected a replay -- idempotent by construction, NARROWED to that one
-            // violation (gh#747): the filter matches only the closing-fill uniqueness fault a concurrent writer's prior
-            // insert causes, so any OTHER write fault falls through to the catch below rather than being mistaken for a
-            // benign replay. A concurrent writer already journalled this exact round trip.
+            // The unique (ClosingFillId, OpeningFillId) index rejected a replay -- idempotent by construction, NARROWED
+            // to that one violation (gh#747): any OTHER write fault falls through to the catch below rather than being
+            // mistaken for a benign replay. A concurrent writer already journalled this exact leg. Detach the rejected
+            // insert so it cannot re-flush on the NEXT leg's SaveChanges in this shared context and roll that leg back
+            // too (gh#759 review).
+            database.Entry(record).State = EntityState.Detached;
             _logger.LogInformation(
-                "Round trip closing on fill {Fill} is already journalled for account {Account}; idempotent skip.",
-                closingFill.Id, exit.Account);
+                "Round trip {Opening} -> {Closing} is already journalled for account {Account}; idempotent skip.",
+                trip.OpeningFillId, trip.ClosingFillId, exit.Account);
             _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalDuplicateRejected);
             return false;
         }
         catch (DbUpdateException) when (!cancellationToken.IsCancellationRequested)
         {
             // NOT the idempotent dupe -- a REAL write fault (a CHECK / FK violation, a serialization failure, a lost
-            // connection). Before gh#747 the bare catch above swallowed this too as a benign "idempotent skip": the
-            // Trade was silently lost, the outer host never learned, and the day's realized P&L under-reported into the
-            // daily governor with nothing to see. Record the distinct outcome and RETHROW -- the host's
-            // JournalRoundTripSafelyAsync logs it (the protection retire already happened) and the stream continues, so
-            // the failure is loud in both the metric and the log rather than invisible. Idempotency is unaffected:
-            // only the true dupe is skipped above.
-            //
-            // The `when (!IsCancellationRequested)` guard excludes a SHUTDOWN cancellation that Npgsql can surface as a
-            // wrapped DbUpdateException (SqlState 57014) rather than a raw OperationCanceledException (gh#747 review):
-            // recording that as a write failure would inflate the JournalWriteFailed METRIC on every graceful stop, so
-            // this guard keeps the metric honest. It does NOT silence the host's log: JournalRoundTripSafelyAsync's own
-            // cancellation branch only matches OperationCanceledException, so this wrapped DbUpdateException still falls
-            // into its generic catch and logs the "P&L will under-report" ERROR on an ordinary shutdown too -- a known
-            // gap this comment does not claim to close. A genuine fault is never masked: the token is only set when the
-            // operator tears the stream down.
+            // connection). Swallowing it would silently drop the Trade and under-report the day's realized P&L into the
+            // daily governor with nothing to see (gh#747). Record the distinct outcome and RETHROW -- the host's
+            // JournalRoundTripSafelyAsync logs it and the stream continues. The `when (!IsCancellationRequested)` guard
+            // excludes a SHUTDOWN cancellation Npgsql wraps as a DbUpdateException (SqlState 57014), keeping the
+            // JournalWriteFailed metric honest on a graceful stop; a genuine fault is never masked.
             _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWriteFailed);
             throw;
         }
@@ -329,21 +348,22 @@ public sealed class TradeJournalService
         _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten);
         _logger.LogInformation(
             "Journalled a {Side} round trip of {Size} on {Contract} for account {Account}: realized {Realized}.",
-            roundTrip.EntrySide, roundTrip.Size, exit.Contract, exit.Account, realized);
+            trip.EntrySide, trip.Size, exit.Contract, exit.Account, realized);
         return true;
     }
 
     /// <summary>
-    /// The unique index on <see cref="Trade.ClosingFillId"/> — the round trip's natural key, and the <b>only</b>
-    /// constraint whose violation is the idempotent replay this writer expects (a concurrent writer journalled the same
-    /// trip first). This literal must equal the index's real database name (set by EF's default convention in
-    /// <c>TradingCopilotDbContext</c> and emitted by the migration); a model-metadata unit test pins it so a rename or
-    /// an added <c>HasDatabaseName</c> cannot silently break the match and demote the catch-side backstop (gh#747 review).
+    /// The unique index on <c>(ClosingFillId, OpeningFillId)</c> — the round trip leg's natural key (ADR-0022, was
+    /// <c>ClosingFillId</c> alone until a spanning exit made that non-unique), and the <b>only</b> constraint whose
+    /// violation is the idempotent replay this writer expects (a concurrent writer journalled the same leg first). This
+    /// literal must equal the index's real database name (set by EF's default convention in <c>TradingCopilotDbContext</c>
+    /// and emitted by the migration); a model-metadata unit test pins it so a rename or an added <c>HasDatabaseName</c>
+    /// cannot silently break the match and demote the catch-side backstop (gh#747 review).
     /// </summary>
-    internal const string ClosingFillUniqueIndex = "IX_Trades_ClosingFillId";
+    internal const string TradeNaturalKeyIndex = "IX_Trades_ClosingFillId_OpeningFillId";
 
     /// <summary>
-    /// Whether a <see cref="DbUpdateException"/> is the idempotent <see cref="ClosingFillUniqueIndex"/> unique-violation
+    /// Whether a <see cref="DbUpdateException"/> is the idempotent <see cref="TradeNaturalKeyIndex"/> unique-violation
     /// — and <b>only</b> that (gh#747). PostgreSQL surfaces the error as a <see cref="PostgresException"/> inner with
     /// <c>SqlState</c> <see cref="PostgresErrorCodes.UniqueViolation"/> and the offending <c>ConstraintName</c>; a
     /// violation of any OTHER constraint (a CHECK, an FK), or any other write fault, is a <b>real</b> failure this
@@ -352,14 +372,14 @@ public sealed class TradeJournalService
     /// <see cref="PostgresException"/> inner, so it never matches here (in-memory idempotency is the pre-check above).
     /// </summary>
     /// <param name="exception">The write fault <c>SaveChanges</c> raised.</param>
-    /// <returns><see langword="true"/> only for the closing-fill unique violation.</returns>
-    internal static bool IsClosingFillUniquenessViolation(DbUpdateException exception)
+    /// <returns><see langword="true"/> only for the trade natural-key unique violation.</returns>
+    internal static bool IsTradeNaturalKeyViolation(DbUpdateException exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
         return exception.InnerException is PostgresException
         {
             SqlState: PostgresErrorCodes.UniqueViolation,
-            ConstraintName: ClosingFillUniqueIndex,
+            ConstraintName: TradeNaturalKeyIndex,
         };
     }
 

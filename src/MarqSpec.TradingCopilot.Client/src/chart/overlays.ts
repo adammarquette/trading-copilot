@@ -200,3 +200,66 @@ export function executionToPriceLines(
   }
   return lines;
 }
+
+/** Where a marker sits relative to the bar, and its glyph — the marker half of the overlay contract (gh#727). */
+export type MarkerPosition = 'aboveBar' | 'belowBar';
+export type MarkerShape = 'arrowUp' | 'arrowDown' | 'circle';
+
+/**
+ * One marker to overlay at a time — a time-anchored glyph on the candle series, the counterpart to the
+ * {@link PriceLineSpec} price line. The {@link MarketChart} translates it into the library's series marker at the one
+ * seam that touches the charting library.
+ */
+export interface MarkerSpec {
+  /** The bar time to anchor to, in UNIX seconds. */
+  readonly time: number;
+  readonly position: MarkerPosition;
+  readonly color: string;
+  readonly shape: MarkerShape;
+  /** Shown on the marker, e.g. `B 2` / `S 1`. */
+  readonly text: string;
+}
+
+/**
+ * One of the operator's fills to mark on the time axis (gh#727): when it executed and how much traded which way.
+ * Chart-agnostic on purpose — the workspace maps a `Fill` (gh#792) onto this, so the chart never imports the fills
+ * API, the same split as {@link FillMark}'s price-line siblings.
+ */
+export interface FillMark {
+  readonly id: string;
+  /** The execution time in UNIX seconds. */
+  readonly time: number;
+  /** The order side the fill executed — anything other than `Buy` is drawn as a sell. */
+  readonly side: string;
+  readonly size: number;
+}
+
+/** The colours the fill overlay marks buys and sells with. */
+export interface FillPalette {
+  readonly buy: string;
+  readonly sell: string;
+}
+
+/**
+ * Maps one fill to its marker: a buy is an up-arrow below the bar (price came up into it), a sell a down-arrow above,
+ * coloured by side and labelled with the size — so a glance reads direction and quantity.
+ */
+export function fillToMarker(fill: FillMark, palette: FillPalette): MarkerSpec {
+  const isBuy = fill.side === 'Buy';
+  return {
+    time: fill.time,
+    position: isBuy ? 'belowBar' : 'aboveBar',
+    color: isBuy ? palette.buy : palette.sell,
+    shape: isBuy ? 'arrowUp' : 'arrowDown',
+    text: `${isBuy ? 'B' : 'S'} ${fill.size}`,
+  };
+}
+
+/**
+ * Flattens the operator's fills to the markers to draw, **ascending by time** — Lightweight Charts requires markers
+ * in time order, so this sorts defensively even though the read already returns them ascending; a copy is sorted so
+ * the caller's array is left untouched.
+ */
+export function fillsToMarkers(fills: readonly FillMark[], palette: FillPalette): MarkerSpec[] {
+  return [...fills].sort((a, b) => a.time - b.time).map((fill) => fillToMarker(fill, palette));
+}

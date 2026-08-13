@@ -13,6 +13,12 @@ const { chartMock } = vi.hoisted(() => {
   const applyOptions = vi.fn();
   const createPriceLine = vi.fn((options: unknown) => options); // a price-level overlay line (gh#727)
   const removePriceLine = vi.fn();
+  // The fill-marker overlay (gh#727) hangs off createSeriesMarkers; the returned handle carries setMarkers / detach.
+  const detachMarkers = vi.fn();
+  const createSeriesMarkers = vi.fn((...args: unknown[]) => {
+    void args; // called (series, markers); the markers arg is asserted via mock.calls below
+    return { setMarkers: vi.fn(), detach: detachMarkers };
+  });
   // addSeries returns a series whose setData is distinguishable by kind, so candle vs indicator data is assertable.
   // The candle series also carries the price-line API (gh#727) — the level overlays hang off it. A rest signature so
   // a call carries all of (seriesType, options, paneIndex) — the pane index is asserted below.
@@ -40,11 +46,14 @@ const { chartMock } = vi.hoisted(() => {
       removePriceLine,
       addSeries,
       createChart,
+      createSeriesMarkers,
+      detachMarkers,
     },
   };
 });
 vi.mock('lightweight-charts', () => ({
   createChart: chartMock.createChart,
+  createSeriesMarkers: chartMock.createSeriesMarkers,
   CandlestickSeries: 'Candlestick',
   LineSeries: 'Line',
   LineStyle: { Solid: 0, Dashed: 2 },
@@ -490,5 +499,104 @@ describe('MarketChart', () => {
     );
 
     expect(await screen.findByText('ORDERS / POSITION unavailable')).toBeTruthy();
+  });
+
+  it('overlays the operator recent fills as buy / sell markers on the candle series (gh#727)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        fills={[
+          { id: 'f1', time: 1_800_000_000, side: 'Buy', size: 2 },
+          { id: 'f2', time: 1_800_000_100, side: 'Sell', size: 1 },
+        ]}
+      />,
+    );
+
+    await waitFor(() => expect(chartMock.createSeriesMarkers).toHaveBeenCalled());
+    const markers = chartMock.createSeriesMarkers.mock.calls[0][1] as Array<{
+      position: string;
+      shape: string;
+      text: string;
+    }>;
+    expect(markers).toHaveLength(2);
+    // A buy is an up-arrow below the bar; a sell a down-arrow above — ascending by time (the Buy at :00 before the Sell).
+    expect(markers[0]).toMatchObject({ position: 'belowBar', shape: 'arrowUp', text: 'B 2' });
+    expect(markers[1]).toMatchObject({ position: 'aboveBar', shape: 'arrowDown', text: 'S 1' });
+  });
+
+  it('shows a FILLS unavailable note when the fills read is unavailable (R-11 / R-19)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    render(<MarketChart venue="topstepx" instrument="ES" resolution={1} fillsUnavailable />);
+
+    expect(await screen.findByText('FILLS unavailable')).toBeTruthy();
+  });
+
+  it('labels the fill markers stale when the socket is not live (R-19)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        fills={[{ id: 'f1', time: 1_800_000_000, side: 'Buy', size: 2 }]}
+        fillsStale
+      />,
+    );
+
+    expect(await screen.findByText('Fills may be stale')).toBeTruthy();
+  });
+
+  it('re-draws the markers when the fills change, detaching the previous set first (the series is still live)', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    const { rerender } = render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        fills={[{ id: 'f1', time: 1_800_000_000, side: 'Buy', size: 2 }]}
+      />,
+    );
+    await waitFor(() => expect(chartMock.createSeriesMarkers).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        fills={[{ id: 'f2', time: 1_800_000_100, side: 'Sell', size: 1 }]}
+      />,
+    );
+
+    await waitFor(() => expect(chartMock.createSeriesMarkers).toHaveBeenCalledTimes(2));
+    // The old marker set is detached before the new one draws — the series is live, so the guard runs the detach.
+    expect(chartMock.detachMarkers).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not detach the markers on unmount — the chart teardown disposes them and the series ref is already gone', async () => {
+    getBarsMock.mockResolvedValue(barsOk([bar('2026-01-01T00:00:00Z', 5300)]));
+
+    const { unmount } = render(
+      <MarketChart
+        venue="topstepx"
+        instrument="ES"
+        resolution={1}
+        fills={[{ id: 'f1', time: 1_800_000_000, side: 'Buy', size: 2 }]}
+      />,
+    );
+    await waitFor(() => expect(chartMock.createSeriesMarkers).toHaveBeenCalledTimes(1));
+
+    unmount();
+
+    // The create effect's cleanup runs first (top-to-bottom), calling chart.remove() and nulling the series ref, so the
+    // guard skips detach — a bare detach would touch an already-disposed chart. chart.remove() frees the markers.
+    expect(chartMock.detachMarkers).not.toHaveBeenCalled();
+    expect(chartMock.remove).toHaveBeenCalled();
   });
 });

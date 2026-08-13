@@ -243,17 +243,17 @@ public class TradeJournalServiceTests
     }
 
     [Fact]
-    public async Task ProcessFlatAsync_ShouldRecordTheRefusalOutcome_WhenTheFillsDoNotFormARoundTrip()
+    public async Task ProcessFlatAsync_ShouldRecordTheRefusalOutcome_WhenTheOpeningDirectionIsAmbiguous()
     {
-        // A stop-and-reverse (Buy 1, Sell 2, Buy 1): net flat, but it crosses through flat into a short, so it is
-        // refused. That refusal must be countable — an account wedged on refusals is exactly what the metric exists
-        // to surface, and it must NOT read as a journalled trade.
+        // A refusal must still be COUNTABLE (gh#759 keeps refuse-don't-guess for GENUINE ambiguity, converting only
+        // scale-in and reverse to composition). Two opposite-side fills share the opening instant, so which side
+        // opened -- and the sign of the P&L -- is not decidable, and the composer refuses. An account wedged on
+        // refusals is what the metric exists to surface, and it must NOT read as a journalled trade.
         IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
         Guid owner = Guid.NewGuid();
         Guid accountId = await SeedAccountAsync(owner, "9001");
         await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
-        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 2, 5)]);
-        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_020m, 1, 10)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 0)]); // SAME instant, opposite side
 
         await Service(metrics).ProcessFlatAsync(Flat("9001"), CancellationToken.None);
 
@@ -290,18 +290,16 @@ public class TradeJournalServiceTests
     }
 
     [Fact]
-    public async Task ProcessFlatAsync_ShouldRefuseToMergeTwoTrips_WhenASameInstantBoundaryHidesTheInteriorFlat()
+    public async Task ProcessFlatAsync_ShouldRefuse_WhenASameInstantBoundaryMakesThePairingAmbiguous()
     {
-        // gh#734 adversarial review. Trip 1 (Buy 1 -> Sell 1) is already journalled. Trip 2 reopens at the SAME
-        // instant Trip 1 closed. With no venue ordinal on Fill, the two same-instant fills can order with Trip 2's
-        // OPEN before Trip 1's CLOSE, hiding the interior return-to-flat from CurrentCycleStart; the composer then
-        // MERGES both trips into one blended size-2 Trade that double-counts Trip 1's P&L into the daily governor. A
-        // composed trip can never legitimately span an already-journalled close, so it must be refused.
+        // gh#734's merge hazard, and gh#759's answer. Trip 1 (Buy 1 -> Sell 1) is already journalled. Trip 2 reopens
+        // at the SAME instant Trip 1 closed -- so at :10 there is a buy AND a sell with no venue sequence to order
+        // them, and whether the window is "close then reopen" or "scale then close" (opposite signs) is undecidable.
+        // Refuse-don't-guess: the second flat writes nothing rather than risk a wrong-signed trade, and Trip 1 is
+        // never double-counted. (Trip 2's realized P&L is under-reported, the SAFE direction, until the ambiguity clears.)
         Guid owner = Guid.NewGuid();
         Guid accountId = await SeedAccountAsync(owner, "9001");
 
-        // Ids chosen so the deterministic (ExecutedAt, Id) order puts Trip 2's :10 OPEN before Trip 1's :10 CLOSE --
-        // the adverse boundary order real Postgres may also return (open id < close id).
         Guid tripOneEntry = new("00000000-0000-0000-0000-000000000010");
         Guid tripOneClose = new("00000000-0000-0000-0000-0000000000cc");
         Guid tripTwoOpen = new("00000000-0000-0000-0000-0000000000aa");
@@ -313,18 +311,47 @@ public class TradeJournalServiceTests
         await Service().ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(10)), CancellationToken.None);
         (await TradesAsync()).Should().ContainSingle("trip 1 journals on its own flat -- the fixture precondition");
 
-        // Trip 2 reopens at the SAME :10 instant and closes at :15.
+        // Trip 2 reopens at the SAME :10 instant as trip 1's close (a buy and a sell share the instant) and closes at :15.
         await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Buy, [(tripTwoOpen, 5_010m, 1, 10)]);
         await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Sell, [(tripTwoClose, 5_020m, 1, 15)]);
 
-        await Service().ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(15)), CancellationToken.None);
+        bool journalled = await Service().ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(15)), CancellationToken.None);
 
+        journalled.Should().BeFalse("the same-instant open/close boundary is ambiguous -- refuse rather than guess a sign");
         List<Trade> trades = await TradesAsync();
-        trades.Should().ContainSingle(
-            "the second flat must not merge trip 2 with the already-journalled trip 1 into one blended size-2 trade -- "
-            + "with the interior boundary hidden by the same-instant tie, the composition spans trip 1's close and "
-            + "must be refused rather than journal a P&L that describes neither trade");
-        trades[0].Size.Should().Be(1, "the only journalled trade is trip 1 (size 1); a merged size-2 trade is the bug");
+        trades.Should().ContainSingle("only trip 1 is journalled; the ambiguous second window wrote nothing");
+        trades[0].Size.Should().Be(1, "no blended size-2 double-count of trip 1's P&L");
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldRefuse_WhenALateInterleavedFillRepairsAnAlreadyJournalledTrade()
+    {
+        // gh#759 review (BLOCKING). A flat processed before all fills are ingested journals a partial trade; if a
+        // LATE, out-of-order fill then lands BEFORE the journalled close and the flat is replayed, FIFO re-pairs the
+        // same fills into DIFFERENT legs with different (ClosingFillId, OpeningFillId) keys. The exact-pair dedup can't
+        // see the old row is now orphaned, so writing the new legs would DOUBLE-COUNT into the daily governor. The
+        // re-pairing guard fails closed: refuse, keep the one (under-reported) row, never double-count.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        Guid f1 = new("00000000-0000-0000-0000-000000000f01");
+        Guid f2 = new("00000000-0000-0000-0000-000000000f02");
+
+        // Run 1: only f1 (buy @:0) and f2 (sell @:10) are ingested; the flat composes a balanced Buy 1 -> Sell 1.
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Buy, [(f1, 5_000m, 1, 0)]);
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Sell, [(f2, 5_010m, 1, 10)]);
+        await Service().ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(10)), CancellationToken.None);
+        (await TradesAsync()).Should().ContainSingle("run 1 journals the partial trade from the fills it can see");
+
+        // Late, out-of-order fills land INTERLEAVED (between :0 and :10): a scale-in buy @:4 and a sell @:6.
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Buy, [(Guid.NewGuid(), 5_000m, 1, 4)]);
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Sell, [(Guid.NewGuid(), 5_005m, 1, 6)]);
+
+        // Replay the SAME flat. FIFO now re-pairs the four fills into legs whose keys don't match the journalled row.
+        bool journalled = await Service().ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(10)), CancellationToken.None);
+
+        journalled.Should().BeFalse("the fill set re-paired -- refuse rather than double-count into the daily governor");
+        (await TradesAsync()).Should().ContainSingle("no new rows: the guard prevented the re-paired double-count");
     }
 
     [Fact]
@@ -449,22 +476,21 @@ public class TradeJournalServiceTests
     }
 
     [Fact]
-    public async Task ProcessFlatAsync_ShouldJournalACleanTripAfterARefusedOne_NotWedgeOnItsFillsForever()
+    public async Task ProcessFlatAsync_ShouldJournalACleanTripAfterAComposedReverse_NotLeakItsFills()
     {
-        // gh#734 review. The round-trip boundary must advance past a REFUSED flat, not only a journalled one. A
-        // stop-and-reverse (Buy 1, Sell 2, Buy 1) ends flat but is refused — it crossed through flat into a short.
-        // If its fills stay in the candidate set, the next clean Buy 1 / Sell 1 is recomposed WITH them, reads as
-        // another reversal, and is refused too — journaling wedged for this account+contract for the rest of the
-        // session, starving DailyRealizedReader and the R-4 throttle, the very readers gh#731 exists to feed.
+        // The round-trip boundary must advance past a COMPOSED cycle, not leak its fills into the next one. gh#759
+        // replaces gh#731's refusal of the reverse with composition: a stop-and-reverse (Buy 1, Sell 2, Buy 1) now
+        // composes TWO trips, and the later clean Buy 1 / Sell 1 must compose from ITS OWN fills alone -- three trades,
+        // none resized by a leaked fill.
         Guid owner = Guid.NewGuid();
         Guid accountId = await SeedAccountAsync(owner, "9001");
 
-        // A stop-and-reverse that ends flat and is refused: +1, then -1 (short), then 0.
+        // A stop-and-reverse: +1 (long), -2 (retires the long AND opens a short), +1 (retires the short). Two trips.
         await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)], placedMinute: 0);
         await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 2, 5)], placedMinute: 5);
         await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_020m, 1, 10)], placedMinute: 10);
         await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
-        (await TradesAsync()).Should().BeEmpty("the stop-and-reverse is refused — the fixture's precondition");
+        (await TradesAsync()).Should().HaveCount(2, "the reverse composes a long leg and a short leg -- the precondition");
 
         // A clean round trip afterwards, on the SAME account + contract.
         await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_030m, 1, 15)], placedMinute: 15);
@@ -472,12 +498,136 @@ public class TradeJournalServiceTests
 
         await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
 
-        Trade trade = (await TradesAsync()).Should().ContainSingle(
-            "the boundary advanced past the refused cycle, so the clean trip composes from its OWN fills").Subject;
-        trade.EntryPrice.Should().Be(5_030m);
-        trade.ExitPrice.Should().Be(5_040m);
-        trade.Size.Should().Be(1, "a leaked stop-and-reverse fill would unbalance or resize this");
-        trade.RealizedPnL.Should().Be(50m, "10 points * 1 * $5");
+        List<Trade> trades = await TradesAsync();
+        trades.Should().HaveCount(3, "the boundary advanced past the reverse's two legs; the clean trip is the third");
+        Trade clean = trades.OrderBy(trade => trade.ClosedAt).Last();
+        clean.EntryPrice.Should().Be(5_030m);
+        clean.ExitPrice.Should().Be(5_040m);
+        clean.Size.Should().Be(1, "a leaked reverse fill would unbalance or resize this");
+        clean.RealizedPnL.Should().Be(50m, "10 points * 1 * $5");
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldJournalOneTradePerLeg_WhenAScaleInIsExitedByASpanningFill()
+    {
+        // gh#759 acceptance: a scale-in (5 then 5) exited by a SINGLE 10-lot fill is TWO trades via allocation -- both
+        // realized into the daily governor, so a scaled-in trade's P&L is no longer lost to a refusal (the hazard this
+        // card closes). The spanning exit splits 5/5 across the two opening legs under FIFO.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 5, 0)], placedMinute: 0);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_010m, 5, 1)], placedMinute: 1);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_030m, 10, 5)], placedMinute: 5);
+
+        await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        List<Trade> trades = await TradesAsync();
+        trades.Should().HaveCount(2, "one trade per opening leg -- the spanning 10-lot exit split 5/5 across them");
+        trades.Should().OnlyContain(trade => trade.Size == 5 && trade.ExitPrice == 5_030m && trade.Side == OrderSide.Buy);
+        trades.Select(trade => trade.EntryPrice).OrderBy(price => price).Should().Equal(5_000m, 5_010m);
+        // First leg (5030-5000)*5*$5 = 750; second (5030-5010)*5*$5 = 500 -- the full 1,250 reaches the governor.
+        trades.Sum(trade => trade.RealizedPnL).Should().Be(1_250m);
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldJournalBothDirectionsWithSignedPnL_WhenAPositionStopsAndReverses()
+    {
+        // gh#759 acceptance: a stop-and-reverse journals the closing leg's trade AND the opposite one, each with its
+        // OWN signed realized P&L reaching the governor. Long 5 @ 5000, reversed by Sell 10 @ 5010 (closes the long
+        // for +$250 and opens a short 5), covered Buy 5 @ 5030 (the short loses -$500). Both hit the daily governor.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 5, 0)], placedMinute: 0);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 10, 5)], placedMinute: 5);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_030m, 5, 10)], placedMinute: 10);
+
+        await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        List<Trade> trades = await TradesAsync();
+        trades.Should().HaveCount(2);
+        Trade longLeg = trades.Single(trade => trade.Side == OrderSide.Buy);
+        longLeg.EntryPrice.Should().Be(5_000m);
+        longLeg.ExitPrice.Should().Be(5_010m);
+        longLeg.RealizedPnL.Should().Be(250m, "long 5 from 5000 to 5010 = +10 points * 5 * $5");
+        Trade shortLeg = trades.Single(trade => trade.Side == OrderSide.Sell);
+        shortLeg.EntryPrice.Should().Be(5_010m, "the short opened at the reversing fill's price");
+        shortLeg.ExitPrice.Should().Be(5_030m);
+        shortLeg.RealizedPnL.Should().Be(-500m, "short 5 from 5010 covered at 5030 = -20 points * 5 * $5");
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldStayAtTwoRows_WhenAMultiLegCycleIsReplayed()
+    {
+        // The composite key's load-bearing case (gh#759 review). A scale-in exited by a SPANNING fill writes TWO legs
+        // that SHARE one ClosingFillId. A replayed flat must recompose the same two (ClosingFillId, OpeningFillId)
+        // keys and write nothing new -- the per-leg pre-check + the composite unique index dedupe each leg, and the
+        // re-pairing guard sees the same keys (a stable replay, not a re-pairing). Single-trip replay is covered
+        // elsewhere; this pins the two-legs-one-closing-fill case the composite key exists for.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 5, 0)], placedMinute: 0);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_010m, 5, 1)], placedMinute: 1);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_030m, 10, 5)], placedMinute: 5);
+
+        await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+        (await TradesAsync()).Should().HaveCount(2, "the scale-in exited by one spanning fill journals two legs");
+
+        bool journalledAgain = await Service().ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        journalledAgain.Should().BeFalse("a replay writes nothing new");
+        (await TradesAsync()).Should().HaveCount(2, "the two legs are deduped on the composite key -- no duplicate rows");
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldSkipIdempotently_WhenReplayingAPreMigrationLegacyRow()
+    {
+        // gh#759 review (BLOCKING). A Trade journalled BEFORE this PR has OpeningFillId = NULL (the column did not
+        // exist). Replaying its flat must be the ORDINARY idempotent skip -- recognized by the old ClosingFillId-alone
+        // key -- NOT a false "re-pairing" refusal that pollutes JournalBoundaryMergeRefused, the metric this PR built
+        // to be a trustworthy signal for GENUINE re-pairing. The legacy row (and its RealizedPnL) is untouched.
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        Guid entryFill = new("00000000-0000-0000-0000-0000000000e1");
+        Guid closeFill = new("00000000-0000-0000-0000-0000000000c1");
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Buy, [(entryFill, 5_000m, 1, 0)]);
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Sell, [(closeFill, 5_010m, 1, 5)]);
+
+        // The pre-migration row: ClosingFillId set, OpeningFillId NULL -- the old single-key format.
+        await SeedLegacyTradeAsync(owner, accountId, closeFill, realized: 50m);
+
+        bool journalled = await Service(metrics)
+            .ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(5)), CancellationToken.None);
+
+        journalled.Should().BeFalse("a replay of the legacy trip writes nothing new");
+        (await TradesAsync()).Should().ContainSingle("the legacy row is recognized as already journalled, not re-paired");
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalAlreadyJournalled)).MustHaveHappened();
+        // A legacy row is the old-format version of the same trip, not a re-pairing.
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalBoundaryMergeRefused))
+            .MustNotHaveHappened();
+    }
+
+    // A pre-#759 Trade row: the natural key is ClosingFillId alone and OpeningFillId is NULL (the column did not exist).
+    private async Task SeedLegacyTradeAsync(Guid owner, Guid accountId, Guid closingFillId, decimal realized)
+    {
+        await using TradingCopilotDbContext context = Context();
+        context.Trades.Add(new Trade
+        {
+            Id = Guid.NewGuid(),
+            UserId = owner,
+            AccountId = accountId,
+            Instrument = Contract,
+            Side = OrderSide.Buy,
+            Size = 1,
+            EntryPrice = 5_000m,
+            ExitPrice = 5_010m,
+            RealizedPnL = realized,
+            Mode = TradingMode.Practice,
+            ClosedAt = _now.AddMinutes(5),
+            ClosingFillId = closingFillId,
+            // OpeningFillId deliberately left NULL -- the pre-#759 single-key format.
+        });
+        await context.SaveChangesAsync();
     }
 
     [Fact]
@@ -708,49 +858,49 @@ public class TradeJournalServiceTests
             constraintName: constraintName));
 
     [Fact]
-    public void IsClosingFillUniquenessViolation_ShouldBeTrue_ForTheClosingFillUniqueViolation() =>
-        TradeJournalService.IsClosingFillUniquenessViolation(
-            PostgresWriteFault(PostgresErrorCodes.UniqueViolation, TradeJournalService.ClosingFillUniqueIndex))
+    public void IsTradeNaturalKeyViolation_ShouldBeTrue_ForTheClosingFillUniqueViolation() =>
+        TradeJournalService.IsTradeNaturalKeyViolation(
+            PostgresWriteFault(PostgresErrorCodes.UniqueViolation, TradeJournalService.TradeNaturalKeyIndex))
             .Should().BeTrue("the closing-fill unique violation IS the idempotent replay this writer expects");
 
     [Fact]
-    public void IsClosingFillUniquenessViolation_ShouldBeFalse_ForAnotherIndexsUniqueViolation() =>
+    public void IsTradeNaturalKeyViolation_ShouldBeFalse_ForAnotherIndexsUniqueViolation() =>
         // A unique violation on some OTHER index is not this writer's idempotent replay -- it must propagate.
-        TradeJournalService.IsClosingFillUniquenessViolation(
+        TradeJournalService.IsTradeNaturalKeyViolation(
             PostgresWriteFault(PostgresErrorCodes.UniqueViolation, "IX_Trades_Some_Other_Unique"))
             .Should().BeFalse("only the ClosingFillId index's violation is the expected dupe");
 
     [Fact]
-    public void IsClosingFillUniquenessViolation_ShouldBeFalse_ForAUniqueViolationWithNoConstraintName() =>
+    public void IsTradeNaturalKeyViolation_ShouldBeFalse_ForAUniqueViolationWithNoConstraintName() =>
         // A 23505 whose ConstraintName is null cannot be attributed to OUR index -- fail safe: propagate, don't skip.
-        TradeJournalService.IsClosingFillUniquenessViolation(
+        TradeJournalService.IsTradeNaturalKeyViolation(
             PostgresWriteFault(PostgresErrorCodes.UniqueViolation, constraintName: null))
             .Should().BeFalse("a unique violation with no constraint name is not identifiably the closing-fill dupe");
 
     [Fact]
-    public void IsClosingFillUniquenessViolation_ShouldBeFalse_ForANonUniqueWriteFault() =>
+    public void IsTradeNaturalKeyViolation_ShouldBeFalse_ForANonUniqueWriteFault() =>
         // A CHECK violation is a REAL failure, not the idempotent dupe -- it must propagate, not be swallowed.
-        TradeJournalService.IsClosingFillUniquenessViolation(
+        TradeJournalService.IsTradeNaturalKeyViolation(
             PostgresWriteFault(PostgresErrorCodes.CheckViolation, "CK_Trades_Size_Positive"))
             .Should().BeFalse("a CHECK violation is a real write failure the writer must not skip");
 
     [Fact]
-    public void IsClosingFillUniquenessViolation_ShouldBeFalse_ForAForeignKeyViolation() =>
-        TradeJournalService.IsClosingFillUniquenessViolation(
+    public void IsTradeNaturalKeyViolation_ShouldBeFalse_ForAForeignKeyViolation() =>
+        TradeJournalService.IsTradeNaturalKeyViolation(
             PostgresWriteFault(PostgresErrorCodes.ForeignKeyViolation, "FK_Trades_Accounts_AccountId"))
             .Should().BeFalse("an FK violation is a real write failure, not the idempotent dupe");
 
     [Fact]
-    public void IsClosingFillUniquenessViolation_ShouldBeFalse_WhenTheInnerIsNotAPostgresException() =>
+    public void IsTradeNaturalKeyViolation_ShouldBeFalse_WhenTheInnerIsNotAPostgresException() =>
         // A provider/transport fault that is not a PostgresException (and the in-memory provider's bare
         // DbUpdateException) is never the dupe.
-        TradeJournalService.IsClosingFillUniquenessViolation(
+        TradeJournalService.IsTradeNaturalKeyViolation(
             new DbUpdateException("save failed", new InvalidOperationException("not a postgres error")))
             .Should().BeFalse();
 
     [Fact]
-    public void IsClosingFillUniquenessViolation_ShouldBeFalse_WhenThereIsNoInnerException() =>
-        TradeJournalService.IsClosingFillUniquenessViolation(new DbUpdateException("save failed"))
+    public void IsTradeNaturalKeyViolation_ShouldBeFalse_WhenThereIsNoInnerException() =>
+        TradeJournalService.IsTradeNaturalKeyViolation(new DbUpdateException("save failed"))
             .Should().BeFalse();
 
     // ----- gh#747: the narrowed catch, wired end-to-end (in-memory) -----
@@ -861,7 +1011,7 @@ public class TradeJournalServiceTests
         await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 5)]);
 
         DbUpdateException dupe = PostgresWriteFault(
-            PostgresErrorCodes.UniqueViolation, TradeJournalService.ClosingFillUniqueIndex);
+            PostgresErrorCodes.UniqueViolation, TradeJournalService.TradeNaturalKeyIndex);
         bool journalled = await ServiceWhoseTradeInsertFaultsWith(dupe, metrics)
             .ProcessFlatAsync(Flat("9001"), CancellationToken.None);
 
@@ -872,7 +1022,7 @@ public class TradeJournalServiceTests
     }
 
     [Fact]
-    public void ClosingFillUniqueIndex_ShouldMatchTheModelsRealIndexName_SoTheNarrowedCatchNeverSilentlyStopsMatching()
+    public void TradeNaturalKeyIndex_ShouldMatchTheModelsRealIndexName_SoTheNarrowedCatchNeverSilentlyStopsMatching()
     {
         // gh#747 review. The predicate keys its idempotent-skip filter on the literal index name -- a third copy of a
         // name EF derives by CONVENTION (the DbContext sets no HasDatabaseName) and the migration emits, with nothing
@@ -889,12 +1039,12 @@ public class TradeJournalServiceTests
         string indexName = relational.Model.FindEntityType(typeof(Trade))!
             .GetIndexes()
             .Single(index => index.Properties.Select(property => property.Name)
-                .SequenceEqual([nameof(Trade.ClosingFillId)]))
+                .SequenceEqual([nameof(Trade.ClosingFillId), nameof(Trade.OpeningFillId)]))
             .GetDatabaseName()!;
 
         indexName.Should().Be(
-            TradeJournalService.ClosingFillUniqueIndex,
-            "IsClosingFillUniquenessViolation matches on this exact name; if the model's index name drifts from the "
+            TradeJournalService.TradeNaturalKeyIndex,
+            "IsTradeNaturalKeyViolation matches on this exact name; if the model's index name drifts from the "
             + "constant, the narrowed catch stops recognising the idempotent replay");
     }
 }
