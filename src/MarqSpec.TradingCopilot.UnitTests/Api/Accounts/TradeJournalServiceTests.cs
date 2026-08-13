@@ -409,6 +409,50 @@ public class TradeJournalServiceTests
         A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten)).MustNotHaveHappened();
     }
 
+    [Theory]
+    [InlineData(true)]  // the reversing exit's partials sort 2,1,1 -- running passes through zero MID-group
+    [InlineData(false)] // ...and 1,1,2 -- running never lands on zero inside the group
+    public async Task ProcessFlatAsync_ShouldJournalBothLegsIdentically_WhenASameSideExitOvershootsFlatAtOneInstant(
+        bool bigPartialFirst)
+    {
+        // gh#809 regression, pinning the CLEAN-END half of the merged slicer rule (which the mixed-side coverage above
+        // does not exercise). A SINGLE-sided instant group can still be Fill.Id-order-dependent: a long 3 reversed by a
+        // sell filling 2,1,1 vs 1,1,2 at ONE instant passes running exposure through zero mid-group in one order but
+        // not the other. The mixed-side guard never fires (all sells), so slicing at that mid-group zero would journal
+        // only the post-tie short and DROP the long cycle's P&L in one order while composing BOTH legs in the other --
+        // the same order-dependence gh#809 is about. Only slicing at a group's CLEAN END (an order-independent net)
+        // fixes it: the whole window composes deterministically into the long leg AND the short leg, identically either
+        // order. Swapping the clean-end clause on develop back for a mixed-side-only check reopens exactly this and
+        // this theory goes red -- so it guards a rule no other test on develop pins.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        Guid entry = new("00000000-0000-0000-0000-000000000001");
+        Guid close = new("00000000-0000-0000-0000-0000000000ff");
+        // The three same-instant reversing partials; their ids are assigned in the array's given order, so the
+        // (ExecutedAt, Id) walk sees exactly this sequence. Sizes 2,1,1 (or 1,1,2) both net to a 4-lot sell.
+        Guid p1 = new("00000000-0000-0000-0000-0000000000a1");
+        Guid p2 = new("00000000-0000-0000-0000-0000000000a2");
+        Guid p3 = new("00000000-0000-0000-0000-0000000000a3");
+        (Guid Id, decimal Price, int Size, int Minute)[] reversingPartials = bigPartialFirst
+            ? [(p1, 5_010m, 2, 1), (p2, 5_010m, 1, 1), (p3, 5_010m, 1, 1)]
+            : [(p1, 5_010m, 1, 1), (p2, 5_010m, 1, 1), (p3, 5_010m, 2, 1)];
+
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Buy, [(entry, 5_000m, 3, 0)]);
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Sell, reversingPartials);
+        await SeedOrderWithFillIdsAsync(owner, accountId, OrderSide.Buy, [(close, 5_005m, 1, 2)]);
+
+        bool journalled = await Service().ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(2)), CancellationToken.None);
+
+        journalled.Should().BeTrue();
+        List<Trade> trades = await TradesAsync();
+        trades.Should().HaveCount(
+            2, "the long 3 is fully closed AND a short 1 is opened and closed -- both legs, never only the post-tie one");
+        // Long 3: 5000 -> 5010 = +30 pt * $5 = +150. Short 1: 5010 -> 5005 = +5 pt * $5 = +25. Order-independent.
+        trades.Sum(trade => trade.RealizedPnL).Should().Be(
+            175m, "the realized P&L into the daily governor cannot depend on which Guid the venue minted first (gh#809)");
+    }
+
     [Fact]
     public async Task ProcessFlatAsync_ShouldRefuse_WhenALateInterleavedFillRepairsAnAlreadyJournalledTrade()
     {
