@@ -119,11 +119,16 @@ jobs:
           #
           # Read-only by construction: no Write, no Edit, and Bash is narrowed to three git reads.
           # The space before `*` is load-bearing -- `Bash(git diff*)` would also match `git diff-index`.
-          # The prompt lives in .github/reviewer-prompt.md rather than inline: it is the thing most
+          # The prompt lives in .github/reviewer-prompt*.md rather than inline: it is the thing most
           # worth reviewing when this bot misbehaves, and a heredoc inside a YAML block scalar has to
           # sit at column 0, which silently ends the scalar.
+          #
+          # TWO FILES, CONCATENATED. reviewer-prompt.md is the shared substance of a review; the
+          # -advisory clause is what makes THIS reviewer advisory (diff on stdin, and no verdict line).
+          # The binding clause a spawned reviewer gets is the sibling -verdict file, which this job must
+          # never pick up (gh#815). Splitting beats copying: one substance, no drift between the two.
           set +e
-          claude --bare -p "$(cat .github/reviewer-prompt.md)" \
+          claude --bare -p "$(cat .github/reviewer-prompt.md .github/reviewer-prompt-advisory.md)" \
             --append-system-prompt-file documentation/agents/code-reviewer.md \
             --model claude-opus-5 \
             --permission-mode dontAsk \
