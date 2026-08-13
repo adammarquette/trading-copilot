@@ -18,7 +18,9 @@
 #
 #   0  approved and green      -> the card is Done; take the next one from Current ToDo
 #   1  changes requested       -> the findings are printed above; fix them, push, and start again at `checks`
-#   2  timed out               -> nobody ruled: alert the operator and pause (did the reviewer get spawned?)
+#   2  timed out               -> alert the operator and pause. What timed out depends on the phase: in
+#                                `verdict` nobody ruled (was a reviewer spawned, and COULD it post one?); in
+#                                `checks` the checks never concluded. Each phase prints which it was.
 #   3  approval is stale       -> the contribution changed since it was approved; SPAWN THE REVIEWER AGAIN
 #   4  a check failed          -> fix CI first; nobody is asked to rule on a diff that does not build
 #   5  too many rounds         -> --max-rounds reached; stop looping and escalate to the operator
