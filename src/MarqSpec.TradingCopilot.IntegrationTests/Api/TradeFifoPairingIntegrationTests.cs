@@ -587,39 +587,29 @@ public class TradeFifoPairingIntegrationTests : IClassFixture<TradeFifoPairingPo
     }
 
     [Fact]
-    public async Task ProcessFlatAsync_JournalsAGuidOrderedRow_WhenTheSameInstantTieFallsOnTheCycleBoundary()
+    public async Task ProcessFlatAsync_ShouldWriteNoRow_WhenTheSameInstantTieFallsOnTheCycleBoundary()
     {
-        // DEFECT gh#809 (work:code, safety-critical): the identical executions, with only the tied pair's Guids
-        // swapped, are NOT refused. With the tied SELL sorting first, TradeJournalService.CurrentCycleStart walks the
-        // fills in the same arbitrary (ExecutedAt, Id) order, sees exposure return to flat AT the tie, and slices the
-        // window there -- so the window TradeRoundTrip.TryCompose receives no longer contains the tie at all and its
-        // ambiguity gate never fires. The gate is real but runs one step too late: the boundary is guessed before it
-        // is consulted. ADR-0022 names exactly this case ("opposite-side fills tied at the BOUNDARY timestamp") as one
-        // that writes no row.
-        //
-        // Pins the OBSERVED behaviour per the QA contract's guard-discipline rule 2 -- documenting reality without
-        // blessing it, rather than leaving the suite red or skipping the case and losing the witness. When gh#809
-        // lands, these three assertions flip to `BeFalse()` / `BeEmpty()` (the sibling case above, verbatim) and this
-        // becomes gh#809's regression guard.
+        // gh#809 REGRESSION GUARD (was the DEFECT pin). The identical executions as the sibling above, with only the
+        // tied pair's Guids swapped so the tied SELL sorts first. Before the fix, TradeJournalService.CurrentCycleStart
+        // walked the fills in that arbitrary (ExecutedAt, Id) order, saw exposure return to flat AT the tie, and sliced
+        // the window there -- so the window TradeRoundTrip.TryCompose received no longer contained the tie and its
+        // ambiguity gate never fired, journalling a Guid-ordered row whose RealizedPnL entered the R-4 / R-5 daily
+        // governor while the pre-tie cycle's P&L was dropped with no watermark to re-derive it. The fix keeps a
+        // zero-crossing that lands inside a same-instant group out of the boundary walk, so the tie stays in the window
+        // and the gate refuses it. ADR-0022 names exactly this case ("opposite-side fills tied at the BOUNDARY
+        // timestamp") as one that writes no row -- now true in EITHER Guid order. This case asserts the sibling's
+        // behaviour verbatim; running BOTH orders is what makes the pair a guard rather than a coincidence.
         Guid owner = Guid.NewGuid();
         Guid accountId = await SeedTiedWindowAsync(owner, venueKey: "7112", block: 12, sellSortsFirst: true);
 
         bool journalled = await JournalAsync(FlatAt("7112", At(2)));
 
-        journalled.Should().BeTrue(
-            "DEFECT gh#809 — OBSERVED, not intended: the tied sell's Guid sorting first makes CurrentCycleStart treat "
-            + "the tie as a return to flat, so the ambiguity never reaches the gate and a row is written");
-
-        List<Trade> written = await TradesAsync(accountId);
-
-        written.Should().ContainSingle(
-            "DEFECT gh#809 — the guessed boundary journals only the post-tie leg; the pre-tie cycle's realized P&L is "
-            + "dropped with no watermark and no later flat event that could re-derive it")
-            .Which.RealizedPnL.Should().Be(
-                50m,
-                "DEFECT gh#809 — this figure (buy 5010 → sell 5020, 10 points at a point value of 5) enters the R-4 / "
-                + "R-5 daily governor for no reason but which Guid the venue happened to mint first: the sibling case "
-                + "above seeds the SAME executions with the tied pair's Guids swapped and correctly writes nothing");
+        journalled.Should().BeFalse(
+            "an opposite-side tie at the cycle boundary has no single right answer -- the boundary must not be guessed "
+            + "by the arbitrary Fill.Id order (gh#809 fixed; ADR-0022)");
+        (await TradesAsync(accountId)).Should().BeEmpty(
+            "the same four executions journal nothing whichever tied fill's Guid the venue happened to mint first -- the "
+            + "pre-fix Guid-ordered row, whose P&L entered the daily governor for that reason alone, is gone");
     }
 
     /// <summary>
