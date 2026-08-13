@@ -47,13 +47,21 @@ opening fill.**
   reconcile to flat. These still write no row.
   - **Where the boundary-tie gate is enforced (gh#809).** The refusal lives in the **composer**
     (`TradeRoundTrip.TryCompose` — one gate, over the window it is given). But the **writer** first slices the fills
-    to the current flat-to-flat cycle (`TradeJournalService.CurrentCycleStart`), and that slice walks fills in an
-    arbitrary `(ExecutedAt, Fill.Id)` order. A boundary tie of opposite sides could make running exposure return to
-    flat *at the tie* under one `Fill.Id` order and not another, so the slicer would split the tie apart and the
-    composer's gate would never see it — the refusal decided by which Guid the venue minted first. The slicer
-    therefore **must not advance the cycle across a mixed-side same-instant tie**: it leaves the tie in the window so
-    the composer's single gate refuses it, in every `Fill.Id` order. The gate stays one place; the slicer's job is
-    only to not hide the tie from it.
+    to the current flat-to-flat cycle (`TradeJournalService.CurrentCycleStart`), walking them in an arbitrary
+    `(ExecutedAt, Fill.Id)` order — and a slice is trustworthy only when it does not depend on that order. Two things
+    make it so, and the slicer needs **both**:
+    - **Slice only at a group's clean end** (the next fill is at a later instant). `running`'s *partial* sums inside a
+      same-instant group are Guid-ordered, but the group's *net* (reached at its last fill) is order-independent. A
+      single-sided reversing exit filling `2,1,1` vs `1,1,2` at one instant passes through zero mid-group in one order
+      and not the other — slicing there journals the post-tie leg and silently drops the pre-boundary cycle in one
+      order only. Slicing at instant boundaries rests the decision on order-independent group nets.
+    - **Never slice across a mixed-side instant.** That is the ADR-0022 boundary tie itself: even when the group nets
+      flat at a clean end, which fill opened/closed/reversed is Guid-decided and would flip a leg's sign. Leaving it
+      in the window hands it to the composer's single gate to refuse (the clean-end rule alone would slice past a
+      mixed tie that nets flat and hide it from that gate).
+
+    The gate stays one place; the slicer's job is only to present the whole flat-to-flat window without letting an
+    arbitrary intra-instant order decide where it begins.
 
 ### The structural cost — a new natural key
 `ClosingFillId` is today a **unique filtered** index (`IX_Trades_ClosingFillId`) and the writer's idempotency key

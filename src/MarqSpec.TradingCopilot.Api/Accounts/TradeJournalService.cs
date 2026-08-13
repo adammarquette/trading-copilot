@@ -402,16 +402,27 @@ public sealed class TradeJournalService
                 _ => 0,
             };
 
-            // A return to flat before the final fill closes a prior cycle; the current trip starts after it -- UNLESS
-            // that flat lands inside a same-instant group carrying MIXED sides (gh#809). There the (ExecutedAt, Id)
-            // order that put `running` at zero exactly here is decided by an arbitrary venue Guid, not by real
-            // sequence: a different Guid order would slice the tied pair differently, or not at all. Slicing across it
-            // would GUESS the boundary -- the sign-flipping ambiguity ADR-0022 refuses -- and, worse, silently drop
-            // the pre-boundary cycle's realized P&L (there is no persisted watermark to revisit it). So leave the tie
-            // in the window and let TradeRoundTrip.TryCompose's same-instant opposite-side gate be the ONE place that
-            // refuses it; the gate is symmetric, so it refuses regardless of which Guid the venue happened to mint
-            // first. A same-instant SAME-side flat (a book-sweeping exit) is unambiguous and still advances the cycle.
-            if (running == 0 && index < ordered.Count - 1 && !FlatFallsInsideAMixedInstant(ordered, sideByOrder, index))
+            // A return to flat before the final fill closes a prior cycle; the current trip starts after it -- but
+            // ONLY when that flat is trustworthy under any (ExecutedAt, Id) order, which needs BOTH guards (gh#809):
+            //
+            //  1. The zero sits at the group's CLEAN END -- the next fill is at a later instant. `running` walks fills
+            //     in an arbitrary intra-instant order, so its PARTIAL sums inside a same-instant group are Guid-
+            //     ordered, but the group's NET sum (reached only at its last fill) is order-independent. Slicing at a
+            //     zero that lands MID-group would let the arbitrary order decide whether exposure hit flat here at all
+            //     -- e.g. a reversing exit filling 2,1,1 vs 1,1,2 passes through zero in one order and not the other,
+            //     journalling the pre-boundary cycle in one and dropping it in the other. Only slice at an instant
+            //     boundary, where the decision rests on order-independent group nets.
+            //  2. The group is SINGLE-sided. A same-instant group of MIXED sides is the ADR-0022 boundary tie: even
+            //     when its net is flat at a clean end, which fill opened/closed/reversed is Guid-decided and would
+            //     flip a leg's sign. Leave it in the window so TradeRoundTrip.TryCompose's same-instant opposite-side
+            //     gate -- the ONE place that refuses -- receives it; guard (1) alone would slice past a mixed tie that
+            //     nets flat and hide it from that gate.
+            //
+            // A same-instant SAME-side flat at a clean group end (a book-sweeping exit) is unambiguous and advances.
+            if (running == 0
+                && index < ordered.Count - 1
+                && ordered[index].ExecutedAt != ordered[index + 1].ExecutedAt
+                && !FlatFallsInsideAMixedInstant(ordered, sideByOrder, index))
             {
                 start = index + 1;
             }
@@ -421,11 +432,11 @@ public sealed class TradeJournalService
     }
 
     /// <summary>
-    /// Whether the return-to-flat at <paramref name="index"/> lands inside a group of fills sharing its exact
-    /// <see cref="Fill.ExecutedAt"/> that carries more than one side (gh#809). When it does, the cycle boundary the
-    /// arbitrary <c>(ExecutedAt, Id)</c> order produced here is not trustworthy — a different order of the tied fills
-    /// would move (or erase) it — so the slice must not cross it. Mirrors <see cref="TradeRoundTrip"/>'s own
-    /// same-instant opposite-side gate, so the slicer and the composer agree on exactly which ties are ambiguous.
+    /// Whether the fills sharing <paramref name="index"/>'s exact <see cref="Fill.ExecutedAt"/> carry more than one
+    /// side (gh#809) — the ADR-0022 boundary tie. When they do, the slice must not cross the instant however its net
+    /// lands, so the tie reaches <see cref="TradeRoundTrip"/>'s same-instant opposite-side gate; mirrors that gate so
+    /// slicer and composer agree on exactly which ties are ambiguous. (The order-dependence of a SAME-side group that
+    /// overshoots flat is handled separately, by only slicing at a group's clean end — see <see cref="CurrentCycleStart"/>.)
     /// </summary>
     private static bool FlatFallsInsideAMixedInstant(
         IReadOnlyList<Fill> ordered, IReadOnlyDictionary<Guid, OrderSide> sideByOrder, int index)
