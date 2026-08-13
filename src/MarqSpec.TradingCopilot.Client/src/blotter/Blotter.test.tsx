@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -8,6 +8,7 @@ import {
   getPositions,
   getRestingOrders,
 } from '../api/blotter';
+import { cancelOrder } from '../api/orders';
 import type { RealtimeContextValue } from '../realtime/RealtimeProvider';
 import { useOptionalRealtime } from '../realtime/RealtimeProvider';
 import { Blotter } from './Blotter';
@@ -20,9 +21,15 @@ vi.mock('../api/blotter', async (importOriginal) => ({
 
 vi.mock('../realtime/RealtimeProvider', () => ({ useOptionalRealtime: vi.fn() }));
 
+vi.mock('../api/orders', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api/orders')>()),
+  cancelOrder: vi.fn(),
+}));
+
 const positions = vi.mocked(getPositions);
 const restingOrders = vi.mocked(getRestingOrders);
 const realtime = vi.mocked(useOptionalRealtime);
+const cancel = vi.mocked(cancelOrder);
 
 const LONG: BlotterPosition = {
   contract: 'CON.F.US.MES.U26',
@@ -90,6 +97,7 @@ beforeEach(() => {
   positions.mockResolvedValue({ ok: true, data: live(LONG) });
   restingOrders.mockResolvedValue({ ok: true, data: live(PROTECTIVE) });
   wireRealtime();
+  cancel.mockResolvedValue({ ok: true, data: undefined });
 });
 
 afterEach(() => {
@@ -251,5 +259,83 @@ describe('Blotter', () => {
       resolveFirst({ ok: true, data: live(LONG) });
     });
     expect(shown().toLowerCase()).toContain('no open positions');
+  });
+
+  it('names the specific order before cancelling it', async () => {
+    // Acceptance: every destructive control states what it will do to WHICH order before it acts. A generic
+    // "are you sure" on a blotter with several resting orders is exactly how the wrong one gets pulled.
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    });
+
+    const confirmation = screen.getByRole('dialog').textContent ?? '';
+    expect(confirmation).toContain('CON.F.US.MES.U26');
+    expect(confirmation).toContain('2');
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('cancels only after the confirmation is accepted', async () => {
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^cancel this order$/i }));
+    });
+
+    expect(cancel).toHaveBeenCalledWith('v1');
+  });
+
+  it('warns that cancelling a PROTECTIVE order removes protection', async () => {
+    // The one cancel that is not merely undoing an intent: pulling a protective leg leaves the position exposed,
+    // and the operator should be told that rather than discovering it from the protection chip afterwards.
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    });
+
+    expect((screen.getByRole('dialog').textContent ?? '').toLowerCase()).toContain('protective');
+  });
+
+  it('re-reads after a cancel, rather than assuming it worked', async () => {
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^cancel this order$/i }));
+    });
+
+    expect(positions).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not cancel twice when confirmed twice before the first resolves', async () => {
+    // The same non-idempotent-transmit hazard as the order ticket: a second click before the first settles
+    // issues a second cancel.
+    let release: () => void = () => {};
+    cancel.mockReturnValue(
+      new Promise((resolve) => {
+        release = () => resolve({ ok: true, data: undefined });
+      }),
+    );
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^cancel this order$/i }));
+      fireEvent.click(screen.getByRole('button', { name: /^cancel this order$/i }));
+    });
+
+    expect(cancel).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      release();
+    });
   });
 });

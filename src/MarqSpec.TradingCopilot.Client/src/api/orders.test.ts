@@ -9,6 +9,7 @@ import {
   armOrder,
   cancelOrder,
   createConditionalOrder,
+  repriceOrder,
   sendOrder,
   takeStagedOrder,
 } from './orders';
@@ -276,5 +277,36 @@ describe('createConditionalOrder', () => {
     });
 
     expect(result.ok).toBe(false);
+  });
+});
+
+describe('repriceOrder', () => {
+  it('patches the order price', async () => {
+    const fetchMock = stubFetch(() => Promise.resolve(response(200, { orderId: 'o1' })));
+
+    await repriceOrder('o1', { entryPrice: 5010 });
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/orders/o1/price');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('PATCH');
+  });
+
+  it('sends only the fields the operator changed', async () => {
+    // The safety stop stays invariant on every reprice path server-side, and a partial PATCH is how the caller
+    // says "move the entry, leave everything else" -- sending nulls for the rest would read as a request to
+    // clear them.
+    const fetchMock = stubFetch(() => Promise.resolve(response(200, { orderId: 'o1' })));
+
+    await repriceOrder('o1', { workingStopPrice: 4996 });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as Record<string, unknown>;
+    expect(body).toEqual({ workingStopPrice: 4996 });
+  });
+
+  it('surfaces a refusal rather than reporting a move', async () => {
+    // A reprice CAN add risk (a wider stop, an entry likelier to fill), so it runs the full send ladder and is
+    // re-gated. A refusal is the gate's answer and must reach the operator.
+    stubFetch(() => Promise.resolve(response(422, { error: 'would breach the drawdown floor' })));
+
+    expect((await repriceOrder('o1', { entryPrice: 5010 })).ok).toBe(false);
   });
 });

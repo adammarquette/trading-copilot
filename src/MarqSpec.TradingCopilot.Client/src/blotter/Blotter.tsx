@@ -1,6 +1,11 @@
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
+import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
+import DialogContent from '@mui/material/DialogContent';
+import DialogTitle from '@mui/material/DialogTitle';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -11,6 +16,7 @@ import {
   getPositions,
   getRestingOrders,
 } from '../api/blotter';
+import { cancelOrder } from '../api/orders';
 import { useOptionalRealtime } from '../realtime/RealtimeProvider';
 
 /**
@@ -39,9 +45,12 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   const [positionView, setPositionView] = useState<VenueView<BlotterPosition> | null>(null);
   const [orderView, setOrderView] = useState<VenueView<BlotterRestingOrder> | null>(null);
   const [unavailable, setUnavailable] = useState(false);
+  const [confirming, setConfirming] = useState<BlotterRestingOrder | null>(null);
   const realtime = useOptionalRealtime();
   const mounted = useRef(true);
   const latest = useRef(0);
+  /** Synchronous re-entrancy guard -- a `pending` state would not exclude two clicks in one tick. */
+  const cancelling = useRef(false);
 
   useEffect(() => {
     mounted.current = true;
@@ -82,6 +91,24 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
     const stops = [realtime.onOrderState(load), realtime.onFill(load), realtime.onResync(load)];
     return () => stops.forEach((stop) => stop());
   }, [realtime, load]);
+
+  const confirmCancel = useCallback(() => {
+    if (confirming === null || cancelling.current) {
+      return; // never a second cancel of the same order
+    }
+    cancelling.current = true;
+    const key = confirming.venueOrderKey;
+
+    void cancelOrder(key)
+      .then(() => {
+        setConfirming(null);
+        // Re-read rather than assume it worked: venue truth decides what is standing, not this click.
+        load();
+      })
+      .finally(() => {
+        cancelling.current = false;
+      });
+  }, [confirming, load]);
 
   const protectionOf = useCallback(
     (position: BlotterPosition): Protection => {
@@ -157,13 +184,48 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
           <Typography variant="body2">No resting orders.</Typography>
         ) : (
           orderView.items.map((order) => (
-            <Typography key={order.venueOrderKey} variant="body2">
-              {order.contract} · {order.size} @ {order.stopPrice ?? order.limitPrice}
-              {order.isProtective ? ' · protective' : ''}
-            </Typography>
+            <Box
+              key={order.venueOrderKey}
+              sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 0.5 }}
+            >
+              <Typography variant="body2" sx={{ flex: 1 }}>
+                {order.contract} · {order.size} @ {order.stopPrice ?? order.limitPrice}
+                {order.isProtective ? ' · protective' : ''}
+              </Typography>
+              <Button size="small" color="error" onClick={() => setConfirming(order)}>
+                Cancel
+              </Button>
+            </Box>
           ))
         )}
       </Box>
+      <Dialog open={confirming !== null} onClose={() => setConfirming(null)}>
+        <DialogTitle>Cancel this resting order?</DialogTitle>
+        <DialogContent>
+          {confirming !== null ? (
+            <>
+              {/* Names the SPECIFIC order, never a generic "are you sure": a blotter carries several at once,
+                  and that is exactly how the wrong one gets pulled. */}
+              <Typography variant="body2" gutterBottom>
+                <strong>{confirming.contract}</strong> · {confirming.size} contract
+                {confirming.size === 1 ? '' : 's'} @ {confirming.stopPrice ?? confirming.limitPrice}
+              </Typography>
+              {confirming.isProtective ? (
+                <Alert severity="error">
+                  This is a <strong>protective</strong> order. Cancelling it leaves the position on
+                  this contract without that stop standing at the venue.
+                </Alert>
+              ) : null}
+            </>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirming(null)}>Keep it</Button>
+          <Button color="error" variant="contained" onClick={confirmCancel}>
+            Cancel this order
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
