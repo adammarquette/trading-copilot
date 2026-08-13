@@ -290,11 +290,34 @@ into a rubber stamp.
 | `REVIEWER_APP_ID` · `REVIEWER_APP_INSTALLATION_ID` · `REVIEWER_APP_PRIVATE_KEY` | Mint the App token the review is posted under (setup below). | ☑ 2026-07-24 |
 
 **Neither of these is what supplies a binding verdict today.** That is the reviewer an **author agent spawns**
-locally once its PR is green (`gh#815`) — same contract, same `reviewer-review.sh` identity below, but its verdict
-line *is* binding, and the author blocks on it with `scripts/watch-verdict.sh` instead of ending its turn (loop:
-[engineering §10](trading-platform-engineering.md)). So the unset key above costs the *pre-review*, not the gate:
-`review-verdict` still clears, because someone is now watching for it. It is still worth setting — an independent
-second opinion on every push is exactly what a single-operator repo is short of.
+once its PR is green (`gh#815`) — same contract, but its verdict line *is* binding, and the author blocks on it
+with `scripts/watch-verdict.sh` instead of ending its turn (loop:
+[engineering §10](trading-platform-engineering.md)). So the unset key above costs the *pre-review*, not the gate.
+It is still worth setting — an independent second opinion on every push is exactly what a single-operator repo is
+short of.
+
+#### Agent review identity — the gate is not satisfiable without one ☐
+
+**Open item, and the honest state of it: `review-verdict` does not clear from a session that cannot create a
+review.** The check reads review **bodies**; creating one takes `pull_requests: write`. The App row above is
+marked *set* — but those secrets are set **in GitHub Actions**, and a spawned reviewer does not run there. Unless
+it can read them from the operator's own environment, its two options are:
+
+| Identity | Where it comes from | What it needs |
+| --- | --- | --- |
+| Reviewer App (preferred — a formal `APPROVED` state, no marker needed) | `REVIEWER_APP_ID` · `REVIEWER_APP_INSTALLATION_ID` · `REVIEWER_APP_PRIVATE_KEY_FILE` in the *session's* environment, from the same App as the CI secrets (setup below) | the App installed on the repo |
+| The session's own `gh` | already authenticated | a token holding `pull_requests: write`; the review goes up as `COMMENT` and the first-line marker carries the verdict |
+
+A **Cursor cloud-agent session has neither** — its installation token is refused on `POST /pulls/{n}/reviews` with
+`Resource not accessible by integration`, and GitHub names the missing permission in
+`X-Accepted-GitHub-Permissions: pull_requests=write`. That is not theoretical: `gh#812`, `gh#813` and `gh#814` each
+**merged with `review-verdict` never satisfied**, and `verdict-state.sh 813` still answers `NONE`. The reviews on
+those PRs are PR comments and empty-bodied inline threads — visible to a human, invisible to the check.
+
+Until an identity is provisioned, `.github/scripts/post-verdict.sh` makes the failure **loud instead of silent**:
+`preflight <pr>` answers before a reviewer spends a review finding out, the posting path refuses to report success
+it cannot prove, and the verdict comes back to the operator to post. Provisioning is `gh#811`; the reviewer's side
+of it is its [contract](agents/code-reviewer.md), *Ruling takes an identity*.
 
 **2. `copilot-review-develop` — present but `enforcement: disabled`.** The rule still exists in repository
 settings and therefore still shows up in `gh api repos/<owner>/<repo>/rulesets`, but a disabled ruleset gates
@@ -464,13 +487,14 @@ nor token is ever printed.
   it posts as `trading-copilot-reviewer[bot]`, a different actor from the author, so GitHub accepts it. The script
   prints the bot login it posted as — the proof self-review was bypassed.
 
-**Until the App exists**, an agent review falls back to a comment whose **first line is the verdict**
-(`**Verdict: Request changes**` / `**Verdict: Approve**`) so the signal is unambiguous even without a formal
-state. Once the App is live, this fallback is retired and (with `gh#45`) its approval can become a required
-check. The App's secrets are set **in CI**; a reviewer spawned in a local session reads them from the operator's
-environment, so **that** is where the fallback still fires — which is why
-[`.github/reviewer-prompt-verdict.md`](../.github/reviewer-prompt-verdict.md) carries both paths and the spawned
-reviewer tries the App first.
+**Where the App identity is not available**, an agent review falls back to a **review** whose **first line is the
+verdict** (`**Verdict: Request changes**` / `**Verdict: Approve**`) so the signal is unambiguous even without a
+formal state. Once the App is reachable from wherever reviewers run, this fallback is retired and (with `gh#45`)
+its approval can become a required check. The distinction that matters: the fallback is still a **review**, not a
+PR comment — a comment carries no verdict the gate can read, whatever its first line says (*Agent review
+identity*, above). Choosing between the two, and proving the result is readable, is
+[`.github/scripts/post-verdict.sh`](../.github/scripts/post-verdict.sh)'s job rather than the reviewer's judgment;
+[`reviewer-prompt-verdict.md`](../.github/reviewer-prompt-verdict.md) points it there.
 
 ## Observability stack (local, opt-in)
 

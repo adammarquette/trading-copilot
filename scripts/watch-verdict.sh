@@ -37,6 +37,11 @@
 #
 # `review-verdict` in CI waits for the same ruling from the same script (.github/scripts/verdict-state.sh) --
 # deliberately, so the gate and the author can never disagree about whether a PR is approved.
+#
+# The reviewer's side of the same boundary is .github/scripts/post-verdict.sh: it posts the verdict and proves
+# the gate reads it. Worth knowing here for one reason -- a verdict can be perfectly visible on the PR and still
+# invisible to this wait, if it went up as a PR comment rather than in a review body. That is what `2` most
+# often means (PR #818 review), which is why the timeout below says so before blaming the reviewer.
 
 set -uo pipefail
 
@@ -243,9 +248,15 @@ while :; do
 
   now=$(date +%s)
   if [ "$now" -ge "$deadline" ]; then
-    printf 'Timed out after %sm -- %s.\n' "$DEADLINE_MINUTES" "$state" >&2
-    printf 'Nobody ruled. Check the reviewer was actually spawned and that it posted to %s;\n' "$PR_URL" >&2
-    printf 'then alert the operator rather than taking another card (engineering §10).\n' >&2
+    printf 'Timed out after %sm. %s.\n' "$DEADLINE_MINUTES" "$state" >&2
+    printf 'Nobody ruled. Check these two, in this order, before waking the operator:\n' >&2
+    printf '  1. COULD the reviewer post a verdict? One only binds inside a review BODY, which takes an\n' >&2
+    printf '     identity holding `pull_requests: write` -- the reviewer App, or a token that has it. A\n' >&2
+    printf '     session without one can post PR comments, and this gate does not read them, so the review\n' >&2
+    printf '     may exist while the verdict does not. `.github/scripts/post-verdict.sh preflight %s`\n' "$PR" >&2
+    printf '     answers it in one call (gh#811).\n' >&2
+    printf '  2. Was a reviewer spawned at all, and did it post to %s?\n' "$PR_URL" >&2
+    printf 'Then alert the operator rather than taking another card (engineering §10).\n' >&2
     exit 2
   fi
 
