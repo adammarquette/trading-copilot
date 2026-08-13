@@ -6,6 +6,7 @@ import {
   OrderSide,
   OrderType,
   armOrder,
+  cancelConditionalOrder,
   cancelOrder,
   createConditionalOrder,
   takeStagedOrder,
@@ -21,12 +22,14 @@ vi.mock('../api/orders', async (importOriginal) => ({
   takeStagedOrder: vi.fn(),
   cancelOrder: vi.fn(),
   createConditionalOrder: vi.fn(),
+  cancelConditionalOrder: vi.fn(),
 }));
 
 const arm = vi.mocked(armOrder);
 const take = vi.mocked(takeStagedOrder);
 const cancel = vi.mocked(cancelOrder);
 const createConditional = vi.mocked(createConditionalOrder);
+const cancelConditional = vi.mocked(cancelConditionalOrder);
 
 const PROPOSAL = {
   accountId: 'a1',
@@ -114,6 +117,7 @@ beforeEach(() => {
   });
   cancel.mockResolvedValue({ ok: true, data: undefined });
   createConditional.mockResolvedValue(pendingConditional());
+  cancelConditional.mockResolvedValue({ ok: true, data: undefined });
 });
 
 afterEach(() => {
@@ -549,5 +553,69 @@ describe('OrderTicket — send when conditions met (gh#655)', () => {
     expect(
       (screen.getByRole('button', { name: /send on trigger/i }) as HTMLButtonElement).disabled,
     ).toBe(false);
+  });
+
+  it('withdraws a pending conditional by its own id, returning to the trigger form', async () => {
+    // A pending conditional will place a real order when it fires (R-12), so the operator must be able to pull it
+    // back before then. Withdrawing it deletes the server-side row (nothing rests at the venue) and clears the
+    // pending panel; the on-trigger form returns so a new one can be composed.
+    await renderTicket();
+    await armTheTrigger('5010');
+    await click(/send on trigger/i);
+    expect(screen.getByTestId('conditional-pending')).toBeTruthy();
+
+    await click(/withdraw/i);
+
+    expect(cancelConditional).toHaveBeenCalledWith('c1');
+    expect(screen.queryByTestId('conditional-pending')).toBeNull();
+    expect(screen.getByLabelText(/trigger price/i)).toBeTruthy();
+  });
+
+  it('keeps the pending conditional on screen when the withdrawal is refused', async () => {
+    // A mid-fire conditional cannot be withdrawn (it is reconciled against venue truth instead). The refusal is
+    // shown and the pending panel stays — the conditional is still live, so the surface must not imply it is gone.
+    cancelConditional.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      status: 409,
+      error: 'Only a pending conditional can be cancelled — this one is Firing.',
+    });
+
+    await renderTicket();
+    await armTheTrigger('5010');
+    await click(/send on trigger/i);
+
+    await click(/withdraw/i);
+
+    expect(screen.getByTestId('order-ticket').textContent?.toLowerCase()).toContain(
+      'only a pending conditional',
+    );
+    expect(screen.getByTestId('conditional-pending')).toBeTruthy();
+  });
+
+  it('does not withdraw twice when Withdraw is clicked again before the first resolves', async () => {
+    // Deleting is not idempotent from the surface's view: a second click while the network is slow must not fire a
+    // second DELETE. The same inFlight guard the arm/send/create paths carry.
+    let release: (value: Awaited<ReturnType<typeof cancelConditionalOrder>>) => void = () => {};
+    cancelConditional.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    await renderTicket();
+    await armTheTrigger('5010');
+    await click(/send on trigger/i);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /withdraw/i }));
+      fireEvent.click(screen.getByRole('button', { name: /withdraw/i }));
+    });
+
+    expect(cancelConditional).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release({ ok: true, data: undefined });
+    });
   });
 });

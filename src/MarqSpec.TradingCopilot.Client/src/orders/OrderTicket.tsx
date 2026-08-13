@@ -17,6 +17,7 @@ import {
   type SendOrderRequest,
   type StagedOrderResponse,
   armOrder,
+  cancelConditionalOrder,
   cancelOrder,
   createConditionalOrder,
   takeStagedOrder,
@@ -211,6 +212,26 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
     expiryDraft,
   ]);
 
+  const handleWithdrawConditional = useCallback(() => {
+    if (conditional === null || !begin()) {
+      return; // never a second DELETE of the same conditional
+    }
+    setRefusal(null);
+    void cancelConditionalOrder(conditional.conditionalOrderId)
+      .then((result) => {
+        if (!result.ok) {
+          // A refused withdrawal (a mid-fire conditional the server will not cancel) leaves the pending panel up —
+          // the conditional is still live, so the surface must not imply it is gone. The reason stays on screen.
+          setRefusal(refusalText(result));
+          return;
+        }
+        // The row is gone server-side; clear the panel. `whenConditionsMet` stays on, so the trigger form returns
+        // and a fresh conditional can be composed without re-toggling the mode.
+        setConditional(null);
+      })
+      .finally(finish);
+  }, [begin, finish, conditional]);
+
   return (
     <Box
       data-testid="order-ticket"
@@ -327,7 +348,13 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
             >
               Send on trigger
             </Button>
-          ) : null
+          ) : (
+            // A pending conditional will place a real order when it fires (R-12), so the operator can pull it back
+            // before then. It is held off the book, so this is a plain server-side delete — nothing rests to cancel.
+            <Button onClick={handleWithdrawConditional} disabled={pending}>
+              Withdraw
+            </Button>
+          )
         ) : staged === null ? (
           <Button variant="contained" onClick={handleArm} disabled={pending}>
             Arm
