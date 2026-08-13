@@ -1,3 +1,5 @@
+using MarqSpec.TradingCopilot.Api.Realtime;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -51,11 +53,19 @@ public sealed class SuggestionExpiryHost : BackgroundService
                 await using (AsyncServiceScope scope = _services.CreateAsyncScope())
                 {
                     ISuggestionExpiry expiry = scope.ServiceProvider.GetRequiredService<ISuggestionExpiry>();
-                    int expired = await expiry.ExpireDueAsync(DateTimeOffset.UtcNow, stoppingToken);
-                    if (expired > 0)
+                    DateTimeOffset now = DateTimeOffset.UtcNow;
+                    IReadOnlyList<SuggestionTransition> expired = await expiry.ExpireDueAsync(now, stoppingToken);
+                    if (expired.Count > 0)
                     {
                         _logger.LogInformation(
-                            "Suggestion expire sweep voided {Count} past-window suggestion(s) (gh#545).", expired);
+                            "Suggestion expire sweep voided {Count} past-window suggestion(s) (gh#545).", expired.Count);
+
+                        // gh#718: the expire write has committed, so push each voided suggestion to its owner (R-20)
+                        // so its card clears without a poll -- the drift/expiry half of the gh#684 realtime push.
+                        // Best-effort: a hub fault is logged and swallowed, never affecting the write (ADR-0021).
+                        await scope.ServiceProvider.GetRequiredService<ISuggestionRealtimeNotifier>()
+                            .PushTransitionsSafelyAsync(
+                                expired, SuggestionState.ExpiredVoid.ToString(), now, _logger, stoppingToken);
                     }
                 }
 

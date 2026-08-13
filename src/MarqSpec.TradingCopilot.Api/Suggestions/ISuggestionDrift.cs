@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -49,8 +50,12 @@ public interface ISuggestionDrift
     /// <param name="band">The drift tolerance as a price distance (ticks × tick size), computed by the caller.</param>
     /// <param name="now">The current time, supplied by the caller — the transition never reads a clock.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>How many suggestions this call moved to <see cref="SuggestionState.Stale"/>.</returns>
-    Task<int> MarkDriftedStaleAsync(
+    /// <returns>
+    /// The suggestions this call moved to <see cref="SuggestionState.Stale"/> — each with its id and owner (gh#718),
+    /// so the caller can push the transition to each owner's realtime connections. Empty when none drifted; the count
+    /// is the list length, for the callers that log it.
+    /// </returns>
+    Task<IReadOnlyList<SuggestionTransition>> MarkDriftedStaleAsync(
         string instrument, decimal bid, decimal ask, decimal band, DateTimeOffset now, CancellationToken cancellationToken);
 }
 
@@ -64,9 +69,10 @@ public sealed class SuggestionDrift : ISuggestionDrift
     public SuggestionDrift(TradingCopilotDbContext database) => _database = database;
 
     /// <inheritdoc />
-    public Task<int> MarkDriftedStaleAsync(
-        string instrument, decimal bid, decimal ask, decimal band, DateTimeOffset now, CancellationToken cancellationToken) =>
-        _database.Suggestions
+    public async Task<IReadOnlyList<SuggestionTransition>> MarkDriftedStaleAsync(
+        string instrument, decimal bid, decimal ask, decimal band, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        IQueryable<Suggestion> drifted = _database.Suggestions
             .IgnoreQueryFilters()
             .Where(suggestion =>
                 suggestion.State == SuggestionState.Active
@@ -76,10 +82,27 @@ public sealed class SuggestionDrift : ISuggestionDrift
                 && ((suggestion.Side == OrderSide.Buy
                         && (suggestion.EntryPrice < ask - band || suggestion.EntryPrice > ask + band))
                     || (suggestion.Side == OrderSide.Sell
-                        && (suggestion.EntryPrice < bid - band || suggestion.EntryPrice > bid + band))))
-            .ExecuteUpdateAsync(
-                setters => setters
-                    .SetProperty(suggestion => suggestion.State, SuggestionState.Stale)
-                    .SetProperty(suggestion => suggestion.StateChangedAt, now),
-                cancellationToken);
+                        && (suggestion.EntryPrice < bid - band || suggestion.EntryPrice > bid + band))));
+
+        // Read the (id, owner) of the rows about to transition, THEN run the guarded UPDATE, in ONE transaction so the
+        // recovered set is exactly what the UPDATE changes (gh#718) -- ExecuteUpdate cannot RETURN the rows. The
+        // Active-only guard on the UPDATE is unchanged, so the gh#546 monotonicity (and idempotence against an
+        // already-Stale row) do not regress; the SELECT adds only the ids the per-owner push needs. Both statements
+        // are relational (the in-memory provider runs neither -- gh#530), so the compare-and-swap's atomicity stays
+        // QA's on Postgres.
+        await using var transaction = await _database.Database.BeginTransactionAsync(cancellationToken);
+
+        List<SuggestionTransition> transitioned = await drifted
+            .Select(suggestion => new SuggestionTransition(suggestion.Id, suggestion.UserId))
+            .ToListAsync(cancellationToken);
+
+        await drifted.ExecuteUpdateAsync(
+            setters => setters
+                .SetProperty(suggestion => suggestion.State, SuggestionState.Stale)
+                .SetProperty(suggestion => suggestion.StateChangedAt, now),
+            cancellationToken);
+
+        await transaction.CommitAsync(cancellationToken);
+        return transitioned;
+    }
 }

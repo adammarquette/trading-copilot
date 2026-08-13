@@ -1,5 +1,6 @@
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.MarketData;
+using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -55,9 +56,10 @@ public class SuggestionDriftServiceTests
             new FixedUser(asUser ?? _operator));
 
     private readonly RecordingLogger _log = new();
+    private readonly ISuggestionRealtimeNotifier _notifier = A.Fake<ISuggestionRealtimeNotifier>();
 
     private SuggestionDriftService Service(TradingCopilotDbContext context) =>
-        new(context, _specs, _options, new InMemoryDrift(context), _log);
+        new(context, _specs, _options, new InMemoryDrift(context), _notifier, _log);
 
     private async Task<Guid> SeedAsync(
         SuggestionState state = SuggestionState.Active,
@@ -297,6 +299,67 @@ public class SuggestionDriftServiceTests
         (await context.Suggestions.IgnoreQueryFilters().SingleAsync(s => s.Id == id)).StateChangedAt.Should().Be(_now);
     }
 
+    // ---- realtime push of the drift transition (gh#718) ----
+
+    [Fact]
+    public async Task ProcessQuotesAsync_ShouldPushTheStaleTransition_ToTheOwningOperator()
+    {
+        // gh#718: once the Active->Stale write commits, the owner's realtime connections get one compact push
+        // (id + new state + when), per-owner (R-20, Clients.User) -- the drift half of the gh#684 realtime push.
+        Guid id = await SeedAsync(side: OrderSide.Buy, entry: 5_300m, owner: _operator);
+
+        await RunAsync(Quote("ES", bid: 5_304.75m, ask: 5_305m));
+
+        A.CallTo(() => _notifier.SuggestionChangedAsync(
+                _operator, new RealtimeSuggestion(id, nameof(SuggestionState.Stale), _now), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ProcessQuotesAsync_ShouldPushEachOwnersOwnRow_WhenTwoOperatorsDriftOnOneInstrument()
+    {
+        // The transition is cross-owner (background plumbing), but the push is per-owner: each operator is pushed
+        // THEIR OWN suggestion, never the other's (R-20).
+        Guid mine = await SeedAsync(owner: _operator, side: OrderSide.Buy, entry: 5_300m);
+        Guid theirs = await SeedAsync(owner: _other, side: OrderSide.Buy, entry: 5_300m);
+
+        await RunAsync(Quote("ES", bid: 5_304.75m, ask: 5_305m));
+
+        A.CallTo(() => _notifier.SuggestionChangedAsync(
+                _operator, new RealtimeSuggestion(mine, nameof(SuggestionState.Stale), _now), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => _notifier.SuggestionChangedAsync(
+                _other, new RealtimeSuggestion(theirs, nameof(SuggestionState.Stale), _now), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ProcessQuotesAsync_ShouldNotPush_WhenNothingDrifts()
+    {
+        await SeedAsync(side: OrderSide.Buy, entry: 5_300m);
+
+        await RunAsync(Quote("ES", bid: 5_300.75m, ask: 5_301m)); // within the 2.0 band -- nothing transitions
+
+        A.CallTo(() => _notifier.SuggestionChangedAsync(A<Guid>._, A<RealtimeSuggestion>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ProcessQuotesAsync_ShouldStillCommitAndCount_WhenTheHubPushThrows()
+    {
+        // Best-effort (ADR-0021): a hub fault must never fail the drift write or the pass. The row is still marked
+        // Stale and the count still returned; the fault is swallowed.
+        Guid id = await SeedAsync(side: OrderSide.Buy, entry: 5_300m);
+        A.CallTo(() => _notifier.SuggestionChangedAsync(A<Guid>._, A<RealtimeSuggestion>._, A<CancellationToken>._))
+            .ThrowsAsync(new InvalidOperationException("hub unreachable"));
+
+        int stale = await RunAsync(Quote("ES", bid: 5_304.75m, ask: 5_305m));
+
+        stale.Should().Be(1, "a hub fault is swallowed -- the write and its count are unaffected");
+        (await StateOfAsync(id)).Should().Be(
+            SuggestionState.Stale, "the Active->Stale write committed regardless of the push");
+    }
+
     /// <summary>
     /// Captures what the service logged. The collision branch's whole contribution is that a skip becomes <b>visible</b>
     /// — a `NullLogger` would swallow exactly the signal under test, so the suite would pass against the silent bug.
@@ -335,7 +398,7 @@ public class SuggestionDriftServiceTests
     /// </summary>
     private sealed class InMemoryDrift(TradingCopilotDbContext database) : ISuggestionDrift
     {
-        public async Task<int> MarkDriftedStaleAsync(
+        public async Task<IReadOnlyList<SuggestionTransition>> MarkDriftedStaleAsync(
             string instrument, decimal bid, decimal ask, decimal band, DateTimeOffset now, CancellationToken cancellationToken)
         {
             List<Suggestion> rows = await database.Suggestions
@@ -343,17 +406,17 @@ public class SuggestionDriftServiceTests
                 .Where(suggestion => suggestion.State == SuggestionState.Active && suggestion.Instrument == instrument)
                 .ToListAsync(cancellationToken);
 
-            int stale = 0;
+            List<SuggestionTransition> transitioned = [];
             foreach (Suggestion suggestion in rows.Where(suggestion =>
                 SuggestionLifecycle.HasDrifted(suggestion.Side, suggestion.EntryPrice, bid, ask, band)))
             {
                 suggestion.State = SuggestionState.Stale;
                 suggestion.StateChangedAt = now;
-                stale++;
+                transitioned.Add(new SuggestionTransition(suggestion.Id, suggestion.UserId));
             }
 
             await database.SaveChangesAsync(cancellationToken);
-            return stale;
+            return transitioned;
         }
     }
 }

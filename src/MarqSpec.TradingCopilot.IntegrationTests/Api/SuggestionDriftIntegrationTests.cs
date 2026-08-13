@@ -322,14 +322,16 @@ public class SuggestionDriftIntegrationTests : IClassFixture<OcoExitTestPostgres
 
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         ISuggestionDrift drift = scope.ServiceProvider.GetRequiredService<ISuggestionDrift>();
-        return await drift.MarkDriftedStaleAsync(instrument, bid, ask, Band, now ?? Now, CancellationToken.None);
+        // gh#718 changed the transition to return the transitioned (id, owner) rows for the realtime push; these
+        // predicate tests assert only the COUNT, so take the list length.
+        return (await drift.MarkDriftedStaleAsync(instrument, bid, ask, Band, now ?? Now, CancellationToken.None)).Count;
     }
 
     private async Task<int> ExpireDueAsync(DateTimeOffset now)
     {
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         ISuggestionExpiry expiry = scope.ServiceProvider.GetRequiredService<ISuggestionExpiry>();
-        return await expiry.ExpireDueAsync(now, CancellationToken.None);
+        return (await expiry.ExpireDueAsync(now, CancellationToken.None)).Count;
     }
 
     /// <summary>Drives <see cref="SuggestionDriftService.ProcessQuotesAsync"/> — discovery + resolve + the guarded

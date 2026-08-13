@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using Microsoft.EntityFrameworkCore;
 
@@ -39,8 +40,12 @@ public interface ISuggestionExpiry
     /// </summary>
     /// <param name="now">The current time, supplied by the caller — the decision never reads a clock.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>How many suggestions this call expired.</returns>
-    Task<int> ExpireDueAsync(DateTimeOffset now, CancellationToken cancellationToken);
+    /// <returns>
+    /// The suggestions this call expired — each with its id and owner (gh#718), so the caller can push the
+    /// <see cref="SuggestionState.ExpiredVoid"/> transition to each owner's realtime connections. Empty when nothing
+    /// was due; the count is the list length, for the callers that log it.
+    /// </returns>
+    Task<IReadOnlyList<SuggestionTransition>> ExpireDueAsync(DateTimeOffset now, CancellationToken cancellationToken);
 }
 
 /// <summary>The database-evaluated expire transition — a single guarded conditional UPDATE (gh#545).</summary>
@@ -53,15 +58,34 @@ public sealed class SuggestionExpiry : ISuggestionExpiry
     public SuggestionExpiry(TradingCopilotDbContext database) => _database = database;
 
     /// <inheritdoc />
-    public Task<int> ExpireDueAsync(DateTimeOffset now, CancellationToken cancellationToken) =>
-        _database.Suggestions
+    public async Task<IReadOnlyList<SuggestionTransition>> ExpireDueAsync(
+        DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        IQueryable<Suggestion> due = _database.Suggestions
             .IgnoreQueryFilters()
             .Where(suggestion =>
                 (suggestion.State == SuggestionState.Active || suggestion.State == SuggestionState.Stale)
-                && suggestion.ExpiresAt <= now)
-            .ExecuteUpdateAsync(
-                setters => setters
-                    .SetProperty(suggestion => suggestion.State, SuggestionState.ExpiredVoid)
-                    .SetProperty(suggestion => suggestion.StateChangedAt, now),
-                cancellationToken);
+                && suggestion.ExpiresAt <= now);
+
+        // Read the (id, owner) of the rows about to transition, THEN run the guarded UPDATE, in ONE transaction so the
+        // recovered set is exactly what the UPDATE changes (gh#718) -- ExecuteUpdate cannot RETURN the rows. The
+        // prior-state guard on the UPDATE is unchanged, so the gh#545 monotonicity and the single-write StateChangedAt
+        // stamp do not regress; the SELECT adds only the ids the per-owner push needs. Both statements are relational
+        // (the in-memory provider runs neither -- gh#530), so this stays off any in-memory path exactly as before, and
+        // the compare-and-swap's atomicity is proven on Postgres by QA.
+        await using var transaction = await _database.Database.BeginTransactionAsync(cancellationToken);
+
+        List<SuggestionTransition> transitioned = await due
+            .Select(suggestion => new SuggestionTransition(suggestion.Id, suggestion.UserId))
+            .ToListAsync(cancellationToken);
+
+        await due.ExecuteUpdateAsync(
+            setters => setters
+                .SetProperty(suggestion => suggestion.State, SuggestionState.ExpiredVoid)
+                .SetProperty(suggestion => suggestion.StateChangedAt, now),
+            cancellationToken);
+
+        await transaction.CommitAsync(cancellationToken);
+        return transitioned;
+    }
 }
