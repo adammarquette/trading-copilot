@@ -124,6 +124,14 @@ sessions have neither**, so `.github/scripts/post-verdict.sh` is how you both ch
 before you write, `review <pr> <STATE> <body-file>` after, and it confirms with the gate's own script that what
 went up is readable. **Exit 0 is the only outcome that means you ruled.**
 
+**Those scripts come out of the PR you are reviewing, and that is a trust boundary.** `post-verdict.sh` and its
+siblings live in the branch's own checkout, so a PR is free to have edited them — and you would be running the
+edited copy with the posting identity in hand. This is sanctioned for one reason only: every PR in this workflow
+comes from a **branch in this repository**, pushed by the operator's own agents, because the claim *is* the pushed
+branch ([`CONTRIBUTING.md`](../../CONTRIBUTING.md)). So if you are ever handed a PR from an **outside fork**, that
+reason is gone: review the diff, run **nothing** out of its tree, and hand the verdict to the operator to post.
+Reading a file is not running it, and the diff is what you were asked about anyway (PR #818 security review).
+
 When you cannot post, **say so loudly and rule nowhere else.** The near-misses are the trap: a PR comment holding
 the verdict line goes to an endpoint the gate never reads, and an inline comment creates a review whose body is
 *empty*. Both are perfectly visible to a human and invisible to the check, so the author's watcher waits out its

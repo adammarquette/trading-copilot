@@ -314,6 +314,15 @@ A **Cursor cloud-agent session has neither** — its installation token is refus
 **merged with `review-verdict` never satisfied**, and `verdict-state.sh 813` still answers `NONE`. The reviews on
 those PRs are PR comments and empty-bodied inline threads — visible to a human, invisible to the check.
 
+**Which identities the gate accepts** is a separate question from which can post, and it is an operator setting
+rather than a session's choice. A ruling counts only from **write standing** — `author_association` of `OWNER`,
+`MEMBER` or `COLLABORATOR` — or from a login on `verdict-state.sh`'s allowlist, which defaults to the reviewer App
+alone (`trading-copilot-reviewer[bot]`) because an App is always `NONE`. This repo is public and read access is
+enough to submit a review, so the filter is what stops a passer-by satisfying the gate with a marker line
+(§10, PR #818 security review). **Sanctioning another bot means changing that default here and in the script** —
+`VERDICT_TRUSTED_LOGINS` overrides it, and a verdict from an unlisted identity reads as `NONE` with the reason in
+the answer, which is the symptom to expect if a provisioned reviewer's ruling never lands.
+
 Until an identity is provisioned, `.github/scripts/post-verdict.sh` makes the failure **loud instead of silent**:
 `preflight <pr>` answers before a reviewer spends a review finding out, the posting path refuses to report success
 it cannot prove, and the verdict comes back to the operator to post. Provisioning is `gh#811`; the reviewer's side
