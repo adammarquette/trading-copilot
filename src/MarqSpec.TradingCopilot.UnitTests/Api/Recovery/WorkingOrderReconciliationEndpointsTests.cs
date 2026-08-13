@@ -6,6 +6,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
@@ -99,7 +100,7 @@ public class WorkingOrderReconciliationEndpointsTests
         // R-20 default-deny at the boundary: another operator's account is indistinguishable from one that does
         // not exist. Anything other than 404 here would disclose existence.
         IResult result = await WorkingOrderReconciliationEndpoints.ReadAsync(
-            Guid.NewGuid(), instrument: null, Service(), CancellationToken.None);
+            Guid.NewGuid(), instrument: null, Service(), Context(), CancellationToken.None);
 
         result.Should().BeOfType<NotFound>();
     }
@@ -110,7 +111,7 @@ public class WorkingOrderReconciliationEndpointsTests
         // `?instrument=` scopes the read to one contract (gh#772); a blank symbol is a malformed request worth naming,
         // rejected before the venue is asked.
         IResult result = await WorkingOrderReconciliationEndpoints.ReadAsync(
-            Guid.NewGuid(), "   ", Service(), CancellationToken.None);
+            Guid.NewGuid(), "   ", Service(), Context(), CancellationToken.None);
 
         result.Should().BeAssignableTo<IStatusCodeHttpResult>()
             .Which.StatusCode.Should().Be(StatusCodes.Status400BadRequest);
@@ -129,7 +130,7 @@ public class WorkingOrderReconciliationEndpointsTests
             .Throws(new ProjectXVenueException("No ProjectX contract matches instrument 'ZZZZ'."));
 
         IResult result = await WorkingOrderReconciliationEndpoints.ReadAsync(
-            accountId, "ZZZZ", Service(), CancellationToken.None);
+            accountId, "ZZZZ", Service(), Context(), CancellationToken.None);
 
         result.Should().BeAssignableTo<IStatusCodeHttpResult>()
             .Which.StatusCode.Should().Be(StatusCodes.Status400BadRequest);
@@ -152,10 +153,77 @@ public class WorkingOrderReconciliationEndpointsTests
     {
         RestingOrdersResponse response = new(
             PositionMarkBasis.Live.ToString(),
-            [new RestingOrder("ORD-1", "MESU26", 4_990m, null, 2, true)]);
+            [new RestingOrder("ORD-1", Guid.NewGuid(), "MESU26", 4_990m, null, 2, true)]);
 
         response.MarkBasis.Should().Be("Live");
         response.Orders[0].Size.Should().Be(2, "the size is the field this whole read exists to surface");
         response.Orders[0].IsProtective.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ReadAsync_ShouldCarryTheJournaledOrderId_WhenAVenueOrderMatchesAJournaledRow()
+    {
+        // gh#656: the venue-truth read keys orders by VenueOrderKey, but DELETE /orders/{id} and PATCH
+        // /orders/{id}/price route on the app Order.Id (a GUID). So the read must surface the journaled id, matched
+        // by venue key, or a UI holding only the venue key cannot act on what it lists. A venue-spawned protective
+        // leg has no Order row (ADR-0007), so its OrderId is null and it is not actionable through /orders/{id}.
+        Guid accountId = await SeedAccountAsync();
+        Guid journaledId = await SeedWorkingOrderAsync(accountId, "ORD-ENTRY");
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>(
+            [
+                new WorkingOrder("ORD-ENTRY", VenueContractId.Create(Venue, "CON.F.US.MES.U26"), null, new Price(5_050m), 1),
+                new WorkingOrder("ORD-LEG", VenueContractId.Create(Venue, "CON.F.US.MES.U26"), new Price(4_990m), null, 1),
+            ]);
+
+        IResult result = await WorkingOrderReconciliationEndpoints.ReadAsync(
+            accountId, instrument: null, Service(), Context(), CancellationToken.None);
+
+        RestingOrdersResponse response = result.Should().BeOfType<Ok<RestingOrdersResponse>>().Which.Value!;
+        response.Orders.Single(order => order.VenueOrderKey == "ORD-ENTRY").OrderId
+            .Should().Be(journaledId, "the journaled entry is actionable through /orders/{id}");
+        response.Orders.Single(order => order.VenueOrderKey == "ORD-LEG").OrderId
+            .Should().BeNull("a venue-spawned protective leg has no Order row, so it is not actionable through /orders/{id}");
+    }
+
+    [Fact]
+    public async Task ReadAsync_ShouldLeaveOrderIdNull_WhenTheMatchingJournaledOrderIsNotWorking()
+    {
+        // A terminal order that once held this venue key must never be matched — acting on it through /orders/{id}
+        // would be refused anyway, and surfacing its id as actionable would mislead. Only a Working row matches.
+        Guid accountId = await SeedAccountAsync();
+        await SeedWorkingOrderAsync(accountId, "ORD-GONE", OrderStatus.Cancelled);
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>(
+            [new WorkingOrder("ORD-GONE", VenueContractId.Create(Venue, "CON.F.US.MES.U26"), new Price(4_990m), null, 1)]);
+
+        IResult result = await WorkingOrderReconciliationEndpoints.ReadAsync(
+            accountId, instrument: null, Service(), Context(), CancellationToken.None);
+
+        RestingOrdersResponse response = result.Should().BeOfType<Ok<RestingOrdersResponse>>().Which.Value!;
+        response.Orders.Single().OrderId.Should().BeNull();
+    }
+
+    private async Task<Guid> SeedWorkingOrderAsync(
+        Guid accountId, string venueOrderKey, OrderStatus status = OrderStatus.Working)
+    {
+        Guid orderId = Guid.NewGuid();
+        await using TradingCopilotDbContext seed = Context();
+        seed.Orders.Add(new Order
+        {
+            Id = orderId,
+            UserId = _operator,
+            AccountId = accountId,
+            Instrument = "CON.F.US.MES.U26",
+            Side = OrderSide.Buy,
+            Size = 1,
+            Type = OrderType.Limit,
+            Status = status,
+            Mode = TradingMode.Practice,
+            VenueOrderKey = venueOrderKey,
+            PlacedAt = DateTimeOffset.UnixEpoch,
+        });
+        await seed.SaveChangesAsync();
+        return orderId;
     }
 }
