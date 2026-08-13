@@ -5,18 +5,25 @@ namespace MarqSpec.TradingCopilot.UnitTests.Domain.Execution;
 
 public class TradeRoundTripTests
 {
-    private static RoundTripFill Fill(OrderSide side, decimal price, int size, int minute = 0) =>
-        new(side, price, size, new DateTimeOffset(2026, 8, 8, 14, minute, 0, TimeSpan.Zero));
+    private static RoundTripFill Fill(
+        OrderSide side, decimal price, int size, int minute = 0, decimal fees = 0m, Guid? id = null) =>
+        new(id ?? Guid.NewGuid(), side, price, size, new DateTimeOffset(2026, 8, 8, 14, minute, 0, TimeSpan.Zero))
+        {
+            Fees = fees,
+        };
+
+    // --- The simple balanced trip (gh#731 behaviour, preserved) ---
 
     [Fact]
-    public void TryCompose_ShouldFormTheRoundTrip_WhenOneEntryFillIsClosedByOneExitFill()
+    public void TryCompose_ShouldComposeOneTrip_WhenOneEntryFillIsClosedByOneExitFill()
     {
         RoundTripFill[] fills = [Fill(OrderSide.Buy, 5000m, 2), Fill(OrderSide.Sell, 5010m, 2, minute: 5)];
 
-        bool composed = TradeRoundTrip.TryCompose(fills, out RoundTrip? trip);
+        bool composed = TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips);
 
         composed.Should().BeTrue();
-        trip!.EntrySide.Should().Be(OrderSide.Buy);
+        RoundTrip trip = trips.Should().ContainSingle().Subject;
+        trip.EntrySide.Should().Be(OrderSide.Buy);
         trip.EntryPrice.Should().Be(5000m);
         trip.ExitPrice.Should().Be(5010m);
         trip.Size.Should().Be(2);
@@ -24,85 +31,217 @@ public class TradeRoundTripTests
     }
 
     [Fact]
-    public void TryCompose_ShouldRefuse_WhenExposureCrossesThroughFlatIntoAReversal()
+    public void TryCompose_ShouldComposeOneTrip_WhenOneOpeningLegIsRetiredByTwoClosingFills()
     {
-        // gh#734 review. Equal TOTALS do not prove one enter -> exit -> flat trip. Buy 1, Sell 2, Buy 1 sums to
-        // 2 buys and 2 sells, so a totals-only balance check accepts it as a single size-2 long — but exposure went
-        // +1, then -1 (a SHORT), then 0. That is a stop-and-reverse: two positions in opposite directions, whose
-        // blended "average entry" and "average exit" describe neither. The money journalled from it would be
-        // fiction, and this composer's whole contract is to refuse anything that is not the simple trip.
+        // Acceptance criterion (gh#759): an entry of 10 exited 5 + 5 is ONE trade -- the exits are partial
+        // retirements of a single leg, not separate trips. Entry price is that one opening fill's (exact); the exit
+        // is the size-weighted blend of the two closes: (5010*5 + 5020*5) / 10 = 5015.
+        Guid opening = Guid.NewGuid();
+        Guid finalClose = Guid.NewGuid();
         RoundTripFill[] fills =
         [
-            Fill(OrderSide.Buy, 5_000m, 1),
-            Fill(OrderSide.Sell, 5_010m, 2, minute: 5),
-            Fill(OrderSide.Buy, 5_020m, 1, minute: 10),
+            Fill(OrderSide.Buy, 5000m, 10, id: opening),
+            Fill(OrderSide.Sell, 5010m, 5, minute: 5),
+            Fill(OrderSide.Sell, 5020m, 5, minute: 6, id: finalClose),
         ];
 
-        bool composed = TradeRoundTrip.TryCompose(fills, out RoundTrip? trip);
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeTrue();
 
-        composed.Should().BeFalse(
-            "exposure reached flat and crossed into a short before the final fill — that is a reversal, not the "
-            + "single round trip this composes");
-        trip.Should().BeNull();
+        RoundTrip trip = trips.Should().ContainSingle().Subject;
+        trip.Size.Should().Be(10);
+        trip.EntryPrice.Should().Be(5000m);
+        trip.ExitPrice.Should().Be(5015m);
+        trip.OpeningFillId.Should().Be(opening);
+        trip.ClosingFillId.Should().Be(finalClose, "the key's closing half is the fill that retired the last of the leg");
+        trip.ClosedAt.Should().Be(new DateTimeOffset(2026, 8, 8, 14, 6, 0, TimeSpan.Zero));
+    }
+
+    // --- Scale-in: per-leg, FIFO (gh#759) ---
+
+    [Fact]
+    public void TryCompose_ShouldComposeTwoTrips_WhenAScaleInIsExitedLegByLeg()
+    {
+        // Acceptance criterion: a scale-in (5 then 5) exited 5 then 5 is TWO trades, oldest leg retired first.
+        Guid firstOpen = Guid.NewGuid();
+        Guid secondOpen = Guid.NewGuid();
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5000m, 5, minute: 0, id: firstOpen),
+            Fill(OrderSide.Buy, 5010m, 5, minute: 1, id: secondOpen),
+            Fill(OrderSide.Sell, 5030m, 5, minute: 5),
+            Fill(OrderSide.Sell, 5040m, 5, minute: 6),
+        ];
+
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeTrue();
+
+        trips.Should().HaveCount(2);
+        trips[0].OpeningFillId.Should().Be(firstOpen, "FIFO retires the oldest open leg first");
+        trips[0].EntryPrice.Should().Be(5000m);
+        trips[0].ExitPrice.Should().Be(5030m);
+        trips[1].OpeningFillId.Should().Be(secondOpen);
+        trips[1].EntryPrice.Should().Be(5010m);
+        trips[1].ExitPrice.Should().Be(5040m);
+        trips.Should().OnlyContain(trip => trip.Size == 5 && trip.EntrySide == OrderSide.Buy);
     }
 
     [Fact]
-    public void TryCompose_ShouldRefuse_WhenThePositionClosesAndReopensBeforeTheFinalFill()
+    public void TryCompose_ShouldSplitASpanningClosingFill_IntoOneTripPerLeg()
     {
-        // The gentler sibling of the reversal above, and the one a totals check is likeliest to wave through: a
-        // completed trip followed by a second entry that has not closed yet. Buy 1, Sell 1, Buy 1, Sell 1 balances
-        // 2-vs-2 and would compose as one size-2 long spanning both — blending two separate trades into a single
-        // journal row with an average that matches neither. Exposure must reach zero exactly ONCE, at the end.
+        // Acceptance criterion + the reason for the composite key: a scale-in (5 then 5) exited by a SINGLE 10-lot
+        // fill is TWO trades via allocation -- not a refusal, not one blended row. Both share the ONE closing fill's
+        // id, so `ClosingFillId` alone is no longer unique; `(ClosingFillId, OpeningFillId)` is what distinguishes them.
+        Guid firstOpen = Guid.NewGuid();
+        Guid secondOpen = Guid.NewGuid();
+        Guid spanningClose = Guid.NewGuid();
         RoundTripFill[] fills =
         [
-            Fill(OrderSide.Buy, 5_000m, 1),
-            Fill(OrderSide.Sell, 5_010m, 1, minute: 5),
-            Fill(OrderSide.Buy, 5_020m, 1, minute: 10),
-            Fill(OrderSide.Sell, 5_030m, 1, minute: 15),
+            Fill(OrderSide.Buy, 5000m, 5, minute: 0, id: firstOpen),
+            Fill(OrderSide.Buy, 5010m, 5, minute: 1, id: secondOpen),
+            Fill(OrderSide.Sell, 5030m, 10, minute: 5, id: spanningClose),
         ];
 
-        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeFalse(
-            "exposure returned to flat at the second fill, so these are TWO round trips — composing them as one "
-            + "would journal a blended entry and exit that neither trade actually had");
-        trip.Should().BeNull();
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeTrue();
+
+        trips.Should().HaveCount(2);
+        trips.Should().OnlyContain(trip => trip.ClosingFillId == spanningClose, "one closing fill retired both legs");
+        trips.Select(trip => trip.OpeningFillId).Should().Equal(firstOpen, secondOpen);
+        trips.Should().OnlyContain(trip => trip.Size == 5 && trip.ExitPrice == 5030m);
+    }
+
+    // --- Stop-and-reverse: falls out of the same walk (gh#759) ---
+
+    [Fact]
+    public void TryCompose_ShouldComposeBothDirections_WhenAPositionStopsAndReverses()
+    {
+        // Acceptance criterion: a stop-and-reverse produces the closing leg's trade then opens the opposite -- no
+        // special-casing. Buy 5 (long), Sell 10 (retires the long AND opens a short 5), Buy 5 (retires the short).
+        // The Sell 10 is BOTH the closing fill of the long leg and the opening fill of the short leg.
+        Guid longOpen = Guid.NewGuid();
+        Guid reversing = Guid.NewGuid();
+        Guid shortClose = Guid.NewGuid();
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5000m, 5, minute: 0, id: longOpen),
+            Fill(OrderSide.Sell, 5010m, 10, minute: 5, id: reversing),
+            Fill(OrderSide.Buy, 4990m, 5, minute: 10, id: shortClose),
+        ];
+
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeTrue();
+
+        trips.Should().HaveCount(2);
+
+        RoundTrip longLeg = trips[0];
+        longLeg.EntrySide.Should().Be(OrderSide.Buy);
+        longLeg.OpeningFillId.Should().Be(longOpen);
+        longLeg.ClosingFillId.Should().Be(reversing, "the reversing fill retired the long leg");
+        longLeg.EntryPrice.Should().Be(5000m);
+        longLeg.ExitPrice.Should().Be(5010m);
+
+        RoundTrip shortLeg = trips[1];
+        shortLeg.EntrySide.Should().Be(OrderSide.Sell);
+        shortLeg.OpeningFillId.Should().Be(reversing, "the same reversing fill opened the short leg");
+        shortLeg.ClosingFillId.Should().Be(shortClose);
+        shortLeg.EntryPrice.Should().Be(5010m);
+        shortLeg.ExitPrice.Should().Be(4990m);
+        shortLeg.Size.Should().Be(5);
     }
 
     [Fact]
-    public void TryCompose_ShouldSizeWeightTheAverages_WhenALegFillsInParts()
+    public void TryCompose_ShouldComposeTwoTrips_WhenTwoRoundTripsShareTheWindow()
     {
-        // Enter 3 @ 5000 and 1 @ 5008 -> size-weighted 5002; exit 2 @ 5020 and 2 @ 5010 -> 5015.
+        // Was refused by gh#731 (exposure returned to flat before the end). Under FIFO it is simply two completed
+        // trips -- Buy 1/Sell 1, then Buy 1/Sell 1 -- each with its own entry and exit, never blended into one row.
         RoundTripFill[] fills =
         [
-            Fill(OrderSide.Buy, 5000m, 3),
-            Fill(OrderSide.Buy, 5008m, 1, minute: 1),
+            Fill(OrderSide.Buy, 5000m, 1, minute: 0),
+            Fill(OrderSide.Sell, 5010m, 1, minute: 5),
+            Fill(OrderSide.Buy, 5020m, 1, minute: 10),
+            Fill(OrderSide.Sell, 5030m, 1, minute: 15),
+        ];
+
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeTrue();
+
+        trips.Should().HaveCount(2);
+        trips[0].EntryPrice.Should().Be(5000m);
+        trips[0].ExitPrice.Should().Be(5010m);
+        trips[1].EntryPrice.Should().Be(5020m);
+        trips[1].ExitPrice.Should().Be(5030m);
+    }
+
+    // --- Prices and fees ---
+
+    [Fact]
+    public void TryCompose_ShouldWeightOnlyTheExit_WhenOneLegIsRetiredInParts()
+    {
+        // A single opening fill (exact entry) retired by two closes -> the ENTRY is not blended (it is one fill), only
+        // the exit is size-weighted: (5020*2 + 5010*2) / 4 = 5015.
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5002m, 4),
             Fill(OrderSide.Sell, 5020m, 2, minute: 6),
             Fill(OrderSide.Sell, 5010m, 2, minute: 7),
         ];
 
-        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeTrue();
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeTrue();
 
-        trip!.EntryPrice.Should().Be(5002m);
+        RoundTrip trip = trips.Should().ContainSingle().Subject;
+        trip.EntryPrice.Should().Be(5002m, "a leg's entry is its one opening fill's price, never blended");
         trip.ExitPrice.Should().Be(5015m);
         trip.Size.Should().Be(4);
     }
 
     [Fact]
+    public void TryCompose_ShouldSumTheFees_AcrossBothLegsOfASimpleTrip()
+    {
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5000m, 1, fees: 1.25m),
+            Fill(OrderSide.Sell, 5010m, 1, minute: 5, fees: 1.30m),
+        ];
+
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeTrue();
+
+        trips.Should().ContainSingle().Subject.Fees.Should().Be(2.55m);
+    }
+
+    [Fact]
+    public void TryCompose_ShouldAllocateASpanningClosingFillsFeesBySize()
+    {
+        // A 10-lot close with $2.00 fees splits 5/10 + 5/10 across the two legs it retires; each leg also keeps its
+        // own opening fill's fee. So each trip = $0.50 (opening) + $1.00 (half the close) = $1.50, and the two sum to
+        // exactly the fees actually charged (2 * 0.50 + 2.00 = 3.00) -- fees are conserved, never invented or dropped.
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5000m, 5, minute: 0, fees: 0.50m),
+            Fill(OrderSide.Buy, 5010m, 5, minute: 1, fees: 0.50m),
+            Fill(OrderSide.Sell, 5030m, 10, minute: 5, fees: 2.00m),
+        ];
+
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeTrue();
+
+        trips.Should().OnlyContain(trip => trip.Fees == 1.50m);
+        trips.Sum(trip => trip.Fees).Should().Be(3.00m, "every fee charged is attributed to exactly one leg, none lost");
+    }
+
+    // --- Ordering ---
+
+    [Fact]
     public void TryCompose_ShouldOrderByExecutionTime_NotByThePositionInTheCollection()
     {
-        // Handed to us newest-first: the Sell is listed before the Buy but executed 20 minutes AFTER it. The
-        // entry leg is the EARLIEST execution (the Buy), never merely the first element.
+        // Handed to us newest-first: the Sell is listed before the Buy but executed 20 minutes AFTER it. The entry
+        // leg is the EARLIEST execution (the Buy), never merely the first element.
         RoundTripFill[] fills =
         [
             Fill(OrderSide.Sell, 5000m, 1, minute: 30),
             Fill(OrderSide.Buy, 4990m, 1, minute: 10),
         ];
 
-        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeTrue();
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeTrue();
 
-        trip!.EntrySide.Should().Be(OrderSide.Buy);
+        RoundTrip trip = trips.Should().ContainSingle().Subject;
+        trip.EntrySide.Should().Be(OrderSide.Buy);
         trip.EntryPrice.Should().Be(4990m);
         trip.ExitPrice.Should().Be(5000m);
-        trip.ClosedAt.Should().Be(new DateTimeOffset(2026, 8, 8, 14, 30, 0, TimeSpan.Zero));
     }
 
     [Fact]
@@ -110,35 +249,25 @@ public class TradeRoundTripTests
     {
         RoundTripFill[] fills = [Fill(OrderSide.Sell, 5000m, 1), Fill(OrderSide.Buy, 4990m, 1, minute: 4)];
 
-        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeTrue();
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeTrue();
 
-        trip!.EntrySide.Should().Be(OrderSide.Sell);
+        RoundTrip trip = trips.Should().ContainSingle().Subject;
+        trip.EntrySide.Should().Be(OrderSide.Sell);
         trip.EntryPrice.Should().Be(5000m);
         trip.ExitPrice.Should().Be(4990m);
     }
 
-    [Fact]
-    public void TryCompose_ShouldSumTheFees_AcrossBothLegs()
-    {
-        RoundTripFill[] fills =
-        [
-            Fill(OrderSide.Buy, 5000m, 1) with { Fees = 1.25m },
-            Fill(OrderSide.Sell, 5010m, 1, minute: 5) with { Fees = 1.30m },
-        ];
-
-        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeTrue();
-
-        trip!.Fees.Should().Be(2.55m);
-    }
+    // --- Refuse-don't-guess (genuine ambiguity only) ---
 
     [Fact]
-    public void TryCompose_ShouldRefuse_WhenTheLegsDoNotBalance()
+    public void TryCompose_ShouldRefuse_WhenTheWindowDoesNotReturnToFlat()
     {
-        // Scale-in/partial-exit: 3 in, 2 out. Not flat, so not a round trip -- deferred, never guessed at.
+        // Scale-in with no full exit: 3 in, 2 out, still holding 1. Leftover open exposure is not a completed trip --
+        // the writer only composes at a flat, so a non-flat window is a bug or a straddle. Refuse the whole window.
         RoundTripFill[] fills = [Fill(OrderSide.Buy, 5000m, 3), Fill(OrderSide.Sell, 5010m, 2, minute: 5)];
 
-        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeFalse();
-        trip.Should().BeNull();
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeFalse();
+        trips.Should().BeEmpty();
     }
 
     [Fact]
@@ -146,15 +275,15 @@ public class TradeRoundTripTests
     {
         RoundTripFill[] fills = [Fill(OrderSide.Buy, 5000m, 1), Fill(OrderSide.Buy, 5001m, 1, minute: 2)];
 
-        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeFalse();
-        trip.Should().BeNull();
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeFalse();
+        trips.Should().BeEmpty();
     }
 
     [Fact]
     public void TryCompose_ShouldRefuse_WhenThereAreNoFills()
     {
-        TradeRoundTrip.TryCompose([], out RoundTrip? trip).Should().BeFalse();
-        trip.Should().BeNull();
+        TradeRoundTrip.TryCompose([], out IReadOnlyList<RoundTrip> trips).Should().BeFalse();
+        trips.Should().BeEmpty();
     }
 
     [Fact]
@@ -168,11 +297,8 @@ public class TradeRoundTripTests
     [Fact]
     public void TryCompose_ShouldRefuse_WhenAFillHasAnUnknownSide()
     {
-        // gh#734 review. `Side != entrySide` was a blacklist, so an undefined OrderSide (a bad cast or deserialize —
-        // and Order.Side carries no known-value DB check) was silently bucketed as an exit. Buy 2, (OrderSide)99
-        // size 1, Sell 1 then "balances" 2-vs-2 and journals an exit average containing the invalid fill;
-        // RealizedPnL only validates the known entry side and never catches it. Whitelist both legs and refuse
-        // anything else before composing.
+        // An undefined OrderSide (a bad cast or deserialize -- Order.Side carries no known-value DB check) cannot be
+        // classified as an open or a close; refuse the whole window rather than compose a trip with a corrupt leg.
         RoundTripFill[] fills =
         [
             Fill(OrderSide.Buy, 5_000m, 2),
@@ -180,45 +306,71 @@ public class TradeRoundTripTests
             Fill(OrderSide.Sell, 5_020m, 1, minute: 10),
         ];
 
-        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeFalse(
-            "a fill whose side is neither leg cannot be classified, so the whole trip is refused rather than "
-            + "journalled with a corrupt average");
-        trip.Should().BeNull();
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeFalse();
+        trips.Should().BeEmpty();
     }
 
     [Fact]
-    public void TryCompose_ShouldRefuse_WhenOppositeSideFillsShareTheEarliestTimestamp()
+    public void TryCompose_ShouldRefuse_WhenOppositeSideFillsShareTheOpeningInstant()
     {
-        // gh#734 review. The entry side is the side of the EARLIEST execution. But when opposite-side fills tie on
-        // that earliest timestamp, there is no venue sequence here to say which opened first, and a stable OrderBy
-        // would silently let the CALLER'S collection order decide EntrySide -- flipping the signed P&L for the exact
-        // same executions. [Buy@t, Sell@t] and [Sell@t, Buy@t] must both refuse, not compose two opposite trips.
+        // The direction of a leg opened from flat must be decidable. When opposite-side fills tie on the opening
+        // instant, there is no venue sequence here to say which opened first, and the choice flips the trip's sign.
+        // [Buy@t, Sell@t] and [Sell@t, Buy@t] must BOTH refuse -- input order must never decide the sign of realized P&L.
         RoundTripFill[] buyFirst = [Fill(OrderSide.Buy, 5_000m, 1), Fill(OrderSide.Sell, 5_010m, 1)];
         RoundTripFill[] sellFirst = [Fill(OrderSide.Sell, 5_010m, 1), Fill(OrderSide.Buy, 5_000m, 1)];
 
-        TradeRoundTrip.TryCompose(buyFirst, out RoundTrip? a).Should().BeFalse(
-            "opposite-side fills share the earliest timestamp -- the entry side is ambiguous with no sequence to break "
-            + "the tie, so the trip is refused rather than composed off collection order");
-        a.Should().BeNull();
+        TradeRoundTrip.TryCompose(buyFirst, out IReadOnlyList<RoundTrip> a).Should().BeFalse();
+        a.Should().BeEmpty();
 
-        TradeRoundTrip.TryCompose(sellFirst, out RoundTrip? b).Should().BeFalse(
-            "the SAME executions in reversed order must reach the SAME refusal -- otherwise input order silently flips "
-            + "which side is treated as the entry, and with it the sign of the realized P&L");
-        b.Should().BeNull();
+        TradeRoundTrip.TryCompose(sellFirst, out IReadOnlyList<RoundTrip> b).Should().BeFalse();
+        b.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void TryCompose_ShouldRefuse_WhenOppositeSideFillsShareAMidCycleInstant()
+    {
+        // gh#759 review. The ambiguity is NOT only at an open-from-flat. Here a Sell and a Buy share an instant
+        // mid-cycle (net != 0): depending on their arbitrary order the Sell reverses into a SHORT (excess opens the
+        // opposite way) OR the Buy scales first and the Sell just closes -- flipping the second leg's SIDE and sign
+        // for the same executions. Refuse rather than let the FillId tie-break silently pick a direction.
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5_000m, 10, minute: 0),
+            Fill(OrderSide.Sell, 5_010m, 15, minute: 5),
+            Fill(OrderSide.Buy, 4_990m, 5, minute: 5), // SAME instant as the sell, opposite side
+        ];
+
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeFalse();
+        trips.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void TryCompose_ShouldRefuse_WhenOppositeSideFillsShareAFlatBoundaryInstant()
+    {
+        // gh#759 review. Two trips where the first's close and the second's open share an instant: their order decides
+        // whether it is "close then reopen" (two trips) or "scale then close" (one) -- opposite compositions. Refuse.
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5_000m, 1, minute: 0),
+            Fill(OrderSide.Sell, 5_010m, 1, minute: 5),
+            Fill(OrderSide.Buy, 5_020m, 1, minute: 5), // SAME instant as the sell above, opposite side
+            Fill(OrderSide.Sell, 5_030m, 1, minute: 10),
+        ];
+
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeFalse();
+        trips.Should().BeEmpty();
     }
 
     [Fact]
     public void TryCompose_ShouldRefuse_WhenTheEarliestFillHasAnUnknownSide()
     {
-        // The entry side is taken from the earliest execution; if THAT is an undefined value the trip cannot be
-        // composed at all, rather than defaulting to a side.
         RoundTripFill[] fills =
         [
             Fill((OrderSide)99, 5_000m, 1),
             Fill(OrderSide.Sell, 5_010m, 1, minute: 5),
         ];
 
-        TradeRoundTrip.TryCompose(fills, out RoundTrip? trip).Should().BeFalse();
-        trip.Should().BeNull();
+        TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeFalse();
+        trips.Should().BeEmpty();
     }
 }
