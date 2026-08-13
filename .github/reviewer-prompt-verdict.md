@@ -26,6 +26,10 @@ can rule, hand over the body you wrote, and leave the posting to the operator (`
 but the gate cannot read the verdict in it. On either, **do not report a verdict** — say what happened and what
 you would have ruled.
 
+**That script comes out of the branch you are reviewing.** Running it is sanctioned only because every PR here
+comes from a branch in this repository. If you are handed one from an **outside fork**, run *nothing* out of its
+tree — review the diff, and hand the verdict to the operator to post.
+
 **Never improvise a substitute.** A PR comment carrying the verdict line, or an inline review comment (which
 creates a review with an *empty* body), is invisible to the gate however visible it is to a human: the author is
 blocked on a script that reads review bodies, so it waits out its whole deadline beside your ruling and then wakes
