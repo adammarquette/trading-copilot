@@ -195,12 +195,16 @@ while :; do
   # No --head: unlike CI, which must rule on the commit its run tested, the author wants the ruling on
   # whatever it last pushed, re-read every poll so a push mid-wait is picked up rather than ignored.
   verdict=""; vsha=""; rounds=0; vid=""
-  detail="the verdict could not be read (transient API failure?)"
+  detail="The verdict could not be read (transient API failure?)"
   if line=$(bash "$VERDICT_STATE" "$PR" --repo "$REPO"); then
     # `|`, not a tab: a tab is IFS whitespace, so a run of them collapses and the empty fields on the NONE
     # line would shift every later field left (verdict-state.sh's header has the full account).
     IFS='|' read -r verdict vsha rounds vid detail <<<"$line"
   fi
+  # $detail arrives sentence-cased and is printed VERBATIM below. It used to be capitalized here with
+  # `${detail^}`, which is Bash 4 and therefore a fatal bad substitution under the Bash 3.2 macOS still ships
+  # as /bin/bash -- killing the STALE and APPROVED paths before their exit statuses, which are this script's
+  # entire interface (PR #818 review). Sentence casing now lives where the sentence is written.
 
   case "$verdict" in
     CHANGES-REQUESTED)
@@ -214,7 +218,7 @@ while :; do
       exit 1 ;;
 
     STALE)
-      printf '%s.\n' "${detail^}"
+      printf '%s.\n' "$detail"
       printf 'The approval does not cover what is at the head now, so it is not a rejection -- it is\n'
       printf 'not-yet-reviewed. SPAWN THE REVIEWER AGAIN for the current head; it will rule afresh.\n'
       exit 3 ;;
@@ -225,7 +229,7 @@ while :; do
       read_checks
       if report_red; then exit 4; fi
       if [ "$pending_checks" -eq 0 ] && [ "$passed_checks" -gt 0 ]; then
-        printf '%s, and %d check(s) green.\n' "${detail^}" "$passed_checks"
+        printf '%s, and %d check(s) green.\n' "$detail" "$passed_checks"
         printf 'Done: move the card to Done and take the next one from Current ToDo (engineering §10).\n'
         exit 0
       fi
