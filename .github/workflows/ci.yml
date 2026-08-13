@@ -275,10 +275,13 @@ jobs:
 
           now=$(date +%s)
           if [ "$now" -ge "$deadline" ]; then
-            echo "::error::Timed out after ${DEADLINE_MINUTES}m waiting for a review verdict -- $detail." \
+            echo "::error::Timed out after ${DEADLINE_MINUTES}m waiting for a review verdict. $detail." \
                  "The reviewer records one as the FIRST LINE of a review body:" \
                  "'**Verdict: Approve**' or '**Verdict: Request changes**'" \
-                 "(documentation/agents/code-reviewer.md). Re-run this job once the review is in."
+                 "(documentation/agents/code-reviewer.md). A PR COMMENT carrying that line does not count and" \
+                 "never has -- this job reads reviews -- so if a reviewer reported posting one, check it had an" \
+                 "identity with pull_requests: write (.github/scripts/post-verdict.sh preflight, gh#811)." \
+                 "Re-run this job once the review is in."
             exit 1
           fi
 
