@@ -63,6 +63,8 @@ public static class OrderEndpoints
             endpoints.MapGroup("/conditionals/{id:guid}").RequireAuthorization().WithTags("Orders");
         conditionalGroup.MapPost("/reconcile", ReconcileFiringConditionalAsync)
             .WithSummary("Reconcile a stranded (mid-fire) conditional against venue truth: adopt if live, release if flat.");
+        conditionalGroup.MapDelete("/", CancelConditionalOrderAsync)
+            .WithSummary("Cancel a pending conditional (send-when-conditions-met) order — an operator withdrawal.");
 
         return endpoints;
     }
@@ -990,6 +992,62 @@ public static class OrderEndpoints
                 + "the account is flat; the ticket is released to Staged (gh#589).",
                 order.Id, order.AccountId);
             return Results.Ok(new { order.Id, status = OrderStatus.Staged.ToString(), adopted = false });
+        }, cancellationToken);
+    }
+
+    internal static async Task<IResult> CancelConditionalOrderAsync(
+        Guid id,
+        TradingCopilotDbContext database,
+        IAccountEntryGuard entryGuard,
+        ILoggerFactory loggerFactory,
+        CancellationToken cancellationToken)
+    {
+        // The operator-facing withdrawal of a still-pending conditional (gh#655, R-11 / R-12): the "send when
+        // conditions met" mode's cancel, the sibling of DELETE /orders/{id}'s Staged case. A Pending conditional is
+        // held LOCAL -- off the book, nothing at the venue -- so cancelling it is a plain server-side status flip and
+        // needs no venue call, no risk profile, no flat check (a withdrawal is risk-reducing). Only Pending is
+        // cancellable: a Firing conditional is a maybe-live entry the venue may already hold (reconciled via
+        // POST /conditionals/{id}/reconcile, never blind-cancelled), and Fired / Cancelled / Expired are terminal.
+        ConditionalOrderRecord? conditional = await database.ConditionalOrders.FirstOrDefaultAsync(
+            candidate => candidate.Id == id, cancellationToken);
+        if (conditional is null)
+        {
+            return Results.NotFound(); // not ours (R-20) or gone
+        }
+
+        if (conditional.Status != ConditionalStatus.Pending)
+        {
+            return Results.Conflict(new
+            {
+                error = $"Only a pending conditional can be cancelled — this one is {conditional.Status}.",
+            });
+        }
+
+        // Serialize against the fire watcher on the same account (gh#589). The watcher commits Pending -> Firing under
+        // THIS account lock before it touches the venue, so absent the lock a cancel could read Pending, the watcher
+        // could fire and place a live order, and the cancel would then write Cancelled over a conditional that is
+        // actually live at the venue -- abandoning tracking of a real order. Blocking is fine: this is an operator
+        // request, not the fire watcher (which try-locks so it never waits on us). Re-read under the lock -- the
+        // watcher (or a concurrent cancel) may have moved it past Pending since the read above.
+        return await entryGuard.RunExclusiveAsync<IResult>(database, conditional.AccountId, async () =>
+        {
+            await database.Entry(conditional).ReloadAsync(cancellationToken);
+            if (conditional.Status != ConditionalStatus.Pending)
+            {
+                return Results.Conflict(new
+                {
+                    error = $"This conditional is no longer pending — it is now {conditional.Status}.",
+                });
+            }
+
+            conditional.Status = ConditionalStatus.Cancelled;
+            await database.SaveChangesAsync(cancellationToken);
+
+            loggerFactory.CreateLogger(nameof(OrderEndpoints)).LogInformation(
+                "Operator cancelled pending conditional {ConditionalId} on account {AccountId} (gh#655).",
+                conditional.Id, conditional.AccountId);
+
+            return Results.Ok(new { conditionalId = conditional.Id, status = conditional.Status.ToString() });
         }, cancellationToken);
     }
 
