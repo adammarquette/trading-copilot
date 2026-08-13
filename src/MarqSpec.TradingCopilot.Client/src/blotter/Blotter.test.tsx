@@ -8,7 +8,7 @@ import {
   getPositions,
   getRestingOrders,
 } from '../api/blotter';
-import { cancelOrder } from '../api/orders';
+import { cancelOrder, repriceOrder } from '../api/orders';
 import type { RealtimeContextValue } from '../realtime/RealtimeProvider';
 import { useOptionalRealtime } from '../realtime/RealtimeProvider';
 import { Blotter } from './Blotter';
@@ -24,12 +24,14 @@ vi.mock('../realtime/RealtimeProvider', () => ({ useOptionalRealtime: vi.fn() })
 vi.mock('../api/orders', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api/orders')>()),
   cancelOrder: vi.fn(),
+  repriceOrder: vi.fn(),
 }));
 
 const positions = vi.mocked(getPositions);
 const restingOrders = vi.mocked(getRestingOrders);
 const realtime = vi.mocked(useOptionalRealtime);
 const cancel = vi.mocked(cancelOrder);
+const reprice = vi.mocked(repriceOrder);
 
 const LONG: BlotterPosition = {
   contract: 'CON.F.US.MES.U26',
@@ -111,6 +113,7 @@ beforeEach(() => {
   restingOrders.mockResolvedValue({ ok: true, data: live(PROTECTIVE) });
   wireRealtime();
   cancel.mockResolvedValue({ ok: true, data: undefined });
+  reprice.mockResolvedValue({ ok: true, data: undefined });
 });
 
 afterEach(() => {
@@ -362,9 +365,126 @@ describe('Blotter', () => {
     await renderBlotter();
 
     expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /reprice/i })).toBeNull();
     expect(screen.getByTestId('leg-not-actionable').textContent?.toLowerCase()).toContain(
       'manage via its position',
     );
     expect(cancel).not.toHaveBeenCalled();
+    expect(reprice).not.toHaveBeenCalled();
+  });
+
+  it('reprices a resting order by its journaled id, carrying the operator-supplied market price', async () => {
+    // Acceptance: reprice a working order. An entry move re-gates against a reference price (R-16); the server has
+    // no quote read, so the operator supplies the current market price, and the move targets the app Order.Id.
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /reprice/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-entry-price'), { target: { value: '4991' } });
+      fireEvent.change(screen.getByTestId('reprice-reference'), { target: { value: '4993' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reprice this order$/i }));
+    });
+
+    expect(reprice).toHaveBeenCalledWith('ord-1', { entryPrice: 4991, referencePrice: 4993 });
+  });
+
+  it('will not reprice until a market price is supplied — the re-gate needs it', async () => {
+    // Fail closed: an entry move without a reference price is refused server-side (R-16), so the action stays
+    // disabled here rather than round-tripping to a certain refusal. The new entry is seeded; the market is not.
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /reprice/i }));
+    });
+
+    expect(
+      (screen.getByRole('button', { name: /^reprice this order$/i }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('reprice-reference'), { target: { value: '4993' } });
+    });
+    expect(
+      (screen.getByRole('button', { name: /^reprice this order$/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(reprice).not.toHaveBeenCalled();
+  });
+
+  it('keeps the sheet up and shows the gate’s refusal, rather than reporting a move', async () => {
+    // A reprice re-gates and CAN be refused (a breach, a fat-finger band). The order did not move, so the sheet
+    // stays and the reason is shown — the same posture the order ticket takes on a refused send.
+    reprice.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 422,
+      reason: 'would breach the drawdown floor',
+    });
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /reprice/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-entry-price'), { target: { value: '4991' } });
+      fireEvent.change(screen.getByTestId('reprice-reference'), { target: { value: '4993' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reprice this order$/i }));
+    });
+
+    expect(screen.getByTestId('reprice-refusal').textContent?.toLowerCase()).toContain(
+      'drawdown floor',
+    );
+    expect(screen.getByTestId('new-entry-price')).toBeTruthy(); // the sheet is still open
+  });
+
+  it('re-reads after a successful reprice, rather than assuming the new price took', async () => {
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /reprice/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-entry-price'), { target: { value: '4991' } });
+      fireEvent.change(screen.getByTestId('reprice-reference'), { target: { value: '4993' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reprice this order$/i }));
+    });
+
+    expect(positions).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reprice twice when confirmed twice before the first resolves', async () => {
+    // The same non-idempotent-transmit hazard as the cancel: a reprice reaches the venue, so a second click before
+    // the first settles must not issue a second move.
+    let release: () => void = () => {};
+    reprice.mockReturnValue(
+      new Promise((resolve) => {
+        release = () => resolve({ ok: true, data: undefined });
+      }),
+    );
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /reprice/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-entry-price'), { target: { value: '4991' } });
+      fireEvent.change(screen.getByTestId('reprice-reference'), { target: { value: '4993' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reprice this order$/i }));
+      fireEvent.click(screen.getByRole('button', { name: /^reprice this order$/i }));
+    });
+
+    expect(reprice).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      release();
+    });
   });
 });
