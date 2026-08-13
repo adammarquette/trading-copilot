@@ -69,10 +69,25 @@ nothing new — it is the property that stops a re-delivered flat double-countin
   already-journalled close makes FIFO re-pair the same fills into different-keyed legs the per-leg dedup cannot
   recognise as the old row. A **pre-write guard** fails closed — a window fill already journalled under a *different*
   pairing refuses the flat rather than double-count into the governor (the safe, under-reporting direction).
-  Reconciling the orphaned row is a settlement-reconcile concern (gh#193).
+  Reconciling the orphaned row is a settlement-reconcile concern (gh#193). A **pre-#759 row** carries only the old
+  single-column closing key (null `OpeningFillId`); the guard and the per-leg pre-check recognise it by `ClosingFillId`
+  **alone** as the already-journalled version of the same trip, so replaying a legacy flat is the ordinary idempotent
+  skip — **not** a false re-pairing that would pollute `JournalBoundaryMergeRefused` (pre-#759 windows were only ever
+  balanced single trips, so a legacy `ClosingFillId` belongs to exactly one recomposed leg).
 - **The idempotency backstop moves to the composite key:** the pre-check `AnyAsync`, the narrowed
   `DbUpdateException` catch, the pinned index-name constant, and the metadata test that pins it all follow the
   index rename.
+- **The composite index is filtered to both keys non-null, so legacy null-`OpeningFillId` rows lose DB-level
+  uniqueness — deliberately, and safely.** `IX_Trades_ClosingFillId_OpeningFillId` is
+  `WHERE "ClosingFillId" IS NOT NULL AND "OpeningFillId" IS NOT NULL`, so two rows that share a `ClosingFillId`
+  but both carry a null `OpeningFillId` (every pre-#759 legacy row) are **not** caught at the DB level as the
+  dropped single-column `IX_Trades_ClosingFillId` caught them unconditionally. This narrowing is safe on both
+  fronts: no post-#759 code path writes a null-`OpeningFillId` row (`fe30ff8` populates the opening key on every
+  new leg), so no *new* null-keyed duplicate can arise; and the pre-existing legacy rows were already unique
+  under the old index at migration time, so no duplicate can arise *among* them either. A new write whose
+  `ClosingFillId` matches a legacy row is still caught app-side by the `ClosingFillId`-alone pre-check above. The
+  two real-Postgres write-fault tests that exercised the old single-column collision were re-pointed at the
+  composite invariant to match.
 - **`Down` may legitimately fail on real data** (composite → single can collide), documented in the migration, as
   the outbox-dedup narrowing already is.
 - **Real-Postgres coverage** — the composite-key uniqueness, idempotent replay, and the governor equality across
