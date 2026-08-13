@@ -113,19 +113,28 @@ have_app() {
     && { [ -n "${REVIEWER_APP_PRIVATE_KEY_FILE:-}" ] || [ -n "${REVIEWER_APP_PRIVATE_KEY:-}" ]; }
 }
 
-# Can `gh`'s own identity create a review? Asked with a payload GitHub must REJECT on validation (an empty body
-# is invalid for REQUEST_CHANGES), so the answer costs nothing and leaves nothing behind:
+# Can `gh`'s own identity create a review? Asked with a payload GitHub cannot accept, so the answer costs nothing:
 #
-#   403  the permission is missing              -> no
-#   422  the permission is there, the payload is not  -> yes
+#   403  the permission is missing                    -> no
+#   422  the permission is there, the payload is not   -> yes
 #
 # Authorization precedes validation, which is what makes the two distinguishable. If that ever inverted, this
 # would read a permitted identity as refused -- the safe direction, and the real post below fails loudly anyway,
 # so this probe is an early warning rather than the guarantee.
+#
+# THE INVALID PART IS THE `event` VALUE, not the body, and that is the whole care taken here (PR #818 review).
+# The first cut sent `REQUEST_CHANGES` with an empty body, relying on "an empty body is invalid" -- an assumption
+# about GitHub's validation that cannot be tested from a session the probe exists to detect. Had it ever been
+# accepted, the probe would have posted an empty-bodied changes-requested review, which the gate reads as
+# CHANGES-REQUESTED by native state: a preflight that REDS THE PR IT WAS ASKED ABOUT. No enum value makes
+# `VERDICT_PREFLIGHT_PROBE` a review, so the worst case now is the API ignoring `event` and drafting a PENDING
+# review -- which carries no verdict, so the gate passes over it. The body says what it is, for the same reason.
 gh_can_review() {
   local status
   status=$(gh api "/repos/${REPO}/pulls/${PR}/reviews" -X POST \
-             -f event=REQUEST_CHANGES -f body= --include 2>&1 \
+             -f event=VERDICT_PREFLIGHT_PROBE \
+             -f body="post-verdict.sh preflight probe -- deliberately invalid, expected to be rejected." \
+             --include 2>&1 \
              | sed -n 's|^HTTP/[0-9.]* \([0-9]\{3\}\).*|\1|p' | head -1)
   [ "$status" = "422" ]
 }
