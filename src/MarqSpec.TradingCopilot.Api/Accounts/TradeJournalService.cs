@@ -390,15 +390,23 @@ public sealed class TradeJournalService
     /// execution order.
     /// </summary>
     /// <remarks>
-    /// A zero-crossing that lands <b>inside</b> a same-<see cref="Fill.ExecutedAt"/> group is <b>not</b> a cycle
-    /// boundary (gh#809). Within one instant there is no venue sequence, so whether running exposure passes through
-    /// zero there is decided only by the arbitrary <c>(ExecutedAt, Id)</c> tie-break — slicing on it would guess a
-    /// boundary <see cref="Fill.Id"/> alone chose, journalling one side's reading and silently dropping the other
-    /// cycle's realized P&amp;L (no watermark re-derives it) into the R-4/R-5 daily governor. Leaving the tie in the
-    /// window instead lets the single ambiguity gate in <see cref="TradeRoundTrip.TryCompose"/> refuse a mixed-side
-    /// tie (and FIFO compose a genuine same-side reversal). A zero-crossing at a group's <i>clean end</i> — the next
-    /// fill is strictly later — is a real boundary: the sum over a same-instant group is order-independent, so it
-    /// still advances.
+    /// A return to flat is a real cycle boundary only when it lands at the <b>clean end of a single-sided
+    /// instant</b> (gh#809). Two conditions, together, because within one <see cref="Fill.ExecutedAt"/> there is no
+    /// venue sequence to order the fills:
+    /// <list type="number">
+    /// <item><description><b>Clean end</b> — the next fill is strictly later. A zero <i>inside</i> a same-instant
+    /// group (the next fill shares the instant) is an artifact of the arbitrary <c>(ExecutedAt, Id)</c> tie-break;
+    /// slicing there would guess a boundary <see cref="Fill.Id"/> alone chose. This also covers a single-sided group
+    /// that <i>overshoots</i> flat (a reversing order filling in parts at one instant), whose intermediate zero is
+    /// order-dependent.</description></item>
+    /// <item><description><b>Single-sided</b> — the just-completed instant carries only one side. A mixed-side
+    /// instant that nets flat is ADR-0022's undecidable tie (which fill opened, which closed, and the sign of the
+    /// P&amp;L, all flip with the order); advancing past it would journal a later clean cycle while silently dropping
+    /// the tie's realized P&amp;L rather than refusing it. Leaving it in the window lets the single ambiguity gate in
+    /// <see cref="TradeRoundTrip.TryCompose"/> refuse it, for a reason.</description></item>
+    /// </list>
+    /// A single-sided group's net sum is order-independent, so a zero at <i>its</i> clean end is a genuine flat and
+    /// still advances (and FIFO composes a genuine same-side reversal that never returns to flat mid-cycle).
     /// </remarks>
     private static int CurrentCycleStart(
         IReadOnlyList<Fill> ordered, IReadOnlyDictionary<Guid, OrderSide> sideByOrder)
@@ -414,18 +422,45 @@ public sealed class TradeJournalService
                 _ => 0,
             };
 
-            // A return to flat before the final fill closes a prior cycle -- but only at a CLEAN instant boundary. If
-            // the next fill shares this instant, the flat is an artifact of intra-instant ordering (gh#809): do not
-            // slice, so the tie stays in the window for TradeRoundTrip.TryCompose's gate to judge.
+            // A return to flat before the final fill closes a prior cycle -- but only at the CLEAN END of a
+            // SINGLE-SIDED instant (gh#809). A zero inside a same-instant group, or at the end of a MIXED-side one, is
+            // decided (or the sign flipped) by the arbitrary (ExecutedAt, Id) order, so the tie is left in the window
+            // for TradeRoundTrip.TryCompose's gate to judge rather than sliced away where the gate can never see it.
             if (running == 0
                 && index < ordered.Count - 1
-                && ordered[index].ExecutedAt != ordered[index + 1].ExecutedAt)
+                && ordered[index].ExecutedAt != ordered[index + 1].ExecutedAt
+                && !InstantHasMixedSides(ordered, sideByOrder, index))
             {
                 start = index + 1;
             }
         }
 
         return start;
+    }
+
+    /// <summary>
+    /// Whether the same-<see cref="Fill.ExecutedAt"/> group ending at <paramref name="index"/> carries <b>both</b> a
+    /// buy and a sell (gh#809). <paramref name="index"/> must be the group's last fill (its
+    /// <see cref="Fill.ExecutedAt"/> differs from the next), and <paramref name="ordered"/> must be execution-ordered,
+    /// so the group is the contiguous run of equal <c>ExecutedAt</c> ending here — scanned backwards.
+    /// </summary>
+    private static bool InstantHasMixedSides(
+        IReadOnlyList<Fill> ordered, IReadOnlyDictionary<Guid, OrderSide> sideByOrder, int index)
+    {
+        DateTimeOffset instant = ordered[index].ExecutedAt;
+        bool sawBuy = false;
+        bool sawSell = false;
+        for (int scan = index; scan >= 0 && ordered[scan].ExecutedAt == instant; scan--)
+        {
+            switch (sideByOrder[ordered[scan].OrderId])
+            {
+                case OrderSide.Buy: sawBuy = true; break;
+                case OrderSide.Sell: sawSell = true; break;
+                default: break;
+            }
+        }
+
+        return sawBuy && sawSell;
     }
 
     private async Task<JournalAccount?> ResolveAccountAsync(
