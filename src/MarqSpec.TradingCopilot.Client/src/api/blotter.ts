@@ -28,6 +28,13 @@ export interface BlotterPosition {
 /** An order resting at the venue. `size` **is** carried by the read — see gh#656's stale "known gap". */
 export interface BlotterRestingOrder {
   readonly venueOrderKey: string;
+  /**
+   * The journaled app `Order.Id` the write endpoints key on (`DELETE /orders/{id}`, `PATCH /orders/{id}/price`),
+   * matched to this venue order server-side by its venue key (gh#656). `null` for a venue-spawned protective leg,
+   * which carries no `Order` row (ADR-0007) — so it **cannot** be cancelled/modified through `/orders/{id}`, and a
+   * control offering it would not route. The blotter renders such an order without an actionable cancel.
+   */
+  readonly orderId: string | null;
   readonly contract: string;
   readonly stopPrice: number | null;
   readonly limitPrice: number | null;

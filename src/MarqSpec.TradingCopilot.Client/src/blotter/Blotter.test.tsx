@@ -40,10 +40,23 @@ const LONG: BlotterPosition = {
 
 const PROTECTIVE: BlotterRestingOrder = {
   venueOrderKey: 'v1',
+  // A journaled protective stop the app placed — it has an Order row, so it is actionable through /orders/{id}.
+  orderId: 'ord-1',
   contract: 'CON.F.US.MES.U26',
   stopPrice: 4_990,
   limitPrice: null,
   size: 2,
+  isProtective: true,
+};
+
+/** A venue-spawned bracket leg: no journaled Order row, so `orderId` is null and it is not actionable via /orders/{id}. */
+const UNJOURNALED_LEG: BlotterRestingOrder = {
+  venueOrderKey: 'v2',
+  orderId: null,
+  contract: 'CON.F.US.MES.U26',
+  stopPrice: 4_980,
+  limitPrice: null,
+  size: 1,
   isProtective: true,
 };
 
@@ -286,7 +299,8 @@ describe('Blotter', () => {
       fireEvent.click(screen.getByRole('button', { name: /^cancel this order$/i }));
     });
 
-    expect(cancel).toHaveBeenCalledWith('v1');
+    // The app Order.Id the endpoint routes on ({id:guid}), never the venue key it cannot match (gh#656).
+    expect(cancel).toHaveBeenCalledWith('ord-1');
   });
 
   it('warns that cancelling a PROTECTIVE order removes protection', async () => {
@@ -337,5 +351,20 @@ describe('Blotter', () => {
     await act(async () => {
       release();
     });
+  });
+
+  it('offers no cancel for an unjournaled leg, since /orders/{id} cannot reach it', async () => {
+    // gh#656: a venue-spawned bracket leg has no journaled Order row (ADR-0007), so it has no app Order.Id and
+    // DELETE /orders/{id} cannot route to it. Rather than a Cancel that would 404, the blotter states plainly that
+    // the leg is managed via its position — the honest, safe rendering, not a control that silently fails.
+    restingOrders.mockResolvedValue({ ok: true, data: live(UNJOURNALED_LEG) });
+
+    await renderBlotter();
+
+    expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull();
+    expect(screen.getByTestId('leg-not-actionable').textContent?.toLowerCase()).toContain(
+      'manage via its position',
+    );
+    expect(cancel).not.toHaveBeenCalled();
   });
 });

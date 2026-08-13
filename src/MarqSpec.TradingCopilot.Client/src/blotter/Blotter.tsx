@@ -93,13 +93,15 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   }, [realtime, load]);
 
   const confirmCancel = useCallback(() => {
-    if (confirming === null || cancelling.current) {
+    // A leg with no journaled order id is never confirmable (its Cancel is disabled), so this is a belt-and-braces
+    // guard: cancelling by the app Order.Id the endpoint routes on, never the venue key it cannot.
+    if (confirming === null || confirming.orderId === null || cancelling.current) {
       return; // never a second cancel of the same order
     }
     cancelling.current = true;
-    const key = confirming.venueOrderKey;
+    const orderId = confirming.orderId;
 
-    void cancelOrder(key)
+    void cancelOrder(orderId)
       .then(() => {
         setConfirming(null);
         // Re-read rather than assume it worked: venue truth decides what is standing, not this click.
@@ -192,9 +194,22 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
                 {order.contract} · {order.size} @ {order.stopPrice ?? order.limitPrice}
                 {order.isProtective ? ' · protective' : ''}
               </Typography>
-              <Button size="small" color="error" onClick={() => setConfirming(order)}>
-                Cancel
-              </Button>
+              {order.orderId === null ? (
+                // A venue-spawned leg carries no journaled Order row (ADR-0007), so /orders/{id} cannot reach it —
+                // rather than a Cancel that would 404, say why it is not actionable here. Managing a bracket's leg
+                // is done by exiting or adjusting its position (a separate, venue-key path — gh#656 follow-up).
+                <Typography
+                  variant="caption"
+                  sx={{ color: 'text.disabled' }}
+                  data-testid="leg-not-actionable"
+                >
+                  bracket leg — manage via its position
+                </Typography>
+              ) : (
+                <Button size="small" color="error" onClick={() => setConfirming(order)}>
+                  Cancel
+                </Button>
+              )}
             </Box>
           ))
         )}

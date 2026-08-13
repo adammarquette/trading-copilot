@@ -119,6 +119,7 @@ describe('getRestingOrders', () => {
       orders: [
         {
           venueOrderKey: 'v1',
+          orderId: 'ord-1',
           contract: 'CON.F.US.MES.U26',
           stopPrice: 4990,
           limitPrice: null,
@@ -133,6 +134,33 @@ describe('getRestingOrders', () => {
     if (result.ok && result.data.basis === 'live') {
       expect(result.data.items[0].size).toBe(2);
       expect(result.data.items[0].isProtective).toBe(true);
+      // gh#656: the journaled app Order.Id the write endpoints route on, surfaced alongside the venue key.
+      expect(result.data.items[0].orderId).toBe('ord-1');
+    }
+  });
+
+  it('surfaces a null orderId for an unjournaled leg', async () => {
+    // A venue-spawned bracket leg has no journaled Order row, so the read carries orderId: null — the blotter
+    // renders it as not-actionable rather than offering a cancel that /orders/{id} could not route.
+    stubJson({
+      markBasis: 'Live',
+      orders: [
+        {
+          venueOrderKey: 'v2',
+          orderId: null,
+          contract: 'CON.F.US.MES.U26',
+          stopPrice: 4980,
+          limitPrice: null,
+          size: 1,
+          isProtective: true,
+        },
+      ],
+    });
+
+    const result = await getRestingOrders('a1');
+
+    if (result.ok && result.data.basis === 'live') {
+      expect(result.data.items[0].orderId).toBeNull();
     }
   });
 
