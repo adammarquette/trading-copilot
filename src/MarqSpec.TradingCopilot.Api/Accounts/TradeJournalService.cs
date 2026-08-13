@@ -385,9 +385,21 @@ public sealed class TradeJournalService
 
     /// <summary>
     /// The index at which the current round trip begins: one past the last fill that returned running exposure to
-    /// flat. Buy adds, Sell subtracts; a fill whose side is neither leaves exposure unchanged and is left for
-    /// <see cref="TradeRoundTrip"/> to refuse. <paramref name="ordered"/> must be in execution order.
+    /// flat <b>at a clean instant boundary</b>. Buy adds, Sell subtracts; a fill whose side is neither leaves exposure
+    /// unchanged and is left for <see cref="TradeRoundTrip"/> to refuse. <paramref name="ordered"/> must be in
+    /// execution order.
     /// </summary>
+    /// <remarks>
+    /// A zero-crossing that lands <b>inside</b> a same-<see cref="Fill.ExecutedAt"/> group is <b>not</b> a cycle
+    /// boundary (gh#809). Within one instant there is no venue sequence, so whether running exposure passes through
+    /// zero there is decided only by the arbitrary <c>(ExecutedAt, Id)</c> tie-break — slicing on it would guess a
+    /// boundary <see cref="Fill.Id"/> alone chose, journalling one side's reading and silently dropping the other
+    /// cycle's realized P&amp;L (no watermark re-derives it) into the R-4/R-5 daily governor. Leaving the tie in the
+    /// window instead lets the single ambiguity gate in <see cref="TradeRoundTrip.TryCompose"/> refuse a mixed-side
+    /// tie (and FIFO compose a genuine same-side reversal). A zero-crossing at a group's <i>clean end</i> — the next
+    /// fill is strictly later — is a real boundary: the sum over a same-instant group is order-independent, so it
+    /// still advances.
+    /// </remarks>
     private static int CurrentCycleStart(
         IReadOnlyList<Fill> ordered, IReadOnlyDictionary<Guid, OrderSide> sideByOrder)
     {
@@ -402,8 +414,12 @@ public sealed class TradeJournalService
                 _ => 0,
             };
 
-            // A return to flat before the final fill closes a prior cycle; the current trip starts after it.
-            if (running == 0 && index < ordered.Count - 1)
+            // A return to flat before the final fill closes a prior cycle -- but only at a CLEAN instant boundary. If
+            // the next fill shares this instant, the flat is an artifact of intra-instant ordering (gh#809): do not
+            // slice, so the tie stays in the window for TradeRoundTrip.TryCompose's gate to judge.
+            if (running == 0
+                && index < ordered.Count - 1
+                && ordered[index].ExecutedAt != ordered[index + 1].ExecutedAt)
             {
                 start = index + 1;
             }

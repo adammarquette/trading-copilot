@@ -323,6 +323,46 @@ public class TradeJournalServiceTests
         trades[0].Size.Should().Be(1, "no blended size-2 double-count of trip 1's P&L");
     }
 
+    [Theory]
+    [InlineData(true)]   // the tied SELL's Guid sorts first -- the gh#809 defect ordering
+    [InlineData(false)]  // the tied BUY's Guid sorts first -- refused even before the fix
+    public async Task ProcessFlatAsync_ShouldWriteNoRow_WhenAnOppositeSideTieFallsOnTheCycleBoundary(bool tiedSellSortsFirst)
+    {
+        // gh#809 (safety-critical): a buy and a sell share the EXACT ExecutedAt at what would be a cycle boundary,
+        // INSIDE a single flat's window. Whether running exposure "returns to flat" at the tie is decided only by the
+        // arbitrary (ExecutedAt, Fill.Id) order -- so before the fix, the tied-sell-first ordering made
+        // CurrentCycleStart slice the window AT the tie, and the sliced-away window no longer carried the tie for
+        // TradeRoundTrip.TryCompose's opposite-side gate to refuse. A Guid-ordered row was journalled and its
+        // RealizedPnL entered the R-4 / R-5 daily governor; the pre-tie cycle's P&L was dropped with no watermark to
+        // re-derive it. The fix keeps a zero-crossing that lands inside a same-instant group out of the boundary walk,
+        // leaving the tie in the window so the existing gate refuses it. ADR-0022: opposite-side fills tied at the
+        // boundary timestamp write no row -- so the SAME four executions must journal NOTHING in EITHER Guid order.
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        Guid lesser = new("00000000-0000-0000-0000-000000000010");
+        Guid greater = new("00000000-0000-0000-0000-000000000020");
+        Guid entry = new("00000000-0000-0000-0000-0000000000e0");
+        Guid final = new("00000000-0000-0000-0000-0000000000f0");
+        Guid tiedSell = tiedSellSortsFirst ? lesser : greater;
+        Guid tiedBuy = tiedSellSortsFirst ? greater : lesser;
+
+        // The entry Buy @:0 and the tied Buy @:1 are the buy side; the tied Sell @:1 and the final Sell @:2 are the
+        // sell side. The two @:1 fills are the tie whose Guid order is the only variable between the two cases.
+        await SeedOrderWithFillIdsAsync(
+            owner, accountId, OrderSide.Buy, [(entry, 5_000m, 1, 0), (tiedBuy, 5_010m, 1, 1)]);
+        await SeedOrderWithFillIdsAsync(
+            owner, accountId, OrderSide.Sell, [(tiedSell, 5_010m, 1, 1), (final, 5_020m, 1, 2)]);
+
+        bool journalled = await Service().ProcessFlatAsync(Flat("9001", at: _now.AddMinutes(2)), CancellationToken.None);
+
+        journalled.Should().BeFalse(
+            "an opposite-side tie at the cycle boundary is decidable only by an arbitrary venue Guid -- refuse in "
+            + "EITHER order rather than let Fill.Id decide whether the day's realized P&L reaches the governor (gh#809)");
+        (await TradesAsync()).Should().BeEmpty(
+            "the same four executions must journal nothing whichever tied fill's Guid the venue happened to mint first");
+    }
+
     [Fact]
     public async Task ProcessFlatAsync_ShouldRefuse_WhenALateInterleavedFillRepairsAnAlreadyJournalledTrade()
     {

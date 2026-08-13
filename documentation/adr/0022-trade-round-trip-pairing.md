@@ -44,7 +44,12 @@ opening fill.**
 - **Refuse-don't-guess is kept only for genuine ambiguity:** a fill whose side is neither leg; an
   **open-from-flat whose direction is not decidable** (opposite-side fills tied at the boundary timestamp, with no
   venue sequence to order them — guessing would flip the sign of the realized P&L); or a window that does **not**
-  reconcile to flat. These still write no row.
+  reconcile to flat. These still write no row. **Enforced in two places (gh#809):** the single ambiguity gate lives
+  in `TradeRoundTrip.TryCompose` (a same-instant opposite-side group in its window is refused), **and**
+  `TradeJournalService.CurrentCycleStart` must not slice the flat-to-flat window *across* such a tie — a boundary
+  reading that split the tied pair apart would hide it from that gate, and the arbitrary `(ExecutedAt, Id)` order
+  would silently decide whether the day's P&L reaches the governor. So the writer only advances the cycle boundary at
+  a **clean instant boundary** (the next fill is strictly later); a tie stays in the window for the gate to judge.
 
 ### The structural cost — a new natural key
 `ClosingFillId` is today a **unique filtered** index (`IX_Trades_ClosingFillId`) and the writer's idempotency key
