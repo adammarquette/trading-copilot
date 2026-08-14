@@ -214,6 +214,7 @@ closed):
 | **Delivered work left parentless** | the bar under-reports; shipped issues sit outside the tree | `gh#155`, `gh#164`, `gh#163`, `gh#161` on D1 |
 | **Delivered work mis-parented** | progress credited to the wrong container | `gh#220` sat under `gh#12` though it delivered X1's audit-records task |
 | **A whole workstream with no checklist line** | shipped work is invisible, and so is its *open* remainder | X1's alerting (`gh#242`–`gh#246`), still carrying `gh#408` / `gh#400` |
+| **A container redundant with its own children** | two cards for one job; the container's estimate makes it look pickup-able | `gh#619` held only `gh#722`, which restated it — closed; `gh#595` also held one child but owns content `gh#597` points at — kept |
 
 **So audit an epic before closing it — diff the body checklist against the sub-issue tree, item by item:**
 
@@ -225,9 +226,13 @@ closed):
    citations** so the body stops needing the same audit next time.
 4. Check the checklist wording still reflects current decisions — an epic body written early keeps asserting
    superseded ones (X1's spend task still said *"operator-only"* long after ADR-0015 reversed that premise).
+5. When one child is left, ask **does the container hold scope its children do not?** — not how many are left.
+   If yes it is still a container: keep it, and **strip its `Work Estimate` / `work:*`**, since an estimate
+   routes a model at a card with no work in it. If no, **re-parent the survivors first**, then close it.
 
 *Done is Done* applies to containers too: an epic closed on a green progress bar silently drops whatever its
-checklist still names.
+checklist still names. Note the *not `Work Estimate`-tagged* rule below binds **any** container, not only
+`epic`-labelled ones — `gh#595` was neither, which is how it kept a `Work Estimate: 5` for twelve days.
 
 ## Time-boxing
 
