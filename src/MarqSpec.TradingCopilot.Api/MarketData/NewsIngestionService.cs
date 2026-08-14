@@ -97,6 +97,14 @@ public sealed class NewsIngestionService
                 {
                     pending.Feeds.Add(feed);
                 }
+                else if (FindFuzzyMatch(deduped.Values, item) is { } fuzzyPending)
+                {
+                    // R-2 fuzzy fallback, WITHIN the pass: a second feed carrying the same story under a DIFFERENT
+                    // URL (Finnhub and Tiingo rarely agree on a canonical link) gets a different key, so canonical
+                    // dedup missed it. Union its feed onto the first item's pending row rather than opening a second
+                    // one -- the first feed to carry a story wins its content, exactly as the canonical path does.
+                    fuzzyPending.Feeds.Add(feed);
+                }
                 else
                 {
                     deduped[key] = new PendingItem(item, [feed]);
@@ -115,18 +123,40 @@ public sealed class NewsIngestionService
             .Where(record => keys.Contains(record.DedupKey))
             .ToDictionaryAsync(record => record.DedupKey, cancellationToken);
 
+        // R-2 fuzzy fallback, ACROSS passes: a story already stored under a DIFFERENT canonical URL than the one now
+        // arriving. Bounded to the publication-time window this pass spans (± the fuzzy gap; PublishedAt is indexed)
+        // and to rows NOT already exact-matched above, then matched in memory below. Empty when nothing recent is
+        // stored, so the ordinary first-time-seen path pays only the bounded window read.
+        DateTimeOffset earliest = deduped.Values.Min(pending => pending.Item.PublishedAt.ToUniversalTime());
+        DateTimeOffset latest = deduped.Values.Max(pending => pending.Item.PublishedAt.ToUniversalTime());
+        DateTimeOffset windowStart = earliest - NewsFuzzyDedup.MaxPublishedGap;
+        DateTimeOffset windowEnd = latest + NewsFuzzyDedup.MaxPublishedGap;
+        List<NewsRecord> fuzzyCandidates = await _database.News
+            .Where(record => record.PublishedAt >= windowStart && record.PublishedAt <= windowEnd
+                && !keys.Contains(record.DedupKey))
+            .ToListAsync(cancellationToken);
+
         int written = 0;
         foreach ((string key, PendingItem pending) in deduped)
         {
             if (existing.TryGetValue(key, out NewsRecord? stored))
             {
-                // The story is already stored; a re-poll from the same feed is a genuine no-op. Only a NEW feed
-                // carrying it changes anything — union its provenance and re-stamp when we learned it.
-                List<string> merged = [.. stored.SourceFeeds.Union(pending.Feeds, StringComparer.OrdinalIgnoreCase)];
-                if (merged.Count != stored.SourceFeeds.Count)
+                // The story is already stored under this canonical key; a re-poll from the same feed is a genuine
+                // no-op. Only a NEW feed carrying it changes anything — union its provenance and re-stamp.
+                if (UnionProvenance(stored, pending.Feeds, now))
                 {
-                    stored.SourceFeeds = merged;
-                    stored.RecordedAt = now;
+                    written++;
+                }
+
+                continue;
+            }
+
+            // Canonical matching found nothing — try the R-2 fuzzy fallback against recently-stored rows. A match
+            // unions provenance onto the surviving row rather than storing a duplicate under the new URL (gh#764).
+            if (FindFuzzyStored(fuzzyCandidates, pending.Item) is { } fuzzy)
+            {
+                if (UnionProvenance(fuzzy, pending.Feeds, now))
+                {
                     written++;
                 }
 
@@ -150,6 +180,53 @@ public sealed class NewsIngestionService
 
         await _database.SaveChangesAsync(cancellationToken);
         return written;
+    }
+
+    // Unions `feeds` into a stored row's provenance, re-stamping RecordedAt when it actually grew. Returns whether it
+    // changed -- so a re-poll that adds no new feed is the no-op it should be.
+    private static bool UnionProvenance(NewsRecord stored, IEnumerable<string> feeds, DateTimeOffset now)
+    {
+        List<string> merged = [.. stored.SourceFeeds.Union(feeds, StringComparer.OrdinalIgnoreCase)];
+        if (merged.Count == stored.SourceFeeds.Count)
+        {
+            return false;
+        }
+
+        stored.SourceFeeds = merged;
+        stored.RecordedAt = now;
+        return true;
+    }
+
+    // The first pending item that is likely the same story as `item` under the R-2 fuzzy rule (title + time + ticker).
+    private static PendingItem? FindFuzzyMatch(IEnumerable<PendingItem> candidates, NewsItem item)
+    {
+        foreach (PendingItem candidate in candidates)
+        {
+            if (NewsFuzzyDedup.AreLikelyTheSameStory(
+                candidate.Item.Title, candidate.Item.PublishedAt, candidate.Item.Tickers ?? [],
+                item.Title, item.PublishedAt, item.Tickers ?? []))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    // The first stored row that is likely the same story as `item` under the R-2 fuzzy rule.
+    private static NewsRecord? FindFuzzyStored(IEnumerable<NewsRecord> candidates, NewsItem item)
+    {
+        foreach (NewsRecord candidate in candidates)
+        {
+            if (NewsFuzzyDedup.AreLikelyTheSameStory(
+                candidate.Title, candidate.PublishedAt, candidate.Tickers,
+                item.Title, item.PublishedAt, item.Tickers ?? []))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
     }
 
     private sealed record PendingItem(NewsItem Item, HashSet<string> Feeds);

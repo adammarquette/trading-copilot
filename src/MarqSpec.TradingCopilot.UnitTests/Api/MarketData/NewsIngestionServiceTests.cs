@@ -115,6 +115,60 @@ public class NewsIngestionServiceTests
         (await context.News.CountAsync()).Should().Be(1);
     }
 
+    // --- Fuzzy fallback (R-2, gh#764): same story, DIFFERENT canonical URLs ---
+
+    [Fact]
+    public async Task IngestAsync_ShouldCollapseSameStoryUnderDifferentUrls_ViaTheFuzzyFallback()
+    {
+        // The headline gh#764 behaviour: Finnhub and Tiingo carry ONE story under different (non-canonical-matching)
+        // URLs. Canonical dedup gives two keys, so without the fuzzy fallback this is two rows; the fallback -- near-
+        // duplicate title + same publish time + shared ticker -- collapses them to one whose provenance records both.
+        await using TradingCopilotDbContext context = Context();
+        INewsSource finnhub = Source(
+            Finnhub, [Item("https://finnhub.example/apple-iphone-17", "Apple unveils the iPhone 17 at its fall event", "AAPL")]);
+        INewsSource tiingo = Source(
+            Tiingo, [Item("https://tiingo.example/aapl/iphone", "Apple unveils iPhone 17", "AAPL")]);
+
+        await Service(context, finnhub, tiingo).IngestAsync(Now, CancellationToken.None);
+
+        NewsRecord stored = await context.News.SingleAsync();
+        stored.SourceFeeds.Should().BeEquivalentTo(["finnhub", "tiingo"]);
+    }
+
+    [Fact]
+    public async Task IngestAsync_ShouldNotCollapseDistinctStoriesOnTheSameTicker_ViaTheFuzzyFallback()
+    {
+        // The false-positive direction, which matters more: two genuinely different stories about AAPL minutes apart
+        // must stay two rows -- a wrongly-merged row destroys a real signal. Same ticker, close in time, but the
+        // titles are not similar, so the conjunction refuses.
+        await using TradingCopilotDbContext context = Context();
+        INewsSource finnhub = Source(Finnhub, [Item("https://finnhub.example/1", "Apple unveils iPhone 17", "AAPL")]);
+        INewsSource tiingo = Source(Tiingo, [Item("https://tiingo.example/2", "Apple stock slides after earnings miss", "AAPL")]);
+
+        await Service(context, finnhub, tiingo).IngestAsync(Now, CancellationToken.None);
+
+        (await context.News.CountAsync()).Should().Be(2, "distinct same-ticker stories must not be fuzzy-merged");
+    }
+
+    [Fact]
+    public async Task IngestAsync_ShouldUnionProvenanceAcrossPasses_WhenTheSameStoryArrivesUnderADifferentUrlLater()
+    {
+        // The cross-pass half of the fallback: pass one stores the story from Finnhub under URL A; a later pass sees
+        // Tiingo carry it under a DIFFERENT URL B. Canonical dedup misses (different key), so the fuzzy fallback must
+        // match the already-stored row and union provenance rather than store a second row.
+        await using TradingCopilotDbContext context = Context();
+        NewsIngestionService first = Service(
+            context, Source(Finnhub, [Item("https://finnhub.example/apple", "Apple unveils the iPhone 17 at its fall event", "AAPL")]));
+        await first.IngestAsync(Now, CancellationToken.None);
+
+        NewsIngestionService second = Service(
+            context, Source(Tiingo, [Item("https://tiingo.example/aapl", "Apple unveils iPhone 17", "AAPL")]));
+        await second.IngestAsync(Now.AddMinutes(2), CancellationToken.None);
+
+        (await context.News.CountAsync()).Should().Be(1, "the same story under a different URL a pass later must not duplicate");
+        (await context.News.SingleAsync()).SourceFeeds.Should().BeEquivalentTo(["finnhub", "tiingo"]);
+    }
+
     [Fact]
     public async Task IngestAsync_ShouldKeepDistinctStoriesDistinct()
     {
