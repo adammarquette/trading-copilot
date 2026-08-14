@@ -58,6 +58,17 @@ export interface RealtimeFill {
   readonly at: string;
 }
 
+/**
+ * A suggestion's new lifecycle state, pushed to the owning operator (gh#684, R-4). Owner-scoped like order / fill —
+ * delivered only to this operator's connections, so it carries no `sequence` and is not part of the resume replay. The
+ * wire is a signal to reconcile by id; the REST read model is the source of truth (ADR-0021).
+ */
+export interface RealtimeSuggestion {
+  readonly suggestionId: string;
+  readonly state: string;
+  readonly at: string;
+}
+
 /** The SignalR client-method names the hub invokes (the `SendAsync` strings). */
 export const RealtimeMethod = {
   Event: 'realtimeEvent',
@@ -65,4 +76,5 @@ export const RealtimeMethod = {
   CatchUp: 'realtimeCatchUp',
   OrderState: 'realtimeOrderState',
   Fill: 'realtimeFill',
+  Suggestion: 'realtimeSuggestion',
 } as const;

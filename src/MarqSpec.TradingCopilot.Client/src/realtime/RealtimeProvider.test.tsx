@@ -143,6 +143,33 @@ describe('RealtimeProvider', () => {
     expect(received).toEqual([1]); // still only the first — the unmounted subscriber did not fire
   });
 
+  it('fans owner-scoped suggestion pushes out to a subscriber, and unsubscribes on unmount', () => {
+    authenticate();
+    const { callbacks } = fakeConnection();
+    const received: string[] = [];
+    function Consumer() {
+      const { onSuggestion } = useRealtime();
+      useEffect(
+        () => onSuggestion((suggestion) => received.push(suggestion.suggestionId)),
+        [onSuggestion],
+      );
+      return null;
+    }
+
+    const { unmount } = render(
+      <RealtimeProvider>
+        <Consumer />
+      </RealtimeProvider>,
+    );
+
+    act(() => callbacks().onSuggestion?.({ suggestionId: 's1', state: 'Active', at: '' }));
+    expect(received).toEqual(['s1']);
+
+    unmount();
+    act(() => callbacks().onSuggestion?.({ suggestionId: 's2', state: 'Superseded', at: '' }));
+    expect(received).toEqual(['s1']); // the unmounted subscriber did not fire
+  });
+
   it('routes a resync (gap or reconnect) to resync subscribers', () => {
     authenticate();
     const { callbacks } = fakeConnection();

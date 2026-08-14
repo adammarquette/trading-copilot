@@ -121,6 +121,17 @@ describe('createRealtimeConnection', () => {
     expect(onGap).toHaveBeenCalledWith(gap);
   });
 
+  it('forwards an owner-scoped suggestion push to onSuggestion', async () => {
+    const onSuggestion = vi.fn();
+    const connection = createRealtimeConnection({ onSuggestion });
+    await connection.start();
+
+    const suggestion = { suggestionId: 's1', state: 'Active', at: '2026-01-01T00:00:00Z' };
+    builds[0].hub.handlers.get(RealtimeMethod.Suggestion)!(suggestion);
+
+    expect(onSuggestion).toHaveBeenCalledWith(suggestion);
+  });
+
   it('tags events inside a catch-up bracket as historical, and live outside it', async () => {
     const onEvent = vi.fn();
     const connection = createRealtimeConnection({ onEvent });
