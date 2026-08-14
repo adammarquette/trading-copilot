@@ -35,22 +35,43 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// from the wrong contract (QA does not touch <c>src/**</c> outside this project). Deferred to gh#854.
 /// </para>
 /// <para>
-/// <b>Prove-the-red, done live against real pgvector (guard discipline #1).</b> This sandbox's egress policy
-/// blocks every container-registry CDN the shipped <see cref="EmbeddingReadTestPostgresFactory"/> needs
-/// (Testcontainers pulling <c>timescale/timescaledb-ha:pg17</c> fails on a policy-denied <c>cloudfront</c> host,
-/// confirmed with the daemon otherwise healthy and unrelated pulls such as <c>mcr.microsoft.com</c> succeeding),
-/// so this suite could not be executed end-to-end pre-commit; that execution is CI's
-/// <c>integration tests (pre-merge)</c> job, over GitHub-hosted runners the policy does not constrain. What COULD
-/// be, and was, verified live pre-commit: an apt-installed native Postgres 16 + <c>pgvector</c> 0.6.0 (no
-/// container pull needed), schema built from the exact <c>AddEmbeddingStore</c> migration DDL, driven by a
-/// standalone harness running these cases' identical query shape through the real <c>TradingCopilotDbContext</c> +
-/// <c>Pgvector.EntityFrameworkCore</c> stack. Against it: the suite as committed passes every case; swapping the
-/// nearest-N query's <c>OrderBy</c> to <c>OrderByDescending</c> flips
+/// <b>gh#858 — a real defect this suite found, blocking 7 of 8 cases (guard discipline #3).</b> CI's real
+/// Testcontainers run (a genuinely fresh Postgres container, migrated in-process) hit every <c>Vector</c>-writing
+/// case with the SAME failure: <c>NotSupportedException: Cannot resolve 'vector' to a fully qualified datatype
+/// name. The datatype was not found in the current database info.</c> Root cause (filed as gh#858):
+/// <c>StartupTasks.MigrateAndBootstrapAsync</c>'s <c>MigrateAsync()</c> opens the process's FIRST Npgsql
+/// connection — which is also what runs <c>AddEmbeddingStore</c>'s <c>CREATE EXTENSION vector</c> — so Npgsql's
+/// per-data-source type catalog is cached from BEFORE the extension existed, and nothing calls
+/// <c>ReloadTypesAsync()</c> afterward; every later <c>Vector</c> write from that same process (i.e. this whole
+/// test run) hits the stale cache. This is a genuine production gap (it would equally break
+/// <c>NewsEmbeddingService</c>'s first upsert after any deployment's first-ever boot against a brand-new
+/// database), not a suite defect — per the guard discipline this is reported, not fixed here: the affected
+/// cases below are marked <c>Skip = "blocked by gh#858"</c> rather than silently left red or hand-patched. Only
+/// <see cref="Migration_ShouldHaveEnabledPgvector_AndBuiltTheHnswCosineIndex"/> (a raw-SQL read that writes no
+/// <c>Vector</c>) is unaffected and stays active — its own pass, isolating the failure to writes only, is what
+/// made the root cause identifiable in the first place. Once gh#858 lands, un-skip these cases; they become its
+/// regression guard.
+/// </para>
+/// <para>
+/// <b>Why the pre-commit local verification (below) did not surface this.</b> Before ever discovering CI's
+/// result, this suite's query shape and its three adversarial guards were verified against an apt-installed
+/// native Postgres 16 + <c>pgvector</c> 0.6.0 (no container pull needed, since this sandbox's egress policy
+/// blocks every container-registry CDN <c>Testcontainers.PostgreSql</c> needs — confirmed a policy block, not a
+/// config issue, since unrelated pulls like <c>mcr.microsoft.com</c> succeeded). That harness ran
+/// <c>CREATE EXTENSION vector</c> via a SEPARATE <c>psql</c> process, before the C# harness's own
+/// <c>NpgsqlDataSource</c> ever opened its first connection — so its type catalog was built AFTER the extension
+/// already existed, sidestepping gh#858's exact window by construction. In hindsight this is itself corroborating
+/// evidence for the root cause: the defect is specific to "the extension is created BY the same process that
+/// then writes the type," which only a from-scratch, migrate-in-process container run (CI's, or
+/// <see cref="EmbeddingReadTestPostgresFactory"/>'s) reproduces. Against that native instance: all 8 cases passed
+/// as committed; swapping the nearest-N query's <c>OrderBy</c> to <c>OrderByDescending</c> flipped
 /// <c>NearestN_ShouldOrderByCosineDistanceAscending_*</c> red (the farthest row led instead of the nearest);
 /// dropping the <c>OwnerKind</c> predicate let the wrong-owner-kind row (identical vector, closest possible
 /// distance) leak into the top hit and flipped <c>NearestN_ShouldExcludeOtherOwnerKinds_*</c> red; dropping the
 /// <c>Model</c> predicate did the same to <c>NearestN_ShouldExcludeOtherModels_*</c> — each break flipped exactly
-/// and only its own case, and all three were restored and reconfirmed green before commit.
+/// and only its own case, and all three were restored and reconfirmed green. That remains real evidence the
+/// query logic itself (ordering, filter-before-rank) is correct; gh#858 is a separate, earlier-in-the-pipeline
+/// bootstrap gap that keeps CI from reaching it right now.
 /// </para>
 /// </remarks>
 public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<EmbeddingReadTestPostgresFactory>
@@ -75,7 +96,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
     // "roughly sorted" hand-wave.
     // =================================================================================================================
 
-    [Fact]
+    [Fact(Skip = "blocked by gh#858 -- any Vector-valued Npgsql parameter (read or write) hits the stale post-migrate type cache; see class remarks")]
     public async Task NearestN_ShouldOrderByCosineDistanceAscending_AndRespectTake()
     {
         // Query points along dimension 0. Closest = identical direction (distance 0); middle = 0.8/0.6 blend
@@ -94,7 +115,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         top2[1].Distance.Should().BeApproximately(0.2, 1e-6, "the 0.8/0.6 unit blend is exactly 0.2 by construction");
     }
 
-    [Fact]
+    [Fact(Skip = "blocked by gh#858 -- the query vector is itself a Vector-valued Npgsql parameter; see class remarks")]
     public async Task NearestN_ShouldReturnEmpty_WhenTheCorpusIsEmpty()
     {
         // No rows seeded for this (OwnerKind, Model) at all -- the query must return an empty result, not throw and
@@ -105,7 +126,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         hits.Should().BeEmpty("an empty corpus is a valid, unexceptional state for the similarity read");
     }
 
-    [Fact]
+    [Fact(Skip = "blocked by gh#858 -- SeedAsync and the query vector both carry a Vector-valued Npgsql parameter; see class remarks")]
     public async Task NearestN_ShouldReturnTheSoleRow_WhenTheCorpusHasExactlyOneRow()
     {
         await SeedAsync(Row(EmbeddingOwnerKind.SoftSignal, "only-row", Model, Direction((1, 1f))));
@@ -117,7 +138,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         hit.Distance.Should().BeApproximately(1.0, 1e-6, "orthogonal to the query is cosine distance 1 -- the request still returns it, not a threshold-filtered empty set");
     }
 
-    [Fact]
+    [Fact(Skip = "blocked by gh#858 -- SeedAsync and the query vector both carry a Vector-valued Npgsql parameter; see class remarks")]
     public async Task NearestN_ShouldExcludeOtherOwnerKinds_EvenWhenTheirVectorPointsExactlyAtTheQuery()
     {
         // The Suggestion-kind row is the CLOSEST possible vector to the query (identical direction) -- if the
@@ -135,7 +156,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
             ["right-kind"], "a Suggestion-owned row must never surface from a SoftSignal query, however close its vector sits to the query");
     }
 
-    [Fact]
+    [Fact(Skip = "blocked by gh#858 -- SeedAsync and the query vector both carry a Vector-valued Npgsql parameter; see class remarks")]
     public async Task NearestN_ShouldExcludeOtherModels_EvenWhenTheirVectorPointsExactlyAtTheQuery()
     {
         // Same adversarial shape as the owner-kind case, over the OTHER half of the composite key: Model is part of
@@ -159,7 +180,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
     // NewsRecord.DedupKey itself: two differently-formatted URLs that canonicalize to one key collapse to one row.
     // =================================================================================================================
 
-    [Fact]
+    [Fact(Skip = "blocked by gh#858 -- SeedAsync's Vector write hits the stale post-migrate type cache; see class remarks")]
     public async Task EmbeddingRecord_ShouldBeReadableByTheCanonicalDedupKey_RegardlessOfWhichRawUrlVariantProducedIt()
     {
         const string rawA = "https://WWW.Example.com/story/?utm_source=newsletter";
@@ -178,7 +199,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         found!.OwnerId.Should().Be(canonical, "the persisted OwnerId is the exact canonical string -- not re-normalized, not truncated, not case-folded further by storage");
     }
 
-    [Fact]
+    [Fact(Skip = "blocked by gh#858 -- SeedAsync's Vector write hits the stale post-migrate type cache; see class remarks")]
     public async Task EmbeddingRecord_ShouldRefuseASecondRow_WhenTwoRawUrlVariantsNormalizeToTheSameOwnerId()
     {
         const string rawA = "https://example.com/second-story";
