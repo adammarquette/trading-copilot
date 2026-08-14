@@ -224,6 +224,66 @@ public class AiSpendIntegrationTests : IClassFixture<AiSpendTestPostgresFactory>
         row.EstimatedCostUsd.Should().Be(0.0027m, "the pinned triage price round-trips through numeric(18,8) without truncation");
     }
 
+    [Fact]
+    public async Task LedgerWriteFault_ShouldNotAbortTheSuggestionAndFiringCommit()
+    {
+        await ResetAsync();
+        (Guid userId, Guid accountId) = await _fixture.SetupOperatorAndAccountAsync();
+        await _fixture.SeedTriggerAsync(userId, accountId);
+        await _fixture.SeedIndicatorAsync(75m);
+        _factory.Llm.ReportsUsage(new LlmUsage(InputTokens: 1_200, OutputTokens: 300)); // so a ledger write is attempted
+        _factory.Llm.ReturnsSuggestion("long", 5_000m, 4_990m, 5_020m);
+
+        // Inject the fault AT THE DATABASE — a `BEFORE INSERT` trigger on AiUsage that raises — never by doubling
+        // IAiUsageLedger. The point is that a REAL write fault (a CHECK violation, a DB blip) is swallowed and the
+        // committed suggestion + firing are untouched. The fail-open is DOUBLY defended: AiUsageLedger.RecordAsync
+        // catches internally, AND the fire wraps the call in its own try/catch (TriggerEvaluationService ~704). The
+        // record runs BEFORE the scan's SaveChanges, so a ledger that rethrew through BOTH layers would abort the
+        // fire — prove-red confirmed by removing both catches (a single-layer regression leaves the guarantee intact,
+        // so this rightly stays green for that). Dropped in a finally so the trigger cannot leak onto another test.
+        await CreateAiUsageInsertBarrierAsync();
+        try
+        {
+            int fires = await _fixture.ScanAsync();
+
+            fires.Should().Be(1, "the edge fired — a swallowed ledger fault is invisible to the scan");
+            (await _fixture.SuggestionCountAsync()).Should().Be(
+                1, "the ledger write is fail-open and in its own context — its fault must not roll back the committed suggestion");
+            (await AiUsageCountAsync()).Should().Be(
+                0, "the ledger insert was refused by the DB barrier — and swallowed, never surfaced to the scan");
+        }
+        finally
+        {
+            await DropAiUsageInsertBarrierAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Escalation_ShouldBeWithheldWithAnAdvisory_WhenTheDeepCallNoLongerFitsTheBudget()
+    {
+        await ResetAsync();
+        (Guid userId, Guid accountId) = await _fixture.SetupOperatorAndAccountAsync();
+        await _fixture.SeedTriggerAsync(userId, accountId);
+        await _fixture.SeedIndicatorAsync(75m);
+
+        // Spend sits JUST under the budget: the triage pass fits ($4.99 < $5, so the fire is NOT blocked outright),
+        // but triage + the estimated DEEP call would not ($4.99 + a Deep-tier estimate > $5). So when triage defers
+        // to the deep tier, the scan must WITHHOLD the escalation (gh#478) — the partial-budget overrun ADR-0008
+        // names, where a triage fits but a triage→deep pair does not.
+        await SeedUsageAsync(userId, AiSpendTestPostgresFactory.DailyBudgetUsd - 0.01m, _todayInWindowUtc);
+        // Triage judges the setup genuinely hard and defers to the deep tier (the only tier offered `escalate`).
+        _factory.Llm.ReturnsForTier(LlmModelTier.Triage, """{"decision":"escalate","reason":"genuinely hard"}""");
+
+        int fires = await _fixture.ScanAsync();
+
+        fires.Should().Be(1, "the edge fired");
+        _factory.Llm.CallCount.Should().Be(
+            1, "triage ran but the deep call was withheld — one call, not the triage→deep pair, because the deep call no longer fit the budget");
+        (await _fixture.SuggestionCountAsync()).Should().Be(0, "a withheld escalation stages no proposal");
+        (await OutboxCountAsync()).Should().BeGreaterThan(
+            0, "the operator is advised a setup was flagged for deeper analysis it could not get — never silently dropped");
+    }
+
     // A valid ledger row every check builds from, mutating exactly one column to its refused value. UserId is a bare
     // Guid (the AIUsage table carries no FK to Users), so a check case needs no seeded operator.
     private static AiUsageRecord ValidRow() => new()
@@ -279,6 +339,29 @@ public class AiSpendIntegrationTests : IClassFixture<AiSpendTestPostgresFactory>
     // so "the operator was advised" is asserted here rather than at the wire.
     private Task<int> OutboxCountAsync() =>
         _factory.WithDatabaseAsync(database => database.NotificationOutbox.CountAsync());
+
+    private Task<int> AiUsageCountAsync() =>
+        _factory.WithDatabaseAsync(database => database.AiUsage.IgnoreQueryFilters().CountAsync());
+
+    // A BEFORE INSERT trigger that refuses every AiUsage row — the DB-level fault case 5 needs, injected at the
+    // database (never by doubling the ledger). Function and trigger are separate statements: EF's ExecuteSqlRaw
+    // sends one statement per call.
+    private Task CreateAiUsageInsertBarrierAsync() => _factory.WithDatabaseAsync(async database =>
+    {
+        await database.Database.ExecuteSqlRawAsync(
+            "CREATE OR REPLACE FUNCTION ai_usage_barrier() RETURNS trigger AS $func$ "
+            + "BEGIN RAISE EXCEPTION 'ai-usage insert barrier (test)'; END; $func$ LANGUAGE plpgsql;");
+        await database.Database.ExecuteSqlRawAsync(
+            "CREATE TRIGGER ai_usage_barrier BEFORE INSERT ON \"AiUsage\" FOR EACH ROW EXECUTE FUNCTION ai_usage_barrier();");
+        return 0;
+    });
+
+    private Task DropAiUsageInsertBarrierAsync() => _factory.WithDatabaseAsync(async database =>
+    {
+        await database.Database.ExecuteSqlRawAsync("DROP TRIGGER IF EXISTS ai_usage_barrier ON \"AiUsage\";");
+        await database.Database.ExecuteSqlRawAsync("DROP FUNCTION IF EXISTS ai_usage_barrier();");
+        return 0;
+    });
 
     // Seeds one ledger row of `costUsd` for `userId` at `occurredAt` — the shared-account spend the governor sums
     // across every owner (ADR-0008). Tokens/latency are zero (all `>= 0` checks hold); only the cost + window matter.
