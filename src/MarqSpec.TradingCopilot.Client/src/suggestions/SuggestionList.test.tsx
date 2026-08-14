@@ -20,8 +20,15 @@ vi.mock('../api/suggestions', async (importOriginal) => ({
   takeSuggestion: vi.fn(),
 }));
 
+const { useRealtimeMock } = vi.hoisted(() => ({ useRealtimeMock: vi.fn() }));
+vi.mock('../realtime/RealtimeProvider', () => ({ useRealtime: useRealtimeMock }));
+
 const listMock = vi.mocked(listActionableSuggestions);
 const passMock = vi.mocked(passSuggestion);
+
+// The realtimeSuggestion / resync handlers the list subscribes — captured so a test can fire either as the socket would.
+let suggestionHandler: (() => void) | null = null;
+let resyncHandler: (() => void) | null = null;
 
 function suggestion(id: string, overrides: Partial<Suggestion> = {}): Suggestion {
   return {
@@ -63,6 +70,22 @@ async function renderList() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  suggestionHandler = null;
+  resyncHandler = null;
+  useRealtimeMock.mockReturnValue({
+    connectionState: 'live',
+    onEvent: vi.fn(),
+    onOrderState: vi.fn(),
+    onFill: vi.fn(),
+    onSuggestion: (handler: () => void) => {
+      suggestionHandler = handler;
+      return vi.fn();
+    },
+    onResync: (handler: () => void) => {
+      resyncHandler = handler;
+      return vi.fn();
+    },
+  });
   vi.mocked(takeSuggestion).mockResolvedValue({
     ok: false,
     kind: 'failed',
@@ -192,5 +215,56 @@ describe('SuggestionList', () => {
     await act(async () => {});
 
     expect(listMock.mock.calls.map((call) => call[0])).toEqual(['acc-1', 'acc-2']);
+  });
+
+  it('refetches the actionable list on a realtimeSuggestion push (gh#760)', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1')] });
+    await renderList();
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(1);
+
+    // A new / superseded suggestion arrives as a compact push — too little to render — so the panel refetches and
+    // now returns two, without a poll or a manual reload (the R-4 decision surface stays live).
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1'), suggestion('s-2')] });
+    await act(async () => {
+      suggestionHandler?.();
+    });
+
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(2);
+  });
+
+  it('keeps the current list when a push-triggered refresh fails — a nudge never nukes a working panel', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1')] });
+    await renderList();
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(1);
+
+    // The background refresh breaks. Unlike the first load / retry, a failed soft refresh must not swap the panel
+    // for an error screen — the operator keeps the setups already on the surface, and the retry owns the error.
+    listMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      status: 503,
+      error: 'BFF unreachable.',
+    });
+    await act(async () => {
+      suggestionHandler?.();
+    });
+
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(1);
+    expect(screen.queryByTestId('empty-state')).toBeNull();
+  });
+
+  it('refetches on a resync — pushes missed during a socket drop are never replayed (R-19)', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1')] });
+    await renderList();
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(1);
+
+    // Owner-scoped pushes are live-only, so a reconnect / retention gap re-fetches the whole list rather than
+    // trusting it survived the drop.
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1'), suggestion('s-2')] });
+    await act(async () => {
+      resyncHandler?.();
+    });
+
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(2);
   });
 });
