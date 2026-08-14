@@ -52,21 +52,12 @@ public sealed class SuggestionExpiryHost : BackgroundService
                 // tracked entities and, on host teardown, leave this loop acting on disposed services (gh#169).
                 await using (AsyncServiceScope scope = _services.CreateAsyncScope())
                 {
-                    ISuggestionExpiry expiry = scope.ServiceProvider.GetRequiredService<ISuggestionExpiry>();
-                    DateTimeOffset now = DateTimeOffset.UtcNow;
-                    IReadOnlyList<SuggestionTransition> expired = await expiry.ExpireDueAsync(now, stoppingToken);
-                    if (expired.Count > 0)
-                    {
-                        _logger.LogInformation(
-                            "Suggestion expire sweep voided {Count} past-window suggestion(s) (gh#545).", expired.Count);
-
-                        // gh#718: the expire write has committed, so push each voided suggestion to its owner (R-20)
-                        // so its card clears without a poll -- the drift/expiry half of the gh#684 realtime push.
-                        // Best-effort: a hub fault is logged and swallowed, never affecting the write (ADR-0021).
-                        await scope.ServiceProvider.GetRequiredService<ISuggestionRealtimeNotifier>()
-                            .PushTransitionsSafelyAsync(
-                                expired, SuggestionState.ExpiredVoid.ToString(), now, _logger, stoppingToken);
-                    }
+                    await ExpireAndNotifyAsync(
+                        scope.ServiceProvider.GetRequiredService<ISuggestionExpiry>(),
+                        scope.ServiceProvider.GetRequiredService<ISuggestionRealtimeNotifier>(),
+                        DateTimeOffset.UtcNow,
+                        _logger,
+                        stoppingToken);
                 }
 
                 await Task.Delay(SweepInterval, stoppingToken);
@@ -94,5 +85,43 @@ public sealed class SuggestionExpiryHost : BackgroundService
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Runs one expire sweep and pushes each voided suggestion to its owner (gh#718), returning how many were voided.
+    /// Extracted from the loop and <see langword="internal"/> <b>only</b> so the recovery-and-route behaviour can be
+    /// unit-tested against fakes without spinning the background host — the push is the part gh#718 singled out as the
+    /// harder shape (no id or owner in hand until <see cref="ISuggestionExpiry.ExpireDueAsync"/> recovers it) and the
+    /// one whose failure is silent: a wrong owner, state string, or a shadowed count guard leaves a dead card on
+    /// screen with nothing red.
+    /// </summary>
+    /// <param name="expiry">The guarded expire transition, which now returns the voided rows (gh#718).</param>
+    /// <param name="notifier">The per-owner realtime push seam (gh#684).</param>
+    /// <param name="now">The moment the sweep runs as of — supplied by the caller; the decision never reads a clock.</param>
+    /// <param name="logger">The caller's logger.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>How many suggestions this sweep voided.</returns>
+    internal static async Task<int> ExpireAndNotifyAsync(
+        ISuggestionExpiry expiry,
+        ISuggestionRealtimeNotifier notifier,
+        DateTimeOffset now,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<SuggestionTransition> expired = await expiry.ExpireDueAsync(now, cancellationToken);
+        if (expired.Count == 0)
+        {
+            return 0;
+        }
+
+        logger.LogInformation(
+            "Suggestion expire sweep voided {Count} past-window suggestion(s) (gh#545).", expired.Count);
+
+        // gh#718: the expire write has committed, so push each voided suggestion to its owner (R-20, Clients.User) so
+        // its card clears without a poll -- the drift/expiry half of the gh#684 realtime push. Best-effort: a hub
+        // fault is logged and swallowed, never affecting the write (ADR-0021).
+        await notifier.PushTransitionsSafelyAsync(
+            expired, SuggestionState.ExpiredVoid.ToString(), now, logger, cancellationToken);
+        return expired.Count;
     }
 }

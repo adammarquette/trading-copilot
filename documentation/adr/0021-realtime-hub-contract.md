@@ -87,9 +87,12 @@ poll-until-refresh until then.
   or roll back the write.
 - **Landed** (gh#718): the **drift → Stale** (gh#546) and **expiry → ExpiredVoid** (gh#545) half — the two
   database-evaluated, set-based `ExecuteUpdate`s that previously returned only a *count*. `ISuggestionDrift` and
-  `ISuggestionExpiry` now **read-then-update in one transaction**, recovering the transitioned `(id, owner)` rows so
-  `SuggestionDriftService` and `SuggestionExpiryHost` push each to its owner (`Clients.User`) **after** the guarded
-  write commits, best-effort — a hub fault never affects the write. The prior-state guard (Active-only for drift,
+  `ISuggestionExpiry` now run the guarded `UPDATE`, then **recover the rows it actually changed by their write
+  fingerprint** — the `(StateChangedAt == now, State)` the `UPDATE` just stamped (plus the instrument, for drift), a
+  value unique to that pass, so it recovers *exactly* the transitioned rows without `ExecuteUpdate` needing
+  `RETURNING` and without a pre-read that could drift from the update under `READ COMMITTED`. `SuggestionDriftService`
+  and `SuggestionExpiryHost` push each recovered `(id, owner)` to its owner (`Clients.User`) **after** the write
+  commits, best-effort — a hub fault never affects the write. The prior-state guard (Active-only for drift,
   `IN (Active, Stale)` for expiry) is unchanged, so the monotonicity does not regress.
 - The payload is the compact signal by design (id + state), never the full projection: the card surface (gh#654)
   upserts by id and reconciles against the REST read model, which stays the source of truth.

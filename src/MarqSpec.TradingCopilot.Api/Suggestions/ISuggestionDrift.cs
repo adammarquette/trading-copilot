@@ -84,23 +84,32 @@ public sealed class SuggestionDrift : ISuggestionDrift
                     || (suggestion.Side == OrderSide.Sell
                         && (suggestion.EntryPrice < bid - band || suggestion.EntryPrice > bid + band))));
 
-        // Read the (id, owner) of the rows about to transition, THEN run the guarded UPDATE, in ONE transaction so the
-        // recovered set is exactly what the UPDATE changes (gh#718) -- ExecuteUpdate cannot RETURN the rows. The
-        // Active-only guard on the UPDATE is unchanged, so the gh#546 monotonicity (and idempotence against an
-        // already-Stale row) do not regress; the SELECT adds only the ids the per-owner push needs. Both statements
-        // are relational (the in-memory provider runs neither -- gh#530), so the compare-and-swap's atomicity stays
-        // QA's on Postgres.
+        // Run the guarded UPDATE, then recover the rows it ACTUALLY changed by their write fingerprint -- the
+        // (StateChangedAt == now, State == Stale, Instrument) triple this UPDATE just stamped (gh#718, #824 review).
+        // ExecuteUpdate cannot RETURN the changed rows, and a PRE-read then update could drift from the update under
+        // READ COMMITTED (a concurrent expire / supersede voiding a row between the two would leave the pre-read
+        // pushing Stale for a row now ExpiredVoid). Recovering by the stamp instead pushes EXACTLY what this UPDATE
+        // transitioned, in either race direction: `now` is this pass's fresh UtcNow, so the fingerprint cannot collide
+        // with another writer's stamp, and the target-state + instrument narrow it to this call. The Active-only guard
+        // is unchanged, so the gh#546 monotonicity does not regress. Both statements are relational (the in-memory
+        // provider runs neither -- gh#530), so the atomicity is proven on Postgres by QA.
         await using var transaction = await _database.Database.BeginTransactionAsync(cancellationToken);
 
-        List<SuggestionTransition> transitioned = await drifted
-            .Select(suggestion => new SuggestionTransition(suggestion.Id, suggestion.UserId))
-            .ToListAsync(cancellationToken);
-
-        await drifted.ExecuteUpdateAsync(
+        int changed = await drifted.ExecuteUpdateAsync(
             setters => setters
                 .SetProperty(suggestion => suggestion.State, SuggestionState.Stale)
                 .SetProperty(suggestion => suggestion.StateChangedAt, now),
             cancellationToken);
+
+        List<SuggestionTransition> transitioned = changed == 0
+            ? []
+            : await _database.Suggestions
+                .IgnoreQueryFilters()
+                .Where(suggestion => suggestion.Instrument == instrument
+                    && suggestion.State == SuggestionState.Stale
+                    && suggestion.StateChangedAt == now)
+                .Select(suggestion => new SuggestionTransition(suggestion.Id, suggestion.UserId))
+                .ToListAsync(cancellationToken);
 
         await transaction.CommitAsync(cancellationToken);
         return transitioned;
