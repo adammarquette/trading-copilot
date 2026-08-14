@@ -51,6 +51,29 @@ public class UnavailableEmbeddingProviderTests
     }
 
     [Fact]
+    public async Task EmbedQueryAsync_ShouldReturnNull_RatherThanAnEmptyOrZeroVector()
+    {
+        // The query side degrades exactly like the document side (gh#852): no provider means no vector, never a
+        // zero vector that would rank every candidate identically and look like a working search.
+        (await Provider().EmbedQueryAsync("anything", CancellationToken.None)).Vector.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task EmbedQueryAsync_ShouldShareTheAnnounceOncePath_WithEmbedAsync()
+    {
+        // Both entry points fold into one announce-once guard, so a deployment that both embeds documents and runs
+        // semantic queries still logs the "retrieval is OFF" fact exactly once, not once per method.
+        CountingLogger logger = new();
+        UnavailableEmbeddingProvider provider = Provider(logger);
+
+        await provider.EmbedAsync("doc", CancellationToken.None);
+        await provider.EmbedQueryAsync("query-a", CancellationToken.None);
+        await provider.EmbedQueryAsync("query-b", CancellationToken.None);
+
+        logger.Errors.Should().Be(1);
+    }
+
+    [Fact]
     public void Dimensions_ShouldMatchTheStoredColumnWidth()
     {
         // A provider whose width disagrees with the column cannot round-trip at all: pgvector rejects the insert
