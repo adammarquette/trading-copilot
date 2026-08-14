@@ -97,12 +97,16 @@ public sealed class NewsIngestionService
                 {
                     pending.Feeds.Add(feed);
                 }
-                else if (FindFuzzyMatch(deduped.Values, item) is { } fuzzyPending)
+                else if (FindFuzzyMatch(deduped.Values, item, feed) is { } fuzzyPending)
                 {
                     // R-2 fuzzy fallback, WITHIN the pass: a second feed carrying the same story under a DIFFERENT
                     // URL (Finnhub and Tiingo rarely agree on a canonical link) gets a different key, so canonical
                     // dedup missed it. Union its feed onto the first item's pending row rather than opening a second
                     // one -- the first feed to carry a story wins its content, exactly as the canonical path does.
+                    // Cross-feed ONLY (FindFuzzyMatch skips candidates already carrying `feed`): two near-duplicate
+                    // headlines from the SAME feed are distinct items (a follow-up or correction under a new URL), and
+                    // unioning `feed` onto the first would be a HashSet no-op that silently drops the second (gh#764 /
+                    // #827 review) -- those fall through to `else` and are stored as their own row.
                     fuzzyPending.Feeds.Add(feed);
                 }
                 else
@@ -198,11 +202,19 @@ public sealed class NewsIngestionService
         return true;
     }
 
-    // The first pending item that is likely the same story as `item` under the R-2 fuzzy rule (title + time + ticker).
-    private static PendingItem? FindFuzzyMatch(IEnumerable<PendingItem> candidates, NewsItem item)
+    // The first pending item from a DIFFERENT feed that is likely the same story as `item` under the R-2 fuzzy rule
+    // (title + time + ticker). Candidates already carrying `feed` are skipped: the fallback exists for cross-source
+    // disagreement on the canonical URL, so a same-feed near-duplicate is a distinct item to store, not a merge target
+    // (unioning `feed` onto it is a no-op that would silently drop the row -- gh#764 / #827 review).
+    private static PendingItem? FindFuzzyMatch(IEnumerable<PendingItem> candidates, NewsItem item, string feed)
     {
         foreach (PendingItem candidate in candidates)
         {
+            if (candidate.Feeds.Contains(feed))
+            {
+                continue;
+            }
+
             if (NewsFuzzyDedup.AreLikelyTheSameStory(
                 candidate.Item.Title, candidate.Item.PublishedAt, candidate.Item.Tickers ?? [],
                 item.Title, item.PublishedAt, item.Tickers ?? []))
