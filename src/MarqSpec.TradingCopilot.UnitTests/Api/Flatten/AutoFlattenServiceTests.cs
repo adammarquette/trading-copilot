@@ -622,6 +622,78 @@ public class AutoFlattenServiceTests
 
         A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
             .MustNotHaveHappened();
+
+        // The credential guard skips BEFORE the roster match, so a foreign-credential account never reaches -- and
+        // must never emit -- the gh#527 unrostered signal, which is only for accounts THIS process is responsible for.
+        A.CallTo(() => _log.AppendAsync(
+                A<EventDraft>.That.Matches(d => d.Type == AutoFlattenService.UnrosteredEventType), A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task RunPassAsync_ShouldJournalTheUnrosteredAccount_WhenTheVenueRosterDoesNotReportIt()
+    {
+        // gh#527. The pass holds a DB row for an account this process's credential set serves, but the venue's
+        // live roster does not report it -- so its exposure cannot be read or acted on this pass. R-13 forbids the
+        // safety net being quietly inert, so the skip becomes OBSERVABLE: a journal row naming the account it
+        // declined to evaluate, for a rediscovery (or an alert) to follow -- never a silent `continue`.
+        Guid op = Guid.NewGuid();
+        string name = Guid.NewGuid().ToString();
+        await SeedAccountAsync(name, op, credentialKey: "topstep-main");
+
+        // Credentials match, so the pass reaches the roster match rather than the ADR-0015 credential skip; but the
+        // roster is empty -- the account we hold, "9001", is not in it. No positions are stubbed: the unrostered
+        // path never reads them.
+        ITradingVenue venue = Venue([]);
+        A.CallTo(() => venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>([]);
+        IProjectXVenueFactory factory = A.Fake<IProjectXVenueFactory>();
+        A.CallTo(() => factory.Create(A<FirmConventions>._)).Returns(venue);
+
+        FlattenOptions options = new() { Instruments = [new FlattenScheduleOption { Symbol = "ES", SessionClose = "14:30" }] };
+        await Service(Db(name, Guid.Empty), factory, options, credentialKey: "topstep-main")
+            .RunPassAsync(Utc(19, 45), CancellationToken.None);
+
+        // The held-but-unreported account is named in the durable journal...
+        A.CallTo(() => _log.AppendAsync(
+                A<EventDraft>.That.Matches(d =>
+                    d.Type == AutoFlattenService.UnrosteredEventType
+                    && d.Source == AutoFlattenService.EventSource
+                    && d.Payload.Contains("9001")),
+                A<CancellationToken>._))
+            .MustHaveHappened();
+
+        // ...and the pass never tries to flatten an account the venue will not name.
+        A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task RunPassAsync_ShouldNotAbortThePass_WhenRecordingAnUnrosteredAccountThrows()
+    {
+        // gh#527. Recording an unrostered account is a SECONDARY, best-effort write on an account that CANNOT be
+        // acted on -- so an event-log fault here must never propagate and abort the pass, which would starve an
+        // actable account later in the sweep of its flatten. It is swallowed like the audit / notification writes
+        // (R-13, ADR-0019), never thrown. Before the guard the bare append propagated and took the whole pass down.
+        Guid op = Guid.NewGuid();
+        string name = Guid.NewGuid().ToString();
+        await SeedAccountAsync(name, op, credentialKey: "topstep-main");
+
+        ITradingVenue venue = Venue([]);
+        A.CallTo(() => venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>([]);
+        A.CallTo(() => _log.AppendAsync(A<EventDraft>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("event log down"));
+        IProjectXVenueFactory factory = A.Fake<IProjectXVenueFactory>();
+        A.CallTo(() => factory.Create(A<FirmConventions>._)).Returns(venue);
+
+        FlattenOptions options = new() { Instruments = [new FlattenScheduleOption { Symbol = "ES", SessionClose = "14:30" }] };
+        Func<Task> act = () => Service(Db(name, Guid.Empty), factory, options, credentialKey: "topstep-main")
+            .RunPassAsync(Utc(19, 45), CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        // It still TRIED to record -- the fault was swallowed, not the recording quietly skipped.
+        A.CallTo(() => _log.AppendAsync(
+                A<EventDraft>.That.Matches(d => d.Type == AutoFlattenService.UnrosteredEventType), A<CancellationToken>._))
+            .MustHaveHappened();
     }
 
     [Fact]
