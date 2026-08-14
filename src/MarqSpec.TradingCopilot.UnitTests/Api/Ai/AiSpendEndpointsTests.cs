@@ -24,9 +24,9 @@ public class AiSpendEndpointsTests
             new FixedUser(asUser ?? _operator));
 
     // 2026-07-15 18:00Z == 13:00 CDT on the 15th. The Central day is the 15th, whose midnight is 05:00Z.
-    private static readonly DateTimeOffset Now = new(2026, 7, 15, 18, 0, 0, TimeSpan.Zero);
+    private static DateTimeOffset Now => new(2026, 7, 15, 18, 0, 0, TimeSpan.Zero);
 
-    private static readonly DateTimeOffset MonthStart = new(2026, 7, 1, 0, 0, 0, TimeSpan.Zero);
+    private static DateTimeOffset MonthStart => new(2026, 7, 1, 0, 0, 0, TimeSpan.Zero);
 
     private async Task SeedAsync(Guid owner, string model, decimal cost, DateTimeOffset occurredAt)
     {
