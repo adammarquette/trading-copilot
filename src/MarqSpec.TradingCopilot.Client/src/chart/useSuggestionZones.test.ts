@@ -17,6 +17,7 @@ import { SuggestionState } from '../api/suggestions';
 import { useSuggestionZones } from './useSuggestionZones';
 
 let resyncHandler: (() => void) | null = null;
+let suggestionHandler: (() => void) | null = null;
 
 function setRealtime(connectionState: string): void {
   useRealtimeMock.mockReturnValue({
@@ -28,12 +29,17 @@ function setRealtime(connectionState: string): void {
       resyncHandler = handler;
       return vi.fn();
     },
+    onSuggestion: (handler: () => void) => {
+      suggestionHandler = handler;
+      return vi.fn();
+    },
   });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   resyncHandler = null;
+  suggestionHandler = null;
   useAccountsMock.mockReturnValue({ status: 'ready', activeAccount: { id: 'acc-1' } });
   setRealtime('live');
   listMock.mockResolvedValue({ ok: true, data: [] });
@@ -41,6 +47,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resyncHandler = null;
+  suggestionHandler = null;
 });
 
 describe('useSuggestionZones', () => {
@@ -88,6 +95,17 @@ describe('useSuggestionZones', () => {
     await waitFor(() => expect(listMock).toHaveBeenCalledTimes(1));
 
     act(() => resyncHandler?.());
+
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2));
+  });
+
+  it('re-derives the zones on a realtimeSuggestion push (gh#760 — new / superseded, no reconnect)', async () => {
+    renderHook(() => useSuggestionZones('ES'));
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(1));
+
+    // The compact owner-scoped push nudges a refetch, so the zones follow a fresh / superseded suggestion live
+    // rather than only on reconnect.
+    act(() => suggestionHandler?.());
 
     await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2));
   });

@@ -23,14 +23,14 @@ const NO_SUGGESTIONS: readonly Suggestion[] = [];
  * a degraded socket must look degraded).
  *
  * The account-wide list is loaded once and the instrument filter is a pure derivation, so switching instrument needs
- * no refetch. A load is token-guarded, so a slow response for the account just left can never land (R-14). Instant
- * per-issue / per-supersede refresh awaits the `realtimeSuggestion` client method the SPA does not yet consume
- * (gh#760 — the suggestion panel is load-once for the same reason); until then the zones refresh on reconnect and
- * honestly label themselves stale in between.
+ * no refetch. A load is token-guarded, so a slow response for the account just left can never land (R-14). It refreshes
+ * on every `realtimeSuggestion` push (gh#760 — a new / superseded suggestion) and on reconnect / retention gap
+ * (`onResync`, since owner-scoped pushes are live-only and never replayed), and flags `stale` whenever the socket is
+ * not `live` in between (R-19 — a degraded socket must look degraded).
  */
 export function useSuggestionZones(instrument: string): SuggestionZonesResult {
   const accounts = useAccounts();
-  const { connectionState, onResync } = useRealtime();
+  const { connectionState, onResync, onSuggestion } = useRealtime();
   const accountId = accounts.status === 'ready' ? accounts.activeAccount.id : null;
 
   const [suggestions, setSuggestions] = useState<readonly Suggestion[]>(NO_SUGGESTIONS);
@@ -65,6 +65,8 @@ export function useSuggestionZones(instrument: string): SuggestionZonesResult {
     load();
   }, [load]);
   useEffect(() => onResync(load), [onResync, load]);
+  // Per-push refresh (gh#760): a new / superseded suggestion re-derives the zones instantly, no longer only on reconnect.
+  useEffect(() => onSuggestion(load), [onSuggestion, load]);
 
   return useMemo<SuggestionZonesResult>(() => {
     const stale = connectionState !== 'live';

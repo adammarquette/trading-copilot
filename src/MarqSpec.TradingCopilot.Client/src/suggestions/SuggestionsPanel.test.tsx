@@ -22,6 +22,11 @@ vi.mock('../api/suggestions', async (importOriginal) => ({
   takeSuggestion: vi.fn(),
 }));
 
+// The hosted SuggestionList subscribes to realtime (gh#760); these tests never fire a push, so a no-op stub is
+// enough to satisfy the hook outside a RealtimeProvider.
+const { useRealtimeMock } = vi.hoisted(() => ({ useRealtimeMock: vi.fn() }));
+vi.mock('../realtime/RealtimeProvider', () => ({ useRealtime: useRealtimeMock }));
+
 const accountsMock = vi.mocked(useAccounts);
 const listMock = vi.mocked(listActionableSuggestions);
 
@@ -74,6 +79,14 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useRealtimeMock.mockReturnValue({
+    connectionState: 'live',
+    onEvent: vi.fn(() => vi.fn()),
+    onOrderState: vi.fn(() => vi.fn()),
+    onFill: vi.fn(() => vi.fn()),
+    onSuggestion: vi.fn(() => vi.fn()),
+    onResync: vi.fn(() => vi.fn()),
+  });
   vi.mocked(takeSuggestion).mockResolvedValue({ ok: false, kind: 'failed', error: 'unused' });
 });
 

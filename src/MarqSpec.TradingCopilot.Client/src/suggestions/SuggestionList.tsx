@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { listActionableSuggestions, type StagedTicket, type Suggestion } from '../api/suggestions';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
+import { useRealtime } from '../realtime/RealtimeProvider';
 import { SuggestionCard } from './SuggestionCard';
 
 /**
@@ -70,6 +71,21 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
     setState({ kind: 'loading' });
     load();
   }, [load]);
+
+  // A realtimeSuggestion push (gh#760) is a compact signal to reconcile — too little to render a card — so a new /
+  // superseded suggestion refetches the actionable list. Owner-scoped and live-only like order / fill, so a reconnect
+  // (onResync) refetches too: the pushes missed during a drop are never replayed. A failed background refresh keeps the
+  // current list rather than nuking a working panel to an error screen — the initial load and the retry own errors.
+  const { onSuggestion, onResync } = useRealtime();
+  const refresh = useCallback(() => {
+    void listActionableSuggestions(accountId).then((result) => {
+      if (mounted.current && result.ok) {
+        setState({ kind: 'loaded', suggestions: result.data });
+      }
+    });
+  }, [accountId]);
+  useEffect(() => onSuggestion(refresh), [onSuggestion, refresh]);
+  useEffect(() => onResync(refresh), [onResync, refresh]);
 
   /**
    * A pass drops the card out of the actionable list — the disposition is recorded and the setup is no longer
