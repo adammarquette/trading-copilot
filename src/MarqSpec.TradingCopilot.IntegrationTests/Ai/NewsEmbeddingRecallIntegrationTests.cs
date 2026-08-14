@@ -46,6 +46,19 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// <c>hnsw.ef_search</c> for this query, add a covering/partial index on <c>OwnerKind</c>, or accept and document
 /// the approximation) named in that issue.
 /// </para>
+/// <para>
+/// <b>gh#858 blocks this suite in CI — confirmed on this PR's own pre-merge run, not assumed.</b> CI's real
+/// Testcontainers Postgres (a genuinely fresh container, migrated in-process — the same window
+/// <see cref="NewsEmbeddingPgvectorReadIntegrationTests"/> hit) throws on <see cref="SeedAsync"/>'s bulk
+/// <c>Vector</c> write with the identical <c>NotSupportedException: Cannot resolve 'vector' to a fully
+/// qualified datatype name</c> that blocks 7 of that sibling suite's 8 cases. The local native-Postgres
+/// investigation described above sidestepped gh#858 by construction (its <c>vector</c> extension was created by
+/// a separate <c>psql</c> process before this harness's own connection ever opened, so its type cache was never
+/// stale) — which is exactly why it could reach and prove the recall question, but is not what CI's from-scratch
+/// container run does. The case below is therefore <c>Skip</c>ped citing gh#858 rather than left red for an
+/// unrelated reason; once gh#858 lands, un-skip it — it goes on to prove (or disprove) the recall hazard for
+/// real, in CI, and becomes gh#864's regression guard the same run.
+/// </para>
 /// </remarks>
 public sealed class NewsEmbeddingRecallIntegrationTests : IClassFixture<EmbeddingReadTestPostgresFactory>
 {
@@ -86,9 +99,14 @@ public sealed class NewsEmbeddingRecallIntegrationTests : IClassFixture<Embeddin
     // with other-owner-kind rows (deliberately seeded closer to the query than every SoftSignal row) before the
     // OwnerKind filter is applied. This pins the OBSERVED (broken) behaviour per the QA guard discipline; the fix
     // is gh#864's to choose, and this assertion becomes its regression guard once it lands.
+    //
+    // Skipped citing gh#858 (a SEPARATE, already-filed defect this PR did not introduce and does not fix): CI's
+    // real Testcontainers run hits it on SeedAsync's bulk Vector write, before this case ever reaches the
+    // NearestNewsAsync call it exists to prove -- see the class remarks for the confirmed CI failure and why the
+    // local investigation that found the gh#864 hazard did not hit it. Un-skip once gh#858 lands.
     // =================================================================================================================
 
-    [Fact]
+    [Fact(Skip = "blocked by gh#858 -- SeedAsync's bulk Vector write hits the stale post-migrate type cache on CI's real Testcontainers run; see class remarks")]
     public async Task NearestNewsAsync_ShouldReturnNSoftSignalNeighbours_WhenTheEmbeddingsTableIsMixedOwnerKindAndAtLeastNExist()
     {
         Random random = new(861); // fixed seed -- deterministic vectors, deterministic planner choice, deterministic recall.
