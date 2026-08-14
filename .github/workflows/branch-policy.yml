@@ -220,7 +220,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      # fetch-depth: 0 so base..head resolves for the gitlink diff. submodules are deliberately NOT checked out:
+      # fetch-depth: 0 so base...head (the merge-base of base and head) resolves for the gitlink diff -- the guard
+      # attributes only THIS PR's own pin change, not one already merged to the base branch (gh#839). submodules are deliberately NOT checked out:
       # the guard reads the old/new pin SHAs from the diff and asks the submodule's remote for the direction, so
       # cloning external/ would be pure cost (and a shallow submodule clone would not even hold both SHAs).
       - uses: actions/checkout@v4

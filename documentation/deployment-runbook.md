@@ -382,7 +382,10 @@ and would have deadlocked every merge if enabled — was deleted at the same tim
   sets, to make the gate binding.
 - **`submodule-guard` CAN and SHOULD be required — on `protect-develop` ONLY** (gh#774). It fails a PR that
   moves an `external/**` pin without declaring it, and always fails a backward move — the exact failure PR #690
-  slipped through, silently reverting a merged fix for five days. It is guarded
+  slipped through, silently reverting a merged fix for five days. It attributes a pin change to the PR that made
+  it by diffing from the **merge-base** of base and head (three-dot), not the two branch tips, so a bump already
+  merged to `develop` is never misread as an unrelated open PR reverting it — the false alarm that would otherwise
+  fire on every open PR at once (gh#839). It is guarded
   `if: github.event_name == 'pull_request' && github.base_ref == 'develop'`, so it **only runs on PRs into
   `develop`** (feature work lands there; a promotion PR re-carries an already-vetted bump). That scoping is
   exactly why it must **not** be added to `protect-staging` / `protect-main`: it is skipped on their PRs, and a

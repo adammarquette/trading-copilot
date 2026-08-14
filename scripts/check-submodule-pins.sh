@@ -20,7 +20,9 @@
 #
 # HOW IT DECIDES
 # --------------
-# For each gitlink under external/ that changed between BASE and HEAD:
+# For each gitlink under external/ whose pin THIS PR moved -- the three-dot diff from the merge-base of BASE and
+# HEAD (scripts/lib/submodule-pin-diff.sh), so a bump already merged to the base branch is never misattributed to a
+# PR that only forked after it and never touched external/ (gh#839):
 #
 #   * DECLARATION (hard) -- the change must be declared: a `submodule-bump` label, or the PR title/body naming
 #     the submodule (its path `external/<name>` or basename). An UNRELATED PR carrying a pin fails here.
@@ -37,10 +39,13 @@
 #
 # REGRESSION (gh#774 acceptance): re-run against the real incident and it must fail --
 #   BASE_SHA=4684565~1 HEAD_SHA=4684565 ./scripts/check-submodule-pins.sh
-# reproduces the backward-move failure on external/MarqSpec.Client.ProjectX (84e2e3c -> 9203242).
+# reproduces the backward-move failure on external/MarqSpec.Client.ProjectX (84e2e3c -> 9203242). The gh#839
+# three-dot change preserves this: the merge-base of a commit and its own parent IS that parent, so the diff is
+# unchanged for a PR that itself moves the pin -- only a bump inherited from the base branch stops counting.
 #
 # INPUTS (env; the CI job in .github/workflows/branch-policy.yml sets them from the PR context):
-#   BASE_SHA   base commit to diff FROM   (default: origin/develop)
+#   BASE_SHA   base commit; the pin diff is taken from its MERGE-BASE with HEAD (three-dot), so only THIS PR's own
+#              pin moves count and a bump already on the base branch is not misattributed here (default: origin/develop; gh#839)
 #   HEAD_SHA   head commit to diff TO     (default: HEAD)
 #   PR_TITLE   PR title    (declaration text; empty locally => treated as undeclared, so a local run shows
 #   PR_BODY    PR body      what CI would say)
@@ -53,6 +58,11 @@
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+
+# The changed-gitlink diff rule, shared with scripts/tests/submodule-pins.test.sh so the guard and its proof cannot
+# drift (gh#839). cwd is the repo root after the cd above, so this repo-relative path resolves.
+# shellcheck source=lib/submodule-pin-diff.sh
+source scripts/lib/submodule-pin-diff.sh
 
 BASE_SHA="${BASE_SHA:-origin/develop}"
 HEAD_SHA="${HEAD_SHA:-HEAD}"
@@ -76,15 +86,13 @@ short() { printf '%s' "${1:0:12}"; }
 # gh api that returns empty on any failure rather than aborting the run (set -e is off deliberately).
 compare_status() { gh api "repos/$1/$2/compare/$3...$4" --jq '.status' 2>/dev/null || true; }
 
-# The changed gitlinks (mode 160000) under external/. git diff --raw gives the old/new submodule SHAs directly,
-# so no submodule checkout is needed. Format: ":<omode> <nmode> <osha> <nsha> <status>\t<path>".
-mapfile -t rows < <(
-    git diff --raw --no-abbrev "$BASE_SHA" "$HEAD_SHA" -- external/ 2>/dev/null \
-        | grep -E $'^:[0-7]{6} 160000|^:160000 [0-7]{6}' || true
-)
+# The changed gitlinks (mode 160000) under external/ that THIS PR introduced. git diff --raw gives the old/new
+# submodule SHAs directly, so no checkout is needed; the diff is from the merge-base (three-dot) so a bump already
+# on the base branch is not misread as this PR reverting it (gh#839). Row: ":<omode> <nmode> <osha> <nsha> <st>\t<path>".
+mapfile -t rows < <(changed_submodule_gitlinks "$BASE_SHA" "$HEAD_SHA")
 
 if [ "${#rows[@]}" -eq 0 ]; then
-    info "OK: no submodule pin under external/ changed in ${BASE_SHA}..${HEAD_SHA}."
+    info "OK: this PR moves no submodule pin under external/ (from the merge-base of ${BASE_SHA}...${HEAD_SHA})."
     exit 0
 fi
 
