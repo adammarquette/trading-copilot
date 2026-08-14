@@ -29,9 +29,9 @@ public class NewsFuzzyDedupTests
             .Should().Be(0d);
 
     [Fact]
-    public void TitleSimilarity_ShouldNotCountSingleCharacterAbbreviationFragments_AsSharedWords() =>
-        // "U.S." / "U.K." tokenize to single-character u/s/k, which are dropped -- otherwise every American headline
-        // shares junk tokens with every other (#827 review). Two unrelated headlines share nothing here.
+    public void TitleSimilarity_ShouldNormalizeDottedAbbreviationsWithoutPaddingOverlap() =>
+        // "U.S." / "U.K." normalize to the entity tokens "us" / "uk", not punctuation fragments u/s/k. Two
+        // unrelated headlines share nothing here, while the country distinction remains available to the subset guard.
         NewsFuzzyDedup.TitleSimilarity("U.S. oil rises", "U.K. gas falls")
             .Should().Be(0d);
 
@@ -125,4 +125,24 @@ public class NewsFuzzyDedupTests
             "Powell says inflation remains too high", _published, ["ES"],
             "Williams says inflation remains too high", _published.AddMinutes(2), ["ES"])
             .Should().BeFalse("two different speakers are two stories, not one");
+
+    [Theory]
+    [InlineData("Company X says it will not restate earnings", "Company X says it will restate earnings")]
+    [InlineData("Market moves up after data release", "Market moves down after data release")]
+    [InlineData("Fed may cut rates this year", "Fed cut rates this year")]
+    public void AreLikelyTheSameStory_ShouldNotMergeOppositeSemanticClaims_WhenTickerAndTimeAgree(
+        string titleA, string titleB) =>
+        // Negation, direction and modality are semantic claims, not stopword noise. Dropping any of these makes
+        // opposite headlines identical under the subset rule and destroys the correction/update that matters (#827 review).
+        NewsFuzzyDedup.AreLikelyTheSameStory(
+            titleA, _published, ["ES"],
+            titleB, _published.AddMinutes(2), ["ES"])
+            .Should().BeFalse("opposite semantic claims are distinct stories, not duplicate provider renderings");
+
+    [Fact]
+    public void AreLikelyTheSameStory_ShouldNotMergeDottedAbbreviationEntities_WhenOtherwiseTemplateIdentical() =>
+        NewsFuzzyDedup.AreLikelyTheSameStory(
+            "U.S. inflation falls more than expected", _published, ["ES"],
+            "U.K. inflation falls more than expected", _published.AddMinutes(3), ["ES"])
+            .Should().BeFalse("U.S. and U.K. are distinct entities; abbreviation punctuation must not erase the difference");
 }

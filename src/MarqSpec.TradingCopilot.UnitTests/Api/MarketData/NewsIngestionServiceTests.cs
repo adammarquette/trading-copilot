@@ -170,6 +170,31 @@ public class NewsIngestionServiceTests
     }
 
     [Fact]
+    public async Task IngestAsync_ShouldUseTheStoredOriginalAsAFuzzyCandidate_WhenAnOverlappingPollCarriesItWithoutTickers()
+    {
+        // gh#827 Bugbot regression. Pass one stores Finnhub's original URL with AAPL. The next overlapping poll
+        // carries that original URL again but WITH incomplete ticker metadata plus Tiingo's different-URL copy with
+        // AAPL. Within-pass fuzzy cannot join them (the current original has no ticker), so the stored row from pass
+        // one must remain visible to the cross-pass fuzzy lookup even though its canonical key is also pending; if it
+        // is filtered out, Tiingo's copy inserts a second NewsRecord.
+        await using TradingCopilotDbContext context = Context();
+        const string originalUrl = "https://finnhub.example/apple";
+        NewsIngestionService first = Service(
+            context, Source(Finnhub, [Item(originalUrl, "Apple unveils the iPhone 17 at its fall event", "AAPL")]));
+        await first.IngestAsync(Now, CancellationToken.None);
+
+        INewsSource replayedOriginalWithoutTickers = Source(
+            Finnhub, [Item(originalUrl, "Apple unveils the iPhone 17 at its fall event")]);
+        INewsSource differentUrl = Source(
+            Tiingo, [Item("https://tiingo.example/aapl", "Apple unveils iPhone 17", "AAPL")]);
+        await Service(context, replayedOriginalWithoutTickers, differentUrl).IngestAsync(Now.AddMinutes(2), CancellationToken.None);
+
+        (await context.News.CountAsync()).Should().Be(
+            1, "the stored original must remain a fuzzy candidate even when its canonical URL is pending this pass");
+        (await context.News.SingleAsync()).SourceFeeds.Should().BeEquivalentTo(["finnhub", "tiingo"]);
+    }
+
+    [Fact]
     public async Task IngestAsync_ShouldKeepDistinctStoriesDistinct()
     {
         await using TradingCopilotDbContext context = Context();

@@ -124,16 +124,17 @@ public sealed class NewsIngestionService
             .ToDictionaryAsync(record => record.DedupKey, cancellationToken);
 
         // R-2 fuzzy fallback, ACROSS passes: a story already stored under a DIFFERENT canonical URL than the one now
-        // arriving. Bounded to the publication-time window this pass spans (± the fuzzy gap; PublishedAt is indexed)
-        // and to rows NOT already exact-matched above, then matched in memory below. Empty when nothing recent is
-        // stored, so the ordinary first-time-seen path pays only the bounded window read.
+        // arriving. Bounded to the publication-time window this pass spans (± the fuzzy gap; PublishedAt is indexed),
+        // then matched in memory below. Keep rows whose canonical key is ALSO in this pass: a later overlapping poll
+        // normally carries the original URL again, and a different-URL copy can still need that stored row as its
+        // fuzzy candidate when the current original's metadata (e.g. tickers) is incomplete (gh#764 / #827 review).
+        // Exact-key pendings never call FindFuzzyStored, so including them cannot turn an exact match into a fuzzy one.
         DateTimeOffset earliest = deduped.Values.Min(pending => pending.Item.PublishedAt.ToUniversalTime());
         DateTimeOffset latest = deduped.Values.Max(pending => pending.Item.PublishedAt.ToUniversalTime());
         DateTimeOffset windowStart = earliest - NewsFuzzyDedup.MaxPublishedGap;
         DateTimeOffset windowEnd = latest + NewsFuzzyDedup.MaxPublishedGap;
         List<NewsRecord> fuzzyCandidates = await _database.News
-            .Where(record => record.PublishedAt >= windowStart && record.PublishedAt <= windowEnd
-                && !keys.Contains(record.DedupKey))
+            .Where(record => record.PublishedAt >= windowStart && record.PublishedAt <= windowEnd)
             .ToListAsync(cancellationToken);
 
         int written = 0;
