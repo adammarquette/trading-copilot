@@ -181,9 +181,10 @@ public sealed class AutoFlattenService
                     // We hold a row for this account but the venue's live roster does not report it, so we cannot
                     // read its exposure or act on it this pass. A rediscovery concern, not the flatten's -- but the
                     // safety net must never be quietly inert (R-13, gh#527), so record the skip rather than hiding
-                    // it: the account is named on the journal, and metered so a persistent roster gap can alert.
-                    await JournalUnrosteredAsync(account, now, cancellationToken);
-                    _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenUnrostered);
+                    // it (named on the journal, metered so a persistent roster gap can alert). Best-effort: this
+                    // account cannot be acted on, so a recording fault must never abort the pass and starve one that
+                    // can -- RecordUnrosteredAsync swallows, as the audit and notification writes do.
+                    await RecordUnrosteredAsync(account, now, cancellationToken);
                     continue;
                 }
 
@@ -535,19 +536,35 @@ public sealed class AutoFlattenService
     }
 
     /// <summary>
-    /// Journals the R-13 fact that a held account was absent from the venue's live roster (gh#527), so the skip is
-    /// observable rather than silent. There is no contract or venue account id to carry — the venue never named the
-    /// account — so this records the key we hold and why it was not evaluated, not reusing <see cref="JournalAsync"/>.
+    /// Records — best-effort — the R-13 fact that a held account was absent from the venue's live roster (gh#527):
+    /// the <c>trading.flatten.deadlines</c> counter meters it so a persistent roster gap can alert, and a
+    /// <see cref="UnrosteredEventType"/> event names the account. There is no contract or venue account id to carry
+    /// (the venue never named the account), so it does not reuse <see cref="JournalAsync"/>. A <b>secondary</b> write
+    /// on an <i>un-actable</i> account: a fault must never abort the pass and starve an actable account of its
+    /// flatten, so it is swallowed like the audit and notification writes (the <see cref="IAuditLog"/> discipline).
+    /// The counter is recorded first, so a persistent roster gap stays alertable even if the event log is faulting.
     /// </summary>
-    private Task JournalUnrosteredAsync(Account account, DateTimeOffset occurredAt, CancellationToken cancellationToken)
+    private async Task RecordUnrosteredAsync(Account account, DateTimeOffset occurredAt, CancellationToken cancellationToken)
     {
-        string payload = JsonSerializer.Serialize(new
+        try
         {
-            account = account.VenueAccountKey,
-            reason = "held account absent from the venue roster; not evaluated this pass",
-        });
+            _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenUnrostered);
 
-        return _eventLog.AppendAsync(new EventDraft(UnrosteredEventType, EventSource, occurredAt, payload), cancellationToken);
+            string payload = JsonSerializer.Serialize(new
+            {
+                account = account.VenueAccountKey,
+                reason = "held account absent from the venue roster; not evaluated this pass",
+            });
+            await _eventLog.AppendAsync(new EventDraft(UnrosteredEventType, EventSource, occurredAt, payload), cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw; // a real shutdown still stops the host
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(error, "Could not record unrostered account {Account}; the pass is unaffected.", account.VenueAccountKey);
+        }
     }
 
     /// <summary>

@@ -661,6 +661,35 @@ public class AutoFlattenServiceTests
     }
 
     [Fact]
+    public async Task RunPassAsync_ShouldNotAbortThePass_WhenRecordingAnUnrosteredAccountThrows()
+    {
+        // gh#527. Recording an unrostered account is a SECONDARY, best-effort write on an account that CANNOT be
+        // acted on -- so an event-log fault here must never propagate and abort the pass, which would starve an
+        // actable account later in the sweep of its flatten. It is swallowed like the audit / notification writes
+        // (R-13, ADR-0019), never thrown. Before the guard the bare append propagated and took the whole pass down.
+        Guid op = Guid.NewGuid();
+        string name = Guid.NewGuid().ToString();
+        await SeedAccountAsync(name, op, credentialKey: "topstep-main");
+
+        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
+        A.CallTo(() => venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>([]);
+        A.CallTo(() => _log.AppendAsync(A<EventDraft>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("event log down"));
+        IProjectXVenueFactory factory = A.Fake<IProjectXVenueFactory>();
+        A.CallTo(() => factory.Create(A<FirmConventions>._)).Returns(venue);
+
+        FlattenOptions options = new() { Instruments = [new FlattenScheduleOption { Symbol = "ES", SessionClose = "14:30" }] };
+        Func<Task> act = () => Service(Db(name, Guid.Empty), factory, options, credentialKey: "topstep-main")
+            .RunPassAsync(Utc(19, 45), CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        // It still TRIED to record -- the fault was swallowed, not the recording quietly skipped.
+        A.CallTo(() => _log.AppendAsync(
+                A<EventDraft>.That.Matches(d => d.Type == AutoFlattenService.UnrosteredEventType), A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    [Fact]
     public async Task RunPassAsync_ShouldDoNothing_WhenNoAccountsExist()
     {
         IProjectXVenueFactory factory = A.Fake<IProjectXVenueFactory>();
