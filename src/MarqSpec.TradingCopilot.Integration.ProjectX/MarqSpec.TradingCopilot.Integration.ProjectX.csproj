@@ -2,8 +2,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Domain\MarqSpec.TradingCopilot.Domain.csproj" />
-    <!-- The ProjectX gateway client, pinned as a submodule under external/. It lives outside src/ so this
-         solution's Directory.Build.props (net10.0-only, warnings-as-errors) is not imposed on it. -->
+    <!-- The ProjectX gateway client, pinned as a submodule under external/, so this solution's
+         Directory.Build.props does not reach it. It now enforces warnings-as-errors and targets net10.0
+         (multi-targeted with net8.0) in its own build, so it meets the same bar rather than being carved out. -->
     <ProjectReference Include="..\..\external\MarqSpec.Client.ProjectX\MarqSpec.Client.ProjectX\MarqSpec.Client.ProjectX.csproj" />
   </ItemGroup>
 
