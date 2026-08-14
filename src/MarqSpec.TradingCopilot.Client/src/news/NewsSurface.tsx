@@ -2,14 +2,16 @@ import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 
 import type { Destination } from '../navigation/destinations';
+import { NewsFeed } from './NewsFeed';
 import { RelevanceMaps } from './RelevanceMaps';
 import { RelevanceTopics } from './RelevanceTopics';
 
 /**
- * The News surface (gh#25 U3, R-2). Its first half is the **relevance configuration** — the ticker↔instrument maps
- * and the topics (gh#658) that decide which news attaches to which instrument, and how loudly. This config is
- * **deployment-global**, not account-scoped, so — unlike the settings surface — nothing here resolves the active
- * account. The relevance-ranked feed itself and the star / mute feedback on its items are their own increments.
+ * The News surface (gh#25 U3, R-2). The **relevance configuration** — the ticker↔instrument maps and the topics
+ * (gh#658) that decide which news attaches to which instrument, and how loudly — is **deployment-global**, not
+ * account-scoped, so unlike the settings surface nothing here resolves the active account. Below it sits the
+ * **personalized news feed** (gh#742), ranked by the operator's own star / mute salience profile; that feedback is
+ * per-operator, but it is a soft reorder weight only and never touches a risk limit or a trade (R-6).
  */
 export interface NewsSurfaceProps {
   readonly destination: Destination;
@@ -35,6 +37,7 @@ export function NewsSurface({ destination }: NewsSurfaceProps) {
       <Box sx={{ p: 2 }}>
         <RelevanceMaps />
         <RelevanceTopics />
+        <NewsFeed />
       </Box>
     </Box>
   );

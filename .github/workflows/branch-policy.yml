@@ -200,6 +200,43 @@ jobs:
           fi
           exit $FAIL
 
+  # gh#774: a submodule pin under external/ has been moved invisibly twice, and the second time (PR #690, a
+  # SignalR PR whose diff quietly carried external/MarqSpec.Client.ProjectX 84e2e3c -> 9203242) it REVERTED a
+  # merged safety fix -- POST /api/Order/place was retryable again for five days. A one-line 40-char gitlink
+  # hash is invisible to review, and no other job inspects external/**. This fails a PR that changes a pin
+  # without declaring it (a `submodule-bump` label, or naming the submodule in the title/body), and ALWAYS fails
+  # a BACKWARD move (resolved against the submodule's OWN remote via the compare API -- no clone) unless an
+  # explicit `submodule-downgrade` override is present. It warns when a new pin is not on the submodule's default
+  # branch. Same script a developer runs locally (platform contract). It should be a required check on
+  # protect-develop -- a maintainer web-UI action, recorded in the deployment runbook.
+  #
+  # Scoped to PRs INTO develop (the integration branch, where feature work lands): a develop -> staging -> main
+  # promotion PR re-carries pin bumps that were already declared and vetted at the develop gate, so running there
+  # would demand a pointless re-declaration on every promotion.
+  submodule-guard:
+    name: submodule-guard
+    if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # fetch-depth: 0 so base..head resolves for the gitlink diff. submodules are deliberately NOT checked out:
+      # the guard reads the old/new pin SHAs from the diff and asks the submodule's remote for the direction, so
+      # cloning external/ would be pure cost (and a shallow submodule clone would not even hold both SHAs).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+      - name: Guard submodule pin moves (declared + forward-only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: ./scripts/check-submodule-pins.sh
+
   issue-link:
     name: issue-link
     if: ${{ github.event_name == 'pull_request' }}

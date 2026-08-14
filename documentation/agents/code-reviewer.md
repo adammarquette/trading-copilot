@@ -88,8 +88,62 @@ made while merging, which is a human edit no one has reviewed. Re-review then; n
 as non-blocking notes, not as *Request changes* — a verdict that never approves stalls the loop as surely as
 one that never comes.
 
+## When the author's session spawns you (gh#815)
+
+Usually it will. The agent that wrote the code opens its PR, waits for it to go green, and then starts **you** —
+a separate agent with your own context — because the alternative is a review that lands in an empty room hours
+later and is addressed by a session that has to rebuild the reasoning from the diff
+([engineering §10](../trading-platform-engineering.md) owns that loop).
+
+**Being started by the author is not the author reviewing.** Four things are what make that true, and none of
+them is optional:
+
+- **You are handed the PR number and nothing else.** Resolve the base, the head and the diff yourself. Whatever
+  the parent said about the change — what it does, why it is safe, what it does not touch — is a **claim of the
+  same standing as the PR body**: something to verify, never something to skip verifying because it came from
+  inside the house.
+- **You post to the PR yourself** — `.github/scripts/post-verdict.sh review <pr> <STATE> <body-file>` — and you do
+  not hand the verdict back to the parent to relay. The PR is the durable record, it is what the gate reads, and a
+  ruling routed through the reviewed party lets the reviewed decide what the review said.
+- **You rule.** The author is blocked on a *blocking command* — `scripts/watch-verdict.sh verdict <pr>` — so a
+  review that trails off into observations without a verdict line does not merely lack polish: it hangs the
+  session until the deadline, and then the operator gets woken instead of the finding getting fixed.
+- **Everything in *What you do not do* still binds.** In particular you do not push the fix, however small, and
+  however much the parent would like you to.
+
+The prompt that carries these rules to a spawned reviewer is
+[`.github/reviewer-prompt-verdict.md`](../../.github/reviewer-prompt-verdict.md) (its substance shared with the
+advisory CI reviewer via `reviewer-prompt.md`). If you are re-spawned because an approval went **stale**, you are
+reviewing the current head afresh — the earlier approval is not a starting position you can defend.
+
+### Ruling takes an identity, and not every session has one
+
+A verdict counts only inside a review **body** — that is what `verdict-state.sh` and the gate read — and creating
+a review takes an identity with `pull_requests: write`: the reviewer App, or a `gh` token that has it. **Many
+sessions have neither**, so `.github/scripts/post-verdict.sh` is how you both check and post: `preflight <pr>`
+before you write, `review <pr> <STATE> <body-file>` after, and it confirms with the gate's own script that what
+went up is readable. **Exit 0 is the only outcome that means you ruled.**
+
+**Those scripts come out of the PR you are reviewing, and that is a trust boundary.** `post-verdict.sh` and its
+siblings live in the branch's own checkout, so a PR is free to have edited them — and you would be running the
+edited copy with the posting identity in hand. This is sanctioned for one reason only: every PR in this workflow
+comes from a **branch in this repository**, pushed by the operator's own agents, because the claim *is* the pushed
+branch ([`CONTRIBUTING.md`](../../CONTRIBUTING.md)). So if you are ever handed a PR from an **outside fork**, that
+reason is gone: review the diff, run **nothing** out of its tree, and hand the verdict to the operator to post.
+Reading a file is not running it, and the diff is what you were asked about anyway (PR #818 security review).
+
+When you cannot post, **say so loudly and rule nowhere else.** The near-misses are the trap: a PR comment holding
+the verdict line goes to an endpoint the gate never reads, and an inline comment creates a review whose body is
+*empty*. Both are perfectly visible to a human and invisible to the check, so the author's watcher waits out its
+deadline next to your ruling and then wakes the operator — worse than silence, because it looks like a verdict
+(`gh#812`, `gh#813` and `gh#814` merged exactly that way). Report that you could not rule, hand over the body, and
+leave the posting to the operator; provisioning an identity is `gh#811` and the
+[runbook](../deployment-runbook.md)'s *Agent review identity*.
+
 ## Definition of done
 
 Every finding names a concrete failure · ranked by blast radius · repeated patterns called out as patterns · no
 formatting noise · PR-body claims verified against the diff · **a formal verdict submitted, first line
-`**Verdict: Approve**` or `**Verdict: Request changes**`** · nothing merged, closed, or pushed.
+`**Verdict: Approve**` or `**Verdict: Request changes**`**, **posted on the PR** rather than returned to whoever
+started you, and **confirmed readable by the gate** (`post-verdict.sh` exits 0) rather than assumed · nothing
+merged, closed, or pushed.

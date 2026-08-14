@@ -84,9 +84,16 @@ poll-until-refresh until then.
   (`TriggerEvaluationService`) queues a compact `realtimeSuggestion` (the id, the new `SuggestionState`, and when) as
   it stages a new `Active` row and, on a supersede, as it voids the incumbent to `ExpiredVoid`; both flush **after**
   the pass's single `SaveChanges` commits, per-owner (`Clients.User`) and best-effort, so a hub fault can never fail
-  or roll back the write. The **drift → Stale** (gh#546) and **expiry → ExpiredVoid** (gh#545) transitions are
-  **deferred**: each is a database-evaluated, set-based `ExecuteUpdate` across *all* owners that returns only a
-  *count*, so pushing them per-owner needs a contract change (read-then-update, or `RETURNING`, to recover the
-  affected `(id, owner)` rows) — carded as gh#718. Until it lands, those two transitions reach a card only
-  on its next REST read. The payload is the compact signal by design (id + state), never the full projection: the
-  card surface (gh#654) upserts by id and reconciles against the REST read model, which stays the source of truth.
+  or roll back the write.
+- **Landed** (gh#718): the **drift → Stale** (gh#546) and **expiry → ExpiredVoid** (gh#545) half. Each is a
+  database-evaluated, set-based `ExecuteUpdate` across *all* owners that returned only a *count*, so the seams
+  (`ISuggestionDrift` / `ISuggestionExpiry`) now **recover the affected `(SuggestionId, UserId)` rows** — a
+  **read-then-update in one transaction**, the update re-applying the same prior-state-guarded predicate so the
+  monotonic compare-and-swap and the single-UPDATE `StateChangedAt` stamp do not regress (gh#546). After the write
+  commits, `SuggestionDriftService` and the expire sweep (`SuggestionExpiryHost.ExpireAndNotifyAsync`) push one
+  `realtimeSuggestion` per affected row to its owner through the same seam, per-owner (`Clients.User`) and
+  best-effort — a hub fault only logs and never fails or unwinds the transition. The startup **recovery-expire**
+  pass does not push (no operator is connected yet; the card loads current state over REST on connect). The exact
+  `(id, owner)` recovery is proven on container Postgres by QA.
+- The payload is the compact signal by design (id + state), never the full projection: the card surface (gh#654)
+  upserts by id and reconciles against the REST read model, which stays the source of truth.

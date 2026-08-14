@@ -1,5 +1,6 @@
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.MarketData;
+using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -55,9 +56,10 @@ public class SuggestionDriftServiceTests
             new FixedUser(asUser ?? _operator));
 
     private readonly RecordingLogger _log = new();
+    private readonly ISuggestionRealtimeNotifier _notifier = A.Fake<ISuggestionRealtimeNotifier>();
 
     private SuggestionDriftService Service(TradingCopilotDbContext context) =>
-        new(context, _specs, _options, new InMemoryDrift(context), _log);
+        new(context, _specs, _options, new InMemoryDrift(context), _notifier, _log);
 
     private async Task<Guid> SeedAsync(
         SuggestionState state = SuggestionState.Active,
@@ -297,6 +299,58 @@ public class SuggestionDriftServiceTests
         (await context.Suggestions.IgnoreQueryFilters().SingleAsync(s => s.Id == id)).StateChangedAt.Should().Be(_now);
     }
 
+    // ---- realtime push (gh#718) ----
+
+    [Fact]
+    public async Task ProcessQuotesAsync_ShouldPushEachDriftedSuggestionToItsOwner()
+    {
+        // gh#718: the drift transition is set-based, so it recovers the (SuggestionId, UserId) it moved and the
+        // service pushes one per-owner realtime signal (Clients.User, R-20 -- never a broadcast). Two owners drift on
+        // the same quote; each gets exactly their own suggestion's Stale signal, and neither the other's.
+        Guid mine = await SeedAsync(owner: _operator, side: OrderSide.Buy, entry: 5_300m);
+        Guid theirs = await SeedAsync(owner: _other, side: OrderSide.Buy, entry: 5_300m);
+
+        (await RunAsync(Quote("ES", bid: 5_304.75m, ask: 5_305m))).Should().Be(2);
+
+        A.CallTo(() => _notifier.SuggestionChangedAsync(
+                _operator,
+                A<RealtimeSuggestion>.That.Matches(push => push.SuggestionId == mine && push.State == "Stale" && push.At == _now),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => _notifier.SuggestionChangedAsync(
+                _other,
+                A<RealtimeSuggestion>.That.Matches(push => push.SuggestionId == theirs && push.State == "Stale" && push.At == _now),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => _notifier.SuggestionChangedAsync(A<Guid>._, A<RealtimeSuggestion>._, A<CancellationToken>._))
+            .MustHaveHappenedTwiceExactly();
+    }
+
+    [Fact]
+    public async Task ProcessQuotesAsync_ShouldNotPush_WhenNothingDrifted()
+    {
+        await SeedAsync(side: OrderSide.Buy, entry: 5_300m);
+
+        (await RunAsync(Quote("ES", bid: 5_300.75m, ask: 5_301m))).Should().Be(0); // within the band
+
+        A.CallTo(() => _notifier.SuggestionChangedAsync(A<Guid>._, A<RealtimeSuggestion>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ProcessQuotesAsync_ShouldReturnTheCountAndKeepTheTransition_WhenAPushFails()
+    {
+        // The push is best-effort and AFTER the commit: a hub fault must never fail the pass or roll back the Stale
+        // write. The transition stays committed, the count is returned, and nothing throws out of the service.
+        Guid id = await SeedAsync(side: OrderSide.Buy, entry: 5_300m);
+        A.CallTo(() => _notifier.SuggestionChangedAsync(A<Guid>._, A<RealtimeSuggestion>._, A<CancellationToken>._))
+            .ThrowsAsync(new InvalidOperationException("hub down"));
+
+        (await RunAsync(Quote("ES", bid: 5_304.75m, ask: 5_305m))).Should().Be(1);
+
+        (await StateOfAsync(id)).Should().Be(SuggestionState.Stale, "the transition committed before the best-effort push");
+    }
+
     /// <summary>
     /// Captures what the service logged. The collision branch's whole contribution is that a skip becomes <b>visible</b>
     /// — a `NullLogger` would swallow exactly the signal under test, so the suite would pass against the silent bug.
@@ -335,7 +389,7 @@ public class SuggestionDriftServiceTests
     /// </summary>
     private sealed class InMemoryDrift(TradingCopilotDbContext database) : ISuggestionDrift
     {
-        public async Task<int> MarkDriftedStaleAsync(
+        public async Task<IReadOnlyList<SuggestionTransition>> MarkDriftedStaleAsync(
             string instrument, decimal bid, decimal ask, decimal band, DateTimeOffset now, CancellationToken cancellationToken)
         {
             List<Suggestion> rows = await database.Suggestions
@@ -343,17 +397,17 @@ public class SuggestionDriftServiceTests
                 .Where(suggestion => suggestion.State == SuggestionState.Active && suggestion.Instrument == instrument)
                 .ToListAsync(cancellationToken);
 
-            int stale = 0;
+            List<SuggestionTransition> transitioned = [];
             foreach (Suggestion suggestion in rows.Where(suggestion =>
                 SuggestionLifecycle.HasDrifted(suggestion.Side, suggestion.EntryPrice, bid, ask, band)))
             {
                 suggestion.State = SuggestionState.Stale;
                 suggestion.StateChangedAt = now;
-                stale++;
+                transitioned.Add(new SuggestionTransition(suggestion.Id, suggestion.UserId));
             }
 
             await database.SaveChangesAsync(cancellationToken);
-            return stale;
+            return transitioned;
         }
     }
 }

@@ -94,9 +94,12 @@ public static class TradeRoundTrip
         // instant there is no venue sequence here to order them, and their order can flip whether a fill opens,
         // closes, or REVERSES -- flipping a leg's side and the sign of its P&L. The FillId tie-break makes the pick
         // reproducible but not boundary-correct, so refuse the whole window rather than let it decide a sign
-        // (refuse-don't-guess). This is the ONE ambiguity gate -- checked up front over the whole window, not only at
-        // an open-from-flat, so a mid-cycle reversal tie is caught too. Same-INSTANT same-SIDE ties are safe (FIFO
-        // pairing preserves both sign and total), and distinct-instant fills (the norm) are unaffected.
+        // (refuse-don't-guess). This is the ambiguity gate -- checked up front over the window, not only at an
+        // open-from-flat, so a mid-cycle reversal tie is caught too. It is only HALF the guard: it can refuse only a
+        // tie that is IN the window handed to it. The caller (TradeJournalService.CurrentCycleStart) is the other half
+        // -- it must not slice a flat-to-flat boundary ACROSS a same-instant tie, or the tie is split out of this
+        // window and never reaches this check (gh#809). Same-INSTANT same-SIDE ties are safe (FIFO pairing preserves
+        // both sign and total), and distinct-instant fills (the norm) are unaffected.
         if (fills.GroupBy(fill => fill.ExecutedAt).Any(group => group.Select(fill => fill.Side).Distinct().Count() > 1))
         {
             return false;

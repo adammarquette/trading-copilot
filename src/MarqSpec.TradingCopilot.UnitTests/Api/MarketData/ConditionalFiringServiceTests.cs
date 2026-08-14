@@ -214,6 +214,58 @@ public class ConditionalFiringServiceTests
             1, "a busy account lock leaves the fire Pending to re-decide next quote (gh#589), never blocking the watcher");
     }
 
+    [Fact]
+    public async Task ProcessQuote_ShouldNotFire_WhenTheConditionalWasWithdrawnInThePreLockWindow()
+    {
+        // gh#655 (review): the operator withdrawal (DELETE /conditionals/{id}) is a SECOND writer that moves a
+        // conditional out of Pending, committing under THIS same account lock. The watcher's Pending read happens
+        // BEFORE it takes the lock, so a withdrawal that commits in that pre-lock window is not yet reflected in the
+        // record the fire holds. Without a re-read under the lock, `Status = Firing` would OVERWRITE the withdrawn
+        // `Cancelled` and place a real order after a 200 "withdrawn". FireAsync must reload under the lock and bail.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await AddConditionalAsync(accountId); // RisesTo 5310, Pending
+
+        // Model the race: at the instant the fire acquires the lock (the callback runs), the operator's withdrawal
+        // has just committed the row to Cancelled in a separate unit of work — exactly the pre-lock-window interleave.
+        IAccountEntryGuard racingGuard = A.Fake<IAccountEntryGuard>();
+        A.CallTo(() => racingGuard.TryRunExclusiveAsync<ConditionalFiringService.FiringOutcome>(
+                A<TradingCopilotDbContext>._, A<Guid>._,
+                A<Func<Task<ConditionalFiringService.FiringOutcome>>>._,
+                A<Func<ConditionalFiringService.FiringOutcome>>._, A<CancellationToken>._))
+            .ReturnsLazily((TradingCopilotDbContext _, Guid _,
+                Func<Task<ConditionalFiringService.FiringOutcome>> transmit,
+                Func<ConditionalFiringService.FiringOutcome> _, CancellationToken _) =>
+                WithdrawThenTransmitAsync(conditionalId, transmit));
+
+        await Service(guard: racingGuard).ProcessQuoteAsync(Contract, bid: 5309m, ask: 5310m, Now, CancellationToken.None);
+
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+        await using TradingCopilotDbContext reload = Context();
+        ConditionalOrderRecord conditional = await reload.ConditionalOrders.SingleAsync(c => c.Id == conditionalId);
+        conditional.Status.Should().Be(
+            ConditionalStatus.Cancelled, "the withdrawal stands; the fire re-read under the lock and bailed");
+        (await reload.Orders.AnyAsync()).Should().BeFalse(
+            "no order is placed on a conditional withdrawn before the fire's locked section");
+    }
+
+    /// <summary>
+    /// Simulates the operator's withdrawal committing at the instant the fire takes the account lock: flips the row to
+    /// <see cref="ConditionalStatus.Cancelled"/> in a separate unit of work, then runs the fire callback. Returns the
+    /// fire's outcome so the guard fake stays typed to <c>Task&lt;FiringOutcome&gt;</c>.
+    /// </summary>
+    private async Task<ConditionalFiringService.FiringOutcome> WithdrawThenTransmitAsync(
+        Guid conditionalId, Func<Task<ConditionalFiringService.FiringOutcome>> transmit)
+    {
+        await using (TradingCopilotDbContext withdraw = Context())
+        {
+            ConditionalOrderRecord row = await withdraw.ConditionalOrders.SingleAsync(c => c.Id == conditionalId);
+            row.Status = ConditionalStatus.Cancelled;
+            await withdraw.SaveChangesAsync();
+        }
+
+        return await transmit();
+    }
+
     private async Task SeedWorkingOrderAsync(Guid accountId)
     {
         await using TradingCopilotDbContext seed = Context();

@@ -1,3 +1,5 @@
+using MarqSpec.TradingCopilot.Api.Realtime;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -51,7 +53,10 @@ public sealed class SuggestionExpiryHost : BackgroundService
                 await using (AsyncServiceScope scope = _services.CreateAsyncScope())
                 {
                     ISuggestionExpiry expiry = scope.ServiceProvider.GetRequiredService<ISuggestionExpiry>();
-                    int expired = await expiry.ExpireDueAsync(DateTimeOffset.UtcNow, stoppingToken);
+                    ISuggestionRealtimeNotifier notifier =
+                        scope.ServiceProvider.GetRequiredService<ISuggestionRealtimeNotifier>();
+                    int expired = await ExpireAndNotifyAsync(
+                        expiry, notifier, _logger, DateTimeOffset.UtcNow, stoppingToken);
                     if (expired > 0)
                     {
                         _logger.LogInformation(
@@ -84,5 +89,28 @@ public sealed class SuggestionExpiryHost : BackgroundService
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Runs one expire pass and pushes a per-owner realtime signal for each voided suggestion (gh#545 / gh#718).
+    /// The expire write commits inside <see cref="ISuggestionExpiry.ExpireDueAsync"/> and returns the transitioned
+    /// rows; the push is <b>best-effort and after the commit</b> — a hub fault only logs and never fails or unwinds
+    /// the write (the sweep is idempotent regardless, and the card surface reconciles against the REST read model).
+    /// Internal, not private, only so the push behaviour can be unit-tested without spinning the background loop.
+    /// </summary>
+    /// <returns>How many suggestions this pass expired.</returns>
+    internal static async Task<int> ExpireAndNotifyAsync(
+        ISuggestionExpiry expiry,
+        ISuggestionRealtimeNotifier notifier,
+        ILogger logger,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<SuggestionTransition> expired = await expiry.ExpireDueAsync(now, cancellationToken);
+        // The best-effort push policy is shared with the drift watcher (SuggestionRealtimePush) so the two cannot
+        // drift apart: log, swallow a hub fault, keep going, and let a caller cancellation propagate.
+        await notifier.PushTransitionsSafelyAsync(
+            expired, SuggestionState.ExpiredVoid, now, logger, cancellationToken);
+        return expired.Count;
     }
 }

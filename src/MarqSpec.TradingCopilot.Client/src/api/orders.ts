@@ -110,6 +110,38 @@ export function cancelOrder(orderId: string): Promise<ApiResult<void>> {
 }
 
 /**
+ * What a reprice may move. **Partial by design** — send only what the operator changed; naming a field is a
+ * request to move it, so filling the rest with nulls would read as a request to clear them.
+ *
+ * The **safety stop is not here**, and cannot be: it stays invariant on every reprice path server-side, so the
+ * R-5 catastrophic floor is untouched by anything this surface can do.
+ */
+export interface RepriceRequest {
+  readonly entryPrice?: number;
+  readonly workingStopPrice?: number;
+  readonly size?: number;
+  /**
+   * The caller's current market reference the fat-finger band re-measures a new **entry** against (R-16) —
+   * **required by the server when `entryPrice` is present**, and there is no server-side quote read on this path
+   * (as on every order path, the client supplies the price it can see). A move that does not touch the entry (a
+   * working-stop re-stage or a pure resize) does not need it.
+   */
+  readonly referencePrice?: number;
+}
+
+/**
+ * Moves a resting working order in place (gh#259/#267/#278/#292) — keeping its queue position and its attached
+ * protective bracket, rather than cancel-and-replace.
+ *
+ * Unlike a cancel, a reprice **can add risk** (a wider stop, an entry likelier to fill), so the server runs the
+ * full send ladder and **re-gates** it before touching the venue. A refusal is the gate's answer, not an error to
+ * swallow — it reaches the operator.
+ */
+export function repriceOrder(orderId: string, change: RepriceRequest): Promise<ApiResult<void>> {
+  return request<void>('PATCH', `/orders/${orderId}/price`, change);
+}
+
+/**
  * Which way price must cross the trigger for a conditional entry to fire (ADR-0007, gh#176). Serialized as its
  * integer — the values must match the domain enum exactly. {@link ConditionalCrossDirection.Unknown} is the
  * **refusable zero**: the unset value never fires, so a conditional must declare a real direction or it would rest
@@ -169,4 +201,14 @@ export function createConditionalOrder(
     `/accounts/${accountId}/orders/conditional`,
     request_,
   );
+}
+
+/**
+ * Withdraws a **pending** conditional — the operator's cancel of a "send when conditions met" entry (gh#655). It is
+ * held local (off the book), so this is a plain server-side delete; nothing reaches the venue. Only a Pending
+ * conditional can be withdrawn — a mid-fire one is a maybe-live entry the server refuses (409), which comes back as
+ * an ordinary result to render, not an error to swallow.
+ */
+export function cancelConditionalOrder(conditionalOrderId: string): Promise<ApiResult<void>> {
+  return request<void>('DELETE', `/conditionals/${conditionalOrderId}`);
 }

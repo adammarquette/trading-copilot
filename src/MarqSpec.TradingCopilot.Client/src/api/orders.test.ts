@@ -7,8 +7,10 @@ import {
   OrderType,
   type SendOrderRequest,
   armOrder,
+  cancelConditionalOrder,
   cancelOrder,
   createConditionalOrder,
+  repriceOrder,
   sendOrder,
   takeStagedOrder,
 } from './orders';
@@ -274,6 +276,75 @@ describe('createConditionalOrder', () => {
       triggerPrice: 5010,
       triggerDirection: ConditionalCrossDirection.RisesTo,
     });
+
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe('repriceOrder', () => {
+  it('patches the order price', async () => {
+    const fetchMock = stubFetch(() => Promise.resolve(response(200, { orderId: 'o1' })));
+
+    await repriceOrder('o1', { entryPrice: 5010 });
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/orders/o1/price');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('PATCH');
+  });
+
+  it('sends only the fields the operator changed', async () => {
+    // The safety stop stays invariant on every reprice path server-side, and a partial PATCH is how the caller
+    // says "move the entry, leave everything else" -- sending nulls for the rest would read as a request to
+    // clear them.
+    const fetchMock = stubFetch(() => Promise.resolve(response(200, { orderId: 'o1' })));
+
+    await repriceOrder('o1', { workingStopPrice: 4996 });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as Record<string, unknown>;
+    expect(body).toEqual({ workingStopPrice: 4996 });
+  });
+
+  it('carries the reference price on an entry move — the fat-finger band re-measures against it', async () => {
+    // An entry reprice re-gates (R-16), and the server has no quote read on this path, so the caller supplies the
+    // current market price. It must travel with the entry, or the server refuses the move for want of it.
+    const fetchMock = stubFetch(() => Promise.resolve(response(200, { orderId: 'o1' })));
+
+    await repriceOrder('o1', { entryPrice: 5010, referencePrice: 5008 });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as Record<string, unknown>;
+    expect(body).toEqual({ entryPrice: 5010, referencePrice: 5008 });
+  });
+
+  it('surfaces a refusal rather than reporting a move', async () => {
+    // A reprice CAN add risk (a wider stop, an entry likelier to fill), so it runs the full send ladder and is
+    // re-gated. A refusal is the gate's answer and must reach the operator.
+    stubFetch(() => Promise.resolve(response(422, { error: 'would breach the drawdown floor' })));
+
+    expect((await repriceOrder('o1', { entryPrice: 5010 })).ok).toBe(false);
+  });
+});
+
+describe('cancelConditionalOrder', () => {
+  it('deletes the conditional by its own id — the operator withdrawal', async () => {
+    const fetchMock = stubFetch(() => Promise.resolve(response(200, { status: 'Cancelled' })));
+
+    await cancelConditionalOrder('c1');
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/conditionals/c1');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('DELETE');
+  });
+
+  it('surfaces a refusal — a mid-fire conditional cannot be withdrawn', async () => {
+    // Only a Pending conditional is cancellable; a Firing one is a maybe-live entry the server refuses (409). The
+    // refusal is an ordinary result to render, not an error to swallow.
+    stubFetch(() =>
+      Promise.resolve(
+        response(409, {
+          error: 'Only a pending conditional can be cancelled — this one is Firing.',
+        }),
+      ),
+    );
+
+    const result = await cancelConditionalOrder('c1');
 
     expect(result.ok).toBe(false);
   });

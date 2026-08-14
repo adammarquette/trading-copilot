@@ -1179,6 +1179,115 @@ public class StagedOrderEndpointsTests
             OrderStatus.Staged, "the no-stacking check counts the Firing conditional and refuses before the claim");
     }
 
+    [Fact]
+    public async Task CancelConditional_ShouldMarkItCancelled_AndTransmitNothing_WhenItIsPending()
+    {
+        // The operator-facing withdrawal of a still-pending conditional (gh#655): a Pending conditional is held LOCAL
+        // -- off the book, nothing at the venue -- so cancelling it is a plain server-side status flip, the sibling of
+        // DELETE /orders/{id}'s Staged case. It reaches no venue.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await SeedFiringConditionalAsync(accountId, ConditionalStatus.Pending);
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.CancelConditionalOrderAsync(
+            conditionalId, context, PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _venue.CancelOrderAsync(A<VenueAccountId>._, A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _venue.PlaceOrderAsync(A<OrderRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.SingleAsync(c => c.Id == conditionalId)).Status
+            .Should().Be(ConditionalStatus.Cancelled);
+    }
+
+    [Fact]
+    public async Task CancelConditional_ShouldRefuseAndLeaveFiring_WhenTheConditionalIsMidFire()
+    {
+        // A mid-fire (Firing) conditional is a maybe-live entry -- the venue may already hold its order (gh#577). It is
+        // resolved against venue truth via POST /conditionals/{id}/reconcile, never blind-cancelled here, or a cancel
+        // would abandon tracking of a live order.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await SeedFiringConditionalAsync(accountId, ConditionalStatus.Firing);
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.CancelConditionalOrderAsync(
+            conditionalId, context, PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.SingleAsync(c => c.Id == conditionalId)).Status
+            .Should().Be(ConditionalStatus.Firing, "a maybe-live fire is reconciled, not cancelled");
+    }
+
+    [Fact]
+    public async Task CancelConditional_ShouldRefuse_WhenTheConditionalIsAlreadyResolved()
+    {
+        // Fired / Cancelled / Expired are terminal. A no-op "success" would hide a mistaken request, exactly as the
+        // staged/working cancel refuses a terminal order.
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await SeedFiringConditionalAsync(accountId, ConditionalStatus.Fired);
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.CancelConditionalOrderAsync(
+            conditionalId, context, PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.ConditionalOrders.SingleAsync(c => c.Id == conditionalId)).Status
+            .Should().Be(ConditionalStatus.Fired);
+    }
+
+    [Fact]
+    public async Task CancelConditional_ShouldReturnNotFound_WhenNoSuchConditional()
+    {
+        // Not ours (R-20, filtered out) or gone -- either way there is nothing to cancel.
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.CancelConditionalOrderAsync(
+            Guid.NewGuid(), context, PassthroughGuard(), NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
+    public async Task CancelConditional_ShouldFlipTheStatusInsideTheAccountEntryLock_NotBeforeIt()
+    {
+        // The race the lock closes (gh#589): without it a cancel could read Pending, the fire watcher could commit
+        // Pending -> Firing and place a live order under the same account lock, and the cancel would then write
+        // Cancelled over a conditional that is actually live at the venue. So the flip must run INSIDE the account
+        // entry lock, keyed on the conditional's account -- the same lock the watcher's fire acquires. This observes
+        // the DB at lock-entry and asserts the row is STILL Pending then: the Pending -> Cancelled write happens
+        // inside the callback, so an implementation that flipped BEFORE taking the guard would fail here (a
+        // wiring-only assertion that RunExclusiveAsync was called would pass it, which is why this reads state).
+        Guid accountId = await SeedAccountAsync();
+        Guid conditionalId = await SeedFiringConditionalAsync(accountId, ConditionalStatus.Pending);
+
+        ConditionalStatus? statusAtLockEntry = null;
+        IAccountEntryGuard guard = A.Fake<IAccountEntryGuard>();
+        A.CallTo(() => guard.RunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .ReturnsLazily(async (TradingCopilotDbContext _, Guid _, Func<Task<IResult>> body, CancellationToken _) =>
+            {
+                await using (TradingCopilotDbContext observe = Context())
+                {
+                    statusAtLockEntry = (await observe.ConditionalOrders.SingleAsync(c => c.Id == conditionalId)).Status;
+                }
+
+                return await body();
+            });
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OrderEndpoints.CancelConditionalOrderAsync(
+            conditionalId, context, guard, NullLoggerFactory.Instance, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        statusAtLockEntry.Should().Be(
+            ConditionalStatus.Pending, "the Pending -> Cancelled flip happens inside the lock, not before the guard is entered");
+        A.CallTo(() => guard.RunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, accountId, A<Func<Task<IResult>>>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
     private async Task<Guid> SeedFiringConditionalAsync(Guid accountId, ConditionalStatus status = ConditionalStatus.Firing, int size = 1)
     {
         // A conditional in a chosen lifecycle state (default Firing -- the stranded mid-fire). Minimal but valid: the

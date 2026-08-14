@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain;
@@ -38,6 +39,7 @@ public sealed class SuggestionDriftService
     private readonly IInstrumentSpecSource _specs;
     private readonly IOptions<SuggestionOptions> _options;
     private readonly ISuggestionDrift _drift;
+    private readonly ISuggestionRealtimeNotifier _notifier;
     private readonly ILogger<SuggestionDriftService> _logger;
 
     /// <summary>Creates the service.</summary>
@@ -45,18 +47,21 @@ public sealed class SuggestionDriftService
     /// <param name="specs">The server-side spec source (gh#541) — the tick size the drift band scales by.</param>
     /// <param name="options">The suggestion options, for <see cref="SuggestionOptions.DriftToleranceTicks"/>.</param>
     /// <param name="drift">The guarded Active→Stale writer.</param>
+    /// <param name="notifier">The per-owner realtime push seam (gh#684/#718) — best-effort, after the write commits.</param>
     /// <param name="logger">The logger.</param>
     public SuggestionDriftService(
         TradingCopilotDbContext discovery,
         IInstrumentSpecSource specs,
         IOptions<SuggestionOptions> options,
         ISuggestionDrift drift,
+        ISuggestionRealtimeNotifier notifier,
         ILogger<SuggestionDriftService> logger)
     {
         _discovery = discovery;
         _specs = specs;
         _options = options;
         _drift = drift;
+        _notifier = notifier;
         _logger = logger;
     }
 
@@ -146,7 +151,17 @@ public sealed class SuggestionDriftService
         {
             if (byContract.TryGetValue(quote.ContractKey, out Match match))
             {
-                stale += await _drift.MarkDriftedStaleAsync(match.Symbol, quote.Bid, quote.Ask, match.Band, now, cancellationToken);
+                IReadOnlyList<SuggestionTransition> transitioned =
+                    await _drift.MarkDriftedStaleAsync(match.Symbol, quote.Bid, quote.Ask, match.Band, now, cancellationToken);
+                stale += transitioned.Count;
+
+                // REALTIME PUSH (gh#718): the Stale write has committed, so signal each owning operator that their
+                // suggestion greyed out -- per-owner (R-20, Clients.User), best-effort, AFTER the write. A hub fault
+                // must never fail or roll back the transition (it already committed inside MarkDriftedStaleAsync); the
+                // card surface reconciles against the REST read model regardless. The best-effort policy is shared
+                // with the expire sweep so the two cannot drift apart (SuggestionRealtimePush).
+                await _notifier.PushTransitionsSafelyAsync(
+                    transitioned, SuggestionState.Stale, now, _logger, cancellationToken);
             }
         }
         return stale;
