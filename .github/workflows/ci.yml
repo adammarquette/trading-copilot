@@ -70,6 +70,14 @@ jobs:
       - name: ADR decision-log invariants
         run: ./scripts/check-adr-decision-log.sh
 
+      # claim.sh is the collision guard every session runs first (gh#375); when its branch-name match reports
+      # "unclaimed" for a genuinely claimed issue, a parallel session double-works. gh#833 was exactly that -- a
+      # Cursor Cloud branch carries the id in the MIDDLE (`cursor/<name>-<id>-<suffix>`), invisible to the old
+      # `/<id>_` anchor. This runs the shared match against a fixture branch list, so the guard's own correctness
+      # is itself a gate. No .NET, no network -- sits with the other no-build checks ahead of restore.
+      - name: Claim branch-match (collision guard)
+        run: ./scripts/tests/claim.test.sh
+
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 

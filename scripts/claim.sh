@@ -44,6 +44,11 @@ STALE_AFTER_HOURS=4
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# The one branch-name -> claim rule, shared with scripts/tests/claim.test.sh so the check and its proof cannot
+# drift (gh#833). Sourced by BASH_SOURCE path, so it resolves whatever cwd this is invoked from.
+# shellcheck source=lib/claim-branch-match.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/claim-branch-match.sh"
+
 ID="${1:-}"
 [ -n "$ID" ] || die "usage: scripts/claim.sh <issue-id> [type] [slug]   (type: feature|bug|hotfix)"
 [[ "$ID" =~ ^[0-9]+$ ]] || die "the work-item id must be the tracking GitHub issue NUMBER, got '$ID'"
@@ -108,7 +113,7 @@ if command -v gh >/dev/null 2>&1; then
 
     if [ -n "$PARENT" ] && [ "$PARENT" != "null" ]; then
         PARENT_CLAIM="$(git ls-remote --heads origin 2>/dev/null | sed 's|.*refs/heads/||' \
-            | grep -E "^[a-z]+/${PARENT}_" || true)"
+            | claim_branches_for "$PARENT")"
 
         if [ -n "$PARENT_CLAIM" ]; then
             IS_EPIC="$(gh api "repos/{owner}/{repo}/issues/$PARENT" \
@@ -142,10 +147,12 @@ fi
 # ---------------------------------------------------------------------------------------------------------
 # 1. Is it already claimed?
 # ---------------------------------------------------------------------------------------------------------
-# The separator before the id is a SLASH, not an underscore -- `<type>/<id>_<title>`. Matching on `_<id>_`
-# never fires, which is worse than no check at all: it reports "unclaimed" for every genuinely claimed issue,
-# permitting exactly the duplicate work this guards against. Anchor on `/<id>_`.
-EXISTING="$(git ls-remote --heads origin 2>/dev/null | sed 's|.*refs/heads/||' | grep -E "^[a-z]+/${ID}_" || true)"
+# A claim is any pushed branch whose name embeds this id as a whole token -- the canonical `<type>/<id>_<title>`,
+# but equally a `wip/<id>-...` or a Cursor Cloud `cursor/<name>-<id>-<suffix>` (gh#833). Matching only `/<id>_`
+# missed every branch of the latter two shapes and reported "unclaimed" for genuinely claimed issues -- exactly
+# the duplicate work this guards against. claim_branches_for matches the id anywhere, digit-bounded so 1731/7310
+# never satisfy 731 (scripts/lib/claim-branch-match.sh).
+EXISTING="$(git ls-remote --heads origin 2>/dev/null | sed 's|.*refs/heads/||' | claim_branches_for "$ID")"
 
 if [ -n "$EXISTING" ]; then
     echo "CLAIMED — a remote branch for #${ID} already exists:"
