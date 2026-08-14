@@ -10,6 +10,8 @@ import { useExecutionOverlays } from '../chart/useExecutionOverlays';
 import { useFillMarkers } from '../chart/useFillMarkers';
 import { useSuggestionZones } from '../chart/useSuggestionZones';
 import type { Destination } from '../navigation/destinations';
+import { useOptionalAccounts } from '../accounts/AccountProvider';
+import { Blotter } from '../blotter/Blotter';
 import { SuggestionsPanel } from '../suggestions/SuggestionsPanel';
 
 /**
@@ -69,6 +71,10 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
 
   // The active suggestion's entry / stop / target overlay the chart, kept fresh + owner-scoped by the hook (gh#727).
   const { zones: suggestionZones, stale: suggestionsStale } = useSuggestionZones(instrument);
+  // Optional rather than required: this surface can render before the provider resolves, and "no account yet" is
+  // NOT "no positions" -- the blotter is withheld rather than mounted against a guess (gh#656).
+  const accounts = useOptionalAccounts();
+  const activeAccountId = accounts?.status === 'ready' ? accounts.activeAccount.id : null;
 
   // The operator's live working orders + net position overlay the chart, kept fresh on every order-state / fill push
   // and owner-scoped by the hook (gh#727 increment 3, from the gh#772 venue-truth reads).
@@ -168,6 +174,17 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
         }}
       >
         <SuggestionsPanel />
+        {/* The live blotter (gh#656) — venue truth for positions and resting orders, beside the decision
+            surface rather than a separate screen: managing what is live is part of the same loop as deciding
+            what to take. Withheld entirely until an account resolves, because an empty blotter would assert
+            something about venue truth that has not been read. */}
+        {activeAccountId !== null ? (
+          <Box
+            sx={{ borderColor: 'divider', borderStyle: 'solid', borderWidth: '1px 0 0 0', p: 1.5 }}
+          >
+            <Blotter accountId={activeAccountId} />
+          </Box>
+        ) : null}
       </Box>
     </Box>
   );
