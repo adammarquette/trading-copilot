@@ -278,7 +278,14 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
                   {position.contract} · {position.netQuantity} @ {position.averagePrice}
                 </Typography>
                 <ProtectionChip state={protectionOf(position)} />
-                <Button size="small" color="error" onClick={() => setExiting(position)}>
+                <Button
+                  size="small"
+                  color="error"
+                  onClick={() => {
+                    setExitFailure(null); // a previous failure must not read as this position's result
+                    setExiting(position);
+                  }}
+                >
                   Exit
                 </Button>
               </Box>
@@ -335,8 +342,6 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
           ))
         )}
       </Box>
-      {exitFailure !== null ? <Alert severity="error">{exitFailure}</Alert> : null}
-
       <Dialog open={exiting !== null} onClose={() => setExiting(null)}>
         <DialogTitle>Exit this position?</DialogTitle>
         <DialogContent>
@@ -354,6 +359,15 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
                 <Alert severity="warning">
                   Protection state is unknown for this contract, so what is standing at the venue
                   cannot be confirmed from here.
+                </Alert>
+              ) : null}
+              {/* INSIDE the dialog, not beside it. The dialog stays open on a failed exit, and MUI's
+                  backdrop would hide a sibling Alert entirely -- so the one message telling the operator
+                  the position may still be live would be invisible until they dismissed the dialog. Same
+                  placement as repriceRefusal, for the same reason (#851 review). */}
+              {exitFailure !== null ? (
+                <Alert severity="error" sx={{ mt: 1 }}>
+                  {exitFailure}
                 </Alert>
               ) : null}
             </>

@@ -534,7 +534,35 @@ describe('Blotter', () => {
       fireEvent.click(screen.getByRole('button', { name: /^exit this position$/i }));
     });
 
-    expect(shown().toLowerCase()).toContain('stillopen');
+    // Rendered INSIDE the dialog the operator is already looking at. As a sibling it sat behind MUI's backdrop
+    // and was invisible until they dismissed the dialog -- so the one message that stops them walking away from
+    // a still-live position needed an extra, undocumented step to see (#851 review).
+    const dialog = screen.getByRole('dialog').textContent?.toLowerCase() ?? '';
+    expect(dialog).toContain('stillopen');
+    expect(dialog).toContain('may still be open');
+  });
+
+  it('clears a previous exit failure when a different position is opened', async () => {
+    // A stale failure left on screen would read as this position's result.
+    exit.mockResolvedValue({ ok: false, kind: 'failed', status: 409, error: 'StillOpen' });
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /exit/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^exit this position$/i }));
+    });
+    expect((screen.getByRole('dialog').textContent ?? '').toLowerCase()).toContain('stillopen');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /keep it/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /exit/i }));
+    });
+
+    expect((screen.getByRole('dialog').textContent ?? '').toLowerCase()).not.toContain('stillopen');
   });
 
   it('re-reads after an exit rather than assuming the position is gone', async () => {
