@@ -309,7 +309,7 @@ describe('SuggestionCard — take arms, it does not send (R-11b)', () => {
     expect(screen.getByTestId('armed-ticket').textContent).toContain(
       'arming and sending are separate steps',
     );
-    expect(onArmed).toHaveBeenCalledWith('s-1', ticket());
+    expect(onArmed).toHaveBeenCalledWith(expect.objectContaining({ id: 's-1' }), ticket());
   });
 
   it('surfaces a gate resize rather than implying the suggested size was armed', async () => {

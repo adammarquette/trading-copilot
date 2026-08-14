@@ -57,8 +57,11 @@ export interface SuggestionCardProps {
   readonly referencePrice?: number | null;
   /** Fired once the pass is durably recorded — the list drops the card from the actionable set on this. */
   readonly onPassed?: (id: string) => void;
-  /** Fired once a ticket is staged. The handoff to the order ticket is the host surface's to make. */
-  readonly onArmed?: (id: string, ticket: StagedTicket) => void;
+  /**
+   * Fired once a ticket is staged, carrying the suggestion that armed it (the host needs its requested size and
+   * summary to review the staged ticket). The handoff to the order ticket is the host surface's to make (gh#655).
+   */
+  readonly onArmed?: (suggestion: Suggestion, ticket: StagedTicket) => void;
 }
 
 type Act = 'take' | 'pass';
@@ -176,7 +179,7 @@ export function SuggestionCard({
     const result = await takeSuggestion(suggestion.id, reference);
     if (result.ok) {
       setAction({ kind: 'armed', ticket: result.data });
-      onArmed?.(suggestion.id, result.data);
+      onArmed?.(suggestion, result.data);
       return;
     }
     setAction(
