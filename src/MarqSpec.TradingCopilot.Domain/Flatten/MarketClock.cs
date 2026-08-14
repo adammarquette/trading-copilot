@@ -21,6 +21,21 @@ public static class MarketClock
         return TimeZoneInfo.ConvertTime(instant, CentralTime).DateTime;
     }
 
+    /// <summary>
+    /// The UTC instant at which the market's Central <b>calendar day</b> containing <paramref name="instant"/> began —
+    /// central midnight, converted to UTC. The daily AI-spend governor, the R-4 suggestion throttle and the
+    /// auto-flatten all reset on this boundary (a UTC date would split a live CME session), so the definition lives
+    /// here, once, rather than in each of them (gh#741).
+    /// </summary>
+    /// <param name="instant">Any instant, in any offset.</param>
+    /// <returns>Central-day midnight for that instant, in UTC.</returns>
+    public static DateTimeOffset CentralDayStartUtc(DateTimeOffset instant)
+    {
+        // Midnight is never inside the DST spring-forward gap, so no invalid-local-time guard is needed.
+        DateTime centralMidnight = DateTime.SpecifyKind(ToMarketTime(instant).Date, DateTimeKind.Unspecified);
+        return new DateTimeOffset(centralMidnight, CentralTime.GetUtcOffset(centralMidnight)).ToUniversalTime();
+    }
+
     private static TimeZoneInfo ResolveCentral()
     {
         // .NET resolves IANA ids on Windows too, but fall back to the Windows id rather than fail at startup on

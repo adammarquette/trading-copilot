@@ -45,12 +45,13 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// <c>ReloadTypesAsync()</c> afterward; every later <c>Vector</c> write from that same process (i.e. this whole
 /// test run) hits the stale cache. This is a genuine production gap (it would equally break
 /// <c>NewsEmbeddingService</c>'s first upsert after any deployment's first-ever boot against a brand-new
-/// database), not a suite defect — per the guard discipline this is reported, not fixed here: the affected
-/// cases below are marked <c>Skip = "blocked by gh#858"</c> rather than silently left red or hand-patched. Only
+/// database), not a suite defect — per the guard discipline it was reported (gh#858), not fixed in the QA suite.
+/// gh#858's fix (this change) makes <c>StartupTasks</c> reload the Npgsql type catalog after the in-process
+/// <c>CREATE EXTENSION</c> — so the cases below, originally marked <c>Skip = "blocked by gh#858"</c>, are now
+/// un-skipped and are its regression guard. Only
 /// <see cref="Migration_ShouldHaveEnabledPgvector_AndBuiltTheHnswCosineIndex"/> (a raw-SQL read that writes no
-/// <c>Vector</c>) is unaffected and stays active — its own pass, isolating the failure to writes only, is what
-/// made the root cause identifiable in the first place. Once gh#858 lands, un-skip these cases; they become its
-/// regression guard.
+/// <c>Vector</c>) was ever unaffected — its own pass, isolating the failure to writes only, is what made the root
+/// cause identifiable in the first place.
 /// </para>
 /// <para>
 /// <b>Why the pre-commit local verification (below) did not surface this.</b> Before ever discovering CI's
@@ -96,7 +97,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
     // "roughly sorted" hand-wave.
     // =================================================================================================================
 
-    [Fact(Skip = "blocked by gh#858 -- any Vector-valued Npgsql parameter (read or write) hits the stale post-migrate type cache; see class remarks")]
+    [Fact]
     public async Task NearestN_ShouldOrderByCosineDistanceAscending_AndRespectTake()
     {
         // Query points along dimension 0. Closest = identical direction (distance 0); middle = 0.8/0.6 blend
@@ -115,7 +116,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         top2[1].Distance.Should().BeApproximately(0.2, 1e-6, "the 0.8/0.6 unit blend is exactly 0.2 by construction");
     }
 
-    [Fact(Skip = "blocked by gh#858 -- the query vector is itself a Vector-valued Npgsql parameter; see class remarks")]
+    [Fact]
     public async Task NearestN_ShouldReturnEmpty_WhenTheCorpusIsEmpty()
     {
         // No rows seeded for this (OwnerKind, Model) at all -- the query must return an empty result, not throw and
@@ -126,7 +127,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         hits.Should().BeEmpty("an empty corpus is a valid, unexceptional state for the similarity read");
     }
 
-    [Fact(Skip = "blocked by gh#858 -- SeedAsync and the query vector both carry a Vector-valued Npgsql parameter; see class remarks")]
+    [Fact]
     public async Task NearestN_ShouldReturnTheSoleRow_WhenTheCorpusHasExactlyOneRow()
     {
         await SeedAsync(Row(EmbeddingOwnerKind.SoftSignal, "only-row", Model, Direction((1, 1f))));
@@ -138,7 +139,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         hit.Distance.Should().BeApproximately(1.0, 1e-6, "orthogonal to the query is cosine distance 1 -- the request still returns it, not a threshold-filtered empty set");
     }
 
-    [Fact(Skip = "blocked by gh#858 -- SeedAsync and the query vector both carry a Vector-valued Npgsql parameter; see class remarks")]
+    [Fact]
     public async Task NearestN_ShouldExcludeOtherOwnerKinds_EvenWhenTheirVectorPointsExactlyAtTheQuery()
     {
         // The Suggestion-kind row is the CLOSEST possible vector to the query (identical direction) -- if the
@@ -156,7 +157,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
             ["right-kind"], "a Suggestion-owned row must never surface from a SoftSignal query, however close its vector sits to the query");
     }
 
-    [Fact(Skip = "blocked by gh#858 -- SeedAsync and the query vector both carry a Vector-valued Npgsql parameter; see class remarks")]
+    [Fact]
     public async Task NearestN_ShouldExcludeOtherModels_EvenWhenTheirVectorPointsExactlyAtTheQuery()
     {
         // Same adversarial shape as the owner-kind case, over the OTHER half of the composite key: Model is part of
@@ -180,7 +181,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
     // NewsRecord.DedupKey itself: two differently-formatted URLs that canonicalize to one key collapse to one row.
     // =================================================================================================================
 
-    [Fact(Skip = "blocked by gh#858 -- SeedAsync's Vector write hits the stale post-migrate type cache; see class remarks")]
+    [Fact]
     public async Task EmbeddingRecord_ShouldBeReadableByTheCanonicalDedupKey_RegardlessOfWhichRawUrlVariantProducedIt()
     {
         const string rawA = "https://WWW.Example.com/story/?utm_source=newsletter";
@@ -199,7 +200,7 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         found!.OwnerId.Should().Be(canonical, "the persisted OwnerId is the exact canonical string -- not re-normalized, not truncated, not case-folded further by storage");
     }
 
-    [Fact(Skip = "blocked by gh#858 -- SeedAsync's Vector write hits the stale post-migrate type cache; see class remarks")]
+    [Fact]
     public async Task EmbeddingRecord_ShouldRefuseASecondRow_WhenTwoRawUrlVariantsNormalizeToTheSameOwnerId()
     {
         const string rawA = "https://example.com/second-story";

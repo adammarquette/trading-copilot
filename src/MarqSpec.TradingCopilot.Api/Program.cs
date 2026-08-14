@@ -370,6 +370,7 @@ builder.Services.AddHostedService<AccountEventStreamHost>();
 // with their mark basis (live / settlement re-mark / declared-unknown), so a settlement re-mark is never read
 // as live and an unreachable venue is not shown as a stale live view.
 builder.Services.AddScoped<PositionReconciliationService>();
+builder.Services.AddScoped<PositionExitService>();
 
 // The resting-orders sibling of the positions read (gh#381): venue truth for the working orders standing on an
 // account, including the attached protective bracket and its SIZE. Read-only -- the gate is untouched.
@@ -556,6 +557,7 @@ app.MapPositionEndpoints();
 app.MapWorkingOrderEndpoints();
 app.MapFillEndpoints();
 app.MapMarketDataEndpoints();
+app.MapAiSpendEndpoints();
 
 // The realtime hub (gh#645, R-10 / R-18). A literal path so it is a concrete authenticated route ahead of the SPA
 // fallback; RequireAuthorization so the R-18 auth-surface sweep treats its negotiate / connect endpoints as gated.

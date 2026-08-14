@@ -6,6 +6,7 @@ using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace MarqSpec.TradingCopilot.Api;
 
@@ -41,8 +42,48 @@ public static class StartupTasks
         //
         // Non-relational (the InMemory test hosts) reports absent, which is the honest answer: EmbeddingRecord is
         // Ignore()d in that model, so there is genuinely nowhere to store a vector.
-        app.Services.GetRequiredService<VectorStore>()
-            .Record(database.Database.IsRelational() && await HasPgVectorAsync(database));
+        bool pgVectorPresent = database.Database.IsRelational() && await HasPgVectorAsync(database);
+
+        // gh#858: MigrateAsync above opened this process's FIRST connection on its single (EF-owned) NpgsqlDataSource
+        // to run AddEmbeddingStore's CREATE EXTENSION vector -- so Npgsql cached its per-data-source type catalog from
+        // BEFORE 'vector' existed, and nothing reloaded it. Every later Vector-valued parameter (NewsEmbeddingService's
+        // upsert gh#377, the gh#852 similarity read) would then bind against that stale cache and throw "Cannot resolve
+        // 'vector'" for the process's life -- but only on a genuinely fresh database where the extension is created
+        // in-process (a long-lived DB the extension predates is fine, which is why it went unnoticed). Flush the catalog
+        // now; the reload is on this connection's connection string, so pooled connections re-opened downstream pick up
+        // the just-created type. Gated on presence, so the gh#109 absent-extension degrade is untouched -- and a
+        // non-relational InMemory host has no NpgsqlConnection to reload.
+        if (pgVectorPresent)
+        {
+            try
+            {
+                await database.Database.OpenConnectionAsync();
+                try
+                {
+                    await ((NpgsqlConnection)database.Database.GetDbConnection()).ReloadTypesAsync();
+                }
+                finally
+                {
+                    await database.Database.CloseConnectionAsync();
+                }
+            }
+            catch (Exception error)
+            {
+                // gh#109 / R-13: this reload is the ONE throw-capable retrieval step in startup, and a retrieval fault
+                // must NEVER keep the safety-critical auto-flatten from running. If the catalog cannot be reloaded,
+                // degrade to "pgvector unavailable" -- IsAvailable goes false so the embed pass skips cleanly rather
+                // than faulting per poll (the state the data dictionary already promises) -- and let the host come up.
+                app.Logger.LogError(
+                    error,
+                    "pgvector type-catalog reload failed after the in-process CREATE EXTENSION; degrading retrieval to "
+                        + "unavailable so startup is not blocked and auto-flatten still runs (gh#858, gh#109, R-13).");
+                pgVectorPresent = false;
+            }
+        }
+
+        // Record the FINAL retrieval state (gh#109): present + catalog reloaded, or degraded-off when the reload could
+        // not run -- so an embedding-path fault can never take the safety-critical auto-flatten down with it.
+        app.Services.GetRequiredService<VectorStore>().Record(pgVectorPresent);
 
         // Rehydrate the kill switch (gh#189): if it was engaged when the process last stopped, come up engaged --
         // the operator's lock persists across a restart, so a crash or redeploy never silently re-enables trading
