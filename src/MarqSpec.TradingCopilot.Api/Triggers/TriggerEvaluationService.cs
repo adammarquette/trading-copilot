@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Data;
@@ -179,6 +180,13 @@ public class TriggerEvaluationService
         {
             return 0;
         }
+
+        // AGENT-PATH TRACE (gh#766, ADR-0002): one root span per scan pass — the parent the fired agent-review
+        // triggers' child spans hang under, so a suggestion's trace shows which strategies contributed and where the
+        // time went. It also makes Activity.Current non-null across the pass, so the AiUsage ledger's trace id (read
+        // at the ledger write below) is finally populated for scan-originated LLM calls instead of always null.
+        using Activity? scanSpan =
+            TelemetryRegistration.Source.StartActivity("trigger-scan.pass", ActivityKind.Internal);
 
         // AI-SPEND GOVERNOR (gh#448): read the deployment-wide daily spend ONCE per pass and seed a mutable tally each
         // fire accrues into, so later fires this pass evaluate against rising spend (the per-fire risk-gate mirror).
@@ -604,6 +612,14 @@ public class TriggerEvaluationService
         GovernorPass? governorPass,
         CancellationToken cancellationToken)
     {
+        // AGENT-PATH TRACE (gh#766): one span per fired agent-review trigger — a child of the scan-pass root, so a
+        // trace shows this strategy's contribution and its latency. There is no multi-agent fan-in in the code: the
+        // "agent" is a fired agent-review trigger, and this span runs for the WHOLE fire (proposal or abstain), so an
+        // abstaining agent is a visible span, never a gap. The outcome + any suggestion id are stamped below.
+        using Activity? agentSpan =
+            TelemetryRegistration.Source.StartActivity("agent.review", ActivityKind.Internal);
+        agentSpan?.SetTag("trigger.id", trigger.Id.ToString());
+
         string dedupKey = DedupKeyFor(trigger);
 
         // Minted up front (gh#542) so a staged suggestion can cite the firing it came from: the firing row is
@@ -686,6 +702,16 @@ public class TriggerEvaluationService
                 review = new AgentReview(new ReviewOutcome.Suppress(SuppressReason.ReviewerUnavailable, "the reviewer threw"), Costs: []);
             }
         }
+
+        // gh#766: record on the span what the agent decided — proposed, or abstained and why — so an abstaining
+        // agent reads as a deliberate outcome, not a missing span. Covers every branch above (throttle/governor
+        // short-circuit, the reviewer's own suppress, and a thrown reviewer treated as unavailable).
+        agentSpan?.SetTag("agent.outcome", review.Outcome switch
+        {
+            ReviewOutcome.Suggest => "suggest",
+            ReviewOutcome.Suppress suppress => $"suppress:{suppress.Reason}",
+            _ => "unknown",
+        });
 
         // Ledger the LLM-call spend, stamped with THIS owner (the scan is the single tenancy authority) + the trace.
         // ONE row per billed call: empty when no call was made (inert reviewer, or a budget-exhausted short-circuit),
@@ -976,6 +1002,11 @@ public class TriggerEvaluationService
         // Size from the TRIGGER (the operator's), mode LIVE from the account -- never the model's. The `!` are sound:
         // an agent-review trigger carries a non-null account + size (the endpoint validation + the DB check).
         Guid suggestionId = Guid.NewGuid(); // hoisted (gh#684) so the realtime push can cite the id that was staged
+
+        // gh#766: link the agent span (Activity.Current here, inside the fire's span) to the suggestion it produced,
+        // so a trace joins to the row — and, via the ledger's now-populated trace id, to the spend that bought it.
+        Activity.Current?.SetTag("suggestion.id", suggestionId.ToString());
+
         database.Suggestions.Add(new Suggestion
         {
             Id = suggestionId,
