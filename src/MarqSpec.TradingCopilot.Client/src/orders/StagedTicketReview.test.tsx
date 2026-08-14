@@ -159,6 +159,41 @@ describe('StagedTicketReview', () => {
     expect(onDone).not.toHaveBeenCalled();
   });
 
+  it('keeps the review open and warns when a cancel is refused — a refused cancel can mean the order is still live', async () => {
+    // The venue can reject a cancel on an order that has gone Working/Filled, and a Taking race can land here too
+    // (409, no terminal status). Closing the panel as if cancelled would tell the operator there is no order when
+    // one may be live — the one failure this review step exists to prevent (#838 review).
+    cancel.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 409,
+      reason: 'the order is working at the venue',
+    });
+
+    renderReview();
+    await click(/cancel/i);
+
+    const text = screen.getByTestId('staged-ticket-review').textContent?.toLowerCase() ?? '';
+    expect(text).toContain('working at the venue'); // the venue's own reason
+    expect(text).toContain('may still be live'); // the honesty the swallowed .finally() dropped
+    expect(onDone).not.toHaveBeenCalled(); // the review stays open, not closed as if the order were gone
+    expect(screen.getByRole('button', { name: /cancel/i })).toBeTruthy(); // and the operator can retry
+  });
+
+  it('keeps the review open and warns when a cancel request outright fails', async () => {
+    // Belt-and-suspenders for an unexpected throw (the api client normally maps failures to ok:false): still must
+    // not report the order gone.
+    cancel.mockRejectedValue(new Error('network down'));
+
+    renderReview();
+    await click(/cancel/i);
+
+    expect(screen.getByTestId('staged-ticket-review').textContent?.toLowerCase()).toContain(
+      'may still be live',
+    );
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
   it('does not send twice when Send is clicked again before the first resolves', async () => {
     let release: (value: Awaited<ReturnType<typeof takeStagedOrder>>) => void = () => {};
     take.mockReturnValue(
