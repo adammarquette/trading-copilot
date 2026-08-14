@@ -20,7 +20,49 @@ public static class PositionReconciliationEndpoints
         endpoints.MapGet("/accounts/{id:guid}/positions", ReconcileAsync).RequireAuthorization()
             .WithTags("Positions")
             .WithSummary("Reconcile and read the account's open positions against venue truth, optionally scoped to one instrument.");
+        // Same "Positions" group as the read on purpose: this is the write half of the same resource, and a new
+        // tag would add a Scalar heading (and a GroupTags edit) for no reader benefit.
+        endpoints.MapPost("/accounts/{id:guid}/positions/{instrument}/exit", ExitAsync).RequireAuthorization()
+            .WithTags("Positions")
+            .WithSummary("Close one instrument's position at market — the operator's per-position exit.");
         return endpoints;
+    }
+
+    /// <summary>
+    /// Closes one instrument's position (gh#656, R-11) — the blotter's exit control.
+    /// </summary>
+    /// <remarks>
+    /// <b>Only a verified flat is a success.</b> A close the venue accepted while still reporting exposure, and a
+    /// venue that could not be reached, both resolve to non-200: an operator told "done" stops watching a position
+    /// that may still be live. A 409 is therefore "try again", not "it failed to close" — the position's state is
+    /// exactly what the body reports.
+    /// </remarks>
+    internal static async Task<IResult> ExitAsync(
+        Guid id,
+        string instrument,
+        PositionExitService exits,
+        CancellationToken cancellationToken)
+    {
+        if (!InstrumentId.TryParse(instrument, out InstrumentId parsed))
+        {
+            // A client mistake, told apart from an unreachable venue: retrying a typo forever is a different
+            // problem from retrying an outage.
+            return Results.BadRequest(new { error = $"'{instrument}' is not a valid instrument." });
+        }
+
+        PositionExitResult? result = await exits.ExitAsync(id, parsed, cancellationToken);
+        if (result is null)
+        {
+            return Results.NotFound(); // not found / not owned (R-20)
+        }
+
+        return result.Outcome switch
+        {
+            PositionExitOutcome.Flat => Results.Ok(new PositionExitResponse(result.Outcome.ToString(), 0)),
+            PositionExitOutcome.StillOpen => Results.Conflict(new PositionExitResponse(
+                result.Outcome.ToString(), result.NetQuantity)),
+            _ => Results.Conflict(new PositionExitResponse(PositionExitOutcome.Unreachable.ToString(), 0)),
+        };
     }
 
     internal static async Task<IResult> ReconcileAsync(
@@ -77,3 +119,8 @@ public sealed record ReconciledPositionsResponse(string MarkBasis, IReadOnlyList
 /// <param name="AveragePrice">The position's average entry price.</param>
 /// <param name="IsFlat">Whether the position is flat.</param>
 public sealed record ReconciledPosition(string Contract, int NetQuantity, decimal AveragePrice, bool IsFlat);
+
+/// <summary>The outcome of an operator-initiated exit (gh#656).</summary>
+/// <param name="Outcome"><c>Flat</c>, <c>StillOpen</c> or <c>Unreachable</c> — as a name, not an integer.</param>
+/// <param name="NetQuantity">The signed exposure the venue still reports; 0 when flat or unreachable.</param>
+public sealed record PositionExitResponse(string Outcome, int NetQuantity);
