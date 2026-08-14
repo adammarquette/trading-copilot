@@ -286,8 +286,10 @@ plumbing.
 suggestion"* maps to what actually runs: the **executor** is one sequential scan pass, and each **strategy agent**
 is a fired agent-review trigger. Two spans, both on `TelemetryRegistration.Source` (`ActivityKind.Internal`):
 
-- **`trigger-scan.pass`** — one root per scan pass that has confirmed agent-review work; the parent the agent
-  spans hang under, so a pass is one trace.
+- **`trigger-scan.pass`** — one root per non-empty scan pass (any confirmed mechanical *or* agent-review trigger);
+  on a pass with agent-review fires it is the parent the agent spans hang under, so a suggestion's pass is one
+  trace. A mechanical-only pass emits a lone, childless root — harmless, and gating it would add a query to the
+  hot scan loop for negligible trace volume.
 - **`agent.review`** — one child per fired agent-review trigger, opened for the **whole** fire so an abstaining
   agent is a visible span, never a gap. Attributes: **`trigger.id`** (the strategy), **`agent.outcome`**
   (`suggest` / `suppress:<reason>` — proposed versus abstained-and-why), and **`suggestion.id`** when the fire
