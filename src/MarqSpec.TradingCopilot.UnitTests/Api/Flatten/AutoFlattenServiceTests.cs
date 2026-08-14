@@ -622,6 +622,12 @@ public class AutoFlattenServiceTests
 
         A.CallTo(() => venue.ClosePositionAsync(A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
             .MustNotHaveHappened();
+
+        // The credential guard skips BEFORE the roster match, so a foreign-credential account never reaches -- and
+        // must never emit -- the gh#527 unrostered signal, which is only for accounts THIS process is responsible for.
+        A.CallTo(() => _log.AppendAsync(
+                A<EventDraft>.That.Matches(d => d.Type == AutoFlattenService.UnrosteredEventType), A<CancellationToken>._))
+            .MustNotHaveHappened();
     }
 
     [Fact]
@@ -636,8 +642,9 @@ public class AutoFlattenServiceTests
         await SeedAccountAsync(name, op, credentialKey: "topstep-main");
 
         // Credentials match, so the pass reaches the roster match rather than the ADR-0015 credential skip; but the
-        // roster is empty -- the account we hold, "9001", is not in it.
-        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
+        // roster is empty -- the account we hold, "9001", is not in it. No positions are stubbed: the unrostered
+        // path never reads them.
+        ITradingVenue venue = Venue([]);
         A.CallTo(() => venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>([]);
         IProjectXVenueFactory factory = A.Fake<IProjectXVenueFactory>();
         A.CallTo(() => factory.Create(A<FirmConventions>._)).Returns(venue);
@@ -671,7 +678,7 @@ public class AutoFlattenServiceTests
         string name = Guid.NewGuid().ToString();
         await SeedAccountAsync(name, op, credentialKey: "topstep-main");
 
-        ITradingVenue venue = Venue([Pos("CON.F.US.EP.M25", 2)]);
+        ITradingVenue venue = Venue([]);
         A.CallTo(() => venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>([]);
         A.CallTo(() => _log.AppendAsync(A<EventDraft>._, A<CancellationToken>._))
             .Throws(new InvalidOperationException("event log down"));

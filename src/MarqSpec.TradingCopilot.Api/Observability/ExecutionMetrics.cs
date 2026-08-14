@@ -230,7 +230,7 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
             // shape between outcomes and breaks aggregation.
             new KeyValuePair<string, object?>("binding_layer", bindingLayer?.ToString() ?? "none"));
 
-    /// <summary>Counts one evaluated flatten deadline — emitted whatever the outcome, including idle.</summary>
+    /// <summary>Counts one flatten-pass disposition — mostly one evaluated deadline, the exception being <c>unrostered</c> (gh#527), an account the pass never reached. Emitted whatever the outcome, including idle.</summary>
     /// <param name="tier">Which tier evaluated it.</param>
     /// <param name="outcome">One of the <c>Flatten*</c> outcome constants.</param>
     public void RecordFlattenDeadline(FlattenTier tier, string outcome) =>
