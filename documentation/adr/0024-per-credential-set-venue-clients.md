@@ -1,12 +1,17 @@
 # ADR-0024: Per-credential-set venue client lifetimes — one deployment serves several ProjectX logins
 
 **Status:** Proposed · **Date:** 2026-08-14 · **Deciders:** Adam (operator/maintainer)
-**Extends:** [ADR-0016](0016-venue-configuration.md) — makes good on its follow-up *"resolve the venue per account
-rather than a process-wide singleton"*; the "adapters compiled in, firms in settings" decision stands.
-**Relates to:** [ADR-0015](0015-distribution-licensing-governance.md) (composition-root-agnostic seams),
-[ADR-0017](0017-single-operator-data-isolation.md) (one operator, several firm logins — **not** tenancy),
-[ADR-0023](0023-venue-setup-contract.md) (the setup contract whose credential schema this scopes per key). PRD
-`R-17` (venue abstraction), `R-18` (auth). Issues: `gh#95` (this), `gh#92` (the 409
+**Supersedes:** the **process-singleton websocket binding** — the one-credential-per-process client lifetime
+[ADR-0015](0015-distribution-licensing-governance.md) records in its Context ("the client's websocket client is a
+singleton today, one credential per process") and both ADR-0015 and [ADR-0016](0016-venue-configuration.md) flag,
+in their Follow-ups, as the thing to lift. **Only that binding** is superseded; ADR-0015's distribution/licensing
+and ADR-0016's venue-configuration decisions stand.
+**Extends:** [ADR-0016](0016-venue-configuration.md) — makes good on its (and ADR-0015's) follow-up *"resolve the
+venue per account rather than a process-wide singleton"*; the "adapters compiled in, firms in settings" decision
+stands.
+**Relates to:** [ADR-0017](0017-single-operator-data-isolation.md) (one operator, several firm logins — **not**
+tenancy), [ADR-0023](0023-venue-setup-contract.md) (the setup contract whose credential schema this scopes per
+key). PRD `R-17` (venue abstraction), `R-18` (auth). Issues: `gh#95` (this), `gh#92` (the 409
 guard), `gh#91` (env-referenced credentials), `gh#41` / `gh#66` (multi-*venue*, the thing this is **not**).
 
 ## Context

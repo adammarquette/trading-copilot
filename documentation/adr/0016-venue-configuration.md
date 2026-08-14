@@ -104,7 +104,9 @@ stake from the platform would give one account two answers (`gh#60`).
 - Decide how **data-only providers** (Finnhub, Tiingo) are configured — same firm-and-endpoint shape, or their
   own, since they have no accounts and no credentials in the same sense.
 - ADR-0015 asks that S3/S4 stay **composition-root-agnostic** — resolve the venue per account rather than a
-  process-wide singleton. Firm records are per-user data, so this must not reintroduce one.
+  process-wide singleton. Firm records are per-user data, so this must not reintroduce one. — **Taken up by
+  [ADR-0024](0024-per-credential-set-venue-clients.md)** (gh#95): per-`CredentialKey` client lifetimes, with the
+  per-user-data caution carried into its decision 5.
 
 ## Status note — accepted as implemented (2026-07-22)
 
