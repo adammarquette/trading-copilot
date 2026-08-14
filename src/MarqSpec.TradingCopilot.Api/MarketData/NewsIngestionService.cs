@@ -106,12 +106,13 @@ public sealed class NewsIngestionService
                     // Cross-feed ONLY (FindFuzzyMatch skips candidates already carrying `feed`): two near-duplicate
                     // headlines from the SAME feed are distinct items (a follow-up or correction under a new URL), and
                     // unioning `feed` onto the first would be a HashSet no-op that silently drops the second (gh#764 /
-                    // #827 review) -- those fall through to `else` and are stored as their own row.
-                    fuzzyPending.Feeds.Add(feed);
+                    // #827 review) -- those fall through to `else` and are stored as their own row. The merge folds in
+                    // the second provider's tickers and a fuller headline, which each provider tags differently.
+                    fuzzyPending.MergeFuzzy(item, feed);
                 }
                 else
                 {
-                    deduped[key] = new PendingItem(item, [feed]);
+                    deduped[key] = new PendingItem(item, feed);
                 }
             }
         }
@@ -133,8 +134,8 @@ public sealed class NewsIngestionService
         // normally carries the original URL again, and a different-URL copy can still need that stored row as its
         // fuzzy candidate when the current original's metadata (e.g. tickers) is incomplete (gh#764 / #827 review).
         // Exact-key pendings never call FindFuzzyStored, so including them cannot turn an exact match into a fuzzy one.
-        DateTimeOffset earliest = deduped.Values.Min(pending => pending.Item.PublishedAt.ToUniversalTime());
-        DateTimeOffset latest = deduped.Values.Max(pending => pending.Item.PublishedAt.ToUniversalTime());
+        DateTimeOffset earliest = deduped.Values.Min(pending => pending.PublishedAt.ToUniversalTime());
+        DateTimeOffset latest = deduped.Values.Max(pending => pending.PublishedAt.ToUniversalTime());
         DateTimeOffset windowStart = earliest - NewsFuzzyDedup.MaxPublishedGap;
         DateTimeOffset windowEnd = latest + NewsFuzzyDedup.MaxPublishedGap;
         List<NewsRecord> fuzzyCandidates = await _database.News
@@ -157,10 +158,11 @@ public sealed class NewsIngestionService
             }
 
             // Canonical matching found nothing — try the R-2 fuzzy fallback against recently-stored rows. A match
-            // unions provenance onto the surviving row rather than storing a duplicate under the new URL (gh#764).
-            if (FindFuzzyStored(fuzzyCandidates, pending.Item) is { } fuzzy)
+            // folds this pending's provenance, tickers and (if fuller) headline onto the surviving row rather than
+            // storing a duplicate under the new URL (gh#764 / #827 review).
+            if (FindFuzzyStored(fuzzyCandidates, pending) is { } fuzzy)
             {
-                if (UnionProvenance(fuzzy, pending.Feeds, now))
+                if (MergeFuzzyStored(fuzzy, pending, now))
                 {
                     written++;
                 }
@@ -172,11 +174,11 @@ public sealed class NewsIngestionService
             {
                 DedupKey = key,
                 Type = NewsType,
-                Url = pending.Item.Url,
-                Title = pending.Item.Title,
-                Summary = pending.Item.Summary,
-                PublishedAt = pending.Item.PublishedAt.ToUniversalTime(),
-                Tickers = [.. (pending.Item.Tickers ?? []).Distinct(StringComparer.OrdinalIgnoreCase)],
+                Url = pending.Url,
+                Title = pending.Title,
+                Summary = pending.Summary,
+                PublishedAt = pending.PublishedAt.ToUniversalTime(),
+                Tickers = [.. pending.Tickers],
                 SourceFeeds = [.. pending.Feeds],
                 RecordedAt = now,
             });
@@ -216,22 +218,6 @@ public sealed class NewsIngestionService
             }
 
             if (NewsFuzzyDedup.AreLikelyTheSameStory(
-                candidate.Item.Title, candidate.Item.PublishedAt, candidate.Item.Tickers ?? [],
-                item.Title, item.PublishedAt, item.Tickers ?? []))
-            {
-                return candidate;
-            }
-        }
-
-        return null;
-    }
-
-    // The first stored row that is likely the same story as `item` under the R-2 fuzzy rule.
-    private static NewsRecord? FindFuzzyStored(IEnumerable<NewsRecord> candidates, NewsItem item)
-    {
-        foreach (NewsRecord candidate in candidates)
-        {
-            if (NewsFuzzyDedup.AreLikelyTheSameStory(
                 candidate.Title, candidate.PublishedAt, candidate.Tickers,
                 item.Title, item.PublishedAt, item.Tickers ?? []))
             {
@@ -242,5 +228,87 @@ public sealed class NewsIngestionService
         return null;
     }
 
-    private sealed record PendingItem(NewsItem Item, HashSet<string> Feeds);
+    // The first stored row that is likely the same story as `pending` under the R-2 fuzzy rule.
+    private static NewsRecord? FindFuzzyStored(IEnumerable<NewsRecord> candidates, PendingItem pending)
+    {
+        foreach (NewsRecord candidate in candidates)
+        {
+            if (NewsFuzzyDedup.AreLikelyTheSameStory(
+                candidate.Title, candidate.PublishedAt, candidate.Tickers,
+                pending.Title, pending.PublishedAt, pending.Tickers))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    // A cross-pass FUZZY match onto an already-stored row: two providers' renderings of one story under different
+    // URLs, so union both the provenance AND the tickers (each provider tags its own -- gh#359 maps relevance off
+    // Tickers), and adopt the incoming headline when it is a strictly fuller rendering. Distinct from UnionProvenance,
+    // the canonical-URL path, where the same payload was already resolved and only provenance can grow (#827 review).
+    private static bool MergeFuzzyStored(NewsRecord stored, PendingItem pending, DateTimeOffset now)
+    {
+        List<string> feeds = [.. stored.SourceFeeds.Union(pending.Feeds, StringComparer.OrdinalIgnoreCase)];
+        List<string> tickers = [.. stored.Tickers.Union(pending.Tickers, StringComparer.OrdinalIgnoreCase)];
+        bool fuller = NewsFuzzyDedup.IsFullerRendering(stored.Title, pending.Title);
+
+        if (feeds.Count == stored.SourceFeeds.Count && tickers.Count == stored.Tickers.Count && !fuller)
+        {
+            return false;
+        }
+
+        stored.SourceFeeds = feeds;
+        stored.Tickers = tickers;
+        if (fuller)
+        {
+            stored.Title = pending.Title;
+            stored.Summary = pending.Summary;
+        }
+
+        stored.RecordedAt = now;
+        return true;
+    }
+
+    // The accumulating dedup state for one pending row: the winning content plus the provenance, tickers and any
+    // fuller headline folded in from a later feed that matches it. Mutable because a cross-feed fuzzy match merges
+    // metadata in place (#827 review); the canonical exact-URL path only ever grows Feeds.
+    private sealed class PendingItem
+    {
+        public PendingItem(NewsItem item, string feed)
+        {
+            Url = item.Url!;
+            Title = item.Title;
+            Summary = item.Summary;
+            PublishedAt = item.PublishedAt;
+            Tickers = new HashSet<string>(item.Tickers ?? [], StringComparer.OrdinalIgnoreCase);
+            Feeds = [feed];
+        }
+
+        public string Url { get; }
+
+        public string Title { get; private set; }
+
+        public string Summary { get; private set; }
+
+        public DateTimeOffset PublishedAt { get; }
+
+        public HashSet<string> Tickers { get; }
+
+        public HashSet<string> Feeds { get; }
+
+        // Fold a cross-feed fuzzy match in: union its feed and tickers, and adopt its headline when it is a strictly
+        // fuller rendering of ours. A same-feed candidate never reaches here (FindFuzzyMatch skips it).
+        public void MergeFuzzy(NewsItem other, string feed)
+        {
+            Feeds.Add(feed);
+            Tickers.UnionWith(other.Tickers ?? []);
+            if (NewsFuzzyDedup.IsFullerRendering(Title, other.Title))
+            {
+                Title = other.Title;
+                Summary = other.Summary;
+            }
+        }
+    }
 }

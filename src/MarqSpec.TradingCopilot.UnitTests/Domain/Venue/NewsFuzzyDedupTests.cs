@@ -130,6 +130,11 @@ public class NewsFuzzyDedupTests
     [InlineData("Company X says it will not restate earnings", "Company X says it will restate earnings")]
     [InlineData("Market moves up after data release", "Market moves down after data release")]
     [InlineData("Fed may cut rates this year", "Fed cut rates this year")]
+    // Contracted negation must survive tokenization the same as the bare word: "won't"/"doesn't" split on the
+    // apostrophe to {won, t}/{doesn, t} and escaped the polarity guard, merging opposite claims (#827 review).
+    [InlineData("Fed won't cut rates this year", "Fed cut rates this year")]
+    [InlineData("Fed won’t cut rates this year", "Fed cut rates this year")] // curly apostrophe, as real feeds emit
+    [InlineData("Company doesn't miss on earnings", "Company miss on earnings")]
     public void AreLikelyTheSameStory_ShouldNotMergeOppositeSemanticClaims_WhenTickerAndTimeAgree(
         string titleA, string titleB) =>
         // Negation, direction and modality are semantic claims, not stopword noise. Dropping any of these makes
