@@ -1,5 +1,6 @@
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
+import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 
 import { useAccounts } from '../accounts/AccountProvider';
@@ -7,6 +8,7 @@ import { FirmOnboarding } from '../accounts/FirmOnboarding';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
 import type { Destination } from '../navigation/destinations';
+import { AiSpendSettings } from './AiSpendSettings';
 import { RiskSettings } from './RiskSettings';
 
 /**
@@ -69,9 +71,15 @@ export function SettingsSurface({ destination }: SettingsSurfaceProps) {
       ) : null}
 
       {accounts.status === 'ready' ? (
-        <Box sx={{ p: 2 }}>
+        <Stack sx={{ p: 2 }} spacing={4}>
           <RiskSettings key={accounts.activeAccount.id} accountId={accounts.activeAccount.id} />
-        </Box>
+          <Box>
+            <Typography variant="subtitle1" component="h3" sx={{ fontWeight: 600, mb: 1 }}>
+              AI usage &amp; spend
+            </Typography>
+            <AiSpendSettings />
+          </Box>
+        </Stack>
       ) : null}
     </Box>
   );
