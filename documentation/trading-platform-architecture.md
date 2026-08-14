@@ -253,8 +253,12 @@ uniform downstream handling. (ProjectX exposes this as SignalR hubs — see the 
 (the decomposed R-17 abstraction; engineering §3). Finnhub's **alternative data** rides the R-2 non-market template.
 **Implemented:** `MarketDataIngestionHost` (+ `IngestionOptions`, the `Ingestion:Symbols` allowlist) publishes market
 data onto the event backbone — today fed by **ProjectX**, the only `IMarketDataSource` that exists.
-**Not yet built:** the Finnhub market-data adapter. `Integration.Finnhub` currently holds the **news** source alone
-(gh#439); the equities/indices surface is tracked by gh#411 (client gh#495, adapter gh#496).
+**Built, but on the *context* seam:** `FinnhubMarketDataSource` implements **`IContextMarketDataSource`** — not
+`IMarketDataSource` — and is registered in `Program.cs`, so the cross-asset context surface described above is live;
+`Integration.Finnhub` holds it alongside the **news** source (gh#439). That distinction is what keeps the sentence
+above true: a *context* source feeds SPY/QQQ alongside the traded future, while an `IMarketDataSource` is a
+**tradable** quote feed, and ProjectX is still the only one of those. **Still not built:** Finnhub as an
+`IMarketDataSource` — tracked by gh#411 (client gh#495, adapter gh#496).
 
 ### Poller service(s) — durable data (R-1 historical, R-2 soft signals)
 Polls REST endpoints on a configurable interval (R-1: default 60s). **Thin by design** — pollers only **poll,
