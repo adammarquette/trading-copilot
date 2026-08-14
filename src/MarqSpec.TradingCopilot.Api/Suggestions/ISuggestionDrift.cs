@@ -1,7 +1,10 @@
+using System.Linq.Expressions;
 using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace MarqSpec.TradingCopilot.Api.Suggestions;
 
@@ -49,8 +52,12 @@ public interface ISuggestionDrift
     /// <param name="band">The drift tolerance as a price distance (ticks × tick size), computed by the caller.</param>
     /// <param name="now">The current time, supplied by the caller — the transition never reads a clock.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>How many suggestions this call moved to <see cref="SuggestionState.Stale"/>.</returns>
-    Task<int> MarkDriftedStaleAsync(
+    /// <returns>
+    /// The <c>(SuggestionId, UserId)</c> of every suggestion this call moved to <see cref="SuggestionState.Stale"/> —
+    /// so the caller can push a per-owner realtime signal (gh#718). Empty when none drifted; the count is its
+    /// <see cref="System.Collections.Generic.IReadOnlyCollection{T}.Count"/>.
+    /// </returns>
+    Task<IReadOnlyList<SuggestionTransition>> MarkDriftedStaleAsync(
         string instrument, decimal bid, decimal ask, decimal band, DateTimeOffset now, CancellationToken cancellationToken);
 }
 
@@ -64,22 +71,48 @@ public sealed class SuggestionDrift : ISuggestionDrift
     public SuggestionDrift(TradingCopilotDbContext database) => _database = database;
 
     /// <inheritdoc />
-    public Task<int> MarkDriftedStaleAsync(
-        string instrument, decimal bid, decimal ask, decimal band, DateTimeOffset now, CancellationToken cancellationToken) =>
-        _database.Suggestions
+    public async Task<IReadOnlyList<SuggestionTransition>> MarkDriftedStaleAsync(
+        string instrument, decimal bid, decimal ask, decimal band, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // |price - entry| > band, expressed as two symmetric bounds (no Math.Abs) so it translates to SQL; a long
+        // measures against the ask (what it pays), a short against the bid (what it receives). One expression, applied
+        // to BOTH the id read and the update, so they cannot diverge.
+        Expression<Func<Suggestion, bool>> drifted = suggestion =>
+            suggestion.State == SuggestionState.Active
+            && suggestion.Instrument == instrument
+            && ((suggestion.Side == OrderSide.Buy
+                    && (suggestion.EntryPrice < ask - band || suggestion.EntryPrice > ask + band))
+                || (suggestion.Side == OrderSide.Sell
+                    && (suggestion.EntryPrice < bid - band || suggestion.EntryPrice > bid + band)));
+
+        // Recover the (SuggestionId, UserId) of the rows this transition moves so the caller can push a per-owner
+        // realtime signal (gh#718) -- ExecuteUpdate returns only a count. Read-then-update in ONE transaction: the read
+        // captures the ids under the drift predicate, and the update re-applies the SAME predicate so the write stays
+        // the monotonic, prior-state-guarded (Active-only) compare-and-swap it was (gh#546), with StateChangedAt still
+        // stamped in the single UPDATE. Atomicity under real concurrency is proven on Postgres by QA (gh#614); the
+        // in-memory provider runs neither ExecuteUpdate nor a transaction, which is why the seam is faked in unit
+        // tests (gh#530).
+        await using IDbContextTransaction transaction = await _database.Database.BeginTransactionAsync(cancellationToken);
+
+        List<SuggestionTransition> transitioned = await _database.Suggestions
             .IgnoreQueryFilters()
-            .Where(suggestion =>
-                suggestion.State == SuggestionState.Active
-                && suggestion.Instrument == instrument
-                // |price - entry| > band, expressed as two symmetric bounds (no Math.Abs) so it translates to SQL;
-                // a long measures against the ask (what it pays), a short against the bid (what it receives).
-                && ((suggestion.Side == OrderSide.Buy
-                        && (suggestion.EntryPrice < ask - band || suggestion.EntryPrice > ask + band))
-                    || (suggestion.Side == OrderSide.Sell
-                        && (suggestion.EntryPrice < bid - band || suggestion.EntryPrice > bid + band))))
-            .ExecuteUpdateAsync(
-                setters => setters
-                    .SetProperty(suggestion => suggestion.State, SuggestionState.Stale)
-                    .SetProperty(suggestion => suggestion.StateChangedAt, now),
-                cancellationToken);
+            .Where(drifted)
+            .Select(suggestion => new SuggestionTransition(suggestion.Id, suggestion.UserId))
+            .ToListAsync(cancellationToken);
+
+        if (transitioned.Count > 0)
+        {
+            await _database.Suggestions
+                .IgnoreQueryFilters()
+                .Where(drifted)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(suggestion => suggestion.State, SuggestionState.Stale)
+                        .SetProperty(suggestion => suggestion.StateChangedAt, now),
+                    cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return transitioned;
+    }
 }

@@ -322,14 +322,16 @@ public class SuggestionDriftIntegrationTests : IClassFixture<OcoExitTestPostgres
 
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         ISuggestionDrift drift = scope.ServiceProvider.GetRequiredService<ISuggestionDrift>();
-        return await drift.MarkDriftedStaleAsync(instrument, bid, ask, Band, now ?? Now, CancellationToken.None);
+        // gh#718 changed the seam to return the transitioned (SuggestionId, UserId) rows; these tests assert on the
+        // COUNT of the guarded update, so take .Count. (The exact rows recovered are proven by the gh#718 DB-tier test.)
+        return (await drift.MarkDriftedStaleAsync(instrument, bid, ask, Band, now ?? Now, CancellationToken.None)).Count;
     }
 
     private async Task<int> ExpireDueAsync(DateTimeOffset now)
     {
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         ISuggestionExpiry expiry = scope.ServiceProvider.GetRequiredService<ISuggestionExpiry>();
-        return await expiry.ExpireDueAsync(now, CancellationToken.None);
+        return (await expiry.ExpireDueAsync(now, CancellationToken.None)).Count;
     }
 
     /// <summary>Drives <see cref="SuggestionDriftService.ProcessQuotesAsync"/> — discovery + resolve + the guarded

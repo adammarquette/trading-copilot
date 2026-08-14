@@ -71,8 +71,11 @@ public static class StartupTasks
         // split the migrate / create branch above already makes. On a non-relational host (an in-memory test) there
         // is nothing to sweep, so the recovery count is simply zero; the rehydration below still runs (its reads are
         // provider-agnostic). This keeps the ExecuteUpdate off any in-memory path structurally, not by assumption.
+        // The recovery pass needs only the COUNT (carried into the rehydrator's report). It does not push a realtime
+        // signal: no operator connection exists during startup, and the card surface loads current state over REST on
+        // connect (gh#718's push serves the STEADY-STATE sweep + drift, where a client is already listening).
         int expiredOnRecovery = database.Database.IsRelational()
-            ? await scope.ServiceProvider.GetRequiredService<ISuggestionExpiry>().ExpireDueAsync(now, CancellationToken.None)
+            ? (await scope.ServiceProvider.GetRequiredService<ISuggestionExpiry>().ExpireDueAsync(now, CancellationToken.None)).Count
             : 0;
 
         // Rehydrate the wider decision surface (gh#221): bring it back visibly and INERTLY -- observe what returned
