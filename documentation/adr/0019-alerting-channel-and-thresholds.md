@@ -463,3 +463,13 @@ ended.
 The gh#481 QA suite found this, and its pinned assertion **stays pinned** — deliberately. It raises the same key
 twice with no resolve, which is the continuing-incident shape, so collapsing to one page is the intended answer
 there. Its annotation now says so rather than calling it a defect.
+
+## Update (2026-08-14) — a held account the venue roster does not report is metered, not paged (gh#527)
+
+The primary auto-flatten tier gained a disposition (gh#527, [ADR-0013](0013-failure-recovery-model.md)): a held
+account the venue's **live roster does not report** is recorded rather than skipped in silence — `flatten.unrostered`
+on the journal, `outcome="unrostered"` on `trading.flatten.deadlines`. It belongs in the **"dashboard only, never
+pushed"** tier above, **deliberately not paged**: the pass cannot read the account's exposure, so it cannot claim
+risk, and paging on every ~15 s roster hiccup would spend §4's noise budget on a maybe-nothing. The alertable
+signal is the metric — a *persistent* gap is a Grafana rule the operator writes, not a built-in page. (Only the
+primary tier emits it so far; the redundant watchdog and the dead-man's switch are gh#850.)

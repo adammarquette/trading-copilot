@@ -338,4 +338,12 @@ rather than log-only (the gh#370 "journalled but never metered" lesson). It is d
 pass cannot read the account's exposure, so it cannot claim risk, and a page on every roster hiccup would spend the
 [ADR-0019](0019-alerting-channel-and-thresholds.md) noise budget on a maybe-nothing; the observable signal is what
 a rediscovery, or an operator's own Grafana rule, follows. The account is still not flattened — it cannot be from
-here — but it is no longer **invisible**.
+here — but it is no longer invisible **to the primary tier**.
+
+**Scoped to the primary tier — the redundant tiers still share the gap.** The same held-but-unrostered skip is
+still silent in the **redundant watchdog** (gh#187, a bare `continue`) and the **dead-man's switch** (gh#244,
+which filters the account out, so its "silence is the alarm" never learns to expect a report for it) — the two
+tiers whose redundancy exists precisely to catch what the primary misses. This update closes the R-13 gap in the
+primary tier only; widening the signal to the watchdog and giving the dead-man's switch an explicit
+*not-applicable* report is tracked in **gh#850**. Until then the honest statement is the narrow one: the primary
+tier no longer goes quietly inert on an account it holds — the backstops still can.
