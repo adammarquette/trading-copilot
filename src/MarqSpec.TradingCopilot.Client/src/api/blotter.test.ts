@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { getPositions, getRestingOrders } from './blotter';
+import { exitPosition, getPositions, getRestingOrders } from './blotter';
 
 function response(status: number, body?: unknown): Response {
   const text = body === undefined ? '' : JSON.stringify(body);
@@ -179,5 +179,33 @@ describe('getRestingOrders', () => {
     await getRestingOrders('a1');
 
     expect(String(fetchMock.mock.calls[0][0])).toContain('/accounts/a1/orders');
+  });
+});
+
+describe('exitPosition', () => {
+  it('posts to the account-and-instrument exit route', async () => {
+    const fetchMock = stubJson({ outcome: 'Flat', netQuantity: 0 });
+
+    await exitPosition('a1', 'MES');
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/accounts/a1/positions/MES/exit');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
+  });
+
+  it('encodes an instrument that is not URL-safe', async () => {
+    // Venue contract keys carry dots and can carry slashes; an unencoded one would silently change the route.
+    const fetchMock = stubJson({ outcome: 'Flat', netQuantity: 0 });
+
+    await exitPosition('a1', 'CON.F.US/MES.U26');
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('CON.F.US%2FMES.U26');
+  });
+
+  it('surfaces a still-open exit as a failure, not a success', async () => {
+    // The server answers 409 when the venue still reports exposure. Reporting that as done would stop the
+    // operator watching a position that is still live.
+    stubJson({ outcome: 'StillOpen', netQuantity: 2 }, 409);
+
+    expect((await exitPosition('a1', 'MES')).ok).toBe(false);
   });
 });

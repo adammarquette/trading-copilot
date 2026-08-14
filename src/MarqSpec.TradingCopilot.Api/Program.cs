@@ -370,6 +370,7 @@ builder.Services.AddHostedService<AccountEventStreamHost>();
 // with their mark basis (live / settlement re-mark / declared-unknown), so a settlement re-mark is never read
 // as live and an unreachable venue is not shown as a stale live view.
 builder.Services.AddScoped<PositionReconciliationService>();
+builder.Services.AddScoped<PositionExitService>();
 
 // The resting-orders sibling of the positions read (gh#381): venue truth for the working orders standing on an
 // account, including the attached protective bracket and its SIZE. Read-only -- the gate is untouched.

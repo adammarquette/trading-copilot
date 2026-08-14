@@ -95,3 +95,30 @@ export async function getRestingOrders(
 
   return result.ok ? { ok: true, data: toView(result.data, result.data.orders) } : result;
 }
+
+/**
+ * What an exit achieved. Only `Flat` is success — see {@link exitPosition}.
+ */
+export interface PositionExitResult {
+  readonly outcome: string;
+  /** The signed exposure the venue still reports; 0 when flat. */
+  readonly netQuantity: number;
+}
+
+/**
+ * Closes one instrument's position at market (gh#656).
+ *
+ * **Only a verified flat is a success.** The server answers 409 when the close was accepted but the venue still
+ * reports exposure (`StillOpen`), and 409 again when the venue could not be reached (`Unreachable`) — both carry
+ * a body. Treating either as done would stop the operator watching a position that is still live, so a failure
+ * here is rendered, never swallowed.
+ */
+export function exitPosition(
+  accountId: string,
+  instrument: string,
+): Promise<ApiResult<PositionExitResult>> {
+  return request<PositionExitResult>(
+    'POST',
+    `/accounts/${accountId}/positions/${encodeURIComponent(instrument)}/exit`,
+  );
+}
