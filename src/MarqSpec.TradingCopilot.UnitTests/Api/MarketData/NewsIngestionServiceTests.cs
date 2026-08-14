@@ -151,6 +151,29 @@ public class NewsIngestionServiceTests
     }
 
     [Fact]
+    public async Task IngestAsync_ShouldStoreBothAsSeparateRows_WhenOneFeedCarriesTwoSimilarHeadlinesUnderDifferentUrls()
+    {
+        // gh#827 regression. The fuzzy fallback exists for a SECOND feed disagreeing on the canonical URL. Within a
+        // SINGLE feed's pass, two near-duplicate headlines under different URLs are distinct items (a follow-up, a
+        // correction, a re-headline) -- unioning the feed onto the first is a HashSet no-op that silently drops the
+        // second, which the pre-fallback code stored. The fallback must be cross-feed only: a same-feed near-duplicate
+        // falls through to its own row. (These are the exact titles the cross-feed fuzzy test collapses, so the only
+        // thing under test is that ONE feed does not.)
+        await using TradingCopilotDbContext context = Context();
+        INewsSource finnhub = Source(
+            Finnhub,
+            [
+                Item("https://finnhub.example/apple-1", "Apple unveils the iPhone 17 at its fall event", "AAPL"),
+                Item("https://finnhub.example/apple-2", "Apple unveils iPhone 17", "AAPL"),
+            ]);
+
+        await Service(context, finnhub).IngestAsync(Now, CancellationToken.None);
+
+        (await context.News.CountAsync()).Should().Be(
+            2, "two near-duplicate headlines from ONE feed are distinct items -- the fuzzy fallback is cross-feed only");
+    }
+
+    [Fact]
     public async Task IngestAsync_ShouldUnionProvenanceAcrossPasses_WhenTheSameStoryArrivesUnderADifferentUrlLater()
     {
         // The cross-pass half of the fallback: pass one stores the story from Finnhub under URL A; a later pass sees
