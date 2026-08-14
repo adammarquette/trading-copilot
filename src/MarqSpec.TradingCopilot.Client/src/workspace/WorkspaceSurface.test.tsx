@@ -64,6 +64,17 @@ vi.mock('../chart/useExecutionOverlays', () => ({
 const { useFillMarkersMock } = vi.hoisted(() => ({ useFillMarkersMock: vi.fn() }));
 vi.mock('../chart/useFillMarkers', () => ({ useFillMarkers: useFillMarkersMock }));
 
+// The blotter has its own suite (venue-truth bases, protection, the cancel confirmation); here it is stubbed to
+// assert only that the workspace mounts it and hands it the ACTIVE account.
+vi.mock('../blotter/Blotter', () => ({
+  Blotter: (props: { accountId: string }) => (
+    <div data-testid="blotter-stub" data-account={props.accountId} />
+  ),
+}));
+
+const { useOptionalAccountsMock } = vi.hoisted(() => ({ useOptionalAccountsMock: vi.fn() }));
+vi.mock('../accounts/AccountProvider', () => ({ useOptionalAccounts: useOptionalAccountsMock }));
+
 import type { Destination } from '../navigation/destinations';
 import { WorkspaceSurface } from './WorkspaceSurface';
 
@@ -82,6 +93,49 @@ beforeEach(() => {
     unavailable: false,
   });
   useFillMarkersMock.mockReturnValue({ fills: [], stale: false, unavailable: false });
+  useOptionalAccountsMock.mockReturnValue({
+    status: 'ready',
+    activeAccount: { id: 'acct-1' },
+  });
+});
+
+describe('WorkspaceSurface live blotter', () => {
+  it('mounts the blotter for the active account', () => {
+    // gh#656. The destination's own note said the blotter was "still its own card"; this is that card landing.
+    render(<WorkspaceSurface destination={destination} />);
+
+    expect(screen.getByTestId('blotter-stub').getAttribute('data-account')).toBe('acct-1');
+  });
+
+  it('retargets the blotter when the operator switches account', () => {
+    const { rerender } = render(<WorkspaceSurface destination={destination} />);
+    useOptionalAccountsMock.mockReturnValue({
+      status: 'ready',
+      activeAccount: { id: 'acct-2' },
+    });
+
+    rerender(<WorkspaceSurface destination={destination} />);
+
+    expect(screen.getByTestId('blotter-stub').getAttribute('data-account')).toBe('acct-2');
+  });
+
+  it('shows no blotter — and nothing implying flat — before an account resolves', () => {
+    // The same discipline the blotter itself holds: "no account yet" is not "no positions". Rendering an empty
+    // blotter here would state something about venue truth that has not been read.
+    useOptionalAccountsMock.mockReturnValue({ status: 'loading' });
+
+    render(<WorkspaceSurface destination={destination} />);
+
+    expect(screen.queryByTestId('blotter-stub')).toBeNull();
+  });
+
+  it('shows no blotter outside an account provider', () => {
+    useOptionalAccountsMock.mockReturnValue(null);
+
+    render(<WorkspaceSurface destination={destination} />);
+
+    expect(screen.queryByTestId('blotter-stub')).toBeNull();
+  });
 });
 
 describe('WorkspaceSurface', () => {
