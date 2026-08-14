@@ -22,8 +22,10 @@ import { describeSizing } from './gateDecision';
  *
  * **Send transmits the staged row by id.** `takeStagedOrder(orderId)` re-validates fresh and transmits (R-12); it
  * never re-arms or re-sends a proposal, so a resize cannot be undone by this surface. A refused send leaves the
- * ticket staged and the reason on screen — the operator decides whether to cancel. `onDone` fires once the ticket
- * has left this surface (sent or cancelled), so the host can return to the list.
+ * ticket staged and the reason on screen — the operator decides whether to cancel. A refused **cancel** is treated
+ * the same way and never as done: the venue can reject a cancel on an order that has gone live, so the review stays
+ * open with a warning rather than closing as if the order were gone. `onDone` fires only once the ticket has really
+ * left this surface — a confirmed send acknowledged, or a **successful** cancel — so the host returns to the list.
  */
 export interface StagedTicketReviewProps {
   readonly ticket: StagedTicket;
@@ -88,10 +90,28 @@ export function StagedTicketReview({
       return;
     }
     setRefusal(null);
-    void cancelOrder(ticket.orderId).finally(() => {
-      // Cancel is idempotent enough to treat as done regardless — the row is staged, not live. Hand back either way.
-      onDone();
-    });
+    void cancelOrder(ticket.orderId)
+      .then((result) => {
+        if (!result.ok) {
+          // A refused cancel does NOT mean the order is gone. The venue can reject a cancel on an order that has
+          // gone Working/Filled, and a Taking race can land here too (409, no terminal status). Closing the review
+          // as if cancelled would tell the operator there is no order when a live one may exist — so surface it and
+          // keep the review open, always flagging that the order may still be live (#838 review).
+          const detail = result.kind === 'refused' ? result.reason : result.error;
+          setRefusal(
+            `${detail ?? 'The cancel was rejected.'} The order may still be live — check it before retrying.`,
+          );
+          inFlight.current = false;
+          setPending(false);
+          return;
+        }
+        onDone();
+      })
+      .catch(() => {
+        setRefusal('The request failed. The order may still be live; check it before retrying.');
+        inFlight.current = false;
+        setPending(false);
+      });
   }, [begin, onDone, ticket.orderId]);
 
   const sizing = describeSizing(requested, ticket);
