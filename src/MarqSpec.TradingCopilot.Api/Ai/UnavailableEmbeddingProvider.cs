@@ -39,7 +39,15 @@ public sealed class UnavailableEmbeddingProvider : IEmbeddingProvider
     public bool IsAvailable => false;
 
     /// <inheritdoc />
-    public Task<EmbeddingResult> EmbedAsync(string text, CancellationToken cancellationToken)
+    public Task<EmbeddingResult> EmbedAsync(string text, CancellationToken cancellationToken) => Unavailable();
+
+    /// <inheritdoc />
+    public Task<EmbeddingResult> EmbedQueryAsync(string text, CancellationToken cancellationToken) => Unavailable();
+
+    // The single unavailable answer for both the document write path and the retrieval query path (gh#852): a null
+    // vector, announced once. Both entry points share the guard, so a deployment that embeds documents AND runs
+    // semantic queries still logs the "retrieval is OFF" fact once rather than once per method.
+    private Task<EmbeddingResult> Unavailable()
     {
         // Once, not per call: a retrieval loop would otherwise turn a configuration state into a log flood, and
         // a flooding error is one that gets filtered out.

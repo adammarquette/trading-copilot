@@ -332,6 +332,16 @@ builder.Services.Configure<NewsEmbeddingOptions>(builder.Configuration.GetSectio
 builder.Services.AddScoped<NewsEmbeddingService>();
 builder.Services.AddHostedService<NewsEmbeddingHost>();
 
+// The news-embedding similarity READ seam (gh#852, R-2): the query-side counterpart to the write pass above.
+// PgVectorNewsSimilarity ranks stored soft-signal embeddings by pgvector CosineDistance; NewsSemanticSearch embeds
+// the query (search_query) and carries the graceful degrade -- an unavailable provider, a query that will not
+// embed, or a read fault all yield an empty result so the feed never errors. Both SCOPED: they hold the scoped
+// TradingCopilotDbContext (PgVectorNewsSimilarity directly, NewsSemanticSearch through the seam), so a singleton
+// would be a captive dependency failing ValidateScopes at startup (the AiUsageLedger lesson). The CosineDistance
+// read is relational-only (gh#109), so it is exercised by QA #855, not a unit test; the degrade is unit-tested.
+builder.Services.AddScoped<INewsEmbeddingSimilarity, PgVectorNewsSimilarity>();
+builder.Services.AddScoped<NewsSemanticSearch>();
+
 builder.Services.AddScoped<ProtectionMonitorService>();
 builder.Services.AddHostedService<ProtectionMonitorHost>();
 

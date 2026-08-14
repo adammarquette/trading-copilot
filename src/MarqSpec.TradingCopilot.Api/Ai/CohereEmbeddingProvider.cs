@@ -77,7 +77,18 @@ public sealed class CohereEmbeddingProvider : IEmbeddingProvider
     public bool IsAvailable => _options.IsConfigured && _vectorStore.IsPresent;
 
     /// <inheritdoc />
-    public async Task<EmbeddingResult> EmbedAsync(string text, CancellationToken cancellationToken)
+    public Task<EmbeddingResult> EmbedAsync(string text, CancellationToken cancellationToken) =>
+        EmbedAsync(text, "search_document", cancellationToken);
+
+    /// <inheritdoc />
+    public Task<EmbeddingResult> EmbedQueryAsync(string text, CancellationToken cancellationToken) =>
+        EmbedAsync(text, "search_query", cancellationToken);
+
+    // The shared embed path (gh#852). The document write path (search_document) and the retrieval query path
+    // (search_query) differ ONLY in Cohere's input_type, so the whole degrade / meter / parse body is written once
+    // and the two public entry points pick the input type. Behaviour, metering and the null-on-failure contract are
+    // byte-identical on both sides -- the split is the input type and nothing else.
+    private async Task<EmbeddingResult> EmbedAsync(string text, string inputType, CancellationToken cancellationToken)
     {
         if (!_options.IsConfigured)
         {
@@ -98,7 +109,7 @@ public sealed class CohereEmbeddingProvider : IEmbeddingProvider
             {
                 Headers = { Authorization = new("Bearer", _options.ApiKey) },
                 Content = JsonContent.Create(new CohereEmbedRequest(
-                    _options.Model, [text], "search_document", ["float"])),
+                    _options.Model, [text], inputType, ["float"])),
             };
 
             using HttpResponseMessage response = await client.SendAsync(request, cancellationToken);
