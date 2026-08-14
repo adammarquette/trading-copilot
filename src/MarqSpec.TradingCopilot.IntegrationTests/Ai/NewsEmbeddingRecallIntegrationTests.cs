@@ -119,8 +119,14 @@ public sealed class NewsEmbeddingRecallIntegrationTests : IClassFixture<Embeddin
             rows.Add(Row(EmbeddingOwnerKind.SoftSignal, $"soft-{i}", vector));
         }
 
+        // Maintaining the HNSW index incrementally over 15,000 individual inserts is minutes slower than a bulk
+        // rebuild once the rows are in -- so the index the AddEmbeddingStore migration created is dropped for the
+        // seed and rebuilt after, exactly as pgvector's own bulk-load guidance recommends. This is test-seeding
+        // infrastructure only; the query under test still runs against the real, fully-built index below.
+        await DropVectorIndexAsync();
         await SeedAsync(rows);
-        // A fresh table has no planner statistics until ANALYZE (autovacuum) runs; running it explicitly makes
+        await RebuildVectorIndexAsync();
+        // A fresh index has no planner statistics until ANALYZE (autovacuum) runs; running it explicitly makes
         // the planner's plan choice -- and therefore this test's result -- deterministic rather than racing
         // autovacuum's default one-minute naptime.
         await AnalyzeAsync();
@@ -222,6 +228,24 @@ public sealed class NewsEmbeddingRecallIntegrationTests : IClassFixture<Embeddin
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
         await database.Database.ExecuteSqlRawAsync("""ANALYZE "Embeddings";""");
+    }
+
+    // Same index the AddEmbeddingStore migration builds (data dictionary §10) -- dropped and rebuilt around the
+    // seed purely for suite speed (see the call site's remarks); the query under test runs against this exact
+    // definition, fully built, either way.
+    private async Task DropVectorIndexAsync()
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        await database.Database.ExecuteSqlRawAsync("""DROP INDEX IF EXISTS "IX_Embeddings_Vector_Cosine";""");
+    }
+
+    private async Task RebuildVectorIndexAsync()
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        await database.Database.ExecuteSqlRawAsync(
+            """CREATE INDEX "IX_Embeddings_Vector_Cosine" ON "Embeddings" USING hnsw ("Embedding" vector_cosine_ops);""");
     }
 
     private async Task ResetEmbeddingsAsync()
