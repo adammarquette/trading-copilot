@@ -322,3 +322,28 @@ is written; the fill **veto** never regresses, because the trade read is a secon
 **A `Trade` still does not compose**, so the realized P&L still does not reach the gh#746 readers: the native
 bracket's **exit** legs remain untracked (venue-spawned, no `Order` row), and `ProcessFlatAsync` cannot balance a
 round trip from an entry alone. gh#770 therefore stays open, blocked on **gh#731**'s bracket-leg tracking.
+
+## Update (2026-08-14) — a held account the venue roster does not report is recorded, not skipped in silence (gh#527)
+
+The primary tier enumerates the accounts to act on from **our** rows (the credential set this process serves, R-20
+filters bypassed) and matches each against the venue's **live** roster before touching it. A row whose
+`VenueAccountKey` the roster does **not** return was skipped by a bare `continue` — genuinely un-actable (with no
+venue account id there is nothing to read positions from or send a close against), but a safety net going quietly
+inert on an account it holds is the exact failure this ADR forbids, whether the cause is a benign de-provisioning
+or a partial-roster glitch masking real exposure the pass never got to see.
+
+The skip now **records** instead of hiding: a **`flatten.unrostered`** journal event names the account, and the
+`trading.flatten.deadlines` counter meters **`outcome="unrostered"`** so a persistent roster gap is *alertable*
+rather than log-only (the gh#370 "journalled but never metered" lesson). It is deliberately **not paged** — the
+pass cannot read the account's exposure, so it cannot claim risk, and a page on every roster hiccup would spend the
+[ADR-0019](0019-alerting-channel-and-thresholds.md) noise budget on a maybe-nothing; the observable signal is what
+a rediscovery, or an operator's own Grafana rule, follows. The account is still not flattened — it cannot be from
+here — but it is no longer invisible **to the primary tier**.
+
+**Scoped to the primary tier — the redundant tiers still share the gap.** The same held-but-unrostered skip is
+still silent in the **redundant watchdog** (gh#187, a bare `continue`) and the **dead-man's switch** (gh#244,
+which filters the account out, so its "silence is the alarm" never learns to expect a report for it) — the two
+tiers whose redundancy exists precisely to catch what the primary misses. This update closes the R-13 gap in the
+primary tier only; widening the signal to the watchdog and giving the dead-man's switch an explicit
+*not-applicable* report is tracked in **gh#850**. Until then the honest statement is the narrow one: the primary
+tier no longer goes quietly inert on an account it holds — the backstops still can.

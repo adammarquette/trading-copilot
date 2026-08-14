@@ -131,6 +131,14 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     public const string FlattenUnconfigured = "unconfigured";
 
     /// <summary>
+    /// Outcome tag: the pass holds a row for an account the venue's live roster does not report, so it could not be
+    /// evaluated this pass (gh#527). Distinct from the deadline dispositions above — the account was never reached,
+    /// no deadline was read — but recorded on the same series so a persistent roster gap can raise an alert rather
+    /// than living only in the event log (the gh#370 "journalled but never metered" lesson).
+    /// </summary>
+    public const string FlattenUnrostered = "unrostered";
+
+    /// <summary>
     /// Outcome tag: a close attempt came back with exposure still open — a partial fill, a silent reject, or a
     /// faulted call (gh#370). Previously indistinguishable from <see cref="FlattenEscalated"/>, which ADR-0019
     /// separates because escalation means <i>attempts exhausted</i> while this means <i>one attempt bounced</i>.
@@ -222,7 +230,7 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
             // shape between outcomes and breaks aggregation.
             new KeyValuePair<string, object?>("binding_layer", bindingLayer?.ToString() ?? "none"));
 
-    /// <summary>Counts one evaluated flatten deadline — emitted whatever the outcome, including idle.</summary>
+    /// <summary>Counts one flatten-pass disposition — mostly one evaluated deadline, the exception being <c>unrostered</c> (gh#527), an account the pass never reached. Emitted whatever the outcome, including idle.</summary>
     /// <param name="tier">Which tier evaluated it.</param>
     /// <param name="outcome">One of the <c>Flatten*</c> outcome constants.</param>
     public void RecordFlattenDeadline(FlattenTier tier, string outcome) =>
