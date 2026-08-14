@@ -29,6 +29,13 @@ public class NewsFuzzyDedupTests
             .Should().Be(0d);
 
     [Fact]
+    public void TitleSimilarity_ShouldNotCountSingleCharacterAbbreviationFragments_AsSharedWords() =>
+        // "U.S." / "U.K." tokenize to single-character u/s/k, which are dropped -- otherwise every American headline
+        // shares junk tokens with every other (#827 review). Two unrelated headlines share nothing here.
+        NewsFuzzyDedup.TitleSimilarity("U.S. oil rises", "U.K. gas falls")
+            .Should().Be(0d);
+
+    [Fact]
     public void TitleSimilarity_ShouldRankASyndicatedNearDuplicateAboveTheThreshold_AndADistinctStoryBelowIt()
     {
         // The property the whole card rests on: a syndicated near-duplicate clears MinTitleSimilarity while two
@@ -81,4 +88,41 @@ public class NewsFuzzyDedupTests
             "Apple unveils iPhone 17", _published, [],
             "Apple unveils iPhone 17", _published.AddMinutes(1), ["AAPL"])
             .Should().BeFalse("with no ticker to overlap on, the fallback does not fire");
+
+    [Fact]
+    public void AreLikelyTheSameStory_ShouldMergeAFullerReHeadlineOfTheSameStory() =>
+        // The value case the fallback exists for: one provider's headline is a fuller version of the other's -- its
+        // content a superset, nothing divergent -- so it merges even though the URLs (and lengths) differ.
+        NewsFuzzyDedup.AreLikelyTheSameStory(
+            "Apple unveils the new iPhone 17 today", _published, ["AAPL"],
+            "Apple unveils iPhone 17", _published.AddMinutes(2), ["AAPL"])
+            .Should().BeTrue("a fuller re-headline of the same story has no content the shorter one lacks");
+
+    // ---- #827 review: template-collision negatives, close to the boundary, same ticker, minutes apart ----
+
+    [Fact]
+    public void AreLikelyTheSameStory_ShouldNotMergeTwoDistinctMacroReleases_SharingOnlyTheirBoilerplate() =>
+        // The reviewer's boundary negative. Unweighted word overlap scored this 0.75 and merged it; two distinct
+        // macro releases share their boilerplate ("fall ... expected"), not their story ("jobless claims" vs "retail
+        // sales") -- each asserts content the other lacks, so the subset rule refuses.
+        NewsFuzzyDedup.AreLikelyTheSameStory(
+            "U.S. jobless claims fall more than expected", _published, ["ES"],
+            "U.S. retail sales fall more than expected", _published.AddMinutes(4), ["ES"])
+            .Should().BeFalse("two distinct macro releases share their boilerplate, not their story");
+
+    [Fact]
+    public void AreLikelyTheSameStory_ShouldNotMergeTwoCentralBanks_OnAnOtherwiseIdenticalHeadline() =>
+        // Bag-of-words scored this ~0.89 -- ABOVE a genuine near-duplicate -- because only one content word differs.
+        // The subset rule refuses: "Fed" and "ECB" are each content the other lacks, so this is two stories.
+        NewsFuzzyDedup.AreLikelyTheSameStory(
+            "Fed holds rates steady, signals one cut this year", _published, ["ES"],
+            "ECB holds rates steady, signals one cut this year", _published.AddMinutes(5), ["ES"])
+            .Should().BeFalse("two different central banks are two stories, however template-identical the headlines");
+
+    [Fact]
+    public void AreLikelyTheSameStory_ShouldNotMergeTwoSpeakers_OnAnOtherwiseIdenticalHeadline() =>
+        NewsFuzzyDedup.AreLikelyTheSameStory(
+            "Powell says inflation remains too high", _published, ["ES"],
+            "Williams says inflation remains too high", _published.AddMinutes(2), ["ES"])
+            .Should().BeFalse("two different speakers are two stories, not one");
 }
