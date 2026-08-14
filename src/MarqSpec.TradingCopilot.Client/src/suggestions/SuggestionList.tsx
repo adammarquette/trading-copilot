@@ -37,6 +37,8 @@ type LoadState =
 export function SuggestionList({ accountId, referencePrice = null, onArmed }: SuggestionListProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const mounted = useRef(true);
+  // Guards the background refresh (onSuggestion / onResync) against a stale write — see `refresh` / `handlePassed`.
+  const refreshToken = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -78,8 +80,12 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
   // current list rather than nuking a working panel to an error screen — the initial load and the retry own errors.
   const { onSuggestion, onResync } = useRealtime();
   const refresh = useCallback(() => {
+    // A background refresh must never clobber a newer local change. A `handlePassed` optimistic drop — or a later
+    // refresh — bumps the token, so an in-flight read that resolves afterwards with a pre-commit snapshot is
+    // discarded rather than resurrecting a just-passed card (the R-4 decision surface must not flicker a card back).
+    const token = (refreshToken.current += 1);
     void listActionableSuggestions(accountId).then((result) => {
-      if (mounted.current && result.ok) {
+      if (mounted.current && token === refreshToken.current && result.ok) {
         setState({ kind: 'loaded', suggestions: result.data });
       }
     });
@@ -95,6 +101,9 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
    * decision surface, kept in the journal.
    */
   const handlePassed = useCallback((id: string) => {
+    // Invalidate any background refresh already in flight (its snapshot predates this pass's commit), so it cannot
+    // resurrect the dropped card when it resolves — the very flicker this local drop exists to avoid.
+    refreshToken.current += 1;
     setState((current) =>
       current.kind === 'loaded'
         ? {

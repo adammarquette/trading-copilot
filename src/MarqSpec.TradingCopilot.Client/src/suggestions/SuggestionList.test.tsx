@@ -61,6 +61,15 @@ function suggestion(id: string, overrides: Partial<Suggestion> = {}): Suggestion
   };
 }
 
+/** A promise whose resolution the test controls, so a background refresh can be settled OUT OF ORDER. */
+function deferred<T>() {
+  let settle!: (value: T) => void;
+  const promise = new Promise<T>((resolve) => {
+    settle = resolve;
+  });
+  return { promise, settle };
+}
+
 /** Renders and lets the load settle — the list opens on `loading` and resolves in a microtask. */
 async function renderList() {
   const view = renderWithProviders(<SuggestionList accountId="acc-1" />);
@@ -266,5 +275,44 @@ describe('SuggestionList', () => {
     });
 
     expect(screen.getAllByTestId('suggestion-card')).toHaveLength(2);
+  });
+
+  it('a background refresh in flight when a pass commits does not resurrect the passed card', async () => {
+    // The push-triggered refresh reads the actionable list BEFORE the operator's pass on s-1 commits, so its
+    // snapshot still contains s-1. If it resolves last and replaces the list wholesale, the just-passed card
+    // flickers back — the exact regression the local pass-drop exists to avoid, so the refresh token must discard
+    // that stale write.
+    const stale = deferred<Awaited<ReturnType<typeof listActionableSuggestions>>>();
+    listMock
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('s-1'), suggestion('s-2')] }) // initial load
+      .mockImplementationOnce(() => stale.promise); // the push-triggered refresh, still in flight
+
+    await renderList();
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(2);
+
+    // A realtimeSuggestion push starts the background refresh — its read is now in flight, snapshot still has s-1.
+    act(() => {
+      suggestionHandler?.();
+    });
+
+    // The operator passes s-1; it commits and drops locally.
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId('pass-button')[0]);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('pass-skip'));
+    });
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['s-2']);
+
+    // Only now does the stale refresh resolve, carrying its pre-commit snapshot — s-1 must NOT come back.
+    await act(async () => {
+      stale.settle({ ok: true, data: [suggestion('s-1'), suggestion('s-2')] });
+    });
+
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['s-2']);
   });
 });
