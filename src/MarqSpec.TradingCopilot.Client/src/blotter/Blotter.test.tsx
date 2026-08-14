@@ -5,6 +5,7 @@ import {
   type BlotterPosition,
   type BlotterRestingOrder,
   type VenueView,
+  exitPosition,
   getPositions,
   getRestingOrders,
 } from '../api/blotter';
@@ -17,6 +18,7 @@ vi.mock('../api/blotter', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api/blotter')>()),
   getPositions: vi.fn(),
   getRestingOrders: vi.fn(),
+  exitPosition: vi.fn(),
 }));
 
 vi.mock('../realtime/RealtimeProvider', () => ({ useOptionalRealtime: vi.fn() }));
@@ -31,6 +33,7 @@ const positions = vi.mocked(getPositions);
 const restingOrders = vi.mocked(getRestingOrders);
 const realtime = vi.mocked(useOptionalRealtime);
 const cancel = vi.mocked(cancelOrder);
+const exit = vi.mocked(exitPosition);
 const reprice = vi.mocked(repriceOrder);
 
 const LONG: BlotterPosition = {
@@ -113,6 +116,7 @@ beforeEach(() => {
   restingOrders.mockResolvedValue({ ok: true, data: live(PROTECTIVE) });
   wireRealtime();
   cancel.mockResolvedValue({ ok: true, data: undefined });
+  exit.mockResolvedValue({ ok: true, data: { outcome: 'Flat', netQuantity: 0 } });
   reprice.mockResolvedValue({ ok: true, data: undefined });
 });
 
@@ -486,5 +490,62 @@ describe('Blotter', () => {
     await act(async () => {
       release();
     });
+  });
+
+  it('names the position, its size and its protection before exiting it', async () => {
+    // The acceptance criterion, on the most destructive control here: exiting closes real exposure at market, so
+    // the operator is told WHICH position and WHAT it is before it happens -- never a bare "are you sure".
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /exit/i }));
+    });
+
+    const confirmation = screen.getByRole('dialog').textContent ?? '';
+    expect(confirmation).toContain('CON.F.US.MES.U26');
+    expect(confirmation).toContain('2');
+    expect(confirmation.toLowerCase()).toContain('market');
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it('exits only after the confirmation is accepted', async () => {
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /exit/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^exit this position$/i }));
+    });
+
+    expect(exit).toHaveBeenCalledWith('a1', 'CON.F.US.MES.U26');
+  });
+
+  it('reports a still-open exit rather than presenting it as done', async () => {
+    // The distinction the endpoint draws, carried through to the operator: the close was accepted but the venue
+    // still reports exposure. Rendering that as success would stop them watching a live position.
+    exit.mockResolvedValue({ ok: false, kind: 'failed', status: 409, error: 'StillOpen' });
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /exit/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^exit this position$/i }));
+    });
+
+    expect(shown().toLowerCase()).toContain('stillopen');
+  });
+
+  it('re-reads after an exit rather than assuming the position is gone', async () => {
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /exit/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^exit this position$/i }));
+    });
+
+    expect(positions).toHaveBeenCalledTimes(2);
   });
 });

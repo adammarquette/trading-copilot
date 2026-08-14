@@ -14,6 +14,7 @@ import {
   type BlotterPosition,
   type BlotterRestingOrder,
   type VenueView,
+  exitPosition,
   getPositions,
   getRestingOrders,
 } from '../api/blotter';
@@ -70,6 +71,8 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   const [orderView, setOrderView] = useState<VenueView<BlotterRestingOrder> | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [confirming, setConfirming] = useState<BlotterRestingOrder | null>(null);
+  const [exiting, setExiting] = useState<BlotterPosition | null>(null);
+  const [exitFailure, setExitFailure] = useState<string | null>(null);
   // The reprice sheet: the order being repriced, the operator's new entry, and the current market price the R-16
   // fat-finger band re-measures against (there is no server-side quote read, so the operator supplies it — the same
   // posture the suggestion card takes). A refusal from the re-gate stays on the sheet rather than closing it.
@@ -82,6 +85,7 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   const latest = useRef(0);
   /** Synchronous re-entrancy guard -- a `pending` state would not exclude two clicks in one tick. */
   const cancelling = useRef(false);
+  const closing = useRef(false);
   const repricingInFlight = useRef(false);
 
   useEffect(() => {
@@ -193,6 +197,34 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
       });
   }, [repricing, newEntry, market, load]);
 
+  const confirmExit = useCallback(() => {
+    if (exiting === null || closing.current) {
+      return; // closing at market is not idempotent -- never a second attempt from a second click
+    }
+    closing.current = true;
+    const contract = exiting.contract;
+
+    void exitPosition(accountId, contract)
+      .then((result) => {
+        if (!result.ok) {
+          // StillOpen and Unreachable both arrive here. Neither is "done": the position may still be live, and
+          // saying otherwise would stop the operator watching it.
+          setExitFailure(
+            `Exit of ${contract} did NOT complete (${result.kind === 'refused' ? result.reason : result.error}). ` +
+              'The position may still be open — check before walking away.',
+          );
+          return;
+        }
+        setExitFailure(null);
+        setExiting(null);
+      })
+      .finally(() => {
+        closing.current = false;
+        // Re-read either way: venue truth decides what is open, not the outcome of this click.
+        load();
+      });
+  }, [accountId, exiting, load]);
+
   const protectionOf = useCallback(
     (position: BlotterPosition): Protection => {
       // Absence of evidence is not evidence of absence: with no trustworthy orders view, protection is UNKNOWN.
@@ -246,6 +278,9 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
                   {position.contract} · {position.netQuantity} @ {position.averagePrice}
                 </Typography>
                 <ProtectionChip state={protectionOf(position)} />
+                <Button size="small" color="error" onClick={() => setExiting(position)}>
+                  Exit
+                </Button>
               </Box>
             ))}
           </>
@@ -300,6 +335,38 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
           ))
         )}
       </Box>
+      {exitFailure !== null ? <Alert severity="error">{exitFailure}</Alert> : null}
+
+      <Dialog open={exiting !== null} onClose={() => setExiting(null)}>
+        <DialogTitle>Exit this position?</DialogTitle>
+        <DialogContent>
+          {exiting !== null ? (
+            <>
+              {/* Names the position, its size and what will actually happen to it. Closing at market is the
+                  most destructive thing this surface does, so "which one" and "how" are both stated. */}
+              <Typography variant="body2" gutterBottom>
+                <strong>{exiting.contract}</strong> · {exiting.netQuantity} @ {exiting.averagePrice}
+              </Typography>
+              <Typography variant="body2" gutterBottom>
+                This closes the position <strong>at market</strong>, now.
+              </Typography>
+              {protectionOf(exiting) === 'unknown' ? (
+                <Alert severity="warning">
+                  Protection state is unknown for this contract, so what is standing at the venue
+                  cannot be confirmed from here.
+                </Alert>
+              ) : null}
+            </>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setExiting(null)}>Keep it</Button>
+          <Button color="error" variant="contained" onClick={confirmExit}>
+            Exit this position
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={confirming !== null} onClose={() => setConfirming(null)}>
         <DialogTitle>Cancel this resting order?</DialogTitle>
         <DialogContent>
