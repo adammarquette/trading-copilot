@@ -174,6 +174,60 @@ public class NewsIngestionServiceTests
     }
 
     [Fact]
+    public async Task IngestAsync_ShouldUnionTickersFromBothFeeds_WhenTheFuzzyFallbackMergesWithinAPass()
+    {
+        // gh#827 review. A fuzzy merge is cross-PROVIDER by construction -- each feed tags its own metadata. Unioning
+        // provenance but keeping only the first feed's tickers loses signal: gh#359 resolves relevance from Tickers,
+        // so a ticker only Tiingo tagged (SPY -> ES) would never map. The merged row must carry both feeds' tickers.
+        await using TradingCopilotDbContext context = Context();
+        INewsSource finnhub = Source(
+            Finnhub, [Item("https://finnhub.example/apple", "Apple unveils the iPhone 17 at its fall event", "AAPL")]);
+        INewsSource tiingo = Source(
+            Tiingo, [Item("https://tiingo.example/aapl", "Apple unveils iPhone 17", "AAPL", "SPY")]);
+
+        await Service(context, finnhub, tiingo).IngestAsync(Now, CancellationToken.None);
+
+        NewsRecord stored = await context.News.SingleAsync();
+        stored.Tickers.Should().BeEquivalentTo(["AAPL", "SPY"], "a fuzzy merge must not discard the other feed's tickers");
+    }
+
+    [Fact]
+    public async Task IngestAsync_ShouldUnionTickersOntoTheStoredRow_WhenTheFuzzyFallbackMergesAcrossPasses()
+    {
+        // The cross-pass half of the same loss: pass one stores AAPL only; a later pass's different-URL copy also tags
+        // SPY. The stored row must gain SPY, not keep AAPL alone (gh#827 review).
+        await using TradingCopilotDbContext context = Context();
+        NewsIngestionService first = Service(
+            context, Source(Finnhub, [Item("https://finnhub.example/apple", "Apple unveils the iPhone 17 at its fall event", "AAPL")]));
+        await first.IngestAsync(Now, CancellationToken.None);
+
+        NewsIngestionService second = Service(
+            context, Source(Tiingo, [Item("https://tiingo.example/aapl", "Apple unveils iPhone 17", "AAPL", "SPY")]));
+        await second.IngestAsync(Now.AddMinutes(2), CancellationToken.None);
+
+        (await context.News.SingleAsync()).Tickers.Should().BeEquivalentTo(["AAPL", "SPY"]);
+    }
+
+    [Fact]
+    public async Task IngestAsync_ShouldAdoptTheFullerHeadline_WhenAFuzzyMergeReceivesAStrictSuperset()
+    {
+        // "First feed wins its content" kept the POORER title whenever the later feed carried the fuller re-headline --
+        // strictly worse than the pre-PR two-rows outcome. On a fuzzy merge the survivor adopts the incoming
+        // title/summary when its content strictly contains the survivor's (gh#827 review).
+        await using TradingCopilotDbContext context = Context();
+        NewsIngestionService first = Service(
+            context, Source(Finnhub, [Item("https://finnhub.example/apple", "Apple unveils iPhone 17", "AAPL")]));
+        await first.IngestAsync(Now, CancellationToken.None);
+
+        NewsIngestionService second = Service(
+            context, Source(Tiingo, [Item("https://tiingo.example/aapl", "Apple unveils the iPhone 17 at its fall event", "AAPL")]));
+        await second.IngestAsync(Now.AddMinutes(2), CancellationToken.None);
+
+        (await context.News.SingleAsync()).Title.Should().Be(
+            "Apple unveils the iPhone 17 at its fall event", "a fuzzy merge adopts a strictly fuller headline");
+    }
+
+    [Fact]
     public async Task IngestAsync_ShouldUnionProvenanceAcrossPasses_WhenTheSameStoryArrivesUnderADifferentUrlLater()
     {
         // The cross-pass half of the fallback: pass one stores the story from Finnhub under URL A; a later pass sees

@@ -6,7 +6,10 @@ namespace MarqSpec.TradingCopilot.Domain.Venue;
 /// The R-2 <b>fuzzy fallback</b> for cross-source news dedup — <c>title similarity + published-time window + ticker
 /// overlap</c> — used <b>only when canonical-URL matching (<see cref="NewsDedupKey"/>) finds nothing</b> (gh#764).
 /// Finnhub and Tiingo rarely agree on a canonical link, so the same story routinely arrives under two different URLs;
-/// without this fallback it lands as two <c>NewsRecord</c> rows and scores as two pieces of corroborating news.
+/// without this fallback it lands as two <c>NewsRecord</c> rows and scores as two pieces of corroborating news. The
+/// lexical rule catches a <b>truncated / extended</b> re-headline (one title's content a superset of the other's); an
+/// <b>arbitrary rewording</b> — each side rephrasing the other — stays two rows, the safe over-count, pending the
+/// semantic <c>pgvector</c> path (gh#377). See the trade-off paragraph below.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -144,6 +147,20 @@ public static class NewsFuzzyDedup
     public static double TitleSimilarity(string titleA, string titleB) =>
         Similarity(Tokenize(titleA), Tokenize(titleB));
 
+    /// <summary>
+    /// Whether <paramref name="candidate"/> is a <b>strictly fuller</b> rendering of <paramref name="current"/> — its
+    /// content tokens a proper superset of the current title's — so a fuzzy merge can adopt it without losing any
+    /// content the survivor carried (the fix for "first feed wins" keeping the poorer headline, #827 review).
+    /// </summary>
+    /// <param name="current">The survivor's current title.</param>
+    /// <param name="candidate">The incoming title offered as a fuller rendering.</param>
+    /// <returns><see langword="true"/> when the candidate strictly contains the current content and adds to it.</returns>
+    public static bool IsFullerRendering(string current, string candidate)
+    {
+        HashSet<string> currentTokens = Tokenize(current);
+        return currentTokens.Count > 0 && currentTokens.IsProperSubsetOf(Tokenize(candidate));
+    }
+
     private static double Similarity(HashSet<string> a, HashSet<string> b)
     {
         if (a.Count == 0 || b.Count == 0)
@@ -186,6 +203,8 @@ public static class NewsFuzzyDedup
         {
             return tokens;
         }
+
+        title = ExpandContractions(title);
 
         StringBuilder word = new();
         for (int index = 0; index < title.Length; index++)
@@ -230,4 +249,20 @@ public static class NewsFuzzyDedup
         && word.Length == 1
         && index + 1 < title.Length
         && char.IsLetterOrDigit(title[index + 1]);
+
+    // Expands contracted negation/modality so the polarity guard sees it: "won't" split on the apostrophe to
+    // {won, t}, and neither token is "not", so a contracted negative slipped past _semanticModifiers and merged
+    // "Fed won't cut" with "Fed cut" (#827 review). Providers vary between the straight (') and curly (’) apostrophe,
+    // so normalize both. The irregular stems (won't -> will not, can't -> can not, shan't -> shall not) run before the
+    // general "<stem>n't" -> "<stem> not" so they are not mangled to "wo not" / "ca not".
+    private static string ExpandContractions(string title)
+    {
+        string expanded = title.ToLowerInvariant().Replace('’', '\'').Replace('ʼ', '\'');
+        expanded = expanded
+            .Replace("won't", "will not", StringComparison.Ordinal)
+            .Replace("can't", "can not", StringComparison.Ordinal)
+            .Replace("shan't", "shall not", StringComparison.Ordinal)
+            .Replace("ain't", "is not", StringComparison.Ordinal);
+        return expanded.Replace("n't", " not", StringComparison.Ordinal);
+    }
 }
