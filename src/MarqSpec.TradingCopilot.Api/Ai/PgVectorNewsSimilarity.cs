@@ -53,4 +53,24 @@ public sealed class PgVectorNewsSimilarity : INewsEmbeddingSimilarity
             .Select(embedding => new SemanticNeighbor(embedding.OwnerId, embedding.Embedding.CosineDistance(query)))
             .ToListAsync(cancellationToken);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<StoredEmbedding>> GetVectorsAsync(
+        IReadOnlyCollection<string> ownerIds, CancellationToken cancellationToken)
+    {
+        // A plain relational by-owner read of the SoftSignal rows for the requested owners -- no CosineDistance, no
+        // ordering (gh#853). The owner-kind predicate leads, matching the store's (OwnerKind, ...) index. The RANKING
+        // is done in-process by the pure EmbeddingSimilarity helper, so the feed scores its KNOWN window candidates
+        // against the starred set rather than searching for a global nearest set that might miss a recent-but-near
+        // item. Relational-only (the Vector column has no in-memory provider mapping, gh#109), so the read itself is
+        // proven by the paired QA card while the ranking is unit-tested.
+        List<EmbeddingRecord> rows = await _database.Embeddings
+            .Where(embedding => embedding.OwnerKind == EmbeddingOwnerKind.SoftSignal)
+            .Where(embedding => ownerIds.Contains(embedding.OwnerId))
+            .ToListAsync(cancellationToken);
+
+        // Vector -> plain float[] happens in memory: Pgvector.Vector.ToArray is a client call, not translatable, and
+        // keeping the seam's contract a plain float list leaves the domain-side ranking Pgvector-free.
+        return [.. rows.Select(embedding => new StoredEmbedding(embedding.OwnerId, embedding.Embedding.ToArray()))];
+    }
 }
