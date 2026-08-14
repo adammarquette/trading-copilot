@@ -196,8 +196,10 @@ An **epic** (`epic` label) is a **container**, not a unit of work, so it does no
   what GitHub's *Sub-issues progress* field reports. See *Closing an epic* below.
 - The things that actually traverse Current ToDo → In Progress → Review → Done are the **child tasks**, each a
   `feature/<id>_…` branch with (per the QA contract) an independent test task.
-- **Epics are not `Work Estimate`-tagged** — the estimate is a per-task routing signal; a container has no single
-  tier. Its child tasks each carry their own.
+- **Containers are not `Work Estimate`-tagged** — the estimate is a per-task routing signal; a container has no
+  single tier. Its child tasks each carry their own. This binds **anything acting as a container, not only what
+  carries the `epic` label**: a task that decomposes into sub-issues becomes one, and `gh#595` kept a
+  `Work Estimate: 5` for twelve days after it did — routing a top-tier model at a card with no work in it.
 
 ### Closing an epic — the progress bar is not the signal
 
@@ -227,12 +229,11 @@ closed):
 4. Check the checklist wording still reflects current decisions — an epic body written early keeps asserting
    superseded ones (X1's spend task still said *"operator-only"* long after ADR-0015 reversed that premise).
 5. When one child is left, ask **does the container hold scope its children do not?** — not how many are left.
-   If yes it is still a container: keep it, and **strip its `Work Estimate` / `work:*`**, since an estimate
-   routes a model at a card with no work in it. If no, **re-parent the survivors first**, then close it.
+   If yes it is still a container: keep it, and strip its routing labels (*Epics vs. tasks* above). If no,
+   **re-parent the survivors first**, then close it.
 
 *Done is Done* applies to containers too: an epic closed on a green progress bar silently drops whatever its
-checklist still names. Note the *not `Work Estimate`-tagged* rule below binds **any** container, not only
-`epic`-labelled ones — `gh#595` was neither, which is how it kept a `Work Estimate: 5` for twelve days.
+checklist still names.
 
 ## Time-boxing
 
