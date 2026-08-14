@@ -61,6 +61,7 @@ public class AuditTrailIntegrationTests : IClassFixture<FlattenTestPostgresFacto
     {
         HttpClient client = await AuthenticatedClientAsync();
         await EnsureDisengagedAsync(client);
+        VenueFactory.ResetPositions(); // hermetic: no leftover position from a sibling test makes this FlattenAll escalate
         await ClearAuditAsync();
 
         try
