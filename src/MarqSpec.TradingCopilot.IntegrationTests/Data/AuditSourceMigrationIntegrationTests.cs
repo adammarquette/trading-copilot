@@ -70,7 +70,9 @@ public class AuditSourceMigrationIntegrationTests : IAsyncLifetime
                  true, {Guid.NewGuid()}, 'Hidden', 'Orphaned', 'venue connection lost — stop orphaned', {_origin})
             """);
 
-        await migrator.MigrateAsync();
+        // Migrate to exactly the migration under test (not head), so a future migration that also touches
+        // AuditRecords can never shift what this case witnesses.
+        await migrator.MigrateAsync(MigrationUnderTestId(database));
 
         (await ColumnCountAsync(database, "Source")).Should().Be(
             1, "AddAuditSourceForKillAndFlatten must apply over a POPULATED AuditRecords table — an operator's audit "
@@ -98,6 +100,15 @@ public class AuditSourceMigrationIntegrationTests : IAsyncLifetime
         index.Should().BeGreaterThan(
             0, $"{MigrationUnderTest} must exist and must not be the first migration, or this suite proves nothing");
         return migrations[index - 1];
+    }
+
+    /// <summary>The migration under test itself, resolved by name — the target to migrate up to (not head).</summary>
+    private static string MigrationUnderTestId(TradingCopilotDbContext database)
+    {
+        string? id = database.Database.GetMigrations()
+            .FirstOrDefault(migration => migration.EndsWith(MigrationUnderTest, StringComparison.Ordinal));
+        id.Should().NotBeNull($"{MigrationUnderTest} must exist in the model's migration list");
+        return id!;
     }
 
     // Aliased "Value" because that is the column name SqlQuery<T> projects a scalar from; cast to int because
