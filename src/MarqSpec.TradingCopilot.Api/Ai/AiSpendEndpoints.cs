@@ -59,8 +59,11 @@ public static class AiSpendEndpoints
             return Results.BadRequest(new { error = "from must not be after to." });
         }
 
-        // Owner-scoped by the R-20 filter -- the operator's OWN spend (ADR-0015 single-operator), distinct from the
-        // governor's deployment-wide enforcement read (which IgnoreQueryFilters); identical under one operator.
+        // The operator's OWN decision spend over the period (R-20 owner-scoped) -- the "your bill" breakdown. It
+        // deliberately excludes the deployment's SystemOwner embed-infra rows (data-dict §12), so it answers "what did
+        // my decisions cost". That is a DIFFERENT question from "am I about to be paused", which `today` below answers
+        // deployment-wide to match the cap -- the two are not the same figure even under one operator, because the
+        // embed sentinel is a distinct owner. Reads the durable ledger, never the export-only meter (ADR-0002).
         var rows = await database.AiUsage
             .Where(record => record.OccurredAt >= windowFrom && record.OccurredAt <= windowTo)
             .Select(record => new { record.OccurredAt, record.Model, record.EstimatedCostUsd })
@@ -83,11 +86,17 @@ public static class AiSpendEndpoints
             .OrderBy(slice => slice.Day)
             .ToList();
 
-        // Today's spend on the SAME window the governor caps against -- the honest "against the cap" figure (the cap is
-        // per-day, not per-period). Read independently of the requested period so it is correct even when the period
-        // excludes today. The nullable cast keeps an empty window a zero, matching the governor's own read.
+        // Today's spend against the cap, read the SAME way the governor ENFORCES it: DEPLOYMENT-WIDE
+        // (IgnoreQueryFilters -- every owner, including the SystemOwner embed-infra rows), on the Central-day window.
+        // The R-20 filter is crossed here for the same reason TriggerEvaluationService crosses it (gh#448): the cap is
+        // a deployment cost, so "today vs cap" must be apples-to-apples with what actually pauses the co-pilot. An
+        // owner-scoped figure would under-count the continuous embed spend and could read "under cap" while the
+        // governor has already paused proposing -- the exact dishonesty this surface exists to avoid. Read
+        // independently of the requested period so it is correct even when the period excludes today. The nullable
+        // cast keeps an empty window a zero, matching the governor's own read.
         DateTimeOffset todayStart = MarketClock.CentralDayStartUtc(now);
         decimal today = await database.AiUsage
+            .IgnoreQueryFilters()
             .Where(record => record.OccurredAt >= todayStart)
             .Select(record => (decimal?)record.EstimatedCostUsd)
             .SumAsync(cancellationToken) ?? 0m;

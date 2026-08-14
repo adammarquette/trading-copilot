@@ -1,15 +1,18 @@
 namespace MarqSpec.TradingCopilot.Api.Ai;
 
 /// <summary>
-/// The operator's AI spend over a period (gh#741, ADR-0008 / ADR-0015) — read from the durable <c>AIUsage</c> ledger,
-/// never the export-only Prometheus meter (ADR-0002). Owner-scoped (R-20): the operator's OWN bill — "your keys, your
-/// bill" (gh#62). The governor's cap is <b>daily</b>, so <see cref="TodayUsd"/> against <see cref="DailyBudgetUsd"/> is
-/// the live "against the cap" figure; <see cref="TotalUsd"/> is the period's context.
+/// The operator's AI spend (gh#741, ADR-0008 / ADR-0015) — read from the durable <c>AIUsage</c> ledger, never the
+/// export-only Prometheus meter (ADR-0002). <b>Two scopes, deliberately.</b> The <b>period</b> breakdown
+/// (<see cref="TotalUsd"/> / <see cref="ByModel"/> / <see cref="ByDay"/>) is the operator's OWN <i>decision</i> spend —
+/// R-20 owner-scoped, "your keys, your bill" (gh#62) — while <see cref="TodayUsd"/> is <b>deployment-wide</b>, matching
+/// exactly what the governor's daily cap enforces. So <see cref="TodayUsd"/> against <see cref="DailyBudgetUsd"/> is the
+/// honest "against the cap" figure: it cannot read "under cap" while the co-pilot has already been paused by spend the
+/// operator's own decisions did not incur (the continuous embed-infra spend, owned by the SystemOwner sentinel).
 /// </summary>
 /// <param name="From">The inclusive start of the reported period (UTC).</param>
 /// <param name="To">The inclusive end of the reported period (UTC).</param>
 /// <param name="TotalUsd">Total spend over the period.</param>
-/// <param name="TodayUsd">Spend so far on the current Central trading day — the window the daily cap resets on.</param>
+/// <param name="TodayUsd">Deployment-wide spend so far on the current Central trading day — the exact figure the governor's daily cap enforces against (every owner, incl. the SystemOwner embed-infra rows).</param>
 /// <param name="DailyBudgetUsd">The governor's daily cap, or <see langword="null"/> when no cap is configured (inert).</param>
 /// <param name="ByModel">Period spend per model, highest first.</param>
 /// <param name="ByDay">Period spend per Central trading day, earliest first.</param>

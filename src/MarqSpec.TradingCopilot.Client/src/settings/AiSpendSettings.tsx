@@ -16,8 +16,9 @@ import { LoadingState } from '../components/LoadingState';
  * cap the co-pilot stops proposing and says so, and it never blocks manual trading. A pure read — it declares and
  * enforces nothing.
  *
- * The governor's cap is a DAILY budget, so the headline is <b>today's</b> spend against it; the period total is
- * context. Operator-level (R-20), not per-account — so, unlike the risk section, it is not keyed on the active account.
+ * The governor's cap is a DAILY budget, so the headline is <b>today's</b> spend against it — and that figure is
+ * deployment-wide (all AI spend, matching exactly what the cap enforces), while the period breakdown is the operator's
+ * own decision spend. Operator-level, not per-account — so, unlike the risk section, it is not keyed on the account.
  */
 type LoadState =
   | { readonly kind: 'loading' }
@@ -125,6 +126,10 @@ export function AiSpendSettings() {
             unaffected.
           </Typography>
         ) : null}
+        <Typography variant="caption" component="p" sx={{ color: 'text.secondary', mt: 0.5 }}>
+          Today counts all AI spend on this deployment, including background embeddings — the figure
+          the daily cap is enforced against.
+        </Typography>
       </Box>
 
       <Typography variant="body2" sx={{ color: 'text.secondary' }}>
