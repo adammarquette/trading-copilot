@@ -60,6 +60,13 @@ public sealed class AutoFlattenService
     /// <summary>An open position in a product with no configured deadline — a gap that must not stay silent.</summary>
     public const string UnconfiguredEventType = "flatten.unconfigured";
 
+    /// <summary>
+    /// This process holds a row for an account its credential set serves, but the venue's live roster does not
+    /// report it, so the pass could not evaluate its exposure. Recorded rather than skipped in silence (R-13,
+    /// gh#527): a rediscovery concern, kept observable so it can be seen and followed up — never a quiet gap.
+    /// </summary>
+    public const string UnrosteredEventType = "flatten.unrostered";
+
     /// <summary>The audit <c>Detail</c> column's width (data dictionary §12); a longer summary is truncated to fit.</summary>
     private const int MaxDetail = 512;
 
@@ -171,7 +178,12 @@ public sealed class AutoFlattenService
                 VenueAccount? venueAccount = roster.FirstOrDefault(candidate => candidate.Id.Key == account.VenueAccountKey);
                 if (venueAccount is null)
                 {
-                    // The venue no longer reports this account -- a rediscovery concern, not the flatten's. Skip.
+                    // We hold a row for this account but the venue's live roster does not report it, so we cannot
+                    // read its exposure or act on it this pass. A rediscovery concern, not the flatten's -- but the
+                    // safety net must never be quietly inert (R-13, gh#527), so record the skip rather than hiding
+                    // it: the account is named on the journal, and metered so a persistent roster gap can alert.
+                    await JournalUnrosteredAsync(account, now, cancellationToken);
+                    _metrics.RecordFlattenDeadline(FlattenTier.Primary, ExecutionMetrics.FlattenUnrostered);
                     continue;
                 }
 
@@ -520,6 +532,22 @@ public sealed class AutoFlattenService
         });
 
         return _eventLog.AppendAsync(new EventDraft(type, EventSource, occurredAt, payload), cancellationToken);
+    }
+
+    /// <summary>
+    /// Journals the R-13 fact that a held account was absent from the venue's live roster (gh#527), so the skip is
+    /// observable rather than silent. There is no contract or venue account id to carry — the venue never named the
+    /// account — so this records the key we hold and why it was not evaluated, not reusing <see cref="JournalAsync"/>.
+    /// </summary>
+    private Task JournalUnrosteredAsync(Account account, DateTimeOffset occurredAt, CancellationToken cancellationToken)
+    {
+        string payload = JsonSerializer.Serialize(new
+        {
+            account = account.VenueAccountKey,
+            reason = "held account absent from the venue roster; not evaluated this pass",
+        });
+
+        return _eventLog.AppendAsync(new EventDraft(UnrosteredEventType, EventSource, occurredAt, payload), cancellationToken);
     }
 
     /// <summary>
