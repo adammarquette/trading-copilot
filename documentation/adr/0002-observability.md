@@ -37,8 +37,8 @@ Instrument everything with **OpenTelemetry** and export the three pillars to the
 - Minor instrumentation overhead; a **sampling** policy may be needed if trace volume grows.
 
 ## Follow-ups
-- Fix the **event-envelope trace-context fields** (with ADR-0001's envelope schema).
-- **Span conventions** for the agent path: a span per strategy agent and per executor step, so a suggestion's trace shows the full fan-in.
+- ~~Fix the **event-envelope trace-context fields** (with ADR-0001's envelope schema).~~ — **delivered by gh#230**: a single optional W3C `traceparent` field on the envelope, producers stamp it and consumers span-link to it (gh#276).
+- ~~**Span conventions** for the agent path: a span per strategy agent and per executor step, so a suggestion's trace shows the full fan-in.~~ — **delivered by gh#766** (see the Update below).
 - **The LGTM stack is stood up (`gh#231`, 2026-07-26).** Prometheus, Loki, Tempo and Grafana behind an
   **OpenTelemetry Collector**, in `docker-compose.yml` under the **`observability` profile** — off by default, so
   `docker compose up -d` is unchanged and a developer who does not want five extra containers is not blocked
@@ -275,3 +275,27 @@ broken query. A dashboard restored from a pre-gh#505 revision against a newer ap
 JSON keeps the old names in its description as a breadcrumb.
 
 *The rule this makes concrete, twice over: **never transcribe a metric name — emit, scrape, and read it back.***
+
+## Update (2026-08-14, gh#766) — the agent-path spans landed
+
+The Follow-up for **span conventions on the agent path** was never done: a trace showed a suggestion arriving and
+nothing about how it was made. The scan now emits them, on the existing SDK (gh#230) — instrumentation, not new
+plumbing.
+
+**The convention.** There is no multi-agent fan-in in the code, so this ADR's *"strategy agents → executor →
+suggestion"* maps to what actually runs: the **executor** is one sequential scan pass, and each **strategy agent**
+is a fired agent-review trigger. Two spans, both on `TelemetryRegistration.Source` (`ActivityKind.Internal`):
+
+- **`trigger-scan.pass`** — one root per scan pass that has confirmed agent-review work; the parent the agent
+  spans hang under, so a pass is one trace.
+- **`agent.review`** — one child per fired agent-review trigger, opened for the **whole** fire so an abstaining
+  agent is a visible span, never a gap. Attributes: **`trigger.id`** (the strategy), **`agent.outcome`**
+  (`suggest` / `suppress:<reason>` — proposed versus abstained-and-why), and **`suggestion.id`** when the fire
+  stages one.
+
+**It reconciles with spend.** The ledger already stamped `AiUsageRecord.TraceId` from `Activity.Current` — which
+was **null** for every scan-originated LLM call, because no span was ever open. The pass root fixes that: a scan's
+spend rows now carry the pass trace id, so a trace joins to the cost that bought it. Per-*agent* spend attribution
+(which of several fires in one pass a cost belongs to) would need a span id the row does not carry — noted, not
+done. Mechanical fires and the drift/promotion consumers are untouched, as are the consumer span links (gh#276)
+and the `traceparent` envelope (gh#230).

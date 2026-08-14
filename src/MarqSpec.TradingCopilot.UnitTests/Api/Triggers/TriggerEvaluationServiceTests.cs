@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Api.Triggers;
@@ -447,6 +449,100 @@ public class TriggerEvaluationServiceTests
 
         // The advisory is best-effort and sent AFTER the commit (commit-then-notify).
         A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // =====================================================================================================
+    // gh#766 -- the agent-path trace (ADR-0002): the scan pass is ONE root span; each fired agent-review trigger is
+    // a child agent.review span, so a suggestion's trace shows which strategies contributed and where the time went.
+    // There is no multi-agent fan-in in the code -- the "agent" is a fired agent-review trigger, the "executor" the
+    // sequential scan pass. Instrumentation on the existing OTel stack (gh#230), no new plumbing.
+    // =====================================================================================================
+
+    [Fact]
+    public async Task ScanAsync_ShouldEmitAnAgentReviewChildSpanPerFiredTrigger_UnderOnePassRoot()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid triggerA = await AddTriggerAsync(route: TriggerRoute.AgentReview, threshold: 30m, accountId: accountId, size: 1);
+        Guid triggerB = await AddTriggerAsync(route: TriggerRoute.AgentReview, threshold: 40m, accountId: accountId, size: 1);
+        IndicatorReturns(25m); // Below both thresholds -- both agent-review triggers fire this pass
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        List<Activity> spans = [];
+        using ActivityListener listener = CaptureSpans(spans);
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        Activity root = spans.Should().ContainSingle(
+            span => span.OperationName == "trigger-scan.pass", "the scan pass is one root span").Which;
+        List<Activity> agentSpans = spans.Where(span => span.OperationName == "agent.review").ToList();
+        agentSpans.Should().HaveCount(2, "each fired agent-review trigger is its own child span");
+        agentSpans.Should().OnlyContain(
+            span => span.ParentSpanId == root.SpanId,
+            "every agent span is a child of the pass root, so one trace shows the whole fan-in");
+        agentSpans.Select(span => (string?)span.GetTagItem("trigger.id")).Should().BeEquivalentTo(
+            new[] { triggerA.ToString(), triggerB.ToString() },
+            "each agent span carries the strategy (trigger) identity");
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldStillEmitTheAgentSpan_WhenTheAgentAbstains()
+    {
+        // A missing span and a fast span must not look alike (gh#766): an agent that reviews and abstains is still a
+        // visible child span, tagged with the outcome that distinguishes it from a proposal.
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suppress(SuppressReason.NotWorthSurfacing, "not worth surfacing"));
+
+        List<Activity> spans = [];
+        using ActivityListener listener = CaptureSpans(spans);
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        Activity agentSpan = spans.Should().ContainSingle(
+            span => span.OperationName == "agent.review", "an abstaining agent still emits its span").Which;
+        agentSpan.GetTagItem("agent.outcome").Should().Be(
+            "suppress:NotWorthSurfacing",
+            "the span records that the agent reviewed and abstained -- distinguishable from a proposal");
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldLinkTheAgentSpanToTheStagedSuggestion()
+    {
+        // The attribute that closes the loop (gh#766): when a fire stages a suggestion, its agent span carries the
+        // suggestion id, so a trace joins to the row (and, via the ledger's now-populated trace id, to its spend).
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        List<Activity> spans = [];
+        using ActivityListener listener = CaptureSpans(spans);
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion suggestion = await reload.Suggestions.SingleAsync();
+        Activity agentSpan = spans.Should().ContainSingle(span => span.OperationName == "agent.review").Which;
+        agentSpan.GetTagItem("suggestion.id").Should().Be(
+            suggestion.Id.ToString(), "the agent span links to the suggestion the fire produced");
+        agentSpan.GetTagItem("agent.outcome").Should().Be("suggest", "the fire proposed a setup");
+    }
+
+    // Captures every finished Activity from the app's ActivitySource into `into`. A listener that does not force
+    // sampling would let StartActivity return null and prove nothing (the gh#230 test pattern); AllDataAndRecorded
+    // forces real Activities. Disposed per test (via `using`) so it never leaks into a sibling.
+    private static ActivityListener CaptureSpans(List<Activity> into)
+    {
+        string sourceName = TelemetryRegistration.Source.Name;
+        ActivityListener listener = new()
+        {
+            ShouldListenTo = source => source.Name == sourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = activity => { lock (into) { into.Add(activity); } },
+        };
+        ActivitySource.AddActivityListener(listener);
+        return listener;
     }
 
     // (b) The review runs ONCE per arming edge -- a persistently-true condition must not re-review every pass.
