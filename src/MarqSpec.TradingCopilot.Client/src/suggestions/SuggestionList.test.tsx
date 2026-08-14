@@ -336,6 +336,37 @@ describe('SuggestionList', () => {
     expect(screen.getAllByTestId('suggestion-card')).toHaveLength(2);
   });
 
+  it('two pushes in quick succession — the older answer never overwrites the newer', async () => {
+    // A suggestion is issued and quickly superseded, so two realtimeSuggestion pushes fire. If the first refresh's
+    // read is slow and resolves LAST, its staler list replaces the fresher one and the operator reads a superseded
+    // setup as still actionable (R-4) until some later push happens to correct it — which may not come for a while
+    // on a quiet account.
+    const slowFirst = deferred<Awaited<ReturnType<typeof listActionableSuggestions>>>();
+    listMock
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('s-1')] }) // initial load
+      .mockImplementationOnce(() => slowFirst.promise) // push 1 — slow, resolves last
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('s-2')] }); // push 2 — fresher, lands first
+
+    await renderList();
+    act(() => {
+      suggestionHandler?.();
+    });
+    await act(async () => {
+      suggestionHandler?.();
+    });
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['s-2']);
+
+    await act(async () => {
+      slowFirst.settle({ ok: true, data: [suggestion('s-1')] });
+    });
+
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['s-2']);
+  });
+
   it('a background refresh in flight when a pass commits does not resurrect the passed card', async () => {
     // The push-triggered refresh reads the actionable list BEFORE the operator's pass on s-1 commits, so its
     // snapshot still contains s-1. If it resolves last and replaces the list wholesale, the just-passed card
