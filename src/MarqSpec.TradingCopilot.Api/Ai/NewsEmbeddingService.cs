@@ -337,13 +337,10 @@ public sealed class NewsEmbeddingService
             .Select(record => (decimal?)record.EstimatedCostUsd)
             .SumAsync(cancellationToken) ?? 0m;
 
-    // The daily spend window resets at CENTRAL-trading-day midnight, exactly as TriggerEvaluationService's governor
-    // and the daily risk governor / auto-flatten do (a UTC date would split a live CME session).
-    private static DateTimeOffset CentralDayStartUtc(DateTimeOffset now)
-    {
-        DateTime centralMidnight = DateTime.SpecifyKind(MarketClock.ToMarketTime(now).Date, DateTimeKind.Unspecified);
-        return new DateTimeOffset(centralMidnight, MarketClock.CentralTime.GetUtcOffset(centralMidnight)).ToUniversalTime();
-    }
+    // The daily spend window resets at CENTRAL-trading-day midnight, exactly as the governor and the daily risk
+    // governor / auto-flatten do (a UTC date would split a live CME session). The boundary lives on MarketClock
+    // (gh#741) -- the one definition they share; this stays a private alias so the call site reads the same.
+    private static DateTimeOffset CentralDayStartUtc(DateTimeOffset now) => MarketClock.CentralDayStartUtc(now);
 
     /// <summary>
     /// The per-pass AI-spend tally — seeded from the once-per-pass ledger read, then accrued by each embed call so
