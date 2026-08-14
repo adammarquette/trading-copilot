@@ -1106,13 +1106,9 @@ public class TriggerEvaluationService
         });
 
     // The daily spend window resets at CENTRAL-trading-day midnight (mirroring the daily risk governor + auto-flatten,
-    // which use MarketClock precisely because a UTC date splits a live CME session), converted to UTC for the
-    // OccurredAt comparison. Midnight is never in the DST spring-forward gap, so no invalid-local-time guard is needed.
-    private static DateTimeOffset CentralDayStartUtc(DateTimeOffset now)
-    {
-        DateTime centralMidnight = DateTime.SpecifyKind(MarketClock.ToMarketTime(now).Date, DateTimeKind.Unspecified);
-        return new DateTimeOffset(centralMidnight, MarketClock.CentralTime.GetUtcOffset(centralMidnight)).ToUniversalTime();
-    }
+    // which use MarketClock precisely because a UTC date splits a live CME session). The boundary itself now lives on
+    // MarketClock (gh#741) -- the one definition these share; this stays a private alias so the call sites read the same.
+    private static DateTimeOffset CentralDayStartUtc(DateTimeOffset now) => MarketClock.CentralDayStartUtc(now);
 
     private static string ThresholdDedupKey(DateTimeOffset now) =>
         FormattableString.Invariant($"ai-spend:threshold:{MarketClock.ToMarketTime(now):yyyy-MM-dd}");
