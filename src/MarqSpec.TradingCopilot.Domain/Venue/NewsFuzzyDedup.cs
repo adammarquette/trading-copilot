@@ -19,8 +19,9 @@ namespace MarqSpec.TradingCopilot.Domain.Venue;
 /// </para>
 /// <list type="bullet">
 /// <item><description><b>Content tokenization.</b> Titles are lower-cased, split on every non-alphanumeric run, and
-/// stripped of <b>single-character</b> tokens (so <c>U.S.</c> no longer contributes junk <c>u</c>/<c>s</c> tokens to
-/// every American-headline pair) and common <b>stopwords</b>, leaving the <i>content</i> words.</description></item>
+/// stripped of common <b>grammatical</b> stopwords, leaving the <i>content</i> words. Dotted/ampersand abbreviations
+/// stay whole (<c>U.S.</c> → <c>us</c>, <c>S&amp;P</c> → <c>sp</c>) rather than becoming punctuation fragments; single
+/// characters are retained when they are the only entity distinction.</description></item>
 /// <item><description><b>Title similarity ≥ <see cref="MinTitleSimilarity"/></b> — the Sørensen–Dice coefficient over
 /// those content-token sets (order-, punctuation- and case-insensitive) — <b>and</b>
 /// <b>no divergent content</b>: one title's content set must be a <b>subset</b> of the other's. This is the crux.
@@ -31,7 +32,9 @@ namespace MarqSpec.TradingCopilot.Domain.Venue;
 /// words fall</b>: two <i>different</i> stories each assert content the other lacks (Fed↔ECB, Powell↔Williams,
 /// jobless-claims↔retail-sales — content unique to <i>both</i> sides), whereas a cross-provider <i>duplicate</i> is
 /// one headline being a fuller version of the other (its content a superset). So a merge is admitted only when one
-/// side carries <b>no</b> content the other lacks.</description></item>
+/// side carries <b>no</b> content the other lacks. <b>Polarity, direction, time-order and modality are the exception
+/// to \"fuller\"</b>: their sets must match exactly, so <c>will not restate</c> never merges with <c>will restate</c>,
+/// nor <c>may cut</c> with <c>cut</c>.</description></item>
 /// <item><description><b>Published within <see cref="MaxPublishedGap"/></b> — two feeds stamp the same story minutes
 /// apart, not hours; an hour is generous enough for syndication lag yet far tighter than a trading session.</description></item>
 /// <item><description><b>At least one shared ticker</b> (case-insensitive) — the same story is tagged with the same
@@ -58,15 +61,28 @@ public static class NewsFuzzyDedup
     /// <summary>The widest publication-time gap two feeds may stamp the same story with (gh#764).</summary>
     public static readonly TimeSpan MaxPublishedGap = TimeSpan.FromMinutes(60);
 
-    // Common English function words dropped before comparing, so a difference in a stopword alone never blocks a
-    // merge and stopword overlap never inflates similarity. Deliberately only function words -- never content, never
-    // a ticker-bearing noun -- so the set can grow without ever making a DISTINCT story look the same (#827 review).
+    // Common English grammatical glue dropped before comparing, so its overlap never inflates similarity. This list
+    // EXCLUDES polarity, direction, time-order and modality: "not"/"no", "up"/"down", "before"/"after" and
+    // "will"/"may"/"might"/etc. are semantic claims, not noise -- dropping one would make an opposite headline look
+    // identical and violate the precision-first invariant (#827 review).
     private static readonly HashSet<string> _stopwords = new(StringComparer.Ordinal)
     {
         "a", "an", "the", "and", "or", "but", "as", "at", "by", "for", "from", "in", "into", "of", "on", "onto",
-        "to", "with", "amid", "after", "before", "over", "under", "up", "down", "out", "off", "than", "then",
+        "to", "with", "amid", "over", "under", "out", "off", "than", "then",
         "this", "that", "these", "those", "it", "its", "is", "are", "was", "were", "be", "been", "being", "has",
-        "have", "had", "will", "would", "can", "could", "may", "might", "more", "most", "no", "not", "new",
+        "have", "had",
+    };
+
+    // A small, explicit subset of content tokens whose PRESENCE is itself a claim. The ordinary subset rule admits a
+    // fuller headline (A's content is contained in B's); that is correct for descriptive detail, but WRONG for
+    // negation/modality/direction: "will not restate" must never be treated as a fuller spelling of "will restate".
+    // Keep this list deliberately narrow and semantic -- it is a guard against false positives, not a second stoplist.
+    private static readonly HashSet<string> _semanticModifiers = new(StringComparer.Ordinal)
+    {
+        "no", "not", "never", "without",
+        "up", "down", "higher", "lower", "rise", "rises", "rising", "fell", "falls", "falling",
+        "before", "after",
+        "will", "would", "can", "could", "may", "might", "must", "should", "shall",
     };
 
     /// <summary>
@@ -109,13 +125,18 @@ public static class NewsFuzzyDedup
         // stories each carry a content word the other lacks (Fed↔ECB, jobless-claims↔retail-sales); a cross-provider
         // DUPLICATE is one headline being a fuller version of the other. This is what a bare Dice threshold cannot do
         // -- a single-content-word difference is lexically identical to a lightly-reworded true dup (#827 review).
-        return Similarity(a, b) >= MinTitleSimilarity && OneContentSetContainsTheOther(a, b);
+        // One exception: polarity/modality/direction words are claims, not descriptive detail, so they must match
+        // exactly; otherwise "will not restate" would be admitted as a fuller form of "will restate".
+        return Similarity(a, b) >= MinTitleSimilarity
+            && OneContentSetContainsTheOther(a, b)
+            && SemanticModifiersMatch(a, b);
     }
 
     /// <summary>
-    /// The Sørensen–Dice similarity of two titles over their normalized <b>content</b>-word sets (single-character
-    /// tokens and stopwords dropped): <c>2·|A∩B| / (|A|+|B|)</c>, in <c>[0, 1]</c>. Case-, punctuation- and
-    /// word-order-insensitive; <c>0</c> when either title has no content words.
+    /// The Sørensen–Dice similarity of two titles over their normalized <b>content</b>-word sets (grammatical
+    /// stopwords dropped; dotted/ampersand abbreviations normalized, semantic single-character tokens retained):
+    /// <c>2·|A∩B| / (|A|+|B|)</c>, in <c>[0, 1]</c>. Case-, punctuation- and word-order-insensitive; <c>0</c>
+    /// when either title has no content words.
     /// </summary>
     /// <param name="titleA">The first title.</param>
     /// <param name="titleB">The second title.</param>
@@ -139,6 +160,10 @@ public static class NewsFuzzyDedup
     private static bool OneContentSetContainsTheOther(HashSet<string> a, HashSet<string> b) =>
         a.Count > 0 && b.Count > 0 && (a.IsSubsetOf(b) || b.IsSubsetOf(a));
 
+    private static bool SemanticModifiersMatch(HashSet<string> a, HashSet<string> b) =>
+        a.Where(_semanticModifiers.Contains).ToHashSet(StringComparer.Ordinal)
+            .SetEquals(b.Where(_semanticModifiers.Contains));
+
     private static bool SharesTicker(IReadOnlyCollection<string> a, IReadOnlyCollection<string> b)
     {
         if (a.Count == 0 || b.Count == 0)
@@ -151,9 +176,9 @@ public static class NewsFuzzyDedup
     }
 
     // The title's distinct CONTENT words: lower-cased, split on every non-alphanumeric run -- so "Fed: rates held
-    // (again)" and "fed rates held again!" yield the same set -- with single-character tokens and stopwords dropped
-    // (#827 review). Single-character drop kills the "U.S." -> u/s junk that otherwise pads every American-headline
-    // pair; stopword drop keeps a function-word difference from either blocking a merge or inflating similarity.
+    // (again)" and "fed rates held again!" yield the same set. Dotted/ampersand abbreviations are kept whole:
+    // "U.S." -> "us", "U.K." -> "uk", "S&P" -> "sp", rather than losing their entity meaning to punctuation
+    // fragments (#827 review). Grammatical stopwords drop; polarity/direction/time/modality stay as content.
     private static HashSet<string> Tokenize(string title)
     {
         HashSet<string> tokens = new(StringComparer.Ordinal);
@@ -163,11 +188,17 @@ public static class NewsFuzzyDedup
         }
 
         StringBuilder word = new();
-        foreach (char character in title)
+        for (int index = 0; index < title.Length; index++)
         {
+            char character = title[index];
             if (char.IsLetterOrDigit(character))
             {
                 word.Append(char.ToLowerInvariant(character));
+            }
+            else if (IsAbbreviationJoin(character, word, title, index))
+            {
+                // "U.S." / "S&P": join a single-letter abbreviation segment to the next letter rather than
+                // flushing it as separate junk tokens. Whitespace around '&' (ordinary "A & B") fails this guard.
             }
             else if (word.Length > 0)
             {
@@ -186,11 +217,17 @@ public static class NewsFuzzyDedup
 
     private static void AddContentWord(HashSet<string> tokens, string word)
     {
-        // Drop single-character tokens (an abbreviation's fragments -- "U.S." -> u, s) and stopwords; both are noise
-        // that a same-ticker, same-time pair of DIFFERENT stories would otherwise share (#827 review).
-        if (word.Length > 1 && !_stopwords.Contains(word))
+        // Do NOT drop all single-character tokens: an un-dotted "X" can be the only entity distinction between two
+        // otherwise-template headlines. Dotted/ampersand forms are normalized above; grammatical glue alone drops.
+        if (!_stopwords.Contains(word))
         {
             tokens.Add(word);
         }
     }
+
+    private static bool IsAbbreviationJoin(char separator, StringBuilder word, string title, int index) =>
+        separator is '.' or '&'
+        && word.Length == 1
+        && index + 1 < title.Length
+        && char.IsLetterOrDigit(title[index + 1]);
 }
