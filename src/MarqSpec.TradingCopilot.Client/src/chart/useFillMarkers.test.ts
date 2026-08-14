@@ -100,6 +100,36 @@ describe('useFillMarkers', () => {
     await waitFor(() => expect(getFillsMock).toHaveBeenCalledTimes(3));
   });
 
+  it('coalesces a burst of fill pushes into a single re-read — the clearTimeout debounce (gh#727)', async () => {
+    // Fake timers so the assertion is on the coalescing itself, not a wall-clock / waitFor race: with real timers a
+    // broken debounce fires two loads back-to-back, and the transient "2" could be observed by chance either way.
+    vi.useFakeTimers();
+    try {
+      renderHook(() => useFillMarkers('ES'));
+      // The mount load calls getFills synchronously; flush its resolved-promise state update under act.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(getFillsMock).toHaveBeenCalledTimes(1);
+
+      // Two pushes land inside the same coalesce window with no await between them — a real multi-fill burst.
+      act(() => {
+        fillHandler?.();
+        fillHandler?.();
+      });
+
+      // Advance well past the coalesce window (REFRESH_COALESCE_MS = 120) and flush the single coalesced load.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      // 1 mount load + 1 coalesced refresh = 2, never 3. Dropping the clearTimeout in scheduleRefresh makes this 3.
+      expect(getFillsMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('flags the markers stale whenever the socket is not live (R-19)', async () => {
     setRealtime('reconnecting');
 
