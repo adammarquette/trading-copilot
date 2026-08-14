@@ -25,7 +25,7 @@ export interface SuggestionListProps {
   readonly accountId: string;
   /** Live market price, when the host surface has one. Threaded straight through to each card. */
   readonly referencePrice?: number | null;
-  readonly onArmed?: (id: string, ticket: StagedTicket) => void;
+  readonly onArmed?: (suggestion: Suggestion, ticket: StagedTicket) => void;
 }
 
 type LoadState =

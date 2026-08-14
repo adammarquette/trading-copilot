@@ -68,7 +68,7 @@ scripts/claim.sh <issue-id> --check  # report only
 Equivalently, by hand:
 
 ```bash
-git ls-remote --heads origin | grep -E "^.*refs/heads/[a-z]+/<id>_"   # is it already claimed?
+git ls-remote --heads origin | grep -E "(^|[^0-9])<id>([^0-9]|$)"     # is it already claimed? (id as a whole token)
 git worktree list | grep "<id>"                                        # same machine only
 git worktree add .worktrees/<id>_<slug> -b <type>/<id>_<slug> origin/develop
 git push -u origin <type>/<id>_<slug>                                  # <- the claim
@@ -80,9 +80,14 @@ to other machines. The remote branch is the only signal that is both global and 
 embeds the issue number, so claims are greppable with no registry to maintain. The only thing wrong with it today
 is *timing*: it appears at first push, which is after the duplicated work, not before it.
 
-**Match on `/<id>_`, not `_<id>_`.** The separator before the id is a slash. A pattern anchored on an underscore
-matches nothing and reports every claimed issue as free — worse than no check, because it fails in the direction
-that permits the collision.
+**The check matches the id as a whole token in _any_ branch shape (gh#833).** The canonical `<type>/<id>_<title>`
+is preferred, but a claim is a claim whatever tool made the branch — a `wip/<id>-…`, or a Cursor Cloud
+`cursor/<name>-<id>-<suffix>` that carries the id in the **middle** because its harness cannot name branches
+otherwise. So `scripts/claim.sh` matches `<id>` as a **digit-bounded token anywhere** in the name (never `1731`
+for `731`), keeping the naming convention a *convention* rather than a load-bearing parser input. The rule lives
+once in [`scripts/lib/claim-branch-match.sh`](scripts/lib/claim-branch-match.sh), proven by
+[`scripts/tests/claim.test.sh`](scripts/tests/claim.test.sh) in CI. Anchoring on `_<id>_` or only `/<id>_` both
+fail in the direction that permits a collision — reporting a genuinely claimed issue as free.
 
 **Push your commits as you go.** The branch tip is the heartbeat the staleness rule below reads.
 
@@ -108,7 +113,7 @@ and correctly reported **UNCLAIMED**. Four commits were superseded by a parallel
 So before decomposing an issue:
 
 ```bash
-git ls-remote --heads origin | grep -E "/<id>_"     # is the issue you are about to split claimed?
+git ls-remote --heads origin | grep -E "(^|[^0-9])<id>([^0-9]|$)"     # is the issue you are about to split claimed?
 ```
 
 If it is, **say so on the issue and coordinate** — do not card the children as available. The claimant is mid-work

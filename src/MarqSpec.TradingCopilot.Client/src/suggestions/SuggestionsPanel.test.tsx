@@ -1,4 +1,4 @@
-import { act, cleanup, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useAccounts } from '../accounts/AccountProvider';
@@ -131,5 +131,42 @@ describe('SuggestionsPanel — account scoping (R-14, gh#713)', () => {
       'acc-live',
       'acc-practice',
     ]);
+  });
+});
+
+describe('SuggestionsPanel — armed handoff to the order ticket (gh#655)', () => {
+  it('hands a taken suggestion to the review → send surface', async () => {
+    // The "where it comes together" step. The card arms (POST /take stages a ticket) and hands off; the panel must
+    // then present that staged ticket for review and sending — the send does not happen on the card.
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1', 'acc-1')] });
+    vi.mocked(takeSuggestion).mockResolvedValue({
+      ok: true,
+      data: {
+        orderId: 'o1',
+        status: 'Staged',
+        outcome: 'Allowed',
+        approvedQuantity: 1,
+        bindingLayer: null,
+        reason: 'Within every layer.',
+        target: 5248.5,
+      },
+    });
+    accountsMock.mockReturnValue(ready('acc-1'));
+
+    renderWithProviders(<SuggestionsPanel />);
+    await act(async () => {});
+    await screen.findByText(/Rationale for s-1\./);
+
+    // No live-quote surface yet (gh#645/#646), so the operator supplies the market price, then arms.
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('reference-price'), { target: { value: '5231' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('take-button'));
+    });
+
+    // The take staged a ticket; the panel now shows the review → send surface for it, with a send control.
+    expect(await screen.findByTestId('staged-ticket-review')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^send$/i })).toBeTruthy();
   });
 });

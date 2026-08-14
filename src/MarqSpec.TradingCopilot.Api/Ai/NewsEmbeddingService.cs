@@ -327,7 +327,8 @@ public sealed class NewsEmbeddingService
     /// Reads the platform-wide AI spend since <paramref name="windowStart"/> -- the SAME shared floor
     /// <see cref="Triggers.TriggerEvaluationService"/> reads (<c>IgnoreQueryFilters</c>, gh#448: one shared LLM +
     /// embeddings account funds every user, R-20), so a heavy embed backlog and agent-review triage draw against one
-    /// deployment-wide daily cap.
+    /// deployment-wide daily cap. The <c>(decimal?)</c> cast + <c>?? 0m</c> is defensive, not load-bearing: an
+    /// empty-window <c>SUM</c> is a SQL <c>NULL</c> that EF 10 + Npgsql coerce to <c>0</c> on this stack (gh#479).
     /// </summary>
     private async Task<decimal> ReadWindowSpendAsync(DateTimeOffset windowStart, CancellationToken cancellationToken) =>
         await _database.AiUsage
