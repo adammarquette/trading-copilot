@@ -37,7 +37,13 @@ type LoadState =
 export function SuggestionList({ accountId, referencePrice = null, onArmed }: SuggestionListProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const mounted = useRef(true);
-  // Guards the background refresh (onSuggestion / onResync) against a stale write — see `refresh` / `handlePassed`.
+  // Ordering guards for the two reads that write this panel. `mounted` says the component is still on screen; it
+  // says nothing about WHICH account a response belongs to, and the list does not remount on an `accountId` change.
+  //
+  // A foreground `load` is authoritative: it always writes, and it supersedes every read started before it, so a
+  // response for the account just left can never land (R-14) — the same guarantee `useSuggestionZones` states.
+  // A background `refresh` yields to anything newer — a later load, a later refresh, or a pass.
+  const loadGeneration = useRef(0);
   const refreshToken = useRef(0);
 
   useEffect(() => {
@@ -48,8 +54,10 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
   }, []);
 
   const load = useCallback(() => {
+    const generation = (loadGeneration.current += 1);
     void listActionableSuggestions(accountId).then((result) => {
-      if (!mounted.current) {
+      // Drop a superseded load — an account switch started a newer one — or a resolve after unmount.
+      if (!mounted.current || generation !== loadGeneration.current) {
         return;
       }
       setState(
@@ -83,9 +91,19 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
     // A background refresh must never clobber a newer local change. A `handlePassed` optimistic drop — or a later
     // refresh — bumps the token, so an in-flight read that resolves afterwards with a pre-commit snapshot is
     // discarded rather than resurrecting a just-passed card (the R-4 decision surface must not flicker a card back).
+    // It also yields to a newer load: an account switch reads through `load`, which never touched this token, so
+    // the generation is what keeps acc-1's answer off acc-2's panel (R-14).
     const token = (refreshToken.current += 1);
+    // Read, never bump: a refresh that superseded an in-flight load and then failed would write nothing at all —
+    // it keeps a working panel rather than nuking it to an error screen — and the panel would hang on its spinner.
+    const generation = loadGeneration.current;
     void listActionableSuggestions(accountId).then((result) => {
-      if (mounted.current && token === refreshToken.current && result.ok) {
+      if (
+        mounted.current &&
+        generation === loadGeneration.current &&
+        token === refreshToken.current &&
+        result.ok
+      ) {
         setState({ kind: 'loaded', suggestions: result.data });
       }
     });

@@ -226,6 +226,65 @@ describe('SuggestionList', () => {
     expect(listMock.mock.calls.map((call) => call[0])).toEqual(['acc-1', 'acc-2']);
   });
 
+  it('a stale LOAD for the account just left never lands on the new account (R-14)', async () => {
+    // The list does not remount on an `accountId` change — same instance, new props — so the previous account's
+    // read is still in flight and resolves against the new account's panel. `mounted.current` only says the
+    // component is on screen; it says nothing about WHICH account the response belongs to.
+    const stale = deferred<Awaited<ReturnType<typeof listActionableSuggestions>>>();
+    listMock
+      .mockImplementationOnce(() => stale.promise) // acc-1's load, still in flight across the switch
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('b-1', { accountId: 'acc-2' })] });
+
+    const view = renderWithProviders(<SuggestionList accountId="acc-1" />);
+    await act(async () => {});
+    view.rerender(<SuggestionList accountId="acc-2" />);
+    await act(async () => {});
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['b-1']);
+
+    // acc-1's answer arrives last. Rendering it now would put the account just left on a decision surface the
+    // operator reads as the account they are on (R-4, R-14) — so the superseded load must be discarded.
+    await act(async () => {
+      stale.settle({ ok: true, data: [suggestion('a-1', { accountId: 'acc-1' })] });
+    });
+
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['b-1']);
+  });
+
+  it('a stale push REFRESH for the account just left never lands either (R-14)', async () => {
+    // Same hazard on the background path: the refresh token orders refreshes against each other and against a
+    // pass, but an account switch loads through `load` — which never touched that token — so a refresh started
+    // for acc-1 still looked current when it resolved under acc-2.
+    const stale = deferred<Awaited<ReturnType<typeof listActionableSuggestions>>>();
+    listMock
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('a-1', { accountId: 'acc-1' })] })
+      .mockImplementationOnce(() => stale.promise) // the push-triggered refresh for acc-1
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('b-1', { accountId: 'acc-2' })] });
+
+    const view = renderWithProviders(<SuggestionList accountId="acc-1" />);
+    await act(async () => {});
+    act(() => {
+      suggestionHandler?.();
+    });
+
+    view.rerender(<SuggestionList accountId="acc-2" />);
+    await act(async () => {});
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['b-1']);
+
+    await act(async () => {
+      stale.settle({ ok: true, data: [suggestion('a-1', { accountId: 'acc-1' })] });
+    });
+
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['b-1']);
+  });
+
   it('refetches the actionable list on a realtimeSuggestion push (gh#760)', async () => {
     listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1')] });
     await renderList();
