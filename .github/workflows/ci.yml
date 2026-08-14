@@ -78,6 +78,14 @@ jobs:
       - name: Claim branch-match (collision guard)
         run: ./scripts/tests/claim.test.sh
 
+      # gh#839: submodule-guard attributes a pin change to the PR that made it by diffing from the merge-base
+      # (three-dot), not the two branch tips. The old two-dot form false-failed EVERY open PR that never touched
+      # external/ the moment a legitimate bump landed on develop -- the safety alarm ("this reverted a merged fix!")
+      # cried on innocent PRs, all at once. This runs the shared diff rule against a synthetic-gitlink fixture so the
+      # fix cannot regress. No .NET, no network -- sits with the other no-build checks ahead of restore.
+      - name: Submodule-pin merge-base diff (guard correctness)
+        run: ./scripts/tests/submodule-pins.test.sh
+
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 
