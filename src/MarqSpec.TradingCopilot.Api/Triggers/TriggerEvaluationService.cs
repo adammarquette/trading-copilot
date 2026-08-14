@@ -222,8 +222,10 @@ public class TriggerEvaluationService
     /// Reads the platform-wide AI spend since <paramref name="windowStart"/> — the deployment's floor for the governor
     /// (gh#448). Crosses the R-20 default-deny filter with <c>IgnoreQueryFilters</c> (ADR-0008: one shared account
     /// funds every user), so it sums <b>every</b> owner's rows and the <see cref="SystemOwner"/> embed-sentinel rows.
-    /// The nullable projection is mandatory — <c>SUM</c> over an empty window returns <c>NULL</c>, which the
-    /// non-nullable overload would throw on. Virtual so a test can force a read fault to prove the fail-open posture.
+    /// The nullable projection + <c>?? 0m</c> is defensive, not load-bearing: a <c>SUM</c> over an empty window is a
+    /// SQL <c>NULL</c> a provider <i>could</i> surface, but EF 10 + Npgsql coerce it to <c>0</c> on this stack
+    /// (verified, gh#479) — the cast guards a provider that would throw, not one that does here. Virtual so a test
+    /// can force a read fault to prove the fail-open posture.
     /// </summary>
     /// <param name="windowStart">The inclusive start of the spend window (UTC).</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
