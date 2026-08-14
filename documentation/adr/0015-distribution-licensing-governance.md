@@ -125,7 +125,9 @@ deployment model they assumed. `0011`'s tenancy mechanism in particular is still
   per-user credential storage and a **per-user venue client lifetime** — the websocket client is a singleton in
   the current client library. Not required by the decision above; do not foreclose it.
 - Keep **S3/S4 composition-root-agnostic**: resolve the venue per account rather than injecting a process-wide
-  singleton, so both deployment shapes stay reachable at no present cost.
+  singleton, so both deployment shapes stay reachable at no present cost. — **Taken up by
+  [ADR-0024](0024-per-credential-set-venue-clients.md)** (gh#95): per-`CredentialKey` client lifetimes that
+  supersede the singleton binding this bullet flags.
 - **Liability wording is not settled by a licence.** The Apache disclaimer covers software warranty, not
   another person's trading losses. The README disclaimer and the human-in-the-loop design carry that weight; take
   legal advice before any commercial offering.
