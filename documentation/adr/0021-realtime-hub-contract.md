@@ -97,3 +97,13 @@ poll-until-refresh until then.
   `(id, owner)` recovery is proven on container Postgres by QA.
 - The payload is the compact signal by design (id + state), never the full projection: the card surface (gh#654)
   upserts by id and reconciles against the REST read model, which stays the source of truth.
+- **Landed** (gh#760): the **client** now consumes `realtimeSuggestion`. `messages.ts` adds the method and its
+  compact type; `connection.ts` listens and fans out a new **`onSuggestion`** (owner-scoped, live-only — no
+  `sequence`, outside the resume replay, exactly like order / fill); `RealtimeProvider` exposes
+  `onSuggestion(handler)`. On each push the **suggestion panel** (gh#654) and the **chart zones** (gh#727) re-fetch
+  over REST — and on a **reconnect** too (`onResync`), since a live-only push dropped with the socket is never
+  replayed — so a new / superseded suggestion updates both without a poll or reload, while a degraded socket still
+  labels them **stale** (R-19). Refining the note above: the panel reloads the whole **R-4 actionable list** rather
+  than upserting one id, because a supersede changes *set membership* (the incumbent leaves as a new row appears)
+  and the server owns that set; the reload is a **soft** refresh — it updates on success and keeps the current list
+  on a failed background read, so a reconcile *signal* never nukes a working decision surface.
