@@ -128,6 +128,55 @@ public class CohereEmbeddingProviderTests
         handler.LastBody.Should().NotContain(Key, "the key authenticates the request; it is never request content");
     }
 
+    // --- Query vs document input type (gh#852: a retrieval query embeds as search_query, the write path as search_document) ---
+
+    [Fact]
+    public async Task EmbedQueryAsync_ShouldSendSearchQueryInputType_SoAQueryMatchesTheDocumentSide()
+    {
+        StubHandler handler = new() { Body = EmbedResponse() };
+
+        await Provider(handler).EmbedQueryAsync("Fed decision", CancellationToken.None);
+
+        handler.LastBody.Should().Contain(
+            "\"input_type\":\"search_query\"", "a retrieval query must be embedded as search_query, not search_document");
+    }
+
+    [Fact]
+    public async Task EmbedAsync_ShouldStillSendSearchDocumentInputType_AfterTheQuerySplit()
+    {
+        // Regression guard on the extract-a-shared-body refactor (gh#852): the write path's input type must not
+        // change when EmbedQueryAsync is carved out beside it, or every stored vector silently shifts space.
+        StubHandler handler = new() { Body = EmbedResponse() };
+
+        await Provider(handler).EmbedAsync("Fed holds rates", CancellationToken.None);
+
+        handler.LastBody.Should().Contain("\"input_type\":\"search_document\"");
+    }
+
+    [Fact]
+    public async Task EmbedQueryAsync_ShouldReturnTheVector_WhenCohereSucceeds()
+    {
+        StubHandler handler = new() { Body = EmbedResponse() };
+
+        EmbeddingResult result = await Provider(handler).EmbedQueryAsync("Fed decision", CancellationToken.None);
+
+        result.Vector.Should().NotBeNull();
+        result.Vector!.Should().HaveCount(1024);
+        result.Outcome.Should().Be(EmbeddingOutcome.Embedded);
+    }
+
+    [Fact]
+    public async Task EmbedQueryAsync_ShouldReturnNull_WhenRateLimited()
+    {
+        // The query path degrades identically to the document path — a 429 returns null, never throws into retrieval.
+        StubHandler handler = new() { Status = HttpStatusCode.TooManyRequests };
+
+        EmbeddingResult result = await Provider(handler).EmbedQueryAsync("query", CancellationToken.None);
+
+        result.Vector.Should().BeNull("a 429 degrades retrieval to sparse — it must not throw into the caller");
+        result.Outcome.Should().Be(EmbeddingOutcome.RateLimited);
+    }
+
     // --- Fallback to sparse rather than throwing (the core safety property) ---
 
     [Fact]

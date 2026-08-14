@@ -43,11 +43,25 @@ public interface IEmbeddingProvider
     /// </summary>
     bool IsAvailable { get; }
 
-    /// <summary>Embeds <paramref name="text"/>.</summary>
+    /// <summary>Embeds <paramref name="text"/> as a stored <b>document</b> — the write path (gh#377).</summary>
     /// <param name="text">The content to embed.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The result, whose <see cref="EmbeddingResult.Vector"/> is null when embedding is unavailable or failed.</returns>
     Task<EmbeddingResult> EmbedAsync(string text, CancellationToken cancellationToken);
+
+    /// <summary>Embeds <paramref name="text"/> as a retrieval <b>query</b> (gh#852).</summary>
+    /// <remarks>
+    /// A query and the documents it should match land in a shared space only when each side declares its role: the
+    /// query is embedded as <c>search_query</c> here, the write path (<see cref="EmbedAsync"/>) as
+    /// <c>search_document</c>. Embedding a query as a document silently degrades match quality — hence the separate
+    /// method rather than a shared default. The same contract as <see cref="EmbedAsync"/> otherwise holds: the
+    /// <see cref="EmbeddingResult.Vector"/> is <see langword="null"/> when embedding is unavailable or failed, never
+    /// a zero vector, and only a genuine caller cancellation propagates.
+    /// </remarks>
+    /// <param name="text">The query text to embed.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The result, whose <see cref="EmbeddingResult.Vector"/> is null when embedding is unavailable or failed.</returns>
+    Task<EmbeddingResult> EmbedQueryAsync(string text, CancellationToken cancellationToken);
 }
 
 /// <summary>
