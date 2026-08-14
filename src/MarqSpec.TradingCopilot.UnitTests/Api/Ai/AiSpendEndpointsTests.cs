@@ -80,17 +80,21 @@ public class AiSpendEndpointsTests
     }
 
     [Fact]
-    public async Task GetSpendAsync_ShouldScopeToTheOwner()
+    public async Task GetSpendAsync_ShouldScopeThePeriodToTheOwner_ButReadTodayDeploymentWide()
     {
+        // The period breakdown is the operator's OWN decision spend (R-20, ADR-0015). TODAY is deployment-wide,
+        // matching what the governor's cap actually enforces -- it counts every owner (incl. the SystemOwner
+        // embed-infra rows), so "today vs cap" is honest and cannot read "under cap" while the co-pilot has paused.
         await SeedAsync(_operator, "mine", 0.30m, Now);
-        await SeedAsync(Guid.NewGuid(), "theirs", 9.99m, Now); // another operator's row (R-20)
+        await SeedAsync(Guid.NewGuid(), "theirs", 9.99m, Now); // a different owner (e.g. the embed sentinel)
 
         IResult result = await AiSpendEndpoints.GetSpendAsync(
             MonthStart, Now, Now, Context(), new GovernorOptions(), CancellationToken.None);
 
         AiSpendResponse body = Body(result);
-        body.TotalUsd.Should().Be(0.30m, "the R-20 filter scopes the read to the operator's own spend (ADR-0015)");
+        body.TotalUsd.Should().Be(0.30m, "the period breakdown is the operator's own decision spend (R-20)");
         body.ByModel.Should().ContainSingle().Which.Model.Should().Be("mine");
+        body.TodayUsd.Should().Be(10.29m, "today is deployment-wide to match what the governor's daily cap enforces");
     }
 
     [Fact]

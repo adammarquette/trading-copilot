@@ -23,7 +23,7 @@ public static class MarketClock
 
     /// <summary>
     /// The UTC instant at which the market's Central <b>calendar day</b> containing <paramref name="instant"/> began —
-    /// central midnight, converted to UTC. The daily AI-spend governor, the R-5 suggestion throttle and the
+    /// central midnight, converted to UTC. The daily AI-spend governor, the R-4 suggestion throttle and the
     /// auto-flatten all reset on this boundary (a UTC date would split a live CME session), so the definition lives
     /// here, once, rather than in each of them (gh#741).
     /// </summary>
