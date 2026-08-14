@@ -196,8 +196,10 @@ An **epic** (`epic` label) is a **container**, not a unit of work, so it does no
   what GitHub's *Sub-issues progress* field reports. See *Closing an epic* below.
 - The things that actually traverse Current ToDo → In Progress → Review → Done are the **child tasks**, each a
   `feature/<id>_…` branch with (per the QA contract) an independent test task.
-- **Epics are not `Work Estimate`-tagged** — the estimate is a per-task routing signal; a container has no single
-  tier. Its child tasks each carry their own.
+- **Containers are not `Work Estimate`-tagged** — the estimate is a per-task routing signal; a container has no
+  single tier. Its child tasks each carry their own. This binds **anything acting as a container, not only what
+  carries the `epic` label**: a task that decomposes into sub-issues becomes one, and `gh#595` kept a
+  `Work Estimate: 5` for twelve days after it did — routing a top-tier model at a card with no work in it.
 
 ### Closing an epic — the progress bar is not the signal
 
@@ -214,6 +216,7 @@ closed):
 | **Delivered work left parentless** | the bar under-reports; shipped issues sit outside the tree | `gh#155`, `gh#164`, `gh#163`, `gh#161` on D1 |
 | **Delivered work mis-parented** | progress credited to the wrong container | `gh#220` sat under `gh#12` though it delivered X1's audit-records task |
 | **A whole workstream with no checklist line** | shipped work is invisible, and so is its *open* remainder | X1's alerting (`gh#242`–`gh#246`), still carrying `gh#408` / `gh#400` |
+| **A container redundant with its own children** | two cards for one job; the container's estimate makes it look pickup-able | `gh#619` held only `gh#722`, which restated it — closed; `gh#595` also held one child but owns content `gh#597` points at — kept |
 
 **So audit an epic before closing it — diff the body checklist against the sub-issue tree, item by item:**
 
@@ -225,6 +228,9 @@ closed):
    citations** so the body stops needing the same audit next time.
 4. Check the checklist wording still reflects current decisions — an epic body written early keeps asserting
    superseded ones (X1's spend task still said *"operator-only"* long after ADR-0015 reversed that premise).
+5. When one child is left, ask **does the container hold scope its children do not?** — not how many are left.
+   If yes it is still a container: keep it, and strip its routing labels (*Epics vs. tasks* above). If no,
+   **re-parent the survivors first**, then close it.
 
 *Done is Done* applies to containers too: an epic closed on a green progress bar silently drops whatever its
 checklist still names.
