@@ -9,6 +9,7 @@ import {
   cancelConditionalOrder,
   cancelOrder,
   createConditionalOrder,
+  editStagedOrder,
   takeStagedOrder,
 } from '../api/orders';
 import { RiskLayer } from './gateDecision';
@@ -23,8 +24,10 @@ vi.mock('../api/orders', async (importOriginal) => ({
   cancelOrder: vi.fn(),
   createConditionalOrder: vi.fn(),
   cancelConditionalOrder: vi.fn(),
+  editStagedOrder: vi.fn(),
 }));
 
+const edit = vi.mocked(editStagedOrder);
 const arm = vi.mocked(armOrder);
 const take = vi.mocked(takeStagedOrder);
 const cancel = vi.mocked(cancelOrder);
@@ -332,6 +335,125 @@ describe('OrderTicket', () => {
     await click(/^send$/i);
 
     expect(screen.getByTestId('order-ticket').textContent?.toLowerCase()).toContain('sent');
+  });
+});
+
+describe('OrderTicket — edit an armed order in place (gh#828)', () => {
+  /** Opens the edit form on an armed ticket and sets a new size. */
+  async function editSize(quantity: string) {
+    await click(/^edit$/i);
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/quantity/i), { target: { value: quantity } });
+    });
+  }
+
+  it('offers the edit step only once there is a staged order to edit', async () => {
+    await renderTicket();
+    expect(screen.queryByRole('button', { name: /^edit$/i })).toBeNull();
+
+    await click(/arm/i);
+
+    expect(screen.getByRole('button', { name: /^edit$/i })).toBeTruthy();
+  });
+
+  it('re-gates the edit and renders the decision from the EDIT’s response', async () => {
+    // The rule this control exists to preserve (ADR-0007): what transmits is the size the gate approved on the
+    // EDITED row. Carrying the arm's decision forward would show an approval that no longer describes the order.
+    await renderTicket();
+    await click(/arm/i);
+    edit.mockResolvedValue(
+      staged({ outcome: 'Resized', approvedQuantity: 2, reason: 'Per-trade risk allows 2.' }),
+    );
+
+    await editSize('4');
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/entry/i), { target: { value: '5001' } });
+    });
+    await click(/apply/i);
+
+    // The whole proposal travels — the server rebuilds the row from it, so an omitted field is not "unchanged".
+    // Both edited fields go, and the safety stop rides along untouched: R-5's floor is not this form's to move.
+    expect(edit).toHaveBeenCalledWith(
+      'o1',
+      expect.objectContaining({
+        quantity: 4,
+        entry: 5_001,
+        safetyStop: 4_990,
+        referencePrice: 5_000,
+      }),
+    );
+    const decision = screen.getByTestId('gate-decision').textContent ?? '';
+    expect(decision).toContain('Per-trade risk allows 2.');
+    expect(decision).toContain('You asked for 4');
+  });
+
+  it('measures the resize against the EDITED size, never the size originally armed', async () => {
+    // The subtle half: after an edit, "what you asked for" is the edited number. Comparing the gate's answer to
+    // the ORIGINAL proposal would report a resize that did not happen — and a false resize on this surface
+    // teaches the operator to ignore the real one.
+    await renderTicket();
+    await click(/arm/i);
+    edit.mockResolvedValue(
+      staged({ outcome: 'Allowed', approvedQuantity: 2, reason: 'Within every layer.' }),
+    );
+
+    await editSize('2');
+    await click(/apply/i);
+
+    const decision = screen.getByTestId('gate-decision').textContent ?? '';
+    expect(decision).toContain('Sending');
+    expect(decision).not.toContain('You asked for');
+  });
+
+  it('offers no send while an edit is open, so an unapplied change cannot be transmitted', async () => {
+    // A typed-but-unapplied size is not what the server holds. Leaving Send live beside it would transmit the
+    // PRE-edit staged row while the operator is looking at the number they just typed.
+    await renderTicket();
+    await click(/arm/i);
+    expect(screen.getByRole('button', { name: /^send$/i })).toBeTruthy();
+
+    await click(/^edit$/i);
+
+    expect(screen.queryByRole('button', { name: /^send$/i })).toBeNull();
+  });
+
+  it('keeps the pre-edit decision when the edit is REFUSED — nothing changed server-side', async () => {
+    // A refused edit leaves the staged row exactly as armed, so the decision on screen must stay the armed one.
+    // Replacing or clearing it would misreport what a subsequent send would transmit.
+    await renderTicket();
+    await click(/arm/i);
+    edit.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 409,
+      reason: 'Only a staged order can be edited — this one has left staging.',
+    });
+
+    await editSize('9');
+    await click(/apply/i);
+
+    expect(screen.getByTestId('order-ticket').textContent).toContain('left staging');
+    expect(screen.getByTestId('gate-decision').textContent).toContain('Within every layer.');
+  });
+
+  it('does not edit twice when Apply is clicked again before the first resolves', async () => {
+    await renderTicket();
+    await click(/arm/i);
+    let settle!: (value: ReturnType<typeof staged>) => void;
+    edit.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+
+    await editSize('3');
+    await click(/apply/i);
+    await click(/apply/i);
+
+    expect(edit).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      settle(staged({ approvedQuantity: 3 }));
+    });
   });
 });
 
