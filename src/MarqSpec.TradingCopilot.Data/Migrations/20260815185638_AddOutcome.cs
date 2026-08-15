@@ -54,7 +54,9 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
             migrationBuilder.CreateIndex(
                 name: "IX_Outcomes_TradeId",
                 table: "Outcomes",
-                column: "TradeId");
+                column: "TradeId",
+                unique: true,
+                filter: "\"TradeId\" IS NOT NULL");
         }
 
         /// <inheritdoc />

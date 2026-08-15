@@ -467,6 +467,14 @@ public class TradingCopilotDbContext : TenantDbContext
                 .WithMany()
                 .HasForeignKey(o => o.SuggestionId)
                 .OnDelete(DeleteBehavior.SetNull);
+
+            // Zero-or-one Outcome per Trade (data-dictionary ERD `Trade ||--o| Outcome`) -- the DB-enforced 1:1-FK
+            // posture StopPlanRecord.OrderId / SuggestionDisposition.SuggestionId take, so a retry or write-path bug
+            // cannot silently mint two outcomes (one Win, one Loss) for one trade. Filtered to non-null (the outbox
+            // partial-index pattern) so the many untaken-suggestion outcomes -- null TradeId, no trade -- are not
+            // forced unique against each other; Postgres treats those nulls as distinct anyway, but the filter states
+            // the intent and keeps the index off the null rows.
+            outcome.HasIndex(o => o.TradeId).IsUnique().HasFilter("\"TradeId\" IS NOT NULL");
         });
 
         modelBuilder.Entity<RiskProfileRecord>(profile =>

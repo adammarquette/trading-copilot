@@ -1060,7 +1060,9 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
 
                     b.HasIndex("SuggestionId");
 
-                    b.HasIndex("TradeId");
+                    b.HasIndex("TradeId")
+                        .IsUnique()
+                        .HasFilter("\"TradeId\" IS NOT NULL");
 
                     b.ToTable("Outcomes", t =>
                         {
