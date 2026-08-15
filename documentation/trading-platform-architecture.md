@@ -257,8 +257,12 @@ data onto the event backbone — today fed by **ProjectX**, the only `IMarketDat
 `IMarketDataSource` — and is registered in `Program.cs`, so the cross-asset context surface described above is live;
 `Integration.Finnhub` holds it alongside the **news** source (gh#439). That distinction is what keeps the sentence
 above true: a *context* source feeds SPY/QQQ alongside the traded future, while an `IMarketDataSource` is a
-**tradable** quote feed, and ProjectX is still the only one of those. **Still not built:** Finnhub as an
-`IMarketDataSource` — tracked by gh#411 (client gh#495, adapter gh#496).
+**tradable** quote feed, and ProjectX is still the only one of those. **That is a decision, not a gap:** Finnhub's
+free tier publishes no order book, so a print reaching `market.quote` would have to invent a bid and an ask in the
+very stream the stop-promotion and conditional-firing watchers act on. Context therefore took its own capability
+(`ContextTrades`), its own event type (`market.context-trade`) and its own host — same backbone and the same
+supervisor discipline, which also makes *"a context outage never disturbs tradable ingestion"* structural
+(operator decision, 2026-08-02; PRD R-1).
 
 ### Poller service(s) — durable data (R-1 historical, R-2 soft signals)
 Polls REST endpoints on a configurable interval (R-1: default 60s). **Thin by design** — pollers only **poll,
