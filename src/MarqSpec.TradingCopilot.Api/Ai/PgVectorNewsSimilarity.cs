@@ -40,14 +40,34 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// predicate, or dropping the partial index re-opens the starvation. If another owner kind ever needs a
 /// vector-ordered read, it wants <b>its own</b> partial index rather than a shared table-wide one.
 /// </para>
+/// <para>
+/// <b>Current-model by-owner reads (gh#881).</b> The by-owner reads (<c>GetVectorsAsync</c> / <c>GetTopicVectorsAsync</c>)
+/// filter on <c>Model == provider.Model</c>. The store keys on <c>(OwnerKind, OwnerId, Model)</c> and lets a retired
+/// model's vectors coexist until swept, but vectors from different models are not comparable — so an unfiltered
+/// by-owner read returns a duplicate row per owner (the gh#854 last-wins collapse then picks an arbitrary model's
+/// vector), and a cross-model cosine is a meaningless-but-nonzero match. Pinning the current model makes
+/// <c>(OwnerKind, OwnerId)</c> unique in the result and keeps every comparison same-model. After a model change, an
+/// owner embedded only under the old model reads back empty — a bounded degrade — until the embedding pass re-embeds
+/// it under the current model (its candidate query already keys on the current model), so the transition self-heals
+/// rather than ever returning a wrong answer. The now-unread stale rows are harmless; sweeping them is a storage-only
+/// follow-up (gh#889). <c>NearestNewsAsync</c> gains the same current-model filter as part of that follow-up —
+/// deferred here because it must land together with aligning the gh#864 recall guard's provider model to its seed
+/// (that guard drives this method through a provider whose <c>Model</c> is <c>"none"</c>).
+/// </para>
 /// </remarks>
 public sealed class PgVectorNewsSimilarity : INewsEmbeddingSimilarity
 {
     private readonly TradingCopilotDbContext _database;
+    private readonly IEmbeddingProvider _provider;
 
     /// <summary>Creates the similarity read over the scoped database.</summary>
     /// <param name="database">The scoped database.</param>
-    public PgVectorNewsSimilarity(TradingCopilotDbContext database) => _database = database;
+    /// <param name="provider">The embedding provider — its <see cref="IEmbeddingProvider.Model"/> scopes the by-owner reads to the current model's vectors (gh#881).</param>
+    public PgVectorNewsSimilarity(TradingCopilotDbContext database, IEmbeddingProvider provider)
+    {
+        _database = database;
+        _provider = provider;
+    }
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<SemanticNeighbor>> NearestNewsAsync(
@@ -78,18 +98,21 @@ public sealed class PgVectorNewsSimilarity : INewsEmbeddingSimilarity
         IReadOnlyCollection<string> topicNames, CancellationToken cancellationToken) =>
         ReadVectorsAsync(EmbeddingOwnerKind.Topic, topicNames, cancellationToken);
 
-    // A plain relational by-owner read of one owner kind's rows for the requested owners -- no CosineDistance, no
-    // ordering (gh#853, gh#854). The owner-kind predicate leads, matching the store's (OwnerKind, ...) index. The
-    // RANKING is done in-process by the pure EmbeddingSimilarity helper, so the caller scores its KNOWN candidates
-    // rather than searching for a global nearest set that might miss a recent-but-near item. Relational-only (the
-    // Vector column has no in-memory provider mapping, gh#109), so the read itself is proven by the paired QA card
-    // while the ranking is unit-tested. One helper serves both the SoftSignal (news) and Topic reads; the
-    // EmbeddingOwnerKind enum stays inside this Api-tier impl and never leaks into the Domain seam.
+    // A plain relational by-owner read of one owner kind's CURRENT-MODEL rows for the requested owners -- no
+    // CosineDistance, no ordering (gh#853, gh#854; the Model == provider.Model filter is gh#881). The owner-kind
+    // predicate leads, matching the store's (OwnerKind, ...) index; the model predicate makes (OwnerKind, OwnerId)
+    // unique in the result (the key is (OwnerKind, OwnerId, Model)), so a model change can't return a duplicate row
+    // per owner or a cross-model vector. The RANKING is done in-process by the pure EmbeddingSimilarity helper, so
+    // the caller scores its KNOWN candidates rather than searching for a global nearest set that might miss a
+    // recent-but-near item. Relational-only (the Vector column has no in-memory provider mapping, gh#109), so the
+    // read itself is proven by the paired QA card while the ranking is unit-tested. One helper serves both the
+    // SoftSignal (news) and Topic reads; the EmbeddingOwnerKind enum stays inside this Api-tier impl.
     private async Task<IReadOnlyList<StoredEmbedding>> ReadVectorsAsync(
         EmbeddingOwnerKind ownerKind, IReadOnlyCollection<string> ownerIds, CancellationToken cancellationToken)
     {
         List<EmbeddingRecord> rows = await _database.Embeddings
             .Where(embedding => embedding.OwnerKind == ownerKind)
+            .Where(embedding => embedding.Model == _provider.Model)
             .Where(embedding => ownerIds.Contains(embedding.OwnerId))
             .ToListAsync(cancellationToken);
 
