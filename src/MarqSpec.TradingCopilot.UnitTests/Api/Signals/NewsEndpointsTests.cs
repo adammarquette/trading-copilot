@@ -1,10 +1,14 @@
+using FakeItEasy;
+using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Api.Signals;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Signals;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Signals;
@@ -33,6 +37,31 @@ public class NewsEndpointsTests
     private static int StatusOf(IResult result) => ((IStatusCodeHttpResult)result).StatusCode ?? 0;
 
     private static NewsFeedResponse FeedOf(IResult result) => (NewsFeedResponse)((IValueHttpResult)result).Value!;
+
+    // A real SemanticSalienceAxis over fakes (it is sealed, so it cannot be faked directly). Default: an unavailable
+    // provider -> an empty axis, i.e. the pre-#853 categorical-only feed. `available: true` with a `vectors` store
+    // scores candidates against the stars via the pure helper (the seam is faked; the real pgvector read is QA-tier).
+    private static SemanticSalienceAxis Axis(
+        bool available = false, IReadOnlyDictionary<string, IReadOnlyList<float>>? vectors = null)
+    {
+        IReadOnlyDictionary<string, IReadOnlyList<float>> store =
+            vectors ?? new Dictionary<string, IReadOnlyList<float>>(StringComparer.Ordinal);
+        IEmbeddingProvider provider = A.Fake<IEmbeddingProvider>();
+        A.CallTo(() => provider.IsAvailable).Returns(available);
+        INewsEmbeddingSimilarity similarity = A.Fake<INewsEmbeddingSimilarity>();
+        A.CallTo(() => similarity.GetVectorsAsync(A<IReadOnlyCollection<string>>._, A<CancellationToken>._))
+            .ReturnsLazily((IReadOnlyCollection<string> ids, CancellationToken _) =>
+            {
+                IReadOnlyList<StoredEmbedding> hits =
+                    [.. ids.Where(store.ContainsKey).Select(id => new StoredEmbedding(id, store[id]))];
+                return hits;
+            });
+        return new SemanticSalienceAxis(provider, similarity, NullLogger<SemanticSalienceAxis>.Instance);
+    }
+
+    private static IReadOnlyDictionary<string, IReadOnlyList<float>> Vectors(
+        params (string OwnerId, float[] Vector)[] entries) =>
+        entries.ToDictionary(entry => entry.OwnerId, entry => (IReadOnlyList<float>)entry.Vector, StringComparer.Ordinal);
 
     private async Task SeedNewsAsync(
         string dedupKey,
@@ -155,7 +184,7 @@ public class NewsEndpointsTests
         await SeedNewsAsync("newer", _t.AddMinutes(5), instruments: ["NQ"]);
 
         await using TradingCopilotDbContext read = Context();
-        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, default));
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
 
         feed.Items.Select(item => item.DedupKey).Should().Equal("newer", "older"); // equal base -> recency
     }
@@ -169,7 +198,7 @@ public class NewsEndpointsTests
         await RateAsync("es-seed"); // star a prior ES story
 
         await using TradingCopilotDbContext read = Context();
-        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, default));
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
 
         feed.Items.First().DedupKey.Should().Be("es-fresh"); // starred-similar beats mere recency
         feed.Items.Should().Contain(item => item.DedupKey == "nq-newer"); // unrelated item still visible (no bubble)
@@ -182,7 +211,7 @@ public class NewsEndpointsTests
         await RateAsync("item");
 
         await using TradingCopilotDbContext read = Context();
-        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, default));
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
 
         feed.Items.Single(item => item.DedupKey == "item").Feedback.Should().Be(SoftSignalKind.Star);
     }
@@ -195,7 +224,7 @@ public class NewsEndpointsTests
         await RateAsync("es-seed");
 
         await using TradingCopilotDbContext read = Context();
-        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, default));
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
 
         NewsFeedItemResponse boosted = feed.Items.Single(item => item.DedupKey == "es-fresh");
         boosted.Multiplier.Should().BeGreaterThan(1.0);
@@ -212,9 +241,92 @@ public class NewsEndpointsTests
         }
 
         await using TradingCopilotDbContext read = Context();
-        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(2, read, _options, default));
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(2, read, _options, Axis(), default));
 
         feed.Items.Should().HaveCount(2);
+    }
+
+    // ---- semantic-embedding axis (gh#853) ----
+
+    [Fact]
+    public async Task Feed_RanksASemanticallySimilarItem_WithNoSharedCategoricalDimension()
+    {
+        // The operator stars an ES story; the target shares NO instrument/topic/source with it, so categorically it is
+        // unrelated. Its embedding is near the star's -> its multiplier rises on the semantic axis alone, with a
+        // SemanticEmbedding reason, and it outranks a categorically-identical but semantically-unrelated peer.
+        await SeedNewsAsync("star-seed", _t.AddDays(-1), instruments: ["ES"]);
+        await SeedNewsAsync("sem-target", _t, instruments: ["NQ"]);
+        await SeedNewsAsync("plain", _t.AddMinutes(1), instruments: ["NQ"]);
+        await RateAsync("star-seed");
+
+        SemanticSalienceAxis axis = Axis(available: true, vectors: Vectors(
+            ("star-seed", new[] { 1f, 0f }),
+            ("sem-target", new[] { 1f, 0f }),  // same direction as the star -> near
+            ("plain", new[] { 0f, 1f })));     // orthogonal -> far
+
+        await using TradingCopilotDbContext read = Context();
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, axis, default));
+
+        NewsFeedItemResponse boosted = feed.Items.Single(item => item.DedupKey == "sem-target");
+        boosted.Multiplier.Should().BeGreaterThan(1.0);
+        boosted.Reasons.Should().Contain(reason => reason.Dimension == nameof(SalienceDimension.SemanticEmbedding));
+
+        NewsFeedItemResponse plain = feed.Items.Single(item => item.DedupKey == "plain");
+        boosted.Salience.Should().BeGreaterThan(plain.Salience); // semantic nearness beats the unrelated (newer) peer
+        plain.Reasons.Should().NotContain(reason => reason.Dimension == nameof(SalienceDimension.SemanticEmbedding));
+    }
+
+    [Fact]
+    public async Task Feed_BoostsARecentItemNearAStar_EvenWhenOlderNearItemsAreOutsideTheWindow()
+    {
+        // SF1 regression: the axis scores THIS window's candidates directly. A recent near-a-star item that IS in the
+        // (small) window is boosted even though five equally-near items exist OUTSIDE it -- the exact case the old
+        // design got wrong, where a global nearest-N over all rows was dominated by the out-of-window near items and
+        // the recent, in-window one, intersected against that global set, got no boost.
+        await SeedNewsAsync("star-seed", _t.AddDays(-3), instruments: ["ES"]);
+        for (int i = 0; i < 5; i++)
+        {
+            await SeedNewsAsync($"old-near-{i}", _t.AddDays(-2).AddMinutes(i), instruments: ["NQ"]); // older -> outside a 2-item window
+        }
+        await SeedNewsAsync("recent-near", _t.AddMinutes(-1), instruments: ["NQ"]); // in the window, near the star
+        await SeedNewsAsync("recent-far", _t, instruments: ["NQ"]);                 // newest, in the window, NOT near
+        await RateAsync("star-seed");
+
+        (string, float[])[] embeddings =
+        [
+            ("star-seed", new[] { 1f, 0f }),
+            ("recent-near", new[] { 1f, 0f }), // same direction as the star
+            ("recent-far", new[] { 0f, 1f }),  // orthogonal
+            .. Enumerable.Range(0, 5).Select(i => ($"old-near-{i}", new[] { 1f, 0f })),
+        ];
+        SemanticSalienceAxis axis = Axis(available: true, vectors: Vectors(embeddings));
+
+        // Window of 2: only the two most-recent items (recent-far, recent-near); the five older near items are excluded.
+        await using TradingCopilotDbContext read = Context();
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(2, read, _options, axis, default));
+
+        feed.Items.Should().HaveCount(2);
+        NewsFeedItemResponse recent = feed.Items.Single(item => item.DedupKey == "recent-near");
+        recent.Multiplier.Should().BeGreaterThan(1.0);
+        recent.Reasons.Should().Contain(reason => reason.Dimension == nameof(SalienceDimension.SemanticEmbedding));
+    }
+
+    [Fact]
+    public async Task Feed_DegradesToCategoricalOnly_WhenTheSemanticAxisIsUnavailable()
+    {
+        // An unavailable axis (the gh#109 degrade) yields an empty map -- the feed is exactly its pre-#853,
+        // categorical-only self: a categorical star still boosts, and no item carries a SemanticEmbedding reason.
+        await SeedNewsAsync("es-seed", _t.AddDays(-1), instruments: ["ES"]);
+        await SeedNewsAsync("es-fresh", _t, instruments: ["ES"]);
+        await RateAsync("es-seed");
+
+        await using TradingCopilotDbContext read = Context();
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
+
+        NewsFeedItemResponse boosted = feed.Items.Single(item => item.DedupKey == "es-fresh");
+        boosted.Multiplier.Should().BeGreaterThan(1.0); // categorical star still boosts
+        feed.Items.Should().OnlyContain(item =>
+            item.Reasons.All(reason => reason.Dimension != nameof(SalienceDimension.SemanticEmbedding)));
     }
 
     // ---- R-20 isolation ----
@@ -228,7 +340,7 @@ public class NewsEndpointsTests
 
         // The OTHER operator has no feedback, so their ES item sits at base (multiplier 1) with no own-feedback.
         await using TradingCopilotDbContext read = Context(_other);
-        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, default));
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
 
         NewsFeedItemResponse fresh = feed.Items.Single(item => item.DedupKey == "es-fresh");
         fresh.Multiplier.Should().Be(1.0);
