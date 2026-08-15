@@ -473,3 +473,21 @@ pushed"** tier above, **deliberately not paged**: the pass cannot read the accou
 risk, and paging on every ~15 s roster hiccup would spend §4's noise budget on a maybe-nothing. The alertable
 signal is the metric — a *persistent* gap is a Grafana rule the operator writes, not a built-in page. (Only the
 primary tier emits it so far; the redundant watchdog and the dead-man's switch are gh#850.)
+
+## Update (2026-08-15) — the same fact is dashboard-only in two tiers and a **page** in the third (gh#850)
+
+The **watchdog** now emits the same disposition as the primary — `flatten.watchdog.unrostered` on the journal,
+`outcome="unrostered"` metered under its own tier — and it sits in the same **"dashboard only, never pushed"** tier,
+for the same reason: it cannot read the account, so it cannot claim risk.
+
+The **dead-man's switch is deliberately the exception, and it pages.** Not by adding an alert — by **staying
+silent**, which in this tier *is* the alarm (§*the inversion*). A check-in pass that cannot read every held account
+now vouches for nothing at all, because the alternative it used to take was worse than silence: it reported the
+instrument **flat** on an aggregate that excluded the unreadable account, telling the monitor everything was fine
+while it could not see one of its own accounts.
+
+So the same underlying fact — a held account missing from the roster — is **dashboard-only** where the tier merely
+could not act on it, and a **page** where the tier would otherwise have made a claim it could not support. That
+asymmetry is the point rather than an inconsistency: this tier's output is a promise to something outside the
+system, and the noise budget in §4 does not buy the right to make a false one. The operator's lever if a stale row
+pages nightly is to rediscover or remove it — the primary and watchdog journals name which account it is.

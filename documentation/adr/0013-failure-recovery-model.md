@@ -347,3 +347,29 @@ tiers whose redundancy exists precisely to catch what the primary misses. This u
 primary tier only; widening the signal to the watchdog and giving the dead-man's switch an explicit
 *not-applicable* report is tracked in **gh#850**. Until then the honest statement is the narrow one: the primary
 tier no longer goes quietly inert on an account it holds — the backstops still can.
+
+## Update (2026-08-15) — the other two tiers, and a worse defect than the scoping note supposed (gh#850)
+
+**The watchdog** now mirrors the primary: `flatten.watchdog.unrostered` on the journal and `outcome="unrostered"`
+metered under the watchdog tier, best-effort so a recording fault cannot abort a pass and starve an account the
+tier could still save. Its own event type, so a gap is attributable to the tier that saw it.
+
+**The dead-man's switch turned out not to have the defect described above.** The note supposed its "silence is the
+alarm" merely *never learned to expect* a report for the account — a hole in the alarm. The actual behaviour was
+the inverse and worse: the check-in aggregates exposure across **all** the accounts it serves and reports flat per
+*instrument*, so silently dropping an unreadable account left the remaining ones free to make an instrument look
+flat **on evidence that excluded an account we hold**. It did not fail to page; it actively vouched to the external
+monitor for a flatness nobody had verified — withdrawing the page at exactly the moment it was warranted. A unit
+test written against the old code shows the switch calling `ReportFlatAsync` while a held account was unreadable.
+
+So the resolution is not a *not-applicable* report, which would have made that silence official. **Unknown exposure
+is treated as exposure:** a pass that cannot read every held account vouches for **nothing** and stays silent, so
+the monitor pages. It withholds the whole pass rather than the affected connection, because the report is per
+instrument and aggregated across every account the process serves — a sibling connection reporting the same
+instrument flat would reinstate the exact claim being withheld — and because nothing bounds *which* instrument an
+unreadable account is exposed in.
+
+The cost is deliberate: a persistent roster gap now pages daily until the account is rediscovered or a stale row
+removed. That is the correct bias for a dead-man's switch, and the primary and watchdog journals name the account
+so the page is actionable rather than mysterious. With this, the R-13 statement is no longer narrow — **no tier
+goes quietly inert on an account it holds.**

@@ -2,6 +2,7 @@ using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Flatten;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Flatten;
@@ -61,6 +62,99 @@ public class FlattenCheckInServiceTests
             Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
             Options.Create(new FlattenOptions()),
             NullLogger<FlattenCheckInService>.Instance);
+
+    // RunPassAsync's roster layer needs a real (in-memory) database and a venue factory, unlike the
+    // ReportForAccountsAsync cases below which drive the aggregation directly.
+    private FlattenCheckInService Service(
+        TradingCopilotDbContext database,
+        IProjectXVenueFactory factory,
+        FlattenOptions options) =>
+        new(
+            database,
+            factory,
+            _switch,
+            Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
+            Options.Create(options),
+            NullLogger<FlattenCheckInService>.Instance);
+
+    private static TradingCopilotDbContext Db(string name) =>
+        new(
+            new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(name).Options,
+            new FixedUser(Guid.Empty));
+
+    /// <summary>Seeds one connection on the given credential key, carrying an account per supplied venue key.</summary>
+    private static async Task SeedAccountsAsync(string database, string credentialKey, params string[] venueAccountKeys)
+    {
+        Guid op = Guid.NewGuid();
+        Guid firmId = Guid.NewGuid();
+        Guid connectionId = Guid.NewGuid();
+
+        await using TradingCopilotDbContext seed = new(
+            new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(database).Options,
+            new FixedUser(op));
+
+        seed.Firms.Add(new Firm { Id = firmId, UserId = op, Name = "Topstep", Type = FirmType.PropFirm });
+        seed.Connections.Add(new Connection
+        {
+            Id = connectionId,
+            UserId = op,
+            FirmId = firmId,
+            Platform = "projectx",
+            CredentialKey = credentialKey,
+        });
+        foreach (string key in venueAccountKeys)
+        {
+            seed.Accounts.Add(new Account
+            {
+                Id = Guid.NewGuid(),
+                UserId = op,
+                ConnectionId = connectionId,
+                VenueAccountKey = key,
+                Name = $"PRAC-{key}",
+                Stage = AccountStage.Practice,
+                Mode = TradingMode.Practice,
+                CanTrade = true,
+                IsVisible = true,
+            });
+        }
+
+        await seed.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task RunPassAsync_ShouldVouchForNothing_WhenAHeldAccountIsAbsentFromTheVenueRoster()
+    {
+        // gh#850. The check-in aggregates exposure across ALL the accounts it serves -- "one flat account does not
+        // make an instrument flat" -- and reports flat to an EXTERNAL monitor, whose silence is the alarm.
+        //
+        // A held account the roster does not report was silently filtered out of that aggregate. So its positions
+        // were never read, its exposure never counted, and the instrument looked flat on evidence that EXCLUDED an
+        // account we hold: the switch vouched for a flatness nobody verified, which is the one thing this tier
+        // exists not to do. Unknown exposure must be treated as exposure -- withhold, and let the monitor page.
+        string name = Guid.NewGuid().ToString();
+        await SeedAccountsAsync(name, credentialKey: "topstep-main", "9001", "9002");
+
+        // 9001 is rostered and flat; 9002 is held but absent from the roster, so nothing can be read for it.
+        ITradingVenue venue = Venue((AccountA, []));
+        A.CallTo(() => venue.GetAccountsAsync(A<CancellationToken>._))
+            .Returns<IReadOnlyList<VenueAccount>>(
+            [
+                new VenueAccount(AccountA, "PRAC-9001", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Practice)
+                {
+                    Stage = AccountStage.Practice,
+                },
+            ]);
+        IProjectXVenueFactory factory = A.Fake<IProjectXVenueFactory>();
+        A.CallTo(() => factory.Create(A<FirmConventions>._)).Returns(venue);
+
+        FlattenOptions options = new() { Instruments = [new FlattenScheduleOption { Symbol = "ES", SessionClose = "14:30" }] };
+
+        IReadOnlyDictionary<InstrumentId, DateOnly> reported = await Service(Db(name), factory, options)
+            .RunPassAsync(Utc(19, 45), new Dictionary<InstrumentId, DateOnly>(), CancellationToken.None);
+
+        A.CallTo(() => _switch.ReportFlatAsync(A<InstrumentId>._, A<CancellationToken>._)).MustNotHaveHappened();
+        reported.Should().BeEmpty("a pass that could not read every held account has vouched for nothing");
+    }
 
     private static FlattenSchedule Schedule(string symbol, TimeOnly close, bool enabled = true) =>
         FlattenSchedule.Create(InstrumentId.Parse(symbol), enabled, deadlineOverride: null, sessionClose: close);
