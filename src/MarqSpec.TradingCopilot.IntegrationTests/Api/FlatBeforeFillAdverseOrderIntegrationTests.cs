@@ -21,19 +21,26 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>gh#748 is not implemented on <c>develop</c>.</b> This suite was authored expecting a coding PR "merged under
-/// #748" (gh#911's own premise); at authoring time there is no such PR, no <c>PendingFlatJournal</c>, no
+/// <b>gh#748 is not merged into <c>develop</c>.</b> This suite was authored expecting a coding PR "merged under
+/// #748" (gh#911's own premise); at authoring time there was no such PR at all, no <c>PendingFlatJournal</c>, no
 /// <c>deferred</c>/<c>journalled</c>-on-retry outcome pair in <see cref="ExecutionMetrics"/>, and
 /// <see cref="AccountEventStreamHost"/>'s <see cref="FillEvent"/> branch — <see cref="AccountEventIngestionService.ProcessAsync"/>
-/// — only ever writes the <see cref="Fill"/> row; it never re-invokes <see cref="TradeJournalService"/>. gh#748's
-/// own claim branch (<c>bug/748_a-flat-event-queued</c>) is pushed with zero commits ahead of the point it branched
-/// from, which is the stale-claim shape CONTRIBUTING.md's staleness rule describes, not work in flight. This suite
-/// proceeds anyway, per the QA contract's rule 3 ("a suite that cannot go green without a production change has
-/// found a defect — report it, don't fix it"): three cases below assert the FIXED behaviour gh#911 specifies and
-/// are <see cref="FactAttribute.Skip"/>ped, referencing gh#748 (already filed; no new issue needed). The other two
-/// are provable TODAY and stay green against `develop` as shipped — one of them (the DEFECT pin) doubles as this
-/// suite's own "prove-red": it demonstrates, without any local revert, that the adverse-order case is lost under
-/// the code the three Skipped cases will exercise once gh#748 lands.
+/// — only ever wrote the <see cref="Fill"/> row, never re-invoking <see cref="TradeJournalService"/>. <b>PR #912</b>
+/// (branch <c>bug/748_a-flat-event-queued</c>) landed the fix moments later, concurrently with this suite's own
+/// authoring, and is open but <b>unmerged</b> as of this revision: it adds exactly the shape gh#911 anticipates —
+/// <c>PendingFlatJournal</c> (keyed on <c>(Account, Contract.Key, At)</c>), the <c>JournalDeferred = "deferred"</c>
+/// outcome, and a retry loop in <see cref="AccountEventStreamHost"/>'s <see cref="FillEvent"/> branch — but it also
+/// changes <see cref="AccountEventStreamHost"/>'s constructor to take a <c>PendingFlatJournal</c> parameter, so the
+/// three cases below will need that one-line constructor-call update (the same fix #912 already applied to
+/// <c>TradeFifoPairingIntegrationTests</c> and <c>TradeJournalWriteFaultIntegrationTests</c>) alongside removing
+/// their <c>Skip</c>, once #912 merges and this branch rebases onto it. This suite proceeds without waiting for
+/// that merge, per the QA contract's rule 3 ("a suite that cannot go green without a production change has found a
+/// defect — report it, don't fix it"): three cases below assert the FIXED behaviour gh#911 specifies and are
+/// <see cref="FactAttribute.Skip"/>ped, referencing gh#748 (already filed; no new issue needed — and #912, once it
+/// exists, is the coding agent's PR to track, not this suite's). The other two are provable TODAY and stay green
+/// against `develop` as shipped — one of them (the DEFECT pin) doubles as this suite's own "prove-red": it
+/// demonstrates, without any local revert, that the adverse-order case is lost under the code on `develop` today,
+/// the same code path #912 replaces.
 /// </para>
 /// <para>
 /// <b>What's provable today vs. blocked.</b>
