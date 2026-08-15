@@ -37,9 +37,12 @@ public static class SalienceScorer
 
         // The semantic-embedding axis (gh#853) is operator-relative and rides on the item: the caller has already
         // scored this item's max cosine similarity to the operator's stars, so — unlike the categorical dimensions —
-        // it needs no profile lookup. A positive similarity adds one SemanticEmbedding reason, weighted like any
-        // other; a null (axis off) or non-positive (no nearer-than-orthogonal star) similarity contributes nothing.
-        if (item.SemanticSimilarity is double similarity && similarity > 0.0)
+        // it needs no profile lookup. A positive similarity AND a non-zero axis weight add one SemanticEmbedding
+        // reason, weighted like any other; a null (axis off), a non-positive (no nearer-than-orthogonal star)
+        // similarity, or a zeroed axis weight contributes nothing — and, exactly like a zero-weight categorical
+        // dimension (CollectReasons), earns no reason, so the "why weighted" panel never explains a contribution
+        // that is not there (gh#884).
+        if (item.SemanticSimilarity is double similarity && similarity > 0.0 && parameters.SemanticWeight != 0.0)
         {
             reasons.Add(new SalienceReason(
                 SalienceDimension.SemanticEmbedding, SemanticValue, similarity * parameters.SemanticWeight));

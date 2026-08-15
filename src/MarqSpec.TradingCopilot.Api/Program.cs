@@ -556,6 +556,7 @@ app.UseAuthorization();
 app.MapAuthEndpoints();
 app.MapFirmEndpoints();
 app.MapConnectionEndpoints();
+app.MapVenueEndpoints();
 app.MapAccountEndpoints();
 app.MapRiskEndpoints();
 app.MapTriggerEndpoints();

@@ -213,6 +213,35 @@ public class SalienceScorerTests
     }
 
     [Fact]
+    public void AZeroedSemanticWeight_AddsNoSemanticReason_EvenWithAPositiveSimilarity()
+    {
+        // Dialling the semantic axis to zero (without disabling the embedding read) contributes nothing, so — like a
+        // zero-weight categorical dimension (CollectReasons) — it must pin NO "weighted up in meaning" reason on the
+        // item. Otherwise the "why weighted" panel (R-4 / R-9) explains a contribution that is not there.
+        SalienceScore score = ScoreSemantic(
+            Dims() with { SemanticSimilarity = 0.7 }, _params with { SemanticWeight = 0.0 });
+
+        score.Multiplier.Should().Be(1.0);
+        score.Reasons.Should().NotContain(reason => reason.Dimension == SalienceDimension.SemanticEmbedding);
+    }
+
+    [Fact]
+    public void ANegativeSemanticWeight_StillAddsAReason_WithANegativeContribution()
+    {
+        // The guard is weight-non-zero, NOT weight-positive: a negative weight (down-weighting items near the
+        // operator's stars — the semantic mirror of a categorical mute) is a real contribution, so its reason and its
+        // negative pull on the multiplier are kept. This locks `!= 0.0` against a refactor to `> 0.0`, which would
+        // silently drop the down-weight and read green against the zero-weight case alone.
+        SalienceScore score = ScoreSemantic(
+            Dims() with { SemanticSimilarity = 0.7 }, _params with { SemanticWeight = -1.0 });
+
+        score.Reasons.Should()
+            .ContainSingle(reason => reason.Dimension == SalienceDimension.SemanticEmbedding)
+            .Which.Contribution.Should().BeLessThan(0.0);
+        score.Multiplier.Should().BeLessThan(1.0); // the negative contribution down-weights the item
+    }
+
+    [Fact]
     public void TheSemanticContribution_ScalesWithSimilarity()
     {
         double near = ScoreSemantic(Dims() with { SemanticSimilarity = 0.9 }).Multiplier;
