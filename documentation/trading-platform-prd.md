@@ -202,7 +202,7 @@ then [Nice-to-Have (P1)](#nice-to-have-p1) · [Future Considerations (P2)](#futu
 - [ ] A confirmed rule captures an **instrument-dependency snapshot** (the Instrument / RelevanceConfig metadata it resolved against). If that metadata later changes (a symbol reclassified, a topic remapped), the rule is **flagged for review / re-validation** rather than silently firing on the wrong asset — no stale-scope triggers
 
 <a id="r-8"></a>
-**R-8: Suggestion & trade journal.** Every suggestion is recorded with full parameters, a market-condition snapshot at issuance, influencing factors, and stated expectation. Every trade is recorded with its originating suggestion (if any), entry rationale, and **native fills from the execution path**.
+**R-8: Suggestion & trade journal.** Every suggestion is recorded with full parameters, a market-condition snapshot at issuance, influencing factors, and stated expectation. Every trade is recorded with its originating suggestion (if any), entry rationale, and **native fills from the execution path** — round-trip journaling is **resilient to fill/flat delivery ordering**: a flat that arrives before its closing fill is deferred and journalled when the fill lands, not lost (gh#748).
 - [ ] Journal writes occur automatically — at suggestion issuance and at order/fill events — with no user action required
 - [ ] Trader can annotate entries (notes, emotional state — optional)
 - [ ] The journal presents a **trade blotter** and lets the operator **drill into a day's trades** — the **current day is the default view** — each trade linked to its originating suggestion, with entry/exit, P&L / R, strategy, and its feedback

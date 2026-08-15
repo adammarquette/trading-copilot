@@ -308,7 +308,9 @@ public class TradeJournalWriteFaultIntegrationTests : IClassFixture<TradeJournal
 
         await BlockTradeInsertsAsync();
         AccountEventStreamHost host = new(
-            _factory.Services, _factory.Services.GetRequiredService<ILogger<AccountEventStreamHost>>());
+            _factory.Services,
+            _factory.Services.GetRequiredService<PendingFlatJournal>(),
+            _factory.Services.GetRequiredService<ILogger<AccountEventStreamHost>>());
 
         try
         {

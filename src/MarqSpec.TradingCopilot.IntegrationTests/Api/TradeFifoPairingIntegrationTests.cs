@@ -504,7 +504,9 @@ public class TradeFifoPairingIntegrationTests : IClassFixture<TradeFifoPairingPo
         _factory.Capture.Clear();
 
         AccountEventStreamHost host = new(
-            _factory.Services, _factory.Services.GetRequiredService<ILogger<AccountEventStreamHost>>());
+            _factory.Services,
+            _factory.Services.GetRequiredService<PendingFlatJournal>(),
+            _factory.Services.GetRequiredService<ILogger<AccountEventStreamHost>>());
         await host.StartAsync(CancellationToken.None);
 
         try

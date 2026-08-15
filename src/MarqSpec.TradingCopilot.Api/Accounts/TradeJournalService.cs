@@ -58,6 +58,7 @@ public sealed class TradeJournalService
     private readonly DbContextOptions<TradingCopilotDbContext> _options;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly IExecutionMetrics _metrics;
+    private readonly PendingFlatJournal _pendingFlats;
     private readonly ILogger<TradeJournalService> _logger;
 
     /// <summary>Creates the service.</summary>
@@ -66,12 +67,15 @@ public sealed class TradeJournalService
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
     /// <param name="metrics">The execution-SLI sink — every flat's journaling outcome is counted through it, so an
     /// account stuck refusing is visible to an alert, not only to a log (gh#731, gh#734 review).</param>
+    /// <param name="pendingFlats">The register of flats awaiting their closing fill (gh#748): a flat whose window does
+    /// not yet reconcile to flat is parked here and retried when a fill for the account lands, rather than lost.</param>
     /// <param name="logger">The logger.</param>
     public TradeJournalService(
         TradingCopilotDbContext discovery,
         DbContextOptions<TradingCopilotDbContext> options,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IExecutionMetrics metrics,
+        PendingFlatJournal pendingFlats,
         ILogger<TradeJournalService> logger)
     {
         ArgumentNullException.ThrowIfNull(projectXOptions);
@@ -80,6 +84,7 @@ public sealed class TradeJournalService
         _options = options;
         _projectX = projectXOptions.Value;
         _metrics = metrics;
+        _pendingFlats = pendingFlats;
         _logger = logger;
     }
 
@@ -135,6 +140,10 @@ public sealed class TradeJournalService
             .ToListAsync(cancellationToken);
         if (fills.Count == 0)
         {
+            // Orders on the contract but not one ingested fill in this window. Deliberately NOT deferred (gh#748):
+            // with orders-but-no-fills this is dominated by "no round trip of ours to journal" -- orders that never
+            // filled, or a flat for a position our orders did not open -- and parking those would retry forever. The
+            // rare burst where even the OPENING fill is not yet ingested is left to gh#722's reconcile, not parked.
             return false;
         }
 
@@ -175,14 +184,40 @@ public sealed class TradeJournalService
             }),
         ];
 
-        if (!TradeRoundTrip.TryCompose(candidates, out IReadOnlyList<RoundTrip> trips))
+        RoundTripComposition outcome = TradeRoundTrip.Compose(candidates, out IReadOnlyList<RoundTrip> trips);
+        if (outcome == RoundTripComposition.StillOpen)
         {
-            // Never closed, or genuinely ambiguous (an unclassifiable fill side, an open-from-flat whose direction is
-            // not decidable, or a window that does not reconcile to flat). Deliberately silent about writing anything,
-            // but loud enough to investigate: a position went flat and produced no journal row.
+            // gh#748: the window does not reconcile to flat -- a closing fill is missing or not yet ingested (the flat
+            // callback beat the fill callback). Defer and retry when a fill lands, rather than mislabel it not-composable
+            // and lose the round trip permanently.
+            _pendingFlats.Register(exit);
             _logger.LogInformation(
-                "Flat {Contract} on account {Account}: {Fills} unjournalled fill(s) do not form completed round "
-                + "trips (still open, or genuinely ambiguous); no Trade written (gh#759 refuse-don't-guess).",
+                "Flat {Contract} on account {Account}: {Fills} fill(s) do not yet reconcile to flat; the closing fill "
+                + "is not yet ingested. Deferred; will retry when a fill lands (gh#748).",
+                exit.Contract, exit.Account, unjournalled.Count);
+            _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalDeferred);
+            return false;
+        }
+
+        // Composed or Ambiguous both end the deferral: the fills reconciled to flat, or are genuinely ambiguous, so a
+        // later fill won't change the COMPOSITION -- clear any deferral we were holding for THIS flat (gh#748). This
+        // clears before the write, so a Composed retry that then hits a *transient* write fault (gh#747 rethrows it)
+        // forgoes its deferral-driven retry: composition being terminal does NOT make JOURNALLING terminal. A conscious
+        // trade -- keeping the flat parked would retry forever on a *persistent* write fault, so we resolve and let
+        // gh#722's reconcile backstop the rare transient case. Clearing before the re-pairing guard is likewise correct:
+        // a Composed-but-re-pairing-refused flat is terminal (it won't self-heal on retry).
+        _pendingFlats.Resolve(exit);
+
+        if (outcome == RoundTripComposition.Ambiguous)
+        {
+            // Genuinely ambiguous: an unclassifiable fill side, or an open-from-flat / mid-cycle same-instant tie whose
+            // direction is not decidable. A StillOpen window (a missing closing fill) was already deferred above, so
+            // this branch is terminal. Deliberately silent about writing anything, but loud enough to investigate: a
+            // position went flat and produced no journal row.
+            _logger.LogInformation(
+                "Flat {Contract} on account {Account}: {Fills} unjournalled fill(s) are genuinely ambiguous (an "
+                + "unclassifiable fill side, or an undecidable same-instant opposite-side tie); no Trade written "
+                + "(gh#759 refuse-don't-guess). A missing closing fill is deferred earlier, not refused here (gh#748).",
                 exit.Contract, exit.Account, unjournalled.Count);
             _metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalNotComposable);
             return false;

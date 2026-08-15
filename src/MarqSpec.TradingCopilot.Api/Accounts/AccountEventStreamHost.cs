@@ -25,14 +25,19 @@ public sealed class AccountEventStreamHost : BackgroundService
     private static TimeSpan ReconnectDelay { get; } = TimeSpan.FromSeconds(5);
 
     private readonly IServiceProvider _services;
+    private readonly PendingFlatJournal _pendingFlats;
     private readonly ILogger<AccountEventStreamHost> _logger;
 
     /// <summary>Creates the host.</summary>
     /// <param name="services">The root provider — the seam, the venue, and a per-event scope resolve from it.</param>
+    /// <param name="pendingFlats">The register of flats deferred awaiting a closing fill (gh#748); a singleton, so it
+    /// survives the supervisor's reconnects. When a fill lands, any flat deferred for that account is retried.</param>
     /// <param name="logger">The logger.</param>
-    public AccountEventStreamHost(IServiceProvider services, ILogger<AccountEventStreamHost> logger)
+    public AccountEventStreamHost(
+        IServiceProvider services, PendingFlatJournal pendingFlats, ILogger<AccountEventStreamHost> logger)
     {
         _services = services;
+        _pendingFlats = pendingFlats;
         _logger = logger;
     }
 
@@ -111,6 +116,19 @@ public sealed class AccountEventStreamHost : BackgroundService
                 await scope.ServiceProvider
                     .GetRequiredService<AccountEventIngestionService>()
                     .ProcessAsync(accountEvent, cancellationToken);
+
+                if (accountEvent is FillEvent fill)
+                {
+                    // gh#748: a fill can land AFTER the flat that closed its round trip was already processed and
+                    // deferred (independent, unordered venue callbacks). Now a fill has arrived -- and ProcessAsync above
+                    // has persisted it -- re-attempt any flat we deferred for this account; the missing closing fill may
+                    // be the one just ingested. Same swallow-and-continue safety as the flat path: a journal fault must
+                    // not abort the stream or the next event's protection retire.
+                    foreach (PositionEvent deferred in _pendingFlats.PendingFor(fill.Account))
+                    {
+                        await JournalRoundTripSafelyAsync(scope.ServiceProvider, deferred, cancellationToken);
+                    }
+                }
             }
         }
     }
