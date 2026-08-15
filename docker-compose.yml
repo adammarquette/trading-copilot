@@ -170,6 +170,9 @@ services:
       # Cohere__ApiKey seam below. Always on -- harmless with no provider configured (or no news needing it);
       # null pass-through leaves the app's 60s default.
       Embedding__PollIntervalSeconds:
+      # Embedding orphan GC (R-2, gh#902) -- a conservative periodic sweep deletes embedding rows whose owner was
+      # renamed or pruned, off the hot embed path; null pass-through leaves the app's 6h default.
+      EmbeddingGc__SweepIntervalSeconds:
       # News / soft-signal ingestion (R-2, gh#358) -- the deduped store of record, the news analogue of the bar
       # store above. Scalar options, so there is no indexed list to enumerate and cap here. OPT-IN via
       # News__Enabled (off unless set); null pass-through leaves the app's defaults (cadence 300 s, lookback
