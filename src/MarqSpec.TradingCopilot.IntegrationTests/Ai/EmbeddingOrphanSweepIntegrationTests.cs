@@ -196,12 +196,12 @@ public sealed class EmbeddingOrphanSweepIntegrationTests : IClassFixture<Embeddi
 
     // =================================================================================================================
     // Acceptance criterion 5 (part 2) — concurrency-safe: a concurrent embed of a still-live owner is never raced
-    // away. The owner's producer is committed BEFORE the race begins and never removed, so the anti-join's
-    // NOT EXISTS predicate can never be true for it at any point in the race -- if DeleteOrphansAsync were anything
-    // other than one atomic DELETE statement evaluated at execution time (e.g. a read-ids-then-delete-by-id
-    // app-level implementation), a sweep racing the embed insert could still remove the row on a stale read. This
-    // is real concurrent execution against Postgres (many simultaneous sweep passes racing one insert on separate
-    // DI scopes/connections), not a simulated interleave -- so it has genuine power to catch that class of bug.
+    // away. The owner's producer is committed BEFORE the race begins and never removed, so NOT EXISTS is false for
+    // it throughout -- this does NOT prove atomicity/TOCTOU-safety (that needs a fluctuating producer, which this
+    // fixture does not exercise). What it does prove: dropping DeleteOrphansAsync's anti-join predicate (an
+    // unconditional delete) flips this test red, so it is a genuine regression guard against that defect, plus a
+    // concurrent-load smoke test -- 25 simultaneous sweep passes racing one insert on separate DI
+    // scopes/connections against real Postgres, not a simulated interleave.
     // =================================================================================================================
 
     [Fact]
