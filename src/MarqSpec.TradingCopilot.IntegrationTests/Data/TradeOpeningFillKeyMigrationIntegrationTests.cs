@@ -199,19 +199,22 @@ public class TradeOpeningFillKeyMigrationIntegrationTests : IAsyncLifetime
             Platform = "projectx",
             CredentialKey = "topstep-main",
         });
-        database.Accounts.Add(new Account
-        {
-            Id = accountId,
-            UserId = owner,
-            ConnectionId = connectionId,
-            VenueAccountKey = "9700",
-            Name = "PRAC-50K",
-            Stage = AccountStage.Practice,
-            Mode = TradingMode.Practice,
-            CanTrade = true,
-            IsVisible = true,
-        });
         await database.SaveChangesAsync();
+
+        // Raw SQL for the same reason InsertPreChangeTradeAsync uses it: at this point the database is migrated
+        // only as far as the PREVIOUS migration, so the entity and the table do NOT agree, and EF would emit an
+        // INSERT naming every column the CURRENT model has. Any column added to Accounts after this migration
+        // therefore broke this seed -- gh#780's `VenueReportsSimulated` was simply the first to do it
+        // ("42703: column ... does not exist"). Naming the pre-change columns explicitly pins the seed to the
+        // schema under test rather than to whatever the model has grown since.
+        await database.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO "Accounts"
+                ("Id", "UserId", "ConnectionId", "VenueAccountKey", "Name", "Stage", "Mode",
+                 "IsActive", "CanTrade", "IsVisible", "Balance")
+            VALUES
+                ({accountId}, {owner}, {connectionId}, '9700', 'PRAC-50K',
+                 {(int)AccountStage.Practice}, {(int)TradingMode.Practice}, true, true, true, 0)
+            """);
 
         return accountId;
     }

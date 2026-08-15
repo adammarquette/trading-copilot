@@ -156,6 +156,76 @@ public class ConnectionEndpointsTests
         responses.Single(r => r.Stage == AccountStage.Unknown).TradeableHere.Should().BeFalse();
     }
 
+    /// <summary>Seeds a BROKERAGE firm — no stage conventions, because a brokerage has no stage ladder.</summary>
+    private async Task<Guid> SeedBrokerageConnectionAsync()
+    {
+        Guid firmId = Guid.NewGuid();
+        Guid connectionId = Guid.NewGuid();
+        await using TradingCopilotDbContext context = Context();
+        context.Firms.Add(new Firm
+        {
+            Id = firmId,
+            UserId = _operator,
+            Name = "Interactive Brokers",
+            Type = FirmType.Brokerage,
+            StageConventions = [],
+        });
+        context.Connections.Add(new Connection
+        {
+            Id = connectionId,
+            UserId = _operator,
+            FirmId = firmId,
+            Platform = "projectx",
+            CredentialKey = "topstep-main",
+        });
+        await context.SaveChangesAsync();
+        return connectionId;
+    }
+
+    [Fact]
+    public async Task DiscoverAccounts_ShouldPersistABrokerageModeFromTheVenueFlag_NotUndeclared()
+    {
+        // gh#780, and the #907 review's second round. This is the wiring the first fix missed: resolving mode
+        // correctly in FirmConventions changed nothing, because discovery persists via RecomputeMode and the
+        // venue flag had no way to reach it. Proving it at ConnectionEndpoints -- not just at the domain method --
+        // is what makes a future revert of that wiring fail here rather than silently ship.
+        Guid connectionId = await SeedBrokerageConnectionAsync();
+        VenueId venueId = VenueId.Parse("projectx");
+        A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
+        [
+            new VenueAccount(VenueAccountId.Create(venueId, "U1000"), "PAPER", 25_000m, CanTrade: true, IsVisible: true, TradingMode.Practice)
+            {
+                Stage = AccountStage.Unknown,
+                VenueReportsSimulated = true,
+            },
+            new VenueAccount(VenueAccountId.Create(venueId, "U2000"), "LIVE", 75_000m, CanTrade: true, IsVisible: true, TradingMode.Live)
+            {
+                Stage = AccountStage.Unknown,
+                VenueReportsSimulated = false,
+            },
+        ]);
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await ConnectionEndpoints.DiscoverAccountsAsync(
+            connectionId, new FixedUser(_operator), context, _factory, OptionsFor("topstep-main"), Development, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+
+        await using TradingCopilotDbContext reload = Context();
+        List<Account> stored = await reload.Accounts.OrderBy(account => account.VenueAccountKey).ToListAsync();
+
+        // Both accounts sit at AccountStage.Unknown -- a brokerage has no ladder -- so under the per-stage model
+        // both persisted Undeclared and were tradeable nowhere. The venue's flag is what separates them.
+        stored[0].Mode.Should().Be(TradingMode.Practice, "the venue reports U1000 as paper");
+        stored[1].Mode.Should().Be(TradingMode.Live, "the venue reports U2000 as live");
+        stored.Should().OnlyContain(account => account.Mode != TradingMode.Undeclared);
+
+        // The flag itself is persisted, because the later recomputes (a stage override, a conventions
+        // re-declaration) have no venue call of their own to ask again.
+        stored[0].VenueReportsSimulated.Should().BeTrue();
+        stored[1].VenueReportsSimulated.Should().BeFalse();
+    }
+
     [Fact]
     public async Task DiscoverAccounts_ShouldUpsertOnRediscovery_NeverDuplicate()
     {
