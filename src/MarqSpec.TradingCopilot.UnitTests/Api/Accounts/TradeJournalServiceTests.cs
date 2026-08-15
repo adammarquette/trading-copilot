@@ -38,11 +38,12 @@ public class TradeJournalServiceTests
 
     private TradingCopilotDbContext Context() => new(Options(), new FixedUser(Guid.Empty));
 
-    private TradeJournalService Service(IExecutionMetrics? metrics = null) => new(
+    private TradeJournalService Service(IExecutionMetrics? metrics = null, PendingFlatJournal? pendingFlats = null) => new(
         Context(),
         Options(),
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = OurCredentialKey }),
         metrics ?? NullExecutionMetrics.Instance,
+        pendingFlats ?? new PendingFlatJournal(),
         NullLogger<TradeJournalService>.Instance);
 
     // The flat event lands at or after the closing fill it reports -- the venue emits it BECAUSE net reached zero.
@@ -261,6 +262,96 @@ public class TradeJournalServiceTests
             .MustHaveHappenedOnceExactly();
         A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten))
             .MustNotHaveHappened();
+    }
+
+    // ----- gh#748: retry-on-fill when the flat callback beats the closing-fill callback -----
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldDeferAndJournalNothing_WhenTheClosingFillIsNotYetIngested()
+    {
+        // gh#748 (safety-critical). PositionEvent(flat) and FillEvent(fill) are independent, unordered venue
+        // callbacks. When the flat is processed BEFORE the closing fill is ingested, the window holds one open Buy leg
+        // -- it does not reconcile to flat. On develop this is mislabelled JournalNotComposable and the round trip is
+        // lost forever (nothing retries), so the R-5/R-9/R-4 governors under-count a real loss as free headroom. The
+        // fix DEFERS: park the flat, record `deferred` (NOT `not-composable`, so the retryable case is distinguishable
+        // from a genuine refusal), and write nothing yet.
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        PendingFlatJournal pending = new();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        // Only the opening Buy fill is ingested; the closing Sell has not arrived on the stream yet.
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+
+        bool journalled = await Service(metrics, pending).ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        journalled.Should().BeFalse("the closing fill is not yet ingested -- defer, never journal a partial round trip");
+        (await TradesAsync()).Should().BeEmpty("nothing is written until the round trip reconciles to flat");
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalDeferred))
+            .MustHaveHappenedOnceExactly();
+        // A missing closing fill is retryable, not the terminal not-composable refusal.
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalNotComposable))
+            .MustNotHaveHappened();
+        pending.PendingFor(VenueAccountId.Create(Projectx, "9001")).Should().ContainSingle(
+            "the flat is parked awaiting its closing fill, to be retried when a fill for this account lands");
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldComposeTheRoundTrip_WhenTheClosingFillArrivesAfterADeferredFlat()
+    {
+        // gh#748: the retry completes the round trip. A flat deferred for a missing closing fill (above) must journal
+        // once that fill lands and the same flat is re-processed -- exactly one trade with the correct signed P&L,
+        // counted JournalWritten, and the deferral cleared from the register.
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        PendingFlatJournal pending = new();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+
+        // The flat beats the closing fill: only the opening Buy is ingested, so the first pass defers.
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+        (await Service(metrics, pending).ProcessFlatAsync(Flat("9001"), CancellationToken.None)).Should().BeFalse();
+        pending.PendingFor(VenueAccountId.Create(Projectx, "9001")).Should().ContainSingle("the flat defers first");
+
+        // The closing Sell fill lands; the same flat is re-processed (the host retries deferred flats when a fill lands).
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 5)]);
+
+        bool journalled = await Service(metrics, pending).ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        journalled.Should().BeTrue("the closing fill has now been ingested, so the round trip composes");
+        Trade trade = (await TradesAsync()).Should().ContainSingle().Subject;
+        trade.Side.Should().Be(OrderSide.Buy);
+        trade.EntryPrice.Should().Be(5_000m);
+        trade.ExitPrice.Should().Be(5_010m);
+        trade.RealizedPnL.Should().Be(50m, "10 points * 1 contract * $5 point value");
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalWritten)).MustHaveHappenedOnceExactly();
+        pending.PendingFor(VenueAccountId.Create(Projectx, "9001")).Should().BeEmpty(
+            "the deferral is cleared once the trip is composed and journalled");
+    }
+
+    [Fact]
+    public async Task ProcessFlatAsync_ShouldRefuseNotDefer_WhenGenuinelyAmbiguous()
+    {
+        // gh#748: a GENUINE ambiguity is terminal, not a missing fill -- it must refuse (countably) and NOT defer, or
+        // an unresolvable window would be retried forever. Two opposite-side fills share the opening instant (net 0,
+        // undecidable sign), so the composer returns Ambiguous: record JournalNotComposable, never JournalDeferred, and
+        // register nothing.
+        IExecutionMetrics metrics = A.Fake<IExecutionMetrics>();
+        PendingFlatJournal pending = new();
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "9001");
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Buy, [(5_000m, 1, 0)]);
+        await SeedFilledOrderAsync(owner, accountId, OrderSide.Sell, [(5_010m, 1, 0)]); // SAME instant, opposite side
+
+        bool journalled = await Service(metrics, pending).ProcessFlatAsync(Flat("9001"), CancellationToken.None);
+
+        journalled.Should().BeFalse();
+        (await TradesAsync()).Should().BeEmpty();
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalNotComposable))
+            .MustHaveHappenedOnceExactly();
+        // A genuine ambiguity is terminal -- retrying cannot resolve it, so it must not defer.
+        A.CallTo(() => metrics.RecordTradeJournalOutcome(ExecutionMetrics.JournalDeferred))
+            .MustNotHaveHappened();
+        pending.PendingFor(VenueAccountId.Create(Projectx, "9001")).Should().BeEmpty(
+            "an ambiguous window parks nothing -- there is no missing fill to wait for");
     }
 
     [Fact]
@@ -1074,6 +1165,7 @@ public class TradeJournalServiceTests
             .Options,
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = OurCredentialKey }),
         metrics,
+        new PendingFlatJournal(),
         NullLogger<TradeJournalService>.Instance);
 
     [Fact]

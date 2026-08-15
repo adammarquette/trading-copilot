@@ -80,8 +80,19 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <summary>Outcome tag: the round trip was journalled.</summary>
     public const string JournalWritten = "journalled";
 
-    /// <summary>Outcome tag: the fills do not form a single balanced round trip (scale-in, partial exit, reversal).</summary>
+    /// <summary>Outcome tag: the fills are <b>genuinely ambiguous</b> — an unclassifiable fill side, or a same-instant
+    /// opposite-side tie whose direction is undecidable (gh#759 refuse-don't-guess). A window that merely does not yet
+    /// reconcile to flat (a closing fill not yet ingested) is <see cref="JournalDeferred"/> (gh#748), not this.</summary>
     public const string JournalNotComposable = "not-composable";
+
+    /// <summary>
+    /// Outcome tag: the flat's fills do not <b>yet</b> reconcile to a completed round trip because a closing fill is
+    /// missing or not yet ingested — the flat callback beat the fill callback (gh#748). Deferred and retried when a
+    /// fill for the account lands, rather than mislabelled <see cref="JournalNotComposable"/> and lost (which would
+    /// leave the round trip's realized P&amp;L out of the daily governor permanently). An account showing this but
+    /// never resolving to <see cref="JournalWritten"/> has a closing fill that never arrived — investigate.
+    /// </summary>
+    public const string JournalDeferred = "deferred";
 
     /// <summary>Outcome tag: the composition spanned an already-journalled close (a same-instant boundary merge) and was refused.</summary>
     public const string JournalBoundaryMergeRefused = "boundary-merge-refused";

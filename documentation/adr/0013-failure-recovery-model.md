@@ -373,3 +373,31 @@ The cost is deliberate: a persistent roster gap now pages daily until the accoun
 removed. That is the correct bias for a dead-man's switch, and the primary and watchdog journals name the account
 so the page is actionable rather than mysterious. With this, the R-13 statement is no longer narrow — **no tier
 goes quietly inert on an account it holds.**
+
+## Update (2026-08-15) — a flat that beats its closing fill into the stream is deferred, not lost (gh#748)
+
+`PositionEvent` (flat) and `FillEvent` (fill) are **independent, unordered** callbacks into the one account-event
+stream (gh#219), and the venue does not guarantee the closing fill reaches the wire before the position-flat. When
+the flat was processed **first**, `TradeJournalService.ProcessFlatAsync` found the window not yet reconciled to flat,
+recorded `not-composable`, and returned — and the later fill **never retried** the journal. The round trip was then
+**permanently lost**: the account is flat, no further flat event fires for it, and nothing re-composes. Silent — and
+the mirror image of the gh#631 / gh#723 reconciles above: those adopt a *stranded order* into `Filled`; this loses the
+*journal* of a cleanly-closed one. Its realized P&L never reached the R-5 daily-loss gate, the R-9 consistency window,
+or the R-4 throttle (the gh#746 readers), so a **real loss read as free headroom**.
+
+**The fix — defer and retry in-process, not a sweep.** `TradeRoundTrip` now reports *why* a window did not compose: a
+**`StillOpen`** window (leftover open exposure — a closing fill missing or not yet ingested) is distinguished from a
+terminal **`Ambiguous`** one (an unclassifiable side, or a same-instant opposite-side tie whose sign is undecidable).
+On `StillOpen`, `ProcessFlatAsync` parks the flat in an in-memory, thread-safe singleton `PendingFlatJournal` (a new
+`deferred` journal outcome + a structured log), and `AccountEventStreamHost` **retries** every deferred flat for an
+account the moment a `FillEvent` for it lands — through the same swallow-and-continue path, so the OCO safety-retire
+still leads and a journal fault never aborts the stream. A retry that finally composes is idempotent on the
+`(ClosingFillId, OpeningFillId)` key (gh#759), so it cannot double-count; `Ambiguous` stays terminal, so the register
+never fills with un-completable flats.
+
+**Bounded to the in-process race, on purpose.** The register is **in-memory** — it survives the supervisor's
+drop-and-reconnect cycles (a singleton) but **not a process restart**. A flat deferred then lost to a restart before
+its fill lands, and a genuinely-never-arriving fill (a venue drop), remain the **reconcile sweep's** job (gh#722
+DESIGN — the persistent backstop this ADR's layered model reserves for state-without-an-operator), alongside gh#770's
+adopt-time fill backfill. The recurring `deferred` metric keeps a stuck account observable meanwhile: `deferred` that
+never resolves to `journalled` is a closing fill that never came.

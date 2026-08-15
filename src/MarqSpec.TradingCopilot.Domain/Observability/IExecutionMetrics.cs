@@ -105,10 +105,11 @@ public interface IExecutionMetrics
 
     /// <summary>
     /// Counts one processed <b>flat</b> event's round-trip journaling outcome (gh#731), dimensioned by
-    /// <paramref name="outcome"/>. Emitted for every flat that reached the composition stage — a journalled trip and
-    /// each way one is <b>refused</b> — so an account stuck permanently refusing is visible to an alert rather than
-    /// only to a log line. The daily governor and the R-4 throttle read the rows this writes; if it silently stops
-    /// producing them, their headroom silently drifts.
+    /// <paramref name="outcome"/>. Emitted for every flat that reached the composition stage — a journalled trip, each
+    /// way one is <b>refused</b>, and each flat <b>deferred</b> because its closing fill has not yet been ingested
+    /// (gh#748) — so an account stuck permanently refusing or deferring is visible to an alert rather than only to a
+    /// log line. The daily governor and the R-4 throttle read the rows this writes; if it silently stops producing
+    /// them, their headroom silently drifts.
     /// </summary>
     /// <param name="outcome">One of the sink's trade-journal outcome constants (a closed set — never an id).</param>
     void RecordTradeJournalOutcome(string outcome);

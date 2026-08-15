@@ -377,6 +377,11 @@ builder.Services.AddScoped<OcoExitService>();
 // with a signed tick-value-aware RealizedPnL. This is what makes DailyRealizedReader (gh#587) and the consistency
 // window read real money rather than the zero they returned while nothing wrote Trade. Resolved per-event by
 // AccountEventStreamHost, after the OCO retire.
+// The register of flats deferred awaiting their closing fill (gh#748): PositionEvent(flat) and FillEvent(fill) are
+// independent, unordered venue callbacks, so a flat can be processed before the closing fill is ingested. A
+// SINGLETON, shared by TradeJournalService (which parks a not-yet-reconciled flat) and AccountEventStreamHost (which
+// retries it when a fill lands) -- it must survive the supervisor's reconnects, so it cannot be scoped.
+builder.Services.AddSingleton<PendingFlatJournal>();
 builder.Services.AddScoped<TradeJournalService>();
 builder.Services.AddHostedService<AccountEventStreamHost>();
 

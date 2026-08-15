@@ -373,4 +373,75 @@ public class TradeRoundTripTests
         TradeRoundTrip.TryCompose(fills, out IReadOnlyList<RoundTrip> trips).Should().BeFalse();
         trips.Should().BeEmpty();
     }
+
+    // --- Compose: the Composed / StillOpen / Ambiguous discriminator (gh#748) ---
+    // TryCompose collapses four different refusals to a bare `false`. Compose keeps the one distinction the caller
+    // needs: a window that does not reconcile because a closing fill is MISSING or not yet ingested is StillOpen
+    // (retryable -- composing again once the fill lands completes the trip), while an undefined side or a same-instant
+    // opposite-side tie is Ambiguous (terminal -- retrying cannot resolve it). The two ambiguity guards must stay
+    // before the FIFO walk so Ambiguous is distinguishable from StillOpen.
+
+    [Fact]
+    public void Compose_ShouldReturnComposed_WhenTheFillsFormABalancedTrip()
+    {
+        RoundTripFill[] fills = [Fill(OrderSide.Buy, 5000m, 2), Fill(OrderSide.Sell, 5010m, 2, minute: 5)];
+
+        RoundTripComposition outcome = TradeRoundTrip.Compose(fills, out IReadOnlyList<RoundTrip> trips);
+
+        outcome.Should().Be(RoundTripComposition.Composed);
+        trips.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void Compose_ShouldReturnStillOpen_WhenAnOpenLegHasNoClosingFillYet()
+    {
+        // 3 in, 2 out -- one lot is still open because its closing fill is missing or not yet ingested. Retryable:
+        // once the fill lands, composing again completes the trip (gh#748), never the terminal refuse-don't-guess.
+        RoundTripFill[] fills = [Fill(OrderSide.Buy, 5000m, 3), Fill(OrderSide.Sell, 5010m, 2, minute: 5)];
+
+        RoundTripComposition outcome = TradeRoundTrip.Compose(fills, out IReadOnlyList<RoundTrip> trips);
+
+        outcome.Should().Be(RoundTripComposition.StillOpen);
+        trips.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Compose_ShouldReturnStillOpen_WhenThereAreNoFillsYet()
+    {
+        // No fills yet is the extreme of a not-yet-reconciled window -- retryable, not ambiguous.
+        RoundTripComposition outcome = TradeRoundTrip.Compose([], out IReadOnlyList<RoundTrip> trips);
+
+        outcome.Should().Be(RoundTripComposition.StillOpen);
+        trips.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Compose_ShouldReturnAmbiguous_WhenAFillHasAnUnknownSide()
+    {
+        // An undefined side cannot be classified as an open or a close -- terminal ambiguity, never a missing fill.
+        RoundTripFill[] fills =
+        [
+            Fill(OrderSide.Buy, 5_000m, 2),
+            Fill((OrderSide)99, 5_010m, 1, minute: 5),
+            Fill(OrderSide.Sell, 5_020m, 1, minute: 10),
+        ];
+
+        RoundTripComposition outcome = TradeRoundTrip.Compose(fills, out IReadOnlyList<RoundTrip> trips);
+
+        outcome.Should().Be(RoundTripComposition.Ambiguous);
+        trips.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Compose_ShouldReturnAmbiguous_WhenOppositeSideFillsShareAnInstant()
+    {
+        // A same-instant opposite-side tie is decidable only by an arbitrary tiebreak that flips the sign (ADR-0022) --
+        // terminal ambiguity. A later fill cannot resolve it, so it must NOT read as StillOpen and be retried forever.
+        RoundTripFill[] fills = [Fill(OrderSide.Buy, 5_000m, 1), Fill(OrderSide.Sell, 5_010m, 1)];
+
+        RoundTripComposition outcome = TradeRoundTrip.Compose(fills, out IReadOnlyList<RoundTrip> trips);
+
+        outcome.Should().Be(RoundTripComposition.Ambiguous);
+        trips.Should().BeEmpty();
+    }
 }
