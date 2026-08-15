@@ -44,7 +44,7 @@ public sealed class VenueCredentialSchema
             }
         }
 
-        // A defensive copy: the caller keeps its array, but the schema's field order and contents are now immutable.
+        // A defensive copy: a later mutation of the caller's array cannot alter this schema's fields or their order.
         return new VenueCredentialSchema([.. fields]);
     }
 }
