@@ -332,6 +332,35 @@ public class AnthropicLlmProviderTests
         await act.Should().ThrowAsync<OperationCanceledException>(); // our shutdown, never wrapped
     }
 
+    [Fact]
+    public async Task StreamAsync_ShouldIgnoreANonTextBlockDelta_SoOnlyTheAnswerSurfaces()
+    {
+        // A thinking / tool-input block delta is not the answer -- it must never be forwarded or accumulated (gh#922 review).
+        StubHandler handler = new(_ => Sse(
+            MessageStart(1, 1),
+            new JsonObject { ["type"] = "content_block_delta", ["delta"] = new JsonObject { ["type"] = "thinking_delta", ["thinking"] = "hmm" } },
+            TextDelta("answer"),
+            MessageDelta("end_turn", 3)));
+
+        (LlmCompletion completion, List<string> deltas) = await Stream(handler);
+
+        deltas.Should().ContainSingle().Which.Should().Be("answer");
+        completion.Text.Should().Be("answer");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldMapATruncatedStreamWithNoStopReason_ToOther_SoTheCallerFailsClosed()
+    {
+        // A stream that ends after a delta with no message_delta (a dropped connection mid-turn) carries no
+        // stop_reason -- so it maps to Other, which ChatTurnService fails closed on, never surfacing a partial
+        // answer as a complete one (gh#922 review).
+        StubHandler handler = new(_ => Sse(MessageStart(1, 1), TextDelta("half an ans")));
+
+        (LlmCompletion completion, _) = await Stream(handler);
+
+        completion.StopReason.Should().Be(LlmStopReason.Other);
+    }
+
     private static async Task<(LlmCompletion Completion, List<string> Deltas)> Stream(StubHandler handler)
     {
         List<string> deltas = [];
