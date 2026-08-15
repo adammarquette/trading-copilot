@@ -339,6 +339,15 @@ builder.Services.Configure<NewsEmbeddingOptions>(builder.Configuration.GetSectio
 builder.Services.AddScoped<NewsEmbeddingService>();
 builder.Services.AddHostedService<NewsEmbeddingHost>();
 
+// The embedding orphan GC (gh#902): the periodic backstop for embedding rows whose owner was renamed or pruned, which
+// the stale-model sweep (gh#889) never reaches (a re-embed never touches a dead owner). EmbeddingOrphanStore is SCOPED
+// -- it holds the scoped DbContext, so a singleton would be a captive dependency failing ValidateScopes at startup
+// (the AiUsageLedger lesson); the host opens a fresh scope per sweep to resolve it. The anti-join DELETE is
+// relational-only (gh#109), so it is exercised by QA, not a unit test; the sweep orchestration + allow-list are.
+builder.Services.Configure<EmbeddingOrphanGcOptions>(builder.Configuration.GetSection(EmbeddingOrphanGcOptions.SectionName));
+builder.Services.AddScoped<IEmbeddingOrphanStore, EmbeddingOrphanStore>();
+builder.Services.AddHostedService<EmbeddingOrphanGcHost>();
+
 // The news-embedding similarity READ seam (gh#852, R-2): the query-side counterpart to the write pass above.
 // PgVectorNewsSimilarity ranks stored soft-signal embeddings by pgvector CosineDistance; NewsSemanticSearch embeds
 // the query (search_query) and carries the graceful degrade -- an unavailable provider, a query that will not
