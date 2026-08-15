@@ -99,6 +99,26 @@ export function armOrder(
   return request<StagedOrderResponse>('POST', `/accounts/${accountId}/orders/arm`, order);
 }
 
+/**
+ * Edits a **staged** order in place and returns the gate's decision on the *edited* proposal (gh#828, ADR-0007).
+ * This is the amend step between arm and send — it does not collapse them, and it still transmits nothing.
+ *
+ * **Every edit re-gates, and the whole proposal travels.** The server rebuilds the staged row from these fields,
+ * so this is a PUT of the complete ticket rather than a patch of what moved: an omitted field is not "unchanged".
+ * What a later take transmits is the size the gate approved on the **edited** row, never the pre-edit approval —
+ * so a caller must render the returned decision in place of the one it was holding, or it shows an approval that
+ * no longer describes what would be sent.
+ *
+ * An edited ticket takes as a `ModifiedTake` rather than an `ArmedTake`; R-11 records the deviation from what was
+ * armed. A row that has left staging is refused (409) — it exists and may be live, so that is an answer to render.
+ */
+export function editStagedOrder(
+  orderId: string,
+  order: SendOrderRequest,
+): Promise<ApiResult<StagedOrderResponse>> {
+  return request<StagedOrderResponse>('PUT', `/orders/${orderId}`, order);
+}
+
 /** Transmits a staged order — the separate, explicit third step. */
 export function takeStagedOrder(orderId: string): Promise<ApiResult<SendOrderResponse>> {
   return request<SendOrderResponse>('POST', `/orders/${orderId}/take`);
