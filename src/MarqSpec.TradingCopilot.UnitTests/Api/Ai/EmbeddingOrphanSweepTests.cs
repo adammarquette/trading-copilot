@@ -6,34 +6,26 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.Ai;
 public class EmbeddingOrphanSweepTests
 {
     [Fact]
-    public void IsSweepable_ShouldBeTrue_ForProducerBackedKinds()
-    {
-        EmbeddingOrphanSweep.IsSweepable(EmbeddingOwnerKind.SoftSignal).Should().BeTrue();
-        EmbeddingOrphanSweep.IsSweepable(EmbeddingOwnerKind.Topic).Should().BeTrue();
-    }
-
-    [Fact]
-    public void IsSweepable_ShouldBeFalse_ForProducerlessAndUnknownKinds()
-    {
-        // Suggestion / Rule / MarketSnapshot have no producer yet -- sweeping them would delete every such row to
-        // zero rather than reclaim orphans -- and Unknown is the refusable sentinel, never a real owner.
-        EmbeddingOrphanSweep.IsSweepable(EmbeddingOwnerKind.Unknown).Should().BeFalse();
-        EmbeddingOrphanSweep.IsSweepable(EmbeddingOwnerKind.Suggestion).Should().BeFalse();
-        EmbeddingOrphanSweep.IsSweepable(EmbeddingOwnerKind.Rule).Should().BeFalse();
-        EmbeddingOrphanSweep.IsSweepable(EmbeddingOwnerKind.MarketSnapshot).Should().BeFalse();
-    }
-
-    [Fact]
-    public void IsSweepable_ShouldBeFalse_ForAnUndefinedKind()
-    {
-        // Fail-safe: an allow-list, so a value outside the enum -- a bad cast, or a kind not yet added here -- is
-        // never swept.
-        EmbeddingOrphanSweep.IsSweepable((EmbeddingOwnerKind)99).Should().BeFalse();
-    }
-
-    [Fact]
     public void SweepableKinds_ShouldBeExactlyTheProducerBackedKinds()
     {
+        // The sweep iterates exactly this list, so it IS the allow-list: SoftSignal (checked against News) and Topic
+        // (against NewsTopics) -- the only kinds with a producer to prove an owner gone.
         EmbeddingOrphanSweep.SweepableKinds.Should().Equal(EmbeddingOwnerKind.SoftSignal, EmbeddingOwnerKind.Topic);
+    }
+
+    [Fact]
+    public void SweepableKinds_ShouldExcludeProducerlessAndUnknownKinds()
+    {
+        // Suggestion / Rule / MarketSnapshot have no producer yet -- sweeping them would delete every such row to
+        // zero rather than reclaim orphans -- and Unknown is the refusable sentinel. Being an allow-list, a value
+        // outside the enum (a bad cast, or a kind not yet added) is excluded too, so a future kind is never swept
+        // until it is deliberately added here alongside its producer check.
+        IReadOnlyList<EmbeddingOwnerKind> sweepable = EmbeddingOrphanSweep.SweepableKinds;
+
+        sweepable.Should().NotContain(EmbeddingOwnerKind.Unknown);
+        sweepable.Should().NotContain(EmbeddingOwnerKind.Suggestion);
+        sweepable.Should().NotContain(EmbeddingOwnerKind.Rule);
+        sweepable.Should().NotContain(EmbeddingOwnerKind.MarketSnapshot);
+        sweepable.Should().NotContain((EmbeddingOwnerKind)99);
     }
 }
