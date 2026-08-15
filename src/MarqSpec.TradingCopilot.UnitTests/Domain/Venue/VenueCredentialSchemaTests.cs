@@ -53,4 +53,20 @@ public class VenueCredentialSchemaTests
 
         schema.Fields[0].Key.Should().Be("first");
     }
+
+    [Fact]
+    public void Of_ShouldThrow_WhenFieldsArrayIsNull()
+    {
+        Action act = () => VenueCredentialSchema.Of(null!);
+
+        act.Should().Throw<ArgumentNullException>();
+    }
+
+    [Fact]
+    public void Of_ShouldThrow_WhenAFieldIsNull()
+    {
+        Action act = () => VenueCredentialSchema.Of(Field("ApiKey"), null!);
+
+        act.Should().Throw<ArgumentNullException>();
+    }
 }
