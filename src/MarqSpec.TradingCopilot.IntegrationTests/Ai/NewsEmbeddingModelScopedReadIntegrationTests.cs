@@ -19,23 +19,29 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Written from the spec, gh#881 is unimplemented as of this suite.</b> As of when this suite was written,
-/// gh#881 (the coding task that is meant to add a <c>Model == provider.Model</c> predicate to
-/// <see cref="PgVectorNewsSimilarity.ReadVectorsAsync"/> / <c>NearestNewsAsync</c>) carried an open claim branch
-/// with zero commits and no linked PR — <see cref="PgVectorNewsSimilarity"/> takes only a
-/// <see cref="TradingCopilotDbContext"/>, no <see cref="IEmbeddingProvider"/>, and its by-owner read filters
-/// solely on <c>(OwnerKind, OwnerId)</c>. Per the QA guard discipline (rule 3), this suite is not blocked on that
-/// landing: every case below is written to the intended (post-gh#881) behaviour, and where today's code cannot
-/// meet it the OBSERVED (broken) behaviour is pinned per rule 2, citing gh#881 — each pinned assertion is this
-/// task's own regression guard until gh#881 lands, at which point it flips to the commented intended assertion.
+/// <b>Written from the spec; gh#881 landed mid-PR, scoped to the by-owner reads only.</b> gh#881 (the coding task
+/// for a <c>Model == provider.Model</c> predicate) was an open claim branch with zero commits when this suite was
+/// first written — <see cref="PgVectorNewsSimilarity"/> took only a <see cref="TradingCopilotDbContext"/>, no
+/// <see cref="IEmbeddingProvider"/>, and NEITHER read filtered by model. Per the QA guard discipline (rule 3),
+/// the suite was not blocked on that landing: every case was written to the intended behaviour, with the
+/// OBSERVED (broken) behaviour pinned per rule 2 everywhere today's code fell short, citing gh#881. gh#881 then
+/// merged to <c>develop</c> while this PR was open (a <c>protect-develop</c> auto-sync carried it in) — but
+/// <b>scoped to <see cref="PgVectorNewsSimilarity.GetVectorsAsync"/> / <c>GetTopicVectorsAsync</c> only</b>; its
+/// own commit message defers the identical filter on <c>NearestNewsAsync</c>, plus the storage sweep of the
+/// now-unread stale rows, to the follow-up gh#889 (opened alongside it) — <c>NearestNewsAsync</c> must move
+/// together with re-aligning the gh#864 recall guard's provider model to its seed, which gh#881 alone would have
+/// broken. So: the by-owner-read pins below were re-verified against the landed fix and flipped to their intended
+/// (now-true) assertions — they are gh#881's regression guard now, not a claim about it; the
+/// <c>NearestNewsAsync</c> pins remain defect pins, re-cited to gh#889, the issue that now owns that gap.
 /// </para>
 /// <para>
-/// <b>Prove-red-first, done by temporarily applying gh#881's intended fix locally.</b> Since there is no existing
-/// predicate to revert, red was proven the other direction: a <c>Model == provider.Model</c> predicate (with
-/// <see cref="IEmbeddingProvider"/> constructor-injected) was added to a local, uncommitted copy of
-/// <see cref="PgVectorNewsSimilarity"/>, confirming every pinned-defect assertion below flips red for exactly the
-/// reason named (and the commented intended assertions flip green) — then discarded; only the pinned suite as
-/// authored here is committed. See the PR body for the exact local diff and command transcript.
+/// <b>Prove-red-first, done by temporarily applying gh#881's intended fix locally, before it landed for real.</b>
+/// Since there was no existing predicate to revert at the time, red was proven the other direction: a
+/// <c>Model == provider.Model</c> predicate (with <see cref="IEmbeddingProvider"/> constructor-injected) was
+/// added to a local, uncommitted copy of <see cref="PgVectorNewsSimilarity"/>, confirming every pinned-defect
+/// assertion below flipped red for exactly the reason named (and the commented intended assertions flipped
+/// green) — then discarded. gh#881 landing for real during this PR's own CI run reproduced the identical flip
+/// independently, on the by-owner-read cases: see the PR body for both accounts.
 /// </para>
 /// <para>
 /// <b>The doubled provider.</b> <see cref="EmbeddingProviderDoubleTestPostgresFactory"/> substitutes
@@ -79,15 +85,11 @@ public sealed class NewsEmbeddingModelScopedReadIntegrationTests : IClassFixture
 
         IReadOnlyList<StoredEmbedding> hits = await GetVectorsAsync(["a"]);
 
-        // DEFECT gh#881: PgVectorNewsSimilarity.ReadVectorsAsync filters only on (OwnerKind, OwnerId) today, so a
-        // stale row from a retired model still surfaces alongside the current one -- the exact "duplicate-owner
-        // rows" hazard gh#881's own issue body names. Once gh#881's Model == provider.Model predicate lands, this
-        // should read `hits.Should().ContainSingle().Which.Vector.Should().Equal(Direction((0, 1f)).ToArray())`
-        // (the CurrentModel vector only) -- this pinned count is that fix's own regression guard.
-        hits.Should().HaveCount(2,
-            "DEFECT gh#881: the by-owner read is not yet scoped to the current model, so BOTH the current-model "
-            + "and the stale old-model row for owner \"a\" are returned instead of exactly one");
-        hits.Select(hit => hit.OwnerId).Should().OnlyContain(id => id == "a");
+        // gh#881's regression guard (landed mid-PR): ReadVectorsAsync now filters Model == provider.Model, so the
+        // stale old-model row for owner "a" no longer surfaces alongside the current one -- the exact
+        // "duplicate-owner rows" hazard gh#881's own issue body named is what this now guards against recurring.
+        hits.Should().ContainSingle("only the CurrentModel row for owner \"a\" should surface, never the stale OldModel one")
+            .Which.Vector.Should().Equal(Direction((0, 1f)).ToArray(), "the surfaced vector is the CurrentModel one, not the OldModel one");
     }
 
     [Fact]
@@ -99,12 +101,10 @@ public sealed class NewsEmbeddingModelScopedReadIntegrationTests : IClassFixture
 
         IReadOnlyList<StoredEmbedding> hits = await GetTopicVectorsAsync(["t"]);
 
-        // DEFECT gh#881: same hazard as the SoftSignal case above, over GetTopicVectorsAsync's shared
-        // ReadVectorsAsync helper. Once fixed: `hits.Should().ContainSingle().Which.Vector.Should().Equal(...)`.
-        hits.Should().HaveCount(2,
-            "DEFECT gh#881: the topic by-owner read is not yet scoped to the current model, so BOTH the "
-            + "current-model and the stale old-model row for topic \"t\" are returned instead of exactly one");
-        hits.Select(hit => hit.OwnerId).Should().OnlyContain(id => id == "t");
+        // gh#881's regression guard (landed mid-PR): same fix as the SoftSignal case above, over
+        // GetTopicVectorsAsync's shared ReadVectorsAsync helper.
+        hits.Should().ContainSingle("only the CurrentModel row for topic \"t\" should surface, never the stale OldModel one")
+            .Which.Vector.Should().Equal(Direction((0, 1f)).ToArray(), "the surfaced vector is the CurrentModel one, not the OldModel one");
     }
 
     // =================================================================================================================
@@ -112,6 +112,12 @@ public sealed class NewsEmbeddingModelScopedReadIntegrationTests : IClassFixture
     // sibling assertion inside NewsEmbeddingPgvectorReadIntegrationTests was rewired to this same real seam in
     // this PR (see that file's remarks); this case additionally proves the double-provider host reaches the
     // identical INewsEmbeddingSimilarity.NearestNewsAsync entry point other-model exclusion depends on.
+    //
+    // Still a DEFECT after gh#881: that fix scoped the Model filter to the by-owner reads only (GetVectorsAsync /
+    // GetTopicVectorsAsync) -- its own commit message defers the identical filter on NearestNewsAsync to the
+    // follow-up gh#889, because it must land together with re-aligning the gh#864 recall guard's provider model
+    // to its seed (that guard drives this exact method through a provider whose Model is "none"). So this case is
+    // re-cited to gh#889, the issue that now owns this gap, rather than the now-closed gh#881.
     // =================================================================================================================
 
     [Fact]
@@ -125,13 +131,14 @@ public sealed class NewsEmbeddingModelScopedReadIntegrationTests : IClassFixture
 
         IReadOnlyList<SemanticNeighbor> hits = await NearestNewsAsync(Direction((0, 1f)).ToArray(), n: 5);
 
-        // DEFECT gh#881: NearestNewsAsync filters only on OwnerKind == SoftSignal today, so the old-model row
-        // (closer by construction) outranks and is included alongside the current-model answer. Once gh#881
-        // lands this should read `hits.Select(h => h.OwnerId).Should().Equal(["right-model"])` -- current-model
-        // only, and this pinned ordering is that fix's own regression guard.
+        // DEFECT gh#889: NearestNewsAsync filters only on OwnerKind == SoftSignal today (gh#881 did not touch
+        // it), so the old-model row (closer by construction) outranks and is included alongside the
+        // current-model answer. Once gh#889 lands this should read
+        // `hits.Select(h => h.OwnerId).Should().Equal(["right-model"])` -- current-model only, and this pinned
+        // ordering is that fix's own regression guard.
         hits.Select(hit => hit.OwnerId).Should().Equal(
             ["wrong-model-but-identical-vector", "right-model"],
-            "DEFECT gh#881: nearest-N is not yet scoped to the current model, so the closer old-model row leads "
+            "DEFECT gh#889: nearest-N is not yet scoped to the current model, so the closer old-model row leads "
             + "the current-model answer instead of being excluded");
     }
 
@@ -171,6 +178,10 @@ public sealed class NewsEmbeddingModelScopedReadIntegrationTests : IClassFixture
     // Model-transition self-heal -- acceptance criterion 3. Seed one owner embedded ONLY under the OLD model; with
     // the provider on the NEW model, the by-owner read should degrade (empty); one EmbedPendingAsync pass should
     // re-embed it under the new model; the read should then surface the new-model vector.
+    //
+    // The by-owner-read halves below are gh#881's regression guard (landed mid-PR, scoped to the by-owner reads).
+    // The "stale row left behind" assertion stays a pinned DEFECT -- gh#881's own commit message defers the
+    // storage sweep of now-unread stale-model rows to the follow-up gh#889 -- re-cited there.
     // =================================================================================================================
 
     [Fact]
@@ -212,19 +223,16 @@ public sealed class NewsEmbeddingModelScopedReadIntegrationTests : IClassFixture
 
         IReadOnlyList<StoredEmbedding> beforeReembed = await GetVectorsAsync([ownerId]);
 
-        // DEFECT gh#881: the by-owner read is not yet scoped to the current model, so the STALE old-model vector
-        // still surfaces even though the deployment has already moved on -- it should degrade to empty instead.
-        // Once gh#881 lands this should read `beforeReembed.Should().BeEmpty(...)`.
-        beforeReembed.Should().ContainSingle(
-            "DEFECT gh#881: the by-owner read still surfaces the stale old-model vector after the deployment's "
-            + "current model has moved on, instead of degrading to empty")
-            .Which.Vector.Should().Equal(oldModelRow.Embedding.ToArray(),
-                "the surfaced vector is exactly the stale OLD-model one, not a coincidental match");
+        // gh#881's regression guard (landed mid-PR): the by-owner read is now scoped to the current model, so the
+        // stale old-model vector no longer surfaces once the deployment has moved on -- a bounded degrade to
+        // empty, exactly as gh#881's own commit message describes ("an owner embedded only under the old model
+        // reads back empty ... until the embedding pass re-embeds it").
+        beforeReembed.Should().BeEmpty(
+            "the deployment's current model has moved on and no current-model vector has been embedded yet, so "
+            + "the by-owner read must degrade to empty rather than surface the stale old-model vector");
 
         // Phase 3: one embedding pass under the NEW model -- the self-heal this suite exists to prove. The
-        // candidacy query's NOT EXISTS(Model == newModel) predicate makes the story a re-embed candidate again
-        // (production NewsEmbeddingService logic, untouched by gh#881), regardless of the by-owner read's own
-        // defect proven above.
+        // candidacy query's NOT EXISTS(Model == newModel) predicate makes the story a re-embed candidate again.
         int embeddedUnderNewModel = await RunEmbedPendingPassAsync(_recordedAt.AddMinutes(2));
         embeddedUnderNewModel.Should().Be(1, "the story has no NEW-model embedding yet, so this pass must re-embed it");
 
@@ -233,19 +241,22 @@ public sealed class NewsEmbeddingModelScopedReadIntegrationTests : IClassFixture
             "the re-embed pass must have written a row under the deployment's NEW current model").Which;
         newModelRow.Embedding.ToArray().Should().NotBeEmpty("the re-embed must have stored a real vector, not a placeholder");
 
-        // The self-heal genuinely happened at the WRITE side -- proven directly against the database, independent
-        // of the by-owner read's own gh#881 defect.
+        // DEFECT gh#889 (storage-GC follow-up gh#881's own commit message spun out): the stale old-model row is
+        // left behind, not swept -- a model transition leaves duplicate-OWNER-KIND-AND-ID rows (harmless post-
+        // gh#881, since the by-owner read below no longer returns it) until gh#889's sweep lands.
         afterSecondPass.Should().Contain(row => row.Model == OldModel,
-            "DEFECT gh#881 (issue body item 1): the stale old-model row is left behind, not swept -- a "
-            + "model transition leaves duplicate-owner rows until gh#881's sweep or read-filter lands");
+            "DEFECT gh#889: the stale old-model row is left behind, not swept, though it is now harmless -- the "
+            + "by-owner read filters it out (asserted below) -- until gh#889's storage sweep lands");
 
-        // DEFECT gh#881: the by-owner read, called again after the re-embed, now returns BOTH rows (old + new
-        // model) for the same owner instead of exactly the new-model one -- the duplicate-owner-rows hazard
-        // gh#881's issue body names as its first symptom. Once fixed: `.Should().ContainSingle().Which.Vector...`.
+        // gh#881's regression guard (landed mid-PR): the by-owner read, called again after the re-embed, now
+        // returns EXACTLY the new-model vector -- the duplicate-owner-rows hazard gh#881's issue body named as
+        // its first symptom no longer reaches a caller, even with the stale row still physically present (proven
+        // directly above).
         IReadOnlyList<StoredEmbedding> afterReembed = await GetVectorsAsync([ownerId]);
-        afterReembed.Should().HaveCount(2,
-            "DEFECT gh#881: after the re-embed, the by-owner read returns BOTH the old-model and new-model rows "
-            + "for the same owner instead of exactly the new-model one");
+        afterReembed.Should().ContainSingle(
+                "the by-owner read must surface exactly the new-model vector, never the stale old-model one that "
+                + "still physically exists in the table")
+            .Which.Vector.Should().Equal(newModelRow.Embedding.ToArray(), "the surfaced vector is the NEW-model one");
     }
 
     // =================================================================================================================
