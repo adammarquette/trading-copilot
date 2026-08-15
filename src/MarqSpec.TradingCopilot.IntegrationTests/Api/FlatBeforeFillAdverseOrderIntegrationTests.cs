@@ -1,0 +1,489 @@
+using MarqSpec.TradingCopilot.Api.Accounts;
+using MarqSpec.TradingCopilot.Api.Observability;
+using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Venue;
+using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+
+namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
+
+/// <summary>
+/// Independent real-Postgres coverage for gh#911, the QA card for gh#748: a <see cref="PositionEvent"/>(flat)
+/// delivered to the account-event stream <b>before</b> its closing <see cref="FillEvent"/> must still journal
+/// exactly one <see cref="Trade"/> once the fill lands, through a defer-then-retry path — not be lost. Authored
+/// from gh#911's and gh#748's own text, not from gh#748's implementation (the QA contract's independence rule) —
+/// see the remarks below for the timeline that makes that worth spelling out here.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Authored ahead of gh#748, landed alongside it.</b> This suite was written from gh#911's acceptance criteria
+/// while gh#748 was still open with no PR — at that point <see cref="AccountEventStreamHost"/>'s
+/// <see cref="FillEvent"/> branch only ever wrote the <see cref="Fill"/> row via
+/// <see cref="AccountEventIngestionService.ProcessAsync"/> and never re-invoked <see cref="TradeJournalService"/>,
+/// so an early flat's round trip was lost forever once its closing fill landed. <b>PR #912</b> (branch
+/// <c>bug/748_a-flat-event-queued</c>) merged into <c>develop</c> minutes later, landing exactly the shape gh#911
+/// anticipates: <see cref="PendingFlatJournal"/> (keyed on <c>(Account, Contract.Key, At)</c>,
+/// <see cref="ExecutionMetrics.JournalDeferred"/> = <c>"deferred"</c>, and the retry loop in
+/// <see cref="AccountEventStreamHost"/>'s <see cref="FillEvent"/> branch. This branch rebased onto that merge; every
+/// case below is now active against the real, shipped defer-then-retry path — nothing here is <c>Skip</c>ped.
+/// </para>
+/// <para>
+/// <b>What each case guards, mapped to gh#911's five acceptance criteria:</b>
+/// <list type="bullet">
+/// <item><description><see cref="AccountEventStreamHost_ShouldComposeExactlyOneTrade_WhenTheFlatArrivesBeforeItsClosingFill"/>
+/// (AC1) — the adverse order composes exactly one <see cref="Trade"/> with the correct signed <c>RealizedPnL</c>,
+/// through the defer-then-retry path, not a same-pass compose (the flat's outcome is observed BEFORE the closing
+/// fill is armed).</description></item>
+/// <item><description><see cref="AccountEventStreamHost_ShouldRecordDeferredThenJournalled_WhenTheFlatArrivesBeforeItsClosingFill"/>
+/// (AC2) — the outcome sequence is exactly <c>deferred</c> → <c>journalled</c>, never <c>not-composable</c> for this
+/// window.</description></item>
+/// <item><description><see cref="AccountEventStreamHost_ShouldWriteNoSecondRow_WhenTheComposedTradeIsReplayed"/>
+/// (AC3) — once composed, a replayed flat writes no second row: the real <c>(ClosingFillId, OpeningFillId)</c>
+/// unique index backstops the retry, not merely the in-memory pre-check.</description></item>
+/// <item><description><see cref="AccountEventStreamHost_ShouldRefuseAndNeverDefer_WhenASameInstantOppositeSideTieFallsInsideTheWindow"/>
+/// (AC4) — a genuine same-instant opposite-side tie still records <c>not-composable</c> and writes no row, and is
+/// never left parked as a retryable <c>deferred</c> — the discriminator's terminal branch, exercised through the
+/// same live host as the retryable case above so the two are told apart in the same harness.</description></item>
+/// <item><description>AC5 (prove-red) — see the note below; the case that pinned the pre-#912 defect was deleted
+/// once the fix landed, per its own stated plan.</description></item>
+/// </list>
+/// </para>
+/// <para>
+/// <b>Prove-red, without a surviving artifact.</b> Before this rebase, the suite carried a <c>// DEFECT gh#748</c>
+/// pinned case (QA contract rule 2) that asserted, against the actual pre-#912 <c>develop</c>, that an early flat's
+/// round trip never composed even after its closing fill landed through real ingestion — the exact adverse-order
+/// loss gh#748 describes. That pin was deleted in the same revision that rebased onto #912's merge, per the plan
+/// stated when it was written ("delete it once gh#748 lands; its own failure IS the signal that the retry now
+/// exists") — deleting it, rather than leaving it to fail, is what "no revert artifact in the committed diff" means
+/// once the fix is no longer hypothetical. <see cref="AccountEventStreamHost_ShouldComposeExactlyOneTrade_WhenTheFlatArrivesBeforeItsClosingFill"/>
+/// (AC1) is its replacement and asserts the mirror image on the SAME harness.
+/// </para>
+/// <para>
+/// <b>Out of scope</b> (gh#911's own list, not re-litigated here): the restart-crosses-the-race edge and a
+/// genuinely-never-arriving closing fill stay with gh#722's reconcile sweep and gh#770's adopt-time fill backfill.
+/// </para>
+/// </remarks>
+public sealed class FlatBeforeFillAdverseOrderIntegrationTests : IClassFixture<FlatBeforeFillAdverseOrderPostgresFactory>
+{
+    private const string Contract = "CON.F.US.MES.U26";
+    private const string OurCredentialKey = "topstep-main";
+    private const decimal ContractPointValue = 5m;
+
+    private static readonly DateTimeOffset _origin = new(2026, 8, 11, 14, 0, 0, TimeSpan.Zero);
+
+    private static readonly VenueId _projectx = VenueId.Parse("projectx");
+
+    private readonly FlatBeforeFillAdverseOrderPostgresFactory _factory;
+
+    public FlatBeforeFillAdverseOrderIntegrationTests(FlatBeforeFillAdverseOrderPostgresFactory factory)
+    {
+        _factory = factory;
+    }
+
+    // =================================================================================================================
+    // AC1 — Adverse order composes: the flat is delivered BEFORE the closing fill; exactly one Trade composes with
+    // the correct signed RealizedPnL once the fill lands, through the defer-then-retry path (not a same-pass compose).
+    // =================================================================================================================
+
+    [Fact]
+    public async Task AccountEventStreamHost_ShouldComposeExactlyOneTrade_WhenTheFlatArrivesBeforeItsClosingFill()
+    {
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "8101");
+
+        Guid entryFill = FillId(1, 0x01);
+        await SeedOrderAsync(owner, accountId, OrderSide.Buy, "entry-8101", [(entryFill, 5_000m, 1, At(0))]);
+        // The closing order is WORKING with no fill yet -- ingestion has a VenueOrderKey to resolve when the late
+        // FillEvent finally arrives, exactly as the gh#799 re-pairing case seeds its late executions.
+        await SeedOrderAsync(owner, accountId, OrderSide.Sell, "exit-8101", []);
+
+        await using RunningHost running = await StartHostAsync();
+
+        // The flat is delivered FIRST -- its closing fill has not been ingested yet. This is the adverse order
+        // gh#748 names, not a race: the fill is armed only after the early flat's outcome is observed below.
+        running.Stream.Arm(FlatAt("8101", At(2)));
+
+        bool earlyOutcomeRecorded = await WaitUntilAsync(
+            () => Task.FromResult(_factory.Capture.For(ExecutionMetrics.JournalOutcomes).Any()));
+        earlyOutcomeRecorded.Should().BeTrue("the early flat must be observed and recorded, never silently dropped");
+
+        // The closing fill lands SECOND, through the real ingestion path (gh#911's own requirement: hand-writing
+        // the Fill row would assume away the delivery-order hazard under test).
+        running.Stream.Arm(ExitFill("8101", "exit-8101", "exit-fill-8101", OrderSide.Sell, 4_980m, At(2)));
+
+        bool composed = await WaitUntilAsync(() => QueryDbAsync(database =>
+            database.Trades.IgnoreQueryFilters().AnyAsync(trade => trade.AccountId == accountId)));
+        composed.Should().BeTrue(
+            "the fill landing after the flat must trigger a retry that composes the round trip -- this is the "
+            + "defer-then-retry path gh#748 adds, not a same-pass compose");
+
+        await running.StopAsync();
+
+        List<Trade> trades = await TradesAsync(accountId);
+        trades.Should().ContainSingle(
+            "exactly one round trip closed here -- a second row would double-count into the daily governor");
+        trades[0].RealizedPnL.Should().Be(
+            -100m, "buy @5000, sell @4980, 1 lot at a point value of 5 -- a 20-point loss, signed");
+        trades[0].OpeningFillId.Should().Be(entryFill, "paired with the only entry fill this window ever had");
+        trades[0].ClosingFillId.Should().NotBeNull("keyed on the fill that arrived after the flat that closed it");
+    }
+
+    // =================================================================================================================
+    // AC2 — Deferred, then journalled: the outcome sequence is `deferred` (early flat) -> `journalled` (fill-
+    // triggered retry), never `not-composable` for this window.
+    // =================================================================================================================
+
+    [Fact]
+    public async Task AccountEventStreamHost_ShouldRecordDeferredThenJournalled_WhenTheFlatArrivesBeforeItsClosingFill()
+    {
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "8102");
+
+        await SeedOrderAsync(owner, accountId, OrderSide.Buy, "entry-8102", [(FillId(2, 0x01), 5_000m, 1, At(0))]);
+        await SeedOrderAsync(owner, accountId, OrderSide.Sell, "exit-8102", []);
+
+        await using RunningHost running = await StartHostAsync();
+
+        running.Stream.Arm(FlatAt("8102", At(2)));
+        bool earlyOutcomeRecorded = await WaitUntilAsync(
+            () => Task.FromResult(_factory.Capture.For(ExecutionMetrics.JournalOutcomes).Any()));
+        earlyOutcomeRecorded.Should().BeTrue();
+
+        running.Stream.Arm(ExitFill("8102", "exit-8102", "exit-fill-8102", OrderSide.Sell, 4_980m, At(2)));
+        bool composed = await WaitUntilAsync(() => QueryDbAsync(database =>
+            database.Trades.IgnoreQueryFilters().AnyAsync(trade => trade.AccountId == accountId)));
+        composed.Should().BeTrue();
+
+        await running.StopAsync();
+
+        List<string?> outcomes = [.. _factory.Capture.For(ExecutionMetrics.JournalOutcomes)
+            .Select(measurement => (string?)measurement.Tags.GetValueOrDefault("outcome"))];
+
+        outcomes.Should().Equal(
+            [ExecutionMetrics.JournalDeferred, ExecutionMetrics.JournalWritten],
+            "the early flat must record 'deferred' -- never 'not-composable', which is the discriminator's "
+            + "TERMINAL branch for genuine ambiguity, not an incomplete window -- and the fill-triggered retry "
+            + "must then record 'journalled'; pre-#748 this sequence was 'not-composable' with nothing after it");
+    }
+
+    // =================================================================================================================
+    // AC3 — Idempotent on retry: once the trade composes, a replayed flat writes no second row -- the real unique
+    // index backstops the retry, not just the in-memory pre-check.
+    // =================================================================================================================
+
+    [Fact]
+    public async Task AccountEventStreamHost_ShouldWriteNoSecondRow_WhenTheComposedTradeIsReplayed()
+    {
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedAccountAsync(owner, "8103");
+
+        await SeedOrderAsync(owner, accountId, OrderSide.Buy, "entry-8103", [(FillId(3, 0x01), 5_000m, 1, At(0))]);
+        await SeedOrderAsync(owner, accountId, OrderSide.Sell, "exit-8103", []);
+
+        await using RunningHost running = await StartHostAsync();
+
+        running.Stream.Arm(FlatAt("8103", At(2)));
+        await WaitUntilAsync(() => Task.FromResult(_factory.Capture.For(ExecutionMetrics.JournalOutcomes).Any()));
+
+        running.Stream.Arm(ExitFill("8103", "exit-8103", "exit-fill-8103", OrderSide.Sell, 4_980m, At(2)));
+        bool composed = await WaitUntilAsync(() => QueryDbAsync(database =>
+            database.Trades.IgnoreQueryFilters().AnyAsync(trade => trade.AccountId == accountId)));
+        composed.Should().BeTrue("the precondition -- AC1's compose -- must hold before the replay means anything");
+
+        List<Trade> afterCompose = await TradesAsync(accountId);
+        afterCompose.Should().ContainSingle();
+        Guid survivingId = afterCompose[0].Id;
+
+        _factory.Capture.Clear();
+
+        // At-least-once redelivery of the SAME flat, well after the trade already composed -- the retry's own
+        // idempotency, not the original compose's.
+        running.Stream.Arm(FlatAt("8103", At(2)));
+
+        bool replayOutcomeRecorded = await WaitUntilAsync(
+            () => Task.FromResult(_factory.Capture.For(ExecutionMetrics.JournalOutcomes).Any()));
+        replayOutcomeRecorded.Should().BeTrue("the replay must be observed, not silently no-op'd with nothing to see");
+
+        await running.StopAsync();
+
+        List<Trade> afterReplay = await TradesAsync(accountId);
+        afterReplay.Should().ContainSingle(
+            "a replayed flat recomposes the SAME leg, whose key is the same row -- a second row here is a "
+            + "double-count straight into the R-4 / R-5 daily governor, and is exactly what the composite "
+            + "(ClosingFillId, OpeningFillId) unique index exists to backstop even if the in-memory pre-check "
+            + "somehow missed it");
+        afterReplay[0].Id.Should().Be(survivingId, "the surviving row is the ORIGINAL one, untouched by the replay");
+    }
+
+    // =================================================================================================================
+    // AC4 — Genuine ambiguity still refuses: a same-instant opposite-side tie window still records `not-composable`
+    // and writes no row, and is NOT left parked deferred. Provable TODAY: unaffected by whether a defer mechanism
+    // exists, so this is a real regression guard both before and after gh#748.
+    // =================================================================================================================
+
+    [Fact]
+    public async Task AccountEventStreamHost_ShouldRefuseAndNeverDefer_WhenASameInstantOppositeSideTieFallsInsideTheWindow()
+    {
+        Guid owner = Guid.NewGuid();
+        Guid accountId = await SeedTiedWindowAsync(owner, "8104", block: 4);
+
+        await using RunningHost running = await StartHostAsync();
+
+        running.Stream.Arm(FlatAt("8104", At(2)));
+
+        bool outcomeRecorded = await WaitUntilAsync(
+            () => Task.FromResult(_factory.Capture.For(ExecutionMetrics.JournalOutcomes).Any()));
+        outcomeRecorded.Should().BeTrue("an ambiguous window must still be observed, not silently ignored");
+
+        await running.StopAsync();
+
+        _factory.Capture.For(ExecutionMetrics.JournalOutcomes).Should().ContainSingle(
+            measurement => (string?)measurement.Tags.GetValueOrDefault("outcome") == ExecutionMetrics.JournalNotComposable,
+            "a genuine same-instant opposite-side tie has no single right answer and must record 'not-composable' "
+            + "-- the discriminator's TERMINAL branch");
+        _factory.Capture.For(ExecutionMetrics.JournalOutcomes).Should().NotContain(
+            measurement => (string?)measurement.Tags.GetValueOrDefault("outcome") == "deferred",
+            "a genuine ambiguity is not an incomplete window -- retrying it on a later fill would only ever "
+            + "reproduce the same tie, so it must never be parked as a retryable 'deferred'");
+
+        (await TradesAsync(accountId)).Should().BeEmpty(
+            "a row written here would carry a side, an entry and an exit chosen by nothing but Guid order, and "
+            + "its P&L would enter the daily governor with a sign that could just as easily have been the other one");
+    }
+
+    // =================================================================================================================
+    // Fixture.
+    // =================================================================================================================
+
+    private static DateTimeOffset At(int minutes) => _origin.AddMinutes(minutes);
+
+    private static Guid FillId(int block, byte order) =>
+        Guid.Parse($"{block:x8}-0000-0000-0000-0000000000{order:x2}");
+
+    private static PositionEvent FlatAt(string venueAccountKey, DateTimeOffset at) =>
+        new(VenueAccountId.Create(_projectx, venueAccountKey), at,
+            VenueContractId.Create(_projectx, Contract), NetQuantity: 0, new Price(5_000m));
+
+    private static FillEvent ExitFill(
+        string venueAccountKey,
+        string venueOrderKey,
+        string venueFillKey,
+        OrderSide side,
+        decimal price,
+        DateTimeOffset at) =>
+        new(VenueAccountId.Create(_projectx, venueAccountKey), at, venueOrderKey, venueFillKey, side,
+            Quantity: 1, new Price(price), Fees: 0m, Voided: false);
+
+    /// <summary>
+    /// Starts a fresh, isolated <see cref="AccountEventStreamHost"/> against this fixture's stream double --
+    /// resetting the channel and clearing captured measurements first, so one test's events and metrics can never
+    /// leak into another's on this shared-container fixture.
+    /// </summary>
+    private async Task<RunningHost> StartHostAsync()
+    {
+        _factory.Services.GetRequiredService<AdversarialTestProjectXVenueFactory>().MakeAccountStreamingSupported();
+        TestAccountEventStream stream = _factory.Services.GetRequiredService<TestAccountEventStream>();
+        stream.Reset();
+        _factory.Capture.Clear();
+
+        AccountEventStreamHost host = new(
+            _factory.Services,
+            _factory.Services.GetRequiredService<PendingFlatJournal>(),
+            _factory.Services.GetRequiredService<ILogger<AccountEventStreamHost>>());
+        await host.StartAsync(CancellationToken.None);
+        return new RunningHost(host, stream);
+    }
+
+    /// <summary>A started host plus its stream double, torn down with <see cref="StopAsync"/> or on dispose --
+    /// the same start/try/finally-stop shape the sibling suites use, wrapped so each case does not repeat it.</summary>
+    private sealed class RunningHost(AccountEventStreamHost host, TestAccountEventStream stream) : IAsyncDisposable
+    {
+        public TestAccountEventStream Stream { get; } = stream;
+
+        private readonly AccountEventStreamHost _host = host;
+        private bool _stopped;
+
+        public async Task StopAsync()
+        {
+            if (_stopped)
+            {
+                return;
+            }
+
+            await _host.StopAsync(CancellationToken.None);
+            _stopped = true;
+        }
+
+        public ValueTask DisposeAsync() => new(StopAsync());
+    }
+
+    /// <summary>Seeds the ambiguous window AC4 needs: a buy at <c>At(0)</c>, an opposite-side pair both at
+    /// <c>At(1)</c>, and a sell at <c>At(2)</c> -- the same shape <c>TradeFifoPairingIntegrationTests</c> uses for
+    /// its direct-call ambiguity cases (gh#809, ADR-0022), driven here through the real host instead.</summary>
+    private async Task<Guid> SeedTiedWindowAsync(Guid owner, string venueKey, int block)
+    {
+        Guid accountId = await SeedAccountAsync(owner, venueKey);
+
+        Guid entry = FillId(block, 0x01);
+        Guid tiedSell = FillId(block, 0x10);
+        Guid tiedBuy = FillId(block, 0x20);
+        Guid finalExit = FillId(block, 0x30);
+
+        DateTimeOffset tie = At(1);
+
+        await SeedOrderAsync(owner, accountId, OrderSide.Buy, $"entry-{venueKey}", [(entry, 5_000m, 1, At(0))]);
+        await SeedOrderAsync(owner, accountId, OrderSide.Sell, $"tied-sell-{venueKey}", [(tiedSell, 5_010m, 1, tie)]);
+        await SeedOrderAsync(owner, accountId, OrderSide.Buy, $"tied-buy-{venueKey}", [(tiedBuy, 5_010m, 1, tie)]);
+        await SeedOrderAsync(owner, accountId, OrderSide.Sell, $"exit-{venueKey}", [(finalExit, 5_020m, 1, At(2))]);
+
+        return accountId;
+    }
+
+    /// <summary>One discoverable practice account for <paramref name="owner"/>, under that operator's single firm
+    /// and its single projectx connection -- created on first call for an owner, reused on later ones (the same
+    /// shape <c>TradeFifoPairingIntegrationTests.SeedAccountAsync</c> documents at length).</summary>
+    private async Task<Guid> SeedAccountAsync(Guid owner, string venueAccountKey)
+    {
+        Guid accountId = Guid.NewGuid();
+
+        await ExecuteDbAsync(async database =>
+        {
+            Connection? existing = await database.Connections
+                .IgnoreQueryFilters()
+                .FirstOrDefaultAsync(connection => connection.UserId == owner
+                    && connection.Platform == "projectx"
+                    && connection.CredentialKey == OurCredentialKey);
+
+            Guid connectionId = existing?.Id ?? Guid.NewGuid();
+
+            if (existing is null)
+            {
+                Guid firmId = Guid.NewGuid();
+                database.Firms.Add(new Firm { Id = firmId, UserId = owner, Name = "Topstep", Type = FirmType.PropFirm });
+                database.Connections.Add(new Connection
+                {
+                    Id = connectionId,
+                    UserId = owner,
+                    FirmId = firmId,
+                    Platform = "projectx",
+                    CredentialKey = OurCredentialKey,
+                });
+            }
+
+            database.Accounts.Add(new Account
+            {
+                Id = accountId,
+                UserId = owner,
+                ConnectionId = connectionId,
+                VenueAccountKey = venueAccountKey,
+                Name = "PRAC-50K",
+                Stage = AccountStage.Practice,
+                Mode = TradingMode.Practice,
+                CanTrade = true,
+                IsVisible = true,
+            });
+            await database.SaveChangesAsync();
+        });
+
+        return accountId;
+    }
+
+    /// <summary>Seeds an executed order and its fills with EXPLICIT fill ids. An empty <paramref name="fills"/>
+    /// seeds a still-working order whose executions the venue has not reported yet -- the shape a late/deferred
+    /// <see cref="FillEvent"/> resolves against.</summary>
+    private async Task SeedOrderAsync(
+        Guid owner,
+        Guid accountId,
+        OrderSide side,
+        string venueOrderKey,
+        (Guid Id, decimal Price, int Size, DateTimeOffset At)[] fills)
+    {
+        Guid orderId = Guid.NewGuid();
+
+        await ExecuteDbAsync(async database =>
+        {
+            database.Orders.Add(new Order
+            {
+                Id = orderId,
+                UserId = owner,
+                AccountId = accountId,
+                Instrument = Contract,
+                Side = side,
+                Size = fills.Length == 0 ? 1 : fills.Sum(fill => fill.Size),
+                Type = OrderType.Market,
+                EntryPrice = fills.Length == 0 ? 5_000m : fills[0].Price,
+                PointValue = ContractPointValue,
+                TickSize = 0.25m,
+                Status = fills.Length == 0 ? OrderStatus.Working : OrderStatus.Filled,
+                Mode = TradingMode.Practice,
+                VenueOrderKey = venueOrderKey,
+                PlacedAt = fills.Length == 0 ? _origin : fills[0].At,
+            });
+
+            foreach ((Guid id, decimal price, int size, DateTimeOffset at) in fills)
+            {
+                database.Fills.Add(new Fill
+                {
+                    Id = id,
+                    UserId = owner,
+                    OrderId = orderId,
+                    VenueFillKey = id.ToString("N"),
+                    Price = price,
+                    Size = size,
+                    ExecutedAt = at,
+                });
+            }
+
+            await database.SaveChangesAsync();
+        });
+    }
+
+    private async Task ExecuteDbAsync(Func<TradingCopilotDbContext, Task> stage)
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        await stage(database);
+    }
+
+    private async Task<T> QueryDbAsync<T>(Func<TradingCopilotDbContext, Task<T>> query)
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        return await query(database);
+    }
+
+    /// <summary>Scoped to ONE account: the fixture is a single container shared by the whole class.</summary>
+    private async Task<List<Trade>> TradesAsync(Guid accountId)
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        return await database.Trades
+            .IgnoreQueryFilters()
+            .Where(trade => trade.AccountId == accountId)
+            .OrderBy(trade => trade.ClosedAt)
+            .ToListAsync();
+    }
+
+    /// <summary>Polls until <paramref name="condition"/> holds, returning <see langword="false"/> on timeout rather
+    /// than throwing -- the shape the sibling stream-driven suites use, so a genuine red reports as an assertion
+    /// failure instead of an unhandled exception.</summary>
+    private static async Task<bool> WaitUntilAsync(Func<Task<bool>> condition, int attempts = 200, int delayMs = 50)
+    {
+        for (int attempt = 0; attempt < attempts; attempt++)
+        {
+            if (await condition())
+            {
+                return true;
+            }
+
+            await Task.Delay(delayMs);
+        }
+
+        return false;
+    }
+}
