@@ -1,5 +1,6 @@
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 using Microsoft.EntityFrameworkCore;
@@ -74,20 +75,36 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// query logic itself (ordering, filter-before-rank) is correct; gh#858 is a separate, earlier-in-the-pipeline
 /// bootstrap gap that keeps CI from reaching it right now.
 /// </para>
+/// <para>
+/// <b>gh#888 rewire.</b> <see cref="NearestN_ShouldExcludeOtherModels_EvenWhenTheirVectorPointsExactlyAtTheQuery"/>
+/// used to call this suite's OWN <see cref="NearestAsync"/> helper below -- which filters by <c>Model</c> itself,
+/// IN THE TEST -- never the production <c>PgVectorNewsSimilarity.NearestNewsAsync</c> (which, pre-gh#881, filters
+/// only on <c>OwnerKind</c>): the assertion could not have caught a missing production filter. It now resolves
+/// the real <see cref="INewsEmbeddingSimilarity"/> from DI over <see cref="EmbeddingProviderDoubleTestPostgresFactory"/>
+/// instead, so it pins the OBSERVED (broken, pre-gh#881) behaviour of the production seam per the QA guard
+/// discipline rather than the suite's own correct-by-construction query -- see that test's own remarks for the
+/// fix's target assertion once gh#881 lands.
+/// </para>
 /// </remarks>
-public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<EmbeddingReadTestPostgresFactory>
+public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<EmbeddingProviderDoubleTestPostgresFactory>
 {
     private const string Model = "cohere-embed-v3-test";
     private const string OtherModel = "cohere-embed-v2-test";
     private static readonly DateTimeOffset _recordedAt = new(2026, 8, 14, 12, 0, 0, TimeSpan.Zero);
 
-    private readonly EmbeddingReadTestPostgresFactory _factory;
+    private readonly EmbeddingProviderDoubleTestPostgresFactory _factory;
 
-    public NewsEmbeddingPgvectorReadIntegrationTests(EmbeddingReadTestPostgresFactory factory)
+    public NewsEmbeddingPgvectorReadIntegrationTests(EmbeddingProviderDoubleTestPostgresFactory factory)
     {
         _factory = factory;
         // Each test owns the store: the container is shared across the class (one per suite, gh#121), so start
         // every test from empty rather than accumulating rows across cases.
+        _factory.Provider.Reset();
+        // gh#888: the ONE test rewired to the real INewsEmbeddingSimilarity seam below needs the double's
+        // reported "current model" to equal this suite's own Model constant, or its assertion would compare
+        // against an unrelated model string once gh#881's filter lands. Harmless to every other case here, none
+        // of which touch IEmbeddingProvider.
+        _factory.Provider.Model = Model;
         ResetEmbeddingsAsync().GetAwaiter().GetResult();
     }
 
@@ -168,10 +185,24 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
             Row(EmbeddingOwnerKind.SoftSignal, "wrong-model-but-identical-vector", OtherModel, Direction((0, 1f))),
             Row(EmbeddingOwnerKind.SoftSignal, "right-model", Model, Direction((0, 0.8f), (1, 0.6f))));
 
-        List<EmbeddingHit> hits = await NearestAsync(EmbeddingOwnerKind.SoftSignal, Model, Direction((0, 1f)), take: 5);
+        // gh#888 rewire: through the REAL production seam (INewsEmbeddingSimilarity.NearestNewsAsync), resolved
+        // from DI -- NOT this suite's own NearestAsync helper below, which filters by Model itself and so could
+        // never have caught a missing production filter (see this class's remarks).
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        INewsEmbeddingSimilarity similarity = scope.ServiceProvider.GetRequiredService<INewsEmbeddingSimilarity>();
+        IReadOnlyList<SemanticNeighbor> hits = await similarity.NearestNewsAsync(
+            Direction((0, 1f)).ToArray(), n: 5, CancellationToken.None);
 
+        // DEFECT gh#881: PgVectorNewsSimilarity.NearestNewsAsync filters only on OwnerKind == SoftSignal today, so
+        // the other-model row -- deliberately the CLOSEST possible vector to the query -- outranks and is
+        // included alongside the same-model answer instead of being excluded. Once gh#881's Model ==
+        // provider.Model predicate lands, this should read `hits.Select(h => h.OwnerId).Should().Equal(["right-model"], ...)`
+        // (restoring this test's original, pre-gh#888 intent) -- this pinned ordering is that fix's own
+        // regression guard.
         hits.Select(hit => hit.OwnerId).Should().Equal(
-            ["right-model"], "a different model's vector must never outrank a same-model candidate, however close its raw direction sits to the query");
+            ["wrong-model-but-identical-vector", "right-model"],
+            "DEFECT gh#881: nearest-N is not yet scoped to the current model, so a different model's vector "
+            + "outranks a same-model candidate instead of being excluded, however close its raw direction sits to the query");
     }
 
     // =================================================================================================================
