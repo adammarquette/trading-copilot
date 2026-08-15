@@ -15,53 +15,53 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// <summary>
 /// Independent real-Postgres coverage for gh#911, the QA card for gh#748: a <see cref="PositionEvent"/>(flat)
 /// delivered to the account-event stream <b>before</b> its closing <see cref="FillEvent"/> must still journal
-/// exactly one <see cref="Trade"/> once the fill lands, through a defer-then-retry path — not be lost, which is
-/// what happens today. Authored from gh#911's and gh#748's own text, not from any implementation of gh#748 (the QA
-/// contract's independence rule) — see the remarks below for why that matters more than usual here.
+/// exactly one <see cref="Trade"/> once the fill lands, through a defer-then-retry path — not be lost. Authored
+/// from gh#911's and gh#748's own text, not from gh#748's implementation (the QA contract's independence rule) —
+/// see the remarks below for the timeline that makes that worth spelling out here.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>gh#748 is not merged into <c>develop</c>.</b> This suite was authored expecting a coding PR "merged under
-/// #748" (gh#911's own premise); at authoring time there was no such PR at all, no <c>PendingFlatJournal</c>, no
-/// <c>deferred</c>/<c>journalled</c>-on-retry outcome pair in <see cref="ExecutionMetrics"/>, and
-/// <see cref="AccountEventStreamHost"/>'s <see cref="FillEvent"/> branch — <see cref="AccountEventIngestionService.ProcessAsync"/>
-/// — only ever wrote the <see cref="Fill"/> row, never re-invoking <see cref="TradeJournalService"/>. <b>PR #912</b>
-/// (branch <c>bug/748_a-flat-event-queued</c>) landed the fix moments later, concurrently with this suite's own
-/// authoring, and is open but <b>unmerged</b> as of this revision: it adds exactly the shape gh#911 anticipates —
-/// <c>PendingFlatJournal</c> (keyed on <c>(Account, Contract.Key, At)</c>), the <c>JournalDeferred = "deferred"</c>
-/// outcome, and a retry loop in <see cref="AccountEventStreamHost"/>'s <see cref="FillEvent"/> branch — but it also
-/// changes <see cref="AccountEventStreamHost"/>'s constructor to take a <c>PendingFlatJournal</c> parameter, so the
-/// three cases below will need that one-line constructor-call update (the same fix #912 already applied to
-/// <c>TradeFifoPairingIntegrationTests</c> and <c>TradeJournalWriteFaultIntegrationTests</c>) alongside removing
-/// their <c>Skip</c>, once #912 merges and this branch rebases onto it. This suite proceeds without waiting for
-/// that merge, per the QA contract's rule 3 ("a suite that cannot go green without a production change has found a
-/// defect — report it, don't fix it"): three cases below assert the FIXED behaviour gh#911 specifies and are
-/// <see cref="FactAttribute.Skip"/>ped, referencing gh#748 (already filed; no new issue needed — and #912, once it
-/// exists, is the coding agent's PR to track, not this suite's). The other two are provable TODAY and stay green
-/// against `develop` as shipped — one of them (the DEFECT pin) doubles as this suite's own "prove-red": it
-/// demonstrates, without any local revert, that the adverse-order case is lost under the code on `develop` today,
-/// the same code path #912 replaces.
+/// <b>Authored ahead of gh#748, landed alongside it.</b> This suite was written from gh#911's acceptance criteria
+/// while gh#748 was still open with no PR — at that point <see cref="AccountEventStreamHost"/>'s
+/// <see cref="FillEvent"/> branch only ever wrote the <see cref="Fill"/> row via
+/// <see cref="AccountEventIngestionService.ProcessAsync"/> and never re-invoked <see cref="TradeJournalService"/>,
+/// so an early flat's round trip was lost forever once its closing fill landed. <b>PR #912</b> (branch
+/// <c>bug/748_a-flat-event-queued</c>) merged into <c>develop</c> minutes later, landing exactly the shape gh#911
+/// anticipates: <see cref="PendingFlatJournal"/> (keyed on <c>(Account, Contract.Key, At)</c>,
+/// <see cref="ExecutionMetrics.JournalDeferred"/> = <c>"deferred"</c>, and the retry loop in
+/// <see cref="AccountEventStreamHost"/>'s <see cref="FillEvent"/> branch. This branch rebased onto that merge; every
+/// case below is now active against the real, shipped defer-then-retry path — nothing here is <c>Skip</c>ped.
 /// </para>
 /// <para>
-/// <b>What's provable today vs. blocked.</b>
+/// <b>What each case guards, mapped to gh#911's five acceptance criteria:</b>
 /// <list type="bullet">
 /// <item><description><see cref="AccountEventStreamHost_ShouldComposeExactlyOneTrade_WhenTheFlatArrivesBeforeItsClosingFill"/>
-/// (AC1) — Skipped; needs the retry-on-fill wiring.</description></item>
+/// (AC1) — the adverse order composes exactly one <see cref="Trade"/> with the correct signed <c>RealizedPnL</c>,
+/// through the defer-then-retry path, not a same-pass compose (the flat's outcome is observed BEFORE the closing
+/// fill is armed).</description></item>
 /// <item><description><see cref="AccountEventStreamHost_ShouldRecordDeferredThenJournalled_WhenTheFlatArrivesBeforeItsClosingFill"/>
-/// (AC2) — Skipped; needs the <c>deferred</c> outcome to exist at all.</description></item>
+/// (AC2) — the outcome sequence is exactly <c>deferred</c> → <c>journalled</c>, never <c>not-composable</c> for this
+/// window.</description></item>
 /// <item><description><see cref="AccountEventStreamHost_ShouldWriteNoSecondRow_WhenTheComposedTradeIsReplayed"/>
-/// (AC3) — Skipped; needs AC1's compose to have happened first.</description></item>
+/// (AC3) — once composed, a replayed flat writes no second row: the real <c>(ClosingFillId, OpeningFillId)</c>
+/// unique index backstops the retry, not merely the in-memory pre-check.</description></item>
 /// <item><description><see cref="AccountEventStreamHost_ShouldRefuseAndNeverDefer_WhenASameInstantOppositeSideTieFallsInsideTheWindow"/>
-/// (AC4) — provable now: a genuine ambiguity is refused identically whether or not a defer mechanism exists, and
-/// asserting it stays terminal (never <c>deferred</c>) is a real regression guard both before and after gh#748.</description></item>
-/// <item><description><see cref="AccountEventStreamHost_ShouldPermanentlyLoseTheRoundTrip_WhenTheFlatArrivesBeforeItsClosingFill_PreGh748"/>
-/// (AC5 / prove-red) — provable now: pins the exact defect gh#748 describes as a DEFECT-annotated regression guard
-/// (QA contract rule 2), so it documents reality without enshrining it and flips into the failure signal for
-/// whoever removes it once gh#748 ships.</description></item>
+/// (AC4) — a genuine same-instant opposite-side tie still records <c>not-composable</c> and writes no row, and is
+/// never left parked as a retryable <c>deferred</c> — the discriminator's terminal branch, exercised through the
+/// same live host as the retryable case above so the two are told apart in the same harness.</description></item>
+/// <item><description>AC5 (prove-red) — see the note below; the case that pinned the pre-#912 defect was deleted
+/// once the fix landed, per its own stated plan.</description></item>
 /// </list>
-/// When gh#748 lands: remove the three <c>Skip</c>s (their assertions were written for the fixed behaviour and
-/// should need no other edit beyond matching the shipped outcome literal, if it differs from the <c>"deferred"</c>
-/// gh#911 names), and delete <c>..._PreGh748</c> — its failure IS the signal that the retry now exists.
+/// </para>
+/// <para>
+/// <b>Prove-red, without a surviving artifact.</b> Before this rebase, the suite carried a <c>// DEFECT gh#748</c>
+/// pinned case (QA contract rule 2) that asserted, against the actual pre-#912 <c>develop</c>, that an early flat's
+/// round trip never composed even after its closing fill landed through real ingestion — the exact adverse-order
+/// loss gh#748 describes. That pin was deleted in the same revision that rebased onto #912's merge, per the plan
+/// stated when it was written ("delete it once gh#748 lands; its own failure IS the signal that the retry now
+/// exists") — deleting it, rather than leaving it to fail, is what "no revert artifact in the committed diff" means
+/// once the fix is no longer hypothetical. <see cref="AccountEventStreamHost_ShouldComposeExactlyOneTrade_WhenTheFlatArrivesBeforeItsClosingFill"/>
+/// (AC1) is its replacement and asserts the mirror image on the SAME harness.
 /// </para>
 /// <para>
 /// <b>Out of scope</b> (gh#911's own list, not re-litigated here): the restart-crosses-the-race edge and a
@@ -90,10 +90,7 @@ public sealed class FlatBeforeFillAdverseOrderIntegrationTests : IClassFixture<F
     // the correct signed RealizedPnL once the fill lands, through the defer-then-retry path (not a same-pass compose).
     // =================================================================================================================
 
-    [Fact(Skip =
-        "blocked by gh#748 -- AccountEventStreamHost's FillEvent branch never retries the journal on develop today, "
-        + "so an early flat's round trip cannot compose no matter how long this waits. Flips green once gh#748's "
-        + "defer/retry wiring lands and the Skip is removed.")]
+    [Fact]
     public async Task AccountEventStreamHost_ShouldComposeExactlyOneTrade_WhenTheFlatArrivesBeforeItsClosingFill()
     {
         Guid owner = Guid.NewGuid();
@@ -141,10 +138,7 @@ public sealed class FlatBeforeFillAdverseOrderIntegrationTests : IClassFixture<F
     // triggered retry), never `not-composable` for this window.
     // =================================================================================================================
 
-    [Fact(Skip =
-        "blocked by gh#748 -- the 'deferred' outcome does not exist in ExecutionMetrics today, and the early flat "
-        + "records 'not-composable' instead (see the DEFECT-pinned case in this class). Flips green once gh#748 "
-        + "lands and the Skip is removed.")]
+    [Fact]
     public async Task AccountEventStreamHost_ShouldRecordDeferredThenJournalled_WhenTheFlatArrivesBeforeItsClosingFill()
     {
         Guid owner = Guid.NewGuid();
@@ -171,7 +165,7 @@ public sealed class FlatBeforeFillAdverseOrderIntegrationTests : IClassFixture<F
             .Select(measurement => (string?)measurement.Tags.GetValueOrDefault("outcome"))];
 
         outcomes.Should().Equal(
-            ["deferred", ExecutionMetrics.JournalWritten],
+            [ExecutionMetrics.JournalDeferred, ExecutionMetrics.JournalWritten],
             "the early flat must record 'deferred' -- never 'not-composable', which is the discriminator's "
             + "TERMINAL branch for genuine ambiguity, not an incomplete window -- and the fill-triggered retry "
             + "must then record 'journalled'; pre-#748 this sequence was 'not-composable' with nothing after it");
@@ -182,9 +176,7 @@ public sealed class FlatBeforeFillAdverseOrderIntegrationTests : IClassFixture<F
     // index backstops the retry, not just the in-memory pre-check.
     // =================================================================================================================
 
-    [Fact(Skip =
-        "blocked by gh#748 -- this case depends on AC1's compose happening first, which cannot happen on develop "
-        + "today. Flips green once gh#748 lands and the Skip is removed.")]
+    [Fact]
     public async Task AccountEventStreamHost_ShouldWriteNoSecondRow_WhenTheComposedTradeIsReplayed()
     {
         Guid owner = Guid.NewGuid();
@@ -265,62 +257,6 @@ public sealed class FlatBeforeFillAdverseOrderIntegrationTests : IClassFixture<F
     }
 
     // =================================================================================================================
-    // AC5 / prove-red — DEFECT gh#748 (QA contract rule 2): pins the OBSERVED pre-fix behaviour so the suite
-    // documents reality without enshrining it. This IS the "would fail on the pre-#748 code" proof gh#911 asks
-    // for; because gh#748 is unimplemented on develop today, there is nothing to locally revert -- this case runs
-    // against the actual pre-#748 code as it stands. Delete it once gh#748 lands; its own failure at that point is
-    // the fix's own regression signal, and AC1 above (Skip removed) becomes its replacement.
-    // =================================================================================================================
-
-    [Fact]
-    public async Task AccountEventStreamHost_ShouldPermanentlyLoseTheRoundTrip_WhenTheFlatArrivesBeforeItsClosingFill_PreGh748()
-    {
-        Guid owner = Guid.NewGuid();
-        Guid accountId = await SeedAccountAsync(owner, "8199");
-
-        await SeedOrderAsync(owner, accountId, OrderSide.Buy, "entry-8199", [(FillId(99, 0x01), 5_000m, 1, At(0))]);
-        await SeedOrderAsync(owner, accountId, OrderSide.Sell, "exit-8199", []);
-
-        await using RunningHost running = await StartHostAsync();
-
-        running.Stream.Arm(FlatAt("8199", At(2)));
-
-        bool earlyOutcomeRecorded = await WaitUntilAsync(
-            () => Task.FromResult(_factory.Capture.For(ExecutionMetrics.JournalOutcomes).Any()));
-        earlyOutcomeRecorded.Should().BeTrue();
-
-        _factory.Capture.For(ExecutionMetrics.JournalOutcomes).Should().ContainSingle(
-            measurement => (string?)measurement.Tags.GetValueOrDefault("outcome") == ExecutionMetrics.JournalNotComposable,
-            "DEFECT gh#748: pre-fix, the writer can only see the entry fill when the flat arrives -- the window "
-            + "never balances, and the early flat records 'not-composable', indistinguishable from a genuine "
-            + "ambiguity it is not");
-
-        running.Stream.Arm(ExitFill("8199", "exit-8199", "exit-fill-8199", OrderSide.Sell, 4_980m, At(2)));
-
-        bool fillLanded = await WaitUntilAsync(() => QueryDbAsync(database => database.Fills
-            .IgnoreQueryFilters()
-            .AnyAsync(fill => fill.VenueFillKey == "exit-fill-8199")));
-        fillLanded.Should().BeTrue(
-            "the closing fill must reach real ingestion before the defect can be observed -- otherwise this proves "
-            + "nothing about the retry gap and only that the fill never arrived");
-
-        // Give the (nonexistent) retry every reasonable chance to fire before concluding it never will.
-        bool everComposed = await WaitUntilAsync(
-            () => QueryDbAsync(database =>
-                database.Trades.IgnoreQueryFilters().AnyAsync(trade => trade.AccountId == accountId)),
-            attempts: 20,
-            delayMs: 50);
-
-        await running.StopAsync();
-
-        everComposed.Should().BeFalse(
-            "DEFECT gh#748: AccountEventIngestionService's FillEvent branch only writes the Fill row -- it never "
-            + "re-invokes TradeJournalService, so the round trip closed here is lost forever, exactly as gh#748 "
-            + "describes ('the round trip is then permanently lost ... nothing re-composes')");
-        (await TradesAsync(accountId)).Should().BeEmpty("DEFECT gh#748: confirmed lost -- no Trade ever composed");
-    }
-
-    // =================================================================================================================
     // Fixture.
     // =================================================================================================================
 
@@ -356,7 +292,9 @@ public sealed class FlatBeforeFillAdverseOrderIntegrationTests : IClassFixture<F
         _factory.Capture.Clear();
 
         AccountEventStreamHost host = new(
-            _factory.Services, _factory.Services.GetRequiredService<ILogger<AccountEventStreamHost>>());
+            _factory.Services,
+            _factory.Services.GetRequiredService<PendingFlatJournal>(),
+            _factory.Services.GetRequiredService<ILogger<AccountEventStreamHost>>());
         await host.StartAsync(CancellationToken.None);
         return new RunningHost(host, stream);
     }
