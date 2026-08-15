@@ -48,6 +48,24 @@ public interface INewsEmbeddingSimilarity
     /// <returns>The stored embedding of each requested owner that has one; empty when retrieval cannot run.</returns>
     Task<IReadOnlyList<StoredEmbedding>> GetVectorsAsync(
         IReadOnlyCollection<string> ownerIds, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Reads back the stored <b>topic</b> embeddings for the given topic names (gh#854) — the semantic-topic-match read
+    /// that lets the relevance pass compare a news item's vector to the deployment's topic vectors in-process.
+    /// </summary>
+    /// <remarks>
+    /// The topic analogue of <see cref="GetVectorsAsync"/>: a plain by-owner read over the <c>Topic</c> embeddings (a
+    /// topic's name + keywords), returning each requested topic's vector as a plain <see cref="float"/> list. Same
+    /// posture — a topic with no stored embedding is simply absent, an unavailable or faulting store yields an empty
+    /// list (the gh#109 degrade) rather than a throw, and only a genuine caller cancellation propagates. Kept a
+    /// distinct, semantically-named read rather than an owner-kind parameter, so the Domain seam carries no <c>Data</c>
+    /// <c>EmbeddingOwnerKind</c> dependency.
+    /// </remarks>
+    /// <param name="topicNames">The topic names whose stored vectors to read.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The stored embedding of each requested topic that has one; empty when retrieval cannot run.</returns>
+    Task<IReadOnlyList<StoredEmbedding>> GetTopicVectorsAsync(
+        IReadOnlyCollection<string> topicNames, CancellationToken cancellationToken);
 }
 
 /// <summary>

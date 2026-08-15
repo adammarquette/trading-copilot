@@ -15,7 +15,10 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// Populates the <c>pgvector</c> embedding behind each ingested news item (gh#377, R-2): the deferred VEC half of
 /// the <c>SoftSignal (NewsItem)</c> entity, the concrete instance of #103's open "which entities embed" question —
 /// news is the R-2 reference implementation. Mirrors <see cref="Relevance.NewsRelevanceService"/>'s pass shape —
-/// batch loop, per-page <c>SaveChanges</c> + <c>ChangeTracker.Clear</c> — over a different store.
+/// batch loop, per-page <c>SaveChanges</c> + <c>ChangeTracker.Clear</c> — over a different store. The same pass also
+/// embeds the deployment's <see cref="NewsTopic"/>s (gh#854) — the anticipated second embeddable owner kind
+/// (<see cref="EmbeddingOwnerKind.Topic"/>), a bounded, near-static config set — against the <b>same</b> provider,
+/// per-pass spend tally and ledger, so semantic topic match can compare a news vector to a topic vector.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -116,6 +119,12 @@ public sealed class NewsEmbeddingService
         string model = _provider.Model;
         int total = 0;
 
+        // Embed the deployment's topics FIRST (gh#854): a bounded, near-static, cheap set — whereas news is an
+        // unbounded backlog that can exhaust the shared daily cap. Doing topics first means semantic topic match
+        // comes online even during a large news backlog rather than waiting for it to drain; they share the same
+        // per-pass spend tally, so the cap still governs the total.
+        total += await EmbedPendingTopicsAsync(governorPass, model, now, cancellationToken);
+
         // Page the work exactly as NewsRelevanceService does: an unbounded backlog (first run, or a long outage)
         // must not be loaded into one SaveChanges, and a row that was actually handled this page (embedded, or
         // touched as unchanged) drops out of the next page's query, guaranteeing progress.
@@ -187,7 +196,15 @@ public sealed class NewsEmbeddingService
                     continue;
                 }
 
-                Upsert(existing, news.DedupKey, model, hash, result.Vector, now);
+                Upsert(existing, EmbeddingOwnerKind.SoftSignal, news.DedupKey, model, hash, result.Vector, now);
+
+                // A new or changed news vector just landed. Null RelevanceVersion so the next relevance pass
+                // RE-resolves this item WITH its vector (gh#854): the embedding and relevance passes are independent,
+                // and a story is usually resolved keyword-only BEFORE it is embedded, so without this nudge the
+                // semantic topic match would never fire for it until an unrelated config-version bump. This is a
+                // one-way data hint, not a gate -- relevance never waits on embedding, so the retrieval feature
+                // cannot stall the core relevance pass. Re-resolution stamps the version again, so it runs once.
+                news.RelevanceVersion = null;
                 progressed = true;
                 total++;
             }
@@ -213,15 +230,15 @@ public sealed class NewsEmbeddingService
 
         if (total > 0)
         {
-            _logger.LogDebug("Embedded {Count} news item(s).", total);
+            _logger.LogDebug("Embedded {Count} item(s) this pass (news + topics).", total);
         }
 
         return total;
     }
 
-    /// <summary>Adds a new <see cref="EmbeddingRecord"/>, or updates <paramref name="existing"/> in place.</summary>
+    /// <summary>Adds a new <see cref="EmbeddingRecord"/> for the owner, or updates <paramref name="existing"/> in place.</summary>
     private void Upsert(
-        EmbeddingRecord? existing, string dedupKey, string model, string contentHash, IReadOnlyList<float> vector, DateTimeOffset now)
+        EmbeddingRecord? existing, EmbeddingOwnerKind ownerKind, string ownerId, string model, string contentHash, IReadOnlyList<float> vector, DateTimeOffset now)
     {
         // Vector's constructor takes a ReadOnlyMemory<float>; a float[] converts to that implicitly, and
         // IReadOnlyList<float> (what the provider seam returns) does not, so it is materialized explicitly.
@@ -231,8 +248,8 @@ public sealed class NewsEmbeddingService
         {
             _database.Embeddings.Add(new EmbeddingRecord
             {
-                OwnerKind = EmbeddingOwnerKind.SoftSignal,
-                OwnerId = dedupKey,
+                OwnerKind = ownerKind,
+                OwnerId = ownerId,
                 Model = model,
                 Dimensions = _provider.Dimensions,
                 Embedding = embedding,
@@ -247,6 +264,69 @@ public sealed class NewsEmbeddingService
         existing.ContentHash = contentHash;
         existing.RecordedAt = now;
     }
+
+    /// <summary>
+    /// Embeds the deployment's topics (gh#854) in the SAME pass and against the SAME per-pass spend tally as news —
+    /// topics are a bounded, near-static config set (embedded once, then idempotent-skipped by content hash), so no
+    /// paging is needed. Mirrors the news per-item flow exactly: cap check, content-hash skip/touch, embed, ledger,
+    /// upsert. Relational-only like the news half (the <c>Embeddings</c> store is <c>Ignore()</c>d off the in-memory
+    /// provider, gh#109), so the real read/upsert is QA integration-tier; the shared gates above are unit-covered.
+    /// </summary>
+    private async Task<int> EmbedPendingTopicsAsync(
+        GovernorPass? governorPass, string model, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        List<NewsTopic> topics = await _database.NewsTopics.AsNoTracking().ToListAsync(cancellationToken);
+        int embedded = 0;
+
+        foreach (NewsTopic topic in topics)
+        {
+            if (IsCapReached(governorPass))
+            {
+                _logger.LogInformation("The daily AI-spend budget is reached; topic embedding stops for this run.");
+                break;
+            }
+
+            string content = ContentForTopic(topic);
+            string hash = EmbeddingContentHash.For(content);
+
+            EmbeddingRecord? existing = await _database.Embeddings.FirstOrDefaultAsync(
+                embedding => embedding.OwnerKind == EmbeddingOwnerKind.Topic
+                    && embedding.OwnerId == topic.Name
+                    && embedding.Model == model,
+                cancellationToken);
+
+            if (existing is not null && existing.ContentHash == hash)
+            {
+                // Unchanged: skip the paid re-embed. Unlike news, the topic candidate set is EVERY topic each pass
+                // (no RecordedAt predicate on this bounded config set), so there is nothing to "touch out" of a
+                // future candidate query -- leave the stored row untouched rather than re-UPDATE every unchanged
+                // topic on every pass.
+                continue;
+            }
+
+            long startedTicks = Stopwatch.GetTimestamp();
+            EmbeddingResult result = await _provider.EmbedAsync(content, cancellationToken);
+            TimeSpan latency = Stopwatch.GetElapsedTime(startedTicks);
+
+            await LedgerAsync(result, latency, now, cancellationToken);
+            governorPass?.Accrue(result.EstimatedCostUsd);
+
+            if (result.Vector is null)
+            {
+                continue; // rate-limited or a fault -- retry next pass, exactly as the news half does
+            }
+
+            Upsert(existing, EmbeddingOwnerKind.Topic, topic.Name, model, hash, result.Vector, now);
+            embedded++;
+        }
+
+        await _database.SaveChangesAsync(cancellationToken);
+        _database.ChangeTracker.Clear();
+        return embedded;
+    }
+
+    /// <summary>The exact text handed to the provider for a topic — its name + keywords, the string the hash is over.</summary>
+    private static string ContentForTopic(NewsTopic topic) => $"{topic.Name}\n\n{string.Join(' ', topic.Keywords)}";
 
     /// <summary>
     /// Ledgers one embed call's spend (gh#436, gh#377): stamped to the deployment <see cref="SystemOwner"/> sentinel

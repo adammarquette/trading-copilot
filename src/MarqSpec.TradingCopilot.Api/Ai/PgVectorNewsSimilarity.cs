@@ -55,17 +55,27 @@ public sealed class PgVectorNewsSimilarity : INewsEmbeddingSimilarity
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<StoredEmbedding>> GetVectorsAsync(
-        IReadOnlyCollection<string> ownerIds, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<StoredEmbedding>> GetVectorsAsync(
+        IReadOnlyCollection<string> ownerIds, CancellationToken cancellationToken) =>
+        ReadVectorsAsync(EmbeddingOwnerKind.SoftSignal, ownerIds, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<StoredEmbedding>> GetTopicVectorsAsync(
+        IReadOnlyCollection<string> topicNames, CancellationToken cancellationToken) =>
+        ReadVectorsAsync(EmbeddingOwnerKind.Topic, topicNames, cancellationToken);
+
+    // A plain relational by-owner read of one owner kind's rows for the requested owners -- no CosineDistance, no
+    // ordering (gh#853, gh#854). The owner-kind predicate leads, matching the store's (OwnerKind, ...) index. The
+    // RANKING is done in-process by the pure EmbeddingSimilarity helper, so the caller scores its KNOWN candidates
+    // rather than searching for a global nearest set that might miss a recent-but-near item. Relational-only (the
+    // Vector column has no in-memory provider mapping, gh#109), so the read itself is proven by the paired QA card
+    // while the ranking is unit-tested. One helper serves both the SoftSignal (news) and Topic reads; the
+    // EmbeddingOwnerKind enum stays inside this Api-tier impl and never leaks into the Domain seam.
+    private async Task<IReadOnlyList<StoredEmbedding>> ReadVectorsAsync(
+        EmbeddingOwnerKind ownerKind, IReadOnlyCollection<string> ownerIds, CancellationToken cancellationToken)
     {
-        // A plain relational by-owner read of the SoftSignal rows for the requested owners -- no CosineDistance, no
-        // ordering (gh#853). The owner-kind predicate leads, matching the store's (OwnerKind, ...) index. The RANKING
-        // is done in-process by the pure EmbeddingSimilarity helper, so the feed scores its KNOWN window candidates
-        // against the starred set rather than searching for a global nearest set that might miss a recent-but-near
-        // item. Relational-only (the Vector column has no in-memory provider mapping, gh#109), so the read itself is
-        // proven by the paired QA card while the ranking is unit-tested.
         List<EmbeddingRecord> rows = await _database.Embeddings
-            .Where(embedding => embedding.OwnerKind == EmbeddingOwnerKind.SoftSignal)
+            .Where(embedding => embedding.OwnerKind == ownerKind)
             .Where(embedding => ownerIds.Contains(embedding.OwnerId))
             .ToListAsync(cancellationToken);
 
