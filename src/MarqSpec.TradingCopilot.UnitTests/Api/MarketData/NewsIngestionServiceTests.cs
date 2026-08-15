@@ -52,8 +52,77 @@ public class NewsIngestionServiceTests
     }
 
     private NewsIngestionService Service(TradingCopilotDbContext context, params INewsSource[] sources) =>
-        new(context, sources, Options.Create(new NewsIngestionOptions { Enabled = true }),
-            NullLogger<NewsIngestionService>.Instance);
+        Service(context, new NewsIngestionOptions { Enabled = true }, sources);
+
+    private NewsIngestionService Service(
+        TradingCopilotDbContext context, NewsIngestionOptions options, params INewsSource[] sources) =>
+        new(context, sources, Options.Create(options), NullLogger<NewsIngestionService>.Instance);
+
+    private static NewsRecord Stored(string url, string title, DateTimeOffset published) =>
+        new()
+        {
+            DedupKey = NewsDedupKey.For(url),
+            Type = "news",
+            Url = url,
+            Title = title,
+            Summary = "Stored.",
+            PublishedAt = published,
+            Tickers = ["ES"],
+            SourceFeeds = ["finnhub"],
+            RecordedAt = Now,
+        };
+
+    [Fact]
+    public async Task IngestAsync_ShouldNotLoadFuzzyCandidates_WhenEveryPendingAlreadyExists()
+    {
+        // gh#836. The cross-pass candidate query is consulted ONLY by FindFuzzyStored, which sits in the `else`
+        // after the canonical lookup fails — so on a typical pass, where every pending is already stored, it
+        // materialized a window of rows as TRACKED entities that nothing ever read.
+        //
+        // Asserted through the change tracker rather than a query spy, because that is what "the query ran" leaves
+        // behind: a row inside the window but outside this pass's keys is tracked if and only if it was fetched.
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            seed.News.Add(Stored("https://site.com/a", "Fed holds rates", Now.AddMinutes(-5)));
+            seed.News.Add(Stored("https://site.com/unrelated", "Jobless claims fall", Now.AddMinutes(-10)));
+            await seed.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext context = Context();
+        await Service(context, Source(Finnhub, [Item("https://site.com/a")]))
+            .IngestAsync(Now, CancellationToken.None);
+
+        context.ChangeTracker.Entries<NewsRecord>().Select(entry => entry.Entity.Url)
+            .Should().NotContain(
+                "https://site.com/unrelated",
+                "a pass whose pendings all hit the canonical lookup never consults a fuzzy candidate, so it must not fetch one");
+    }
+
+    [Fact]
+    public async Task IngestAsync_ShouldWidenTheCandidateWindowWithTheConfiguredGap_NotTheDefaultConstant()
+    {
+        // gh#836's trap: the configured gap governs BOTH the pairwise comparison and the window this query loads.
+        // Size the window off the constant while the comparison honours a wider configured value and the knob is
+        // silently inert past 60 minutes — the pair would be admissible but never fetched to be compared.
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            // Stored 90 minutes before the arriving item: outside the default window, inside a configured 180.
+            seed.News.Add(Stored("https://other.com/same-story", "Fed holds rates", Now.AddMinutes(-95)));
+            await seed.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext context = Context();
+        NewsIngestionOptions options = new() { Enabled = true, FuzzyMaxPublishedGapMinutes = 180 };
+
+        // A different URL — so canonical dedup misses and the fuzzy path is the only thing that can merge it.
+        await Service(context, options, Source(Tiingo, [Item("https://site.com/a", "Fed holds rates", "ES")]))
+            .IngestAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext read = Context();
+        List<NewsRecord> rows = await read.News.ToListAsync(CancellationToken.None);
+        rows.Should().HaveCount(1, "the stored story was inside the CONFIGURED window, so it merged rather than duplicating");
+        rows[0].SourceFeeds.Should().Contain("tiingo");
+    }
 
     // --- It stores what it fetched ---
 

@@ -134,13 +134,26 @@ public sealed class NewsIngestionService
         // normally carries the original URL again, and a different-URL copy can still need that stored row as its
         // fuzzy candidate when the current original's metadata (e.g. tickers) is incomplete (gh#764 / #827 review).
         // Exact-key pendings never call FindFuzzyStored, so including them cannot turn an exact match into a fuzzy one.
-        DateTimeOffset earliest = deduped.Values.Min(pending => pending.PublishedAt.ToUniversalTime());
-        DateTimeOffset latest = deduped.Values.Max(pending => pending.PublishedAt.ToUniversalTime());
-        DateTimeOffset windowStart = earliest - NewsFuzzyDedup.MaxPublishedGap;
-        DateTimeOffset windowEnd = latest + NewsFuzzyDedup.MaxPublishedGap;
-        List<NewsRecord> fuzzyCandidates = await _database.News
-            .Where(record => record.PublishedAt >= windowStart && record.PublishedAt <= windowEnd)
-            .ToListAsync(cancellationToken);
+        //
+        // Loaded only when at least one pending MISSED the canonical lookup, because that is the only condition
+        // under which a candidate is ever consulted: FindFuzzyStored sits in the `else` after `existing` fails
+        // below. On a typical pass every pending hits `existing`, and this query used to materialize roughly the
+        // lookback plus a gap either side of stored rows as TRACKED entities for nothing (gh#836). Tracking is
+        // needed on the rows that DO match, so AsNoTracking is not the answer — not asking is.
+        List<NewsRecord> fuzzyCandidates = [];
+        if (deduped.Keys.Any(key => !existing.ContainsKey(key)))
+        {
+            // The SAME configured gap the comparison uses (gh#836): sizing this window off the constant while the
+            // comparison honoured a wider configured value would accept pairs this query never fetched, so the
+            // knob would silently do nothing past its default.
+            DateTimeOffset earliest = deduped.Values.Min(pending => pending.PublishedAt.ToUniversalTime());
+            DateTimeOffset latest = deduped.Values.Max(pending => pending.PublishedAt.ToUniversalTime());
+            DateTimeOffset windowStart = earliest - _options.FuzzyMaxPublishedGap;
+            DateTimeOffset windowEnd = latest + _options.FuzzyMaxPublishedGap;
+            fuzzyCandidates = await _database.News
+                .Where(record => record.PublishedAt >= windowStart && record.PublishedAt <= windowEnd)
+                .ToListAsync(cancellationToken);
+        }
 
         int written = 0;
         foreach ((string key, PendingItem pending) in deduped)
@@ -208,7 +221,7 @@ public sealed class NewsIngestionService
     // (title + time + ticker). Candidates already carrying `feed` are skipped: the fallback exists for cross-source
     // disagreement on the canonical URL, so a same-feed near-duplicate is a distinct item to store, not a merge target
     // (unioning `feed` onto it is a no-op that would silently drop the row -- gh#764 / #827 review).
-    private static PendingItem? FindFuzzyMatch(IEnumerable<PendingItem> candidates, NewsItem item, string feed)
+    private PendingItem? FindFuzzyMatch(IEnumerable<PendingItem> candidates, NewsItem item, string feed)
     {
         foreach (PendingItem candidate in candidates)
         {
@@ -219,7 +232,8 @@ public sealed class NewsIngestionService
 
             if (NewsFuzzyDedup.AreLikelyTheSameStory(
                 candidate.Title, candidate.PublishedAt, candidate.Tickers,
-                item.Title, item.PublishedAt, item.Tickers ?? []))
+                item.Title, item.PublishedAt, item.Tickers ?? [],
+                _options.FuzzyMinTitleSimilarity, _options.FuzzyMaxPublishedGap))
             {
                 return candidate;
             }
@@ -229,13 +243,14 @@ public sealed class NewsIngestionService
     }
 
     // The first stored row that is likely the same story as `pending` under the R-2 fuzzy rule.
-    private static NewsRecord? FindFuzzyStored(IEnumerable<NewsRecord> candidates, PendingItem pending)
+    private NewsRecord? FindFuzzyStored(IEnumerable<NewsRecord> candidates, PendingItem pending)
     {
         foreach (NewsRecord candidate in candidates)
         {
             if (NewsFuzzyDedup.AreLikelyTheSameStory(
                 candidate.Title, candidate.PublishedAt, candidate.Tickers,
-                pending.Title, pending.PublishedAt, pending.Tickers))
+                pending.Title, pending.PublishedAt, pending.Tickers,
+                _options.FuzzyMinTitleSimilarity, _options.FuzzyMaxPublishedGap))
             {
                 return candidate;
             }
