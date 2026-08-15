@@ -26,6 +26,20 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// so this is "the nearest <i>news</i> item", never "the nearest anything" — soft-signal embeddings share one
 /// polymorphic table with suggestions, rules and market snapshots.
 /// </para>
+/// <para>
+/// <b>The soft-signal predicate must stay matchable by <c>IX_Embeddings_Vector_Cosine_SoftSignal</c></b> — the
+/// <b>partial</b> HNSW index gh#864 added, whose predicate is exactly <c>OwnerKind = SoftSignal</c>. That index is
+/// what makes this read's recall sound rather than merely fast: against the table-wide vector index, Postgres may
+/// serve the <c>ORDER BY … LIMIT</c> from the HNSW graph and apply the owner kind as a <i>post-scan filter</i>, so
+/// a crowd of closer other-kind rows fills the approximate candidate window and the read returns <b>zero</b>
+/// neighbours though thousands exist (reproduced at 15,000 rows by gh#861's suite). Searching a soft-signal-only
+/// index leaves nothing for a post-filter to discard.
+/// </para>
+/// <para>
+/// So this is a query whose correctness depends on a schema object: parameterising the owner kind, widening the
+/// predicate, or dropping the partial index re-opens the starvation. If another owner kind ever needs a
+/// vector-ordered read, it wants <b>its own</b> partial index rather than a shared table-wide one.
+/// </para>
 /// </remarks>
 public sealed class PgVectorNewsSimilarity : INewsEmbeddingSimilarity
 {
