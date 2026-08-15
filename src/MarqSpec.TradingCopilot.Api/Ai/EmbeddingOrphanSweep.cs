@@ -17,13 +17,10 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// </remarks>
 public static class EmbeddingOrphanSweep
 {
-    /// <summary>The owner kinds with a live producer, and so safe to sweep for orphans.</summary>
+    /// <summary>
+    /// The owner kinds with a live producer, and so safe to sweep for orphans — the sweep iterates exactly these, so
+    /// any kind absent here (producer-less, or not yet added) is never touched.
+    /// </summary>
     public static IReadOnlyList<EmbeddingOwnerKind> SweepableKinds { get; } =
         [EmbeddingOwnerKind.SoftSignal, EmbeddingOwnerKind.Topic];
-
-    /// <summary>
-    /// Whether <paramref name="ownerKind"/> may be swept for orphans — <see langword="true"/> only for a
-    /// producer-backed kind on the allow-list.
-    /// </summary>
-    public static bool IsSweepable(EmbeddingOwnerKind ownerKind) => SweepableKinds.Contains(ownerKind);
 }
