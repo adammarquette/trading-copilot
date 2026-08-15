@@ -1,11 +1,18 @@
+using System.Diagnostics;
+using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Chat;
+using MarqSpec.TradingCopilot.Domain.Flatten;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.Api.Chat;
 
@@ -54,6 +61,13 @@ public static class ChatEndpoints
             TradingCopilotDbContext database, CancellationToken cancellationToken) =>
             AppendAsync(id, request, DateTimeOffset.UtcNow, database, cancellationToken))
             .WithSummary("Append a message to a conversation.");
+        group.MapPost("/{id:guid}/turns", (Guid id, ChatTurnRequest? request, TradingCopilotDbContext database,
+            IChatTurnService turnService, IAiSpendGovernor governor, IOptions<GovernorOptions> governorOptions,
+            IAiUsageLedger ledger, ILlmMetrics metrics, IChatRealtimeNotifier notifier, ILoggerFactory loggerFactory,
+            CancellationToken cancellationToken) =>
+            TurnAsync(id, request, DateTimeOffset.UtcNow, database, turnService, governor, governorOptions, ledger,
+                metrics, notifier, loggerFactory, cancellationToken))
+            .WithSummary("Take a grounded co-pilot chat turn.");
 
         return endpoints;
     }
@@ -208,46 +222,253 @@ public static class ChatEndpoints
             return Results.NotFound();
         }
 
-        // GUARD 2 (gh#900 review): allocate the next sequence; the unique (ConversationId, Sequence) index is the
-        // backstop. This max+1 read is not itself race-free — two concurrent appends can read the same max — so the
-        // index is what actually keeps the thread integral; a loser is caught below and returned as a 409.
-        int highest = await database.ChatMessages
+        // GUARDS 1 + 2 (gh#900 review): TryAppendAsync stamps the owner from the loaded conversation — never request
+        // input — and allocates Sequence max+1 with the unique (ConversationId, Sequence) index as the backstop; a
+        // concurrent append that lost the race is a graceful 409.
+        (ChatMessage? appended, bool conflict) = await TryAppendAsync(
+            database, conversation, request.Role, request.Content, now, cancellationToken);
+        return conflict ? SequenceConflict() : Results.Ok(ChatMessageResponse.From(appended!));
+    }
+
+    /// <summary>
+    /// Takes a grounded co-pilot chat turn (<c>POST /conversations/{id}/turns</c>, gh#906, R-6): appends the
+    /// operator's message, runs the model over the thread, meters and ledgers the call, appends the reply, and pushes
+    /// it to the owner's realtime connections.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Order and safety.</b> A foreign / absent conversation is a <b>404</b> (R-20). The <b>governor gate</b>
+    /// (gh#448, ADR-0008) caps deployment-wide daily AI spend <b>before</b> any call — inert until a budget is set,
+    /// and <b>fail-open</b> on a spend-read fault (the inverse of the fail-closed risk gate: a bookkeeping blip must
+    /// never pause the co-pilot). The operator's turn is persisted <b>before</b> the call, so a later LLM fault never
+    /// loses it; the call is metered (export-only) and ledgered (durable, <b>fail-open</b>) whatever its outcome, so
+    /// the governor sees every billed turn. A refused / faulted turn is <b>fail-closed</b> — a 422 with the reason,
+    /// and <b>no assistant turn is invented</b>. Enforcement lives below the model: nothing here proposes an order.
+    /// </para>
+    /// <para>
+    /// <b>Presentation-only push.</b> On success the reply is pushed per-owner over the hub (ADR-0021) <b>after</b> the
+    /// write commits, and that push's failure never fails the turn — the REST response already carries the answer to
+    /// the initiating caller. Token streaming (3b) extends the provider seam and is deferred (gh#906).
+    /// </para>
+    /// </remarks>
+    /// <param name="id">The conversation to take a turn in.</param>
+    /// <param name="request">The operator's message text.</param>
+    /// <param name="now">The clock, injected so timestamps and the spend window are testable.</param>
+    /// <param name="database">The scoped, R-20-filtered database.</param>
+    /// <param name="turnService">Runs the model over the thread and prices the call.</param>
+    /// <param name="governor">The pure AI-spend gate.</param>
+    /// <param name="governorOptions">The daily-budget config (inert when unset).</param>
+    /// <param name="ledger">The durable, fail-open AI-usage ledger.</param>
+    /// <param name="metrics">The export-only LLM meter.</param>
+    /// <param name="notifier">The per-owner realtime notifier.</param>
+    /// <param name="loggerFactory">The logger factory (fail-open faults are logged, never silently swallowed).</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The persisted turn pair (200), or 400 / 404 / 422 / 429 / 409.</returns>
+    internal static async Task<IResult> TurnAsync(
+        Guid id,
+        ChatTurnRequest? request,
+        DateTimeOffset now,
+        TradingCopilotDbContext database,
+        IChatTurnService turnService,
+        IAiSpendGovernor governor,
+        IOptions<GovernorOptions> governorOptions,
+        IAiUsageLedger ledger,
+        ILlmMetrics metrics,
+        IChatRealtimeNotifier notifier,
+        ILoggerFactory loggerFactory,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+        ArgumentNullException.ThrowIfNull(turnService);
+        ArgumentNullException.ThrowIfNull(governor);
+        ArgumentNullException.ThrowIfNull(governorOptions);
+        ArgumentNullException.ThrowIfNull(ledger);
+        ArgumentNullException.ThrowIfNull(metrics);
+        ArgumentNullException.ThrowIfNull(notifier);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
+        // Validate the turn text FIRST — a 400 reveals nothing about whether the conversation exists.
+        if (request is null || string.IsNullOrWhiteSpace(request.Content))
+        {
+            return Results.BadRequest(new { error = "Message content is required." });
+        }
+        if (request.Content.Length > ChatMessage.ContentMaxLength)
+        {
+            return Results.BadRequest(new { error = $"Message content must be at most {ChatMessage.ContentMaxLength} characters." });
+        }
+
+        // R-20: a foreign or absent conversation is a 404. The loaded owner is the single authority on whose turn this
+        // is — the ledger and the hub push both target it, never request input.
+        Conversation? conversation = await database.Conversations
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (conversation is null)
+        {
+            return Results.NotFound();
+        }
+
+        ILogger logger = loggerFactory.CreateLogger("MarqSpec.TradingCopilot.Api.Chat.Turn");
+
+        // GOVERNOR GATE (gh#448, ADR-0008): cap deployment-wide daily AI spend before the call — inert until a budget
+        // is configured. The windowed read crosses R-20 with IgnoreQueryFilters (one shared account funds every user)
+        // and is FAIL-OPEN: a spend-read fault leaves the decision null and the turn proceeds un-gated.
+        AiSpendBudget? budget = governorOptions.Value.ToBudget();
+        if (budget is not null)
+        {
+            AiSpendDecision? decision = null;
+            try
+            {
+                decimal spent = await database.AiUsage
+                    .IgnoreQueryFilters()
+                    .Where(record => record.OccurredAt >= MarketClock.CentralDayStartUtc(now))
+                    .Select(record => (decimal?)record.EstimatedCostUsd)
+                    .SumAsync(cancellationToken) ?? 0m;
+                decision = governor.Evaluate(budget, spent);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                logger.LogError(error, "Chat turn could not read AI spend; running this turn un-gated (fail-open).");
+            }
+
+            if (decision is { IsBlocked: true })
+            {
+                // Nothing persisted, no call made: the operator retries when the daily budget resets.
+                return Results.Json(new { error = decision.Reason }, statusCode: StatusCodes.Status429TooManyRequests);
+            }
+        }
+
+        // Persist the operator's turn BEFORE the call, so a later LLM fault never loses it (fail-closed keeps it).
+        (ChatMessage? userMessage, bool userConflict) = await TryAppendAsync(
+            database, conversation, ChatRole.User, request.Content, now, cancellationToken);
+        if (userConflict)
+        {
+            return SequenceConflict();
+        }
+
+        // Run the turn over the whole thread in order — the just-persisted user turn is last. A context-window cap is
+        // deferred (gh#906); a single operator's thread is bounded in practice.
+        List<ChatMessage> history = await database.ChatMessages
+            .AsNoTracking()
             .Where(message => message.ConversationId == id)
+            .OrderBy(message => message.Sequence)
+            .ToListAsync(cancellationToken);
+
+        ChatTurnResult turn = await turnService.CompleteAsync(history, cancellationToken);
+
+        // Meter (export-only, never throws) and ledger (durable, FAIL-OPEN) the call — success OR failure, so the
+        // governor floor sees every billed turn. The owner is the conversation's (R-20); the clock is the turn's now.
+        metrics.RecordLlmCall(turn.Cost);
+        try
+        {
+            await ledger.RecordAsync(
+                new AiUsageEntry(conversation.UserId, turn.Cost, Activity.Current?.TraceId.ToString(), now),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            logger.LogError(error, "Chat turn AI-usage ledger write faulted for owner {Owner}; the turn stands.", conversation.UserId);
+        }
+
+        // Fail-closed: a refused / truncated / faulted turn is a 422 with the reason. The operator's turn stays saved
+        // and the cost recorded, but no assistant turn is invented.
+        if (!turn.Succeeded)
+        {
+            return Results.UnprocessableEntity(new { error = turn.Message });
+        }
+
+        (ChatMessage? assistantMessage, bool assistantConflict) = await TryAppendAsync(
+            database, conversation, ChatRole.Assistant, turn.Message, now, cancellationToken);
+        if (assistantConflict)
+        {
+            return SequenceConflict();
+        }
+
+        // Presentation-only push to the owner's OTHER connections, AFTER the write commits; its failure never fails
+        // the turn (the REST response below already carries the answer to the initiating caller).
+        try
+        {
+            await notifier.MessageAppendedAsync(
+                conversation.UserId,
+                new RealtimeChatMessage(
+                    id, assistantMessage!.Id, assistantMessage.Sequence, assistantMessage.Role,
+                    assistantMessage.Content, assistantMessage.CreatedAt),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            logger.LogError(error, "Chat turn realtime push faulted for owner {Owner}; the turn stands.", conversation.UserId);
+        }
+
+        return Results.Ok(new ChatTurnResponse(
+            ChatMessageResponse.From(userMessage!), ChatMessageResponse.From(assistantMessage!)));
+    }
+
+    /// <summary>
+    /// Appends one message to a conversation with the shared write guards (gh#900 review, reused by gh#906): the owner
+    /// is the loaded <paramref name="conversation"/>'s (never request input), the <c>Sequence</c> is allocated
+    /// <c>max+1</c>, and the unique <c>(ConversationId, Sequence)</c> index is the backstop against a concurrent race.
+    /// </summary>
+    /// <returns>The appended message, or <c>(null, true)</c> when the sequence race lost — the caller returns a 409.</returns>
+    private static async Task<(ChatMessage? Message, bool Conflict)> TryAppendAsync(
+        TradingCopilotDbContext database,
+        Conversation conversation,
+        ChatRole role,
+        string content,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        // The max+1 read is not itself race-free — two concurrent appends can read the same max — so the unique index
+        // is what actually keeps the thread integral; a loser is caught below and surfaced as a 409.
+        int highest = await database.ChatMessages
+            .Where(message => message.ConversationId == conversation.Id)
             .Select(message => (int?)message.Sequence)
             .MaxAsync(cancellationToken) ?? 0;
 
-        ChatMessage appended = new()
+        ChatMessage message = new()
         {
             Id = Guid.NewGuid(),
-            // GUARD 1 (gh#900 review): the owner is the CONVERSATION's, read under R-20 above — never request input
-            // (AppendMessageRequest has no UserId). Mirrors SuggestionEndpoints.PassAsync (UserId = suggestion.UserId).
-            UserId = conversation.UserId,
-            ConversationId = id,
+            UserId = conversation.UserId, // the CONVERSATION's owner, read under R-20 — never request input
+            ConversationId = conversation.Id,
             Sequence = highest + 1,
-            Role = request.Role,
-            Content = request.Content,
+            Role = role,
+            Content = content,
             CreatedAt = now,
         };
-        database.ChatMessages.Add(appended);
+        database.ChatMessages.Add(message);
         conversation.UpdatedAt = now; // bump so the conversation-list read surfaces the freshest thread first
 
         try
         {
             await database.SaveChangesAsync(cancellationToken);
+            return (message, false);
         }
         catch (DbUpdateException)
         {
-            // The unique (ConversationId, Sequence) index rejected a concurrent append that took this position. The FK
-            // to the just-loaded conversation and the Role/Sequence CHECKs are all pre-satisfied, so a violation here
-            // is the sequence race. Rare in a single-operator deployment; QA proves the collision against real Postgres.
-            return Results.Conflict(new
-            {
-                error = "A concurrent message took that position in the conversation; retry.",
-            });
+            // The unique (ConversationId, Sequence) index rejected a concurrent append that took this position. Every
+            // other constraint (the FK to the loaded conversation, the Role / Sequence CHECKs) is pre-satisfied, so a
+            // violation here is the sequence race. Detach the failed entity so the context stays usable; QA proves the
+            // collision against real Postgres.
+            database.Entry(message).State = EntityState.Detached;
+            return (null, true);
         }
-
-        return Results.Ok(ChatMessageResponse.From(appended));
     }
+
+    // The shared 409 for a lost sequence race — rare in a single-operator deployment.
+    private static IResult SequenceConflict() => Results.Conflict(new
+    {
+        error = "A concurrent message took that position in the conversation; retry.",
+    });
 
     // A blank title is no title: trim, and collapse empty/whitespace to null so "" and "   " are not stored as a title.
     private static string? Normalize(string? value) =>

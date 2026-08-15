@@ -91,3 +91,19 @@ public sealed record ChatMessageResponse(
             message.Id, message.ConversationId, message.Sequence, message.Role, message.Content, message.CreatedAt);
     }
 }
+
+/// <summary>
+/// Take a grounded co-pilot chat turn (gh#906): the operator's new message. The server appends it as the
+/// <see cref="ChatRole.User"/> turn, runs the model over the thread, and appends the reply — so the request carries
+/// only the text, never a role or owner.
+/// </summary>
+/// <param name="Content">The operator's message text.</param>
+public sealed record ChatTurnRequest(string Content);
+
+/// <summary>
+/// The result of a successful chat turn: the operator's persisted turn and the co-pilot's reply, both with their
+/// allocated sequence. A refused / faulted turn returns an error status instead (the user turn is still saved).
+/// </summary>
+/// <param name="UserMessage">The operator's message, as persisted.</param>
+/// <param name="AssistantMessage">The co-pilot's reply, as persisted.</param>
+public sealed record ChatTurnResponse(ChatMessageResponse UserMessage, ChatMessageResponse AssistantMessage);
