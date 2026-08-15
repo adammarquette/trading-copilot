@@ -116,8 +116,9 @@ public sealed class AnthropicLlmProvider : ILlmProvider
 
         try
         {
-            // Server-Sent Events: only `data:` lines carry JSON. We dispatch on the JSON's own `type` and ignore the
-            // `event:`, blank, and comment lines, so a minor SSE-framing variation does not break the parse.
+            // Server-Sent Events: only `data:` lines carry JSON, one complete object per line (the Messages API never
+            // splits one across lines). We dispatch on the JSON's own `type` and ignore the `event:`, blank, and
+            // comment lines; a malformed `data:` line fails closed at the parse rather than mis-parsing.
             while (await reader.ReadLineAsync(cancellationToken) is { } line)
             {
                 if (!line.StartsWith("data:", StringComparison.Ordinal))
