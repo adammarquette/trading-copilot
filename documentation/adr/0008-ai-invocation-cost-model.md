@@ -120,6 +120,7 @@ escalation policy, the enrichment injection-surface argument) is untouched.)*
 | 2026-07-30 | deep-context enrichment landed; the deep tier now gets more than the model upgrade (gh#476) |
 | 2026-07-30 | the per-call budget-aware escalation skip landed; the pair-overrun is closed (gh#478) |
 | 2026-07-30 | the LLM-side meter landed; Grafana now sees true total AI spend (gh#477) |
+| 2026-08-15 | the stale-model embedding sweep rides the embed pass but costs no AI spend (gh#889) |
 
 ## Update (2026-07-28) — the deterministic mechanical route landed (gh#385)
 
@@ -376,6 +377,17 @@ spend). **Crucially this is observability, not enforcement** (the gh#448 finding
 is export-only / not app-readable, so the governor's read is **unchanged** — it still enforces on the persisted
 `AIUsage` ledger floor; this closes the **Grafana-visibility** gap only. Amends the gh#448/gh#449 "still open:
 LLM-side meter" notes above — **landed**.
+
+## Update (2026-08-15) — the stale-model embedding sweep rides the embed pass but costs no AI spend (gh#889)
+
+gh#889 added a **stale-model sweep** to the news-embedding pass (the cost-bearing pass this ADR governs): after a
+re-embed's current-model row is durably saved, a set-based `ExecuteDeleteAsync` removes that owner's `Model != current`
+rows. **It adds nothing to the cost model** — the delete is one SQL statement, not an AI call, so it is neither metered
+(`LlmMetrics` / the embed meter) nor ledgered (`AIUsage`) nor gated by the governor. The **paid** side of a model
+migration is unchanged and already recorded (the ADR-0001 gh#881/gh#889 updates): re-embedding the whole corpus under
+the new model is one paid `EmbedAsync` per owner, cap-gated exactly like any other embed, so a large corpus re-embeds
+over several passes; the sweep is the free janitor that rides each of those passes, deleting only the rows the pass
+just superseded. No governor, meter, or ledger change.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the

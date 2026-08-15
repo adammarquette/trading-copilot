@@ -189,7 +189,7 @@ then [Nice-to-Have (P1)](#nice-to-have-p1) · [Future Considerations (P2)](#futu
 <a id="r-6"></a>
 **R-6: Multi-turn chat.** Conversational interface grounded in platform state (market data, order-flow analytics, soft-signal events, journal, rulebook, live positions/orders). Supports analysis, on-demand suggestions, journal queries, and rulebook management.
 - [ ] Chat can invoke platform capabilities as tools (quote data, generate suggestion, query journal, edit rulebook, read positions). *Chat does not place orders — execution is an explicit UI action (R-11).*
-- [ ] Conversation history persists across sessions
+- [x] Conversation history persists across sessions — the store (gh#18 inc 1) plus the `/conversations` REST CRUD (gh#18 inc 2): a conversation and its messages written in one session are read back in the next, R-20 owner-scoped
 - [ ] The co-pilot can **proactively ask follow-up questions** grounded in trades + their feedback (e.g. a pattern across recent losses) to **refine strategy** — turning feedback into candidate **rulebook** changes (R-7) on explicit confirmation
 
 <a id="r-7"></a>

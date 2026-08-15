@@ -7,6 +7,7 @@ using MarqSpec.TradingCopilot.Api.Accounts;
 using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Auth;
+using MarqSpec.TradingCopilot.Api.Chat;
 using MarqSpec.TradingCopilot.Api.Documentation;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Flatten;
@@ -572,6 +573,7 @@ app.MapWorkingOrderEndpoints();
 app.MapFillEndpoints();
 app.MapMarketDataEndpoints();
 app.MapAiSpendEndpoints();
+app.MapChatEndpoints();
 
 // The realtime hub (gh#645, R-10 / R-18). A literal path so it is a concrete authenticated route ahead of the SPA
 // fallback; RequireAuthorization so the R-18 auth-surface sweep treats its negotiate / connect endpoints as gated.
