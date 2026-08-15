@@ -379,6 +379,8 @@ public sealed record PatchTriggerRequest(
 /// <param name="LastEvaluatedValue">The last measured value, if any.</param>
 /// <param name="LastFiredAt">When it last fired, if ever.</param>
 /// <param name="CreatedAt">When it was created.</param>
+/// <param name="SourceRuleId">The rulebook rule that authored the trigger, or null — a soft R-7 provenance reference (gh#471).</param>
+/// <param name="SourceConversationId">The conversation the trigger's rule was authored in, or null — a soft R-7 provenance reference (gh#471).</param>
 public sealed record TriggerResponse(
     Guid Id,
     string Symbol,
@@ -398,7 +400,9 @@ public sealed record TriggerResponse(
     int ArmCycle,
     decimal? LastEvaluatedValue,
     DateTimeOffset? LastFiredAt,
-    DateTimeOffset CreatedAt)
+    DateTimeOffset CreatedAt,
+    Guid? SourceRuleId,
+    Guid? SourceConversationId)
 {
     /// <summary>Projects a persisted trigger into its API representation.</summary>
     /// <param name="record">The persisted trigger.</param>
@@ -422,5 +426,7 @@ public sealed record TriggerResponse(
         record.ArmCycle,
         record.LastEvaluatedValue,
         record.LastFiredAt,
-        record.CreatedAt);
+        record.CreatedAt,
+        record.SourceRuleId,
+        record.SourceConversationId);
 }
