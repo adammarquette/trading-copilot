@@ -140,6 +140,12 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>The append-only per-call AI spend ledger (gh#431, ADR-0008 / ADR-0002). Operator-owned.</summary>
     public DbSet<AiUsageRecord> AiUsage => Set<AiUsageRecord>();
 
+    /// <summary>Co-pilot chat conversations (gh#18, R-6) — the thread a session's messages belong to. Operator-owned.</summary>
+    public DbSet<Conversation> Conversations => Set<Conversation>();
+
+    /// <summary>Messages within a conversation (gh#18, R-6) — ordered by <c>Sequence</c>. Operator-owned.</summary>
+    public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -866,6 +872,37 @@ public class TradingCopilotDbContext : TenantDbContext
                 // trigger — the exact defeat-the-column bug the unit tests (in-memory, no CHECK) cannot catch.
                 table.HasCheckConstraint(
                     "CK_AuditRecords_Source_MatchesAction", "(\"Action\" IN (5, 6, 7)) = (\"Source\" IS NOT NULL)");
+            });
+        });
+
+        modelBuilder.Entity<Conversation>(conversation =>
+        {
+            conversation.Property(c => c.Title).HasMaxLength(256);
+
+            // The conversation-list read (gh#18): an operator's conversations, most-recent activity first.
+            conversation.HasIndex(c => new { c.UserId, c.UpdatedAt });
+        });
+
+        modelBuilder.Entity<ChatMessage>(message =>
+        {
+            message.Property(m => m.Content).HasMaxLength(ChatMessage.ContentMaxLength);
+
+            message.HasOne<Conversation>()
+                .WithMany()
+                .HasForeignKey(m => m.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // A message's position in the thread is unique -- two messages cannot share a sequence, and the
+            // conversation reads in this order. The unique index is both the ordering-integrity guard and the read.
+            message.HasIndex(m => new { m.ConversationId, m.Sequence })
+                .IsUnique()
+                .HasDatabaseName("IX_ChatMessages_ConversationId_Sequence");
+
+            message.ToTable(table =>
+            {
+                // Fail-closed zero (gh#60): a message always has a real author, and a real position in the thread.
+                table.HasCheckConstraint("CK_ChatMessages_Role_NotUnknown", "\"Role\" <> 0");
+                table.HasCheckConstraint("CK_ChatMessages_Sequence_Positive", "\"Sequence\" > 0");
             });
         });
     }
