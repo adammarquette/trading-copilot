@@ -118,3 +118,13 @@ poll-until-refresh until then.
   proposed". This is the **honest-states** stance R-19 / ADR-0013 asks for, and that `useExecutionOverlays` /
   `useFillMarkers` take — they blank and mark **unavailable** on a failed read; the panel instead **keeps** the list
   and flags it (same principle, since a stale decision list is more useful to act against than a blank one).
+- **Landed** (gh#906): the **chat turn** (R-6) is the second server producer to adopt this contract. The grounded
+  turn is **initiated over REST** — `POST /conversations/{id}/turns` — because the hub is **never a command path**;
+  the co-pilot's reply is then pushed **per-owner** as **`realtimeChatMessage`** (`Clients.User(ownerId)`, payload
+  `RealtimeChatMessage` = the compact conversation id + message id + sequence + role + content + timestamp),
+  **after** the write commits and **presentation-only**. The REST turn response already carries the answer to the
+  initiating caller, so the push serves the owner's **other** connections (the multi-screen workspace, ADR-0006) and
+  its failure never fails the turn — the REST read model stays the source of truth, the wire is a reconcile signal,
+  exactly as for `realtimeSuggestion`. **Deferred (inc 3b):** token-by-token streaming, which extends the core
+  `ILlmProvider` completion seam (a streaming response) rather than this hub contract — **turn-event granularity**
+  (the whole assistant message) ships now.
