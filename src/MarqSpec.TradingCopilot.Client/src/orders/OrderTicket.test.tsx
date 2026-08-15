@@ -41,12 +41,17 @@ vi.mock('../api/risk', async (importOriginal) => ({
   getRiskProfile: vi.fn(),
 }));
 
-/** Puts one account of the given mode on the roster, as the ticket's own account. */
-function roster(mode: TradingMode) {
+/**
+ * Puts one account on the roster as the ticket's own. `tradeableHere` is the server's per-request answer to
+ * whether THIS environment may trade it, so it is passed explicitly rather than derived: an `Undeclared` account
+ * is never tradeable anywhere, and a live one is tradeable only in production.
+ */
+function roster(mode: TradingMode, tradeableHere = true) {
+  const account = { id: 'a1', mode, name: 'Account 1', tradeableHere };
   useOptionalAccountsMock.mockReturnValue({
     status: 'ready',
-    accounts: [{ id: 'a1', mode, name: 'Practice 1', tradeableHere: true }],
-    activeAccount: { id: 'a1', mode, name: 'Practice 1', tradeableHere: true },
+    accounts: [account],
+    activeAccount: account,
   });
 }
 
@@ -525,6 +530,31 @@ describe('OrderTicket — the default-entry-action split button (gh#828, gh#218)
     await renderTicket();
 
     expect(screen.getByRole('button', { name: /^arm$/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /entry options/i })).toBeNull();
+  });
+
+  it('withholds the fast path entirely for an UNDECLARED account — it produces no orders anywhere', async () => {
+    // `TradingMode.Undeclared` is the enum's zero, and an undeclared account is refused everywhere, production
+    // included. A roster entry that says "tradeable nowhere" is precisely the one that does NOT vouch for the
+    // account, so the split button must not appear at all — no menu, and no reachable one-click transmit.
+    roster(TradingMode.Undeclared, false);
+    profile(DefaultEntryAction.SendAsIs);
+
+    await renderTicket();
+
+    expect(screen.getByRole('button', { name: /^arm$/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /entry options/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /send as-is/i })).toBeNull();
+    expect(sendAsIs).not.toHaveBeenCalled();
+  });
+
+  it('withholds it where THIS environment may not trade the account (R-14), rather than offering a control that must fail', async () => {
+    // A live account outside production is refused by the server on every order path. Offering the fast path for
+    // it would be a control that always fails — the same reasoning that keeps TrailingStop off this ticket.
+    roster(TradingMode.Live, false);
+
+    await renderTicket();
+
     expect(screen.queryByRole('button', { name: /entry options/i })).toBeNull();
   });
 
