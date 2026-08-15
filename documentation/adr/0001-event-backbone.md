@@ -238,3 +238,33 @@ did not exist.
 *Landed:* the real provider (**gh#403**, Cohere with its sparse fallback and per-call cost metering) and the first
 consumer wiring (**gh#377**, `NewsEmbeddingService` populating `NewsItem`'s embedding). *Still open:* which other
 owner kinds (suggestion / rule / snapshot) embed, and when.
+
+## Update (2026-08-14) — "not comparable" is now enforced at the read, not just the key (gh#881)
+
+The **Model is in the key** decision above keeps two models' vectors as separate rows, but the retrieval reads
+(`INewsEmbeddingSimilarity`) filtered only on owner kind — so after a model change they returned **both** models'
+rows for an owner. Downstream, the by-owner reads (`GetVectorsAsync` / `GetTopicVectorsAsync`) returned a duplicate
+row per owner, so the gh#854 last-wins collapse picked an **arbitrary** model's vector, and a **cross-model cosine**
+— a meaningless-but-nonzero similarity — could result: exactly the mixed-model comparison the key was meant to
+prevent. (Before gh#854 added that collapse, an unguarded `ToDictionary` would have *thrown* on the duplicate key —
+which is why the collapse exists; it is not a whole-pass throw today.) `NearestNewsAsync`, a plain ranked list, could
+likewise rank a retired-model vector or return the same owner twice. The invariant is now enforced **where it
+matters**, at the read: `PgVectorNewsSimilarity` injects `IEmbeddingProvider` and the **by-owner** reads
+(`GetVectorsAsync`, `GetTopicVectorsAsync`) filter `Model == provider.Model`, so `(OwnerKind, OwnerId)` is unique in
+the result and every comparison is same-model. After a model change an owner embedded only under the old model reads
+back **empty** — a bounded degrade — until the embedding pass re-embeds it under the current model (its candidate
+query already keys on the current model), so the transition **self-heals** and never returns a wrong (cross-model)
+answer. `NearestNewsAsync` gains the same filter in the storage-GC follow-up (gh#889), deferred here only because it
+must land together with aligning the gh#864 recall guard — which drives `NearestNewsAsync` through a provider whose
+`Model` is `"none"`, so adding the filter alone would redden that guard.
+
+Two honest costs. **The self-heal is cap-gated, not prompt:** a model change re-embeds the *whole* corpus (every news
+item + topic, each a paid call), so under the daily AI-spend cap a large corpus re-embeds over several passes —
+potentially days — during which the affected items degrade correctly to non-semantic. And when `NearestNewsAsync` gains the filter (gh#889), the
+model predicate will be a *second* post-scan filter on the approximate HNSW window, so during a migration window
+(new-model rows still sparse) recall can be reduced further than the owner-kind filter alone — the gh#864 interaction;
+the result stays distance-ordered and the consumer degrades gracefully, never wrong.
+
+The now-unread stale rows are **harmless** (never read), so the "leaves its vector behind until swept" cost the
+polymorphic store documents is a **storage-only** concern; the actual GC — deleting stale-model rows after a re-embed,
+and orphaned-owner rows after a rename/delete — is a small follow-up (gh#889), not a correctness fix.

@@ -143,10 +143,10 @@ public sealed class NewsRelevanceService
                 return topics; // nothing embedded yet -> keyword-only
             }
 
-            // Last-wins on OwnerId, tolerating multiple coexisting rows per owner after a model change (the store keys
-            // on (OwnerKind, OwnerId, Model), so both models' vectors persist until swept) -- a ToDictionary would
-            // throw on the duplicate key and degrade the whole pass. Mirrors gh#853's SemanticSalienceAxis, which
-            // collapses the same way.
+            // Last-wins on OwnerId -- belt-and-suspenders since gh#881: the by-owner read now filters by the current
+            // model, so (OwnerKind, OwnerId) is unique and a duplicate should no longer arrive. Collapsing last-wins
+            // (rather than a ToDictionary that would throw on a duplicate key and degrade the whole pass) keeps this
+            // robust if that read filter ever regresses. Mirrors gh#853's SemanticSalienceAxis.
             Dictionary<string, IReadOnlyList<float>> byName = new(StringComparer.Ordinal);
             foreach (StoredEmbedding vector in vectors)
             {
@@ -183,8 +183,8 @@ public sealed class NewsRelevanceService
         {
             IReadOnlyList<StoredEmbedding> vectors = await _similarity.GetVectorsAsync(dedupKeys, cancellationToken);
 
-            // Last-wins on OwnerId (see WithTopicEmbeddingsAsync): tolerate coexisting per-model rows rather than
-            // throwing on a duplicate key and degrading the whole page to keyword-only.
+            // Last-wins on OwnerId (see WithTopicEmbeddingsAsync): the gh#881 current-model read should make a
+            // duplicate impossible, but collapsing rather than throwing on a duplicate key keeps the page robust.
             Dictionary<string, IReadOnlyList<float>> byKey = new(StringComparer.Ordinal);
             foreach (StoredEmbedding vector in vectors)
             {
