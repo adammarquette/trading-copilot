@@ -151,6 +151,7 @@ public sealed class NewsEmbeddingService
 
             bool progressed = false;
             bool capReachedMidPage = false;
+            List<string> embeddedDedupKeys = []; // owners re-embedded THIS page -> sweep their stale-model rows (gh#889)
 
             foreach (NewsRecord news in batch)
             {
@@ -197,6 +198,7 @@ public sealed class NewsEmbeddingService
                 }
 
                 Upsert(existing, EmbeddingOwnerKind.SoftSignal, news.DedupKey, model, hash, result.Vector, now);
+                embeddedDedupKeys.Add(news.DedupKey);
 
                 // A new or changed news vector just landed. Null RelevanceVersion so the next relevance pass
                 // RE-resolves this item WITH its vector (gh#854): the embedding and relevance passes are independent,
@@ -210,6 +212,7 @@ public sealed class NewsEmbeddingService
             }
 
             await _database.SaveChangesAsync(cancellationToken);
+            await SweepStaleModelRowsAsync(EmbeddingOwnerKind.SoftSignal, embeddedDedupKeys, model, cancellationToken);
             _database.ChangeTracker.Clear(); // release the page before loading the next
 
             if (capReachedMidPage)
@@ -277,6 +280,7 @@ public sealed class NewsEmbeddingService
     {
         List<NewsTopic> topics = await _database.NewsTopics.AsNoTracking().ToListAsync(cancellationToken);
         int embedded = 0;
+        List<string> embeddedTopicNames = []; // topics re-embedded this pass -> sweep their stale-model rows (gh#889)
 
         foreach (NewsTopic topic in topics)
         {
@@ -317,16 +321,56 @@ public sealed class NewsEmbeddingService
             }
 
             Upsert(existing, EmbeddingOwnerKind.Topic, topic.Name, model, hash, result.Vector, now);
+            embeddedTopicNames.Add(topic.Name);
             embedded++;
         }
 
         await _database.SaveChangesAsync(cancellationToken);
+        await SweepStaleModelRowsAsync(EmbeddingOwnerKind.Topic, embeddedTopicNames, model, cancellationToken);
         _database.ChangeTracker.Clear();
         return embedded;
     }
 
     /// <summary>The exact text handed to the provider for a topic — its name + keywords, the string the hash is over.</summary>
     private static string ContentForTopic(NewsTopic topic) => $"{topic.Name}\n\n{string.Join(' ', topic.Keywords)}";
+
+    /// <summary>
+    /// Deletes the just-re-embedded owners' <b>other-model</b> rows (gh#889) — the stale-model half of the embedding
+    /// model-migration hygiene. Runs after the page's <c>SaveChanges</c>, so the current-model row is durably present;
+    /// <c>ExecuteDeleteAsync</c> is a set-based SQL DELETE (no AI spend, no change-tracker interaction). Scoped to
+    /// <c>(this owner kind, an owner embedded THIS page, Model != current)</c>, so it can never touch a current-model
+    /// row, another owner kind, or an owner not embedded this page. Best-effort: a sweep fault leaves the stale rows —
+    /// harmless, since the gh#881 / gh#889 read-filters never read them — and must not fail an otherwise-progressing pass.
+    /// Because it sweeps only owners re-embedded THIS pass, a stale row leaked here (a crash between <c>SaveChanges</c>
+    /// and this delete, or a transient delete fault) is not reclaimed by a later <i>targeted</i> re-embed — that owner
+    /// is then idempotent-skipped — so a periodic full <c>Model != current</c> GC (gh#902) is the backstop for those.
+    /// </summary>
+    private async Task SweepStaleModelRowsAsync(
+        EmbeddingOwnerKind ownerKind, IReadOnlyCollection<string> ownerIds, string model, CancellationToken cancellationToken)
+    {
+        if (ownerIds.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await _database.Embeddings
+                .Where(embedding => embedding.OwnerKind == ownerKind
+                    && ownerIds.Contains(embedding.OwnerId)
+                    && embedding.Model != model)
+                .ExecuteDeleteAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw; // a genuine caller cancellation is host shutdown, not a fault to swallow
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning(
+                error, "Stale-model embedding sweep failed; the harmless stale rows remain until the next re-embed.");
+        }
+    }
 
     /// <summary>
     /// Ledgers one embed call's spend (gh#436, gh#377): stamped to the deployment <see cref="SystemOwner"/> sentinel
