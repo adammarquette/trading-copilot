@@ -32,4 +32,18 @@ public class ChatRealtimeNotifierTests
         A.CallTo(() => _proxy.SendCoreAsync(RealtimeChatMessage.ClientMethod, A<object?[]>._, A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
     }
+
+    [Fact]
+    public async Task ChunkAsync_ShouldPushTheTokenDelta_ToTheOwnersConnectionsOnly()
+    {
+        Guid owner = Guid.NewGuid();
+
+        await new ChatRealtimeNotifier(_hub).ChunkAsync(
+            owner, new RealtimeChatChunk(Guid.NewGuid(), "tok"), CancellationToken.None);
+
+        // Per-owner routing (R-20): a streamed delta reaches this operator's connections, and no one else's.
+        A.CallTo(() => _clients.User(owner.ToString())).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _proxy.SendCoreAsync(RealtimeChatChunk.ClientMethod, A<object?[]>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
 }

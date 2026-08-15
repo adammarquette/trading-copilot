@@ -36,11 +36,20 @@ public sealed record ChatTurnResult(bool Succeeded, string Message, AiCallCost C
 /// </remarks>
 public interface IChatTurnService
 {
-    /// <summary>Runs one turn over the conversation history (oldest first).</summary>
+    /// <summary>
+    /// Runs one turn over the conversation history (oldest first), <b>streaming</b> the answer token-by-token (inc 3b).
+    /// <paramref name="onDelta"/> is invoked for each text delta as it arrives; the returned result carries the full
+    /// answer (or refusal) and the priced cost, so a caller that does not want streaming passes a no-op delta and gets
+    /// exactly the non-streamed behaviour.
+    /// </summary>
     /// <param name="history">The thread's messages in <c>Sequence</c> order — must end with the operator's new turn.</param>
+    /// <param name="onDelta">Called with each incremental text delta (a presentation side-channel; should not throw).</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The turn result — the answer or a refusal, and the priced cost.</returns>
-    Task<ChatTurnResult> CompleteAsync(IReadOnlyList<ChatMessage> history, CancellationToken cancellationToken);
+    Task<ChatTurnResult> StreamAsync(
+        IReadOnlyList<ChatMessage> history,
+        Func<string, CancellationToken, Task> onDelta,
+        CancellationToken cancellationToken);
 }
 
 /// <inheritdoc />
@@ -81,9 +90,13 @@ internal sealed class ChatTurnService : IChatTurnService
     }
 
     /// <inheritdoc />
-    public async Task<ChatTurnResult> CompleteAsync(IReadOnlyList<ChatMessage> history, CancellationToken cancellationToken)
+    public async Task<ChatTurnResult> StreamAsync(
+        IReadOnlyList<ChatMessage> history,
+        Func<string, CancellationToken, Task> onDelta,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(history);
+        ArgumentNullException.ThrowIfNull(onDelta);
 
         // Only User / Assistant turns become the model conversation; a System or Unknown row is not a turn. Each turn's
         // Content rides as a User or prior-Assistant message, never elevated into the system prompt (R-6).
@@ -102,7 +115,9 @@ internal sealed class ChatTurnService : IChatTurnService
         LlmCompletion completion;
         try
         {
-            completion = await _provider.CompleteAsync(request, cancellationToken);
+            // Streaming: each text delta is forwarded to onDelta as it arrives; the returned completion is the full
+            // accumulated answer, so pricing and the fail-closed check below are identical to the non-streamed path.
+            completion = await _provider.StreamAsync(request, onDelta, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

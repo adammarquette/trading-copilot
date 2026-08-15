@@ -241,6 +241,168 @@ public class AnthropicLlmProviderTests
         await act.Should().ThrowAsync<OperationCanceledException>();
     }
 
+    // --- Streaming (gh#906 inc 3b): the SSE parser surfaces deltas in order and maps the final stop reason + usage ---
+
+    [Fact]
+    public async Task StreamAsync_ShouldSurfaceEachTextDeltaInOrder_AndMapTheFinalStopReasonAndUsage()
+    {
+        StubHandler handler = new(_ => Sse(
+            MessageStart(input: 11, output: 1),
+            TextDelta("Hello"),
+            TextDelta(" world"),
+            MessageDelta("end_turn", output: 7),
+            new JsonObject { ["type"] = "message_stop" }));
+
+        (LlmCompletion completion, List<string> deltas) = await Stream(handler);
+
+        deltas.Should().ContainInOrder("Hello", " world"); // streamed token-by-token, in order
+        completion.Text.Should().Be("Hello world"); // and accumulated to the full answer
+        completion.StopReason.Should().Be(LlmStopReason.Completed);
+        // input from message_start; output is the cumulative count on the final message_delta, not the initial 1.
+        completion.Usage.Should().Be(new LlmUsage(11, 7));
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldRequestStreaming_InTheBody()
+    {
+        StubHandler handler = new(_ => Sse(MessageStart(1, 1), MessageDelta("end_turn", 1)));
+
+        await Stream(handler);
+
+        Body(handler)["stream"]!.GetValue<bool>().Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldMapARefusalStop_SoTheCallerFailsClosed()
+    {
+        StubHandler handler = new(_ => Sse(MessageStart(1, 1), TextDelta("no"), MessageDelta("refusal", 1)));
+
+        (LlmCompletion completion, _) = await Stream(handler);
+
+        completion.StopReason.Should().Be(LlmStopReason.Refusal);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    public async Task StreamAsync_ShouldThrow_WhenTheStatusIsNotSuccess(HttpStatusCode status)
+    {
+        StubHandler handler = new(_ => Json(status, """{"type":"error"}"""));
+
+        Func<Task> act = () => Stream(handler);
+
+        await act.Should().ThrowAsync<AnthropicLlmException>(); // fail-closed, exactly as CompleteAsync
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldThrow_WhenADataLineIsNotValidJson()
+    {
+        StubHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("data: this is not json\n\n", System.Text.Encoding.UTF8, "text/event-stream"),
+        });
+
+        Func<Task> act = () => Stream(handler);
+
+        await act.Should().ThrowAsync<AnthropicLlmException>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldThrow_WhenTheStreamCarriesAnErrorEvent()
+    {
+        StubHandler handler = new(_ => Sse(
+            MessageStart(1, 1),
+            new JsonObject { ["type"] = "error", ["error"] = new JsonObject { ["message"] = "overloaded" } }));
+
+        Func<Task> act = () => Stream(handler);
+
+        await act.Should().ThrowAsync<AnthropicLlmException>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldPropagate_WhenTheCallerCancels()
+    {
+        using CancellationTokenSource cts = new();
+        await cts.CancelAsync();
+        StubHandler handler = new(_ => Sse(MessageStart(1, 1)));
+
+        Func<Task> act = () => Provider(handler).StreamAsync(Request(), (_, _) => Task.CompletedTask, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>(); // our shutdown, never wrapped
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldIgnoreANonTextBlockDelta_SoOnlyTheAnswerSurfaces()
+    {
+        // A thinking / tool-input block delta is not the answer -- it must never be forwarded or accumulated (gh#922 review).
+        StubHandler handler = new(_ => Sse(
+            MessageStart(1, 1),
+            new JsonObject { ["type"] = "content_block_delta", ["delta"] = new JsonObject { ["type"] = "thinking_delta", ["thinking"] = "hmm" } },
+            TextDelta("answer"),
+            MessageDelta("end_turn", 3)));
+
+        (LlmCompletion completion, List<string> deltas) = await Stream(handler);
+
+        deltas.Should().ContainSingle().Which.Should().Be("answer");
+        completion.Text.Should().Be("answer");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldMapATruncatedStreamWithNoStopReason_ToOther_SoTheCallerFailsClosed()
+    {
+        // A stream that ends after a delta with no message_delta (a dropped connection mid-turn) carries no
+        // stop_reason -- so it maps to Other, which ChatTurnService fails closed on, never surfacing a partial
+        // answer as a complete one (gh#922 review).
+        StubHandler handler = new(_ => Sse(MessageStart(1, 1), TextDelta("half an ans")));
+
+        (LlmCompletion completion, _) = await Stream(handler);
+
+        completion.StopReason.Should().Be(LlmStopReason.Other);
+    }
+
+    private static async Task<(LlmCompletion Completion, List<string> Deltas)> Stream(StubHandler handler)
+    {
+        List<string> deltas = [];
+        LlmCompletion completion = await Provider(handler).StreamAsync(
+            Request(), (delta, _) => { deltas.Add(delta); return Task.CompletedTask; }, CancellationToken.None);
+        return (completion, deltas);
+    }
+
+    // Assembles a text/event-stream body from event objects (built via JsonObject to dodge brace-escaping).
+    private static HttpResponseMessage Sse(params JsonObject[] events)
+    {
+        IEnumerable<string> lines = events.SelectMany(e => new[]
+        {
+            "event: " + e["type"]!.GetValue<string>(),
+            "data: " + e.ToJsonString(),
+            string.Empty,
+        });
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Join("\n", lines) + "\n", System.Text.Encoding.UTF8, "text/event-stream"),
+        };
+    }
+
+    private static JsonObject MessageStart(int input, int output) => new()
+    {
+        ["type"] = "message_start",
+        ["message"] = new JsonObject { ["usage"] = new JsonObject { ["input_tokens"] = input, ["output_tokens"] = output } },
+    };
+
+    private static JsonObject TextDelta(string text) => new()
+    {
+        ["type"] = "content_block_delta",
+        ["delta"] = new JsonObject { ["type"] = "text_delta", ["text"] = text },
+    };
+
+    private static JsonObject MessageDelta(string stopReason, int output) => new()
+    {
+        ["type"] = "message_delta",
+        ["delta"] = new JsonObject { ["stop_reason"] = stopReason },
+        ["usage"] = new JsonObject { ["output_tokens"] = output },
+    };
+
     private static JsonNode Body(StubHandler handler)
     {
         handler.LastBody.Should().NotBeNull();

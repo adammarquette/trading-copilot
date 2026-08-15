@@ -30,6 +30,20 @@ public sealed record RealtimeChatMessage(
 }
 
 /// <summary>
+/// One streamed token delta of an in-flight assistant turn (gh#906 inc 3b), pushed to the owning operator as the
+/// model generates. <b>Presentation-only</b> and best-effort: a client renders a live draft from the deltas and
+/// then swaps it for the canonical <see cref="RealtimeChatMessage"/> when the turn commits. A dropped chunk is
+/// never fatal — the REST turn response and the final message are the source of truth, not the delta stream.
+/// </summary>
+/// <param name="ConversationId">The conversation whose turn is streaming (the correlation key — one in-flight turn per conversation).</param>
+/// <param name="Delta">The incremental text — untrusted display data, never re-injected as instruction.</param>
+public sealed record RealtimeChatChunk(Guid ConversationId, string Delta)
+{
+    /// <summary>The client method the hub invokes to deliver a streamed token delta.</summary>
+    public const string ClientMethod = "realtimeChatChunk";
+}
+
+/// <summary>
 /// Pushes an operator's own newly appended chat messages to their realtime connections (gh#906). <b>Read-side
 /// only</b>: it is called AFTER the message write commits, and its failure never affects that write. Routing is
 /// per-owner via <c>Clients.User(ownerId)</c> — chat is operator-owned (R-20), never broadcast — which resolves
@@ -43,6 +57,12 @@ public interface IChatRealtimeNotifier
     /// <param name="message">The appended message.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     Task MessageAppendedAsync(Guid ownerId, RealtimeChatMessage message, CancellationToken cancellationToken);
+
+    /// <summary>Pushes one streamed token delta of an in-flight turn to the owning operator's connections (inc 3b).</summary>
+    /// <param name="ownerId">The conversation's owner (R-20) — the only recipient.</param>
+    /// <param name="chunk">The streamed delta.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    Task ChunkAsync(Guid ownerId, RealtimeChatChunk chunk, CancellationToken cancellationToken);
 }
 
 /// <inheritdoc />
@@ -56,4 +76,8 @@ internal sealed class ChatRealtimeNotifier : IChatRealtimeNotifier
     /// <inheritdoc />
     public Task MessageAppendedAsync(Guid ownerId, RealtimeChatMessage message, CancellationToken cancellationToken) =>
         _hub.Clients.User(ownerId.ToString()).SendAsync(RealtimeChatMessage.ClientMethod, message, cancellationToken);
+
+    /// <inheritdoc />
+    public Task ChunkAsync(Guid ownerId, RealtimeChatChunk chunk, CancellationToken cancellationToken) =>
+        _hub.Clients.User(ownerId.ToString()).SendAsync(RealtimeChatChunk.ClientMethod, chunk, cancellationToken);
 }
