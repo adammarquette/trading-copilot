@@ -104,7 +104,7 @@ poll-until-refresh until then.
   over REST — and on a **reconnect** too (`onResync`), since a live-only push dropped with the socket is never
   replayed — so a new / superseded suggestion updates both without a poll or reload. A degraded socket still surfaces
   R-19 — the chart **zones** self-label **stale**, and the global connection indicator marks the view not-live (the
-  panel carries no per-surface stale badge of its own). Refining the note above: the panel reloads the whole **R-4 actionable list** rather
+  panel carries no per-surface stale badge of its own — superseded by gh#874 below). Refining the note above: the panel reloads the whole **R-4 actionable list** rather
   than upserting one id, because a supersede changes *set membership* (the incumbent leaves as a new row appears)
   and the server owns that set; the reload is a **soft** refresh — it updates on success and keeps the current list
   on a failed background read, so a reconcile *signal* never nukes a working decision surface.
@@ -112,6 +112,9 @@ poll-until-refresh until then.
   above left. Keeping the list on a failed background refresh is right, but a suggestions REST read failing while the
   socket stays `live` (global indicator green) is a degraded state the panel would otherwise hide. It now tracks
   whether its last background refresh failed and, while set, shows a subtle, non-destructive "may be out of date"
-  affordance over the kept list — never an error screen, and never on the empty / loading / error states — cleared by
-  the next successful load or refresh. This is the `useExecutionOverlays` / `useFillMarkers` unavailable-on-failed-read
-  stance (ADR-0004), now the panel's too.
+  affordance — never an error screen, and never on the loading / error states (which own their own screens) — cleared
+  by the next successful load or refresh. It shows over the **empty** state too, not just a populated list: an empty
+  panel whose last refresh failed is the worst case, a just-issued suggestion hidden behind a confident "nothing
+  proposed". This is the **honest-states** stance R-19 / ADR-0013 asks for, and that `useExecutionOverlays` /
+  `useFillMarkers` take — they blank and mark **unavailable** on a failed read; the panel instead **keeps** the list
+  and flags it (same principle, since a stale decision list is more useful to act against than a blank one).
