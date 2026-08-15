@@ -108,3 +108,10 @@ poll-until-refresh until then.
   than upserting one id, because a supersede changes *set membership* (the incumbent leaves as a new row appears)
   and the server owns that set; the reload is a **soft** refresh — it updates on success and keeps the current list
   on a failed background read, so a reconcile *signal* never nukes a working decision surface.
+- **Landed** (gh#874): the panel **now does** carry a per-surface stale badge, closing the R-19 gap the gh#760 note
+  above left. Keeping the list on a failed background refresh is right, but a suggestions REST read failing while the
+  socket stays `live` (global indicator green) is a degraded state the panel would otherwise hide. It now tracks
+  whether its last background refresh failed and, while set, shows a subtle, non-destructive "may be out of date"
+  affordance over the kept list — never an error screen, and never on the empty / loading / error states — cleared by
+  the next successful load or refresh. This is the `useExecutionOverlays` / `useFillMarkers` unavailable-on-failed-read
+  stance (ADR-0004), now the panel's too.
