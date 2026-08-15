@@ -72,6 +72,16 @@ reprice of a working order, behind `IOrderExecutor.ModifyOrderAsync`); `MarketDe
 **declared-but-unreached** by the neutral contract and stay unadvertised, so a caller never commits to a path that
 cannot work.
 
+**Setup-time self-description — the onboarding half (ADR-0023, gh#64).** Alongside the runtime contract, an adapter
+declares an `IVenueSetupContract`: its identity and an ordered **credential schema**, each field carrying a config
+key, a human **label**, and `secret` / `required` / help text. Onboarding is generated from that declaration rather
+than hand-written per venue — what lets ProjectX's 2 credential fields and Tradovate's 7 (gh#41) share one form. The
+label is the point: ProjectX's `ApiKey` is really the *username* and `ApiSecret` the *API key*, a trap that until now
+lived only in an `.env.example` comment. Discovery stays **compile-time** — the contract is declared in source and
+registered at the composition root, never dynamically loaded, since a venue places orders and auto-flattens (R-13) —
+and a declaration is never an enforcement point (the gate is, ADR-0007). *Shipped so far: identity + credential
+schema, ProjectX declaring; the endpoint model and mode-reporting mechanism land with Tradovate (gh#41).*
+
 **What must not leak across it:** transport shape (ProjectX = one realtime host, two SignalR hubs; Tradovate =
 two separate sockets), auth scheme, and how the venue expresses its **execution mode** (ProjectX exposes a
 required **`simulated`** flag per account; Tradovate splits it by **host**). The core sees only `TradingMode`,

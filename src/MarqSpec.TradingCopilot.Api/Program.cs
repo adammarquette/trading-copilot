@@ -73,6 +73,12 @@ builder.Services.Configure<ProjectXConnectionOptions>(
     builder.Configuration.GetSection(ProjectXConnectionOptions.SectionName));
 builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
 
+// The venue setup contract (ADR-0023, gh#64): ProjectX self-describes its onboarding — the credential schema with
+// labels that make the ApiKey-is-really-a-username trap legible. Discovery is compile-time: a declared-in-source
+// singleton resolved by VenueId, never dynamically loaded (a venue places orders and auto-flattens, R-13). It holds
+// no credential values, so it is a plain singleton independent of the per-process credential set above.
+builder.Services.AddSingleton<IVenueSetupContract, ProjectXSetupContract>();
+
 // Venue connection liveness (R-17, gh#209): a process-wide singleton over the venue's websocket client, so the
 // orphan guard can watch for a drop. One credential set per process (ADR-0015) -> one connection.
 builder.Services.AddSingleton<IVenueConnection, ProjectXConnection>();
