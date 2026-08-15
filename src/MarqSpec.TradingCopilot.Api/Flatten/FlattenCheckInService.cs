@@ -105,7 +105,12 @@ public sealed class FlattenCheckInService
             .Where(connection => connectionIds.Contains(connection.Id))
             .ToDictionaryAsync(connection => connection.Id, cancellationToken);
 
-        Dictionary<InstrumentId, DateOnly> reported = [];
+        // Resolve every connection's roster BEFORE reporting anything. The decision below is about the pass as a
+        // whole, and a report is an irrevocable statement to an external monitor — so nothing may be sent until it
+        // is known that every held account could be read.
+        List<(ITradingVenue Venue, List<VenueAccountId> Accounts)> readable = [];
+        List<string> unrostered = [];
+
         foreach (IGrouping<Guid, Account> byConnection in accounts.GroupBy(account => account.ConnectionId))
         {
             if (!connections.TryGetValue(byConnection.Key, out Connection? connection))
@@ -123,19 +128,52 @@ public sealed class FlattenCheckInService
             ITradingVenue venue = _venueFactory.Create(conventions);
 
             IReadOnlyList<VenueAccount> roster = await venue.GetAccountsAsync(cancellationToken);
-            List<VenueAccountId> venueAccounts =
-            [
-                .. byConnection
-                    .Select(account => roster.FirstOrDefault(candidate => candidate.Id.Key == account.VenueAccountKey))
-                    .Where(match => match is not null)
-                    .Select(match => match!.Id),
-            ];
-
-            if (venueAccounts.Count == 0)
+            List<VenueAccountId> venueAccounts = [];
+            foreach (Account account in byConnection)
             {
-                continue;
+                VenueAccount? match = roster.FirstOrDefault(candidate => candidate.Id.Key == account.VenueAccountKey);
+                if (match is null)
+                {
+                    unrostered.Add(account.VenueAccountKey);
+                    continue;
+                }
+
+                venueAccounts.Add(match.Id);
             }
 
+            if (venueAccounts.Count > 0)
+            {
+                readable.Add((venue, venueAccounts));
+            }
+        }
+
+        // gh#850 — unknown exposure is treated as exposure. A held account the venue's roster did not report cannot
+        // have its positions read, so it contributes nothing to the aggregate this pass; it used to be filtered out
+        // silently, and the remaining accounts could then make an instrument look flat on evidence that EXCLUDED an
+        // account we hold. That is the one thing this tier must never do: vouch to the outside world for a flatness
+        // nobody verified, withdrawing the page at the moment it is most needed.
+        //
+        // It withholds the WHOLE pass, not the affected connection: the report is per instrument and aggregated
+        // across every account this process serves, so a sibling connection reporting the same instrument flat
+        // would reinstate exactly the claim being withheld. And nothing bounds WHICH instrument an unreadable
+        // account is exposed in, so no narrower withhold is sound.
+        //
+        // Silence is the alarm (ADR-0019): the monitor pages, which is the correct outcome for a process that
+        // cannot see all of its own accounts. A persistent roster gap therefore pages daily until the account is
+        // rediscovered or the stale row removed — the primary tier's flatten.unrostered journal (gh#527) and the
+        // watchdog's (gh#850) name the account so that is actionable rather than mysterious.
+        if (unrostered.Count > 0)
+        {
+            _logger.LogWarning(
+                "Dead-man's switch withholding every instrument this pass: {Count} held account(s) absent from the venue roster ({Accounts}). Their exposure could not be read, so flatness cannot be vouched for.",
+                unrostered.Count,
+                string.Join(", ", unrostered));
+            return new Dictionary<InstrumentId, DateOnly>();
+        }
+
+        Dictionary<InstrumentId, DateOnly> reported = [];
+        foreach ((ITradingVenue venue, List<VenueAccountId> venueAccounts) in readable)
+        {
             IReadOnlyDictionary<InstrumentId, DateOnly> sent = await ReportForAccountsAsync(
                 venueAccounts, venue, schedules, now, lastCheckedIn, cancellationToken);
 
