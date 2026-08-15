@@ -84,6 +84,19 @@ public class ChatEndpointsTests
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
     }
 
+    [Fact]
+    public async Task CreateAsync_ShouldTreatAWhitespaceTitleAsNone()
+    {
+        // A blank title is no title: Normalize collapses "" / "   " to null, so the store never holds a whitespace
+        // title the list read would then show as a named-but-empty thread.
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await ChatEndpoints.CreateAsync(new CreateConversationRequest("   "), At(1), new FixedUser(_operator), context, default);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        ValueOf<ConversationResponse>(result).Title.Should().BeNull();
+    }
+
     // -- list ------------------------------------------------------------------------------------------------------
 
     [Fact]
@@ -213,6 +226,22 @@ public class ChatEndpointsTests
     }
 
     [Fact]
+    public async Task AppendAsync_ShouldReject_WhenRoleIsUndefined()
+    {
+        // A role OUTSIDE the enum, not just Unknown(0). With no global JsonStringEnumConverter a numeric body binds
+        // straight through, and the DB `Role <> 0` CHECK passes 99 — so the handler's `!Enum.IsDefined` clause is the
+        // ONLY thing refusing a fail-open role. This is its guard: delete that clause and 99 persists with every
+        // other test still green. (gh#903 review finding 1.)
+        Guid conversationId = await SeedConversationAsync();
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await ChatEndpoints.AppendAsync(
+            conversationId, new AppendMessageRequest((ChatRole)99, "x"), At(3), context, default);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+    }
+
+    [Fact]
     public async Task AppendAsync_ShouldReject_WhenContentIsBlank()
     {
         Guid conversationId = await SeedConversationAsync();
@@ -220,6 +249,19 @@ public class ChatEndpointsTests
         await using TradingCopilotDbContext context = Context();
         IResult result = await ChatEndpoints.AppendAsync(
             conversationId, new AppendMessageRequest(ChatRole.User, "   "), At(3), context, default);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+    }
+
+    [Fact]
+    public async Task AppendAsync_ShouldReject_WhenContentExceedsTheCap()
+    {
+        Guid conversationId = await SeedConversationAsync();
+        string tooLong = new('x', ChatMessage.ContentMaxLength + 1);
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await ChatEndpoints.AppendAsync(
+            conversationId, new AppendMessageRequest(ChatRole.User, tooLong), At(3), context, default);
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
     }
