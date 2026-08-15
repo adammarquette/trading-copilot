@@ -4,8 +4,10 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 
 /// <summary>
 /// A relevance topic (gh#359, R-2) — a named set of keywords with a <see cref="TopicScope"/>. <b>Deployment-global
-/// config</b>, not <c>IUserOwned</c>. Matching is keyword-based for now; the embedding that would enable semantic
-/// (non-keyword) topic matching is deferred with the news vector (gh#377).
+/// config</b>, not <c>IUserOwned</c>. Matching is keyword-based <b>and semantic</b> (gh#854): the topic is embedded
+/// (its name + keywords) as an <c>EmbeddingRecord</c> with <c>OwnerKind = Topic</c> on the news-embedding pass, and a
+/// news item also matches when its own vector is near the topic's by cosine proximity — additive to keywords, and
+/// degrading to keyword-only when the embedding provider or the <c>pgvector</c> read is unavailable.
 /// </summary>
 public sealed class NewsTopic
 {
