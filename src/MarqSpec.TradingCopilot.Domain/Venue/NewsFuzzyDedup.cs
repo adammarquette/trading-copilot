@@ -98,6 +98,12 @@ public static class NewsFuzzyDedup
     /// <param name="titleB">The second item's headline.</param>
     /// <param name="publishedB">The second item's publication time.</param>
     /// <param name="tickersB">The second item's tagged tickers.</param>
+    /// <param name="minTitleSimilarity">
+    /// The similarity floor, defaulting to <see cref="MinTitleSimilarity"/>. Supplied by the caller so the knob can
+    /// be tuned from configuration (gh#836) without this class taking a dependency — it stays pure and
+    /// dependency-free, which is what makes it trivially unit-testable.
+    /// </param>
+    /// <param name="maxPublishedGap">The gap ceiling, defaulting to <see cref="MaxPublishedGap"/>.</param>
     /// <returns><see langword="true"/> when all three signals agree the items are the same story.</returns>
     public static bool AreLikelyTheSameStory(
         string titleA,
@@ -105,13 +111,15 @@ public static class NewsFuzzyDedup
         IReadOnlyCollection<string> tickersA,
         string titleB,
         DateTimeOffset publishedB,
-        IReadOnlyCollection<string> tickersB)
+        IReadOnlyCollection<string> tickersB,
+        double minTitleSimilarity = MinTitleSimilarity,
+        TimeSpan? maxPublishedGap = null)
     {
         ArgumentNullException.ThrowIfNull(tickersA);
         ArgumentNullException.ThrowIfNull(tickersB);
 
         // Cheapest, most-selective checks first; title similarity (the only allocation) is last.
-        if ((publishedA - publishedB).Duration() > MaxPublishedGap)
+        if ((publishedA - publishedB).Duration() > (maxPublishedGap ?? MaxPublishedGap))
         {
             return false;
         }
@@ -130,7 +138,7 @@ public static class NewsFuzzyDedup
         // -- a single-content-word difference is lexically identical to a lightly-reworded true dup (#827 review).
         // One exception: polarity/modality/direction words are claims, not descriptive detail, so they must match
         // exactly; otherwise "will not restate" would be admitted as a fuller form of "will restate".
-        return Similarity(a, b) >= MinTitleSimilarity
+        return Similarity(a, b) >= minTitleSimilarity
             && OneContentSetContainsTheOther(a, b)
             && SemanticModifiersMatch(a, b);
     }

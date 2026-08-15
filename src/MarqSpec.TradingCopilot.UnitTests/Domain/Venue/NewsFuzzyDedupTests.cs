@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Domain.Venue;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Domain.Venue;
@@ -150,4 +151,48 @@ public class NewsFuzzyDedupTests
             "U.S. inflation falls more than expected", _published, ["ES"],
             "U.K. inflation falls more than expected", _published.AddMinutes(3), ["ES"])
             .Should().BeFalse("U.S. and U.K. are distinct entities; abbreviation punctuation must not erase the difference");
+
+    // --- The tunable thresholds (gh#836): gh#464 tunes these against real feeds, so they are parameters with the
+    // constants as defaults, rather than compile-time constants a redeploy is needed to change. ---
+
+    [Fact]
+    public void AreLikelyTheSameStory_ShouldHonourAConfiguredSimilarityFloor_BelowTheDefault()
+    {
+        // A far fuller re-headline: one content set contains the other, so only the similarity floor separates them.
+        const string shorter = "Fed holds rates steady";
+        const string fuller = "Fed holds rates steady in July decision during long committee debate session today";
+
+        NewsFuzzyDedup.AreLikelyTheSameStory(shorter, _published, ["ES"], fuller, _published, ["ES"])
+            .Should().BeFalse("at the default 0.6 floor the pair is too dissimilar to merge");
+
+        NewsFuzzyDedup.AreLikelyTheSameStory(
+            shorter, _published, ["ES"], fuller, _published, ["ES"], minTitleSimilarity: 0.4)
+            .Should().BeTrue("a lowered floor is what gh#464 tunes; the other two guards still had to hold");
+    }
+
+    [Fact]
+    public void AreLikelyTheSameStory_ShouldHonourAConfiguredPublishedGap_WiderThanTheDefault()
+    {
+        NewsFuzzyDedup.AreLikelyTheSameStory(
+            "Fed holds rates", _published, ["ES"],
+            "Fed holds rates", _published.AddMinutes(90), ["ES"])
+            .Should().BeFalse("90 minutes exceeds the default 60-minute window");
+
+        NewsFuzzyDedup.AreLikelyTheSameStory(
+            "Fed holds rates", _published, ["ES"],
+            "Fed holds rates", _published.AddMinutes(90), ["ES"],
+            maxPublishedGap: TimeSpan.FromMinutes(120))
+            .Should().BeTrue("a widened window is the second knob gh#464 tunes");
+    }
+
+    [Fact]
+    public void NewsIngestionOptions_ShouldDefaultToTheDedupConstants_SoTheTwoCannotDrift()
+    {
+        // The options carry the gap as minutes and the floor as a double, so nothing structurally ties them to the
+        // constants they mirror. This pins them: an unconfigured deployment behaves exactly as it did before gh#836.
+        NewsIngestionOptions options = new();
+
+        options.FuzzyMinTitleSimilarity.Should().Be(NewsFuzzyDedup.MinTitleSimilarity);
+        options.FuzzyMaxPublishedGap.Should().Be(NewsFuzzyDedup.MaxPublishedGap);
+    }
 }
