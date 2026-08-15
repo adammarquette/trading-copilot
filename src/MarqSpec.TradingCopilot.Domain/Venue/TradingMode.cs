@@ -20,7 +20,7 @@ namespace MarqSpec.TradingCopilot.Domain.Venue;
 /// stake — the flag lies there. At a brokerage a paper account <i>is</i> practice and a live account <i>is</i>
 /// live, so no declaration the operator could type would be more reliable than the venue's own answer; it could
 /// only disagree with it. <see cref="FirmConventions.ModeFollowsVenue"/> carries which rule a firm is under, and
-/// the flag reaches resolution through <see cref="FirmConventions.ModeFor(AccountStage, bool)"/> — the adapter
+/// the flag reaches resolution through <see cref="FirmConventions.ModeFor(AccountStage, bool?)"/> — the adapter
 /// passes it, the conventions decide whether it may be read.
 /// </para>
 /// <para>

@@ -66,6 +66,27 @@ public class Account : IUserOwned
     public TradingMode Mode { get; set; }
 
     /// <summary>
+    /// The venue's <b>own</b> live/paper routing flag as of the last discovery (gh#780) — an <i>input</i> to
+    /// <see cref="Mode"/>, never a substitute for it.
+    /// </summary>
+    /// <remarks>
+    /// Persisted for one reason: <see cref="Mode"/> is recomputed at write points that have <b>no live venue
+    /// call</b> — a stage override, a conventions re-declaration — and a brokerage's mode is resolved from this
+    /// flag. Without it stored, those recomputes would have to guess, and guessing resolved every brokerage
+    /// account back to <see cref="TradingMode.Undeclared"/>. Venue-reported, so it is overwritten on every
+    /// rediscovery like <see cref="CanTrade"/> and <see cref="IsVisible"/>. It is <b>not</b> consulted at a prop
+    /// firm at all (R-14).
+    /// <para>
+    /// <b>Nullable on purpose — "never observed" is not "not simulated".</b> A row that predates this column, or
+    /// one whose venue never reported the flag, must not resolve to <see cref="TradingMode.Live"/> off a default:
+    /// that would make an account live-tradeable on the strength of a value nobody read. <see langword="null"/>
+    /// resolves to <see cref="TradingMode.Undeclared"/> for a brokerage — refused everywhere until a discovery
+    /// fills it in, the same declared-unknown posture as the mode itself.
+    /// </para>
+    /// </remarks>
+    public bool? VenueReportsSimulated { get; set; }
+
+    /// <summary>
     /// Whether the account is active, cascaded from its connection (gh#210). Deliberately <b>distinct</b> from
     /// <see cref="CanTrade"/> and <see cref="IsVisible"/>, which are <b>venue-reported</b> and overwritten on every
     /// rediscovery — writing deactivation into those would let a rediscovery silently resurrect a deactivated

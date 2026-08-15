@@ -32,6 +32,19 @@ public sealed record VenueAccount(
     public AccountStage Stage { get; init; } = AccountStage.Unknown;
 
     /// <summary>
+    /// The venue's <b>own</b> live/paper routing flag, carried raw and unjudged (gh#780).
+    /// </summary>
+    /// <remarks>
+    /// This is <b>not</b> the mode and must never be read as one — <see cref="FirmConventions"/> decides whether
+    /// it may be consulted at all, and at a prop firm it may not (a funded account reports simulated and is
+    /// <see cref="TradingMode.Live"/>, R-14). It is carried because the <i>persisted</i> mode is recomputed later,
+    /// at write points with no live venue call — a stage override, a conventions re-declaration — and those need
+    /// the same input the adapter had. Defaults to <see langword="false"/>: a venue that reports nothing is not
+    /// thereby reporting "paper".
+    /// </remarks>
+    public bool VenueReportsSimulated { get; init; }
+
+    /// <summary>
     /// Whether the account belongs in the account switcher — tradable and not hidden. The full roster (passed,
     /// failed, hidden) stays available in settings (R-17).
     /// </summary>

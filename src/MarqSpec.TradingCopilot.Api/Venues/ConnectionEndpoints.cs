@@ -203,8 +203,14 @@ public static class ConnectionEndpoints
             account.CanTrade = venueAccount.CanTrade;
             account.IsVisible = venueAccount.IsVisible;
             account.Balance = venueAccount.Balance;
+            // The venue's raw routing flag, refreshed like the rest of what the venue reports. NOT the mode --
+            // it is an input the recompute below may or may not be permitted to read (gh#780). It is stored
+            // because the other two write points have no venue call of their own.
+            account.VenueReportsSimulated = venueAccount.VenueReportsSimulated;
 
             // Write point 1 of 3 for the persisted mode (gh#7): the resolver may have moved the stage.
+            // `venueAccount.Mode` is still deliberately NOT copied -- the domain recomputes from conventions
+            // rather than trusting a mode the venue reports.
             account.RecomputeMode(conventions);
 
             responses.Add(AccountResponse.From(account, environment));
