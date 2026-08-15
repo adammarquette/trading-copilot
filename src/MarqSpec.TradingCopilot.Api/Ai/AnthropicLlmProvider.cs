@@ -55,7 +55,7 @@ public sealed class AnthropicLlmProvider : ILlmProvider
         ArgumentNullException.ThrowIfNull(request);
 
         string model = ModelFor(request.Tier);
-        using StringContent body = new(BuildRequestBody(request, model), Encoding.UTF8, "application/json");
+        using StringContent body = new(BuildRequestBody(request, model, stream: false), Encoding.UTF8, "application/json");
         using HttpRequestMessage message = new(HttpMethod.Post, MessagesUrl) { Content = body };
 
         // The key rides a header -- never the request body, never a log. It is non-null in production: the real
@@ -79,11 +79,150 @@ public sealed class AnthropicLlmProvider : ILlmProvider
         return Parse(payload);
     }
 
+    /// <inheritdoc />
+    public async Task<LlmCompletion> StreamAsync(
+        LlmRequest request, Func<string, CancellationToken, Task> onDelta, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(onDelta);
+
+        string model = ModelFor(request.Tier);
+        using StringContent body = new(BuildRequestBody(request, model, stream: true), Encoding.UTF8, "application/json");
+        using HttpRequestMessage message = new(HttpMethod.Post, MessagesUrl) { Content = body };
+        message.Headers.TryAddWithoutValidation("x-api-key", _options.ApiKey);
+        message.Headers.TryAddWithoutValidation("anthropic-version", AnthropicVersion);
+
+        // ResponseHeadersRead so we begin parsing the event stream as it arrives rather than after the whole body.
+        using HttpResponseMessage response =
+            await _client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            // FAIL-CLOSED, exactly as CompleteAsync: a non-2xx is not an answer. Log the status only -- no key, no body.
+            _logger.LogWarning(
+                "Anthropic returned {Status} for a streamed {Tier} completion ({Model}); treating as unavailable.",
+                (int)response.StatusCode,
+                request.Tier,
+                model);
+            throw new AnthropicLlmException($"the model provider returned HTTP {(int)response.StatusCode}");
+        }
+
+        await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using StreamReader reader = new(stream, Encoding.UTF8);
+
+        StringBuilder text = new();
+        int inputTokens = 0;
+        int outputTokens = 0;
+        string? stopReason = null;
+
+        try
+        {
+            // Server-Sent Events: only `data:` lines carry JSON. We dispatch on the JSON's own `type` and ignore the
+            // `event:`, blank, and comment lines, so a minor SSE-framing variation does not break the parse.
+            while (await reader.ReadLineAsync(cancellationToken) is { } line)
+            {
+                if (!line.StartsWith("data:", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                string data = line["data:".Length..].Trim();
+                if (data.Length == 0)
+                {
+                    continue;
+                }
+
+                using JsonDocument document = JsonDocument.Parse(data);
+                JsonElement root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object
+                    || !root.TryGetProperty("type", out JsonElement typeElement)
+                    || typeElement.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                switch (typeElement.GetString())
+                {
+                    case "message_start" when root.TryGetProperty("message", out JsonElement startMessage)
+                        && startMessage.TryGetProperty("usage", out JsonElement startUsage):
+                        inputTokens = ReadTokenCount(startUsage, "input_tokens");
+                        outputTokens = ReadTokenCount(startUsage, "output_tokens"); // the initial count; overwritten below
+                        break;
+
+                    case "content_block_delta" when TryReadTextDelta(root, out string chunk):
+                        text.Append(chunk);
+                        await onDelta(chunk, cancellationToken);
+                        break;
+
+                    case "message_delta":
+                        if (root.TryGetProperty("delta", out JsonElement messageDelta)
+                            && messageDelta.TryGetProperty("stop_reason", out JsonElement sr)
+                            && sr.ValueKind == JsonValueKind.String)
+                        {
+                            stopReason = sr.GetString();
+                        }
+
+                        if (root.TryGetProperty("usage", out JsonElement deltaUsage))
+                        {
+                            outputTokens = ReadTokenCount(deltaUsage, "output_tokens"); // cumulative final -- overwrite
+                        }
+
+                        break;
+
+                    case "error":
+                        // An in-stream error event is a provider fault, not an answer. Fail closed like a non-2xx.
+                        _logger.LogWarning(
+                            "Anthropic streamed an error event for a {Tier} completion ({Model}); treating as unavailable.",
+                            request.Tier,
+                            model);
+                        throw new AnthropicLlmException("the model provider streamed an error event");
+
+                    default:
+                        break; // message_stop, content_block_start/stop, ping -- nothing to accumulate
+                }
+            }
+        }
+        catch (JsonException error)
+        {
+            // A `data:` line that is not the shape the streaming API promises is a protocol violation, not an answer.
+            _logger.LogWarning(error, "Anthropic streamed a body that could not be parsed; treating as unavailable.");
+            throw new AnthropicLlmException("the model provider streamed an unexpected body");
+        }
+
+        return new LlmCompletion(text.ToString(), MapStopReason(stopReason), new LlmUsage(inputTokens, outputTokens));
+    }
+
+    // The incremental text of a content_block_delta, when it is a non-empty text_delta; false for any other block delta.
+    private static bool TryReadTextDelta(JsonElement root, out string chunk)
+    {
+        chunk = string.Empty;
+        if (root.TryGetProperty("delta", out JsonElement delta)
+            && delta.TryGetProperty("type", out JsonElement deltaType)
+            && deltaType.ValueKind == JsonValueKind.String
+            && deltaType.GetString() == "text_delta"
+            && delta.TryGetProperty("text", out JsonElement deltaText)
+            && deltaText.ValueKind == JsonValueKind.String
+            && deltaText.GetString() is { Length: > 0 } text)
+        {
+            chunk = text;
+            return true;
+        }
+
+        return false;
+    }
+
+    // One token count from a usage object, or 0 when absent -- defensive, the same posture as ExtractUsage.
+    private static int ReadTokenCount(JsonElement usage, string property) =>
+        usage.ValueKind == JsonValueKind.Object
+        && usage.TryGetProperty(property, out JsonElement value)
+        && value.TryGetInt32(out int count)
+            ? count
+            : 0;
+
     // Delegates to LlmOptions so the model the provider POSTs and the model the reviewer ledgers (gh#431) are, by
     // construction, the same string.
     private string ModelFor(LlmModelTier tier) => _options.ModelFor(tier);
 
-    private static string BuildRequestBody(LlmRequest request, string model)
+    private static string BuildRequestBody(LlmRequest request, string model, bool stream)
     {
         JsonArray messages = [];
         foreach (LlmMessage message in request.Messages)
@@ -98,6 +237,11 @@ public sealed class AnthropicLlmProvider : ILlmProvider
             ["system"] = request.SystemPrompt,
             ["messages"] = messages,
         };
+
+        if (stream)
+        {
+            body["stream"] = true; // ask for the incremental Server-Sent-Events response (gh#906 inc 3b)
+        }
 
         if (request.ResponseFormat.JsonSchema is { } schema)
         {
