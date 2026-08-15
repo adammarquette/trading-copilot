@@ -18,6 +18,41 @@ public class FirmConventionsTests
             (AccountStage.Funded, true));
     }
 
+    // --- Brokerages resolve from the venue's routing flag (gh#780) ---
+
+    [Fact]
+    public void ModeFor_ShouldFollowTheVenueFlag_WhenTheFirmIsABrokerage()
+    {
+        // gh#780. At a BROKERAGE the venue's flag is honest: a paper account IS practice and a live account IS
+        // live. R-14's "never derive mode from the venue flag" exists because a prop-firm FUNDED account executes
+        // on a simulated engine while real payout is at stake — that argument does not reach a brokerage, and
+        // extending it there left every discovered brokerage account permanently Undeclared, i.e. untradeable
+        // everywhere with no way for the operator to fix it.
+        FirmConventions brokerage = FirmConventions.ForBrokerage("Interactive Brokers");
+
+        brokerage.ModeFor(AccountStage.Unknown, venueReportsSimulated: true).Should().Be(TradingMode.Practice);
+        brokerage.ModeFor(AccountStage.Unknown, venueReportsSimulated: false).Should().Be(TradingMode.Live);
+    }
+
+    [Fact]
+    public void ModeFor_ShouldIgnoreTheVenueFlag_WhenTheFirmIsAPropFirm()
+    {
+        // The other half of the same rule, and the one that must not regress: a funded prop account reports
+        // `simulated` at the venue and is nonetheless Live. If the brokerage branch ever leaked into this path it
+        // would resolve a real-payout account to Practice — the exact inversion R-14 exists to prevent.
+        Topstep().ModeFor(AccountStage.Funded, venueReportsSimulated: true).Should().Be(TradingMode.Live);
+        Topstep().ModeFor(AccountStage.Evaluation, venueReportsSimulated: false).Should().Be(TradingMode.Practice);
+    }
+
+    [Fact]
+    public void ModeFor_ShouldStayUndeclared_WhenABrokerageStageIsResolvedWithoutTheVenueFlag()
+    {
+        // The stage-only overload cannot answer for a brokerage — it has no flag to read — so it fails closed
+        // rather than guessing. Callers that can supply the flag use the two-argument form.
+        FirmConventions.ForBrokerage("Interactive Brokers").ModeFor(AccountStage.Unknown)
+            .Should().Be(TradingMode.Undeclared);
+    }
+
     [Fact]
     public void ModeFor_ShouldBePractice_WhenTheFirmDeclaresTheStageCarriesNoCapital()
     {

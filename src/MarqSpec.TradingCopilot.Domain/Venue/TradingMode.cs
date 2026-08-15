@@ -10,14 +10,23 @@ namespace MarqSpec.TradingCopilot.Domain.Venue;
 /// funded Topstep account executes on a simulated engine yet a breach costs a real payout.
 /// </para>
 /// <para>
-/// So the venue's own flag is <b>not consulted</b> here at all, and the <b>operator declares</b> what each stage
-/// means at each firm (<see cref="FirmConventions"/>). Firms sharing one platform can and do differ.
+/// So at a <b>prop firm</b> the venue's own flag is <b>not consulted</b> at all, and the <b>operator declares</b>
+/// what each stage means at each firm (<see cref="FirmConventions"/>). Firms sharing one platform can and do
+/// differ.
 /// </para>
 /// <para>
-/// The raw execution-routing fact is presently <b>discarded</b> by the adapters rather than carried on
-/// <see cref="VenueAccount"/> — nothing consumes it yet. The firm-onboarding surface will want to show it
-/// ("this platform reports the account as simulated"), which is when it earns a field; until then a value
-/// nothing reads is one more thing to mistake for the mode.
+/// <b>At a brokerage that reasoning does not apply, and the flag is authoritative</b> (gh#780). The rule above
+/// exists because a prop-firm <i>funded</i> account executes on a simulated engine while a real payout is at
+/// stake — the flag lies there. At a brokerage a paper account <i>is</i> practice and a live account <i>is</i>
+/// live, so no declaration the operator could type would be more reliable than the venue's own answer; it could
+/// only disagree with it. <see cref="FirmConventions.ModeFollowsVenue"/> carries which rule a firm is under, and
+/// the flag reaches resolution through <see cref="FirmConventions.ModeFor(AccountStage, bool)"/> — the adapter
+/// passes it, the conventions decide whether it may be read.
+/// </para>
+/// <para>
+/// That is the <b>scope</b> of "never derive mode from the venue flag", not an exception to it: extending a
+/// safety rule past the case it was written for is how it becomes superstition — and here it cost every
+/// discovered brokerage account its tradeability, permanently and with no operator remedy.
 /// </para>
 /// </remarks>
 public enum TradingMode
