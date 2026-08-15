@@ -78,12 +78,14 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// <para>
 /// <b>gh#888 rewire.</b> <see cref="NearestN_ShouldExcludeOtherModels_EvenWhenTheirVectorPointsExactlyAtTheQuery"/>
 /// used to call this suite's OWN <see cref="NearestAsync"/> helper below -- which filters by <c>Model</c> itself,
-/// IN THE TEST -- never the production <c>PgVectorNewsSimilarity.NearestNewsAsync</c> (which, pre-gh#881, filters
-/// only on <c>OwnerKind</c>): the assertion could not have caught a missing production filter. It now resolves
-/// the real <see cref="INewsEmbeddingSimilarity"/> from DI over <see cref="EmbeddingProviderDoubleTestPostgresFactory"/>
-/// instead, so it pins the OBSERVED (broken, pre-gh#881) behaviour of the production seam per the QA guard
-/// discipline rather than the suite's own correct-by-construction query -- see that test's own remarks for the
-/// fix's target assertion once gh#881 lands.
+/// IN THE TEST -- never the production <c>PgVectorNewsSimilarity.NearestNewsAsync</c>: the assertion could not
+/// have caught a missing production filter. It now resolves the real <see cref="INewsEmbeddingSimilarity"/> from
+/// DI over <see cref="EmbeddingProviderDoubleTestPostgresFactory"/> instead, so it pins the OBSERVED (broken)
+/// behaviour of the production seam per the QA guard discipline rather than the suite's own correct-by-construction
+/// query. <b>gh#881 landed mid-PR but did not close this gap</b> — its commit message scopes the fix to the
+/// by-owner reads only and defers the identical filter on <c>NearestNewsAsync</c> to the follow-up gh#889 (opened
+/// alongside it), so this case is cited to gh#889 rather than the now-closed gh#881 — see that test's own remarks
+/// for the fix's target assertion once gh#889 lands.
 /// </para>
 /// </remarks>
 public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<EmbeddingProviderDoubleTestPostgresFactory>
@@ -193,15 +195,16 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         IReadOnlyList<SemanticNeighbor> hits = await similarity.NearestNewsAsync(
             Direction((0, 1f)).ToArray(), n: 5, CancellationToken.None);
 
-        // DEFECT gh#881: PgVectorNewsSimilarity.NearestNewsAsync filters only on OwnerKind == SoftSignal today, so
+        // DEFECT gh#889: PgVectorNewsSimilarity.NearestNewsAsync filters only on OwnerKind == SoftSignal today
+        // (gh#881 landed but scoped its Model filter to the by-owner reads only -- see this class's remarks), so
         // the other-model row -- deliberately the CLOSEST possible vector to the query -- outranks and is
-        // included alongside the same-model answer instead of being excluded. Once gh#881's Model ==
+        // included alongside the same-model answer instead of being excluded. Once gh#889's Model ==
         // provider.Model predicate lands, this should read `hits.Select(h => h.OwnerId).Should().Equal(["right-model"], ...)`
         // (restoring this test's original, pre-gh#888 intent) -- this pinned ordering is that fix's own
         // regression guard.
         hits.Select(hit => hit.OwnerId).Should().Equal(
             ["wrong-model-but-identical-vector", "right-model"],
-            "DEFECT gh#881: nearest-N is not yet scoped to the current model, so a different model's vector "
+            "DEFECT gh#889: nearest-N is not yet scoped to the current model, so a different model's vector "
             + "outranks a same-model candidate instead of being excluded, however close its raw direction sits to the query");
     }
 
