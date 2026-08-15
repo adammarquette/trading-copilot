@@ -450,4 +450,60 @@ describe('SuggestionList', () => {
     expect(screen.getAllByTestId('suggestion-card')).toHaveLength(2);
     expect(screen.queryByTestId('suggestions-stale')).toBeNull();
   });
+
+  it('flags an EMPTY panel when a background refresh fails — a suggestion could be hidden (R-19, gh#874)', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [] });
+    await renderList();
+    expect(screen.getByTestId('empty-state').textContent).toContain('No setup right now');
+    expect(screen.queryByTestId('suggestions-stale')).toBeNull();
+
+    // A realtimeSuggestion push fires — a suggestion was just issued — but the read to fetch it fails. The panel would
+    // otherwise keep showing a confident "No setup right now"; the operator gets a degraded hint instead (the worst
+    // case the badge exists for — a real suggestion hidden behind an empty panel).
+    listMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      status: 503,
+      error: 'BFF unreachable.',
+    });
+    await act(async () => {
+      suggestionHandler?.();
+    });
+
+    expect(screen.getByTestId('empty-state').textContent).toContain('No setup right now'); // still empty
+    expect(screen.getByTestId('suggestions-stale')).toBeTruthy(); // but flagged possibly out of date
+  });
+
+  it('a superseded failed refresh never raises the stale flag — only the current read decides it (gh#874)', async () => {
+    // Two pushes race: the newer one succeeds first (panel current), the older one FAILS and resolves last. The flag
+    // must reflect the CURRENT read, not a superseded failure — otherwise a blip on an already-corrected refresh would
+    // falsely mark a fresh panel out of date. This locks the guard order (mounted/generation/token before ok/else).
+    const slowFail = deferred<Awaited<ReturnType<typeof listActionableSuggestions>>>();
+    listMock
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('s-1')] }) // initial load
+      .mockImplementationOnce(() => slowFail.promise) // push A — slow, will FAIL, resolves last
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('s-2')] }); // push B — fresher, succeeds first
+
+    await renderList();
+    act(() => {
+      suggestionHandler?.(); // A
+    });
+    await act(async () => {
+      suggestionHandler?.(); // B supersedes A, and succeeds
+    });
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['s-2']);
+    expect(screen.queryByTestId('suggestions-stale')).toBeNull();
+
+    // A resolves last with a failure — but it is superseded (token no longer current), so it must NOT raise the flag.
+    await act(async () => {
+      slowFail.settle({ ok: false, kind: 'failed', status: 503, error: 'late failure' });
+    });
+
+    expect(screen.queryByTestId('suggestions-stale')).toBeNull();
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['s-2']);
+  });
 });
