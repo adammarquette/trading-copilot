@@ -19,6 +19,9 @@ public enum EmbeddingOwnerKind
 
     /// <summary>A market snapshot at issuance (R-8).</summary>
     MarketSnapshot = 4,
+
+    /// <summary>A <see cref="NewsTopic"/> — its name + keywords, embedded for semantic topic match (gh#854, R-2).</summary>
+    Topic = 5,
 }
 
 /// <summary>
