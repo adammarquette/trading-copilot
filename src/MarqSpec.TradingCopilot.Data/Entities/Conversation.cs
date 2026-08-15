@@ -8,6 +8,9 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// </summary>
 public class Conversation : IUserOwned
 {
+    /// <summary>How long a conversation title may be (characters) — enough for a descriptive line, still bounded.</summary>
+    public const int TitleMaxLength = 256;
+
     /// <summary>The conversation's unique id.</summary>
     public Guid Id { get; set; }
 

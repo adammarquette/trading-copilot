@@ -877,7 +877,7 @@ public class TradingCopilotDbContext : TenantDbContext
 
         modelBuilder.Entity<Conversation>(conversation =>
         {
-            conversation.Property(c => c.Title).HasMaxLength(256);
+            conversation.Property(c => c.Title).HasMaxLength(Conversation.TitleMaxLength);
 
             // The conversation-list read (gh#18): an operator's conversations, most-recent activity first.
             conversation.HasIndex(c => new { c.UserId, c.UpdatedAt });
