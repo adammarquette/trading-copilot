@@ -12,6 +12,7 @@ import {
   createConditionalOrder,
   editStagedOrder,
   repriceOrder,
+  sendAsIsOrder,
   sendOrder,
   takeStagedOrder,
 } from './orders';
@@ -162,6 +163,55 @@ describe('armOrder', () => {
     if (result.ok) {
       expect(result.data.status).toBe('Staged');
       expect(result.data.bindingLayer).toBe(4);
+    }
+  });
+});
+
+describe('sendAsIsOrder', () => {
+  it('takes the fast path, which skips STAGING but not the gate', async () => {
+    // The opt-in one-action send (R-11, gh#218): arm -> take collapsed for an operator who has already decided.
+    // It is a different ROUTE, not a different guarantee — the same ladder runs, and the journal records the
+    // method as SendAsIs so a reader can tell an unreviewed send from a reviewed one.
+    const fetchMock = stubFetch(() =>
+      Promise.resolve(
+        response(200, {
+          outcome: 'Allowed',
+          orderId: 'o1',
+          venueOrderKey: 'v1',
+          approvedQuantity: 5,
+          bindingLayer: null,
+          reason: 'Within every layer.',
+          advisories: [],
+        }),
+      ),
+    );
+
+    const result = await sendAsIsOrder('a1', TICKET);
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/accounts/a1/orders/send-as-is');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      quantity: 5,
+      safetyStop: 4990,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.venueOrderKey).toBe('v1');
+    }
+  });
+
+  it('renders a gate refusal as the answer it is — the fast path skips review, never the gate', async () => {
+    stubFetch(() =>
+      Promise.resolve(response(409, { error: 'The daily governor leaves room for nothing.' })),
+    );
+
+    const result = await sendAsIsOrder('a1', TICKET);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.kind === 'refused') {
+      expect(result.reason).toContain('daily governor');
+    } else {
+      expect.unreachable('a 409 with an error body is the gate answering, not a failure');
     }
   });
 });

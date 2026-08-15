@@ -1,13 +1,19 @@
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
+import ButtonGroup from '@mui/material/ButtonGroup';
 import Checkbox from '@mui/material/Checkbox';
 import FormControlLabel from '@mui/material/FormControlLabel';
+import Menu from '@mui/material/Menu';
+import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { useOptionalAccounts } from '../accounts/AccountProvider';
+import { TradingMode } from '../api/accounts';
+import { DefaultEntryAction, getRiskProfile } from '../api/risk';
 import {
   ConditionalCrossDirection,
   type ConditionalOrderResponse,
@@ -21,6 +27,7 @@ import {
   cancelOrder,
   createConditionalOrder,
   editStagedOrder,
+  sendAsIsOrder,
   takeStagedOrder,
 } from '../api/orders';
 import { ConditionalPending } from './ConditionalPending';
@@ -89,6 +96,67 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
   // NaN -> null and silently amend the ticket to something the operator never typed.
   const editValid =
     Number.isFinite(editedQuantity) && editedQuantity > 0 && Number.isFinite(editedEntry);
+
+  /**
+   * The entry-action split button (gh#828, gh#218): the operator's declared default acts on click, the other
+   * action sits in the menu. Two rules decide what it may offer, and both fail toward review-first.
+   *
+   * **The roster must vouch for the account, and vouching means `tradeableHere`.** Resolved from the OPTIONAL
+   * context, so a ticket mounted without a provider degrades to plain arm → review → send instead of throwing:
+   * the fast path is a convenience, and a menu whose entries cannot be vouched for is worse than no menu.
+   *
+   * The eligibility test is the server's own per-request `tradeableHere` — practice anywhere, live only in
+   * production, **undeclared nowhere** — never "the roster has a mode for it". `TradingMode.Undeclared` is the
+   * enum's zero, so a mode-presence check (`mode ?? null`, then `!== null`) reads `0` as a real answer and offers
+   * a one-click transmit for the one account class this system refuses **everywhere, production included**
+   * (#879 review). Deriving eligibility from the field built to answer it is what keeps that from recurring.
+   *
+   * **Defaulting to `SendAsIs` is practice-only (gh#218).** The preference can only be *declared* on a practice
+   * account, but an account's mode can change under a stored one — so the mode is re-checked here at render
+   * rather than trusted from when it was written. On anything but practice it is demoted out of the primary
+   * click: "skip the review" must never become the one-click default on real money. It stays reachable from the
+   * menu, where choosing it is an explicit gesture, and every gate still runs on it either way.
+   */
+  const accounts = useOptionalAccounts();
+  const resolvedAccount =
+    accounts?.status === 'ready'
+      ? accounts.accounts.find((candidate) => candidate.id === proposal.accountId)
+      : undefined;
+  const fastPathOffered = resolvedAccount?.tradeableHere ?? false;
+  const [defaultAction, setDefaultAction] = useState<DefaultEntryAction>(
+    DefaultEntryAction.ApproveAndArm,
+  );
+  const [entryMenuAnchor, setEntryMenuAnchor] = useState<HTMLElement | null>(null);
+  const mounted = useRef(true);
+  const profileToken = useRef(0);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!fastPathOffered) {
+      return; // nothing to offer, so nothing to read
+    }
+    const token = (profileToken.current += 1);
+    void getRiskProfile(proposal.accountId).then((result) => {
+      // A superseded read (the ticket re-targeted) or a resolve after unmount must not land — and an undeclared
+      // or unreadable profile resolves to ApproveAndArm, the enum's zero, which is the fail-safe answer.
+      if (!mounted.current || token !== profileToken.current) {
+        return;
+      }
+      setDefaultAction(
+        result.ok && result.data !== null
+          ? result.data.defaultEntryAction
+          : DefaultEntryAction.ApproveAndArm,
+      );
+    });
+  }, [proposal.accountId, fastPathOffered]);
+  const sendAsIsPrimary =
+    fastPathOffered &&
+    defaultAction === DefaultEntryAction.SendAsIs &&
+    resolvedAccount?.mode === TradingMode.Practice;
 
   // "Send when conditions met" (gh#655, R-11 / R-12): the opt-in on-trigger mode. Off by default, so the common
   // path stays the three-step arm → review → send. The trigger is drafted as text and parsed on submit; the
@@ -160,6 +228,37 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
       })
       .finally(finish);
   }, [begin, finish, proposal, type]);
+
+  /**
+   * The fast path (R-11, gh#218): one action instead of arm → review → send. It stages nothing, so there is no
+   * ticket left behind to review or cancel — and it is a real transmission, which is why it takes the same
+   * synchronous re-entrancy guard as Send rather than relying on the disabled state.
+   */
+  const handleSendAsIs = useCallback(() => {
+    setEntryMenuAnchor(null);
+    if (!begin()) {
+      return; // transmission is not idempotent — a second click must not place a second live order
+    }
+    setRefusal(null);
+    setSent(null);
+    const { accountId, order } = splitProposal({ ...current, type });
+    void sendAsIsOrder(accountId, order)
+      .then((result) => {
+        if (!result.ok) {
+          // The fast path skips the review, never the gate — a refusal here is the gate's answer, and nothing
+          // was staged, so there is no armed ticket to fall back to.
+          setRefusal(refusalText(result));
+          return;
+        }
+        setSent(`Sent ${result.data.approvedQuantity} — ${result.data.reason}`);
+      })
+      .finally(finish);
+  }, [begin, finish, current, type]);
+
+  const handleArmFromMenu = useCallback(() => {
+    setEntryMenuAnchor(null);
+    handleArm();
+  }, [handleArm]);
 
   const handleOpenEdit = useCallback(() => {
     setQuantityDraft(String(current.quantity));
@@ -448,9 +547,39 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
             </Button>
           )
         ) : staged === null ? (
-          <Button variant="contained" onClick={handleArm} disabled={pending}>
-            Arm
-          </Button>
+          fastPathOffered ? (
+            <>
+              <ButtonGroup variant="contained">
+                <Button onClick={sendAsIsPrimary ? handleSendAsIs : handleArm} disabled={pending}>
+                  {sendAsIsPrimary ? 'Send as-is' : 'Arm'}
+                </Button>
+                <Button
+                  size="small"
+                  aria-label="Entry options"
+                  onClick={(event) => setEntryMenuAnchor(event.currentTarget)}
+                  disabled={pending}
+                >
+                  ▾
+                </Button>
+              </ButtonGroup>
+              <Menu
+                anchorEl={entryMenuAnchor}
+                open={entryMenuAnchor !== null}
+                onClose={() => setEntryMenuAnchor(null)}
+              >
+                {/* Exactly the action that is NOT primary — a menu that repeats the button teaches nothing. */}
+                {sendAsIsPrimary ? (
+                  <MenuItem onClick={handleArmFromMenu}>Approve &amp; arm</MenuItem>
+                ) : (
+                  <MenuItem onClick={handleSendAsIs}>Send as-is</MenuItem>
+                )}
+              </Menu>
+            </>
+          ) : (
+            <Button variant="contained" onClick={handleArm} disabled={pending}>
+              Arm
+            </Button>
+          )
         ) : editing ? (
           // Send is deliberately absent while an edit is open: a typed-but-unapplied size is not what the server
           // holds, so a send here would transmit the PRE-edit row while the operator reads the number they typed.

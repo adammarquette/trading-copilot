@@ -93,11 +93,15 @@ public sealed class NewsEmbeddingRecallIntegrationTests : IClassFixture<Embeddin
     }
 
     // =================================================================================================================
-    // DEFECT gh#864: a mixed-owner-kind Embeddings table can starve NearestNewsAsync's SoftSignal recall down to
-    // ZERO, even though thousands of SoftSignal rows exist -- the HNSW approximate scan's candidate window fills
-    // with other-owner-kind rows (deliberately seeded closer to the query than every SoftSignal row) before the
-    // OwnerKind filter is applied. This pins the OBSERVED (broken) behaviour per the QA guard discipline; the fix
-    // is gh#864's to choose, and this assertion becomes its regression guard once it lands.
+    // REGRESSION GUARD for gh#864 (was a pinned defect until the fix landed). A mixed-owner-kind Embeddings table
+    // used to starve NearestNewsAsync's SoftSignal recall down to ZERO, even though thousands of SoftSignal rows
+    // existed -- the HNSW approximate scan's candidate window filled with other-owner-kind rows (deliberately
+    // seeded closer to the query than every SoftSignal row) before the OwnerKind filter was applied.
+    //
+    // The fix is a PARTIAL HNSW index over the soft-signal rows only (AddSoftSignalVectorIndex), so the vector
+    // search happens inside the owner kind the read filters on and there is nothing left for a post-filter to
+    // discard. Dropping that index -- or reverting to the table-wide one -- reddens this case, which is the whole
+    // point of leaving the seeding deliberately adversarial.
     // =================================================================================================================
 
     [Fact]
@@ -150,16 +154,22 @@ public sealed class NewsEmbeddingRecallIntegrationTests : IClassFixture<Embeddin
 
         noiseIndex.Should().Be(NoiseCountPerKind * _noiseKinds.Length, "sanity: every noise row was seeded");
 
-        // DEFECT gh#864: NearestNewsAsync returns ZERO SoftSignal neighbours here, though SoftSignalCount (3,750)
-        // exist -- the HNSW approximate scan's candidate window (bounded by the default hnsw.ef_search = 40)
-        // fills entirely with closer non-SoftSignal rows before the OwnerKind filter can accept a SoftSignal
-        // candidate. This assertion pins that OBSERVED behaviour; once gh#864's fix lands (raised ef_search for
-        // this query, a covering/partial OwnerKind index, or a documented accepted-approximation with a
-        // narrower guard), it should be revisited -- a fix should flip this to
-        // `hits.Should().HaveCount(RequestedN)` and this becomes its regression guard.
-        hits.Should().BeEmpty(
-            "DEFECT gh#864: the mixed-owner-kind approximate scan starves SoftSignal recall to zero even though "
-            + $"{SoftSignalCount} SoftSignal rows exist -- see class remarks and gh#864 for the fix decision");
+        // gh#864's regression guard. Before the partial index, this returned ZERO SoftSignal neighbours though
+        // SoftSignalCount (3,750) existed: the approximate scan's candidate window (bounded by the default
+        // hnsw.ef_search = 40) filled entirely with closer non-SoftSignal rows before the OwnerKind filter could
+        // accept a SoftSignal candidate. The partial index removes the post-filter entirely, so a full n comes back.
+        hits.Should().HaveCount(
+            RequestedN,
+            "gh#864: the soft-signal partial HNSW index searches inside the owner kind this read filters on, so a "
+            + $"crowd of closer other-kind rows cannot starve recall -- {SoftSignalCount} SoftSignal rows exist");
+
+        // ...and every one of them is genuinely a soft signal. Counting alone would pass if the fix had widened
+        // the search instead of scoping it, letting another owner kind's row through as a "neighbour".
+        IReadOnlyList<string> softSignalIds = [.. rows
+            .Where(row => row.OwnerKind == EmbeddingOwnerKind.SoftSignal)
+            .Select(row => row.OwnerId)];
+        hits.Select(hit => hit.OwnerId).Should().BeSubsetOf(
+            softSignalIds, "the read is 'the nearest NEWS item', never 'the nearest anything'");
     }
 
     // =================================================================================================================
