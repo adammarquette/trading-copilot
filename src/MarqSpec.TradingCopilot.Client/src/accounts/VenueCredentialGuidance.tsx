@@ -12,7 +12,7 @@ export interface VenueCredentialGuidanceProps {
 
 /**
  * Renders a venue's setup contract (gh#64, ADR-0023) as read-only onboarding guidance: each credential field's
- * config key mapped to its **true label**, whether it is a secret, and its help text. It makes ProjectX's
+ * config key mapped to its **true label**, whether it is a secret or optional, and its help text. It makes ProjectX's
  * "`ApiKey` is really the username" trap legible where the operator wires the login, and it auto-adapts to whatever
  * a venue declares (2 fields for ProjectX, 7 for Tradovate). It **never collects a value** — credentials are set
  * server-side (ADR-0015); this is a reference, not an input.
@@ -47,6 +47,7 @@ export function VenueCredentialGuidance({ venue }: VenueCredentialGuidanceProps)
                 {field.label}
               </Typography>
               {field.secret ? <Chip label="secret" size="small" variant="outlined" /> : null}
+              {!field.required ? <Chip label="optional" size="small" variant="outlined" /> : null}
             </Box>
             {field.helpText !== null ? (
               <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>

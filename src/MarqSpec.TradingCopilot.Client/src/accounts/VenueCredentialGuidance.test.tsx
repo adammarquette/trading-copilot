@@ -25,6 +25,15 @@ const PROJECTX: VenueSetup = {
   ],
 };
 
+const WITH_OPTIONAL: VenueSetup = {
+  venueId: 'demo',
+  displayName: 'Demo venue',
+  credentials: [
+    { key: 'Required', label: 'A required field', secret: false, required: true, helpText: null },
+    { key: 'Optional', label: 'An optional field', secret: false, required: false, helpText: null },
+  ],
+};
+
 afterEach(cleanup);
 
 describe('VenueCredentialGuidance', () => {
@@ -62,5 +71,18 @@ describe('VenueCredentialGuidance', () => {
     render(<VenueCredentialGuidance venue={PROJECTX} />);
 
     expect(screen.getByText(/ProjectX \/ TopstepX/i)).toBeTruthy();
+  });
+
+  it('marks an optional field optional, and leaves required fields unmarked', () => {
+    // ProjectX's fields are all required, so this is invisible today — but the schema carries `required`, and a
+    // venue with a genuinely optional field (Tradovate's seven) must not render it identically to a required one.
+    render(<VenueCredentialGuidance venue={WITH_OPTIONAL} />);
+
+    expect(
+      within(screen.getByTestId('venue-credential-Optional')).getByText('optional'),
+    ).toBeTruthy();
+    expect(
+      within(screen.getByTestId('venue-credential-Required')).queryByText('optional'),
+    ).toBeNull();
   });
 });
