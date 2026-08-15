@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using MarqSpec.TradingCopilot.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -13,9 +14,11 @@ using Pgvector;
 namespace MarqSpec.TradingCopilot.Data.Migrations
 {
     [DbContext(typeof(TradingCopilotDbContext))]
-    partial class TradingCopilotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260815185638_AddOutcome")]
+    partial class AddOutcome
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -66,9 +69,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
-
-                    b.Property<bool?>("VenueReportsSimulated")
-                        .HasColumnType("boolean");
 
                     b.HasKey("Id");
 
@@ -1659,9 +1659,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
 
                     b.Property<int?>("Size")
                         .HasColumnType("integer");
-
-                    b.Property<Guid?>("SourceConversationId")
-                        .HasColumnType("uuid");
 
                     b.Property<Guid?>("SourceRuleId")
                         .HasColumnType("uuid");

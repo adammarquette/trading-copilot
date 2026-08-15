@@ -15,8 +15,9 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// Operator-owned (R-20). The debounce memory — <see cref="ArmState"/> and <see cref="ArmCycle"/> — turns the level
 /// condition into an edge-triggered, fire-once alert: a crossing fires exactly one incident, and a re-arm bumps the
 /// cycle so the <i>next</i> crossing mints a fresh dedup key. Enum fields whose zero is refused are <c>required</c>
-/// and DB-check-constrained (defense-in-depth below the boundary). <see cref="SourceRuleId"/> is the only R-7 seam:
-/// a soft reference (no FK, no navigation) to the rulebook rule that authored the trigger, when one did.
+/// and DB-check-constrained (defense-in-depth below the boundary). <see cref="SourceRuleId"/> and
+/// <see cref="SourceConversationId"/> are the R-7 seams: soft references (no FK, no navigation) to the rulebook rule
+/// and the conversation that authored the trigger, when one did.
 /// </remarks>
 public class TriggerRecord : IUserOwned
 {
@@ -111,6 +112,14 @@ public class TriggerRecord : IUserOwned
     /// navigation), so the trigger outlives the rule and the trigger layer stays decoupled from the rulebook.
     /// </summary>
     public Guid? SourceRuleId { get; set; }
+
+    /// <summary>
+    /// The <see cref="Conversation"/> this trigger's rule was authored in, when it came from chat (R-7, gh#471) — a
+    /// <b>soft</b> reference (no FK, no navigation), matching <see cref="SourceRuleId"/>, so the trigger outlives the
+    /// conversation. NULL for a trigger authored directly over the API. Makes a trigger's origin ("why does this
+    /// exist?") answerable at the read path without a database walk.
+    /// </summary>
+    public Guid? SourceConversationId { get; set; }
 
     /// <summary>
     /// The account a fired <see cref="TriggerRoute.AgentReview"/> suggestion is issued against (R-14) — a real FK,

@@ -254,17 +254,46 @@ matters**, at the read: `PgVectorNewsSimilarity` injects `IEmbeddingProvider` an
 the result and every comparison is same-model. After a model change an owner embedded only under the old model reads
 back **empty** — a bounded degrade — until the embedding pass re-embeds it under the current model (its candidate
 query already keys on the current model), so the transition **self-heals** and never returns a wrong (cross-model)
-answer. `NearestNewsAsync` gains the same filter in the storage-GC follow-up (gh#889), deferred here only because it
-must land together with aligning the gh#864 recall guard — which drives `NearestNewsAsync` through a provider whose
-`Model` is `"none"`, so adding the filter alone would redden that guard.
+answer. `NearestNewsAsync` gained the same filter in the follow-up (gh#889) — deferred out of *this* PR only because
+it had to land together with aligning the gh#864 recall guard (which drives `NearestNewsAsync` through a provider
+whose `Model` is `"none"`, so adding the filter alone would have reddened that guard). See the 2026-08-15 update.
 
 Two honest costs. **The self-heal is cap-gated, not prompt:** a model change re-embeds the *whole* corpus (every news
 item + topic, each a paid call), so under the daily AI-spend cap a large corpus re-embeds over several passes —
-potentially days — during which the affected items degrade correctly to non-semantic. And when `NearestNewsAsync` gains the filter (gh#889), the
-model predicate will be a *second* post-scan filter on the approximate HNSW window, so during a migration window
-(new-model rows still sparse) recall can be reduced further than the owner-kind filter alone — the gh#864 interaction;
-the result stays distance-ordered and the consumer degrades gracefully, never wrong.
+potentially days — during which the affected items degrade correctly to non-semantic. And now that `NearestNewsAsync`
+carries the filter too (gh#889), the model predicate is a *second* post-scan filter on the approximate HNSW window, so
+during a migration window (new-model rows still sparse) recall can be reduced further than the owner-kind filter alone —
+the gh#864 interaction; the result stays distance-ordered and the consumer degrades gracefully, never wrong.
 
 The now-unread stale rows are **harmless** (never read), so the "leaves its vector behind until swept" cost the
-polymorphic store documents is a **storage-only** concern; the actual GC — deleting stale-model rows after a re-embed,
-and orphaned-owner rows after a rename/delete — is a small follow-up (gh#889), not a correctness fix.
+polymorphic store documents is a **storage-only** concern; the actual GC follows in gh#889 (stale-model rows, below)
+and gh#902 (orphaned-owner rows after a rename/delete), neither a correctness fix.
+
+## Update (2026-08-15) — the read-scope filter reaches `NearestNewsAsync`, and the stale-model sweep lands (gh#889)
+
+gh#881 (above) scoped the **by-owner** reads to the current model and deferred two coupled pieces to this follow-up:
+
+- **`NearestNewsAsync` current-model filter.** The ranked read now also filters `Model == provider.Model`, so after a
+  model change it can no longer rank a retired-model vector or return the same owner twice — the last gap gh#881 named.
+  It had to ship with a **QA alignment**: the gh#864 recall guard drives `NearestNewsAsync` through a host whose
+  provider `Model` is `"none"`, so that guard's seed model moves to `"none"` in the same PR — the filter alone would
+  have reddened it. The **gh#864 interaction** the gh#881 update predicted is now live (a *second* post-scan filter on
+  the approximate HNSW window), so during a migration window recall can narrow further than the owner-kind filter
+  alone; still distance-ordered, still a graceful degrade. The sweep below does **not** blunt this: it removes an
+  owner's retired-model row only *after* that owner is re-embedded, so early in the pass — new-model rows sparsest —
+  the still-unprocessed owners' old rows crowd the window undiminished; the sweep prevents a lingering
+  two-rows-per-owner state, not the early-pass starvation.
+- **Stale-model sweep.** After each embed page's `SaveChanges` (current-model row durably present), a set-based
+  `ExecuteDeleteAsync` removes the just-re-embedded owners' **other-model** rows — scoped to `(this owner kind, an
+  owner embedded this page, Model != current)`, so it can never touch a current-model row, another owner kind, or an
+  owner not embedded this page. **Best-effort** (a sweep fault logs and leaves the harmless stale rows) and spends
+  nothing (a SQL DELETE on the success path, no AI call). A *completed* model transition now leaves **no**
+  duplicate-owner rows; it still self-heals incrementally under the AI-spend cap (one owner swept per owner re-embedded).
+
+**Still deferred: full GC (gh#902).** Two row classes the incremental sweep can't reach: rows for a **deleted or
+renamed** owner (no re-embed ever touches them), and **stale-model rows leaked by a crash** between a re-embed's
+`SaveChanges` and its sweep (the owner then has a current-model row, so the next pass idempotent-skips it and never
+re-sweeps). Both are harmless to reads (every read pins the current model) but accumulate; both are reclaimed by a
+**periodic full `Model != current` / anti-join GC** rather than the embed hot path — it needs per-owner-kind existence
+logic (skipping the producer-less owner kinds), a concurrency-safe bulk delete, and an irreversibility guard (a deleted
+vector is a paid re-embed if the owner returns or the model reverts), so it is its own increment (gh#902).

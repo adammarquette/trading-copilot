@@ -7,6 +7,7 @@ using MarqSpec.TradingCopilot.Api.Accounts;
 using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Auth;
+using MarqSpec.TradingCopilot.Api.Chat;
 using MarqSpec.TradingCopilot.Api.Documentation;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Flatten;
@@ -376,6 +377,11 @@ builder.Services.AddScoped<OcoExitService>();
 // with a signed tick-value-aware RealizedPnL. This is what makes DailyRealizedReader (gh#587) and the consistency
 // window read real money rather than the zero they returned while nothing wrote Trade. Resolved per-event by
 // AccountEventStreamHost, after the OCO retire.
+// The register of flats deferred awaiting their closing fill (gh#748): PositionEvent(flat) and FillEvent(fill) are
+// independent, unordered venue callbacks, so a flat can be processed before the closing fill is ingested. A
+// SINGLETON, shared by TradeJournalService (which parks a not-yet-reconciled flat) and AccountEventStreamHost (which
+// retries it when a fill lands) -- it must survive the supervisor's reconnects, so it cannot be scoped.
+builder.Services.AddSingleton<PendingFlatJournal>();
 builder.Services.AddScoped<TradeJournalService>();
 builder.Services.AddHostedService<AccountEventStreamHost>();
 
@@ -572,6 +578,7 @@ app.MapWorkingOrderEndpoints();
 app.MapFillEndpoints();
 app.MapMarketDataEndpoints();
 app.MapAiSpendEndpoints();
+app.MapChatEndpoints();
 
 // The realtime hub (gh#645, R-10 / R-18). A literal path so it is a concrete authenticated route ahead of the SPA
 // fallback; RequireAuthorization so the R-18 auth-surface sweep treats its negotiate / connect endpoints as gated.

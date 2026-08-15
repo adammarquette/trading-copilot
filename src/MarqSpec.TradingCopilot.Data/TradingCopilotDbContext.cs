@@ -52,6 +52,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Journaled trades — round-trip outcomes. Operator-owned.</summary>
     public DbSet<Trade> Trades => Set<Trade>();
 
+    /// <summary>Journal outcomes — how a suggestion / trade resolved, with the R-15 removal flags (gh#832). Operator-owned.</summary>
+    public DbSet<Outcome> Outcomes => Set<Outcome>();
+
     /// <summary>Declared per-account risk rules (R-5, gh#10). Operator-owned; one per account.</summary>
     public DbSet<RiskProfileRecord> RiskProfiles => Set<RiskProfileRecord>();
 
@@ -430,6 +433,48 @@ public class TradingCopilotDbContext : TenantDbContext
                 table.HasCheckConstraint("CK_Trades_Mode_NotUndeclared", "\"Mode\" <> 0");
                 table.HasCheckConstraint("CK_Trades_Size_Positive", "\"Size\" > 0");
             });
+        });
+
+        modelBuilder.Entity<Outcome>(outcome =>
+        {
+            outcome.ToTable(table =>
+            {
+                // A persisted outcome always carries a REAL resolution -- a defaulted or bad-cast Unknown (0) cannot
+                // masquerade as one, the same posture SuggestionState takes.
+                table.HasCheckConstraint("CK_Outcomes_Resolution_NotUnknown", "\"Resolution\" <> 0");
+
+                // An outcome resolves a trade or scores a suggestion (data-dictionary ERD) -- at least one parent,
+                // never a free-floating row that resolves nothing.
+                table.HasCheckConstraint(
+                    "CK_Outcomes_ParentPresent",
+                    "\"TradeId\" IS NOT NULL OR \"SuggestionId\" IS NOT NULL");
+            });
+
+            // Dies WITH its trade -- which dies with its account (Trade.AccountId cascades) -- so removing the
+            // operator's account (R-20) carries the outcome away too and never strands a trade-only row against
+            // CK_Outcomes_ParentPresent.
+            outcome.HasOne<Trade>()
+                .WithMany()
+                .HasForeignKey(o => o.TradeId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Survives suggestion deletion as null -- the same posture Trade.SuggestionId takes, so the R-9 outcome
+            // lineage is not silently erased when a suggestion is removed. (A future untaken-suggestion outcome, which
+            // has no trade, will need the hard-delete / account-removal card to settle its removal so this SetNull
+            // cannot orphan it against CK_Outcomes_ParentPresent -- untaken outcomes are not composed until [J2]/[J3],
+            // so none exist to hit that edge yet, gh#832.)
+            outcome.HasOne<Suggestion>()
+                .WithMany()
+                .HasForeignKey(o => o.SuggestionId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // Zero-or-one Outcome per Trade (data-dictionary ERD `Trade ||--o| Outcome`) -- the DB-enforced 1:1-FK
+            // posture StopPlanRecord.OrderId / SuggestionDisposition.SuggestionId take, so a retry or write-path bug
+            // cannot silently mint two outcomes (one Win, one Loss) for one trade. Filtered to non-null (the outbox
+            // partial-index pattern) so the many untaken-suggestion outcomes -- null TradeId, no trade -- are not
+            // forced unique against each other; Postgres treats those nulls as distinct anyway, but the filter states
+            // the intent and keeps the index off the null rows.
+            outcome.HasIndex(o => o.TradeId).IsUnique().HasFilter("\"TradeId\" IS NOT NULL");
         });
 
         modelBuilder.Entity<RiskProfileRecord>(profile =>
@@ -877,7 +922,7 @@ public class TradingCopilotDbContext : TenantDbContext
 
         modelBuilder.Entity<Conversation>(conversation =>
         {
-            conversation.Property(c => c.Title).HasMaxLength(256);
+            conversation.Property(c => c.Title).HasMaxLength(Conversation.TitleMaxLength);
 
             // The conversation-list read (gh#18): an operator's conversations, most-recent activity first.
             conversation.HasIndex(c => new { c.UserId, c.UpdatedAt });

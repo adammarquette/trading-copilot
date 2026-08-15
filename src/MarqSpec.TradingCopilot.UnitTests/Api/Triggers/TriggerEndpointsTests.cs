@@ -44,7 +44,9 @@ public class TriggerEndpointsTests
         Guid owner,
         TriggerArmState armState = TriggerArmState.Armed,
         int armCycle = 0,
-        TriggerConfirmation confirmation = TriggerConfirmation.Confirmed)
+        TriggerConfirmation confirmation = TriggerConfirmation.Confirmed,
+        Guid? sourceRuleId = null,
+        Guid? sourceConversationId = null)
     {
         Guid id = Guid.NewGuid();
         await using TradingCopilotDbContext context = Context(owner);
@@ -65,6 +67,8 @@ public class TriggerEndpointsTests
             Confirmation = confirmation,
             ArmState = armState,
             ArmCycle = armCycle,
+            SourceRuleId = sourceRuleId,
+            SourceConversationId = sourceConversationId,
             CreatedAt = DateTimeOffset.UnixEpoch,
         });
         await context.SaveChangesAsync();
@@ -114,6 +118,40 @@ public class TriggerEndpointsTests
         stored.ConditionKind.Should().Be(TriggerConditionKind.IndicatorThreshold);
         stored.Symbol.Should().Be("ES");
         stored.Indicator.Should().Be("rsi");
+    }
+
+    [Fact]
+    public async Task GetTrigger_ShouldExposeTheSourceOrigin_WhenAuthoredFromARuleAndConversation()
+    {
+        // A trigger a rule minted from a conversation must answer "why does this exist?" at the READ path — the origin
+        // is recoverable without a database query (R-7, gh#471). Both references are SOFT (no FK), so the trigger
+        // outlives either the rule or the conversation.
+        Guid ruleId = Guid.NewGuid();
+        Guid conversationId = Guid.NewGuid();
+        Guid triggerId = await SeedTriggerAsync(
+            _operator, sourceRuleId: ruleId, sourceConversationId: conversationId);
+
+        IResult result = await TriggerEndpoints.GetTriggerAsync(triggerId, Context(), CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        TriggerResponse response = ((IValueHttpResult)result).Value.Should().BeOfType<TriggerResponse>().Subject;
+        response.SourceRuleId.Should().Be(ruleId);
+        response.SourceConversationId.Should().Be(conversationId);
+    }
+
+    [Fact]
+    public async Task Create_ShouldLeaveTheSourceOriginNull_WhenAuthoredOverTheApi()
+    {
+        // A trigger authored directly over the API has no rule or conversation behind it: the provenance is null, not
+        // a requirement (gh#471). The reference is for triggers a rule minted from chat, never operator-hand-authored ones.
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+            ValidRequest(), new FixedUser(_operator), context, CancellationToken.None);
+
+        TriggerResponse response = ((IValueHttpResult)result).Value.Should().BeOfType<TriggerResponse>().Subject;
+        response.SourceRuleId.Should().BeNull();
+        response.SourceConversationId.Should().BeNull();
     }
 
     [Theory]

@@ -43,6 +43,29 @@ public sealed record RoundTrip(
     decimal Fees);
 
 /// <summary>
+/// Why a window did — or did not — compose into completed round trips (gh#748). The caller needs the distinction a
+/// bare <c>false</c> hides: whether the window is retryable or terminal.
+/// </summary>
+public enum RoundTripComposition
+{
+    /// <summary>The fills formed at least one completed round trip.</summary>
+    Composed,
+
+    /// <summary>
+    /// The window does not reconcile to flat — a closing fill is missing or not yet ingested (the flat callback beat
+    /// the fill callback). Composing again once the fill lands completes the trip (gh#748), so this is <b>retryable</b>.
+    /// </summary>
+    StillOpen,
+
+    /// <summary>
+    /// A fill's side is undefined, or a same-instant opposite-side tie has no venue sequence here to order it —
+    /// <b>terminal</b>, because retrying cannot resolve it (either choice would flip the sign of realized P&amp;L,
+    /// ADR-0022). Refuse-don't-guess.
+    /// </summary>
+    Ambiguous,
+}
+
+/// <summary>
 /// Composes a contract's executions into the per-leg round trips the journal records (gh#731, gh#759, ADR-0022,
 /// R-8/R-9).
 /// </summary>
@@ -72,22 +95,45 @@ public static class TradeRoundTrip
     /// <param name="trips">The composed trips, oldest opening leg first; empty when the fills do not form any.</param>
     /// <returns><see langword="true"/> when at least one completed round trip was composed.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="fills"/> is <see langword="null"/>.</exception>
-    public static bool TryCompose(IReadOnlyCollection<RoundTripFill> fills, out IReadOnlyList<RoundTrip> trips)
+    /// <remarks>
+    /// A thin wrapper over <see cref="Compose"/>: it collapses every non-<see cref="RoundTripComposition.Composed"/>
+    /// outcome to <see langword="false"/>. Callers that must tell a retryable <see cref="RoundTripComposition.StillOpen"/>
+    /// window (a closing fill not yet ingested, gh#748) from a terminal <see cref="RoundTripComposition.Ambiguous"/> one
+    /// call <see cref="Compose"/> directly.
+    /// </remarks>
+    public static bool TryCompose(IReadOnlyCollection<RoundTripFill> fills, out IReadOnlyList<RoundTrip> trips) =>
+        Compose(fills, out trips) == RoundTripComposition.Composed;
+
+    /// <summary>
+    /// Composes the per-leg round trips in <paramref name="fills"/>, reporting <b>why</b> when it cannot (gh#748).
+    /// </summary>
+    /// <param name="fills">The contract's executions for one flat-to-flat window, in any order.</param>
+    /// <param name="trips">The composed trips, oldest opening leg first; empty unless the outcome is
+    /// <see cref="RoundTripComposition.Composed"/>.</param>
+    /// <returns>
+    /// <see cref="RoundTripComposition.Composed"/> when at least one completed round trip was composed;
+    /// <see cref="RoundTripComposition.StillOpen"/> when the window does not reconcile to flat (a closing fill is
+    /// missing / not yet ingested — retryable); <see cref="RoundTripComposition.Ambiguous"/> when a fill's side is
+    /// undefined or a same-instant opposite-side tie makes the direction undecidable (terminal).
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="fills"/> is <see langword="null"/>.</exception>
+    public static RoundTripComposition Compose(IReadOnlyCollection<RoundTripFill> fills, out IReadOnlyList<RoundTrip> trips)
     {
         ArgumentNullException.ThrowIfNull(fills);
 
         trips = [];
         if (fills.Count == 0)
         {
-            return false;
+            return RoundTripComposition.StillOpen;
         }
 
         // Both legs must be a KNOWN side. An undefined OrderSide -- a bad cast or deserialize, and Order.Side carries
         // no known-value DB check -- cannot be classified as an open or a close, so refuse the whole window rather
-        // than let a corrupt side compose a trip whose sign RealizedPnL would trust (gh#734 review).
+        // than let a corrupt side compose a trip whose sign RealizedPnL would trust (gh#734 review). Terminal: a later
+        // fill cannot make a corrupt side decidable (gh#748).
         if (fills.Any(fill => fill.Side is not (OrderSide.Buy or OrderSide.Sell)))
         {
-            return false;
+            return RoundTripComposition.Ambiguous;
         }
 
         // Same-instant OPPOSITE-side ambiguity (gh#759 review). When a buy and a sell share the exact execution
@@ -99,10 +145,12 @@ public static class TradeRoundTrip
         // tie that is IN the window handed to it. The caller (TradeJournalService.CurrentCycleStart) is the other half
         // -- it must not slice a flat-to-flat boundary ACROSS a same-instant tie, or the tie is split out of this
         // window and never reaches this check (gh#809). Same-INSTANT same-SIDE ties are safe (FIFO pairing preserves
-        // both sign and total), and distinct-instant fills (the norm) are unaffected.
+        // both sign and total), and distinct-instant fills (the norm) are unaffected. Terminal, and it MUST stay
+        // before the walk so it is distinguishable from StillOpen (gh#748): both leave the window unreconciled, but a
+        // tie will never reconcile however many fills land, whereas a missing closing fill will.
         if (fills.GroupBy(fill => fill.ExecutedAt).Any(group => group.Select(fill => fill.Side).Distinct().Count() > 1))
         {
-            return false;
+            return RoundTripComposition.Ambiguous;
         }
 
         // Deterministic order: time, then FillId as a stable tiebreak so same-instant same-side fills pair reproducibly.
@@ -150,19 +198,21 @@ public static class TradeRoundTrip
             }
         }
 
-        // Must reconcile to flat: leftover open exposure means this window is not a set of completed round trips.
+        // Must reconcile to flat: leftover open exposure means a closing fill is missing or not yet ingested -- the
+        // flat callback beat the fill callback (gh#748). StillOpen, not a refusal: composing again once the fill lands
+        // completes the trip, so the caller defers and retries rather than losing the round trip's realized P&L.
         if (open.Count != 0)
         {
-            return false;
+            return RoundTripComposition.StillOpen;
         }
 
         if (composed.Count == 0)
         {
-            return false;
+            return RoundTripComposition.StillOpen;
         }
 
         trips = composed;
-        return true;
+        return RoundTripComposition.Composed;
     }
 
     /// <summary>The size-proportional share of <paramref name="whole"/> attributable to <paramref name="part"/> of <paramref name="total"/>.</summary>

@@ -61,7 +61,12 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// </remarks>
 public sealed class NewsEmbeddingRecallIntegrationTests : IClassFixture<EmbeddingReadTestPostgresFactory>
 {
-    private const string Model = "cohere-embed-v3-recall-test";
+    // Must equal the host provider's Model. This suite drives the REAL production seam (NearestNewsAsync, resolved
+    // from DI below), and gh#889 scoped that read to Model == provider.Model. EmbeddingReadTestPostgresFactory wires
+    // no Cohere key, so the resolved provider is UnavailableEmbeddingProvider, whose Model is "none" -- seed under
+    // any other model and gh#889's filter discards every SoftSignal row, collapsing this gh#864 recall guard to zero
+    // for a reason unrelated to the partial index it exists to guard.
+    private const string Model = "none";
     private const int Dimensions = TradingCopilotDbContext.EmbeddingDimensions;
 
     // 25% SoftSignal selectivity at 15,000 total rows -- the smallest configuration this suite's investigation

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using MarqSpec.TradingCopilot.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -13,9 +14,11 @@ using Pgvector;
 namespace MarqSpec.TradingCopilot.Data.Migrations
 {
     [DbContext(typeof(TradingCopilotDbContext))]
-    partial class TradingCopilotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260815055729_AddTriggerSourceConversation")]
+    partial class AddTriggerSourceConversation
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -66,9 +69,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
-
-                    b.Property<bool?>("VenueReportsSimulated")
-                        .HasColumnType("boolean");
 
                     b.HasKey("Id");
 
@@ -1020,58 +1020,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         });
                 });
 
-            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.Outcome", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<bool>("Deleted")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("HiddenFromUser")
-                        .HasColumnType("boolean");
-
-                    b.Property<decimal?>("PredictedRewardRisk")
-                        .HasColumnType("numeric");
-
-                    b.Property<decimal?>("RealizedRewardRisk")
-                        .HasColumnType("numeric");
-
-                    b.Property<int>("Resolution")
-                        .HasColumnType("integer");
-
-                    b.Property<bool>("Simulated")
-                        .HasColumnType("boolean");
-
-                    b.Property<Guid?>("SuggestionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("TradeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<bool>("TrainingExcluded")
-                        .HasColumnType("boolean");
-
-                    b.Property<Guid>("UserId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("SuggestionId");
-
-                    b.HasIndex("TradeId")
-                        .IsUnique()
-                        .HasFilter("\"TradeId\" IS NOT NULL");
-
-                    b.ToTable("Outcomes", t =>
-                        {
-                            t.HasCheckConstraint("CK_Outcomes_ParentPresent", "\"TradeId\" IS NOT NULL OR \"SuggestionId\" IS NOT NULL");
-
-                            t.HasCheckConstraint("CK_Outcomes_Resolution_NotUnknown", "\"Resolution\" <> 0");
-                        });
-                });
-
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.PriceLevel", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1839,19 +1787,6 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .WithMany()
                         .HasForeignKey("SuggestionId")
                         .OnDelete(DeleteBehavior.SetNull);
-                });
-
-            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.Outcome", b =>
-                {
-                    b.HasOne("MarqSpec.TradingCopilot.Data.Entities.Suggestion", null)
-                        .WithMany()
-                        .HasForeignKey("SuggestionId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("MarqSpec.TradingCopilot.Data.Entities.Trade", null)
-                        .WithMany()
-                        .HasForeignKey("TradeId")
-                        .OnDelete(DeleteBehavior.Cascade);
                 });
 
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.RiskProfileRecord", b =>

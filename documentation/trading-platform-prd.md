@@ -189,7 +189,7 @@ then [Nice-to-Have (P1)](#nice-to-have-p1) · [Future Considerations (P2)](#futu
 <a id="r-6"></a>
 **R-6: Multi-turn chat.** Conversational interface grounded in platform state (market data, order-flow analytics, soft-signal events, journal, rulebook, live positions/orders). Supports analysis, on-demand suggestions, journal queries, and rulebook management.
 - [ ] Chat can invoke platform capabilities as tools (quote data, generate suggestion, query journal, edit rulebook, read positions). *Chat does not place orders — execution is an explicit UI action (R-11).*
-- [ ] Conversation history persists across sessions
+- [x] Conversation history persists across sessions — the store (gh#18 inc 1) plus the `/conversations` REST CRUD (gh#18 inc 2): a conversation and its messages written in one session are read back in the next, R-20 owner-scoped
 - [ ] The co-pilot can **proactively ask follow-up questions** grounded in trades + their feedback (e.g. a pattern across recent losses) to **refine strategy** — turning feedback into candidate **rulebook** changes (R-7) on explicit confirmation
 
 <a id="r-7"></a>
@@ -202,7 +202,7 @@ then [Nice-to-Have (P1)](#nice-to-have-p1) · [Future Considerations (P2)](#futu
 - [ ] A confirmed rule captures an **instrument-dependency snapshot** (the Instrument / RelevanceConfig metadata it resolved against). If that metadata later changes (a symbol reclassified, a topic remapped), the rule is **flagged for review / re-validation** rather than silently firing on the wrong asset — no stale-scope triggers
 
 <a id="r-8"></a>
-**R-8: Suggestion & trade journal.** Every suggestion is recorded with full parameters, a market-condition snapshot at issuance, influencing factors, and stated expectation. Every trade is recorded with its originating suggestion (if any), entry rationale, and **native fills from the execution path**.
+**R-8: Suggestion & trade journal.** Every suggestion is recorded with full parameters, a market-condition snapshot at issuance, influencing factors, and stated expectation. Every trade is recorded with its originating suggestion (if any), entry rationale, and **native fills from the execution path** — round-trip journaling is **resilient to fill/flat delivery ordering**: a flat that arrives before its closing fill is deferred and journalled when the fill lands, not lost (gh#748).
 - [ ] Journal writes occur automatically — at suggestion issuance and at order/fill events — with no user action required
 - [ ] Trader can annotate entries (notes, emotional state — optional)
 - [ ] The journal presents a **trade blotter** and lets the operator **drill into a day's trades** — the **current day is the default view** — each trade linked to its originating suggestion, with entry/exit, P&L / R, strategy, and its feedback
@@ -277,6 +277,9 @@ then [Nice-to-Have (P1)](#nice-to-have-p1) · [Future Considerations (P2)](#futu
 **R-15: Record removal — soft delete (default) + hard delete.** The trader can remove a trade record from the learning signal and default views via two operations:
 - **Soft delete (default):** a `deleted` toggle that excludes the record from all suggestion-engine training and default stats and hides it from default views, while retaining the full record and an audit trail. Reversible.
 - **Hard delete (explicit):** permanently erases the record. A deliberate, confirmed action and the exception — not the default — since it removes the honest-recovery path.
+
+**Delivered — the `Outcome` model + R-15 flag semantics (gh#832):** the three flags persist on the `Outcome` entity and are set only through its methods, so they can't be re-collapsed into one — `SoftDelete()` turns on all three together (the reversible combined shortcut), `Restore()` reverses, and `training_excluded` / `hidden_from_user` are each settable alone (proven test-first). The resolution (win / loss / no-fill-scratch / expired) derives from a closed trade's signed P&L or an unfilled suggestion's terminal disposition via a pure function, and `OutcomeQueries` gives the flag-honouring read that toggles inclusive vs. exclusive of soft-deleted rows from one call. **Still outstanding** (boxes stay unticked): the removal **operation / endpoint**, the confirmed **hard delete** and its audit fact (the paired I/O follow-on), and the report surface ([J2]/[J3]).
+
 - [ ] Soft delete is the default removal action and is reversible (un-toggling restores the record to learning and stats)
 - [ ] The soft-delete audit trail preserves the original record and the exclusion (what, when, why-optional)
 - [ ] Reports can be toggled to show figures inclusive vs. exclusive of soft-deleted records, so the honest picture stays recoverable

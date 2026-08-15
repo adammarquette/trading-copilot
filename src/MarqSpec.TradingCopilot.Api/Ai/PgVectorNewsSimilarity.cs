@@ -41,18 +41,24 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// vector-ordered read, it wants <b>its own</b> partial index rather than a shared table-wide one.
 /// </para>
 /// <para>
-/// <b>Current-model by-owner reads (gh#881).</b> The by-owner reads (<c>GetVectorsAsync</c> / <c>GetTopicVectorsAsync</c>)
-/// filter on <c>Model == provider.Model</c>. The store keys on <c>(OwnerKind, OwnerId, Model)</c> and lets a retired
-/// model's vectors coexist until swept, but vectors from different models are not comparable — so an unfiltered
-/// by-owner read returns a duplicate row per owner (the gh#854 last-wins collapse then picks an arbitrary model's
-/// vector), and a cross-model cosine is a meaningless-but-nonzero match. Pinning the current model makes
-/// <c>(OwnerKind, OwnerId)</c> unique in the result and keeps every comparison same-model. After a model change, an
-/// owner embedded only under the old model reads back empty — a bounded degrade — until the embedding pass re-embeds
-/// it under the current model (its candidate query already keys on the current model), so the transition self-heals
-/// rather than ever returning a wrong answer. The now-unread stale rows are harmless; sweeping them is a storage-only
-/// follow-up (gh#889). <c>NearestNewsAsync</c> gains the same current-model filter as part of that follow-up —
-/// deferred here because it must land together with aligning the gh#864 recall guard's provider model to its seed
-/// (that guard drives this method through a provider whose <c>Model</c> is <c>"none"</c>).
+/// <b>Current-model reads (gh#881, gh#889).</b> Every read (<c>GetVectorsAsync</c> / <c>GetTopicVectorsAsync</c> and
+/// <c>NearestNewsAsync</c>) filters on <c>Model == provider.Model</c>. The store keys on <c>(OwnerKind, OwnerId, Model)</c>
+/// and lets a retired model's vectors coexist until swept, but vectors from different models are not comparable — so an
+/// unfiltered by-owner read returns a duplicate row per owner (the gh#854 last-wins collapse then picks an arbitrary
+/// model's vector), a cross-model cosine is a meaningless-but-nonzero match, and an unfiltered nearest-N could rank a
+/// retired-model vector or return the same owner twice. Pinning the current model makes <c>(OwnerKind, OwnerId)</c>
+/// unique in the by-owner result and keeps every comparison same-model. After a model change, an owner embedded only
+/// under the old model reads back empty — a bounded degrade — until the embedding pass re-embeds it under the current
+/// model (its candidate query already keys on the current model) and sweeps that owner's stale-model rows (gh#889), so
+/// the transition self-heals rather than ever returning a wrong answer. On the <b>nearest-N</b> path this same filter
+/// sits <i>on top of</i> the owner-kind-only partial HNSW index (gh#864), so during a migration window — new-model rows
+/// still sparse — the approximate candidate window can fill with old-model rows the <c>Model</c> post-filter then
+/// discards, transiently under-returning (missing even owners already re-embedded); still distance-ordered, still never
+/// wrong. The sweep does not relieve this early in the pass (it acts only once an owner is re-embedded) — the gh#864
+/// interaction, see ADR-0001. The by-owner filter landed in gh#881; the nearest-N filter + the stale-model sweep in
+/// gh#889 (the nearest-N filter had to land together with aligning the gh#864 recall guard, whose host provider
+/// <c>Model</c> is <c>"none"</c>). Orphaned-owner rows (a deleted/renamed owner), and stale-model rows leaked by a
+/// crash between a re-embed's save and its sweep, remain a follow-up (gh#902).
 /// </para>
 /// </remarks>
 public sealed class PgVectorNewsSimilarity : INewsEmbeddingSimilarity
@@ -62,7 +68,7 @@ public sealed class PgVectorNewsSimilarity : INewsEmbeddingSimilarity
 
     /// <summary>Creates the similarity read over the scoped database.</summary>
     /// <param name="database">The scoped database.</param>
-    /// <param name="provider">The embedding provider — its <see cref="IEmbeddingProvider.Model"/> scopes the by-owner reads to the current model's vectors (gh#881).</param>
+    /// <param name="provider">The embedding provider — its <see cref="IEmbeddingProvider.Model"/> scopes every read to the current model's vectors (gh#881 by-owner, gh#889 nearest-N).</param>
     public PgVectorNewsSimilarity(TradingCopilotDbContext database, IEmbeddingProvider provider)
     {
         _database = database;
@@ -82,6 +88,7 @@ public sealed class PgVectorNewsSimilarity : INewsEmbeddingSimilarity
         // provider -- the reason this whole type is integration-tier (gh#852; the real read is proven by QA #855).
         return await _database.Embeddings
             .Where(embedding => embedding.OwnerKind == EmbeddingOwnerKind.SoftSignal)
+            .Where(embedding => embedding.Model == _provider.Model) // current model only (gh#889) -- never rank a retired-model vector
             .OrderBy(embedding => embedding.Embedding.CosineDistance(query))
             .Take(n)
             .Select(embedding => new SemanticNeighbor(embedding.OwnerId, embedding.Embedding.CosineDistance(query)))

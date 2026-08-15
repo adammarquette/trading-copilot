@@ -195,17 +195,14 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         IReadOnlyList<SemanticNeighbor> hits = await similarity.NearestNewsAsync(
             Direction((0, 1f)).ToArray(), n: 5, CancellationToken.None);
 
-        // DEFECT gh#889: PgVectorNewsSimilarity.NearestNewsAsync filters only on OwnerKind == SoftSignal today
-        // (gh#881 landed but scoped its Model filter to the by-owner reads only -- see this class's remarks), so
-        // the other-model row -- deliberately the CLOSEST possible vector to the query -- outranks and is
-        // included alongside the same-model answer instead of being excluded. Once gh#889's Model ==
-        // provider.Model predicate lands, this should read `hits.Select(h => h.OwnerId).Should().Equal(["right-model"], ...)`
-        // (restoring this test's original, pre-gh#888 intent) -- this pinned ordering is that fix's own
-        // regression guard.
+        // gh#889's regression guard (restoring this test's original, pre-gh#888 intent): PgVectorNewsSimilarity
+        // .NearestNewsAsync now filters on Model == provider.Model as well as OwnerKind == SoftSignal, so the
+        // other-model row -- deliberately the CLOSEST possible vector to the query -- is excluded outright rather
+        // than outranking the same-model answer. Only the same-model owner surfaces.
         hits.Select(hit => hit.OwnerId).Should().Equal(
-            ["wrong-model-but-identical-vector", "right-model"],
-            "DEFECT gh#889: nearest-N is not yet scoped to the current model, so a different model's vector "
-            + "outranks a same-model candidate instead of being excluded, however close its raw direction sits to the query");
+            ["right-model"],
+            "nearest-N is scoped to the current model (gh#889), so a different model's vector is excluded however "
+            + "close its raw direction sits to the query, and only the same-model candidate is returned");
     }
 
     // =================================================================================================================
