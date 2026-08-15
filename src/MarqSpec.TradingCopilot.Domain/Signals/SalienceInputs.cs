@@ -8,10 +8,17 @@ namespace MarqSpec.TradingCopilot.Domain.Signals;
 /// <param name="Instruments">The traded instruments the item bears on (normalized, as stored on the news row).</param>
 /// <param name="Topics">The topics the item matched.</param>
 /// <param name="Sources">The source feeds that carried the item.</param>
+/// <param name="SemanticSimilarity">
+/// The item's embedding-neighbourhood similarity to the operator's stars in <c>[0, 1]</c> (gh#853) — the max cosine
+/// similarity to the nearest starred item's vector, supplied by the caller (it already ranked this item against the
+/// stars). <see langword="null"/> when the semantic axis is unavailable or off, so it simply contributes nothing and
+/// the scorer degrades to the categorical dimensions; a trailing optional so positional construction still compiles.
+/// </param>
 public sealed record NewsDimensions(
     IReadOnlyList<string> Instruments,
     IReadOnlyList<string> Topics,
-    IReadOnlyList<string> Sources);
+    IReadOnlyList<string> Sources,
+    double? SemanticSimilarity = null);
 
 /// <summary>
 /// One piece of the operator's feedback joined to the dimensions of the item it rated (gh#27) — the unit the
@@ -37,13 +44,15 @@ public sealed record SoftSignalRating(
 /// <param name="InstrumentWeight">Per-star weight contributed along a shared instrument.</param>
 /// <param name="TopicWeight">Per-star weight contributed along a shared topic.</param>
 /// <param name="SourceWeight">Per-star weight contributed along a shared source (weaker than instrument/topic).</param>
+/// <param name="SemanticWeight">Weight on the semantic-embedding axis (gh#853): the item's max cosine similarity to a star, scaled by this, is its semantic contribution. A trailing default so positional construction still compiles.</param>
 public sealed record SalienceParameters(
     double HalfLifeDays = 14.0,
     double MultiplierCap = 5.0,
     double MultiplierFloor = 0.25,
     double InstrumentWeight = 1.0,
     double TopicWeight = 1.0,
-    double SourceWeight = 0.5);
+    double SourceWeight = 0.5,
+    double SemanticWeight = 1.0);
 
 /// <summary>
 /// One reason an item was reweighted (gh#27) — the explainability ADR-0014 requires, so weighting is never a hidden

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { listActionableSuggestions, type StagedTicket, type Suggestion } from '../api/suggestions';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
+import { useRealtime } from '../realtime/RealtimeProvider';
 import { SuggestionCard } from './SuggestionCard';
 
 /**
@@ -36,6 +37,14 @@ type LoadState =
 export function SuggestionList({ accountId, referencePrice = null, onArmed }: SuggestionListProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const mounted = useRef(true);
+  // Ordering guards for the two reads that write this panel. `mounted` says the component is still on screen; it
+  // says nothing about WHICH account a response belongs to, and the list does not remount on an `accountId` change.
+  //
+  // A foreground `load` is authoritative: it always writes, and it supersedes every read started before it, so a
+  // response for the account just left can never land (R-14) — the same guarantee `useSuggestionZones` states.
+  // A background `refresh` yields to anything newer — a later load, a later refresh, or a pass.
+  const loadGeneration = useRef(0);
+  const refreshToken = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -45,8 +54,10 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
   }, []);
 
   const load = useCallback(() => {
+    const generation = (loadGeneration.current += 1);
     void listActionableSuggestions(accountId).then((result) => {
-      if (!mounted.current) {
+      // Drop a superseded load — an account switch started a newer one — or a resolve after unmount.
+      if (!mounted.current || generation !== loadGeneration.current) {
         return;
       }
       setState(
@@ -71,6 +82,35 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
     load();
   }, [load]);
 
+  // A realtimeSuggestion push (gh#760) is a compact signal to reconcile — too little to render a card — so a new /
+  // superseded suggestion refetches the actionable list. Owner-scoped and live-only like order / fill, so a reconnect
+  // (onResync) refetches too: the pushes missed during a drop are never replayed. A failed background refresh keeps the
+  // current list rather than nuking a working panel to an error screen — the initial load and the retry own errors.
+  const { onSuggestion, onResync } = useRealtime();
+  const refresh = useCallback(() => {
+    // A background refresh must never clobber a newer local change. A `handlePassed` optimistic drop — or a later
+    // refresh — bumps the token, so an in-flight read that resolves afterwards with a pre-commit snapshot is
+    // discarded rather than resurrecting a just-passed card (the R-4 decision surface must not flicker a card back).
+    // It also yields to a newer load: an account switch reads through `load`, which never touched this token, so
+    // the generation is what keeps acc-1's answer off acc-2's panel (R-14).
+    const token = (refreshToken.current += 1);
+    // Read, never bump: a refresh that superseded an in-flight load and then failed would write nothing at all —
+    // it keeps a working panel rather than nuking it to an error screen — and the panel would hang on its spinner.
+    const generation = loadGeneration.current;
+    void listActionableSuggestions(accountId).then((result) => {
+      if (
+        mounted.current &&
+        generation === loadGeneration.current &&
+        token === refreshToken.current &&
+        result.ok
+      ) {
+        setState({ kind: 'loaded', suggestions: result.data });
+      }
+    });
+  }, [accountId]);
+  useEffect(() => onSuggestion(refresh), [onSuggestion, refresh]);
+  useEffect(() => onResync(refresh), [onResync, refresh]);
+
   /**
    * A pass drops the card out of the actionable list — the disposition is recorded and the setup is no longer
    * something to decide on. It is **removed here rather than re-fetched**: a refetch would race the operator's
@@ -79,6 +119,9 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
    * decision surface, kept in the journal.
    */
   const handlePassed = useCallback((id: string) => {
+    // Invalidate any background refresh already in flight (its snapshot predates this pass's commit), so it cannot
+    // resurrect the dropped card when it resolves — the very flicker this local drop exists to avoid.
+    refreshToken.current += 1;
     setState((current) =>
       current.kind === 'loaded'
         ? {

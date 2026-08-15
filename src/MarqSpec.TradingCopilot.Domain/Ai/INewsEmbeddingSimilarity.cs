@@ -28,6 +28,26 @@ public interface INewsEmbeddingSimilarity
     /// <returns>The nearest news owners and their cosine distance, nearest first; empty when retrieval cannot run.</returns>
     Task<IReadOnlyList<SemanticNeighbor>> NearestNewsAsync(
         IReadOnlyList<float> queryVector, int n, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Reads back the stored soft-signal embeddings for the given owners (gh#853) — the salience read that lets the
+    /// feed score its window candidates against the operator's starred items in-process.
+    /// </summary>
+    /// <remarks>
+    /// A plain by-owner read over the same <c>SoftSignal</c> embeddings <see cref="NearestNewsAsync"/> ranks — no
+    /// ordering, no distance operator — returning each requested owner's vector as a plain <see cref="float"/> list so
+    /// the seam stays <c>Pgvector</c>- and <c>Data</c>-free. The <b>ranking</b> is a pure, unit-tested function over
+    /// these vectors (<c>EmbeddingSimilarity.MaxCosineSimilarity</c>, with <c>Domain.Signals</c> unaware of it), so
+    /// only the read itself is integration-tier. This replaces a nearest-N search: the feed already knows its
+    /// candidate window, so it <i>scores those candidates</i> rather than searching for a global nearest set that
+    /// might miss them. Owners with no stored embedding are simply absent from the result; an unavailable or faulting
+    /// store yields an empty list (the gh#109 degrade), never a throw — only a genuine caller cancellation propagates.
+    /// </remarks>
+    /// <param name="ownerIds">The owners whose stored vectors to read (a starred set or a candidate window).</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The stored embedding of each requested owner that has one; empty when retrieval cannot run.</returns>
+    Task<IReadOnlyList<StoredEmbedding>> GetVectorsAsync(
+        IReadOnlyCollection<string> ownerIds, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -37,3 +57,11 @@ public interface INewsEmbeddingSimilarity
 /// <param name="OwnerId">The embedded owner's id — a <c>NewsRecord.DedupKey</c> for a soft-signal embedding.</param>
 /// <param name="Distance">The cosine distance in <c>[0, 2]</c>; smaller is nearer, and similarity is <c>1 - Distance</c>.</param>
 public sealed record SemanticNeighbor(string OwnerId, double Distance);
+
+/// <summary>
+/// One stored embedding read back by owner (gh#853): the embedded owner's id and its vector as a plain
+/// <see cref="float"/> list, so the read seam carries no <c>Pgvector</c> dependency into the domain.
+/// </summary>
+/// <param name="OwnerId">The embedded owner's id — a <c>NewsRecord.DedupKey</c> for a soft-signal embedding.</param>
+/// <param name="Vector">The stored embedding as a plain float list.</param>
+public sealed record StoredEmbedding(string OwnerId, IReadOnlyList<float> Vector);

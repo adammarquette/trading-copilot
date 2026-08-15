@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
@@ -40,6 +41,7 @@ public static class NewsEndpoints
         int? limit,
         TradingCopilotDbContext database,
         IOptions<SalienceOptions> options,
+        SemanticSalienceAxis semanticAxis,
         CancellationToken cancellationToken)
     {
         SalienceOptions config = options.Value;
@@ -60,12 +62,26 @@ public static class NewsEndpoints
             .Take(take)
             .ToListAsync(cancellationToken);
 
+        // The semantic-embedding axis (gh#853): score THIS window's candidates by embedding nearness to the items the
+        // operator STARRED (mutes shape only the categorical profile). Scoring the actual window candidates -- not a
+        // global nearest-N -- is what makes a recent near-a-star item reliably surface; it rides on the item, not the
+        // profile, and degrades to an empty map (categorical-only) when the provider or the pgvector read is unavailable.
+        List<string> starredKeys = [.. feedback.Where(f => f.Kind == SoftSignalKind.Star).Select(f => f.NewsDedupKey)];
+        List<string> candidateKeys = [.. candidates.Select(item => item.DedupKey)];
+        IReadOnlyDictionary<string, double> semanticAxisMap =
+            await semanticAxis.ForCandidatesAsync(candidateKeys, starredKeys, cancellationToken);
+
         List<NewsFeedItemResponse> items =
         [
             .. candidates
                 .Select(item =>
                 {
-                    NewsDimensions dimensions = DimensionsOf(item);
+                    NewsDimensions dimensions = DimensionsOf(item) with
+                    {
+                        SemanticSimilarity = semanticAxisMap.TryGetValue(item.DedupKey, out double similarity)
+                            ? similarity
+                            : (double?)null,
+                    };
                     SalienceScore score = SalienceScorer.Score(profile, dimensions, parameters);
                     double baseRelevance = BaseRelevanceOf(dimensions);
                     ownFeedback.TryGetValue(item.DedupKey, out SoftSignalFeedback? own);
