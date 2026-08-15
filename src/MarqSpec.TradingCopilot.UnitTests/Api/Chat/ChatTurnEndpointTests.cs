@@ -136,6 +136,18 @@ public class ChatTurnEndpointTests
     }
 
     [Fact]
+    public async Task TurnAsync_ShouldReject_WhenContentExceedsTheCap()
+    {
+        Guid id = await SeedConversationAsync();
+        string tooLong = new('x', ChatMessage.ContentMaxLength + 1);
+
+        IResult result = await Invoke(id, tooLong, At(3));
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+        A.CallTo(() => _turn.CompleteAsync(A<IReadOnlyList<ChatMessage>>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
     public async Task TurnAsync_ShouldReturn429_AndMakeNoCall_AndPersistNothing_WhenTheDailyBudgetIsReached()
     {
         Guid id = await SeedConversationAsync();

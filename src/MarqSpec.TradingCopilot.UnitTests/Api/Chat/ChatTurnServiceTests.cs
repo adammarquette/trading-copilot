@@ -107,6 +107,18 @@ public class ChatTurnServiceTests
     }
 
     [Fact]
+    public async Task CompleteAsync_ShouldFailClosed_MappingAnyOtherStop_ToFailed()
+    {
+        // Any stop the seam does not name maps to Failed and fails closed (gh#916 review) — the catch-all leg.
+        ProviderReturns(new LlmCompletion("odd", LlmStopReason.Other, new LlmUsage(30, 3)));
+
+        ChatTurnResult result = await Service().CompleteAsync([Message(1, ChatRole.User, "hi")], CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        result.Cost.Outcome.Should().Be(AiUsageOutcome.Failed);
+    }
+
+    [Fact]
     public async Task CompleteAsync_ShouldFailClosed_AndRecordAFailedZeroTokenCall_WhenTheProviderThrows()
     {
         A.CallTo(() => _provider.CompleteAsync(A<LlmRequest>._, A<CancellationToken>._))
