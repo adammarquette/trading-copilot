@@ -10,6 +10,7 @@ import {
   cancelConditionalOrder,
   cancelOrder,
   createConditionalOrder,
+  editStagedOrder,
   repriceOrder,
   sendOrder,
   takeStagedOrder,
@@ -161,6 +162,63 @@ describe('armOrder', () => {
     if (result.ok) {
       expect(result.data.status).toBe('Staged');
       expect(result.data.bindingLayer).toBe(4);
+    }
+  });
+});
+
+describe('editStagedOrder', () => {
+  it('PUTs the whole edited proposal and returns the RE-GATED decision', async () => {
+    // An edit re-gates (ADR-0007). What transmits is the size the gate approved on the EDITED row, never the
+    // pre-edit approval — so the response carries a fresh decision, and a caller that kept the old one would
+    // show an approval that no longer describes what would be sent.
+    const fetchMock = stubFetch(() =>
+      Promise.resolve(
+        response(200, {
+          orderId: 'o1',
+          status: 'Staged',
+          outcome: 'Resized',
+          approvedQuantity: 3,
+          bindingLayer: RiskLayer.PerTradeRisk,
+          reason: 'Per-trade risk allows 3.',
+          target: 5020,
+          advisories: [],
+        }),
+      ),
+    );
+
+    const result = await editStagedOrder('o1', { ...TICKET, quantity: 4 });
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/orders/o1');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('PUT');
+    // Whole, not partial: the server rebuilds the ticket from these fields, so an omitted one is not "unchanged".
+    // The safety stop rides along on every edit — the R-5 floor is never dropped by an amendment.
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      quantity: 4,
+      safetyStop: 4990,
+      referencePrice: 5000,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.approvedQuantity).toBe(3);
+    }
+  });
+
+  it('renders a refusal when the order has already left staging', async () => {
+    // The row can go Working / Taking between the review and the amendment. That 409 is an ANSWER — the order
+    // exists and may be live — so it must reach the operator as a refusal, never as a retryable failure.
+    stubFetch(() =>
+      Promise.resolve(
+        response(409, { error: 'Only a staged order can be edited — this one has left staging.' }),
+      ),
+    );
+
+    const result = await editStagedOrder('o1', TICKET);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.kind === 'refused') {
+      expect(result.reason).toContain('left staging');
+    } else {
+      expect.unreachable('a 409 with an error body is a refusal, not a failure');
     }
   });
 });

@@ -20,6 +20,7 @@ import {
   cancelConditionalOrder,
   cancelOrder,
   createConditionalOrder,
+  editStagedOrder,
   takeStagedOrder,
 } from '../api/orders';
 import { ConditionalPending } from './ConditionalPending';
@@ -67,6 +68,27 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
   const [refusal, setRefusal] = useState<string | null>(null);
   const [type, setType] = useState<OrderType>(proposal.type);
   const [pending, setPending] = useState(false);
+
+  /**
+   * The amend step between arm and send (gh#828, R-11 / R-12, ADR-0007). An operator who armed the wrong size had
+   * to cancel and re-arm; this edits the staged row in place instead.
+   *
+   * `current` is the proposal **as the server now holds it** — the armed one until an edit lands, then the edited
+   * one. Everything the surface says about "what you asked for" reads from here rather than from `proposal`,
+   * because an edit re-gates and the gate's answer must be compared against the number the operator actually
+   * asked for last. Comparing it to the originally armed size would report a resize that did not happen, and a
+   * false resize on this surface teaches the operator to ignore the real one.
+   */
+  const [current, setCurrent] = useState<OrderProposal>(proposal);
+  const [editing, setEditing] = useState(false);
+  const [quantityDraft, setQuantityDraft] = useState('');
+  const [entryDraft, setEntryDraft] = useState('');
+  const editedQuantity = Number(quantityDraft);
+  const editedEntry = Number(entryDraft);
+  // Fail closed, exactly as the conditional's cancel band does: a blank or non-numeric field would serialize to
+  // NaN -> null and silently amend the ticket to something the operator never typed.
+  const editValid =
+    Number.isFinite(editedQuantity) && editedQuantity > 0 && Number.isFinite(editedEntry);
 
   // "Send when conditions met" (gh#655, R-11 / R-12): the opt-in on-trigger mode. Off by default, so the common
   // path stays the three-step arm → review → send. The trigger is drafted as text and parsed on submit; the
@@ -132,10 +154,53 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
           setRefusal(refusalText(result));
           return;
         }
+        // A fresh arm re-bases what was asked for: any earlier edit belonged to a ticket that no longer exists.
+        setCurrent(proposal);
         setStaged(result.data);
       })
       .finally(finish);
   }, [begin, finish, proposal, type]);
+
+  const handleOpenEdit = useCallback(() => {
+    setQuantityDraft(String(current.quantity));
+    setEntryDraft(String(current.entry));
+    setRefusal(null);
+    setEditing(true);
+  }, [current]);
+
+  const handleDiscardEdit = useCallback(() => {
+    setEditing(false);
+    setRefusal(null);
+  }, []);
+
+  const handleApplyEdit = useCallback(() => {
+    // Fail closed on an unusable draft even though Apply is disabled for it — a NaN quantity would reach the
+    // server as null and amend the ticket to something nobody typed.
+    if (staged === null || !editValid) {
+      return;
+    }
+    const next: OrderProposal = { ...current, quantity: editedQuantity, entry: editedEntry, type };
+    if (!begin()) {
+      return; // never a second amendment of the same staged row
+    }
+    setRefusal(null);
+    // The account is already on the staged row — an edit addresses the order by id, so only the order travels.
+    const { order } = splitProposal(next);
+    void editStagedOrder(staged.orderId, order)
+      .then((result) => {
+        if (!result.ok) {
+          // A refused edit changed NOTHING server-side, so the armed decision still describes what a send would
+          // transmit. Keep it — and keep the form open with the reason, so the operator can amend and retry.
+          setRefusal(refusalText(result));
+          return;
+        }
+        // The edit re-gated: this decision, and this asked-for size, replace the ones the arm produced.
+        setCurrent(next);
+        setStaged(result.data);
+        setEditing(false);
+      })
+      .finally(finish);
+  }, [begin, finish, staged, current, editValid, editedQuantity, editedEntry, type]);
 
   const handleSend = useCallback(() => {
     if (staged === null || !begin()) {
@@ -163,9 +228,12 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
       .then(() => {
         setStaged(null);
         setRefusal(null);
+        // The row is gone; drop any amendment with it, so a re-arm starts from the original proposal.
+        setEditing(false);
+        setCurrent(proposal);
       })
       .finally(finish);
-  }, [begin, finish, staged]);
+  }, [begin, finish, staged, proposal]);
 
   const handleCreateConditional = useCallback(() => {
     // Fail closed on an unfireable trigger or an invalid cancel band even though the control is disabled for them —
@@ -237,8 +305,10 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
       data-testid="order-ticket"
       sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, maxWidth: 460 }}
     >
+      {/* Reads the CURRENT proposal, so an applied edit is reflected here rather than leaving the header
+          contradicting the decision panel below it. */}
       <Typography variant="subtitle2">
-        {proposal.symbol} — {proposal.quantity} @ {proposal.entry}
+        {current.symbol} — {current.quantity} @ {current.entry}
       </Typography>
 
       {/* The catastrophic floor rests at the venue on every order (R-5). Stated, never assumed: "insured" is the
@@ -323,7 +393,7 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
 
       {staged !== null ? (
         <GateDecisionPanel
-          requested={proposal.quantity}
+          requested={current.quantity}
           decision={{
             outcome: staged.outcome,
             approvedQuantity: staged.approvedQuantity,
@@ -334,6 +404,28 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
       ) : null}
 
       {conditional !== null ? <ConditionalPending conditional={conditional} /> : null}
+
+      {/* The amendment form (gh#828). Only the two fields an operator actually gets wrong on an armed ticket:
+          the size and the entry. The safety stop is deliberately absent — the R-5 floor is not something this
+          surface may move — and the type stays locked because the staged row was gated as that type. */}
+      {editing ? (
+        <>
+          <TextField
+            size="small"
+            label="Quantity"
+            value={quantityDraft}
+            onChange={(event) => setQuantityDraft(event.target.value)}
+            inputMode="numeric"
+          />
+          <TextField
+            size="small"
+            label="Entry"
+            value={entryDraft}
+            onChange={(event) => setEntryDraft(event.target.value)}
+            inputMode="decimal"
+          />
+        </>
+      ) : null}
 
       {refusal !== null ? <Alert severity="error">{refusal}</Alert> : null}
       {sent !== null ? <Alert severity="success">{sent}</Alert> : null}
@@ -359,13 +451,29 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
           <Button variant="contained" onClick={handleArm} disabled={pending}>
             Arm
           </Button>
+        ) : editing ? (
+          // Send is deliberately absent while an edit is open: a typed-but-unapplied size is not what the server
+          // holds, so a send here would transmit the PRE-edit row while the operator reads the number they typed.
+          <>
+            <Button variant="contained" onClick={handleApplyEdit} disabled={pending || !editValid}>
+              Apply
+            </Button>
+            <Button onClick={handleDiscardEdit} disabled={pending}>
+              Discard
+            </Button>
+          </>
         ) : (
           <>
-            {describeSizing(proposal.quantity, staged).sendable ? (
+            {describeSizing(current.quantity, staged).sendable ? (
               <Button variant="contained" color="primary" onClick={handleSend} disabled={pending}>
                 Send
               </Button>
             ) : null}
+            {/* An edit re-gates, so it is offered even when the armed decision is unsendable — amending a
+                blocked ticket down to a size the gate allows is the point, not a dead end. */}
+            <Button onClick={handleOpenEdit} disabled={pending}>
+              Edit
+            </Button>
             <Button onClick={handleCancel} disabled={pending}>
               Cancel
             </Button>
@@ -374,6 +482,19 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
       </Stack>
     </Box>
   );
+}
+
+/**
+ * Splits a proposal into the account it belongs to and the order itself. The two travel **separately** on every
+ * order path — the account in the URL (arm, conditional) or already on the staged row (edit, take) — never as a
+ * field of the order body, so the account an order acts on is never something a request body can disagree about.
+ */
+function splitProposal(proposal: OrderProposal): {
+  readonly accountId: string;
+  readonly order: SendOrderRequest;
+} {
+  const { accountId, ...order } = proposal;
+  return { accountId, order };
 }
 
 function refusalText(result: {
