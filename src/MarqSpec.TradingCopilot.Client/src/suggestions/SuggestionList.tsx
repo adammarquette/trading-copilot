@@ -151,6 +151,20 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
     );
   }, []);
 
+  // The R-19 degraded-refresh affordance, shared by the loaded and empty returns below. A failed background read
+  // while the socket stays live is the one degraded state the panel would otherwise hide (see `refresh`); it is
+  // subtle and non-destructive, and never shown on the loading / error states (which own their own screens).
+  const staleBanner = staleRefresh ? (
+    <Typography
+      role="status"
+      data-testid="suggestions-stale"
+      variant="caption"
+      sx={{ color: 'warning.main' }}
+    >
+      The last refresh did not go through — what is shown may be out of date.
+    </Typography>
+  ) : null;
+
   if (state.kind === 'loading') {
     return <LoadingState label="Loading suggestions" />;
   }
@@ -171,32 +185,26 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
   }
 
   if (state.suggestions.length === 0) {
+    // An empty panel whose last background refresh failed is the WORST case for R-19: a just-issued suggestion could
+    // be hidden behind a confident "nothing proposed", so the degraded hint shows here too (gh#874 review).
     return (
-      <EmptyState
-        icon={<LightbulbOutlinedIcon sx={{ fontSize: 40 }} />}
-        title="No setup right now"
-        // "Nothing proposed" is a normal, frequent state — the honest answer when conditions are not there. It is
-        // told apart from a failed load above, because an operator who reads one as the other trades on nothing.
-        description="The co-pilot has nothing to propose on this account. Passed and expired setups stay in the journal."
-        tag="R-4"
-      />
+      <>
+        {staleBanner}
+        <EmptyState
+          icon={<LightbulbOutlinedIcon sx={{ fontSize: 40 }} />}
+          title="No setup right now"
+          // "Nothing proposed" is a normal, frequent state — the honest answer when conditions are not there. It is
+          // told apart from a failed load above, because an operator who reads one as the other trades on nothing.
+          description="The co-pilot has nothing to propose on this account. Passed and expired setups stay in the journal."
+          tag="R-4"
+        />
+      </>
     );
   }
 
   return (
     <Stack data-testid="suggestion-list" sx={{ gap: 1.5, p: 2 }}>
-      {staleRefresh && (
-        // A degraded background refresh must look degraded (R-19). Kept subtle and non-destructive — the list is
-        // still the operator's, it just may not be current — and never shown on the empty / loading / error states.
-        <Typography
-          role="status"
-          data-testid="suggestions-stale"
-          variant="caption"
-          sx={{ color: 'warning.main' }}
-        >
-          This list may be out of date — the last refresh did not go through.
-        </Typography>
-      )}
+      {staleBanner}
       {state.suggestions.map((suggestion) => (
         <SuggestionCard
           key={suggestion.id}
