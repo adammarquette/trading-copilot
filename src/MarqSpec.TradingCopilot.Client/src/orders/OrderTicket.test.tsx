@@ -492,6 +492,23 @@ describe('OrderTicket — edit an armed order in place (gh#828)', () => {
     expect(edit).not.toHaveBeenCalled();
   });
 
+  it('disables Apply for a cleared field but shows no error until something invalid is typed (gh#895)', async () => {
+    // The error must appear only once the operator has typed something invalid — never on a pristine or mid-clear
+    // field. A red field the instant a digit is deleted reads as "you did something wrong" when they have not yet;
+    // Apply is already disabled (a blank draft is not `> 0`), which is signal enough while the field is empty.
+    await renderTicket();
+    await click(/arm/i);
+    await click(/^edit$/i);
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/quantity/i), { target: { value: '' } });
+    });
+
+    expect((screen.getByRole('button', { name: /apply/i }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(screen.queryByText(/whole number of contracts/i)).toBeNull();
+  });
+
   it('offers no send while an edit is open, so an unapplied change cannot be transmitted', async () => {
     // A typed-but-unapplied size is not what the server holds. Leaving Send live beside it would transmit the
     // PRE-edit staged row while the operator is looking at the number they just typed.
