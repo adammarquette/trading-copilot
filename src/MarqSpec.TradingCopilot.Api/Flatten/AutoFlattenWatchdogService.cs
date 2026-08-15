@@ -53,6 +53,13 @@ public sealed class AutoFlattenWatchdogService
     /// <summary>Exposure remains past the firing window — the loudest alarm; firing blind now is worse than escalating.</summary>
     public const string CriticalEventType = "flatten.watchdog.critical";
 
+    /// <summary>
+    /// A held account the venue's live roster did not report, so this pass could not evaluate it (gh#850, the
+    /// watchdog's half of gh#527). Its own type rather than the primary's, so a gap can be attributed to the tier
+    /// that saw it — the same reason every other event here is <c>flatten.watchdog.*</c>.
+    /// </summary>
+    public const string UnrosteredEventType = "flatten.watchdog.unrostered";
+
     private readonly TradingCopilotDbContext _database;
     private readonly IProjectXVenueFactory _venueFactory;
     private readonly IEventLog _eventLog;
@@ -147,6 +154,13 @@ public sealed class AutoFlattenWatchdogService
                 VenueAccount? venueAccount = roster.FirstOrDefault(candidate => candidate.Id.Key == account.VenueAccountKey);
                 if (venueAccount is null)
                 {
+                    // Held, but the venue's live roster does not report it, so there is no exposure to read this
+                    // pass. Silence here is the worst of the three tiers to leave: this is the REDUNDANT net, so a
+                    // partial-roster glitch that hides an exposed account from the primary hides it from its
+                    // backstop at the same moment (R-13, gh#850). Best-effort, exactly like the primary's — the
+                    // account cannot be acted on, so a recording fault must never abort the pass and starve one
+                    // that can.
+                    await RecordUnrosteredAsync(account, now, cancellationToken);
                     continue;
                 }
 
@@ -352,6 +366,42 @@ public sealed class AutoFlattenWatchdogService
         catch (Exception error)
         {
             _logger.LogError(error, "Could not resolve incident {Incident}; the watchdog is unaffected.", incidentKey);
+        }
+    }
+
+    /// <summary>
+    /// Records — best-effort — that a held account was absent from the venue's live roster on a watchdog pass
+    /// (gh#850), the redundant tier's mirror of <c>AutoFlattenService.RecordUnrosteredAsync</c> (gh#527): the
+    /// <c>trading.flatten.deadlines</c> counter meters it under this tier so a persistent gap can alert, and a
+    /// <see cref="UnrosteredEventType"/> event names the account.
+    /// </summary>
+    /// <remarks>
+    /// It does not reuse <see cref="JournalAsync"/> because there is no contract and no venue account id to carry
+    /// — the venue never named the account. A <b>secondary</b> write about an <i>un-actable</i> account, so a fault
+    /// must never abort the pass and starve an account this tier could still save; it is swallowed like the audit
+    /// and notification writes. The counter is recorded first, so a persistent roster gap stays alertable even
+    /// while the event log is faulting.
+    /// </remarks>
+    private async Task RecordUnrosteredAsync(Account account, DateTimeOffset occurredAt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            _metrics.RecordFlattenDeadline(FlattenTier.Watchdog, ExecutionMetrics.FlattenUnrostered);
+
+            string payload = JsonSerializer.Serialize(new
+            {
+                account = account.VenueAccountKey,
+                reason = "held account absent from the venue roster; not backstopped this pass",
+            });
+            await _eventLog.AppendAsync(new EventDraft(UnrosteredEventType, EventSource, occurredAt, payload), cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw; // a real shutdown still stops the host
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(error, "Could not record unrostered account {Account}; the watchdog pass is unaffected.", account.VenueAccountKey);
         }
     }
 
