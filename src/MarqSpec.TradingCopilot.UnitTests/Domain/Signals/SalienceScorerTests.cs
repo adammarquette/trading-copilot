@@ -213,6 +213,19 @@ public class SalienceScorerTests
     }
 
     [Fact]
+    public void AZeroedSemanticWeight_AddsNoSemanticReason_EvenWithAPositiveSimilarity()
+    {
+        // Dialling the semantic axis to zero (without disabling the embedding read) contributes nothing, so — like a
+        // zero-weight categorical dimension (CollectReasons) — it must pin NO "weighted up in meaning" reason on the
+        // item. Otherwise the "why weighted" panel (R-4 / R-9) explains a contribution that is not there.
+        SalienceScore score = ScoreSemantic(
+            Dims() with { SemanticSimilarity = 0.7 }, _params with { SemanticWeight = 0.0 });
+
+        score.Multiplier.Should().Be(1.0);
+        score.Reasons.Should().NotContain(reason => reason.Dimension == SalienceDimension.SemanticEmbedding);
+    }
+
+    [Fact]
     public void TheSemanticContribution_ScalesWithSimilarity()
     {
         double near = ScoreSemantic(Dims() with { SemanticSimilarity = 0.9 }).Multiplier;
