@@ -101,9 +101,15 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
    * The entry-action split button (gh#828, gh#218): the operator's declared default acts on click, the other
    * action sits in the menu. Two rules decide what it may offer, and both fail toward review-first.
    *
-   * **The roster must vouch for the account.** Resolved from the OPTIONAL context, so a ticket mounted without a
-   * provider degrades to plain arm → review → send instead of throwing: the fast path is a convenience, and a
-   * menu whose entries cannot be vouched for is worse than no menu.
+   * **The roster must vouch for the account, and vouching means `tradeableHere`.** Resolved from the OPTIONAL
+   * context, so a ticket mounted without a provider degrades to plain arm → review → send instead of throwing:
+   * the fast path is a convenience, and a menu whose entries cannot be vouched for is worse than no menu.
+   *
+   * The eligibility test is the server's own per-request `tradeableHere` — practice anywhere, live only in
+   * production, **undeclared nowhere** — never "the roster has a mode for it". `TradingMode.Undeclared` is the
+   * enum's zero, so a mode-presence check (`mode ?? null`, then `!== null`) reads `0` as a real answer and offers
+   * a one-click transmit for the one account class this system refuses **everywhere, production included**
+   * (#879 review). Deriving eligibility from the field built to answer it is what keeps that from recurring.
    *
    * **Defaulting to `SendAsIs` is practice-only (gh#218).** The preference can only be *declared* on a practice
    * account, but an account's mode can change under a stored one — so the mode is re-checked here at render
@@ -112,10 +118,11 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
    * menu, where choosing it is an explicit gesture, and every gate still runs on it either way.
    */
   const accounts = useOptionalAccounts();
-  const accountMode =
+  const resolvedAccount =
     accounts?.status === 'ready'
-      ? (accounts.accounts.find((candidate) => candidate.id === proposal.accountId)?.mode ?? null)
-      : null;
+      ? accounts.accounts.find((candidate) => candidate.id === proposal.accountId)
+      : undefined;
+  const fastPathOffered = resolvedAccount?.tradeableHere ?? false;
   const [defaultAction, setDefaultAction] = useState<DefaultEntryAction>(
     DefaultEntryAction.ApproveAndArm,
   );
@@ -129,7 +136,7 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
     };
   }, []);
   useEffect(() => {
-    if (accountMode === null) {
+    if (!fastPathOffered) {
       return; // nothing to offer, so nothing to read
     }
     const token = (profileToken.current += 1);
@@ -145,12 +152,11 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
           : DefaultEntryAction.ApproveAndArm,
       );
     });
-  }, [proposal.accountId, accountMode]);
-  const fastPathOffered = accountMode !== null;
+  }, [proposal.accountId, fastPathOffered]);
   const sendAsIsPrimary =
     fastPathOffered &&
     defaultAction === DefaultEntryAction.SendAsIs &&
-    accountMode === TradingMode.Practice;
+    resolvedAccount?.mode === TradingMode.Practice;
 
   // "Send when conditions met" (gh#655, R-11 / R-12): the opt-in on-trigger mode. Off by default, so the common
   // path stays the three-step arm → review → send. The trigger is drafted as text and parsed on submit; the
