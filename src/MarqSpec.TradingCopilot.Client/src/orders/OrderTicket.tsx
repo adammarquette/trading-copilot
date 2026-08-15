@@ -93,9 +93,13 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
   const editedQuantity = Number(quantityDraft);
   const editedEntry = Number(entryDraft);
   // Fail closed, exactly as the conditional's cancel band does: a blank or non-numeric field would serialize to
-  // NaN -> null and silently amend the ticket to something the operator never typed.
-  const editValid =
-    Number.isFinite(editedQuantity) && editedQuantity > 0 && Number.isFinite(editedEntry);
+  // NaN -> null and silently amend the ticket to something the operator never typed. The quantity must also be a
+  // WHOLE positive number of contracts -- a fractional count fails ASP.NET model binding before the endpoint runs
+  // (a bare 400 the operator cannot read); the entry must be a positive price. R-16 re-gates server-side, but the
+  // form owes the operator the reason here rather than a cryptic server error (gh#895).
+  const quantityValid = Number.isInteger(editedQuantity) && editedQuantity > 0;
+  const entryValid = Number.isFinite(editedEntry) && editedEntry > 0;
+  const editValid = quantityValid && entryValid;
 
   /**
    * The entry-action split button (gh#828, gh#218): the operator's declared default acts on click, the other
@@ -515,6 +519,12 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
             value={quantityDraft}
             onChange={(event) => setQuantityDraft(event.target.value)}
             inputMode="numeric"
+            error={quantityDraft.trim() !== '' && !quantityValid}
+            helperText={
+              quantityDraft.trim() !== '' && !quantityValid
+                ? 'A whole number of contracts, greater than zero.'
+                : undefined
+            }
           />
           <TextField
             size="small"
@@ -522,6 +532,10 @@ export function OrderTicket({ proposal }: { readonly proposal: OrderProposal }) 
             value={entryDraft}
             onChange={(event) => setEntryDraft(event.target.value)}
             inputMode="decimal"
+            error={entryDraft.trim() !== '' && !entryValid}
+            helperText={
+              entryDraft.trim() !== '' && !entryValid ? 'A price greater than zero.' : undefined
+            }
           />
         </>
       ) : null}
