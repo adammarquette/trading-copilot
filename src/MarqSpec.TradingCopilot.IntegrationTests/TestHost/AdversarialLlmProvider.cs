@@ -147,4 +147,33 @@ public sealed class AdversarialLlmProvider : ILlmProvider
             return Task.FromResult(new LlmCompletion(body, _stopReason, _usage));
         }
     }
+
+    /// <inheritdoc />
+    public async Task<LlmCompletion> StreamAsync(
+        LlmRequest request, Func<string, CancellationToken, Task> onDelta, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(onDelta);
+
+        string body;
+        LlmStopReason stopReason;
+        LlmUsage usage;
+        lock (_gate)
+        {
+            // Recorded and fault-scripted exactly as CompleteAsync (the request counts even on a fault).
+            _requests.Add(request);
+            if (_throws)
+            {
+                throw new InvalidOperationException("the review provider is unavailable (test)");
+            }
+
+            body = _textByTier.TryGetValue(request.Tier, out string? scripted) ? scripted : _text;
+            stopReason = _stopReason;
+            usage = _usage;
+        }
+
+        // Emit the scripted body as a single delta (outside the lock -- never await while holding it): still raw model
+        // output, never the decision. The accumulated completion matches CompleteAsync so pricing / fail-closed agree.
+        await onDelta(body, cancellationToken);
+        return new LlmCompletion(body, stopReason, usage);
+    }
 }

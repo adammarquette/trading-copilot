@@ -46,7 +46,25 @@ public class ChatTurnEndpointTests
         new(AiUsageFeature.Chat, "claude-sonnet-5", LlmModelTier.Deep, outcome, 100, 20, usd, TimeSpan.FromMilliseconds(50));
 
     private void TurnReturns(ChatTurnResult result) =>
-        A.CallTo(() => _turn.CompleteAsync(A<IReadOnlyList<ChatMessage>>._, A<CancellationToken>._)).Returns(result);
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).Returns(result);
+
+    // Makes the fake turn service stream the given deltas to the endpoint's onDelta (which pushes to the hub), then
+    // return the result -- so a test can assert the endpoint forwarded each delta.
+    private void TurnStreams(ChatTurnResult result, params string[] deltas) =>
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
+            .ReturnsLazily((IReadOnlyList<ChatMessage> _, Func<string, CancellationToken, Task> onDelta, CancellationToken ct) =>
+                EmitAsync(onDelta, ct, result, deltas));
+
+    private static async Task<ChatTurnResult> EmitAsync(
+        Func<string, CancellationToken, Task> onDelta, CancellationToken ct, ChatTurnResult result, string[] deltas)
+    {
+        foreach (string delta in deltas)
+        {
+            await onDelta(delta, ct);
+        }
+
+        return result;
+    }
 
     private async Task<Guid> SeedConversationAsync(Guid? owner = null)
     {
@@ -113,6 +131,37 @@ public class ChatTurnEndpointTests
     }
 
     [Fact]
+    public async Task TurnAsync_ShouldPushEachStreamedDelta_ToTheOwner_DuringTheTurn()
+    {
+        Guid id = await SeedConversationAsync();
+        TurnStreams(new ChatTurnResult(true, "Hello", Cost()), "Hel", "lo");
+
+        IResult result = await Invoke(id, "hi", At(3));
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        // Each token delta reaches the conversation's owner as a realtimeChatChunk during the turn (inc 3b).
+        A.CallTo(() => _notifier.ChunkAsync(
+            _operator, A<RealtimeChatChunk>.That.Matches(c => c.ConversationId == id && c.Delta == "Hel"), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => _notifier.ChunkAsync(
+            _operator, A<RealtimeChatChunk>.That.Matches(c => c.Delta == "lo"), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task TurnAsync_ShouldStillSucceed_WhenAStreamedChunkPushThrows()
+    {
+        Guid id = await SeedConversationAsync();
+        TurnStreams(new ChatTurnResult(true, "Hello", Cost()), "Hel");
+        A.CallTo(() => _notifier.ChunkAsync(A<Guid>._, A<RealtimeChatChunk>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("hub down"));
+
+        IResult result = await Invoke(id, "hi", At(3));
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK); // a per-chunk push is fail-open, never fails the turn
+    }
+
+    [Fact]
     public async Task TurnAsync_ShouldReturn404_AndMakeNoCall_ForAForeignConversation()
     {
         Guid foreign = await SeedConversationAsync(owner: Guid.NewGuid());
@@ -120,7 +169,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(foreign, "sneak in", At(3));
 
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
-        A.CallTo(() => _turn.CompleteAsync(A<IReadOnlyList<ChatMessage>>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
         A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
@@ -132,7 +181,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(id, "   ", At(3));
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
-        A.CallTo(() => _turn.CompleteAsync(A<IReadOnlyList<ChatMessage>>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
     [Fact]
@@ -144,7 +193,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(id, tooLong, At(3));
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
-        A.CallTo(() => _turn.CompleteAsync(A<IReadOnlyList<ChatMessage>>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
     [Fact]
@@ -156,7 +205,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(id, "hi", At(3), governor: new GovernorOptions { DailyBudgetUsd = 10m });
 
         StatusOf(result).Should().Be(StatusCodes.Status429TooManyRequests);
-        A.CallTo(() => _turn.CompleteAsync(A<IReadOnlyList<ChatMessage>>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
         await using TradingCopilotDbContext verify = Context();
         (await verify.ChatMessages.AnyAsync()).Should().BeFalse(); // a governor block persists nothing
     }
@@ -171,7 +220,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(id, "hi", At(3), governor: new GovernorOptions { DailyBudgetUsd = 10m });
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
-        A.CallTo(() => _turn.CompleteAsync(A<IReadOnlyList<ChatMessage>>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
     }
 
     [Fact]
