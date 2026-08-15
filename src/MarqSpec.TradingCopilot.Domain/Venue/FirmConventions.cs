@@ -94,7 +94,7 @@ public sealed record FirmConventions
     /// rather than from per-stage declarations (gh#780).
     /// </summary>
     /// <param name="firm">The firm's name.</param>
-    /// <returns>Conventions that resolve mode from the venue flag supplied at <see cref="ModeFor(AccountStage, bool)"/>.</returns>
+    /// <returns>Conventions that resolve mode from the venue flag supplied at <see cref="ModeFor(AccountStage, bool?)"/>.</returns>
     /// <remarks>
     /// <para>
     /// There are no stage declarations to make. A brokerage has no evaluation / funded ladder, its account names
@@ -127,18 +127,31 @@ public sealed record FirmConventions
     /// </summary>
     /// <param name="stage">The account's stage. Ignored when <see cref="ModeFollowsVenue"/>.</param>
     /// <param name="venueReportsSimulated">
-    /// Whether the <b>venue</b> reports this account as simulated / paper. Consulted <b>only</b> for a firm whose
-    /// <see cref="ModeFollowsVenue"/> — at a prop firm this flag is precisely the thing R-14 refuses to trust.
+    /// Whether the <b>venue</b> reports this account as simulated / paper, or <see langword="null"/> when it has
+    /// never been observed. Consulted <b>only</b> for a firm whose <see cref="ModeFollowsVenue"/> — at a prop firm
+    /// this flag is precisely the thing R-14 refuses to trust.
     /// </param>
     /// <returns>The resolved mode, or <see cref="TradingMode.Undeclared"/> when nothing authorises an answer.</returns>
-    public TradingMode ModeFor(AccountStage stage, bool venueReportsSimulated)
+    public TradingMode ModeFor(AccountStage stage, bool? venueReportsSimulated)
     {
         // A brokerage's mode is the venue's answer, and the stage is not consulted at all -- there is no ladder to
         // read and no declaration to match. A prop firm's mode ignores the flag entirely (R-14): a funded account
         // reports `simulated` and is nonetheless Live, which is the inversion this branch must never introduce.
-        return ModeFollowsVenue
-            ? venueReportsSimulated ? TradingMode.Practice : TradingMode.Live
-            : ModeFor(stage);
+        //
+        // Unobserved is NOT "not simulated": a null resolves to Undeclared rather than Live, so an account whose
+        // flag nobody has read is refused everywhere until a discovery fills it in, rather than becoming
+        // live-tradeable off a default.
+        if (!ModeFollowsVenue)
+        {
+            return ModeFor(stage);
+        }
+
+        return venueReportsSimulated switch
+        {
+            true => TradingMode.Practice,
+            false => TradingMode.Live,
+            null => TradingMode.Undeclared,
+        };
     }
 
     /// <summary>Resolves what an account at this stage means economically.</summary>
@@ -150,7 +163,7 @@ public sealed record FirmConventions
     /// <remarks>
     /// The stage-only form. It cannot answer for a firm whose <see cref="ModeFollowsVenue"/> — it has no flag to
     /// read — so such a firm resolves to <see cref="TradingMode.Undeclared"/> here: fail closed rather than guess.
-    /// A caller that can supply the venue's flag uses <see cref="ModeFor(AccountStage, bool)"/>.
+    /// A caller that can supply the venue's flag uses <see cref="ModeFor(AccountStage, bool?)"/>.
     /// </remarks>
     public TradingMode ModeFor(AccountStage stage)
     {
