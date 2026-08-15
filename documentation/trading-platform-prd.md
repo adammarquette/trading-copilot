@@ -277,6 +277,9 @@ then [Nice-to-Have (P1)](#nice-to-have-p1) · [Future Considerations (P2)](#futu
 **R-15: Record removal — soft delete (default) + hard delete.** The trader can remove a trade record from the learning signal and default views via two operations:
 - **Soft delete (default):** a `deleted` toggle that excludes the record from all suggestion-engine training and default stats and hides it from default views, while retaining the full record and an audit trail. Reversible.
 - **Hard delete (explicit):** permanently erases the record. A deliberate, confirmed action and the exception — not the default — since it removes the honest-recovery path.
+
+**Delivered — the `Outcome` model + R-15 flag semantics (gh#832):** the three flags persist on the `Outcome` entity and are set only through its methods, so they can't be re-collapsed into one — `SoftDelete()` turns on all three together (the reversible combined shortcut), `Restore()` reverses, and `training_excluded` / `hidden_from_user` are each settable alone (proven test-first). The resolution (win / loss / no-fill-scratch / expired) derives from a closed trade's signed P&L or an unfilled suggestion's terminal disposition via a pure function, and `OutcomeQueries` gives the flag-honouring read that toggles inclusive vs. exclusive of soft-deleted rows from one call. **Still outstanding** (boxes stay unticked): the removal **operation / endpoint**, the confirmed **hard delete** and its audit fact (the paired I/O follow-on), and the report surface ([J2]/[J3]).
+
 - [ ] Soft delete is the default removal action and is reversible (un-toggling restores the record to learning and stats)
 - [ ] The soft-delete audit trail preserves the original record and the exclusion (what, when, why-optional)
 - [ ] Reports can be toggled to show figures inclusive vs. exclusive of soft-deleted records, so the honest picture stays recoverable
