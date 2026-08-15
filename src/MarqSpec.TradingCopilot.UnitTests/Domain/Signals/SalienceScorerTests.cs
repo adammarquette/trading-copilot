@@ -226,6 +226,22 @@ public class SalienceScorerTests
     }
 
     [Fact]
+    public void ANegativeSemanticWeight_StillAddsAReason_WithANegativeContribution()
+    {
+        // The guard is weight-non-zero, NOT weight-positive: a negative weight (down-weighting items near the
+        // operator's stars — the semantic mirror of a categorical mute) is a real contribution, so its reason and its
+        // negative pull on the multiplier are kept. This locks `!= 0.0` against a refactor to `> 0.0`, which would
+        // silently drop the down-weight and read green against the zero-weight case alone.
+        SalienceScore score = ScoreSemantic(
+            Dims() with { SemanticSimilarity = 0.7 }, _params with { SemanticWeight = -1.0 });
+
+        score.Reasons.Should()
+            .ContainSingle(reason => reason.Dimension == SalienceDimension.SemanticEmbedding)
+            .Which.Contribution.Should().BeLessThan(0.0);
+        score.Multiplier.Should().BeLessThan(1.0); // the negative contribution down-weights the item
+    }
+
+    [Fact]
     public void TheSemanticContribution_ScalesWithSimilarity()
     {
         double near = ScoreSemantic(Dims() with { SemanticSimilarity = 0.9 }).Multiplier;
