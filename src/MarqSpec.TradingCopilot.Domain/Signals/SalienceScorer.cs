@@ -14,6 +14,11 @@ namespace MarqSpec.TradingCopilot.Domain.Signals;
 /// </remarks>
 public static class SalienceScorer
 {
+    // The semantic axis is operator-relative (nearness to the whole starred set), so its reason has no single shared
+    // value the way an instrument or topic does; this stands in as the reason's Value for explainability and stable
+    // tie-break ordering. The API's "why weighted" label reads the SemanticEmbedding dimension, not this string.
+    private const string SemanticValue = "your starred items";
+
     /// <summary>Scores an item's salience multiplier against an operator's profile.</summary>
     /// <param name="profile">The operator's accumulated, decayed weights.</param>
     /// <param name="item">The item's similarity dimensions.</param>
@@ -29,6 +34,16 @@ public static class SalienceScorer
         CollectReasons(reasons, profile, SalienceDimension.Instrument, item.Instruments);
         CollectReasons(reasons, profile, SalienceDimension.Topic, item.Topics);
         CollectReasons(reasons, profile, SalienceDimension.Source, item.Sources);
+
+        // The semantic-embedding axis (gh#853) is operator-relative and rides on the item: the caller has already
+        // scored this item's max cosine similarity to the operator's stars, so — unlike the categorical dimensions —
+        // it needs no profile lookup. A positive similarity adds one SemanticEmbedding reason, weighted like any
+        // other; a null (axis off) or non-positive (no nearer-than-orthogonal star) similarity contributes nothing.
+        if (item.SemanticSimilarity is double similarity && similarity > 0.0)
+        {
+            reasons.Add(new SalienceReason(
+                SalienceDimension.SemanticEmbedding, SemanticValue, similarity * parameters.SemanticWeight));
+        }
 
         // The multiplier is 1 (base) plus the summed signed contributions of every dimension the item shares with the
         // operator's feedback, clamped so a stack of stars can't run away (cap) and a stack of mutes can't hide a

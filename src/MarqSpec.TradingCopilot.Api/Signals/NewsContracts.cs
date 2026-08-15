@@ -90,6 +90,9 @@ public sealed record NewsFeedItemResponse(
         SalienceDimension.Instrument => $"on {reason.Value}",
         SalienceDimension.Topic => $"about {reason.Value}",
         SalienceDimension.Source => $"from {reason.Value}",
+        // The semantic axis is operator-relative (nearness to the whole starred set), so — unlike the categorical
+        // dimensions — it reads no per-value; it explains the "why weighted" as similarity in meaning (gh#853).
+        SalienceDimension.SemanticEmbedding => "in meaning",
         _ => reason.Value,
     };
 }

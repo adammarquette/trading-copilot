@@ -29,6 +29,9 @@ public sealed class SalienceOptions
     /// <summary>Per-star weight along a shared source (a weaker similarity signal than instrument/topic).</summary>
     public double SourceWeight { get; init; } = 0.5;
 
+    /// <summary>Weight on the semantic-embedding axis — how much nearness to a starred item raises salience (gh#853).</summary>
+    public double SemanticWeight { get; init; } = 1.0;
+
     /// <summary>The number of feed items returned when the caller gives no limit.</summary>
     public int DefaultFeedLimit { get; init; } = 50;
 
@@ -38,5 +41,5 @@ public sealed class SalienceOptions
     /// <summary>Projects the bound options into the domain scorer's parameters.</summary>
     /// <returns>The domain parameters.</returns>
     public SalienceParameters ToParameters() =>
-        new(HalfLifeDays, MultiplierCap, MultiplierFloor, InstrumentWeight, TopicWeight, SourceWeight);
+        new(HalfLifeDays, MultiplierCap, MultiplierFloor, InstrumentWeight, TopicWeight, SourceWeight, SemanticWeight);
 }

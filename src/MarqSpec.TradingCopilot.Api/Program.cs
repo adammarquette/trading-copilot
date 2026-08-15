@@ -342,6 +342,13 @@ builder.Services.AddHostedService<NewsEmbeddingHost>();
 builder.Services.AddScoped<INewsEmbeddingSimilarity, PgVectorNewsSimilarity>();
 builder.Services.AddScoped<NewsSemanticSearch>();
 
+// The semantic-embedding salience axis (gh#853, R-2, R-9): the news-feed consumer of the read seam above. It ranks
+// each candidate's embedding nearness to the operator's STARRED items (max cosine similarity) into the operator-
+// relative axis SalienceScorer folds into an item's multiplier, degrading to an empty map -- the categorical-only
+// feed -- when the provider or the pgvector read is unavailable. SCOPED: it holds the scoped INewsEmbeddingSimilarity
+// (its production impl carries the scoped DbContext), so a singleton would be a captive dependency (the #852 lesson).
+builder.Services.AddScoped<SemanticSalienceAxis>();
+
 builder.Services.AddScoped<ProtectionMonitorService>();
 builder.Services.AddHostedService<ProtectionMonitorHost>();
 
