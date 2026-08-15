@@ -95,7 +95,7 @@ erDiagram
   Order         ||--o{ GateDecision           : checked
 
   Trade         ||--o{ TradeFeedback          : "annotated by"
-  Trade         ||--|| Outcome                : resolves
+  Trade         ||--o| Outcome                : resolves
 
   Rule          ||--o{ Trigger                : "compiles to"
   Trigger       ||--o{ TriggerFiring          : "fires"
@@ -168,7 +168,9 @@ identifier, so a domain is never renumbered.
   in `AccountSnapshot`, so a past snapshot stays interpretable — and backtests / audits stay correct — after the
   derivation logic changes (ADR-0009, eng §9).
 - **Exclusion & soft-delete (R-15)** — the three orthogonal flags are defined once under *Conventions* above
-  (`training_excluded` / `hidden_from_user` / `deleted`); still deferred (no entity persists them yet).
+  (`training_excluded` / `hidden_from_user` / `deleted`); **persisted on the `Outcome` entity and set only through its
+  methods** so they can't be re-collapsed — soft-delete is the reversible combined shortcut, the two are settable
+  independently (gh#832).
 - **Synthetic orders carry orphan risk (ADR-0007).** A synthetic / in-app stop or bracket needs the connection live;
   on connection loss the affected orders move to **orphaned → emergency**, the `AuditRecord` flags the
   `synthetic_risk` (now written per transition, gh#220), and the operator is alerted (a high-severity log until the
