@@ -3,14 +3,17 @@ namespace MarqSpec.TradingCopilot.Domain.Journal;
 /// <summary>The terminal fact an <c>Outcome</c> resolves over (gh#832, R-9).</summary>
 public enum OutcomeBasis
 {
+    /// <summary>The unset zero — not a real basis; <c>TryResolve</c> refuses it (fail closed).</summary>
+    Unknown = 0,
+
     /// <summary>A round trip closed; the signed realized P&amp;L carries the result.</summary>
-    ClosedTrade = 0,
+    ClosedTrade = 1,
 
     /// <summary>The suggestion's validity window passed with no fill.</summary>
-    ExpiredUnfilled = 1,
+    ExpiredUnfilled = 2,
 
     /// <summary>The suggestion was passed / cancelled with no fill, before it could expire.</summary>
-    Scratched = 2,
+    Scratched = 3,
 }
 
 /// <summary>

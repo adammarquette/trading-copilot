@@ -66,6 +66,16 @@ public class OutcomeResolutionPolicyTests
     }
 
     [Fact]
+    public void TryResolve_ShouldRefuse_WhenTheBasisIsTheUnknownSentinel()
+    {
+        // The unset zero is not a real basis -- fail closed rather than resolve it.
+        OutcomeResolutionPolicy.TryResolve(OutcomeBasis.Unknown, 10m, out OutcomeResolution resolution)
+            .Should().BeFalse();
+
+        resolution.Should().Be(OutcomeResolution.Unknown);
+    }
+
+    [Fact]
     public void TryResolve_ShouldRefuse_WhenTheBasisIsNotADefinedValue()
     {
         // A bad cast / corrupt basis cannot be classified -- exhaustive over the enum, refuse the rest.

@@ -8,7 +8,7 @@ public class OutcomeTests
     private static Outcome AnOutcome() => new() { Resolution = OutcomeResolution.Loss };
 
     [Fact]
-    public void NewOutcome_ShouldBeActive_WithNoRemovalFlagSet()
+    public void NewOutcome_ShouldBeActive_WhenFirstConstructed()
     {
         Outcome outcome = AnOutcome();
 
@@ -18,7 +18,7 @@ public class OutcomeTests
     }
 
     [Fact]
-    public void SoftDelete_ShouldSetAllThreeFlags_AsTheCombinedShortcut()
+    public void SoftDelete_ShouldSetAllThreeFlags_AsR15sReversibleCombinedShortcut()
     {
         // R-15: soft-delete is the combined shortcut -- excluded from training AND hidden, together, reversibly.
         Outcome outcome = AnOutcome();
@@ -31,7 +31,7 @@ public class OutcomeTests
     }
 
     [Fact]
-    public void Restore_ShouldClearAllThreeFlags_ReversingASoftDelete()
+    public void Restore_ShouldClearAllThreeFlags_WhenReversingASoftDelete()
     {
         Outcome outcome = AnOutcome();
         outcome.SoftDelete();
