@@ -10,8 +10,11 @@ import {
   cancelOrder,
   createConditionalOrder,
   editStagedOrder,
+  sendAsIsOrder,
   takeStagedOrder,
 } from '../api/orders';
+import { TradingMode } from '../api/accounts';
+import { DefaultEntryAction, getRiskProfile } from '../api/risk';
 import { RiskLayer } from './gateDecision';
 import { OrderTicket } from './OrderTicket';
 
@@ -25,8 +28,42 @@ vi.mock('../api/orders', async (importOriginal) => ({
   createConditionalOrder: vi.fn(),
   cancelConditionalOrder: vi.fn(),
   editStagedOrder: vi.fn(),
+  sendAsIsOrder: vi.fn(),
 }));
 
+// The roster seam. `useOptionalAccounts` is deliberate: outside a provider it is null, and the ticket must then
+// FAIL CLOSED to plain arm-then-send rather than throw — the fast path is a convenience, never a requirement.
+const { useOptionalAccountsMock } = vi.hoisted(() => ({ useOptionalAccountsMock: vi.fn() }));
+vi.mock('../accounts/AccountProvider', () => ({ useOptionalAccounts: useOptionalAccountsMock }));
+
+vi.mock('../api/risk', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api/risk')>()),
+  getRiskProfile: vi.fn(),
+}));
+
+/**
+ * Puts one account on the roster as the ticket's own. `tradeableHere` is the server's per-request answer to
+ * whether THIS environment may trade it, so it is passed explicitly rather than derived: an `Undeclared` account
+ * is never tradeable anywhere, and a live one is tradeable only in production.
+ */
+function roster(mode: TradingMode, tradeableHere = true) {
+  const account = { id: 'a1', mode, name: 'Account 1', tradeableHere };
+  useOptionalAccountsMock.mockReturnValue({
+    status: 'ready',
+    accounts: [account],
+    activeAccount: account,
+  });
+}
+
+/** The declared profile, carrying only the preference this surface reads. */
+function profile(defaultEntryAction: DefaultEntryAction) {
+  vi.mocked(getRiskProfile).mockResolvedValue({
+    ok: true,
+    data: { accountId: 'a1', defaultEntryAction } as never,
+  });
+}
+
+const sendAsIs = vi.mocked(sendAsIsOrder);
 const edit = vi.mocked(editStagedOrder);
 const arm = vi.mocked(armOrder);
 const take = vi.mocked(takeStagedOrder);
@@ -105,6 +142,22 @@ async function renderTicket() {
 }
 
 beforeEach(() => {
+  // No roster and no declared profile by default: the ticket falls back to plain arm → review → send, which is
+  // what every case below that is not about the split button expects to find.
+  useOptionalAccountsMock.mockReturnValue(null);
+  vi.mocked(getRiskProfile).mockResolvedValue({ ok: true, data: null });
+  sendAsIs.mockResolvedValue({
+    ok: true,
+    data: {
+      outcome: 'Allowed',
+      orderId: 'o9',
+      venueOrderKey: 'v9',
+      approvedQuantity: 5,
+      bindingLayer: null,
+      reason: 'Within every layer.',
+      advisories: [],
+    },
+  });
   arm.mockResolvedValue(staged());
   take.mockResolvedValue({
     ok: true,
@@ -453,6 +506,157 @@ describe('OrderTicket — edit an armed order in place (gh#828)', () => {
     expect(edit).toHaveBeenCalledTimes(1);
     await act(async () => {
       settle(staged({ approvedQuantity: 3 }));
+    });
+  });
+});
+
+describe('OrderTicket — the default-entry-action split button (gh#828, gh#218)', () => {
+  /** Opens the split button's menu. */
+  async function openMenu() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /entry options/i }));
+    });
+  }
+
+  async function chooseFromMenu(name: RegExp) {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name }));
+    });
+  }
+
+  it('falls back to plain Arm when the account cannot be resolved — no menu at all', async () => {
+    // Fail closed. Without the roster the ticket cannot tell whether this account may default to the one-action
+    // send, and a menu whose entries it cannot vouch for is worse than no menu.
+    await renderTicket();
+
+    expect(screen.getByRole('button', { name: /^arm$/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /entry options/i })).toBeNull();
+  });
+
+  it('withholds the fast path entirely for an UNDECLARED account — it produces no orders anywhere', async () => {
+    // `TradingMode.Undeclared` is the enum's zero, and an undeclared account is refused everywhere, production
+    // included. A roster entry that says "tradeable nowhere" is precisely the one that does NOT vouch for the
+    // account, so the split button must not appear at all — no menu, and no reachable one-click transmit.
+    roster(TradingMode.Undeclared, false);
+    profile(DefaultEntryAction.SendAsIs);
+
+    await renderTicket();
+
+    expect(screen.getByRole('button', { name: /^arm$/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /entry options/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /send as-is/i })).toBeNull();
+    expect(sendAsIs).not.toHaveBeenCalled();
+  });
+
+  it('withholds it where THIS environment may not trade the account (R-14), rather than offering a control that must fail', async () => {
+    // A live account outside production is refused by the server on every order path. Offering the fast path for
+    // it would be a control that always fails — the same reasoning that keeps TrailingStop off this ticket.
+    roster(TradingMode.Live, false);
+
+    await renderTicket();
+
+    expect(screen.queryByRole('button', { name: /entry options/i })).toBeNull();
+  });
+
+  it('keeps Approve & arm primary when no profile is declared, offering the fast path in the menu', async () => {
+    // `ApproveAndArm` is the enum's zero on purpose: an unset or never-written profile resolves to review-first,
+    // never to the one-action send.
+    roster(TradingMode.Practice);
+
+    await renderTicket();
+
+    expect(screen.getByRole('button', { name: /^arm$/i })).toBeTruthy();
+    await openMenu();
+    expect(screen.getByRole('menuitem', { name: /send as-is/i })).toBeTruthy();
+  });
+
+  it('makes the operator’s declared default the primary action on a practice account', async () => {
+    roster(TradingMode.Practice);
+    profile(DefaultEntryAction.SendAsIs);
+
+    await renderTicket();
+
+    expect(screen.getByRole('button', { name: /send as-is/i })).toBeTruthy();
+    await openMenu();
+    expect(screen.getByRole('menuitem', { name: /approve & arm/i })).toBeTruthy();
+  });
+
+  it('DEMOTES a SendAsIs default on a live account — defaulting to it is practice-only (gh#218)', async () => {
+    // The preference can only be SET on a practice account, but an account's mode can change under a stored one.
+    // Letting it stay the primary click would turn "skip the review" into the default on real money, which is
+    // exactly what the practice-only rule exists to prevent. It stays reachable, deliberately, from the menu.
+    roster(TradingMode.Live);
+    profile(DefaultEntryAction.SendAsIs);
+
+    await renderTicket();
+
+    expect(screen.getByRole('button', { name: /^arm$/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /send as-is/i })).toBeNull();
+  });
+
+  it('sends in ONE action when the fast path is chosen, staging nothing', async () => {
+    roster(TradingMode.Practice);
+
+    await renderTicket();
+    await openMenu();
+    await chooseFromMenu(/send as-is/i);
+
+    expect(sendAsIs).toHaveBeenCalledWith(
+      'a1',
+      expect.objectContaining({ quantity: 5, safetyStop: 4_990, type: OrderType.Market }),
+    );
+    expect(arm).not.toHaveBeenCalled();
+    expect(screen.getByTestId('order-ticket').textContent?.toLowerCase()).toContain('sent');
+  });
+
+  it('renders a refused fast-path send — it skips the review, never the gate', async () => {
+    roster(TradingMode.Practice);
+    sendAsIs.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 409,
+      reason: 'The daily governor leaves room for nothing.',
+    });
+
+    await renderTicket();
+    await openMenu();
+    await chooseFromMenu(/send as-is/i);
+
+    expect(screen.getByTestId('order-ticket').textContent).toContain('daily governor');
+    expect(screen.queryByTestId('gate-decision')).toBeNull();
+  });
+
+  it('does not send twice when the fast path is chosen again before the first resolves', async () => {
+    // A send-as-is IS a transmission, and transmission is not idempotent (ProjectX ADR-0002) — so this needs the
+    // same synchronous guard as Send, not merely a disabled control.
+    roster(TradingMode.Practice);
+    profile(DefaultEntryAction.SendAsIs);
+    let settle!: () => void;
+    sendAsIs.mockReturnValue(
+      new Promise((resolve) => {
+        settle = () =>
+          resolve({
+            ok: true,
+            data: {
+              outcome: 'Allowed',
+              orderId: 'o9',
+              venueOrderKey: 'v9',
+              approvedQuantity: 5,
+              bindingLayer: null,
+              reason: 'ok',
+              advisories: [],
+            },
+          });
+      }),
+    );
+
+    await renderTicket();
+    await click(/send as-is/i);
+    await click(/send as-is/i);
+
+    expect(sendAsIs).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      settle();
     });
   });
 });
