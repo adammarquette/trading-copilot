@@ -349,6 +349,40 @@ public class AutoFlattenWatchdogServiceTests
             .MustNotHaveHappened();
     }
 
+    [Fact]
+    public async Task RunPassAsync_ShouldRecordTheUnrosteredAccount_WhenTheVenueRosterDoesNotReportIt()
+    {
+        // gh#850, extending gh#527's primary-tier close to this tier. The watchdog holds a DB row for an account
+        // this process's credential set serves, but the venue's live roster does not report it, so its exposure
+        // cannot be read or acted on this pass.
+        //
+        // A bare `continue` here is worse than it was in the primary tier: this is the REDUNDANT net, the one
+        // whose whole job is catching the primary's misses. A partial-roster glitch that hides a genuinely
+        // exposed account from the primary hides it from the backstop too, and nothing anywhere says so (R-13).
+        Guid op = Guid.NewGuid();
+        string name = Guid.NewGuid().ToString();
+        await SeedAccountAsync(name, op, credentialKey: "topstep-main");
+
+        // Credentials match, so the pass reaches the roster match rather than the ADR-0015 credential skip; the
+        // roster is empty, so the account we hold ("9001") is not in it.
+        ITradingVenue venue = Venue([]);
+        A.CallTo(() => venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>([]);
+        IProjectXVenueFactory factory = A.Fake<IProjectXVenueFactory>();
+        A.CallTo(() => factory.Create(A<FirmConventions>._)).Returns(venue);
+
+        FlattenOptions options = new() { Instruments = [new FlattenScheduleOption { Symbol = "ES", SessionClose = "14:30" }] };
+        await Service(Db(name, Guid.Empty), factory, options, credentialKey: "topstep-main")
+            .RunPassAsync(Utc(19, 45), CancellationToken.None);
+
+        // Named on the durable journal, so a rediscovery -- or an alert on a persistent gap -- can follow.
+        A.CallTo(() => _log.AppendAsync(
+                A<EventDraft>.That.Matches(draft =>
+                    draft.Type == AutoFlattenWatchdogService.UnrosteredEventType
+                    && draft.Payload.Contains("9001", StringComparison.Ordinal)),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
     private static async Task SeedAccountAsync(string database, Guid op, string credentialKey)
     {
         Guid firmId = Guid.NewGuid();
