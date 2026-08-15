@@ -343,7 +343,7 @@ public sealed class NewsEmbeddingService
     /// harmless, since the gh#881 / gh#889 read-filters never read them — and must not fail an otherwise-progressing pass.
     /// Because it sweeps only owners re-embedded THIS pass, a stale row leaked here (a crash between <c>SaveChanges</c>
     /// and this delete, or a transient delete fault) is not reclaimed by a later <i>targeted</i> re-embed — that owner
-    /// is then idempotent-skipped — so a periodic full <c>Model != current</c> GC (gh#902) is the backstop for those.
+    /// is then idempotent-skipped — so a periodic full <c>Model != current</c> GC (gh#915) is the backstop for those.
     /// </summary>
     private async Task SweepStaleModelRowsAsync(
         EmbeddingOwnerKind ownerKind, IReadOnlyCollection<string> ownerIds, string model, CancellationToken cancellationToken)
