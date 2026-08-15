@@ -26,6 +26,44 @@ public class FirmConventionsMappingTests
     }
 
     [Fact]
+    public void ToConventions_ShouldResolveABrokerageAccountToSomethingOtherThanUndeclared()
+    {
+        // gh#780's acceptance, stated as the card states it. A brokerage carries NO stage declarations — it has no
+        // evaluation/funded ladder, its account names resolve to AccountStage.Unknown, and FirmConventions.For
+        // refuses to declare Unknown — so the per-stage model resolved every discovered brokerage account to
+        // Undeclared: refused in every environment, production included, with nothing the operator could declare
+        // to fix it. The bridge now routes a brokerage to the venue-flag form instead.
+        Firm brokerage = new()
+        {
+            Id = Guid.NewGuid(),
+            UserId = Guid.NewGuid(),
+            Name = "Interactive Brokers",
+            Type = FirmType.Brokerage,
+            StageConventions = [],
+        };
+
+        FirmConventions conventions = brokerage.ToConventions();
+
+        conventions.ModeFor(AccountStage.Unknown, venueReportsSimulated: true)
+            .Should().Be(TradingMode.Practice, "a brokerage paper account IS practice");
+        conventions.ModeFor(AccountStage.Unknown, venueReportsSimulated: false)
+            .Should().NotBe(TradingMode.Undeclared, "gh#780: a discovered brokerage account must be tradeable somewhere");
+        conventions.ModeFor(AccountStage.Unknown, venueReportsSimulated: false)
+            .Should().Be(TradingMode.Live);
+    }
+
+    [Fact]
+    public void ToConventions_ShouldKeepAPropFirmOnItsDeclarations_NotTheVenueFlag()
+    {
+        // The R-14 half. A funded prop account reports `simulated` at the venue and is nonetheless Live, so the
+        // brokerage branch must not reach a prop firm — that leak would resolve a real-payout account to Practice.
+        Firm propFirm = FirmWith("Topstep", (AccountStage.Funded, true));
+
+        propFirm.ToConventions().ModeFor(AccountStage.Funded, venueReportsSimulated: true)
+            .Should().Be(TradingMode.Live);
+    }
+
+    [Fact]
     public void ToConventions_ShouldResolveEachDeclaredStageToItsMode()
     {
         Firm firm = FirmWith(

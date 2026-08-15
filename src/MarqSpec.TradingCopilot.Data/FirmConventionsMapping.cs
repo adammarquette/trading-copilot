@@ -20,8 +20,15 @@ public static class FirmConventionsMapping
     {
         ArgumentNullException.ThrowIfNull(firm);
 
-        return FirmConventions.For(
-            firm.Name,
-            [.. firm.StageConventions.Select(convention => (convention.Stage, convention.CapitalAtRisk))]);
+        // The one place the persisted taxonomy becomes a domain behaviour (gh#780). A brokerage has no stage
+        // ladder to declare — its account names resolve to AccountStage.Unknown, which FirmConventions.For
+        // refuses on purpose — so it does not go through the per-stage model at all; its mode comes from the
+        // venue's own live/paper flag, which at a brokerage is the honest answer rather than the misleading one
+        // R-14 was written about.
+        return firm.Type == FirmType.Brokerage
+            ? FirmConventions.ForBrokerage(firm.Name)
+            : FirmConventions.For(
+                firm.Name,
+                [.. firm.StageConventions.Select(convention => (convention.Stage, convention.CapitalAtRisk))]);
     }
 }

@@ -47,7 +47,10 @@ public static class ProjectXMapping
             account.Balance,
             account.CanTrade,
             account.IsVisible,
-            conventions.ModeFor(stage))
+            // The venue's own routing flag is passed in, not applied: FirmConventions decides whether it may be
+            // read at all. At a prop firm it is ignored (a funded account reports `simulated` and is Live, R-14);
+            // at a brokerage it IS the answer (gh#780).
+            conventions.ModeFor(stage, account.Simulated))
         {
             Stage = stage,
         };
