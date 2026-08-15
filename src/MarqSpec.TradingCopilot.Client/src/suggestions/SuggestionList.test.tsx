@@ -405,4 +405,49 @@ describe('SuggestionList', () => {
       screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
     ).toEqual(['s-2']);
   });
+
+  it('flags the list as possibly out of date when a background refresh fails, without nuking it (R-19, gh#874)', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1')] });
+    await renderList();
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(1);
+    expect(screen.queryByTestId('suggestions-stale')).toBeNull(); // a healthy panel shows nothing
+
+    // The suggestions read starts failing while the socket stays live (the global indicator green): the list is
+    // kept — a nudge never nukes a working panel — but the panel must LOOK degraded, because otherwise the operator
+    // has no signal at all that the actionable set may be stale (R-19).
+    listMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      status: 503,
+      error: 'BFF unreachable.',
+    });
+    await act(async () => {
+      suggestionHandler?.();
+    });
+
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(1); // list kept
+    expect(screen.getByTestId('suggestions-stale')).toBeTruthy(); // but marked possibly stale
+    expect(screen.queryByTestId('empty-state')).toBeNull(); // never an error screen
+  });
+
+  it('clears the may-be-out-of-date flag once a background refresh succeeds again (gh#874)', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1')] });
+    await renderList();
+
+    listMock.mockResolvedValue({ ok: false, kind: 'failed', status: 503, error: 'down' });
+    await act(async () => {
+      suggestionHandler?.();
+    });
+    expect(screen.getByTestId('suggestions-stale')).toBeTruthy();
+
+    // The read recovers: the panel is current again, so the affordance goes away — a degraded view stops looking
+    // degraded only once it truly is not.
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1'), suggestion('s-2')] });
+    await act(async () => {
+      suggestionHandler?.();
+    });
+
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(2);
+    expect(screen.queryByTestId('suggestions-stale')).toBeNull();
+  });
 });

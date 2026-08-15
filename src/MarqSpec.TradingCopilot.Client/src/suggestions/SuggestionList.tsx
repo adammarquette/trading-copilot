@@ -1,6 +1,7 @@
 import LightbulbOutlinedIcon from '@mui/icons-material/LightbulbOutlined';
 import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
+import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { listActionableSuggestions, type StagedTicket, type Suggestion } from '../api/suggestions';
@@ -36,13 +37,22 @@ type LoadState =
 
 export function SuggestionList({ accountId, referencePrice = null, onArmed }: SuggestionListProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
+  // A background refresh keeps the current list on a failed read rather than nuking a working panel — but the panel
+  // must still LOOK degraded, so a stale actionable set does not read as confidently current (R-19, gh#874).
+  const [staleRefresh, setStaleRefresh] = useState(false);
   const mounted = useRef(true);
   // Ordering guards for the two reads that write this panel. `mounted` says the component is still on screen; it
-  // says nothing about WHICH account a response belongs to, and the list does not remount on an `accountId` change.
+  // says nothing about WHICH account a response belongs to.
+  //
+  // The sole host, `SuggestionsPanel`, keys this component by account (gh#713), so an account switch is already a
+  // full remount there — `mounted.current` goes false on the old instance. This generation guard is therefore
+  // defense-in-depth: it protects a caller that reuses the component WITHOUT keying it (and is what the
+  // same-instance unit tests exercise), not a reachable bug in the current tree — unlike `useSuggestionZones`,
+  // whose host is not remounted per account, where the equivalent `loadToken` IS the live guard.
   //
   // A foreground `load` is authoritative: it always writes, and it supersedes every read started before it, so a
-  // response for the account just left can never land (R-14) — the same guarantee `useSuggestionZones` states.
-  // A background `refresh` yields to anything newer — a later load, a later refresh, or a pass.
+  // response for the account just left can never land (R-14). A background `refresh` yields to anything newer — a
+  // later load, a later refresh, or a pass.
   const loadGeneration = useRef(0);
   const refreshToken = useRef(0);
 
@@ -60,14 +70,15 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
       if (!mounted.current || generation !== loadGeneration.current) {
         return;
       }
-      setState(
-        result.ok
-          ? { kind: 'loaded', suggestions: result.data }
-          : {
-              kind: 'error',
-              message: result.kind === 'refused' ? result.reason : result.error,
-            },
-      );
+      if (result.ok) {
+        setState({ kind: 'loaded', suggestions: result.data });
+        setStaleRefresh(false); // an authoritative read landed — the panel is current again
+      } else {
+        setState({
+          kind: 'error',
+          message: result.kind === 'refused' ? result.reason : result.error,
+        });
+      }
     });
   }, [accountId]);
 
@@ -98,13 +109,21 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
     // it keeps a working panel rather than nuking it to an error screen — and the panel would hang on its spinner.
     const generation = loadGeneration.current;
     void listActionableSuggestions(accountId).then((result) => {
+      // Ignore a superseded refresh (a newer load / refresh / pass has run since) or a resolve after unmount.
       if (
-        mounted.current &&
-        generation === loadGeneration.current &&
-        token === refreshToken.current &&
-        result.ok
+        !mounted.current ||
+        generation !== loadGeneration.current ||
+        token !== refreshToken.current
       ) {
+        return;
+      }
+      if (result.ok) {
         setState({ kind: 'loaded', suggestions: result.data });
+        setStaleRefresh(false);
+      } else {
+        // Keep the current list, but flag it possibly out of date. A failed background read while the socket stays
+        // live is the one degraded state the panel would otherwise hide — the operator has no other signal (R-19).
+        setStaleRefresh(true);
       }
     });
   }, [accountId]);
@@ -166,6 +185,18 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
 
   return (
     <Stack data-testid="suggestion-list" sx={{ gap: 1.5, p: 2 }}>
+      {staleRefresh && (
+        // A degraded background refresh must look degraded (R-19). Kept subtle and non-destructive — the list is
+        // still the operator's, it just may not be current — and never shown on the empty / loading / error states.
+        <Typography
+          role="status"
+          data-testid="suggestions-stale"
+          variant="caption"
+          sx={{ color: 'warning.main' }}
+        >
+          This list may be out of date — the last refresh did not go through.
+        </Typography>
+      )}
       {state.suggestions.map((suggestion) => (
         <SuggestionCard
           key={suggestion.id}
