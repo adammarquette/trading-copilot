@@ -57,6 +57,7 @@ two in step when an entry is appended (gh#600).
 | Date | Update |
 |---|---|
 | 2026-08-14 | the SemanticEmbedding salience dimension is activated (gh#853) |
+| 2026-08-14 | semantic **topic** match — a news item matched to a topic by embedding proximity — is live (gh#854) |
 
 ## Update (2026-08-14) — the SemanticEmbedding salience dimension is activated (gh#853)
 
@@ -82,11 +83,40 @@ deliberate bound shared with the gh#27 resolution. The **vector read** is relati
 by a **paired QA card**; the **ranking itself is a pure, fully unit-tested** function (`EmbeddingSimilarity`), as are
 the degrade and the scorer fold. Only **named-entity** similarity now remains deferred.
 
+## Update (2026-08-14) — semantic topic match is live (gh#854)
+
+Distinct from the salience axis above (which reweights *how a given operator's* feed ranks): the **relevance model's**
+semantic **topic** match — the *Decision*'s "topic-map + semantic match" — is now **live**, upstream of salience. Alongside
+the keyword path, `NewsRelevanceResolver` matches a news item to a `NewsTopic` when the **cosine similarity** of the news
+item's stored embedding to the **topic's** embedding clears a threshold (v1: `0.75`, a domain constant); a semantically-matched
+**instrument-scoped** topic attaches its instrument exactly as a keyword hit does. Topic vectors are produced by the
+news-embedding pass as a new **`EmbeddingOwnerKind.Topic`** owner kind — the polymorphic `EmbeddingRecord` store absorbs it
+with **no migration** (data dictionary §10) — embedded from a topic's name + keywords against the **same** provider, per-pass
+spend tally and ledger as news. The relevance pass reads the topic vectors **once per pass** and each page's news vectors
+**once per page** (`INewsEmbeddingSimilarity.GetTopicVectorsAsync` / `GetVectorsAsync`), then ranks in-process via the same
+pure `EmbeddingSimilarity` helper. It is **additive** to keyword matching and **degrades to keyword-only** — an un-embedded
+topic, a not-yet-embedded news item, an unavailable provider, or a faulting read each simply leave the semantic path off,
+never an error; only a genuine caller cancellation propagates. **Deployment-global relevance, not a risk control** — it
+decides which topics a story is *about*, and the `Domain.Risk` ↔ `Domain.Signals` structural guard is untouched (the change
+is confined to `Domain.Relevance` / `Domain.Ai` / the API).
+
+**v1 bounds (deliberate):** the threshold is a single **domain constant (`0.75`)**, not yet sourced from the relevance config;
+the news + topic embed and the topic read are **relational-only (gh#109)**, so they are proven by **QA #877** while
+the resolver's semantic branch is **pure and fully unit-tested**. When a news vector lands, the embedding pass **nulls
+that item's `RelevanceVersion`**, so the next relevance pass **re-resolves it with its vector** — closing the
+resolve-before-embed race (a story is normally resolved keyword-only *before* it is embedded) without coupling the two
+passes: it is a **one-way data hint, never a gate**, so relevance still never waits on embedding and the retrieval
+feature can't stall the core pass. Topics are embedded **first** in the pass (a bounded, cheap set), so semantic topic
+match comes online even during a large news backlog rather than waiting for it to drain. A non-positive match threshold
+disables the semantic path outright, so the fail-safe can't be inverted into match-everything.
+
 ## Follow-ups
 - Define the **aggregation**: how stars map to per-dimension weights (instrument / topic / source / entity /
   embedding), the **decay**, and the **salience floor** that prevents a filter bubble.
 - Decide where the multiplier applies: **surfacing order**, **rerank score**, and/or the **context budget** the
   co-pilot spends on an item.
+- Source the semantic **topic-match threshold** from the relevance config (feeding `RelevanceConfigState.Version` so a
+  threshold change re-resolves), rather than the `0.75` `NewsRelevanceResolver.DefaultSemanticThreshold` domain constant (gh#854).
 - Surface the **"why weighted"** explanation in the news UI (R-2 panel).
 
 ## Follow-up resolutions (gh#27)

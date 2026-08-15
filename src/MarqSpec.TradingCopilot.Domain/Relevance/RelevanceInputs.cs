@@ -16,11 +16,13 @@ public sealed record TickerInstrumentMapping(string Ticker, string Instrument);
 /// <param name="Keywords">The keywords whose presence in a story's text marks the topic matched.</param>
 /// <param name="Scope">Instrument-scoped or global.</param>
 /// <param name="Instrument">The instrument an instrument-scoped topic marks relevant; <see langword="null"/> for a global topic.</param>
+/// <param name="Embedding">The topic's stored vector (name + keywords) for semantic matching (gh#854); <see langword="null"/> when not embedded — matching then falls back to keyword-only.</param>
 public sealed record NewsTopicDefinition(
     string Name,
     IReadOnlyList<string> Keywords,
     TopicScope Scope,
-    string? Instrument);
+    string? Instrument,
+    IReadOnlyList<float>? Embedding = null);
 
 /// <summary>The resolved relevance of a news item (gh#359): the instruments and topics it matched, each sorted and deduped.</summary>
 /// <param name="Instruments">The traded instruments the item bears on.</param>
