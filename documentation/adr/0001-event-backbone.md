@@ -297,3 +297,22 @@ re-sweeps). Both are harmless to reads (every read pins the current model) but a
 **periodic full `Model != current` / anti-join GC** rather than the embed hot path — it needs per-owner-kind existence
 logic (skipping the producer-less owner kinds), a concurrency-safe bulk delete, and an irreversibility guard (a deleted
 vector is a paid re-embed if the owner returns or the model reverts), so it is its own increment (gh#902).
+
+## Update (2026-08-15) — the orphaned-owner GC lands (gh#902)
+
+The **orphaned-owner** half of the deferred full GC ships: `EmbeddingOrphanGcHost` periodically deletes
+`EmbeddingRecord` rows whose owner no longer exists — a renamed `NewsTopic` (its old-name `Topic` row) or a pruned
+`NewsRecord` (its `SoftSignal` row). A set-based **anti-join** `ExecuteDeleteAsync` per owner kind
+(`OwnerKind = SoftSignal AND NOT EXISTS(News.DedupKey)`, `OwnerKind = Topic AND NOT EXISTS(NewsTopics.Name)`), on a
+long conservative cadence **off** the hot embed path — the delete is irreversible (a paid re-embed if the owner
+returns). One atomic statement, so a concurrent embed of a still-live owner cannot be raced (it only embeds owners
+that exist, which the anti-join never deletes); best-effort per kind (a fault sweeping one logs and leaves the others).
+
+The **producer-less** owner kinds — `Suggestion` / `Rule` / `MarketSnapshot`, which have no producer table yet — are
+kept out by an **allow-list**, not a deny-list: `EmbeddingOrphanSweep.SweepableKinds` is exactly `SoftSignal` + `Topic`,
+so a future owner kind is **not** swept until it is deliberately added alongside its producer check, and cannot be
+GC'd to zero before it has one.
+
+The second row class the paragraph above lumped under gh#902 — **stale-model rows leaked by a crash** between a
+re-embed's `SaveChanges` and its sweep (the owner still *exists*, so this anti-join keeps it) — is **not** this
+increment. It is a bounded, storage-only residual split out to **gh#915**, whose natural home is this same host.
