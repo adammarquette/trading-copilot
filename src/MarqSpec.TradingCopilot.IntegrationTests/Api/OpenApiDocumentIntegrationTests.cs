@@ -81,6 +81,7 @@ public class OpenApiDocumentIntegrationTests : IClassFixture<PostgresApiFactory>
         ["/api/triggers"] = "Triggers",
         ["/suggestions/{id}"] = "Suggestions",
         ["/connections"] = "Connections",
+        ["/venues/setup"] = "Venues",
         ["/api/ai/spend"] = "AI",
     };
 
@@ -127,6 +128,7 @@ public class OpenApiDocumentIntegrationTests : IClassFixture<PostgresApiFactory>
         "Auth",
         "Firms",
         "Connections",
+        "Venues",
         "Accounts",
         "Risk",
         "Triggers",
