@@ -91,6 +91,23 @@ export function sendOrder(
   return request<SendOrderResponse>('POST', `/accounts/${accountId}/orders`, order);
 }
 
+/**
+ * The **opt-in fast path** (R-11, gh#218): arm → take collapsed into one action for an operator who has already
+ * decided. It skips the manual **review**, never the gate — the same ladder runs (kill switch, R-14 mode ×
+ * environment, the R-5 gate, R-16 caps, R-12 re-validation), and only the journal marker differs, `SendAsIs`
+ * rather than `Manual`, so a reader can tell an unreviewed send from a reviewed one.
+ *
+ * Offering it is a **preference**, not a default: `DefaultEntryAction.SendAsIs` is practice-only and
+ * confirm-to-enable. That rule is enforced where the preference is *declared*, so a surface must not offer this
+ * route on an account whose mode does not permit it.
+ */
+export function sendAsIsOrder(
+  accountId: string,
+  order: SendOrderRequest,
+): Promise<ApiResult<SendOrderResponse>> {
+  return request<SendOrderResponse>('POST', `/accounts/${accountId}/orders/send-as-is`, order);
+}
+
 /** Stages an order and returns the gate's decision — **does not transmit**. Step one of arm → review → send. */
 export function armOrder(
   accountId: string,
