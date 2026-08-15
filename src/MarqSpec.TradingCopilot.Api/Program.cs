@@ -535,6 +535,9 @@ builder.Services.AddSingleton<IAccountRealtimeNotifier, AccountRealtimeNotifier>
 // The suggestion lifecycle push (gh#684): the trigger scan calls this after a suggestion write commits, routed
 // per-owner exactly like the order/fill notifier above. Singleton — it holds only the (singleton) hub context.
 builder.Services.AddSingleton<ISuggestionRealtimeNotifier, SuggestionRealtimeNotifier>();
+// The chat-turn push (gh#906): the chat endpoint calls this after an assistant turn commits, routed per-owner like
+// the suggestion notifier above. Singleton — it holds only the (singleton) hub context.
+builder.Services.AddSingleton<IChatRealtimeNotifier, ChatRealtimeNotifier>();
 builder.Services.AddHostedService<RealtimeEventLogFanoutHost>();
 
 // The self-documenting API surface (R-10, gh#604): an OpenAPI document generated from the minimal-API routes

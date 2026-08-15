@@ -216,11 +216,11 @@ public class OpenApiDocumentIntegrationTests : IClassFixture<PostgresApiFactory>
         string[] paths = [.. spec.RootElement.GetProperty("paths").EnumerateObject().Select(path => path.Name)];
 
         // Guard the guard. Every assertion below is a containment check, and containment checks over a document
-        // that turned out to be nearly empty pass by being asked almost nothing. The application maps 64
+        // that turned out to be nearly empty pass by being asked almost nothing. The application maps 65
         // operations today; a document offering fewer than 55 has lost an area, whether or not it lost an anchor.
         paths.Should().NotBeEmpty("a document with no paths describes nothing");
         Operations(spec).Should().HaveCountGreaterThanOrEqualTo(55,
-            "the host maps 64 operations into the document; materially fewer means a group stopped being "
+            "the host maps 65 operations into the document; materially fewer means a group stopped being "
             + "described and the anchor checks below may be passing over a shrunken document");
 
         foreach (string anchor in AnchorPaths.Keys)
@@ -530,7 +530,7 @@ public class ScalarProductionGateIntegrationTests : IClassFixture<ProductionDocs
         IReadOnlyList<string> routes = OpenApiDocumentIntegrationTests.MappedRoutes(_factory.Services);
 
         // Vacuity guard, and only that: "no /scalar route" over an empty or half-built route table is not
-        // evidence of a gate. Deliberately slack against the 51 templates mapped today — tightening it would
+        // evidence of a gate. Deliberately slack against the 52 templates mapped today — tightening it would
         // turn an unrelated dropped endpoint group into a confusing red HERE, where the subject is the console.
         routes.Should().HaveCountGreaterThanOrEqualTo(40, "the production host maps the same API as any other");
 
