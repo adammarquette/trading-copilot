@@ -1,6 +1,6 @@
 # ADR-0023: The venue setup contract — a compiled-in adapter declares its own onboarding, discovery stays compile-time
 
-**Status:** Proposed · **Date:** 2026-08-14 · **Deciders:** Adam (operator/maintainer)
+**Status:** Accepted · **Date:** 2026-08-14 · **Deciders:** Adam (operator/maintainer)
 **Extends:** [ADR-0016](0016-venue-configuration.md) — resolves its deferred plugin contract (`gh#64`); the "adapters
 are compiled in, firms are configured in settings" decision stands unchanged. **Relates to:**
 [ADR-0015](0015-distribution-licensing-governance.md) (fork-first distribution),
