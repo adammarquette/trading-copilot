@@ -8,6 +8,7 @@ import type {
   RealtimeFill,
   RealtimeGap,
   RealtimeOrderState,
+  RealtimeSuggestion,
 } from './messages';
 import { RealtimeCatchUpPhase, RealtimeMethod } from './messages';
 
@@ -22,6 +23,8 @@ export interface RealtimeConnectionCallbacks {
   onEvent?: (event: RealtimeEvent, historical: boolean) => void;
   onOrderState?: (state: RealtimeOrderState) => void;
   onFill?: (fill: RealtimeFill) => void;
+  /** A suggestion's new lifecycle state (gh#684). Owner-scoped + live-only like order / fill — a reconnect fires onResynced. */
+  onSuggestion?: (suggestion: RealtimeSuggestion) => void;
   /** The cursor fell off retention (or the resume was too large): re-fetch state over REST, then keep consuming. */
   onGap?: (gap: RealtimeGap) => void;
   /** Fired after a RE-connect: owner-scoped order/fill pushes are live-only (never replayed), so surfaces re-fetch. */
@@ -95,6 +98,9 @@ export function createRealtimeConnection(
       callbacks.onOrderState?.(orderState),
     );
     hub.on(RealtimeMethod.Fill, (fill: RealtimeFill) => callbacks.onFill?.(fill));
+    hub.on(RealtimeMethod.Suggestion, (suggestion: RealtimeSuggestion) =>
+      callbacks.onSuggestion?.(suggestion),
+    );
     hub.onclose(() => onClosed());
   }
 

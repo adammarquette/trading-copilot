@@ -20,8 +20,15 @@ vi.mock('../api/suggestions', async (importOriginal) => ({
   takeSuggestion: vi.fn(),
 }));
 
+const { useRealtimeMock } = vi.hoisted(() => ({ useRealtimeMock: vi.fn() }));
+vi.mock('../realtime/RealtimeProvider', () => ({ useRealtime: useRealtimeMock }));
+
 const listMock = vi.mocked(listActionableSuggestions);
 const passMock = vi.mocked(passSuggestion);
+
+// The realtimeSuggestion / resync handlers the list subscribes — captured so a test can fire either as the socket would.
+let suggestionHandler: (() => void) | null = null;
+let resyncHandler: (() => void) | null = null;
 
 function suggestion(id: string, overrides: Partial<Suggestion> = {}): Suggestion {
   return {
@@ -54,6 +61,15 @@ function suggestion(id: string, overrides: Partial<Suggestion> = {}): Suggestion
   };
 }
 
+/** A promise whose resolution the test controls, so a background refresh can be settled OUT OF ORDER. */
+function deferred<T>() {
+  let settle!: (value: T) => void;
+  const promise = new Promise<T>((resolve) => {
+    settle = resolve;
+  });
+  return { promise, settle };
+}
+
 /** Renders and lets the load settle — the list opens on `loading` and resolves in a microtask. */
 async function renderList() {
   const view = renderWithProviders(<SuggestionList accountId="acc-1" />);
@@ -63,6 +79,22 @@ async function renderList() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  suggestionHandler = null;
+  resyncHandler = null;
+  useRealtimeMock.mockReturnValue({
+    connectionState: 'live',
+    onEvent: vi.fn(),
+    onOrderState: vi.fn(),
+    onFill: vi.fn(),
+    onSuggestion: (handler: () => void) => {
+      suggestionHandler = handler;
+      return vi.fn();
+    },
+    onResync: (handler: () => void) => {
+      resyncHandler = handler;
+      return vi.fn();
+    },
+  });
   vi.mocked(takeSuggestion).mockResolvedValue({
     ok: false,
     kind: 'failed',
@@ -192,5 +224,185 @@ describe('SuggestionList', () => {
     await act(async () => {});
 
     expect(listMock.mock.calls.map((call) => call[0])).toEqual(['acc-1', 'acc-2']);
+  });
+
+  it('a stale LOAD for the account just left never lands on the new account (R-14)', async () => {
+    // The list does not remount on an `accountId` change — same instance, new props — so the previous account's
+    // read is still in flight and resolves against the new account's panel. `mounted.current` only says the
+    // component is on screen; it says nothing about WHICH account the response belongs to.
+    const stale = deferred<Awaited<ReturnType<typeof listActionableSuggestions>>>();
+    listMock
+      .mockImplementationOnce(() => stale.promise) // acc-1's load, still in flight across the switch
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('b-1', { accountId: 'acc-2' })] });
+
+    const view = renderWithProviders(<SuggestionList accountId="acc-1" />);
+    await act(async () => {});
+    view.rerender(<SuggestionList accountId="acc-2" />);
+    await act(async () => {});
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['b-1']);
+
+    // acc-1's answer arrives last. Rendering it now would put the account just left on a decision surface the
+    // operator reads as the account they are on (R-4, R-14) — so the superseded load must be discarded.
+    await act(async () => {
+      stale.settle({ ok: true, data: [suggestion('a-1', { accountId: 'acc-1' })] });
+    });
+
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['b-1']);
+  });
+
+  it('a stale push REFRESH for the account just left never lands either (R-14)', async () => {
+    // Same hazard on the background path: the refresh token orders refreshes against each other and against a
+    // pass, but an account switch loads through `load` — which never touched that token — so a refresh started
+    // for acc-1 still looked current when it resolved under acc-2.
+    const stale = deferred<Awaited<ReturnType<typeof listActionableSuggestions>>>();
+    listMock
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('a-1', { accountId: 'acc-1' })] })
+      .mockImplementationOnce(() => stale.promise) // the push-triggered refresh for acc-1
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('b-1', { accountId: 'acc-2' })] });
+
+    const view = renderWithProviders(<SuggestionList accountId="acc-1" />);
+    await act(async () => {});
+    act(() => {
+      suggestionHandler?.();
+    });
+
+    view.rerender(<SuggestionList accountId="acc-2" />);
+    await act(async () => {});
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['b-1']);
+
+    await act(async () => {
+      stale.settle({ ok: true, data: [suggestion('a-1', { accountId: 'acc-1' })] });
+    });
+
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['b-1']);
+  });
+
+  it('refetches the actionable list on a realtimeSuggestion push (gh#760)', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1')] });
+    await renderList();
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(1);
+
+    // A new / superseded suggestion arrives as a compact push — too little to render — so the panel refetches and
+    // now returns two, without a poll or a manual reload (the R-4 decision surface stays live).
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1'), suggestion('s-2')] });
+    await act(async () => {
+      suggestionHandler?.();
+    });
+
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(2);
+  });
+
+  it('keeps the current list when a push-triggered refresh fails — a nudge never nukes a working panel', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1')] });
+    await renderList();
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(1);
+
+    // The background refresh breaks. Unlike the first load / retry, a failed soft refresh must not swap the panel
+    // for an error screen — the operator keeps the setups already on the surface, and the retry owns the error.
+    listMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      status: 503,
+      error: 'BFF unreachable.',
+    });
+    await act(async () => {
+      suggestionHandler?.();
+    });
+
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(1);
+    expect(screen.queryByTestId('empty-state')).toBeNull();
+  });
+
+  it('refetches on a resync — pushes missed during a socket drop are never replayed (R-19)', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1')] });
+    await renderList();
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(1);
+
+    // Owner-scoped pushes are live-only, so a reconnect / retention gap re-fetches the whole list rather than
+    // trusting it survived the drop.
+    listMock.mockResolvedValue({ ok: true, data: [suggestion('s-1'), suggestion('s-2')] });
+    await act(async () => {
+      resyncHandler?.();
+    });
+
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(2);
+  });
+
+  it('two pushes in quick succession — the older answer never overwrites the newer', async () => {
+    // A suggestion is issued and quickly superseded, so two realtimeSuggestion pushes fire. If the first refresh's
+    // read is slow and resolves LAST, its staler list replaces the fresher one and the operator reads a superseded
+    // setup as still actionable (R-4) until some later push happens to correct it — which may not come for a while
+    // on a quiet account.
+    const slowFirst = deferred<Awaited<ReturnType<typeof listActionableSuggestions>>>();
+    listMock
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('s-1')] }) // initial load
+      .mockImplementationOnce(() => slowFirst.promise) // push 1 — slow, resolves last
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('s-2')] }); // push 2 — fresher, lands first
+
+    await renderList();
+    act(() => {
+      suggestionHandler?.();
+    });
+    await act(async () => {
+      suggestionHandler?.();
+    });
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['s-2']);
+
+    await act(async () => {
+      slowFirst.settle({ ok: true, data: [suggestion('s-1')] });
+    });
+
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['s-2']);
+  });
+
+  it('a background refresh in flight when a pass commits does not resurrect the passed card', async () => {
+    // The push-triggered refresh reads the actionable list BEFORE the operator's pass on s-1 commits, so its
+    // snapshot still contains s-1. If it resolves last and replaces the list wholesale, the just-passed card
+    // flickers back — the exact regression the local pass-drop exists to avoid, so the refresh token must discard
+    // that stale write.
+    const stale = deferred<Awaited<ReturnType<typeof listActionableSuggestions>>>();
+    listMock
+      .mockResolvedValueOnce({ ok: true, data: [suggestion('s-1'), suggestion('s-2')] }) // initial load
+      .mockImplementationOnce(() => stale.promise); // the push-triggered refresh, still in flight
+
+    await renderList();
+    expect(screen.getAllByTestId('suggestion-card')).toHaveLength(2);
+
+    // A realtimeSuggestion push starts the background refresh — its read is now in flight, snapshot still has s-1.
+    act(() => {
+      suggestionHandler?.();
+    });
+
+    // The operator passes s-1; it commits and drops locally.
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId('pass-button')[0]);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('pass-skip'));
+    });
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['s-2']);
+
+    // Only now does the stale refresh resolve, carrying its pre-commit snapshot — s-1 must NOT come back.
+    await act(async () => {
+      stale.settle({ ok: true, data: [suggestion('s-1'), suggestion('s-2')] });
+    });
+
+    expect(
+      screen.getAllByTestId('suggestion-card').map((card) => card.dataset.suggestionId),
+    ).toEqual(['s-2']);
   });
 });

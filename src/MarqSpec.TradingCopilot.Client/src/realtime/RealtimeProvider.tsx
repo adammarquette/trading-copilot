@@ -12,11 +12,17 @@ import type { ReactNode } from 'react';
 import { useAuth } from '../auth/AuthProvider';
 import { createRealtimeConnection } from './connection';
 import type { RealtimeConnection, RealtimeConnectionState } from './connection';
-import type { RealtimeEvent, RealtimeFill, RealtimeOrderState } from './messages';
+import type {
+  RealtimeEvent,
+  RealtimeFill,
+  RealtimeOrderState,
+  RealtimeSuggestion,
+} from './messages';
 
 type EventHandler = (event: RealtimeEvent, historical: boolean) => void;
 type OrderStateHandler = (state: RealtimeOrderState) => void;
 type FillHandler = (fill: RealtimeFill) => void;
+type SuggestionHandler = (suggestion: RealtimeSuggestion) => void;
 type ResyncHandler = () => void;
 
 export interface RealtimeContextValue {
@@ -26,9 +32,11 @@ export interface RealtimeContextValue {
   onEvent(handler: EventHandler): () => void;
   onOrderState(handler: OrderStateHandler): () => void;
   onFill(handler: FillHandler): () => void;
+  /** Subscribe to owner-scoped suggestion lifecycle pushes (gh#684) — a new / superseded suggestion. */
+  onSuggestion(handler: SuggestionHandler): () => void;
   /**
    * Fired when the client must re-fetch its state over REST — a retention gap, or a reconnect (owner-scoped
-   * order/fill pushes are live-only and are not replayed). A surface subscribes to reload its REST reads.
+   * order/fill/suggestion pushes are live-only and are not replayed). A surface subscribes to reload its REST reads.
    */
   onResync(handler: ResyncHandler): () => void;
 }
@@ -49,6 +57,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
   const eventSubs = useRef(new Set<EventHandler>());
   const orderStateSubs = useRef(new Set<OrderStateHandler>());
   const fillSubs = useRef(new Set<FillHandler>());
+  const suggestionSubs = useRef(new Set<SuggestionHandler>());
   const resyncSubs = useRef(new Set<ResyncHandler>());
 
   const authenticated = session.status === 'authenticated';
@@ -63,6 +72,8 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
         eventSubs.current.forEach((handler) => handler(event, historical)),
       onOrderState: (state) => orderStateSubs.current.forEach((handler) => handler(state)),
       onFill: (fill) => fillSubs.current.forEach((handler) => handler(fill)),
+      onSuggestion: (suggestion) =>
+        suggestionSubs.current.forEach((handler) => handler(suggestion)),
       onGap: () => resyncSubs.current.forEach((handler) => handler()),
       onResynced: () => resyncSubs.current.forEach((handler) => handler()),
       onStateChange: setConnectionState,
@@ -80,14 +91,18 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
     [],
   );
   const onFill = useCallback((handler: FillHandler) => subscribe(fillSubs.current, handler), []);
+  const onSuggestion = useCallback(
+    (handler: SuggestionHandler) => subscribe(suggestionSubs.current, handler),
+    [],
+  );
   const onResync = useCallback(
     (handler: ResyncHandler) => subscribe(resyncSubs.current, handler),
     [],
   );
 
   const value = useMemo<RealtimeContextValue>(
-    () => ({ connectionState, onEvent, onOrderState, onFill, onResync }),
-    [connectionState, onEvent, onOrderState, onFill, onResync],
+    () => ({ connectionState, onEvent, onOrderState, onFill, onSuggestion, onResync }),
+    [connectionState, onEvent, onOrderState, onFill, onSuggestion, onResync],
   );
 
   return <RealtimeContext.Provider value={value}>{children}</RealtimeContext.Provider>;
