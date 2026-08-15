@@ -11,7 +11,7 @@ import TextField from '@mui/material/TextField';
 import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Typography from '@mui/material/Typography';
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 
 import type { Account, Connection } from '../api/accounts';
 import {
@@ -24,7 +24,9 @@ import {
   FirmType,
   type StageConvention,
 } from '../api/onboarding';
+import { getVenueSetup, type VenueSetup } from '../api/venues';
 import { ModeChip } from './ModeChip';
+import { VenueCredentialGuidance } from './VenueCredentialGuidance';
 
 /**
  * The firm → conventions → connection → discover onboarding walk (gh#653, R-14/R-17, ADR-0016). A fresh deployment
@@ -86,6 +88,22 @@ export function FirmOnboarding({ onComplete }: FirmOnboardingProps) {
   const [fundedAtRisk, setFundedAtRisk] = useState(true);
   // Step 3 — the login. The key NAMES a server-side env entry; it is never the secret.
   const [credentialKey, setCredentialKey] = useState('');
+
+  // The wired venue's setup contract (gh#64, ADR-0023), fetched once so the connection step can show what each
+  // credential field actually holds — ProjectX's `ApiKey` is really the username. A failed or absent fetch simply
+  // omits the hints: credentials are set server-side (ADR-0015), so the walk never depends on this.
+  const [venueSetup, setVenueSetup] = useState<VenueSetup | null>(null);
+  useEffect(() => {
+    let active = true;
+    void getVenueSetup().then((result) => {
+      if (active && result.ok) {
+        setVenueSetup(result.data.find((venue) => venue.venueId === WIRED_PLATFORM) ?? null);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Prop-firm-only for now (gh#780): a brokerage account has no mode-resolution path yet, so Brokerage is offered
   // as not-yet-supported and can never be selected — the walk is always these four steps.
@@ -283,6 +301,7 @@ export function FirmOnboarding({ onComplete }: FirmOnboardingProps) {
                     sx={{ mb: 2 }}
                     helperText="The only wired adapter today; others (Tradovate, Rithmic) ship as code."
                   />
+                  {venueSetup !== null ? <VenueCredentialGuidance venue={venueSetup} /> : null}
                   <TextField
                     label="Credential key"
                     value={credentialKey}
