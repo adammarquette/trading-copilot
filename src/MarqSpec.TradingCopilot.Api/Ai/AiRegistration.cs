@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Api.Chat;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
@@ -98,6 +99,11 @@ public static class AiRegistration
         // AI-spend governor beside it, a singleton with no state of its own. Inert until SuggestionOptions.Throttle*
         // opts an account in; the scan reads the account's headroom and decides Full / Throttled / Suppressed.
         services.AddSingleton<ISuggestionThrottle, SuggestionThrottle>();
+
+        // The grounded chat turn (gh#906, R-6): runs the model over a conversation's history and prices the call.
+        // Scoped like the reviewer beside it — it wraps the transient ILlmProvider and holds no state of its own; the
+        // chat endpoint resolves it per request. Enforcement lives below the model: it converses, never proposes an order.
+        services.AddScoped<IChatTurnService, ChatTurnService>();
 
         return services;
     }

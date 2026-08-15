@@ -30,6 +30,12 @@ public enum AiUsageFeature
     /// failure alike.
     /// </summary>
     Embed = 5,
+
+    /// <summary>
+    /// A co-pilot chat-turn call (gh#906, R-6). The grounded chat turn ledgers one row per turn against the operator,
+    /// success or failure alike, and is governed by the same daily AI-spend budget as agent review.
+    /// </summary>
+    Chat = 6,
 }
 
 /// <summary>
