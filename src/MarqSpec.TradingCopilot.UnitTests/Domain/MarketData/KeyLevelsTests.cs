@@ -706,4 +706,244 @@ public class KeyLevelsTests
     public void EvictAllButMostRecent_ShouldRefuse_WhenTheZonesAreNull() =>
         FluentActions.Invoking(() => KeyLevels.EvictAllButMostRecent(null!, maxPerKind: 1))
             .Should().Throw<ArgumentNullException>().WithParameterName("zones");
+
+    // ---- Detect: the whole pipeline, merge -> flip -> evict, as one pure function ----
+
+    /// <summary>The tiny 1/1 window on the raw high/low series, so every zone below is hand-checkable.</summary>
+    private static KeyLevelOptions HighLowTiny() => Tiny() with { Source = PivotSource.HighLow };
+
+    /// <summary>Two isolated pivot highs — 120 at minute 2, 140 at minute 6 — over a flat series.</summary>
+    private static IReadOnlyList<Bar> TwoHighs120At2And140At6() =>
+    [
+        Bar(0, 100, 100, 100, 100),
+        Bar(1, 100, 100, 100, 100),
+        Bar(2, 100, 120, 100, 100),
+        Bar(3, 100, 100, 100, 100),
+        Bar(4, 100, 100, 100, 100),
+        Bar(5, 100, 100, 100, 100),
+        Bar(6, 100, 140, 100, 100),
+        Bar(7, 100, 100, 100, 100),
+        Bar(8, 100, 100, 100, 100),
+    ];
+
+    [Fact]
+    public void Detect_ShouldMeasureEachPivotAgainstItsOwnBucketsAtr()
+    {
+        // The ATR that sizes a zone is read at the PIVOT'S OWN bucket, not one shared reading -- so two pivots on
+        // bars of different volatility get differently-wide zones. min-2 is measured at ATR 4 (half-width 2), and
+        // min-6 at ATR 10 (half-width 5). A single shared ATR would give them the same width and hide the bug.
+        Dictionary<DateTimeOffset, decimal> atr = new() { [Open(2)] = 4m, [Open(6)] = 10m };
+
+        IReadOnlyList<KeyLevelZone> zones = KeyLevels.Detect(
+            TwoHighs120At2And140At6(), atr, HighLowTiny(), maxPerKind: 12);
+
+        KeyLevelZone atTwo = zones.Single(zone => zone.FormedAtBucket == Open(2));
+        KeyLevelZone atSix = zones.Single(zone => zone.FormedAtBucket == Open(6));
+        atTwo.Bottom.Should().Be(118m);
+        atTwo.Top.Should().Be(122m);
+        atSix.Bottom.Should().Be(135m);
+        atSix.Top.Should().Be(145m);
+    }
+
+    [Fact]
+    public void Detect_ShouldSkipAPivot_WhenNoAtrExistsAtItsBucket()
+    {
+        // "Cannot measure => do not fabricate", the same posture ZoneFor takes on a zero ATR: a pivot whose bucket
+        // has no ATR yields NO zone rather than one off a made-up width. Only min-2 has an ATR here, so only it forms.
+        Dictionary<DateTimeOffset, decimal> atr = new() { [Open(2)] = 4m };
+
+        IReadOnlyList<KeyLevelZone> zones = KeyLevels.Detect(
+            TwoHighs120At2And140At6(), atr, HighLowTiny(), maxPerKind: 12);
+
+        zones.Should().ContainSingle();
+        zones[0].FormedAtBucket.Should().Be(Open(2));
+    }
+
+    /// <summary>
+    /// A pivot high at minute 2, then minute 4 — the last bar — closes at 200 straight through its zone. The
+    /// close-through is deliberately the final bar: a trailing flat bar at 100 would break the freshly-flipped
+    /// support from below and flip it back, which is a fact about the series, not about <see cref="KeyLevels.Detect"/>.
+    /// </summary>
+    private static IReadOnlyList<Bar> HighAt2ThenCloseThroughAt4() =>
+    [
+        Bar(0, 100, 100, 100, 100),
+        Bar(1, 100, 100, 100, 100),
+        Bar(2, 100, 120, 100, 100), // pivot high 120 -> resistance
+        Bar(3, 100, 100, 100, 100),
+        Bar(4, 100, 200, 100, 200), // last bar, closes 200 through the zone; on the un-windowed edge, so not a pivot
+    ];
+
+    [Fact]
+    public void Detect_ShouldFlipAZone_WhenALaterCloseBreaksThroughIt()
+    {
+        // Role reversal: a resistance the price later closes above becomes support. min-2's ceiling [118,122] is
+        // broken by min-4's close of 200 and flips. min-4 sits on the un-windowed edge, so it is not a pivot and
+        // the only zone is min-2's, now flipped to support.
+        Dictionary<DateTimeOffset, decimal> atr = new() { [Open(2)] = 4m };
+
+        IReadOnlyList<KeyLevelZone> zones = KeyLevels.Detect(
+            HighAt2ThenCloseThroughAt4(), atr, HighLowTiny(), maxPerKind: 12);
+
+        zones.Should().ContainSingle();
+        zones[0].FormedAtBucket.Should().Be(Open(2));
+        zones[0].Kind.Should().Be(KeyLevelKind.Support, "price closed above the resistance, reversing its role");
+    }
+
+    /// <summary>Minute 1 closes at 200, THEN a pivot high forms at minute 4 — the close predates the level.</summary>
+    private static IReadOnlyList<Bar> CloseThroughAt1ThenHighAt4() =>
+    [
+        Bar(0, 100, 200, 100, 100), // high 200 sits on the un-windowed left edge, so it is not itself a pivot
+        Bar(1, 100, 200, 100, 200), // closes 200, but its high equals bar 0's, so it is not a pivot either
+        Bar(2, 100, 100, 100, 100),
+        Bar(3, 100, 100, 100, 100),
+        Bar(4, 100, 120, 100, 100), // pivot high 120 -> resistance, formed AFTER the 200-close
+        Bar(5, 100, 100, 100, 100),
+        Bar(6, 100, 100, 100, 100),
+    ];
+
+    [Fact]
+    public void Detect_ShouldNotFlipAZone_WhenTheOnlyCloseThroughPrecedesItsFormation()
+    {
+        // Formation order is respected. min-1 closes at 200, but the min-4 resistance had not formed yet, so that
+        // close cannot reach back and reverse it. A pipeline replaying every close regardless of order would flip
+        // this to support; it must stay resistance. This pins the "FormedAtBucket < bar" guard in the replay.
+        Dictionary<DateTimeOffset, decimal> atr = new() { [Open(4)] = 4m };
+
+        IReadOnlyList<KeyLevelZone> zones = KeyLevels.Detect(
+            CloseThroughAt1ThenHighAt4(), atr, HighLowTiny(), maxPerKind: 12);
+
+        zones.Should().ContainSingle();
+        zones[0].FormedAtBucket.Should().Be(Open(4));
+        zones[0].Kind.Should().Be(KeyLevelKind.Resistance, "a close predating a zone's formation cannot flip it");
+    }
+
+    /// <summary>Two pivot highs one tick apart — 120 at minute 2, 121 at minute 4 — whose zones overlap.</summary>
+    private static IReadOnlyList<Bar> TwoOverlappingHighsAt2And4() =>
+    [
+        Bar(0, 100, 100, 100, 100),
+        Bar(1, 100, 100, 100, 100),
+        Bar(2, 100, 120, 100, 100),
+        Bar(3, 100, 100, 100, 100),
+        Bar(4, 100, 121, 100, 100),
+        Bar(5, 100, 100, 100, 100),
+        Bar(6, 100, 100, 100, 100),
+    ];
+
+    [Fact]
+    public void Detect_ShouldRaiseTouchCount_WhenTwoPivotsOverlapThroughThePipeline()
+    {
+        // Two nearby pivots describe ONE stronger level, not two: their zones overlap and merge, the union spans
+        // both, the touch count rides all the way through the pipeline, and the level dates from the earlier pivot.
+        Dictionary<DateTimeOffset, decimal> atr = new() { [Open(2)] = 4m, [Open(4)] = 4m };
+
+        IReadOnlyList<KeyLevelZone> zones = KeyLevels.Detect(
+            TwoOverlappingHighsAt2And4(), atr, HighLowTiny(), maxPerKind: 12);
+
+        zones.Should().ContainSingle();
+        zones[0].TouchCount.Should().Be(2);
+        zones[0].Bottom.Should().Be(118m);
+        zones[0].Top.Should().Be(123m);
+        zones[0].FormedAtBucket.Should().Be(Open(2));
+    }
+
+    /// <summary>Three disjoint pivot highs — 120, 130, 140 at minutes 2, 4, 6.</summary>
+    private static IReadOnlyList<Bar> ThreeDisjointHighsAt2And4And6() =>
+    [
+        Bar(0, 100, 100, 100, 100),
+        Bar(1, 100, 100, 100, 100),
+        Bar(2, 100, 120, 100, 100),
+        Bar(3, 100, 100, 100, 100),
+        Bar(4, 100, 130, 100, 100),
+        Bar(5, 100, 100, 100, 100),
+        Bar(6, 100, 140, 100, 100),
+        Bar(7, 100, 100, 100, 100),
+        Bar(8, 100, 100, 100, 100),
+    ];
+
+    [Fact]
+    public void Detect_ShouldKeepAtMostMaxPerKind_NewestFirst()
+    {
+        // The live set is bounded per side: three resistances, a cap of two, keeps the two most recently formed.
+        Dictionary<DateTimeOffset, decimal> atr = new() { [Open(2)] = 4m, [Open(4)] = 4m, [Open(6)] = 4m };
+
+        IReadOnlyList<KeyLevelZone> zones = KeyLevels.Detect(
+            ThreeDisjointHighsAt2And4And6(), atr, HighLowTiny(), maxPerKind: 2);
+
+        zones.Should().HaveCount(2);
+        zones.Select(zone => zone.FormedAtBucket).Should().BeEquivalentTo(new[] { Open(4), Open(6) });
+    }
+
+    [Fact]
+    public void Detect_ShouldBeDeterministic_OverTheSameInputs()
+    {
+        // The DoD's own words: same inputs in -> same zones out, so a rebuild restores history rather than
+        // rewriting it (ADR-0001). Asserted with strict ordering, since the result's order is part of the contract.
+        Dictionary<DateTimeOffset, decimal> atr = new() { [Open(2)] = 4m, [Open(6)] = 10m };
+        IReadOnlyList<Bar> bars = TwoHighs120At2And140At6();
+
+        IReadOnlyList<KeyLevelZone> first = KeyLevels.Detect(bars, atr, HighLowTiny(), maxPerKind: 12);
+        IReadOnlyList<KeyLevelZone> second = KeyLevels.Detect(bars, atr, HighLowTiny(), maxPerKind: 12);
+
+        second.Should().BeEquivalentTo(first, options => options.WithStrictOrdering());
+    }
+
+    /// <summary>
+    /// A pivot low at minute 2 (support) and a pivot high at minute 6 (resistance) whose bands touch, then minute 9
+    /// — the last bar — closes at 200 and flips the resistance.
+    /// </summary>
+    private static IReadOnlyList<Bar> SupportAt2AndResistanceAt6ThenFlipAt9() =>
+    [
+        Bar(0, 100, 100, 100, 100),
+        Bar(1, 100, 100, 100, 100),
+        Bar(2, 100, 100, 98, 100),  // dip -> pivot LOW 98 -> support [96,100]
+        Bar(3, 100, 100, 100, 100),
+        Bar(4, 100, 100, 100, 100),
+        Bar(5, 100, 100, 100, 100),
+        Bar(6, 100, 102, 100, 100), // spike -> pivot HIGH 102 -> resistance [100,104]
+        Bar(7, 100, 100, 100, 100),
+        Bar(8, 100, 100, 100, 100),
+        Bar(9, 100, 200, 100, 200), // last bar closes 200, flipping the resistance; nothing merges afterwards
+    ];
+
+    [Fact]
+    public void Detect_ShouldNotReMergeAfterAFlip_LeavingTwoOverlappingSameKindZones()
+    {
+        // Pipeline order is merge -> flip -> evict, with NO second merge. A support and a resistance that only
+        // touch are two levels (a merge never crosses kinds); when a later close flips the resistance to support
+        // they become two SAME-kind zones that overlap -- and they must stay two. Re-merging here would fold a role
+        // reversal into a neighbour it never touched and silently halve two levels into one.
+        Dictionary<DateTimeOffset, decimal> atr = new() { [Open(2)] = 4m, [Open(6)] = 4m };
+
+        IReadOnlyList<KeyLevelZone> zones = KeyLevels.Detect(
+            SupportAt2AndResistanceAt6ThenFlipAt9(), atr, HighLowTiny(), maxPerKind: 12);
+
+        zones.Should().HaveCount(2);
+        zones.Should().OnlyContain(zone => zone.Kind == KeyLevelKind.Support);
+        zones.Should().OnlyContain(zone => zone.TouchCount == 1, "a re-merge would have summed the touch counts");
+        zones.Select(zone => zone.Bottom).Should().BeEquivalentTo(new[] { 96m, 100m });
+        zones.Select(zone => zone.Top).Should().BeEquivalentTo(new[] { 100m, 104m });
+    }
+
+    [Fact]
+    public void Detect_ShouldReturnNothing_ForAnEmptySeries() =>
+        KeyLevels.Detect([], new Dictionary<DateTimeOffset, decimal>(), HighLowTiny(), maxPerKind: 12)
+            .Should().BeEmpty();
+
+    [Fact]
+    public void Detect_ShouldRefuse_WhenBarsAreNull() =>
+        FluentActions.Invoking(() => KeyLevels.Detect(
+                null!, new Dictionary<DateTimeOffset, decimal>(), HighLowTiny(), maxPerKind: 12))
+            .Should().Throw<ArgumentNullException>();
+
+    [Fact]
+    public void Detect_ShouldRefuse_WhenTheAtrMapIsNull() =>
+        FluentActions.Invoking(() => KeyLevels.Detect(
+                TwoHighs120At2And140At6(), null!, HighLowTiny(), maxPerKind: 12))
+            .Should().Throw<ArgumentNullException>().WithParameterName("atrByBucket");
+
+    [Fact]
+    public void Detect_ShouldRefuse_WhenOptionsAreNull() =>
+        FluentActions.Invoking(() => KeyLevels.Detect(
+                TwoHighs120At2And140At6(), new Dictionary<DateTimeOffset, decimal>(), null!, maxPerKind: 12))
+            .Should().Throw<ArgumentNullException>();
 }
