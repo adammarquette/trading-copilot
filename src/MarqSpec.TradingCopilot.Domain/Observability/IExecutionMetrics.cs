@@ -113,6 +113,16 @@ public interface IExecutionMetrics
     /// </summary>
     /// <param name="outcome">One of the sink's trade-journal outcome constants (a closed set — never an id).</param>
     void RecordTradeJournalOutcome(string outcome);
+
+    /// <summary>
+    /// Counts one stranded pre-transmit intent the runtime reconcile sweep newly detected (gh#722), dimensioned by
+    /// <paramref name="kind"/>. Emitted <b>once</b> per strand as it crosses the age bound — a maybe-live order left
+    /// <c>Taking</c> or conditional left <c>Firing</c> past its bound, awaiting operator reconcile — so an operator
+    /// alert can fire on a strand that a log line alone would let scroll past. The sweep transmits nothing; this is
+    /// the detection signal, not an action.
+    /// </summary>
+    /// <param name="kind">One of the sink's reconcile-strand kind constants (a closed set — never an id).</param>
+    void RecordReconcileStrandDetected(string kind);
 }
 
 /// <summary>
@@ -184,6 +194,11 @@ public sealed class NullExecutionMetrics : IExecutionMetrics
 
     /// <inheritdoc />
     public void RecordTradeJournalOutcome(string outcome)
+    {
+    }
+
+    /// <inheritdoc />
+    public void RecordReconcileStrandDetected(string kind)
     {
     }
 }

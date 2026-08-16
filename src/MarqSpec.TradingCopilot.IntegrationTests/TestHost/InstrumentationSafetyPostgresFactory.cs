@@ -147,6 +147,11 @@ public sealed class FaultInjectingExecutionMetrics : IExecutionMetrics
     {
     }
 
+    /// <inheritdoc />
+    public void RecordReconcileStrandDetected(string kind)
+    {
+    }
+
     private static void FailIf(bool armed)
     {
         if (armed)
