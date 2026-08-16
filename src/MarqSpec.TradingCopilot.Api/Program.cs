@@ -11,6 +11,7 @@ using MarqSpec.TradingCopilot.Api.Chat;
 using MarqSpec.TradingCopilot.Api.Documentation;
 using MarqSpec.TradingCopilot.Api.Firms;
 using MarqSpec.TradingCopilot.Api.Flatten;
+using MarqSpec.TradingCopilot.Api.Journal;
 using MarqSpec.TradingCopilot.Api.Kill;
 using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Notifications;
@@ -238,6 +239,14 @@ builder.Services.AddSingleton<IReadOnlyList<IIndicator>>(sp =>
 builder.Services.AddScoped<IndicatorProjectionService>();
 builder.Services.AddScoped<IIndicatorSource, StoredIndicatorSource>();
 builder.Services.AddHostedService<IndicatorProjectionHost>();
+
+// The Outcome writer (gh#909, R-9): composes an Outcome for each closed trade that lacks one, so the R-15 report
+// surface and the calibration / expectancy readers (gh#21 / gh#22) have outcomes to read. ALWAYS runs -- its work
+// list is whatever the journal holds -- and is idempotent on Outcome.TradeId's unique index. The IndicatorProjection
+// shape: a scoped service driven by a hosted per-pass sweep.
+builder.Services.Configure<OutcomeJournalOptions>(builder.Configuration.GetSection(OutcomeJournalOptions.SectionName));
+builder.Services.AddScoped<OutcomeJournalService>();
+builder.Services.AddHostedService<OutcomeJournalHost>();
 
 // The read seam over persisted key-level zones (gh#596) that confluence (gh#593) and any chart overlay consult;
 // the detector that writes them is gh#597.
