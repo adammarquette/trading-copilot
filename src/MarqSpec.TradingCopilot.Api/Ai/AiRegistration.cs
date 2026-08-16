@@ -108,6 +108,7 @@ public static class AiRegistration
         // ChatTurnService resolves IEnumerable<IChatTool> -- the full registered set -- and offers it to the model.
         services.AddScoped<IChatTool, QueryJournalTool>();
         services.AddScoped<IChatTool, GetQuoteTool>();
+        services.AddScoped<IChatTool, ReadPositionsTool>();
 
         // The grounded chat turn (gh#906 / gh#925, R-6): runs the model over a conversation's history, runs any
         // read-only tool calls in a bounded loop, and prices every call. Scoped like the reviewer beside it — it wraps

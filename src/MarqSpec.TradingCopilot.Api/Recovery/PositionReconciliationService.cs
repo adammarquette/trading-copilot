@@ -25,7 +25,7 @@ namespace MarqSpec.TradingCopilot.Api.Recovery;
 /// rehydration); this is the reconcile the caller invokes. The account-level basis flags the settlement window if
 /// <b>any</b> configured instrument is in it; per-position precision is a noted refinement.
 /// </remarks>
-public sealed class PositionReconciliationService
+public sealed class PositionReconciliationService : IPositionReconciler
 {
     private readonly TradingCopilotDbContext _database;
     private readonly IProjectXVenueFactory _venueFactory;

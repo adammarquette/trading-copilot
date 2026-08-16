@@ -398,6 +398,9 @@ builder.Services.AddHostedService<AccountEventStreamHost>();
 // with their mark basis (live / settlement re-mark / declared-unknown), so a settlement re-mark is never read
 // as live and an unreachable venue is not shown as a stale live view.
 builder.Services.AddScoped<PositionReconciliationService>();
+// The read-only reconcile seam (gh#929) points at the same scoped instance -- the chat read_positions tool injects
+// IPositionReconciler (read only), never the concrete service (which also drives the safety-critical flatten).
+builder.Services.AddScoped<IPositionReconciler>(provider => provider.GetRequiredService<PositionReconciliationService>());
 builder.Services.AddScoped<PositionExitService>();
 
 // The resting-orders sibling of the positions read (gh#381): venue truth for the working orders standing on an
