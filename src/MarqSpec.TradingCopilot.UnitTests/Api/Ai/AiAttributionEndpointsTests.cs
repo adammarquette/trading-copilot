@@ -31,7 +31,8 @@ public class AiAttributionEndpointsTests
     private static DateTimeOffset Now => new(2026, 7, 15, 18, 0, 0, TimeSpan.Zero);
     private static DateTimeOffset MonthStart => new(2026, 7, 1, 0, 0, 0, TimeSpan.Zero);
 
-    private async Task SeedCostAsync(Guid owner, Guid firing, decimal cost, LlmModelTier tier = LlmModelTier.Triage)
+    private async Task SeedCostAsync(
+        Guid owner, Guid firing, decimal cost, LlmModelTier tier = LlmModelTier.Triage, DateTimeOffset? occurredAt = null)
     {
         await using TradingCopilotDbContext context = Context(owner);
         context.AiUsage.Add(new AiUsageRecord
@@ -44,7 +45,7 @@ public class AiAttributionEndpointsTests
             Outcome = AiUsageOutcome.Succeeded,
             EstimatedCostUsd = cost,
             TriggerFiringId = firing,
-            OccurredAt = Now,
+            OccurredAt = occurredAt ?? Now,
         });
         await context.SaveChangesAsync();
     }
@@ -184,6 +185,72 @@ public class AiAttributionEndpointsTests
         body.Suggestions.Should().BeEmpty();
         body.TakenTrades.Should().BeEmpty();
         body.UnattributedUsd.Should().Be(0m);
+    }
+
+    [Fact]
+    public async Task GetAttributionAsync_ShouldReportASinglePassSuggestion_AsNotEscalated()
+    {
+        Guid firing = Guid.NewGuid();
+        await SeedSuggestionAsync(_operator, firing, "ES", Now);
+        await SeedCostAsync(_operator, firing, 0.0005m); // one triage call, no deep-tier row
+
+        IResult result = await AiAttributionEndpoints.GetAttributionAsync(
+            MonthStart, Now, Now, Context(), CancellationToken.None);
+
+        AiSuggestionCost cost = Body(result).Suggestions.Should().ContainSingle().Subject;
+        cost.Calls.Should().Be(1);
+        cost.Escalated.Should().BeFalse(); // a single triage call is not an escalation (read from the tier, not the count)
+    }
+
+    [Fact]
+    public async Task GetAttributionAsync_ShouldDefaultToTheCentralMonth_WhenNoPeriodIsGiven()
+    {
+        // The SPA's default call passes no from/to; the window must resolve to Central-month-start..now, covering a
+        // suggestion issued this month. Exercises CentralMonthStartUtc, which the explicit-period tests never reach.
+        Guid firing = Guid.NewGuid();
+        Guid suggestionId = await SeedSuggestionAsync(_operator, firing, "ES", Now);
+        await SeedCostAsync(_operator, firing, 0.0005m);
+
+        IResult result = await AiAttributionEndpoints.GetAttributionAsync(
+            from: null, to: null, Now, Context(), CancellationToken.None);
+
+        AiAttributionResponse body = Body(result);
+        body.To.Should().Be(Now);
+        body.From.Should().BeOnOrBefore(Now).And.BeAfter(Now.AddDays(-40)); // the current Central month's start
+        body.Suggestions.Should().ContainSingle().Which.SuggestionId.Should().Be(suggestionId);
+    }
+
+    [Fact]
+    public async Task GetAttributionAsync_ShouldCostATradeOffAPreWindowSuggestion_TheCostMapIsNotPeriodBounded()
+    {
+        // THE design's crux: a trade closes IN the window off a suggestion that fired BEFORE it, so the cost map must
+        // NOT be period-bounded. If a future "windowed pre-filter" optimization broke this, only this test would fail.
+        DateTimeOffset lastMonth = new(2026, 6, 15, 18, 0, 0, TimeSpan.Zero);
+        Guid firing = Guid.NewGuid();
+        Guid suggestionId = await SeedSuggestionAsync(_operator, firing, "ES", lastMonth);   // suggestion fired in June
+        await SeedCostAsync(_operator, firing, 0.0060m, occurredAt: lastMonth);              // its cost occurred in June
+        await SeedTradeAsync(_operator, suggestionId, "ES", 40m, Now);                       // trade closed in July (in window)
+
+        IResult result = await AiAttributionEndpoints.GetAttributionAsync(
+            MonthStart, Now, Now, Context(), CancellationToken.None);
+
+        AiAttributionResponse body = Body(result);
+        body.Suggestions.Should().BeEmpty(); // the June suggestion is out of the July window...
+        AiTradeCost trade = body.TakenTrades.Should().ContainSingle().Subject;
+        trade.SuggestionCostUsd.Should().Be(0.0060m); // ...but the trade still carries its (pre-window) suggestion's cost
+    }
+
+    [Fact]
+    public async Task GetAttributionAsync_ShouldCostAForeignSuggestionTradeAsZero_WithoutThrowing()
+    {
+        // A trade whose SuggestionId references no owned suggestion (foreign / pruned) degrades to zero cost, never a throw.
+        await SeedTradeAsync(_operator, Guid.NewGuid(), "NQ", 10m, Now);
+
+        IResult result = await AiAttributionEndpoints.GetAttributionAsync(
+            MonthStart, Now, Now, Context(), CancellationToken.None);
+
+        AiTradeCost trade = Body(result).TakenTrades.Should().ContainSingle().Subject;
+        trade.SuggestionCostUsd.Should().Be(0m);
     }
 
     [Fact]

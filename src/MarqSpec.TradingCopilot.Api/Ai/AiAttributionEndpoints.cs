@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -63,12 +64,17 @@ public static class AiAttributionEndpoints
         // operator's agent-review history is modest; a windowed pre-filter is a future refinement if it grows.
         var costRows = await database.AiUsage
             .Where(record => record.TriggerFiringId != null)
-            .Select(record => new { Firing = record.TriggerFiringId!.Value, record.EstimatedCostUsd, record.OccurredAt })
+            .Select(record => new { Firing = record.TriggerFiringId!.Value, record.EstimatedCostUsd, record.OccurredAt, record.Tier })
             .ToListAsync(cancellationToken);
 
-        Dictionary<Guid, (decimal Cost, int Calls)> costByFiring = costRows
+        // Escalation is read from a DEEP-tier row's presence, not the call count: two rows on a firing is a
+        // triage→deep escalation today, but a future same-tier retry would inflate the count without escalating —
+        // the tier is the truthful signal (gh#767 review).
+        Dictionary<Guid, (decimal Cost, int Calls, bool Escalated)> costByFiring = costRows
             .GroupBy(row => row.Firing)
-            .ToDictionary(group => group.Key, group => (group.Sum(row => row.EstimatedCostUsd), group.Count()));
+            .ToDictionary(
+                group => group.Key,
+                group => (group.Sum(row => row.EstimatedCostUsd), group.Count(), group.Any(row => row.Tier == LlmModelTier.Deep)));
 
         // The operator's suggestions carrying a firing (R-20): the CreatedAt/instrument metadata for the per-suggestion
         // read, plus the suggestion-id → firing map a taken trade joins through (its suggestion may pre-date the window).
@@ -95,13 +101,14 @@ public static class AiAttributionEndpoints
             .Where(suggestion => suggestion.CreatedAt >= windowFrom && suggestion.CreatedAt <= windowTo)
             .Select(suggestion =>
             {
-                costByFiring.TryGetValue(suggestion.Firing, out (decimal Cost, int Calls) tally);
+                costByFiring.TryGetValue(suggestion.Firing, out (decimal Cost, int Calls, bool Escalated) tally);
                 return new AiSuggestionCost(
                     suggestion.Id, suggestion.Instrument, suggestion.Side.ToString(),
-                    tally.Cost, tally.Calls, tally.Calls > 1, suggestion.CreatedAt);
+                    tally.Cost, tally.Calls, tally.Escalated, suggestion.CreatedAt);
             })
             .OrderByDescending(cost => cost.CostUsd)
             .ThenByDescending(cost => cost.CreatedAt)
+            .ThenBy(cost => cost.SuggestionId) // a stable tiebreak so paging / output is deterministic
             .ToList();
 
         // Per-taken-trade cost: trades CLOSED in the window that came from a suggestion, each reporting that suggestion's
@@ -125,13 +132,14 @@ public static class AiAttributionEndpoints
                 decimal cost = 0m;
                 if (firingBySuggestion.TryGetValue(trade.SuggestionId, out Guid firing))
                 {
-                    costByFiring.TryGetValue(firing, out (decimal Cost, int Calls) tally);
+                    costByFiring.TryGetValue(firing, out (decimal Cost, int Calls, bool Escalated) tally);
                     cost = tally.Cost;
                 }
 
                 return new AiTradeCost(trade.Id, trade.Instrument, trade.RealizedPnL, cost, trade.ClosedAt);
             })
             .OrderByDescending(trade => trade.ClosedAt)
+            .ThenBy(trade => trade.TradeId) // a stable tiebreak so paging / output is deterministic
             .ToList();
 
         // Unattributed: firing-correlated cost that OCCURRED in the window whose firing produced no suggestion (a billed
