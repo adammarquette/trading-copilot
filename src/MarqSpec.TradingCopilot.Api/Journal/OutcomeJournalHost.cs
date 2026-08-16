@@ -56,6 +56,7 @@ public sealed class OutcomeJournalHost : BackgroundService
                 {
                     OutcomeJournalService service = scope.ServiceProvider.GetRequiredService<OutcomeJournalService>();
                     await service.ComposeClosedTradeOutcomesAsync(stoppingToken);
+                    await service.ComposeUnfilledSuggestionOutcomesAsync(stoppingToken); // gh#939: terminal unfilled suggestions
                 }
 
                 await _delay(interval, stoppingToken);

@@ -458,15 +458,17 @@ public class TradingCopilotDbContext : TenantDbContext
                 .HasForeignKey(o => o.TradeId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // Survives suggestion deletion as null -- the same posture Trade.SuggestionId takes, so the R-9 outcome
-            // lineage is not silently erased when a suggestion is removed. (A future untaken-suggestion outcome, which
-            // has no trade, will need the hard-delete / account-removal card to settle its removal so this SetNull
-            // cannot orphan it against CK_Outcomes_ParentPresent -- untaken outcomes are not composed until [J2]/[J3],
-            // so none exist to hit that edge yet, gh#832.)
+            // Cascade: an outcome dies WITH its suggestion (gh#939, operator decision 2026-08-16), settling the orphan
+            // the gh#832 comment flagged -- an untaken outcome (no TradeId) that SetNull would have stranded against
+            // CK_Outcomes_ParentPresent when a suggestion is deleted. Safe because a suggestion is append-only and is
+            // only ever deleted via an account-removal cascade (Suggestion.AccountId cascades), where the outcome
+            // should die anyway -- a TAKEN suggestion's outcome already dies via its Trade's cascade above. Postgres
+            // permits the two cascade paths to one Outcome row (Trade and Suggestion); a row reached by both is
+            // deleted once.
             outcome.HasOne<Suggestion>()
                 .WithMany()
                 .HasForeignKey(o => o.SuggestionId)
-                .OnDelete(DeleteBehavior.SetNull);
+                .OnDelete(DeleteBehavior.Cascade);
 
             // Zero-or-one Outcome per Trade (data-dictionary ERD `Trade ||--o| Outcome`) -- the DB-enforced 1:1-FK
             // posture StopPlanRecord.OrderId / SuggestionDisposition.SuggestionId take, so a retry or write-path bug
@@ -475,6 +477,13 @@ public class TradingCopilotDbContext : TenantDbContext
             // forced unique against each other; Postgres treats those nulls as distinct anyway, but the filter states
             // the intent and keeps the index off the null rows.
             outcome.HasIndex(o => o.TradeId).IsUnique().HasFilter("\"TradeId\" IS NOT NULL");
+
+            // One UNTAKEN outcome per suggestion (gh#939) -- the untaken path's idempotency backstop, mirroring the
+            // TradeId index. Filtered to no-trade rows: a taken suggestion can produce several trade legs (gh#759),
+            // each a trade-derived outcome carrying the same SuggestionId, so uniqueness must apply only where there is
+            // no trade. OutcomeJournalService.OutcomeSuggestionKeyIndex pins this name; a metadata test guards it.
+            outcome.HasIndex(o => o.SuggestionId).IsUnique()
+                .HasFilter("\"SuggestionId\" IS NOT NULL AND \"TradeId\" IS NULL");
         });
 
         modelBuilder.Entity<RiskProfileRecord>(profile =>
