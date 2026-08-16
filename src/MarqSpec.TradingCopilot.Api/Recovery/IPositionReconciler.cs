@@ -2,11 +2,12 @@ namespace MarqSpec.TradingCopilot.Api.Recovery;
 
 /// <summary>
 /// The <b>read-only</b> seam onto venue-truth position reconciliation (gh#193, gh#929): read an account's positions
-/// from the venue, tagged with their <see cref="MarqSpec.TradingCopilot.Domain.Flatten.PositionMarkBasis"/>. It
-/// exposes only the read — no exit / close / order path — so a consumer that injects <i>this</i> (rather than the
-/// concrete <see cref="PositionReconciliationService"/>, which also drives the safety-critical flatten) is read-only
-/// by construction. The chat co-pilot's <c>read_positions</c> tool depends on this so the model can never reach an
-/// order path through it (enforcement lives below the model).
+/// from the venue, tagged with their <see cref="MarqSpec.TradingCopilot.Domain.Flatten.PositionMarkBasis"/>. The chat
+/// co-pilot's <c>read_positions</c> tool depends on <i>this narrow interface</i> rather than the concrete
+/// <see cref="PositionReconciliationService"/> for two reasons: the concrete service does live venue I/O (it sits on
+/// the execution-recovery paths — stranded-order recovery and the settlement/position reconcile endpoint), so the
+/// tool is unit-tested against a fake of this seam; and the tool's dependency is then, by its very type, a
+/// <b>read</b> that cannot grow a write / order path (enforcement lives below the model).
 /// </summary>
 public interface IPositionReconciler
 {
