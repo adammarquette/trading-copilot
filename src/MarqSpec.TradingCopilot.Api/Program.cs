@@ -489,6 +489,23 @@ builder.Services.AddScoped<KillSwitchService>();
 // alongside migrate + bootstrap.
 builder.Services.AddScoped<DecisionStateRehydrator>();
 
+// The RUNTIME sibling of the rehydrator above (R-20, R-12, ADR-0013, gh#722): a periodic sweep that detects an
+// order stranded Taking / a conditional stranded Firing past an age bound and raises an operator alert so the human
+// reconciles it (POST /orders|conditionals/{id}/reconcile). It is propose-and-confirm -- it transmits nothing,
+// adopts nothing, releases nothing and changes no order state, preserving "never auto-act on rehydrated state".
+// Age is measured by the in-memory first-seen register (per process lifetime, no timestamp column): a runtime
+// strand is clocked when the sweep sees it, and a restart strand is already covered by the rehydrator, so the
+// register starting empty at boot is not a gap. The register is a SINGLETON (it must survive the sweep's per-pass
+// scopes); the cadence/bound are validated on start so a bad configuration fails the host once, not every pass.
+builder.Services.AddSingleton<ReconcileStrandRegister>();
+builder.Services.AddOptions<ReconcileSweepOptions>()
+    .Bind(builder.Configuration.GetSection(ReconcileSweepOptions.SectionName))
+    .Validate(
+        options => options.SweepIntervalSeconds >= 1 && options.StrandAgeThresholdSeconds >= 1,
+        "ReconcileSweep: require SweepIntervalSeconds >= 1 and StrandAgeThresholdSeconds >= 1.")
+    .ValidateOnStart();
+builder.Services.AddHostedService<ReconcileSweepHost>();
+
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>

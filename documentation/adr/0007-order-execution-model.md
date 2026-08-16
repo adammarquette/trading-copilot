@@ -1079,8 +1079,9 @@ fire's *release* returns the conditional to **auto-firing `Pending`** where the 
 safe (the account is provably flat at release, and the re-fire re-gates) but able to re-arm a one-shot whose fire in
 fact already *round-tripped* (filled and closed), which "nothing-rests-and-flat" cannot distinguish from "never placed";
 telling them apart needs the deferred **fill-level** reconcile. Deferred: that venue-seam refusal outcome (which would let each path itself
-tell a rejection from a landed fault), an **automatic** background reconcile sweep (**both** endpoints keep a human in
-the loop, resisting *auto-acting on rehydrated state*), and the real-Postgres concurrent proofs. The guard was
+tell a rejection from a landed fault), an **automatic** background reconcile sweep (since landed in gh#722 as
+**propose-and-confirm** *detection* — it alerts on a runtime strand while **both** endpoints still keep a human in the
+loop, resisting *auto-acting on rehydrated state*; ADR-0013, 2026-08-15), and the real-Postgres concurrent proofs. The guard was
 generalized (generic over its result, taking the caller's `DbContext`) so the fire watcher serializes on its own
 per-owner context with lock + work on one backend. The unit tier proves the deterministic no-stacking, fault-leaves-
 `Firing`/`Taking`, and reconcile (adopt / release / refuse) logic on both paths.
