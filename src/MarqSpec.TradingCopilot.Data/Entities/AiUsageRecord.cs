@@ -59,6 +59,12 @@ public class AiUsageRecord : IUserOwned
     /// suggestion's total AI cost is the sum of the rows sharing its firing; not an FK, because the fail-open ledger
     /// outlives the trigger it references (the same reason <see cref="Suggestion"/> soft-links the firing).
     /// </summary>
+    /// <remarks>
+    /// A firing that billed a review but staged <b>no</b> suggestion (suppressed / geometry-rejected / throttled /
+    /// non-tradable) still stamps its cost rows, so some rows carry a firing that <b>no</b> <see cref="Suggestion"/>
+    /// references — the per-suggestion cost read (gh#767 increment B) is therefore a floor on total agent-review
+    /// spend, not equal to it, and must account for that orphan-firing bucket rather than silently drop it.
+    /// </remarks>
     public Guid? TriggerFiringId { get; set; }
 
     /// <summary>When the call happened (caller-supplied; the ledger never reads a clock).</summary>

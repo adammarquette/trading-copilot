@@ -910,6 +910,12 @@ public class TriggerEvaluationServiceTests
         List<AiUsageRecord> rows = await reload.AiUsage.ToListAsync();
         rows.Should().HaveCount(2);                                   // one row per billed call
         rows.Should().OnlyContain(row => row.UserId == _operator);    // both stamped with the firing owner (R-20)
+
+        // gh#767: BOTH the triage and the deep row carry the produced suggestion's firing, so a per-suggestion
+        // SUM(cost) totals triage+deep for the one suggestion -- the escalation-correlation the read increment sums.
+        Suggestion suggestion = await reload.Suggestions.SingleAsync();
+        suggestion.TriggerFiringId.Should().NotBeNull();
+        rows.Should().OnlyContain(row => row.TriggerFiringId == suggestion.TriggerFiringId);
     }
 
     // FAIL-OPEN AT THE LEDGER BOUNDARY: the scan calls _ledger.RecordAsync UNGUARDED -- the fail-open lives inside the
