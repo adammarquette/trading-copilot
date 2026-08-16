@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.Chat.Tools;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Chat;
@@ -9,43 +10,45 @@ using Microsoft.Extensions.Options;
 namespace MarqSpec.TradingCopilot.Api.Chat;
 
 /// <summary>
-/// The result of one grounded chat turn (gh#906): whether it produced a usable answer, the text to surface (the
-/// assistant answer, or a refusal reason), and the priced <see cref="AiCallCost"/> the caller meters and ledgers.
+/// The result of one grounded chat turn (gh#906 / gh#925): whether it produced a usable answer, the text to surface
+/// (the assistant answer, or a refusal reason), and the priced <see cref="AiCallCost"/> rows the caller meters and
+/// ledgers — <b>one per model call</b>, since a tool-using turn makes several (gh#925).
 /// </summary>
 /// <param name="Succeeded">
 /// <see langword="true"/> only on a clean completion — the caller then persists <see cref="Message"/> as the
-/// assistant turn. <see langword="false"/> for a refused / truncated / faulted call (fail-closed): the caller
-/// surfaces <see cref="Message"/> as a refusal and persists <b>no</b> assistant turn.
+/// assistant turn. <see langword="false"/> for a refused / truncated / faulted / tool-exhausted turn (fail-closed):
+/// the caller surfaces <see cref="Message"/> as a refusal and persists <b>no</b> assistant turn.
 /// </param>
 /// <param name="Message">The assistant answer (on success) or a human refusal reason (on failure).</param>
-/// <param name="Cost">The call's priced facts — recorded whatever the outcome, so a failed call still reaches the governor.</param>
-public sealed record ChatTurnResult(bool Succeeded, string Message, AiCallCost Cost);
+/// <param name="Costs">The priced facts of every model call the turn made — recorded whatever the outcome, so the governor sees each billed call.</param>
+public sealed record ChatTurnResult(bool Succeeded, string Message, IReadOnlyList<AiCallCost> Costs);
 
 /// <summary>
 /// Runs one grounded co-pilot chat turn over <see cref="ILlmProvider"/> (gh#906, R-6): builds the model conversation
-/// from the thread's history under a fixed system prompt, calls the model, and prices the call. <b>Pure of
-/// persistence, tenancy, the hub, and the governor</b> — the endpoint owns those — so it is trivially unit-testable
-/// behind a fake provider (the reviewer / scan split).
+/// from the thread's history under a fixed system prompt, offers the <b>read-only</b> tool layer (gh#925), calls the
+/// model, runs any tool calls, and prices every call. <b>Pure of persistence, tenancy, the hub, and the governor</b> —
+/// the endpoint owns those — so it is trivially unit-testable behind a fake provider + fake tools.
 /// </summary>
 /// <remarks>
 /// <b>Enforcement lives below the model.</b> Nothing here places, sizes, or proposes an order — the co-pilot only
-/// converses. The system prompt is <b>fixed and holds no risk limits or account state</b>, and message
-/// <see cref="ChatMessage.Content"/> is <b>untrusted display data</b>: it becomes a User / Assistant turn, never
-/// folded into the system prompt as instruction. Any stop other than a clean completion is treated <b>fail-closed</b>
-/// (the <see cref="ILlmProvider"/> seam contract): the model's text is not surfaced as the co-pilot's answer.
+/// converses and reads. Every offered <see cref="IChatTool"/> is read-only by construction; the loop runs whatever the
+/// model asks for from that fixed, read-only set and never invents an action outside it. The system prompt is
+/// <b>fixed and holds no risk limits or account state</b>, and message <see cref="ChatMessage.Content"/> is
+/// <b>untrusted display data</b>: it becomes a User / Assistant turn, never folded into the system prompt as
+/// instruction. The tool loop is <b>bounded</b> (a hard round cap → fail-closed) so the model can never drive an
+/// unbounded call sequence, and any stop other than a clean completion is treated <b>fail-closed</b>.
 /// </remarks>
 public interface IChatTurnService
 {
     /// <summary>
     /// Runs one turn over the conversation history (oldest first), <b>streaming</b> the answer token-by-token (inc 3b).
-    /// <paramref name="onDelta"/> is invoked for each text delta as it arrives; the returned result carries the full
-    /// answer (or refusal) and the priced cost, so a caller that does not want streaming passes a no-op delta and gets
-    /// exactly the non-streamed behaviour.
+    /// A no-tool turn streams exactly as before; a tool-using turn's read tools run in a bounded loop and its final
+    /// answer is delivered by the caller's message push (streaming a tool-using turn's final answer is 4b).
     /// </summary>
     /// <param name="history">The thread's messages in <c>Sequence</c> order — must end with the operator's new turn.</param>
     /// <param name="onDelta">Called with each incremental text delta (a presentation side-channel; should not throw).</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>The turn result — the answer or a refusal, and the priced cost.</returns>
+    /// <returns>The turn result — the answer or a refusal, and the priced cost of every model call.</returns>
     Task<ChatTurnResult> StreamAsync(
         IReadOnlyList<ChatMessage> history,
         Func<string, CancellationToken, Task> onDelta,
@@ -62,29 +65,42 @@ internal sealed class ChatTurnService : IChatTurnService
     private const int MaxOutputTokens = 1024;
 
     /// <summary>
+    /// The hard cap on tool rounds after the first stream (gh#925). The model can call read tools, read the results,
+    /// and answer — but it can never drive an <b>unbounded</b> call sequence: past this many rounds still wanting
+    /// tools, the turn fails closed. Bounds cost and latency, and is the loop's safety backstop.
+    /// </summary>
+    private const int MaxToolRounds = 4;
+
+    /// <summary>
     /// The co-pilot system prompt. <b>Fixed</b> — never assembled from message <c>Content</c> — and holds <b>no risk
     /// limits or account state</b> (enforcement lives below the model; the LLM only proposes).
     /// </summary>
     private const string SystemPrompt =
         "You are a trading co-pilot for a single futures trader. Help them analyse markets, setups, order flow, and "
-        + "their own trading, grounded in the conversation. You never place, modify, or size orders, and you never "
-        + "give personalized financial advice — execution is always an explicit action the trader takes themselves. "
+        + "their own trading, grounded in the conversation and the read-only tools you are given. You never place, "
+        + "modify, or size orders, and you never give personalized financial advice — execution is always an explicit "
+        + "action the trader takes themselves. Use a tool when it would ground your answer in the trader's real data. "
         + "Be concise and specific, and say plainly when you are not sure.";
 
     private readonly ILlmProvider _provider;
+    private readonly IReadOnlyList<IChatTool> _tools;
     private readonly LlmOptions _options;
     private readonly ILogger<ChatTurnService> _logger;
 
-    /// <summary>Creates the service over the provider seam and the pricing options.</summary>
+    /// <summary>Creates the service over the provider seam, the read-only tools, and the pricing options.</summary>
     /// <param name="provider">The provider-neutral LLM seam.</param>
+    /// <param name="tools">The read-only chat tools the model may call (gh#925).</param>
     /// <param name="options">The LLM options — the model id and pinned per-tier rates.</param>
     /// <param name="logger">The logger (a faulted call is logged, never silently swallowed).</param>
-    public ChatTurnService(ILlmProvider provider, IOptions<LlmOptions> options, ILogger<ChatTurnService> logger)
+    public ChatTurnService(
+        ILlmProvider provider, IEnumerable<IChatTool> tools, IOptions<LlmOptions> options, ILogger<ChatTurnService> logger)
     {
         ArgumentNullException.ThrowIfNull(provider);
+        ArgumentNullException.ThrowIfNull(tools);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
         _provider = provider;
+        _tools = [.. tools];
         _options = options.Value;
         _logger = logger;
     }
@@ -108,16 +124,74 @@ internal sealed class ChatTurnService : IChatTurnService
                     message.Role == ChatRole.Assistant ? LlmRole.Assistant : LlmRole.User, message.Content))
         ];
 
-        LlmRequest request = new(Tier, SystemPrompt, messages, LlmResponseFormat.Text, MaxOutputTokens);
+        IReadOnlyList<LlmToolDefinition> toolDefinitions = [.. _tools.Select(tool => tool.Definition)];
         string model = _options.ModelFor(Tier);
+        List<AiCallCost> costs = [];
+        LlmRequest request = new(Tier, SystemPrompt, messages, LlmResponseFormat.Text, MaxOutputTokens, toolDefinitions);
 
+        // ROUND 1 STREAMS (inc 3b): a no-tool answer still tokens-streams to the operator. Only if the model asks for a
+        // tool do we fall into the loop below.
+        (LlmCompletion? streamed, ChatTurnResult? fault) = await CallAsync(
+            () => _provider.StreamAsync(request, onDelta, cancellationToken), model, costs, cancellationToken);
+        if (fault is not null)
+        {
+            return fault;
+        }
+
+        if (streamed!.StopReason != LlmStopReason.ToolUse)
+        {
+            return ResultFor(streamed, costs); // exactly the inc-3b behaviour when no tool is called
+        }
+
+        // The model wants tools. StreamAsync (4a) does not parse the tool_use blocks, so the loop re-issues via
+        // CompleteAsync -- the documented round-1 double-call (removed in 4b) -- to recover the ToolCalls, runs them,
+        // and continues until the model answers or the round cap fails the turn closed.
+        for (int round = 0; round < MaxToolRounds; round++)
+        {
+            (LlmCompletion? completion, ChatTurnResult? loopFault) = await CallAsync(
+                () => _provider.CompleteAsync(request, cancellationToken), model, costs, cancellationToken);
+            if (loopFault is not null)
+            {
+                return loopFault;
+            }
+
+            if (completion!.StopReason == LlmStopReason.Completed)
+            {
+                return new ChatTurnResult(true, completion.Text, costs);
+            }
+
+            if (completion.StopReason != LlmStopReason.ToolUse)
+            {
+                return new ChatTurnResult(false, RefusalFor(completion.StopReason), costs);
+            }
+
+            IReadOnlyList<LlmToolResult> results = await RunToolsAsync(completion.ToolCalls ?? [], cancellationToken);
+
+            // Append the assistant tool-use turn + the user tool-result turn, then loop with the extended conversation.
+            messages.Add(new LlmMessage(LlmRole.Assistant, completion.Text, ToolCalls: completion.ToolCalls));
+            messages.Add(new LlmMessage(LlmRole.User, string.Empty, ToolResults: results));
+            request = request with { Messages = [.. messages] };
+        }
+
+        // Past the cap while still asking for tools: fail closed (bounded loop -- the model cannot run away).
+        _logger.LogWarning("Chat turn exceeded the {Cap}-round tool cap; failing closed.", MaxToolRounds);
+        return new ChatTurnResult(
+            false, "The co-pilot could not finish working through that request — please try again.", costs);
+    }
+
+    /// <summary>
+    /// Runs one model call, appends its priced cost to <paramref name="costs"/> whatever the outcome, and returns
+    /// either the completion or a fail-closed result (on a provider fault). A genuine caller cancellation propagates.
+    /// </summary>
+    private async Task<(LlmCompletion? Completion, ChatTurnResult? Fault)> CallAsync(
+        Func<Task<LlmCompletion>> call, string model, List<AiCallCost> costs, CancellationToken cancellationToken)
+    {
         long start = Stopwatch.GetTimestamp();
-        LlmCompletion completion;
         try
         {
-            // Streaming: each text delta is forwarded to onDelta as it arrives; the returned completion is the full
-            // accumulated answer, so pricing and the fail-closed check below are identical to the non-streamed path.
-            completion = await _provider.StreamAsync(request, onDelta, cancellationToken);
+            LlmCompletion completion = await call();
+            costs.Add(CostFor(completion, model, Stopwatch.GetElapsedTime(start)));
+            return (completion, null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -125,40 +199,81 @@ internal sealed class ChatTurnService : IChatTurnService
         }
         catch (Exception error)
         {
-            // A provider fault (transport / timeout / 5xx) — billable latency that produced nothing (gh#431). Fail
+            // A provider fault (transport / timeout / 5xx) -- billable latency that produced nothing (gh#431). Fail
             // CLOSED: invent no assistant text; the cost still records the failed, zero-token call for the governor.
             _logger.LogWarning(error, "Chat turn LLM call faulted; failing closed.");
-            return new ChatTurnResult(
+            costs.Add(new AiCallCost(
+                AiUsageFeature.Chat, model, Tier, AiUsageOutcome.Failed, 0, 0, 0m, Stopwatch.GetElapsedTime(start)));
+            return (null, new ChatTurnResult(
                 false,
                 "The co-pilot could not complete a response right now. Your message was saved — please try again.",
-                new AiCallCost(AiUsageFeature.Chat, model, Tier, AiUsageOutcome.Failed, 0, 0, 0m, Stopwatch.GetElapsedTime(start)));
+                costs));
+        }
+    }
+
+    /// <summary>
+    /// Runs each requested tool from the fixed read-only set, fail-closed: an unknown tool or a tool that throws yields
+    /// an <c>IsError</c> result the model reads, never a throw out of the turn. Only a genuine caller cancellation propagates.
+    /// </summary>
+    private async Task<IReadOnlyList<LlmToolResult>> RunToolsAsync(
+        IReadOnlyList<LlmToolCall> calls, CancellationToken cancellationToken)
+    {
+        List<LlmToolResult> results = [];
+        foreach (LlmToolCall call in calls)
+        {
+            IChatTool? tool = _tools.FirstOrDefault(candidate => candidate.Name == call.Name);
+            if (tool is null)
+            {
+                // The model named a tool that is not offered -- never dispatch it; a fail-closed error result lets the
+                // model recover or apologise rather than the turn throwing.
+                results.Add(new LlmToolResult(call.Id, "{\"error\":\"unknown tool\"}", IsError: true));
+                continue;
+            }
+
+            try
+            {
+                results.Add(new LlmToolResult(call.Id, await tool.ExecuteAsync(call.InputJson, cancellationToken)));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                _logger.LogWarning(error, "Chat tool {Tool} threw; returning a fail-closed error result.", call.Name);
+                results.Add(new LlmToolResult(call.Id, "{\"error\":\"the tool could not run\"}", IsError: true));
+            }
         }
 
-        TimeSpan latency = Stopwatch.GetElapsedTime(start);
-        AiUsageOutcome outcome = completion.StopReason switch
-        {
-            LlmStopReason.Completed => AiUsageOutcome.Succeeded,
-            LlmStopReason.MaxTokens => AiUsageOutcome.Truncated,
-            LlmStopReason.Refusal => AiUsageOutcome.Refused,
-            _ => AiUsageOutcome.Failed,
-        };
-        AiCallCost cost = new(
-            AiUsageFeature.Chat,
-            model,
-            Tier,
-            outcome,
-            completion.Usage.InputTokens,
-            completion.Usage.OutputTokens,
-            _options.EstimateCost(Tier, completion.Usage.InputTokens, completion.Usage.OutputTokens),
-            latency);
-
-        // Fail CLOSED on anything but a clean completion (the ILlmProvider seam contract): a refused / truncated /
-        // other stop is not an answer the operator should read as the co-pilot's, so it is surfaced as a refusal and
-        // never persisted as an assistant turn — while the call is still metered and ledgered above.
-        return completion.StopReason == LlmStopReason.Completed
-            ? new ChatTurnResult(true, completion.Text, cost)
-            : new ChatTurnResult(false, RefusalFor(completion.StopReason), cost);
+        return results;
     }
+
+    private AiCallCost CostFor(LlmCompletion completion, string model, TimeSpan latency) => new(
+        AiUsageFeature.Chat,
+        model,
+        Tier,
+        OutcomeFor(completion.StopReason),
+        completion.Usage.InputTokens,
+        completion.Usage.OutputTokens,
+        _options.EstimateCost(Tier, completion.Usage.InputTokens, completion.Usage.OutputTokens),
+        latency);
+
+    // A ToolUse stop is a SUCCESSFUL, billed call that happens to request tools -- not a failure; the loop continues.
+    private static AiUsageOutcome OutcomeFor(LlmStopReason stopReason) => stopReason switch
+    {
+        LlmStopReason.Completed => AiUsageOutcome.Succeeded,
+        LlmStopReason.ToolUse => AiUsageOutcome.Succeeded,
+        LlmStopReason.MaxTokens => AiUsageOutcome.Truncated,
+        LlmStopReason.Refusal => AiUsageOutcome.Refused,
+        _ => AiUsageOutcome.Failed,
+    };
+
+    // Fail CLOSED on anything but a clean completion (the ILlmProvider seam contract): a refused / truncated / other
+    // stop is not an answer the operator should read as the co-pilot's, so it is surfaced as a refusal, never persisted.
+    private static ChatTurnResult ResultFor(LlmCompletion completion, IReadOnlyList<AiCallCost> costs) =>
+        completion.StopReason == LlmStopReason.Completed
+            ? new ChatTurnResult(true, completion.Text, costs)
+            : new ChatTurnResult(false, RefusalFor(completion.StopReason), costs);
 
     private static string RefusalFor(LlmStopReason stopReason) => stopReason switch
     {

@@ -59,10 +59,41 @@ public enum LlmRole
     Assistant = 2,
 }
 
-/// <summary>One message in the request.</summary>
+/// <summary>
+/// A tool the model may call (gh#906 inc 4, R-6). The definition is a name, a description the model reads to decide
+/// when to call it, and a JSON-Schema for its input. <b>Read-only by the caller's construction</b> — the tool layer
+/// registers no tool that can place, size, or modify an order (enforcement lives below the model).
+/// </summary>
+/// <param name="Name">The tool's stable id (e.g. <c>read_positions</c>).</param>
+/// <param name="Description">What it does and when to call it — the model reads this.</param>
+/// <param name="InputSchema">A JSON-Schema object for the tool's input.</param>
+public sealed record LlmToolDefinition(string Name, string Description, string InputSchema);
+
+/// <summary>The model's request to call one tool (gh#906 inc 4).</summary>
+/// <param name="Id">The provider's id for this call, echoed back on the result.</param>
+/// <param name="Name">Which tool to call.</param>
+/// <param name="InputJson">The tool input as a JSON string (the caller parses it).</param>
+public sealed record LlmToolCall(string Id, string Name, string InputJson);
+
+/// <summary>The caller's result for one <see cref="LlmToolCall"/> (gh#906 inc 4), fed back to the model.</summary>
+/// <param name="ToolCallId">The <see cref="LlmToolCall.Id"/> this answers.</param>
+/// <param name="Content">The result text (compact JSON) the model reads.</param>
+/// <param name="IsError">Whether the tool failed — an unknown / faulted tool returns a fail-closed error result.</param>
+public sealed record LlmToolResult(string ToolCallId, string Content, bool IsError = false);
+
+/// <summary>
+/// One message in the request. A plain text turn, an <b>assistant tool-use</b> turn (carries <see cref="ToolCalls"/>),
+/// or a <b>user tool-result</b> turn (carries <see cref="ToolResults"/>) — the last two round-trip a tool loop.
+/// </summary>
 /// <param name="Role">Who authored it.</param>
-/// <param name="Content">The text.</param>
-public sealed record LlmMessage(LlmRole Role, string Content);
+/// <param name="Content">The text (may be empty on a tool-result turn).</param>
+/// <param name="ToolCalls">The tool calls this assistant turn requested, or null for a plain turn.</param>
+/// <param name="ToolResults">The tool results this user turn carries, or null for a plain turn.</param>
+public sealed record LlmMessage(
+    LlmRole Role,
+    string Content,
+    IReadOnlyList<LlmToolCall>? ToolCalls = null,
+    IReadOnlyList<LlmToolResult>? ToolResults = null);
 
 /// <summary>
 /// The desired response shape: free text, or JSON constrained to a schema. The provider constrains the model; the
@@ -86,12 +117,14 @@ public sealed record LlmResponseFormat(string? JsonSchema)
 /// <param name="Messages">The conversation, oldest first.</param>
 /// <param name="ResponseFormat">The desired response shape.</param>
 /// <param name="MaxOutputTokens">A hard output-token ceiling.</param>
+/// <param name="Tools">The tools the model may call, or null / empty for a plain (no-tool) completion (gh#906 inc 4).</param>
 public sealed record LlmRequest(
     LlmModelTier Tier,
     string SystemPrompt,
     IReadOnlyList<LlmMessage> Messages,
     LlmResponseFormat ResponseFormat,
-    int MaxOutputTokens = 1024);
+    int MaxOutputTokens = 1024,
+    IReadOnlyList<LlmToolDefinition>? Tools = null);
 
 /// <summary>Why the model stopped. Anything other than <see cref="Completed"/> is treated fail-closed by callers.</summary>
 public enum LlmStopReason
@@ -107,6 +140,9 @@ public enum LlmStopReason
 
     /// <summary>Any other stop condition.</summary>
     Other = 4,
+
+    /// <summary>The model wants to call one or more tools (gh#906 inc 4) — the caller runs them and continues the loop.</summary>
+    ToolUse = 5,
 }
 
 /// <summary>Token usage for one call — the hook the AIUsage cost/latency tracker (A2) fills from the real client.</summary>
@@ -122,4 +158,9 @@ public sealed record LlmUsage(int InputTokens, int OutputTokens)
 /// <param name="Text">The completion text (JSON when a JSON format was requested).</param>
 /// <param name="StopReason">Why the model stopped.</param>
 /// <param name="Usage">Token usage.</param>
-public sealed record LlmCompletion(string Text, LlmStopReason StopReason, LlmUsage Usage);
+/// <param name="ToolCalls">
+/// The tools the model asked to call when <see cref="StopReason"/> is <see cref="LlmStopReason.ToolUse"/>; null / empty
+/// otherwise (gh#906 inc 4).
+/// </param>
+public sealed record LlmCompletion(
+    string Text, LlmStopReason StopReason, LlmUsage Usage, IReadOnlyList<LlmToolCall>? ToolCalls = null);
