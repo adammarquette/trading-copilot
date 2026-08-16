@@ -35,7 +35,16 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 /// </remarks>
 public sealed class ReconcileSweepTestPostgresFactory : StubbedVenuePostgresFactory
 {
-    /// <summary>The meter this host records to — private to this fixture.</summary>
+    private readonly List<ExecutionMetrics> _sinks = [];
+    private int _hostsBuilt;
+
+    /// <summary>
+    /// The meter the fixture's <b>primary</b> host records to — private to this fixture, and the one the suite
+    /// counts. Any further host built from this factory (<c>CreateHost</c> / <c>WithWebHostBuilder</c>, both
+    /// inherited and both re-running <see cref="ConfigureTestServices"/>) gets a meter name of its own instead of a
+    /// second <c>Meter</c> under this one — which the listener would capture as a duplicate of every measurement,
+    /// breaking the exactly-once counts this suite rests on (PR #926 review).
+    /// </summary>
     public string MeterName { get; } = ExecutionMetrics.MeterName + ".ReconcileSweep." + Guid.NewGuid().ToString("N");
 
     /// <summary>Every measurement this fixture's host emitted — the strand-detected counter is read from here.</summary>
@@ -79,7 +88,41 @@ public sealed class ReconcileSweepTestPostgresFactory : StubbedVenuePostgresFact
             services.Remove(concrete);
         }
 
-        services.AddSingleton(new ExecutionMetrics(MeterName));
-        Capture.ListenTo(MeterName);
+        int host = Interlocked.Increment(ref _hostsBuilt);
+        string meterName = host == 1 ? MeterName : $"{MeterName}.host{host}";
+        ExecutionMetrics sink = new(meterName);
+        lock (_sinks)
+        {
+            _sinks.Add(sink);
+        }
+
+        services.AddSingleton(sink);
+        Capture.ListenTo(meterName);
+    }
+
+    /// <summary>
+    /// Disposes the meters this fixture created. The container disposes only what it constructs, and these are
+    /// registered as pre-built instances — so without this each one's <c>Meter</c> would outlive the fixture in the
+    /// process-wide diagnostics registry for the rest of the assembly's run (PR #926 review).
+    /// </summary>
+    /// <param name="disposing">Whether managed state is being released.</param>
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+
+        if (!disposing)
+        {
+            return;
+        }
+
+        lock (_sinks)
+        {
+            foreach (ExecutionMetrics sink in _sinks)
+            {
+                sink.Dispose();
+            }
+
+            _sinks.Clear();
+        }
     }
 }
