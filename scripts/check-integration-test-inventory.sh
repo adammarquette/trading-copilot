@@ -55,6 +55,10 @@ mapfile -t DUPLICATE_BASENAMES < <(printf '%s\n' "${ON_DISK[@]}" | uniq -d)
 # and a cross-reference to a since-deleted suite fails as a phantom "row" that does not exist to be removed.
 # Scoping to the subject is what makes "every suite has a row" the thing actually enforced.
 #
+# The trade, stated so it is a decision and not an oversight: a cross-reference to a suite that is later DELETED
+# now goes unnoticed here. That is accepted -- a dangling cross-reference costs a reader one failed grep, while
+# the alternative costs the check the thing it exists for.
+#
 # Rows are excluded from the *inventory* only by prose: §2 also names two files it once listed and has since
 # cleared (`OrderExecutionEndpointsIntegrationTests.cs` / `ProductionSmokeTests.cs`, which never existed in any
 # commit), and that note must not read as a row either -- which the '^|' filter already handles.
