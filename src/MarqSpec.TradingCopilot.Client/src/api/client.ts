@@ -119,8 +119,25 @@ export async function request<T>(
   }
 
   if (response.ok) {
-    const data = (response.status === 204 ? undefined : await readJsonOrUndefined(response)) as T;
-    return { ok: true, data };
+    // The body read is guarded, not just the send. A 2xx can still carry something that is not JSON — a proxy or
+    // misconfigured host answering 200 with an HTML error page, or a truncated body — and an unguarded
+    // `JSON.parse` throws *after* the promise has been handed to the caller. Every read surface consumes this as
+    // `void getX().then(...)` with no `.catch`, so the rejection is unhandled and the surface sits on its
+    // LoadingState forever with no error and no retry. A malformed body IS a failed read (the `failed` contract
+    // above names "an unparseable body" already), so it maps to `failed` and the operator gets error + retry
+    // (gh#951). The 4xx path has always done this via `readRefusal`; this closes the asymmetry.
+    let data: unknown;
+    try {
+      data = response.status === 204 ? undefined : await readJsonOrUndefined(response);
+    } catch {
+      return {
+        ok: false,
+        kind: 'failed',
+        status: response.status,
+        error: 'The response body could not be read.',
+      };
+    }
+    return { ok: true, data: data as T };
   }
 
   // A non-2xx that is not 401. A **4xx** that carries a JSON `{ error }` is the gate's ANSWER — surface it as a

@@ -107,9 +107,11 @@ describe('AiCostAttribution', () => {
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
   });
 
-  it('surfaces a rejected load (a malformed 2xx body) as an error, never a stuck spinner', async () => {
-    // A 200 carrying non-JSON rejects out of the client (JSON.parse throws outside its fetch try/catch); the .catch
-    // must land on the error branch, not leave the operator on LoadingState forever.
+  it('surfaces a rejected load as an error, never a stuck spinner', async () => {
+    // Drives the component's `.catch` arm directly by rejecting the mocked read. Since gh#951 a malformed 2xx
+    // body no longer reaches it — the client seam maps that to `{ ok: false, kind: 'failed' }` — so this now
+    // guards the arm generically: ANY rejection out of the read must land on the error branch rather than leave
+    // the operator on LoadingState forever.
     attributionMock.mockRejectedValue(new Error('Unexpected token < in JSON'));
 
     renderWithProviders(<AiCostAttribution />);

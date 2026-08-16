@@ -5,7 +5,15 @@ import { readToken, storeToken } from './token';
 
 /** A stand-in for the parts of Response the client reads: `ok`, `status`, and a text body. */
 function response(status: number, body?: unknown): Response {
-  const text = body === undefined ? '' : JSON.stringify(body);
+  return rawResponse(status, body === undefined ? '' : JSON.stringify(body));
+}
+
+/**
+ * The same stand-in, but with the body passed through **verbatim** rather than serialized — the only way to
+ * express a response whose body is not JSON at all, which is exactly the gh#951 case (a proxy or misconfigured
+ * host answering 200 with an HTML error page).
+ */
+function rawResponse(status: number, text: string): Response {
   return {
     ok: status >= 200 && status < 300,
     status,
@@ -64,6 +72,33 @@ describe('request — the one JWT-attach path', () => {
     const result = await request('DELETE', '/orders/1');
 
     expect(result).toEqual({ ok: true, data: undefined });
+  });
+
+  it('maps a 2xx carrying a non-JSON body to failed — never a rejected promise (gh#951)', async () => {
+    // A proxy or misconfigured host answering 200 with an HTML error page. Before gh#951 the 2xx body read sat
+    // OUTSIDE request()'s try/catch, so JSON.parse threw and the promise rejected. Callers that do
+    // `void getX().then(...)` with no `.catch` — the shape every read surface uses — then sat on their
+    // LoadingState forever, with no error and no retry: the one outcome these surfaces exist to avoid.
+    stubFetch(() => Promise.resolve(rawResponse(200, '<!doctype html><title>502 Bad Gateway</title>')));
+
+    const result = await request('GET', '/settings/ai-spend');
+
+    expect(result).toEqual({
+      ok: false,
+      kind: 'failed',
+      status: 200,
+      error: 'The response body could not be read.',
+    });
+  });
+
+  it('maps a 2xx carrying a truncated JSON body to failed, not a rejection (gh#951)', async () => {
+    // The same defect reached the other way: a body that starts as valid JSON and stops mid-object. Kept
+    // separate from the HTML case because a guard that only sniffed for a leading '<' would pass that one.
+    stubFetch(() => Promise.resolve(rawResponse(200, '{"value": 4')));
+
+    const result = await request<{ value: number }>('GET', '/anything');
+
+    expect(result.ok).toBe(false);
   });
 
   it('on a protected 401 clears the token, notifies, and returns failed — never retries', async () => {
