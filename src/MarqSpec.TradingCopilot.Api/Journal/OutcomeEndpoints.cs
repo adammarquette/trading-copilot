@@ -27,9 +27,11 @@ namespace MarqSpec.TradingCopilot.Api.Journal;
 /// </para>
 /// <para>
 /// <b>Removals span the reversible controls and the one irreversible one.</b> Soft-delete / restore and the two
-/// toggles are undoable; <b>hard delete</b> is the confirmed exception — it removes the row, but records the <b>fact</b>
-/// of the deletion to the audit trail (R-15), so the removal outlives the content. Nothing here touches a broker or
-/// account record.
+/// toggles are undoable; <b>hard delete</b> is the confirmed exception — it removes the row and records the <b>fact</b>
+/// of the deletion to the audit trail (R-15), so the removal outlives the content. A <b>trade-derived</b> outcome is
+/// <b>refused</b> (a 409) — the journal writer would recompose it, so soft-delete is its removal; hard delete serves a
+/// record with <b>no live re-deriving source</b> (the untaken-suggestion path lands with gh#939). Nothing here touches
+/// a broker or account record.
 /// </para>
 /// </remarks>
 public static class OutcomeEndpoints
@@ -57,7 +59,7 @@ public static class OutcomeEndpoints
         group.MapDelete("/{id:guid}", (Guid id, TradingCopilotDbContext database, IAuditLog auditLog,
             ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
             HardDeleteAsync(id, DateTimeOffset.UtcNow, database, auditLog, loggerFactory, cancellationToken))
-            .WithSummary("Hard-delete an outcome (R-15) — the confirmed, irreversible removal; the deletion fact is audited.");
+            .WithSummary("Hard-delete an outcome with no live source (R-15) — the confirmed, irreversible removal (a trade-derived outcome is refused; soft-delete removes it). The deletion is audited.");
 
         return endpoints;
     }
@@ -154,6 +156,23 @@ public static class OutcomeEndpoints
         if (outcome is null)
         {
             return Results.NotFound(); // not found / not owned (R-20) — never a disclosure
+        }
+
+        if (outcome.TradeId is not null)
+        {
+            // A trade-derived outcome is a PROJECTION of a closed Trade, so hard-deleting the row does not stick: the
+            // OutcomeJournalService anti-join keys on the presence of an outcome row for the trade, so the next sweep
+            // (≤ one poll interval) recomposes it — with the R-15 flags defaulting off — resurrecting it into training
+            // and default views against the operator's confirmed removal, and leaving the audit trail claiming a
+            // deletion that came back. Soft-delete is its correct removal: it KEEPS the row (so the writer never
+            // recomposes) while excluding it from training and hiding it. Hard delete is for a record with no live
+            // re-deriving source; the untaken-suggestion outcome and the recomposition-suppression that make hard
+            // delete permanent land together with the untaken writer (gh#939).
+            return Results.Conflict(new
+            {
+                error = "A trade-derived outcome cannot be hard-deleted — the journal would recompose it. Soft-delete "
+                    + "removes it from training and default views. Hard delete is for records with no live source (gh#939).",
+            });
         }
 
         // Capture what the audit names BEFORE the row is gone.
