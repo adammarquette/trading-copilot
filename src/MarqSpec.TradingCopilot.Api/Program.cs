@@ -256,7 +256,15 @@ builder.Services.AddScoped<IPriceLevelSource, StoredPriceLevelSource>();
 // the indicator projection above. It recomputes swing-pivot / ATR zones (KeyLevels.Detect, © Bjorgum defaults,
 // gh#626) over the bar store and reconciles them into the PriceLevel table, reusing gh#311's stored ATR. ALWAYS
 // runs -- its work list is whatever the bar store holds -- on a slower cadence, since levels form over many bars.
-builder.Services.Configure<KeyLevelDetectorOptions>(builder.Configuration.GetSection(KeyLevelDetectorOptions.SectionName));
+builder.Services.AddOptions<KeyLevelDetectorOptions>()
+    .Bind(builder.Configuration.GetSection(KeyLevelDetectorOptions.SectionName))
+    // Fail fast on start rather than at runtime: a non-positive PollIntervalSeconds throws from Task.Delay inside the
+    // host's retry loop -- and a faulting BackgroundService stops the whole host process -- while a non-positive
+    // MaxLevelsPerKind makes every Detect pass throw (swallowed per series), so the host runs but writes no level.
+    .Validate(
+        options => options.Validate(),
+        "KeyLevels: require PollIntervalSeconds > 0 and MaxLevelsPerKind > 0.")
+    .ValidateOnStart();
 builder.Services.AddScoped<KeyLevelProjectionService>();
 builder.Services.AddHostedService<KeyLevelProjectionHost>();
 

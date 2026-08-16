@@ -30,4 +30,13 @@ public sealed class KeyLevelDetectorOptions
 
     /// <summary>The poll cadence as a <see cref="TimeSpan"/>.</summary>
     public TimeSpan PollInterval => TimeSpan.FromSeconds(PollIntervalSeconds);
+
+    /// <summary>
+    /// Whether the knobs are usable — validated <b>on start</b> (Program.cs) so a misconfiguration fails fast rather
+    /// than at runtime. A non-positive <see cref="PollIntervalSeconds"/> throws from <c>Task.Delay</c> inside the
+    /// host's retry loop, and a faulting <c>BackgroundService</c> stops the whole host process; a non-positive
+    /// <see cref="MaxLevelsPerKind"/> makes every <see cref="Domain.MarketData.KeyLevels.Detect"/> pass throw — caught
+    /// per series and swallowed — so the host runs but never writes a level. Neither is a safe silent default.
+    /// </summary>
+    public bool Validate() => PollIntervalSeconds > 0 && MaxLevelsPerKind > 0;
 }
