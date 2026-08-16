@@ -841,6 +841,31 @@ public class TriggerEvaluationServiceTests
         captured.OccurredAt.Should().Be(Now);       // the caller-supplied clock, threaded through -- the ledger reads none
     }
 
+    // gh#767: the recorded cost and the suggestion it produced share the FIRING id -- the correlation key that later
+    // attributes this call's spend to that suggestion. The cost is ledgered BEFORE the suggestion is staged, so the
+    // firing (which both the AIUsage row and the Suggestion carry) is the only key that spans them.
+    [Fact]
+    public async Task ScanAsync_ShouldStampTheRecordedCostWithTheSameFiring_AsTheSuggestionItProduced()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(
+            route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        AiUsageEntry? captured = null;
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._))
+            .Invokes((AiUsageEntry entry, CancellationToken _) => captured = entry);
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion suggestion = await reload.Suggestions.SingleAsync();
+        captured.Should().NotBeNull();
+        captured!.TriggerFiringId.Should().NotBeNull();
+        captured.TriggerFiringId.Should().Be(suggestion.TriggerFiringId); // the join key that attributes cost to the suggestion
+    }
+
     // A no-call (inert-reviewer) review carries EMPTY Costs, and the scan must then record NOTHING. The scan records
     // one row per cost (foreach over Costs), so an empty Costs writes zero rows -- there is no spend to record for a
     // call never made (gh#449).
@@ -885,6 +910,12 @@ public class TriggerEvaluationServiceTests
         List<AiUsageRecord> rows = await reload.AiUsage.ToListAsync();
         rows.Should().HaveCount(2);                                   // one row per billed call
         rows.Should().OnlyContain(row => row.UserId == _operator);    // both stamped with the firing owner (R-20)
+
+        // gh#767: BOTH the triage and the deep row carry the produced suggestion's firing, so a per-suggestion
+        // SUM(cost) totals triage+deep for the one suggestion -- the escalation-correlation the read increment sums.
+        Suggestion suggestion = await reload.Suggestions.SingleAsync();
+        suggestion.TriggerFiringId.Should().NotBeNull();
+        rows.Should().OnlyContain(row => row.TriggerFiringId == suggestion.TriggerFiringId);
     }
 
     // FAIL-OPEN AT THE LEDGER BOUNDARY: the scan calls _ledger.RecordAsync UNGUARDED -- the fail-open lives inside the
