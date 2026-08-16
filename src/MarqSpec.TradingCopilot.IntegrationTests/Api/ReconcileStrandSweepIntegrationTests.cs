@@ -90,6 +90,11 @@ public class ReconcileStrandSweepIntegrationTests : IClassFixture<ReconcileSweep
         {
             (await WaitUntilAsync(() => AlertsNaming(orderId).Count >= 1)).Should().BeTrue(
                 "an order still Taking past the age bound is a maybe-live intent with no journal behind it — the sweep must detect and alert it (gh#923)");
+
+            // The sweep keeps running for several further passes over the still-stranded order. Without this the
+            // "once, not once per pass" assertion below would be read ~100ms after the first alert, with the host
+            // already stopping — green even against a sweep that re-alerts every pass (PR #926 review).
+            await Task.Delay(_inertWindow);
         }
 
         CapturedLog alert = AlertsNaming(orderId).Should().ContainSingle(
@@ -118,9 +123,14 @@ public class ReconcileStrandSweepIntegrationTests : IClassFixture<ReconcileSweep
         {
             (await WaitUntilAsync(() => AlertsNaming(conditionalId).Count >= 1)).Should().BeTrue(
                 "a conditional still Firing past the age bound is the same maybe-live strand on the conditional path (gh#923)");
+
+            // Several further passes over the still-Firing conditional, so the once-only assertion below is a guard
+            // on the conditional path too — a kind-specific idempotency regression would page every pass (#926 review).
+            await Task.Delay(_inertWindow);
         }
 
-        CapturedLog alert = AlertsNaming(conditionalId).Should().ContainSingle().Subject;
+        CapturedLog alert = AlertsNaming(conditionalId).Should().ContainSingle(
+            "a stranded conditional pages the operator once, not once per pass").Subject;
         alert.Level.Should().Be(LogLevel.Critical);
         alert.Message.Should().Contain("synthetic_risk");
         alert.Message.Should().Contain(owner.ToString(), "the alert names the owning operator (R-20)");
@@ -267,6 +277,11 @@ public class ReconcileStrandSweepIntegrationTests : IClassFixture<ReconcileSweep
             await Task.Delay(_inertWindow); // and several further passes get their chance to act
         }
 
+        // Both kinds stayed stranded through those passes, so this is also where each kind's alert-once holds
+        // across many passes — the conditional path's idempotency has no other cover (PR #926 review).
+        AlertsNaming(strandedOrder).Should().ContainSingle("the Taking strand alerted once across every pass it survived");
+        AlertsNaming(strandedConditional).Should().ContainSingle("and so did the Firing strand — once per strand, not once per pass");
+
         (await OrderStatusAsync(strandedOrder)).Should().Be(OrderStatus.Taking, "no adopt, no release — the Taking order is exactly as it was");
         (await OrderVenueKeyAsync(strandedOrder)).Should().BeNull("nothing was adopted onto the order");
         (await ConditionalStatusAsync(strandedConditional)).Should().Be(ConditionalStatus.Firing, "the Firing conditional is exactly as it was");
@@ -410,12 +425,16 @@ public class ReconcileStrandSweepIntegrationTests : IClassFixture<ReconcileSweep
             && entry.Level == LogLevel.Critical
             && entry.Message.Contains(entityId.ToString(), StringComparison.Ordinal))];
 
-    /// <summary>The strand-detected measurements for one kind tag, since the last reset.</summary>
+    /// <summary>
+    /// The strand-detected measurements for one kind tag, since the last reset — scoped to the fixture's primary
+    /// meter, so a second host built from the factory could never be counted as a duplicate (PR #926 review).
+    /// </summary>
     /// <param name="kind">The kind tag (<c>order-taking</c> / <c>conditional-firing</c>).</param>
     /// <returns>The matching measurements.</returns>
     private IReadOnlyList<SliCapture.Measurement> StrandMeasurements(string kind) =>
         [.. _factory.Capture.For(ExecutionMetrics.ReconcileStrandsDetected)
-            .Where(measurement => measurement.Tags.TryGetValue("kind", out string? tag)
+            .Where(measurement => string.Equals(measurement.MeterName, _factory.MeterName, StringComparison.Ordinal)
+                && measurement.Tags.TryGetValue("kind", out string? tag)
                 && string.Equals(tag, kind, StringComparison.Ordinal))];
 
     // ---------------------------------------------------------------------------------------------------------
