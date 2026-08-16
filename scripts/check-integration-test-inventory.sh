@@ -16,11 +16,14 @@
 #
 # WHAT IT CHECKS
 # --------------
-#   1. Every *IntegrationTests.cs / *SmokeTests.cs file has a row naming it in the inventory.
-#   2. Every suite a ROW names still exists (a row for a deleted -- or never-written -- file sends the next
-#      reader looking for something that is not there; the two found in the gh#862 audit had never existed in
-#      any commit, on any branch). Scoped to rows so §2 can still DISCUSS a suite it does not list.
-#   3. The stated total matches the real one, so a future drift is visible in the document itself rather than
+#   1. Every *IntegrationTests.cs / *SmokeTests.cs file is the SUBJECT of a row -- named in the row's first
+#      cell, not merely mentioned somewhere in one. A description cell cross-referencing another suite is not
+#      that suite's row, and treating it as one would let a suite ship with no row at all (PR #945 review).
+#   2. Every suite a row's subject names still exists (a row for a deleted -- or never-written -- file sends the
+#      next reader looking for something that is not there; the two found in the gh#862 audit had never existed
+#      in any commit, on any branch). Scoped the same way, so §2 can still DISCUSS a suite it does not list.
+#   3. No two suite files share a basename, which the inventory's name-keyed rows cannot express.
+#   4. The stated total matches the real one, so a future drift is visible in the document itself rather than
 #      only in this check's output.
 #
 # Deliberately SDK-free and dependency-free (grep + find), so it runs in the fast tier beside
@@ -39,19 +42,45 @@ SUITE_ROOT="src/MarqSpec.TradingCopilot.IntegrationTests"
 # The suites on disk, by file name. TestHost/ scaffolding and factories are not suites and carry no row.
 mapfile -t ON_DISK < <(find "$SUITE_ROOT" \( -name '*IntegrationTests.cs' -o -name '*SmokeTests.cs' \) -printf '%f\n' | sort)
 
-# Names appearing in a TABLE ROW -- a line starting with '|'. Deliberately not "mentioned anywhere": the inventory
-# also discusses suites in prose, including a note naming two files it once listed and has since cleared
-# (`OrderExecutionEndpointsIntegrationTests.cs` / `ProductionSmokeTests.cs`, which never existed in any commit).
-# Counting a historical note as a row would resurrect exactly the phantom the note exists to record removing.
-mapfile -t NAMED < <(grep '^|' "$INVENTORY" | grep -o '[A-Za-z0-9_]*\(IntegrationTests\|SmokeTests\)\.cs' | sort -u)
+# The inventory keys rows on FILE NAME, not path, so two suites sharing one basename in different folders are a
+# state it cannot express: whichever row you write, the other suite has no row of its own and no row you can add
+# will give it one. Caught here with an actionable message rather than left to surface as a permanently-missing
+# suite on a required check -- the remedy is renaming a test file, which the missing-row error would never suggest.
+mapfile -t DUPLICATE_BASENAMES < <(printf '%s\n' "${ON_DISK[@]}" | uniq -d)
+
+# Names in the row's SUBJECT cell -- field 2 of a '|'-delimited line -- not anywhere in the row. A description
+# cell legitimately cross-references OTHER suites (§2 has several: the sibling that widened a card, the staging
+# gate that proves the venue half, the suite that guards a neighbouring filter), and counting those as rows
+# breaks the check in BOTH directions: a suite with no row of its own passes because a neighbour name-dropped it,
+# and a cross-reference to a since-deleted suite fails as a phantom "row" that does not exist to be removed.
+# Scoping to the subject is what makes "every suite has a row" the thing actually enforced.
+#
+# Rows are excluded from the *inventory* only by prose: §2 also names two files it once listed and has since
+# cleared (`OrderExecutionEndpointsIntegrationTests.cs` / `ProductionSmokeTests.cs`, which never existed in any
+# commit), and that note must not read as a row either -- which the '^|' filter already handles.
+mapfile -t NAMED < <(grep '^|' "$INVENTORY" | awk -F'|' '{print $2}' \
+    | grep -o '[A-Za-z0-9_]*\(IntegrationTests\|SmokeTests\)\.cs' | sort -u)
 
 # Both directions of the set difference at once. `comm` rather than a nested grep loop on purpose: the loop form
 # spawns one subprocess per pair, which at 90 suites is ~8k processes -- imperceptible on the Linux runner, but
 # ~30s per invocation on a Windows dev box, and a local check slow enough to skip is one that gets skipped.
-mapfile -t missing < <(comm -23 <(printf '%s\n' "${ON_DISK[@]}") <(printf '%s\n' "${NAMED[@]}"))
-mapfile -t phantom < <(comm -13 <(printf '%s\n' "${ON_DISK[@]}") <(printf '%s\n' "${NAMED[@]}"))
+# Compared against the DEDUPED disk list: `comm` is a set operation, and a basename appearing twice would
+# otherwise report as missing however many rows name it -- an unfixable failure. The duplicate itself is reported
+# above as its own finding; ON_DISK keeps every entry so the count below stays a true file count.
+mapfile -t missing < <(comm -23 <(printf '%s\n' "${ON_DISK[@]}" | uniq) <(printf '%s\n' "${NAMED[@]}"))
+mapfile -t phantom < <(comm -13 <(printf '%s\n' "${ON_DISK[@]}" | uniq) <(printf '%s\n' "${NAMED[@]}"))
 
 status=0
+
+if [ ${#DUPLICATE_BASENAMES[@]} -gt 0 ]; then
+    status=1
+    echo "FAIL: ${#DUPLICATE_BASENAMES[@]} suite file name(s) are used by more than one file:" >&2
+    printf '  %s\n' "${DUPLICATE_BASENAMES[@]}" >&2
+    echo "" >&2
+    echo "The inventory keys rows on file name, so it cannot describe two suites that share one -- and no row you" >&2
+    echo "add will fix it. Rename one of the files (its folder is not enough to tell them apart here)." >&2
+    echo "" >&2
+fi
 
 if [ ${#missing[@]} -gt 0 ]; then
     status=1
