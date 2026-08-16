@@ -53,7 +53,8 @@ export function getAiSpend(from?: string, to?: string): Promise<ApiResult<AiSpen
 
 /**
  * One suggestion's total AI cost (gh#767) — the sum of the model calls its firing made. `escalated` marks a
- * triage→deep escalation (gh#449); `calls` is 1 for a single-pass review, 2 when it escalated.
+ * triage→deep escalation (gh#449), read from the deep-tier call's presence (not the raw `calls` count); `calls` is
+ * the number of billed model calls (usually 1, or 2 for a triage→deep pair).
  */
 export interface AiSuggestionCost {
   readonly suggestionId: string;

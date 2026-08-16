@@ -25,13 +25,27 @@ function usd(value: number): string {
   return `$${value.toFixed(value !== 0 && Math.abs(value) < 0.01 ? 4 : 2)}`;
 }
 
-/** Formats a signed realized P&L, or an em-dash when none is recorded. */
+/** Formats a signed realized P&L (sign before the `$`, e.g. `-$125.00`), or an em-dash when none is recorded. */
 function pnl(value: number | null): string {
   if (value === null) {
     return '—';
   }
-  const sign = value > 0 ? '+' : '';
-  return `${sign}$${value.toFixed(2)}`;
+  const magnitude = `$${Math.abs(value).toFixed(2)}`;
+  if (value > 0) {
+    return `+${magnitude}`;
+  }
+  if (value < 0) {
+    return `-${magnitude}`;
+  }
+  return magnitude; // breakeven — no sign
+}
+
+/** The P&L colour: a gain is positive, a loss negative, and a breakeven / unrecorded value stays neutral (never green). */
+function pnlColor(value: number | null): 'success.main' | 'error.main' | 'text.secondary' {
+  if (value === null || value === 0) {
+    return 'text.secondary';
+  }
+  return value < 0 ? 'error.main' : 'success.main';
 }
 
 export function AiCostAttribution() {
@@ -46,19 +60,32 @@ export function AiCostAttribution() {
   }, []);
 
   const load = useCallback(() => {
-    void getAiAttribution().then((result) => {
-      if (!mounted.current) {
-        return;
-      }
-      if (!result.ok) {
+    void getAiAttribution()
+      .then((result) => {
+        if (!mounted.current) {
+          return;
+        }
+        if (!result.ok) {
+          setState({
+            kind: 'error',
+            message: result.kind === 'refused' ? result.reason : result.error,
+          });
+          return;
+        }
+        setState({ kind: 'loaded', attribution: result.data });
+      })
+      .catch((error: unknown) => {
+        // A malformed 2xx body (JSON.parse throws OUTSIDE the client's fetch try/catch) rejects here — surface it as
+        // an error + retry, never leave the operator stuck on a spinner. The shared client seam has the same gap
+        // (AiSpendSettings too); a systemic fix is filed as a follow-up.
+        if (!mounted.current) {
+          return;
+        }
         setState({
           kind: 'error',
-          message: result.kind === 'refused' ? result.reason : result.error,
+          message: error instanceof Error ? error.message : 'Unexpected error.',
         });
-        return;
-      }
-      setState({ kind: 'loaded', attribution: result.data });
-    });
+      });
   }, []);
 
   // Mount loads; the initial state is already `loading`, so nothing is set synchronously in the effect.
@@ -103,7 +130,7 @@ export function AiCostAttribution() {
         sx={{ color: 'text.secondary' }}
         data-testid="ai-attribution-empty"
       >
-        No AI-costed suggestions in this period yet.
+        No AI-costed decisions in this period yet.
       </Typography>
     );
   }
@@ -166,15 +193,7 @@ export function AiCostAttribution() {
                   <Box component="span" sx={{ color: 'text.secondary' }}>
                     {usd(trade.suggestionCostUsd)} cost
                   </Box>{' '}
-                  <Box
-                    component="span"
-                    sx={{
-                      color:
-                        trade.realizedPnL !== null && trade.realizedPnL < 0
-                          ? 'error.main'
-                          : 'success.main',
-                    }}
-                  >
+                  <Box component="span" sx={{ color: pnlColor(trade.realizedPnL) }}>
                     {pnl(trade.realizedPnL)}
                   </Box>
                 </Typography>

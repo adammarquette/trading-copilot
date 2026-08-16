@@ -1,4 +1,4 @@
-import { cleanup, screen } from '@testing-library/react';
+import { cleanup, fireEvent, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type AiAttribution, getAiAttribution } from '../api/ai';
@@ -105,5 +105,51 @@ describe('AiCostAttribution', () => {
 
     expect(await screen.findByText('Could not load AI cost attribution')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+  });
+
+  it('surfaces a rejected load (a malformed 2xx body) as an error, never a stuck spinner', async () => {
+    // A 200 carrying non-JSON rejects out of the client (JSON.parse throws outside its fetch try/catch); the .catch
+    // must land on the error branch, not leave the operator on LoadingState forever.
+    attributionMock.mockRejectedValue(new Error('Unexpected token < in JSON'));
+
+    renderWithProviders(<AiCostAttribution />);
+
+    expect(await screen.findByText('Could not load AI cost attribution')).toBeTruthy();
+  });
+
+  it('reloads when Try again is clicked — a failed first load can recover', async () => {
+    attributionMock
+      .mockResolvedValueOnce({ ok: false, kind: 'failed', status: 500, error: 'boom' })
+      .mockResolvedValueOnce({ ok: true, data: ATTRIBUTION });
+
+    renderWithProviders(<AiCostAttribution />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findByTestId('ai-attribution')).toBeTruthy();
+    expect(screen.getByText('ES Buy')).toBeTruthy();
+  });
+
+  it('renders a loss as -$NN.NN (sign before the $), not $-NN.NN', async () => {
+    attributionMock.mockResolvedValue({
+      ok: true,
+      data: {
+        ...ATTRIBUTION,
+        takenTrades: [
+          {
+            tradeId: 't2',
+            instrument: 'CL',
+            realizedPnL: -80,
+            suggestionCostUsd: 0.001,
+            closedAt: '2026-07-15T16:00:00Z',
+          },
+        ],
+      },
+    });
+
+    renderWithProviders(<AiCostAttribution />);
+    await screen.findByTestId('ai-attribution');
+
+    expect(screen.getByText('-$80.00')).toBeTruthy();
   });
 });
