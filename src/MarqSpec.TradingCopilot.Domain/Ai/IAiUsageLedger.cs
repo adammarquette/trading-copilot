@@ -103,7 +103,13 @@ public sealed record AiCallCost(
 /// <param name="Cost">The per-call cost.</param>
 /// <param name="TraceId">The W3C trace id of the invocation (ADR-0002), or <see langword="null"/> if none was active.</param>
 /// <param name="OccurredAt">When the call happened — caller-supplied; the ledger never reads a clock.</param>
-public sealed record AiUsageEntry(Guid UserId, AiCallCost Cost, string? TraceId, DateTimeOffset OccurredAt);
+/// <param name="TriggerFiringId">
+/// The trigger firing this call served (gh#767), or <see langword="null"/> for a call with no firing (a chat turn, a
+/// news embedding). It is the per-suggestion cost key: a suggestion's total AI cost is the sum of its firing's rows,
+/// joined on the firing the suggestion also carries. Defaulted so the firing-less consumers need not pass it.
+/// </param>
+public sealed record AiUsageEntry(
+    Guid UserId, AiCallCost Cost, string? TraceId, DateTimeOffset OccurredAt, Guid? TriggerFiringId = null);
 
 /// <summary>
 /// Persists one AIUsage row per AI invocation (gh#431, ADR-0008 / ADR-0002) — the durable per-owner ledger behind

@@ -85,6 +85,7 @@ public class AiUsageLedger : IAiUsageLedger
             EstimatedCostUsd = entry.Cost.EstimatedCostUsd,
             LatencyMs = (long)entry.Cost.Latency.TotalMilliseconds,
             TraceId = entry.TraceId,
+            TriggerFiringId = entry.TriggerFiringId,
             OccurredAt = entry.OccurredAt,
         });
 

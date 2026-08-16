@@ -732,7 +732,10 @@ public class TriggerEvaluationService
 
             try
             {
-                await _ledger.RecordAsync(new AiUsageEntry(owner, cost, traceId, now), cancellationToken);
+                // Stamp the firing (gh#767): the cost is recorded BEFORE the suggestion is staged, so the firing --
+                // which the suggestion also carries (TriggerFiringId) -- is the correlation key that later attributes
+                // this call's cost to the suggestion it produced. Escalated fires stamp BOTH the triage and deep rows.
+                await _ledger.RecordAsync(new AiUsageEntry(owner, cost, traceId, now, firingId), cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

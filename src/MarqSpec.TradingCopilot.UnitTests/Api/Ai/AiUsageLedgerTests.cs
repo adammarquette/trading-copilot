@@ -30,13 +30,16 @@ public class AiUsageLedgerTests
     // A reading context scoped to an owner -- the R-20 filter matches only that owner's rows.
     private TradingCopilotDbContext Context(Guid asUser) => new(Options, new FixedUser(asUser));
 
+    private static readonly Guid _firing = Guid.Parse("11111111-1111-1111-1111-111111111111");
+
     private static AiUsageEntry Entry(Guid owner) => new(
         owner,
         new AiCallCost(
             AiUsageFeature.Triage, "claude-haiku-4-5", LlmModelTier.Triage, AiUsageOutcome.Succeeded,
             42, 9, 0.0006m, TimeSpan.FromMilliseconds(1234)),
         "trace-abc",
-        Now);
+        Now,
+        _firing);
 
     private AiUsageLedger Ledger() => new(Options, NullLogger<AiUsageLedger>.Instance);
 
@@ -59,6 +62,7 @@ public class AiUsageLedgerTests
         row.LatencyMs.Should().Be(1234);            // (long)Latency.TotalMilliseconds
         row.TraceId.Should().Be("trace-abc");
         row.OccurredAt.Should().Be(Now);            // the caller-supplied clock, verbatim
+        row.TriggerFiringId.Should().Be(_firing);   // the firing this call served (gh#767) -- the per-suggestion cost key
     }
 
     [Fact]
@@ -105,6 +109,7 @@ public class AiUsageLedgerTests
         row.Outcome.Should().Be(AiUsageOutcome.RateLimited);
         row.InputTokens.Should().Be(0);
         row.OutputTokens.Should().Be(0);
+        row.TriggerFiringId.Should().BeNull(); // an embed serves no firing -- the correlation is null, not a fabricated link
 
         // ...and it is INVISIBLE to the operator's own scoped read -- deployment infra spend must not inflate the
         // operator's per-decision meter (gh#62, ADR-0008 "embeddings reported in Grafana, not surfaced to end users").
