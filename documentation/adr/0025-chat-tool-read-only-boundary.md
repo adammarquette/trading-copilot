@@ -51,5 +51,10 @@ The operator was asked (2026-08-15) and chose a **read-only** tool set for this 
 
 ## Follow-ups
 
-- `read_positions` (venue-truth) is a read-only tool deferred from this increment (gh#925 follow-on).
+- ✅ `read_positions` (venue-truth) landed as its own increment (gh#929), completing the
+  `get_quote` / `query_journal` / `read_positions` read triad. It depends on a new **read-only**
+  `IPositionReconciler` seam onto `PositionReconciliationService` (gh#193) — the tool injects the read, never the
+  concrete service that also drives the safety-critical flatten, so the read-only-by-construction rule holds. An
+  unreachable venue is reported **declared-unknown** (never a fabricated flat), and the tool reconciles only the
+  operator's own active accounts (R-20).
 - Streaming a *tool-using* turn's final answer (removing the round-1 double-call) is inc 4b.
