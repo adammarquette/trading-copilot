@@ -75,9 +75,11 @@ export function AiCostAttribution() {
         setState({ kind: 'loaded', attribution: result.data });
       })
       .catch((error: unknown) => {
-        // A malformed 2xx body (JSON.parse throws OUTSIDE the client's fetch try/catch) rejects here — surface it as
-        // an error + retry, never leave the operator stuck on a spinner. The shared client seam has the same gap
-        // (AiSpendSettings too); a systemic fix is filed as a follow-up.
+        // Belt-and-braces. The gap this was added for — a malformed 2xx body rejecting out of the client, because
+        // its body read sat outside the fetch try/catch — is closed at the seam itself now (gh#951), so a
+        // malformed body arrives above as `{ ok: false, kind: 'failed' }` and this arm no longer fires for it.
+        // Kept because an unhandled rejection here would strand the operator on a spinner, and that is the one
+        // outcome this surface must never produce.
         if (!mounted.current) {
           return;
         }
