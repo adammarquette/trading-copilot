@@ -41,6 +41,22 @@ export interface BlotterRestingOrder {
   readonly size: number;
   /** True when it carries a stop — i.e. it is a protective leg actually standing at the venue. */
   readonly isProtective: boolean;
+  /**
+   * **PLATFORM-held** (ADR-0007, gh#865), *not* venue truth like the rest of this record. The staged-stop plan the
+   * platform holds for this order — the hidden working stop and its `safety → working → entry` band — which does
+   * **not** rest at the venue. Carried so a future move-stop UI can display the working stop and pre-validate a move.
+   *
+   * Present or absent **as a whole**: all four are set together when the order has a stop plan, and all `undefined`
+   * otherwise (a bare entry, or a venue-spawned leg). `stopStaging` is **load-bearing** — only `Hidden` is locally
+   * movable (`Native` is a venue order, `Orphaned` re-arms on reconnect), so a move control must gate on it.
+   */
+  readonly workingStopPrice?: number;
+  /** Where the working stop rests: `Hidden` | `Native` | `Orphaned` | `Retired`. See {@link workingStopPrice}. */
+  readonly stopStaging?: string;
+  /** The catastrophic safety floor beyond the working stop — the outer bound of the band. See {@link workingStopPrice}. */
+  readonly safetyStopPrice?: number;
+  /** The entry the stops are measured from — the inner bound of the band. See {@link workingStopPrice}. */
+  readonly entryPrice?: number;
 }
 
 /**
