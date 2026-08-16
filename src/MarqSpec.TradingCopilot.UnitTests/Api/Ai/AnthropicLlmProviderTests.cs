@@ -38,6 +38,34 @@ public class AnthropicLlmProviderTests
         LlmModelTier tier = LlmModelTier.Triage, LlmResponseFormat? format = null, int maxTokens = 512) =>
         new(tier, "sys", [new LlmMessage(LlmRole.User, "hello")], format ?? LlmResponseFormat.Text, maxTokens);
 
+    // A request with a custom message list and/or offered tools -- the tool-serialization + extraction tests (inc 4).
+    private static LlmRequest RequestWith(
+        IReadOnlyList<LlmMessage>? messages = null, IReadOnlyList<LlmToolDefinition>? tools = null) =>
+        new(LlmModelTier.Deep, "sys", messages ?? [new LlmMessage(LlmRole.User, "hello")], LlmResponseFormat.Text, 512, tools);
+
+    // A read-only tool definition, name/description/JSON-Schema -- shaped exactly like the ones IChatTool will offer.
+    private static readonly LlmToolDefinition SampleTool = new(
+        "get_quote",
+        "Get the latest quote for a contract.",
+        """{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}""");
+
+    // A well-formed Messages-API answer in which the model asks to call get_quote (a text block, then a tool_use block).
+    private static HttpResponseMessage ToolUseResponse(string text = "let me look that up") =>
+        Json(HttpStatusCode.OK, new JsonObject
+        {
+            ["content"] = new JsonArray(
+                new JsonObject { ["type"] = "text", ["text"] = text },
+                new JsonObject
+                {
+                    ["type"] = "tool_use",
+                    ["id"] = "toolu_99",
+                    ["name"] = "get_quote",
+                    ["input"] = new JsonObject { ["symbol"] = "ESU5" },
+                }),
+            ["stop_reason"] = "tool_use",
+            ["usage"] = new JsonObject { ["input_tokens"] = 20, ["output_tokens"] = 15 },
+        }.ToJsonString());
+
     private static AnthropicLlmProvider Provider(StubHandler handler, LlmOptions? options = null) =>
         new(new HttpClient(handler),
             Options.Create(options ?? new LlmOptions { ApiKey = ApiKey }),
@@ -133,7 +161,7 @@ public class AnthropicLlmProviderTests
     [InlineData("stop_sequence", LlmStopReason.Completed)]
     [InlineData("max_tokens", LlmStopReason.MaxTokens)]
     [InlineData("refusal", LlmStopReason.Refusal)]
-    [InlineData("tool_use", LlmStopReason.Other)]
+    [InlineData("tool_use", LlmStopReason.ToolUse)] // the model wants a tool -- its own reason now (gh#906 inc 4)
     [InlineData("something_new", LlmStopReason.Other)]
     public async Task CompleteAsync_ShouldMapTheStopReason(string wire, LlmStopReason expected)
     {
@@ -359,6 +387,147 @@ public class AnthropicLlmProviderTests
         (LlmCompletion completion, _) = await Stream(handler);
 
         completion.StopReason.Should().Be(LlmStopReason.Other);
+    }
+
+    // --- Tools (gh#906 inc 4): serialize offered tools + tool-use/tool-result turns; extract the model's tool_use ---
+
+    [Fact]
+    public async Task CompleteAsync_ShouldSerializeOfferedTools_AsTopLevelDefinitions()
+    {
+        StubHandler handler = new(_ => Ok());
+        await Provider(handler).CompleteAsync(RequestWith(tools: [SampleTool]), CancellationToken.None);
+
+        JsonNode tool = Body(handler)["tools"]![0]!;
+        tool["name"]!.GetValue<string>().Should().Be("get_quote");
+        tool["description"]!.GetValue<string>().Should().Be("Get the latest quote for a contract.");
+        // The schema is embedded as an OBJECT (not a re-stringified string), so the provider can read it -- the same
+        // posture as output_config.format above.
+        tool["input_schema"]!["type"]!.GetValue<string>().Should().Be("object");
+        tool["input_schema"]!["properties"]!["symbol"]!["type"]!.GetValue<string>().Should().Be("string");
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ShouldOmitTools_WhenNoneAreOffered()
+    {
+        StubHandler handler = new(_ => Ok());
+        await Provider(handler).CompleteAsync(RequestWith(), CancellationToken.None);
+
+        Body(handler)["tools"].Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ShouldOmitTools_WhenTheToolListIsEmpty()
+    {
+        StubHandler handler = new(_ => Ok());
+        await Provider(handler).CompleteAsync(RequestWith(tools: []), CancellationToken.None);
+
+        Body(handler)["tools"].Should().BeNull(); // an empty list is no tools, not an empty `tools: []`
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ShouldSerializeAnAssistantToolUseTurn_AsTextThenToolUseBlocks()
+    {
+        LlmMessage assistant = new(
+            LlmRole.Assistant, "let me check", ToolCalls: [new LlmToolCall("toolu_1", "get_quote", """{"symbol":"ESU5"}""")]);
+        StubHandler handler = new(_ => Ok());
+        await Provider(handler).CompleteAsync(RequestWith(messages: [assistant]), CancellationToken.None);
+
+        JsonArray content = Body(handler)["messages"]![0]!["content"]!.AsArray();
+        content.Should().HaveCount(2);
+        content[0]!["type"]!.GetValue<string>().Should().Be("text");
+        content[0]!["text"]!.GetValue<string>().Should().Be("let me check");
+        content[1]!["type"]!.GetValue<string>().Should().Be("tool_use");
+        content[1]!["id"]!.GetValue<string>().Should().Be("toolu_1");
+        content[1]!["name"]!.GetValue<string>().Should().Be("get_quote");
+        // input embedded as an object the model can read, not a re-stringified string
+        content[1]!["input"]!["symbol"]!.GetValue<string>().Should().Be("ESU5");
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ShouldOmitTheTextBlock_WhenAnAssistantToolUseTurnHasNoText()
+    {
+        LlmMessage assistant = new(
+            LlmRole.Assistant, "", ToolCalls: [new LlmToolCall("toolu_1", "get_quote", """{"symbol":"ESU5"}""")]);
+        StubHandler handler = new(_ => Ok());
+        await Provider(handler).CompleteAsync(RequestWith(messages: [assistant]), CancellationToken.None);
+
+        JsonArray content = Body(handler)["messages"]![0]!["content"]!.AsArray();
+        content.Should().HaveCount(1); // just the tool_use block -- no empty text block
+        content[0]!["type"]!.GetValue<string>().Should().Be("tool_use");
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ShouldSerializeAUserToolResultTurn_AsToolResultBlocks()
+    {
+        LlmMessage toolResult = new(
+            LlmRole.User, "", ToolResults: [new LlmToolResult("toolu_1", """{"last":5123.25}""", IsError: false)]);
+        StubHandler handler = new(_ => Ok());
+        await Provider(handler).CompleteAsync(RequestWith(messages: [toolResult]), CancellationToken.None);
+
+        JsonNode block = Body(handler)["messages"]![0]!["content"]![0]!;
+        block["type"]!.GetValue<string>().Should().Be("tool_result");
+        block["tool_use_id"]!.GetValue<string>().Should().Be("toolu_1");
+        block["content"]!.GetValue<string>().Should().Be("""{"last":5123.25}""");
+        block["is_error"]!.GetValue<bool>().Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ShouldMarkAToolResultAsError_WhenTheToolFailed()
+    {
+        LlmMessage toolResult = new(
+            LlmRole.User, "", ToolResults: [new LlmToolResult("toolu_1", "no such tool", IsError: true)]);
+        StubHandler handler = new(_ => Ok());
+        await Provider(handler).CompleteAsync(RequestWith(messages: [toolResult]), CancellationToken.None);
+
+        Body(handler)["messages"]![0]!["content"]![0]!["is_error"]!.GetValue<bool>().Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ShouldExtractTheToolCallAndMapToolUse_WhenTheModelRequestsAToolUse()
+    {
+        StubHandler handler = new(_ => ToolUseResponse());
+        LlmCompletion completion =
+            await Provider(handler).CompleteAsync(RequestWith(tools: [SampleTool]), CancellationToken.None);
+
+        completion.StopReason.Should().Be(LlmStopReason.ToolUse);
+        completion.ToolCalls.Should().ContainSingle();
+        LlmToolCall call = completion.ToolCalls![0];
+        call.Id.Should().Be("toolu_99");
+        call.Name.Should().Be("get_quote");
+        // the input is kept as raw JSON -- the caller (the tool loop) owns the parse, exactly like the completion Text
+        JsonNode.Parse(call.InputJson)!["symbol"]!.GetValue<string>().Should().Be("ESU5");
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ShouldExtractBothTheTextAndTheToolCall()
+    {
+        StubHandler handler = new(_ => ToolUseResponse(text: "checking the quote"));
+        LlmCompletion completion =
+            await Provider(handler).CompleteAsync(RequestWith(tools: [SampleTool]), CancellationToken.None);
+
+        completion.Text.Should().Be("checking the quote");
+        completion.ToolCalls.Should().ContainSingle().Which.Name.Should().Be("get_quote");
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ShouldReturnNoToolCalls_WhenTheModelAnswersInPlainText()
+    {
+        StubHandler handler = new(_ => Ok());
+        LlmCompletion completion = await Provider(handler).CompleteAsync(RequestWith(), CancellationToken.None);
+
+        completion.ToolCalls.Should().BeNull(); // null, not an empty list -- there was no tool_use block
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldMapTheToolUseStopReason_SoTheLoopFallsBackToCompleteAsync()
+    {
+        // 4a does not parse tool_use blocks from the stream -- it only surfaces the stop reason, so the tool loop
+        // re-issues the round non-streamed (CompleteAsync) to read the calls (the round-1 double-call, removed in 4b).
+        StubHandler handler = new(_ => Sse(MessageStart(1, 1), TextDelta("let me check"), MessageDelta("tool_use", 5)));
+
+        (LlmCompletion completion, _) = await Stream(handler);
+
+        completion.StopReason.Should().Be(LlmStopReason.ToolUse);
     }
 
     private static async Task<(LlmCompletion Completion, List<string> Deltas)> Stream(StubHandler handler)

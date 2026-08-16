@@ -244,6 +244,24 @@ public sealed class AnthropicLlmProvider : ILlmProvider
             body["stream"] = true; // ask for the incremental Server-Sent-Events response (gh#906 inc 3b)
         }
 
+        if (request.Tools is { Count: > 0 } tools)
+        {
+            // The read-only tools the model may call (gh#906 inc 4). Each schema embeds as an OBJECT (like the
+            // output_config schema below) so the model reads it; an empty / null list POSTs no `tools` at all.
+            JsonArray definitions = [];
+            foreach (LlmToolDefinition tool in tools)
+            {
+                definitions.Add(new JsonObject
+                {
+                    ["name"] = tool.Name,
+                    ["description"] = tool.Description,
+                    ["input_schema"] = JsonNode.Parse(tool.InputSchema),
+                });
+            }
+
+            body["tools"] = definitions;
+        }
+
         if (request.ResponseFormat.JsonSchema is { } schema)
         {
             // Constrain the model to the caller's schema. Best-effort tightening only -- the caller still owns the
@@ -261,11 +279,54 @@ public sealed class AnthropicLlmProvider : ILlmProvider
         return body.ToJsonString();
     }
 
-    private static JsonObject ToMessage(LlmMessage message) => new()
+    private static JsonObject ToMessage(LlmMessage message)
     {
-        ["role"] = message.Role == LlmRole.Assistant ? "assistant" : "user",
-        ["content"] = message.Content,
-    };
+        string role = message.Role == LlmRole.Assistant ? "assistant" : "user";
+
+        // A plain turn carries its text as a string. A tool-use (assistant) or tool-result (user) turn round-trips a
+        // content-block ARRAY (gh#906 inc 4) -- the Messages API accepts either shape for `content`.
+        if (message.ToolCalls is not { Count: > 0 } && message.ToolResults is not { Count: > 0 })
+        {
+            return new JsonObject { ["role"] = role, ["content"] = message.Content };
+        }
+
+        JsonArray content = [];
+        if (message.Content.Length > 0)
+        {
+            content.Add(new JsonObject { ["type"] = "text", ["text"] = message.Content });
+        }
+
+        if (message.ToolCalls is { Count: > 0 } calls)
+        {
+            foreach (LlmToolCall call in calls)
+            {
+                content.Add(new JsonObject
+                {
+                    ["type"] = "tool_use",
+                    ["id"] = call.Id,
+                    ["name"] = call.Name,
+                    // The input embeds as an object the model reads back; a blank input is the no-arg `{}` object.
+                    ["input"] = JsonNode.Parse(string.IsNullOrWhiteSpace(call.InputJson) ? "{}" : call.InputJson),
+                });
+            }
+        }
+
+        if (message.ToolResults is { Count: > 0 } results)
+        {
+            foreach (LlmToolResult result in results)
+            {
+                content.Add(new JsonObject
+                {
+                    ["type"] = "tool_result",
+                    ["tool_use_id"] = result.ToolCallId,
+                    ["content"] = result.Content,
+                    ["is_error"] = result.IsError,
+                });
+            }
+        }
+
+        return new JsonObject { ["role"] = role, ["content"] = content };
+    }
 
     private LlmCompletion Parse(string payload)
     {
@@ -284,7 +345,7 @@ public sealed class AnthropicLlmProvider : ILlmProvider
             string? stopReason = root.TryGetProperty("stop_reason", out JsonElement sr) && sr.ValueKind == JsonValueKind.String
                 ? sr.GetString()
                 : null;
-            return new LlmCompletion(text, MapStopReason(stopReason), ExtractUsage(root));
+            return new LlmCompletion(text, MapStopReason(stopReason), ExtractUsage(root), ExtractToolCalls(root));
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException)
         {
@@ -319,12 +380,44 @@ public sealed class AnthropicLlmProvider : ILlmProvider
         return builder.ToString();
     }
 
+    // The tool_use content blocks the model emitted, or null when it asked for none (gh#906 inc 4). The input is kept
+    // as its raw JSON -- the caller (the tool loop) parses it, exactly as the completion Text is the caller's to parse.
+    // A malformed block is skipped, never crashing an accessor (the same total-defensive posture as ExtractText).
+    private static IReadOnlyList<LlmToolCall>? ExtractToolCalls(JsonElement root)
+    {
+        if (!root.TryGetProperty("content", out JsonElement content) || content.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        List<LlmToolCall>? calls = null;
+        foreach (JsonElement block in content.EnumerateArray())
+        {
+            if (block.ValueKind == JsonValueKind.Object
+                && block.TryGetProperty("type", out JsonElement type)
+                && type.ValueKind == JsonValueKind.String
+                && type.GetString() == "tool_use"
+                && block.TryGetProperty("id", out JsonElement id)
+                && id.ValueKind == JsonValueKind.String
+                && block.TryGetProperty("name", out JsonElement name)
+                && name.ValueKind == JsonValueKind.String)
+            {
+                // GetRawText preserves the input object exactly; an absent input is the no-arg `{}`.
+                string inputJson = block.TryGetProperty("input", out JsonElement input) ? input.GetRawText() : "{}";
+                (calls ??= []).Add(new LlmToolCall(id.GetString()!, name.GetString()!, inputJson));
+            }
+        }
+
+        return calls;
+    }
+
     private static LlmStopReason MapStopReason(string? stopReason) => stopReason switch
     {
         "end_turn" or "stop_sequence" => LlmStopReason.Completed,
         "max_tokens" => LlmStopReason.MaxTokens,
         "refusal" => LlmStopReason.Refusal,
-        _ => LlmStopReason.Other, // tool_use, pause_turn, absent, anything unknown -- the caller fails closed
+        "tool_use" => LlmStopReason.ToolUse, // the model wants a tool -- the caller runs it and continues (gh#906 inc 4)
+        _ => LlmStopReason.Other, // pause_turn, absent, anything unknown -- the caller fails closed
     };
 
     private static LlmUsage ExtractUsage(JsonElement root)
