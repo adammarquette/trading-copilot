@@ -1,3 +1,4 @@
+using System.Text.Json;
 using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Venues;
@@ -5,6 +6,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Audit;
+using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -38,10 +40,20 @@ namespace MarqSpec.TradingCopilot.Api.Accounts;
 /// </remarks>
 public sealed class AccountEventIngestionService
 {
+    /// <summary>The <c>Source</c> stamped on this consumer's own journal events.</summary>
+    public const string EventSource = "account-event-ingestion";
+
+    /// <summary>
+    /// A fill this process could not attribute to any order it holds (gh#770) — most often the native bracket's
+    /// <b>exit</b> leg, which the venue spawns with no <see cref="Order"/> of ours behind it.
+    /// </summary>
+    public const string UnmatchedFillEventType = "fill.unmatched";
+
     private readonly TradingCopilotDbContext _discovery;
     private readonly DbContextOptions<TradingCopilotDbContext> _options;
     private readonly IAuditLog _auditLog;
     private readonly IAccountRealtimeNotifier _notifier;
+    private readonly IEventLog _eventLog;
     private readonly ProjectXConnectionOptions _projectX;
     private readonly ILogger<AccountEventIngestionService> _logger;
 
@@ -50,6 +62,7 @@ public sealed class AccountEventIngestionService
     /// <param name="options">The context options, used to build a per-owner (R-20-scoped) context for the writes.</param>
     /// <param name="auditLog">The immutable audit trail — a retired stop plan is recorded (gh#220), a secondary write.</param>
     /// <param name="notifier">Read-side realtime push to the owning operator (gh#683) — best-effort, after the commit.</param>
+    /// <param name="eventLog">The durable journal — carries the unattributable-fill record (gh#770), a secondary write.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
     /// <param name="logger">The logger.</param>
     public AccountEventIngestionService(
@@ -57,6 +70,7 @@ public sealed class AccountEventIngestionService
         DbContextOptions<TradingCopilotDbContext> options,
         IAuditLog auditLog,
         IAccountRealtimeNotifier notifier,
+        IEventLog eventLog,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         ILogger<AccountEventIngestionService> logger)
     {
@@ -66,6 +80,7 @@ public sealed class AccountEventIngestionService
         _options = options;
         _auditLog = auditLog;
         _notifier = notifier;
+        _eventLog = eventLog;
         _projectX = projectXOptions.Value;
         _logger = logger;
     }
@@ -136,9 +151,15 @@ public sealed class AccountEventIngestionService
         Order? order = await FindOrderAsync(database, owner.AccountId, fill.VenueOrderKey, cancellationToken);
         if (order is null)
         {
-            _logger.LogWarning(
-                "Fill {Fill} for unknown order {Order} on account {Account}; ignored.",
-                fill.VenueFillKey, fill.VenueOrderKey, fill.Account);
+            // We hold the account but no order of ours carries this venue key, so there is nothing to attribute the
+            // execution to. The common case is NOT a stray payload: it is the native bracket's exit leg, which the
+            // venue spawns itself (gh#770). That fill is the closing side of a round trip, so dropping it silently
+            // means TradeJournalService composes no Trade and a real realized loss never reaches the R-5 governor,
+            // the R-9 window or the R-4 throttle -- they read headroom that is not there.
+            //
+            // This does not invent the missing side; it refuses to lose it quietly (R-13, as gh#527 / gh#850 did
+            // for the flatten tiers' silent skips).
+            await RecordUnmatchedFillAsync(fill, cancellationToken);
             return false;
         }
 
@@ -202,6 +223,55 @@ public sealed class AccountEventIngestionService
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Records — best-effort — a fill this process could not attribute to any order it holds (gh#770): a
+    /// <see cref="UnmatchedFillEventType"/> event naming the account, contract and both venue keys, so the gap is
+    /// queryable rather than a log line that scrolls away.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>It records the gap; it does not close it.</b> Composing a <c>Fill</c> here would need to invent which
+    /// order the execution belongs to, and a wrong attribution mis-states realized P&amp;L rather than merely
+    /// missing it — worse, on the path that feeds a risk limit. Closing it properly needs the bracket legs
+    /// journalled as orders, which turns on whether the venue tags a spawned leg at all (gh#770).
+    /// </para>
+    /// <para>
+    /// A <b>secondary</b> write about an event that is already un-actable, so a fault must never take the consumer
+    /// down or stall the cursor behind it — swallowed like the audit and notification writes. Cancellation still
+    /// propagates, so a real shutdown stops the host.
+    /// </para>
+    /// </remarks>
+    private async Task RecordUnmatchedFillAsync(FillEvent fill, CancellationToken cancellationToken)
+    {
+        _logger.LogWarning(
+            "Fill {Fill} for unknown order {Order} on account {Account}; not attributable — journalled as {Event}.",
+            fill.VenueFillKey, fill.VenueOrderKey, fill.Account, UnmatchedFillEventType);
+
+        try
+        {
+            string payload = JsonSerializer.Serialize(new
+            {
+                account = fill.Account.Key,
+                venueOrderKey = fill.VenueOrderKey,
+                venueFillKey = fill.VenueFillKey,
+                size = fill.Quantity,
+                reason = "no order held by this process carries the fill's venue order key; "
+                    + "most likely a venue-spawned bracket leg, so a round trip may not compose",
+            });
+            await _eventLog.AppendAsync(
+                new EventDraft(UnmatchedFillEventType, EventSource, fill.At, payload), cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw; // a real shutdown still stops the host
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error, "Could not journal unmatched fill {Fill}; ingestion is unaffected.", fill.VenueFillKey);
+        }
     }
 
     private async Task<bool> ProcessOrderStateAsync(
