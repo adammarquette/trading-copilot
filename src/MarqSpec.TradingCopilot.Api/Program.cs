@@ -620,6 +620,7 @@ app.MapWorkingOrderEndpoints();
 app.MapFillEndpoints();
 app.MapMarketDataEndpoints();
 app.MapAiSpendEndpoints();
+app.MapAiAttributionEndpoints();
 app.MapChatEndpoints();
 app.MapOutcomeEndpoints();
 
