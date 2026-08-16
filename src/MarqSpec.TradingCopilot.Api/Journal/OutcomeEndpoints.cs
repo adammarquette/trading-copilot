@@ -1,10 +1,14 @@
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Journal;
+using MarqSpec.TradingCopilot.Domain.Audit;
+using MarqSpec.TradingCopilot.Domain.Journal;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace MarqSpec.TradingCopilot.Api.Journal;
 
@@ -22,9 +26,10 @@ namespace MarqSpec.TradingCopilot.Api.Journal;
 /// one at a time — cannot be bypassed by a direct column write.
 /// </para>
 /// <para>
-/// <b>These are the reversible R-15 controls only.</b> The one irreversible operation — <b>hard delete</b>, which
-/// removes the row while logging that a deletion occurred — is the paired follow-on, kept separate because it is the
-/// confirmed exception, not the default. Nothing here touches a broker or account record.
+/// <b>Removals span the reversible controls and the one irreversible one.</b> Soft-delete / restore and the two
+/// toggles are undoable; <b>hard delete</b> is the confirmed exception — it removes the row, but records the <b>fact</b>
+/// of the deletion to the audit trail (R-15), so the removal outlives the content. Nothing here touches a broker or
+/// account record.
 /// </para>
 /// </remarks>
 public static class OutcomeEndpoints
@@ -48,6 +53,11 @@ public static class OutcomeEndpoints
             .WithSummary("Include or exclude an outcome from the AI learning set (R-15), independently of its visibility.");
         group.MapPut("/{id:guid}/visibility", SetVisibilityAsync)
             .WithSummary("Show or hide an outcome in default journal views (R-15), independently of whether it trains.");
+        // now is injected (not bound) so the audit timestamp is testable, mirroring the chat / disposition writers.
+        group.MapDelete("/{id:guid}", (Guid id, TradingCopilotDbContext database, IAuditLog auditLog,
+            ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
+            HardDeleteAsync(id, DateTimeOffset.UtcNow, database, auditLog, loggerFactory, cancellationToken))
+            .WithSummary("Hard-delete an outcome (R-15) — the confirmed, irreversible removal; the deletion fact is audited.");
 
         return endpoints;
     }
@@ -114,6 +124,79 @@ public static class OutcomeEndpoints
 
         // 'value' true means HIDDEN — the request models the flag, and SetHiddenFromUser takes hidden.
         return MutateAsync(id, outcome => outcome.SetHiddenFromUser(request.Value), database, cancellationToken);
+    }
+
+    /// <summary>
+    /// Hard-deletes an outcome (<c>DELETE /outcomes/{id}</c>, R-15) — the confirmed, irreversible removal — then records
+    /// the <b>fact</b> of the deletion to the audit trail, or a <b>404</b> when the outcome is foreign or absent (R-20).
+    /// </summary>
+    /// <param name="id">The outcome to remove.</param>
+    /// <param name="now">The clock, injected so the audit timestamp is testable.</param>
+    /// <param name="database">The scoped, R-20-filtered database.</param>
+    /// <param name="auditLog">The append-only audit trail — records that the deletion occurred (R-15).</param>
+    /// <param name="loggerFactory">The logger factory (a failed audit write is logged, never surfaced).</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>204 when removed, or 404.</returns>
+    internal static async Task<IResult> HardDeleteAsync(
+        Guid id,
+        DateTimeOffset now,
+        TradingCopilotDbContext database,
+        IAuditLog auditLog,
+        ILoggerFactory loggerFactory,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+        ArgumentNullException.ThrowIfNull(auditLog);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
+        Outcome? outcome = await database.Outcomes
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (outcome is null)
+        {
+            return Results.NotFound(); // not found / not owned (R-20) — never a disclosure
+        }
+
+        // Capture what the audit names BEFORE the row is gone.
+        Guid owner = outcome.UserId;
+        OutcomeResolution resolution = outcome.Resolution;
+
+        database.Outcomes.Remove(outcome);
+        await database.SaveChangesAsync(cancellationToken);
+
+        // R-15: the content is gone, but the FACT of the deletion is still logged. A SECONDARY write, the IAuditLog
+        // posture — the removal is the operator's confirmed action and has committed, so the audit is written AFTER
+        // and its failure is logged, never surfaced: a transient audit fault must not resurrect a row the operator
+        // deliberately removed, and recording a deletion that did not happen would be worse than a logged gap. The
+        // delete just proved the database reachable, so the audit all but always succeeds.
+        try
+        {
+            await auditLog.WriteAsync(
+                [
+                    new AuditRecord
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = owner, // the outcome's owner (R-20)
+                        Action = AuditAction.OutcomeHardDeleted,
+                        Placement = AuditPlacement.None, // concerns no protective leg
+                        Source = null, // not a kill / flatten action (CK_AuditRecords_Source_MatchesAction)
+                        SyntheticRisk = false,
+                        Detail = $"Hard-deleted journal outcome {id} (was {resolution}); R-15 confirmed removal.",
+                        RecordedAt = now,
+                    },
+                ],
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            loggerFactory.CreateLogger("MarqSpec.TradingCopilot.Api.Journal.OutcomeHardDelete")
+                .LogError(error, "Hard-deleted outcome {Outcome} but could not write its R-15 deletion audit.", id);
+        }
+
+        return Results.NoContent();
     }
 
     /// <summary>

@@ -1,10 +1,14 @@
+using FakeItEasy;
+using MarqSpec.TradingCopilot.Api.Audit;
 using MarqSpec.TradingCopilot.Api.Journal;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Audit;
 using MarqSpec.TradingCopilot.Domain.Journal;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Journal;
 
@@ -190,5 +194,92 @@ public class OutcomeEndpointsTests
         IResult result = await OutcomeEndpoints.SetVisibilityAsync(id, new OutcomeFlagRequest(true), caller, default);
 
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    // -- hard delete + audit ------------------------------------------------------------------------------------
+
+    private static readonly DateTimeOffset _now = new(2026, 8, 16, 9, 30, 0, TimeSpan.Zero);
+
+    private static IAuditLog OkAudit()
+    {
+        IAuditLog audit = A.Fake<IAuditLog>();
+        A.CallTo(() => audit.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .Returns(Task.CompletedTask);
+        return audit;
+    }
+
+    [Fact]
+    public async Task HardDeleteAsync_ShouldRemoveTheOutcome_AndReturnNoContent()
+    {
+        Guid id = await SeedOutcomeAsync();
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OutcomeEndpoints.HardDeleteAsync(id, _now, context, OkAudit(), NullLoggerFactory.Instance, default);
+
+        StatusOf(result).Should().Be(StatusCodes.Status204NoContent);
+
+        await using TradingCopilotDbContext verify = Context();
+        (await verify.Outcomes.AnyAsync(outcome => outcome.Id == id)).Should().BeFalse(); // the content is gone
+    }
+
+    [Fact]
+    public async Task HardDeleteAsync_ShouldAuditTheDeletion_NamingTheOutcomeAndResolution()
+    {
+        Guid id = await SeedOutcomeAsync(configure: outcome => outcome.Resolution = OutcomeResolution.Loss);
+
+        IReadOnlyCollection<AuditRecord>? captured = null;
+        IAuditLog audit = A.Fake<IAuditLog>();
+        A.CallTo(() => audit.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .Invokes((IReadOnlyCollection<AuditRecord> records, CancellationToken _) => captured = records)
+            .Returns(Task.CompletedTask);
+
+        await using TradingCopilotDbContext context = Context();
+        await OutcomeEndpoints.HardDeleteAsync(id, _now, context, audit, NullLoggerFactory.Instance, default);
+
+        AuditRecord record = captured.Should().ContainSingle().Subject;
+        record.Action.Should().Be(AuditAction.OutcomeHardDeleted);
+        record.Placement.Should().Be(AuditPlacement.None); // concerns no protective leg
+        record.Source.Should().BeNull(); // CK_AuditRecords_Source_MatchesAction: a non-5/6/7 action carries no source
+        record.SyntheticRisk.Should().BeFalse();
+        record.UserId.Should().Be(_operator); // the outcome's owner (R-20)
+        record.RecordedAt.Should().Be(_now);
+        record.Detail.Should().Contain(id.ToString()).And.Contain("Loss"); // the fact outlives the content
+    }
+
+    [Fact]
+    public async Task HardDeleteAsync_ShouldReturnNotFound_ForAForeignOutcome_AndNeitherDeleteNorAudit()
+    {
+        Guid strangerOwner = Guid.NewGuid();
+        Guid id = await SeedOutcomeAsync(owner: strangerOwner);
+        IAuditLog audit = OkAudit();
+
+        await using TradingCopilotDbContext caller = Context();
+        IResult result = await OutcomeEndpoints.HardDeleteAsync(id, _now, caller, audit, NullLoggerFactory.Instance, default);
+
+        StatusOf(result).Should().Be(StatusCodes.Status404NotFound); // R-20
+        A.CallTo(() => audit.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .MustNotHaveHappened(); // a 404 removes nothing, so it audits nothing
+
+        await using TradingCopilotDbContext verify = Context(strangerOwner);
+        (await verify.Outcomes.AnyAsync(outcome => outcome.Id == id)).Should().BeTrue(); // untouched
+    }
+
+    [Fact]
+    public async Task HardDeleteAsync_ShouldStillRemoveTheOutcome_WhenTheAuditWriteFaults()
+    {
+        // R-15: the removal is the operator's confirmed, committed action; a transient audit fault is logged, never
+        // surfaced, and must not resurrect a row the operator deliberately removed.
+        Guid id = await SeedOutcomeAsync();
+        IAuditLog audit = A.Fake<IAuditLog>();
+        A.CallTo(() => audit.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("audit store unavailable"));
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OutcomeEndpoints.HardDeleteAsync(id, _now, context, audit, NullLoggerFactory.Instance, default);
+
+        StatusOf(result).Should().Be(StatusCodes.Status204NoContent);
+
+        await using TradingCopilotDbContext verify = Context();
+        (await verify.Outcomes.AnyAsync(outcome => outcome.Id == id)).Should().BeFalse(); // the delete stands
     }
 }

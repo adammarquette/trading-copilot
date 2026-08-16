@@ -71,4 +71,14 @@ public enum AuditAction
     /// <c>Placement</c> is <see cref="AuditPlacement.None"/> — it acts on the position, not a single protective leg.
     /// </summary>
     AutoFlatten = 7,
+
+    /// <summary>
+    /// A journal <c>Outcome</c> was <b>hard-deleted</b> (R-15, gh#909): the explicit, confirmed removal whose content
+    /// is gone, but whose <b>fact of deletion is still recorded</b> — <c>Detail</c> names the removed outcome and its
+    /// resolution so the removal survives in the trail even though the row does not. A data-removal audit, not a
+    /// safety action: its <c>Placement</c> is <see cref="AuditPlacement.None"/> (it concerns no protective leg), it
+    /// carries no <c>synthetic_risk</c>, and — being outside the kill / flatten set — its <c>Source</c> is
+    /// <see langword="null"/> (<c>CK_AuditRecords_Source_MatchesAction</c>).
+    /// </summary>
+    OutcomeHardDeleted = 8,
 }
