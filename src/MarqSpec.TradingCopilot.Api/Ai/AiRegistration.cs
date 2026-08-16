@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Api.Chat;
+using MarqSpec.TradingCopilot.Api.Chat.Tools;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
@@ -100,9 +101,18 @@ public static class AiRegistration
         // opts an account in; the scan reads the account's headroom and decides Full / Throttled / Suppressed.
         services.AddSingleton<ISuggestionThrottle, SuggestionThrottle>();
 
-        // The grounded chat turn (gh#906, R-6): runs the model over a conversation's history and prices the call.
-        // Scoped like the reviewer beside it — it wraps the transient ILlmProvider and holds no state of its own; the
-        // chat endpoint resolves it per request. Enforcement lives below the model: it converses, never proposes an order.
+        // The read-only chat tools (gh#925): the co-pilot may call these to ground its reply in the operator's real
+        // data. SCOPED -- each holds the scoped DbContext (R-20 owner-filtered), so a singleton would be a captive
+        // dependency failing ValidateScopes at startup. Every tool is read-only by construction (IChatTool): the model
+        // reads the journal or a quote, but the tool layer reaches no order / write path (enforcement below the model).
+        // ChatTurnService resolves IEnumerable<IChatTool> -- the full registered set -- and offers it to the model.
+        services.AddScoped<IChatTool, QueryJournalTool>();
+        services.AddScoped<IChatTool, GetQuoteTool>();
+
+        // The grounded chat turn (gh#906 / gh#925, R-6): runs the model over a conversation's history, runs any
+        // read-only tool calls in a bounded loop, and prices every call. Scoped like the reviewer beside it — it wraps
+        // the transient ILlmProvider and holds no state of its own; the chat endpoint resolves it per request.
+        // Enforcement lives below the model: it converses and reads, never proposes an order.
         services.AddScoped<IChatTurnService, ChatTurnService>();
 
         return services;

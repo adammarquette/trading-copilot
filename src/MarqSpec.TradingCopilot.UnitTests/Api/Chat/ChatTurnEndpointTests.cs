@@ -103,7 +103,7 @@ public class ChatTurnEndpointTests
     {
         Guid id = await SeedConversationAsync();
         AiCallCost cost = Cost();
-        TurnReturns(new ChatTurnResult(true, "here is the read", cost));
+        TurnReturns(new ChatTurnResult(true, "here is the read", [cost]));
 
         IResult result = await Invoke(id, "what's the ES read?", At(3));
 
@@ -134,7 +134,7 @@ public class ChatTurnEndpointTests
     public async Task TurnAsync_ShouldPushEachStreamedDelta_ToTheOwner_DuringTheTurn()
     {
         Guid id = await SeedConversationAsync();
-        TurnStreams(new ChatTurnResult(true, "Hello", Cost()), "Hel", "lo");
+        TurnStreams(new ChatTurnResult(true, "Hello", [Cost()]), "Hel", "lo");
 
         IResult result = await Invoke(id, "hi", At(3));
 
@@ -152,7 +152,7 @@ public class ChatTurnEndpointTests
     public async Task TurnAsync_ShouldStillSucceed_WhenAStreamedChunkPushThrows()
     {
         Guid id = await SeedConversationAsync();
-        TurnStreams(new ChatTurnResult(true, "Hello", Cost()), "Hel");
+        TurnStreams(new ChatTurnResult(true, "Hello", [Cost()]), "Hel");
         A.CallTo(() => _notifier.ChunkAsync(A<Guid>._, A<RealtimeChatChunk>._, A<CancellationToken>._))
             .Throws(new InvalidOperationException("hub down"));
 
@@ -215,7 +215,7 @@ public class ChatTurnEndpointTests
     {
         Guid id = await SeedConversationAsync();
         await SeedSpendAsync(usd: 2m, at: At(1));
-        TurnReturns(new ChatTurnResult(true, "ok", Cost()));
+        TurnReturns(new ChatTurnResult(true, "ok", [Cost()]));
 
         IResult result = await Invoke(id, "hi", At(3), governor: new GovernorOptions { DailyBudgetUsd = 10m });
 
@@ -228,7 +228,7 @@ public class ChatTurnEndpointTests
     {
         Guid id = await SeedConversationAsync();
         AiCallCost cost = Cost(AiUsageOutcome.Failed, usd: 0m);
-        TurnReturns(new ChatTurnResult(false, "the co-pilot could not answer", cost));
+        TurnReturns(new ChatTurnResult(false, "the co-pilot could not answer", [cost]));
 
         IResult result = await Invoke(id, "hi", At(3));
 
@@ -247,7 +247,7 @@ public class ChatTurnEndpointTests
     public async Task TurnAsync_ShouldStillSucceed_WhenTheLedgerWriteThrows()
     {
         Guid id = await SeedConversationAsync();
-        TurnReturns(new ChatTurnResult(true, "ok", Cost()));
+        TurnReturns(new ChatTurnResult(true, "ok", [Cost()]));
         A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._))
             .Throws(new InvalidOperationException("ledger db down"));
 
@@ -262,7 +262,7 @@ public class ChatTurnEndpointTests
     public async Task TurnAsync_ShouldStillSucceed_WhenTheRealtimePushThrows()
     {
         Guid id = await SeedConversationAsync();
-        TurnReturns(new ChatTurnResult(true, "ok", Cost()));
+        TurnReturns(new ChatTurnResult(true, "ok", [Cost()]));
         A.CallTo(() => _notifier.MessageAppendedAsync(A<Guid>._, A<RealtimeChatMessage>._, A<CancellationToken>._))
             .Throws(new InvalidOperationException("hub down"));
 
