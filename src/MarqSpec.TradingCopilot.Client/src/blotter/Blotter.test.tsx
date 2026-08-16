@@ -65,6 +65,37 @@ const UNJOURNALED_LEG: BlotterRestingOrder = {
   isProtective: true,
 };
 
+/**
+ * A resting order carrying a HIDDEN working stop the operator can move (gh#865). Long: the entry is above the
+ * safety floor, so the band is safety(4980) < working(4990) < entry(5000). The four platform-held fields are
+ * present as a whole — that is what makes the Move stop control appear.
+ */
+const HIDDEN_LONG: BlotterRestingOrder = {
+  venueOrderKey: 'v3',
+  orderId: 'ord-2',
+  contract: 'CON.F.US.MES.U26',
+  stopPrice: null,
+  limitPrice: 5_000,
+  size: 2,
+  isProtective: false,
+  workingStopPrice: 4_990,
+  stopStaging: 'Hidden',
+  safetyStopPrice: 4_980,
+  entryPrice: 5_000,
+};
+
+/** The short mirror: the entry is BELOW the safety floor, so the band inverts — entry(5000) < working(5010) < safety(5020). */
+const HIDDEN_SHORT: BlotterRestingOrder = {
+  ...HIDDEN_LONG,
+  venueOrderKey: 'v4',
+  workingStopPrice: 5_010,
+  safetyStopPrice: 5_020,
+  entryPrice: 5_000,
+};
+
+/** A working stop already promoted to a NATIVE venue order — it rests at the venue, so it is not locally movable and offers no Move stop. */
+const NATIVE_STOP: BlotterRestingOrder = { ...HIDDEN_LONG, stopStaging: 'Native' };
+
 function live<T>(...items: T[]): VenueView<T> {
   return { basis: 'live', items };
 }
@@ -370,6 +401,7 @@ describe('Blotter', () => {
 
     expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /reprice/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /move stop/i })).toBeNull();
     expect(screen.getByTestId('leg-not-actionable').textContent?.toLowerCase()).toContain(
       'manage via its position',
     );
@@ -490,6 +522,220 @@ describe('Blotter', () => {
     await act(async () => {
       release();
     });
+  });
+
+  it('offers a Move stop control only when the working stop is Hidden', async () => {
+    // gh#865: only a Hidden working stop is locally movable. Native (a real venue order) and Orphaned (re-arms on
+    // reconnect) are not, and an order with no stop plan has no hidden stop at all — none may offer the control.
+    restingOrders.mockResolvedValue({ ok: true, data: live(HIDDEN_LONG) });
+
+    await renderBlotter();
+
+    expect(screen.getByRole('button', { name: /^move stop$/i })).toBeTruthy();
+  });
+
+  it('offers no Move stop control for a Native stop — it rests at the venue, not locally', async () => {
+    restingOrders.mockResolvedValue({ ok: true, data: live(NATIVE_STOP) });
+
+    await renderBlotter();
+
+    expect(screen.queryByRole('button', { name: /^move stop$/i })).toBeNull();
+  });
+
+  it('offers no Move stop control for an order with no stop plan', async () => {
+    // The default PROTECTIVE fixture carries no staging fields — a plain protective stop, not a hidden working stop.
+    await renderBlotter();
+
+    expect(screen.queryByRole('button', { name: /^move stop$/i })).toBeNull();
+  });
+
+  it('rejects a working stop outside the safety→entry band (long) and accepts one inside it', async () => {
+    // The band is strict at both ends: onto the safety stop removes it, onto the entry is degenerate — both are
+    // refused. Client validation is UX; the server re-validates the same band fail-closed. Long: 4980 < w < 5000.
+    restingOrders.mockResolvedValue({ ok: true, data: live(HIDDEN_LONG) });
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move stop$/i }));
+    });
+    const confirm = () =>
+      screen.getByRole('button', { name: /^move this stop$/i }) as HTMLButtonElement;
+
+    for (const outOfBand of ['5000', '5001', '4980', '4979']) {
+      await act(async () => {
+        fireEvent.change(screen.getByTestId('new-working-stop'), { target: { value: outOfBand } });
+      });
+      expect(confirm().disabled).toBe(true);
+      expect(screen.getByTestId('move-stop-band')).toBeTruthy(); // the inline out-of-band reason
+    }
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-working-stop'), { target: { value: '4995' } });
+    });
+    expect(confirm().disabled).toBe(false);
+    expect(screen.queryByTestId('move-stop-band')).toBeNull();
+    expect(reprice).not.toHaveBeenCalled();
+  });
+
+  it('rejects a working stop outside the band (short) and accepts one inside it', async () => {
+    // Side is not on the venue-truth record, so direction is inferred from band geometry. Short: the entry is below
+    // the safety floor, so the band inverts — 5000 < w < 5020 — and the same strict bounds apply.
+    restingOrders.mockResolvedValue({ ok: true, data: live(HIDDEN_SHORT) });
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move stop$/i }));
+    });
+    const confirm = () =>
+      screen.getByRole('button', { name: /^move this stop$/i }) as HTMLButtonElement;
+
+    for (const outOfBand of ['5000', '4999', '5020', '5021']) {
+      await act(async () => {
+        fireEvent.change(screen.getByTestId('new-working-stop'), { target: { value: outOfBand } });
+      });
+      expect(confirm().disabled).toBe(true);
+    }
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-working-stop'), { target: { value: '5010' } });
+    });
+    expect(confirm().disabled).toBe(false);
+  });
+
+  it('moves the hidden stop by its journaled id, sending only the working stop', async () => {
+    // Acceptance: the move targets the app Order.Id, and a hidden re-stage is a LOCAL write — it needs no reference
+    // price (unlike an entry reprice), so the payload carries the working stop and nothing else.
+    restingOrders.mockResolvedValue({ ok: true, data: live(HIDDEN_LONG) });
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move stop$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-working-stop'), { target: { value: '4995' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move this stop$/i }));
+    });
+
+    // Exact-object match: no entryPrice, no referencePrice — naming a field would be a request to move it.
+    expect(reprice).toHaveBeenCalledWith('ord-2', { workingStopPrice: 4995 });
+  });
+
+  it('keeps the sheet up and shows the server’s band refusal, rather than reporting a move', async () => {
+    reprice.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 422,
+      reason: 'the move must keep the safety → working → entry ordering',
+    });
+    restingOrders.mockResolvedValue({ ok: true, data: live(HIDDEN_LONG) });
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move stop$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-working-stop'), { target: { value: '4995' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move this stop$/i }));
+    });
+
+    expect(screen.getByTestId('move-stop-refusal').textContent?.toLowerCase()).toContain(
+      'ordering',
+    );
+    expect(screen.getByTestId('new-working-stop')).toBeTruthy(); // the sheet is still open
+  });
+
+  it('surfaces a lost-race refusal when the stop promoted to a native venue order mid-edit', async () => {
+    // The UI offered the control because the read said Hidden, but the stop promoted before the move landed. The
+    // server refuses (409) and the reason reaches the operator — proving the server is the real guard, not the UI
+    // gate. Nothing unprotected results: the move simply did not happen.
+    reprice.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 409,
+      reason: 'the working stop is now a native venue order and cannot be re-staged here',
+    });
+    restingOrders.mockResolvedValue({ ok: true, data: live(HIDDEN_LONG) });
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move stop$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-working-stop'), { target: { value: '4995' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move this stop$/i }));
+    });
+
+    expect(screen.getByTestId('move-stop-refusal').textContent?.toLowerCase()).toContain(
+      'native venue order',
+    );
+  });
+
+  it('re-reads after a successful move, rather than assuming the stop moved', async () => {
+    restingOrders.mockResolvedValue({ ok: true, data: live(HIDDEN_LONG) });
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move stop$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-working-stop'), { target: { value: '4995' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move this stop$/i }));
+    });
+
+    expect(positions).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not move the stop twice when confirmed twice before the first resolves', async () => {
+    // The same non-idempotent-transmit hazard as reprice/cancel: a re-stage reaches the venue, so a second click
+    // before the first settles must not issue a second move.
+    let release: () => void = () => {};
+    reprice.mockReturnValue(
+      new Promise((resolve) => {
+        release = () => resolve({ ok: true, data: undefined });
+      }),
+    );
+    restingOrders.mockResolvedValue({ ok: true, data: live(HIDDEN_LONG) });
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move stop$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-working-stop'), { target: { value: '4995' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move this stop$/i }));
+      fireEvent.click(screen.getByRole('button', { name: /^move this stop$/i }));
+    });
+
+    expect(reprice).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      release();
+    });
+  });
+
+  it('names the specific order and its current stop before moving it', async () => {
+    // Acceptance: every modify control states WHICH order and its current terms before acting — a blotter carries
+    // several at once, and moving the wrong stop is the same class of mistake as pulling the wrong order.
+    restingOrders.mockResolvedValue({ ok: true, data: live(HIDDEN_LONG) });
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^move stop$/i }));
+    });
+
+    const sheet = screen.getByRole('dialog').textContent ?? '';
+    expect(sheet).toContain('CON.F.US.MES.U26');
+    expect(sheet).toContain('4990'); // the current working stop, so the operator sees what they are moving from
+    expect(reprice).not.toHaveBeenCalled();
   });
 
   it('names the position, its size and its protection before exiting it', async () => {

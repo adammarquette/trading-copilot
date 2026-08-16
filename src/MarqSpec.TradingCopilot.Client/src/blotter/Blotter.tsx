@@ -45,6 +45,26 @@ function refusalText(result: {
 }
 
 /**
+ * The `safety → working → entry` band a hidden working stop may move strictly inside (gh#865, ADR-0007). **Side is
+ * not on the venue-truth record**, so direction is inferred from the band's geometry: for a long the entry sits
+ * above the safety floor, for a short below it — either way the working stop must lie strictly between the two.
+ * Returns `null` when the order carries no stop plan (the four platform-held fields are absent as a whole), so a
+ * non-`Hidden` order has no band and no move. This mirrors the server's authoritative check; it is UX, not the
+ * guard — the re-stage re-validates the same band, the `Hidden` gate and any widen fail-closed.
+ */
+function stopBand(
+  order: BlotterRestingOrder,
+): { readonly low: number; readonly high: number } | null {
+  if (order.safetyStopPrice === undefined || order.entryPrice === undefined) {
+    return null;
+  }
+  return {
+    low: Math.min(order.safetyStopPrice, order.entryPrice),
+    high: Math.max(order.safetyStopPrice, order.entryPrice),
+  };
+}
+
+/**
  * The live blotter (gh#656, R-11 / R-3, ADR-0013) — positions and resting orders from **venue truth**.
  *
  * **An outage must never read as flat.** `unknown` is rendered as *unknown*: not as an empty table, not as the
@@ -80,6 +100,11 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   const [newEntryDraft, setNewEntryDraft] = useState('');
   const [marketDraft, setMarketDraft] = useState('');
   const [repriceRefusal, setRepriceRefusal] = useState<string | null>(null);
+  // The move-stop sheet: the order whose HIDDEN working stop is being moved, the operator's new stop, and a refusal
+  // that stays on the sheet. Unlike a reprice this is a LOCAL re-stage — no market reference — so there is one input.
+  const [movingStop, setMovingStop] = useState<BlotterRestingOrder | null>(null);
+  const [newWorkingDraft, setNewWorkingDraft] = useState('');
+  const [moveStopRefusal, setMoveStopRefusal] = useState<string | null>(null);
   const realtime = useOptionalRealtime();
   const mounted = useRef(true);
   const latest = useRef(0);
@@ -87,6 +112,7 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   const cancelling = useRef(false);
   const closing = useRef(false);
   const repricingInFlight = useRef(false);
+  const movingStopInFlight = useRef(false);
 
   useEffect(() => {
     mounted.current = true;
@@ -163,11 +189,34 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
     setRepriceRefusal(null);
   }, []);
 
+  const openMoveStop = useCallback((order: BlotterRestingOrder) => {
+    setMovingStop(order);
+    setMoveStopRefusal(null);
+    // Seed the field with the current hidden stop so it reads as a nudge, not a blank.
+    setNewWorkingDraft(String(order.workingStopPrice ?? ''));
+  }, []);
+
+  const closeMoveStop = useCallback(() => {
+    setMovingStop(null);
+    setMoveStopRefusal(null);
+  }, []);
+
   const newEntry = parsePrice(newEntryDraft);
   const market = parsePrice(marketDraft);
   // An entry move re-gates and REQUIRES a reference price server-side (R-16), so the action stays disabled until
   // both are real positive numbers -- fail closed rather than let the server refuse for a missing/mistyped field.
   const canReprice = newEntry !== null && market !== null;
+
+  const newWorking = parsePrice(newWorkingDraft);
+  const moveBand = movingStop !== null ? stopBand(movingStop) : null;
+  // The move is allowed only STRICTLY inside the safety→entry band. This is UX: the server re-validates the same
+  // band (and any widen, and the Hidden gate) fail-closed, so an out-of-band or lost-race value never reaches the venue.
+  const workingInBand =
+    newWorking !== null &&
+    moveBand !== null &&
+    newWorking > moveBand.low &&
+    newWorking < moveBand.high;
+  const workingOutOfBand = newWorking !== null && moveBand !== null && !workingInBand;
 
   const confirmReprice = useCallback(() => {
     if (repricing === null || repricing.orderId === null || repricingInFlight.current) {
@@ -196,6 +245,36 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
         repricingInFlight.current = false;
       });
   }, [repricing, newEntry, market, load]);
+
+  const confirmMoveStop = useCallback(() => {
+    if (movingStop === null || movingStop.orderId === null || movingStopInFlight.current) {
+      return; // never a second move of the same stop
+    }
+    if (newWorking === null || !workingInBand) {
+      return; // fail closed on an out-of-band or unparseable price even though the control is disabled for it
+    }
+    movingStopInFlight.current = true;
+    setMoveStopRefusal(null);
+    const orderId = movingStop.orderId;
+
+    // A hidden re-stage is a LOCAL write — no reference price — so only the working stop is sent. Naming a field is a
+    // request to move it, so entry/market are deliberately absent.
+    void repriceOrder(orderId, { workingStopPrice: newWorking })
+      .then((result) => {
+        if (!result.ok) {
+          // The server's answer -- a band breach, or a lost race where the stop promoted to a native venue order --
+          // stays on the sheet: the stop did not move, and the operator needs the reason to decide.
+          setMoveStopRefusal(refusalText(result));
+          return;
+        }
+        setMovingStop(null);
+        // Re-read rather than assume the stop moved: platform/venue truth decides what is staged, not this click.
+        load();
+      })
+      .finally(() => {
+        movingStopInFlight.current = false;
+      });
+  }, [movingStop, newWorking, workingInBand, load]);
 
   const confirmExit = useCallback(() => {
     if (exiting === null || closing.current) {
@@ -333,6 +412,14 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
                   <Button size="small" onClick={() => openReprice(order)}>
                     Reprice
                   </Button>
+                  {/* Only a HIDDEN working stop is locally movable (gh#865, ADR-0007): Native rests at the venue,
+                      Orphaned re-arms on reconnect, and an order with no stop plan has none. The read carries the
+                      staging, so the gate is exact rather than a guess. */}
+                  {order.stopStaging === 'Hidden' ? (
+                    <Button size="small" onClick={() => openMoveStop(order)}>
+                      Move stop
+                    </Button>
+                  ) : null}
                   <Button size="small" color="error" onClick={() => setConfirming(order)}>
                     Cancel
                   </Button>
@@ -459,6 +546,60 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
           <Button onClick={closeReprice}>Keep it</Button>
           <Button variant="contained" onClick={confirmReprice} disabled={!canReprice}>
             Reprice this order
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={movingStop !== null} onClose={closeMoveStop}>
+        <DialogTitle>Move the hidden stop?</DialogTitle>
+        <DialogContent>
+          {movingStop !== null ? (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, pt: 0.5 }}>
+              {/* Names the SPECIFIC order and its current hidden stop, like the reprice/cancel dialogs — the same
+                  blotter carries several at once, and moving the wrong one's stop is the same class of mistake. */}
+              <Typography variant="body2">
+                <strong>{movingStop.contract}</strong> · {movingStop.size} contract
+                {movingStop.size === 1 ? '' : 's'} · stop now at {movingStop.workingStopPrice}
+              </Typography>
+              <TextField
+                size="small"
+                label="New working stop"
+                value={newWorkingDraft}
+                onChange={(event) => setNewWorkingDraft(event.target.value)}
+                slotProps={{
+                  htmlInput: { inputMode: 'decimal', 'data-testid': 'new-working-stop' },
+                }}
+                helperText={
+                  moveBand !== null
+                    ? `Between ${moveBand.low} and ${moveBand.high} — inside the safety-to-entry band.`
+                    : undefined
+                }
+              />
+              {/* The promise the sheet makes: the SAFETY stop never moves here, so the R-5 floor holds. The move must
+                  stay strictly inside the band, and the server re-checks it (and any widen) before the venue sees it. */}
+              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                The safety stop is unchanged. The move must stay strictly between the safety stop
+                and the entry; the server re-checks the band before the venue sees it — a breach is
+                blocked, not just flagged.
+              </Typography>
+              {workingOutOfBand ? (
+                <Alert severity="warning" data-testid="move-stop-band">
+                  That price is outside the safety-to-entry band — onto or past a bound would remove
+                  or invert the stop, so it is refused before the venue sees it.
+                </Alert>
+              ) : null}
+              {moveStopRefusal !== null ? (
+                <Alert severity="error" data-testid="move-stop-refusal">
+                  {moveStopRefusal}
+                </Alert>
+              ) : null}
+            </Box>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeMoveStop}>Keep it</Button>
+          <Button variant="contained" onClick={confirmMoveStop} disabled={!workingInBand}>
+            Move this stop
           </Button>
         </DialogActions>
       </Dialog>
