@@ -365,7 +365,8 @@ entry/stop/target zones, and live positions / orders / fills. **Drawing tools ar
 candlestick base is built (gh#725, Lightweight Charts) on the workspace, beside the suggestion panel (gh#654); its
 underlying data reaches the client over HTTP (gh#644): `/api/marketdata/bars`, `/indicators` and `/levels` serve
 OHLCV, the **pre-computed** indicator series (R-22's single number, never re-derived in the browser) and the active
-price levels — authenticated (R-18), bounded, and global (not operator-owned). The **indicator panes** are built
+price levels (**now populated by the gh#597 key-level projection host** — swing-pivot / ATR zones detected over the
+bar store and reconciled into `PriceLevels`) — authenticated (R-18), bounded, and global (not operator-owned). The **indicator panes** are built
 (gh#726 — RSI / ATR, each in its own pane below the candles, toggled by the operator), with **price-level overlays**
 (gh#727 — active support / resistance, toggled), **suggestion-zone overlays** (gh#727 — an active suggestion's entry /
 stop / target, owner-scoped, stale-labelled on a dropped socket) and **execution overlays** (gh#727 — the operator's

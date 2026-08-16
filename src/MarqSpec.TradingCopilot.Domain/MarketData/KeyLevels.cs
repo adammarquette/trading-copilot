@@ -137,6 +137,99 @@ public sealed record KeyLevelOptions
 /// </remarks>
 public static class KeyLevels
 {
+    /// <summary>
+    /// Runs the whole key-level pipeline over a bar series and its ATR: swing pivots, the ATR-normalised zone each
+    /// projects, overlap merge, a formation-respecting close-replay for role reversal, and per-kind eviction — the
+    /// pure orchestration the projection host (gh#597) schedules and persists.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A pure function of its four arguments</b> — no clock, no store — so the same inputs always yield the same
+    /// zones and a rebuild restores history rather than rewriting it (ADR-0001). ATR arrives as a <i>value</i>
+    /// (gh#311 computes it), keyed by bar bucket.
+    /// </para>
+    /// <para>
+    /// <b>The order is merge, then flip, then evict — with no re-merge after the flip.</b> Merging folds aligned
+    /// pivots into one level before any reversal; the close-replay then flips only what price has closed through;
+    /// and there is deliberately no second merge, so a reversal that leaves two same-kind zones overlapping keeps
+    /// them as two honest levels rather than folding a flip into a neighbour it never touched.
+    /// </para>
+    /// <para>
+    /// <b>The close-replay respects formation order.</b> A bar's close can flip only a zone that already existed
+    /// when the bar printed (<c>FormedAtBucket &lt; </c> the bar's own bucket), so a close can never reach back and
+    /// reverse a level that had not formed yet. <see cref="ApplyClose"/> changes only <see cref="KeyLevelZone.Kind"/>,
+    /// so partitioning the eligible zones out and recombining them is identity-stable.
+    /// </para>
+    /// <para>
+    /// <b>A pivot whose bucket has no ATR is skipped</b>, not zoned off a fabricated width — the same "cannot
+    /// measure ⇒ do not fabricate" posture <see cref="ZoneFor"/> takes on a zero ATR.
+    /// </para>
+    /// </remarks>
+    /// <param name="bars">The series, in <b>ascending</b> time order.</param>
+    /// <param name="atrByBucket">ATR keyed by bar bucket; a pivot whose bucket is absent forms no zone.</param>
+    /// <param name="options">The pivot-window, source and zone-width knobs.</param>
+    /// <param name="maxPerKind">How many zones to keep per side. Positive.</param>
+    /// <returns>The live zones, ordered as <see cref="MergeOverlapping"/> and <see cref="EvictAllButMostRecent"/> order them.</returns>
+    /// <exception cref="ArgumentNullException">A reference argument is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="bars"/> is not ascending (from <see cref="FindPivots"/>).</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A window or <paramref name="maxPerKind"/> is not positive.</exception>
+    public static IReadOnlyList<KeyLevelZone> Detect(
+        IReadOnlyList<Bar> bars,
+        IReadOnlyDictionary<DateTimeOffset, decimal> atrByBucket,
+        KeyLevelOptions options,
+        int maxPerKind)
+    {
+        ArgumentNullException.ThrowIfNull(bars);
+        ArgumentNullException.ThrowIfNull(atrByBucket);
+        ArgumentNullException.ThrowIfNull(options);
+
+        // 1. Swing pivots over the series. FindPivots validates the window and the ascending ordering.
+        IReadOnlyList<SwingPivot> pivots = FindPivots(bars, options);
+
+        // 2. One zone per pivot -- but only where an ATR exists to measure it by. A pivot whose bucket has no ATR is
+        //    SKIPPED rather than zoned off a fabricated width: "cannot measure => do not fabricate".
+        List<KeyLevelZone> zones = [];
+        foreach (SwingPivot pivot in pivots)
+        {
+            if (atrByBucket.TryGetValue(pivot.OpenTime, out decimal atr))
+            {
+                zones.Add(ZoneFor(pivot, atr, options));
+            }
+        }
+
+        // 3. Fold overlapping same-kind zones (raising their touch counts) BEFORE any flip.
+        IReadOnlyList<KeyLevelZone> working = MergeOverlapping(zones);
+
+        // 4. Replay every close in formation order. Each bar can flip only the zones that had already formed when it
+        //    printed; ApplyClose touches only Kind, so the eligible subset is flipped and recombined in place. There
+        //    is deliberately NO re-merge -- a flip leaving two same-kind zones overlapping keeps them two.
+        foreach (Bar bar in bars)
+        {
+            decimal close = bar.Close.Value;
+            List<KeyLevelZone> eligible = [.. working.Where(zone => zone.FormedAtBucket < bar.OpenTime)];
+            if (eligible.Count == 0)
+            {
+                continue;
+            }
+
+            IReadOnlyList<KeyLevelZone> flipped = ApplyClose(eligible, close);
+
+            List<KeyLevelZone> recombined = new(working.Count);
+            int next = 0;
+            foreach (KeyLevelZone zone in working)
+            {
+                // The predicate is evaluated over the same snapshot with FormedAtBucket unchanged, so the k-th
+                // eligible zone here is the k-th flipped one -- the recombination stays aligned and identity-stable.
+                recombined.Add(zone.FormedAtBucket < bar.OpenTime ? flipped[next++] : zone);
+            }
+
+            working = recombined;
+        }
+
+        // 5. Bound the live set per side.
+        return EvictAllButMostRecent(working, maxPerKind);
+    }
+
     /// <summary>Finds every confirmed swing pivot in <paramref name="bars"/>.</summary>
     /// <param name="bars">The series, in <b>ascending</b> time order.</param>
     /// <param name="options">The window and source to read.</param>
