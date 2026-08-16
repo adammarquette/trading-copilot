@@ -79,7 +79,9 @@ describe('request — the one JWT-attach path', () => {
     // OUTSIDE request()'s try/catch, so JSON.parse threw and the promise rejected. Callers that do
     // `void getX().then(...)` with no `.catch` — the shape every read surface uses — then sat on their
     // LoadingState forever, with no error and no retry: the one outcome these surfaces exist to avoid.
-    stubFetch(() => Promise.resolve(rawResponse(200, '<!doctype html><title>502 Bad Gateway</title>')));
+    stubFetch(() =>
+      Promise.resolve(rawResponse(200, '<!doctype html><title>502 Bad Gateway</title>')),
+    );
 
     const result = await request('GET', '/settings/ai-spend');
 
