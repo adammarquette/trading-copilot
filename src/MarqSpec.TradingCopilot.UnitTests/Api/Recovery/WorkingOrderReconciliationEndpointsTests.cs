@@ -204,6 +204,101 @@ public class WorkingOrderReconciliationEndpointsTests
         response.Orders.Single().OrderId.Should().BeNull();
     }
 
+    [Fact]
+    public void MapRestingOrder_ShouldSurfaceTheHiddenWorkingStopAndBand_WhenThePlanIsHidden()
+    {
+        // gh#865: the working stop is PLATFORM-held (ADR-0007) -- it does NOT rest at the venue, so it rides back
+        // alongside the venue-truth order. A Hidden plan is the only locally-movable one, so the move-stop UI needs
+        // its price AND the safety -> working -> entry band to pre-validate a move before it ever calls the write.
+        WorkingOrder entry = new("ORD-ENTRY", VenueContractId.Create(Venue, "MESU26"), null, new Price(5_050m), 2);
+        WorkingStopGeometry plan = new(WorkingStopPrice: 4_990m, StopStaging.Hidden, SafetyStopPrice: 4_980m, EntryPrice: 5_000m);
+
+        RestingOrder mapped = WorkingOrderReconciliationEndpoints.MapRestingOrder(entry, Guid.NewGuid(), plan);
+
+        mapped.WorkingStopPrice.Should().Be(4_990m, "the hidden working stop is what the operator will move");
+        mapped.StopStaging.Should().Be("Hidden");
+        mapped.SafetyStopPrice.Should().Be(4_980m);
+        mapped.EntryPrice.Should().Be(5_000m);
+    }
+
+    [Theory]
+    [InlineData(StopStaging.Native)]
+    [InlineData(StopStaging.Orphaned)]
+    public void MapRestingOrder_ShouldSurfaceTheStaging_WhenThePlanIsNotHidden(StopStaging staging)
+    {
+        // The staging is LOAD-BEARING: only Hidden is locally movable. A Native plan is a venue order (moved there,
+        // not here); an Orphaned one re-arms on reconnect. The UI gates on this, so it MUST be exposed verbatim even
+        // off the hidden path -- surfacing the working stop without its staging would invite a move that cannot route.
+        WorkingOrder entry = new("ORD-ENTRY", VenueContractId.Create(Venue, "MESU26"), new Price(4_990m), null, 1);
+        WorkingStopGeometry plan = new(4_990m, staging, 4_980m, 5_000m);
+
+        RestingOrder mapped = WorkingOrderReconciliationEndpoints.MapRestingOrder(entry, Guid.NewGuid(), plan);
+
+        mapped.StopStaging.Should().Be(staging.ToString());
+        mapped.WorkingStopPrice.Should().Be(4_990m, "the working stop is surfaced regardless of staging; the UI gates on staging");
+    }
+
+    [Fact]
+    public void MapRestingOrder_ShouldLeaveEveryPlatformFieldNull_WhenThereIsNoPlan()
+    {
+        // An order with no staged-stop plan -- a bare entry, or a venue-spawned leg -- surfaces as pure venue truth:
+        // none of the platform-held fields exist to show. The venue-truth fields (including IsProtective) still stand.
+        WorkingOrder leg = new("ORD-LEG", VenueContractId.Create(Venue, "MESU26"), new Price(4_990m), null, 1);
+
+        RestingOrder mapped = WorkingOrderReconciliationEndpoints.MapRestingOrder(leg, orderId: null, plan: null);
+
+        mapped.WorkingStopPrice.Should().BeNull();
+        mapped.StopStaging.Should().BeNull();
+        mapped.SafetyStopPrice.Should().BeNull();
+        mapped.EntryPrice.Should().BeNull();
+        mapped.IsProtective.Should().BeTrue("the venue-truth stop leg still carries a stop trigger");
+    }
+
+    [Fact]
+    public async Task ReadAsync_ShouldSurfaceThePlatformHeldWorkingStop_WhenAWorkingOrderHasAStopPlan()
+    {
+        // The relational wall (gh#865): the read already joins the journaled Order.Id (gh#656); it now also joins the
+        // order's staged-stop plan, keyed by Order.Id and Working-scoped, so the hidden working stop rides back on the
+        // venue-truth order for a move-stop UI to display.
+        Guid accountId = await SeedAccountAsync();
+        Guid journaledId = await SeedWorkingOrderAsync(accountId, "ORD-ENTRY");
+        await SeedStopPlanAsync(journaledId, StopStaging.Hidden);
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>(
+            [new WorkingOrder("ORD-ENTRY", VenueContractId.Create(Venue, "CON.F.US.MES.U26"), new Price(4_990m), null, 1)]);
+
+        IResult result = await WorkingOrderReconciliationEndpoints.ReadAsync(
+            accountId, instrument: null, Service(), Context(), CancellationToken.None);
+
+        RestingOrder order = result.Should().BeOfType<Ok<RestingOrdersResponse>>().Which.Value!.Orders.Single();
+        order.OrderId.Should().Be(journaledId);
+        order.WorkingStopPrice.Should().Be(4_990m);
+        order.StopStaging.Should().Be("Hidden");
+        order.SafetyStopPrice.Should().Be(4_980m);
+        order.EntryPrice.Should().Be(5_000m);
+    }
+
+    [Fact]
+    public async Task ReadAsync_ShouldNotSurfaceThePlan_WhenTheMatchingOrderIsTerminal()
+    {
+        // Working-scoped, exactly like the Order.Id join: a plan for a terminal order must never surface. The operator
+        // cannot move a stop on an order that is gone, and showing its band would invite a move that can never route.
+        Guid accountId = await SeedAccountAsync();
+        Guid terminalId = await SeedWorkingOrderAsync(accountId, "ORD-GONE", OrderStatus.Cancelled);
+        await SeedStopPlanAsync(terminalId, StopStaging.Hidden);
+        A.CallTo(() => _venue.GetWorkingOrdersAsync(A<VenueAccountId>._, A<CancellationToken>._))
+            .Returns<IReadOnlyList<WorkingOrder>>(
+            [new WorkingOrder("ORD-GONE", VenueContractId.Create(Venue, "CON.F.US.MES.U26"), new Price(4_990m), null, 1)]);
+
+        IResult result = await WorkingOrderReconciliationEndpoints.ReadAsync(
+            accountId, instrument: null, Service(), Context(), CancellationToken.None);
+
+        RestingOrder order = result.Should().BeOfType<Ok<RestingOrdersResponse>>().Which.Value!.Orders.Single();
+        order.OrderId.Should().BeNull("a terminal order is not matched");
+        order.WorkingStopPrice.Should().BeNull("and so its plan is never surfaced");
+        order.StopStaging.Should().BeNull();
+    }
+
     private async Task<Guid> SeedWorkingOrderAsync(
         Guid accountId, string venueOrderKey, OrderStatus status = OrderStatus.Working)
     {
@@ -225,5 +320,25 @@ public class WorkingOrderReconciliationEndpointsTests
         });
         await seed.SaveChangesAsync();
         return orderId;
+    }
+
+    private async Task SeedStopPlanAsync(Guid orderId, StopStaging staging)
+    {
+        // A valid Buy-side geometry (safety < actual < entry), owner-stamped so the read's query filter admits it.
+        await using TradingCopilotDbContext seed = Context();
+        seed.StopPlans.Add(new StopPlanRecord
+        {
+            Id = Guid.NewGuid(),
+            UserId = _operator,
+            OrderId = orderId,
+            Side = OrderSide.Buy,
+            EntryPrice = 5_000m,
+            ActualStopPrice = 4_990m,
+            SafetyStopPrice = 4_980m,
+            ProximityMetric = StopProximityMetric.Ticks,
+            ProximityValue = 4m,
+            Staging = staging,
+        });
+        await seed.SaveChangesAsync();
     }
 }
