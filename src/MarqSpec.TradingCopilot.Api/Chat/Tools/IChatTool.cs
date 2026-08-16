@@ -11,9 +11,9 @@ namespace MarqSpec.TradingCopilot.Api.Chat.Tools;
 /// <para>
 /// An implementation is <b>owner-scoped (R-20)</b>: it runs under the request's <c>ICurrentUser</c> via the scoped
 /// read services it injects, so it can only ever read the operator's own data. It is <b>fail-closed</b>: a malformed
-/// input, an unknown argument, or a read fault returns a compact error string the loop wraps as an
-/// <see cref="LlmToolResult"/> with <c>IsError = true</c> — it never throws out of <see cref="ExecuteAsync"/> and never
-/// invents data.
+/// input, an unknown argument, or a read fault returns a compact <b>error string</b> the model reads — it never throws
+/// out of <see cref="ExecuteAsync"/> and never invents data. (The loop marks a result <see cref="LlmToolResult.IsError"/>
+/// only when it could not dispatch the tool at all — an unknown name, or a tool that threw despite this contract.)
 /// </para>
 /// <para>
 /// <see cref="ExecuteAsync"/> returns <b>compact JSON</b> the model reads as the tool result. Money / prices are
