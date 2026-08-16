@@ -21,6 +21,12 @@ public static class AccountModeMapping
     {
         ArgumentNullException.ThrowIfNull(account);
         ArgumentNullException.ThrowIfNull(conventions);
-        account.Mode = conventions.ModeFor(account.StageOverride ?? account.Stage);
+
+        // The venue's routing flag is passed, not applied: the conventions decide whether it may be read (gh#780).
+        // At a prop firm it is ignored entirely (R-14). At a brokerage it IS the answer, and it has to come from
+        // the persisted column because two of the three write points here -- a stage override, a conventions
+        // re-declaration -- have no live venue call to ask again.
+        account.Mode = conventions.ModeFor(
+            account.StageOverride ?? account.Stage, account.VenueReportsSimulated);
     }
 }

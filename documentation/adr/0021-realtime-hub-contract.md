@@ -128,3 +128,11 @@ poll-until-refresh until then.
   exactly as for `realtimeSuggestion`. **Deferred (inc 3b):** token-by-token streaming, which extends the core
   `ILlmProvider` completion seam (a streaming response) rather than this hub contract — **turn-event granularity**
   (the whole assistant message) ships now.
+- **Landed** (gh#919, inc 3b): **token streaming** — the deferral above is closed, and it confirmed this contract
+  already carried it (a chunk is just another per-owner push). `ILlmProvider` gained a `StreamAsync` primitive (real
+  Server-Sent-Events on the Anthropic client, **fail-closed** exactly as `CompleteAsync`), and the chat turn now
+  forwards each token delta to the owner as **`realtimeChatChunk`** (`RealtimeChatChunk` = the conversation id + the
+  incremental text) **during** the call — per-owner and **fail-open**, so a dropped chunk never aborts the turn. The
+  REST turn response and the final `realtimeChatMessage` remain the source of truth; the chunks are a live draft a
+  client renders and swaps for the canonical message on completion. No new command path — the REST endpoint still
+  initiates, the hub still only presents.

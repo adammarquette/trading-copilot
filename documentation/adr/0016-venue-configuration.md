@@ -118,3 +118,37 @@ env-entry reference** (`Connection.CredentialKey` — no secret stored) rather t
 store, which stays a later increment (`gh#95` tracks the one-credential-set-per-process constraint that implies).
 The consequence above — "until it exists, every account reads `Undeclared`" — is therefore historical: the
 configuration surface exists.
+
+## Update (2026-08-15) — "the operator declares the meaning" is a **prop-firm** rule (gh#780)
+
+§*Mode* above says the operator declares what each stage means per firm, and that an undeclared stage resolves to
+`TradingMode.Undeclared`, refused everywhere. That is right — **for a prop firm**, and the reason is specific: a
+funded prop account executes on a *simulated* engine while a real payout is at stake, so the venue's own live/paper
+flag is a lie exactly where it matters most.
+
+**A brokerage has no such divergence, and the per-stage model cannot represent one anyway.** There is no
+evaluation/funded ladder; a brokerage account name resolves to `AccountStage.Unknown`; and `FirmConventions.For`
+refuses to declare `Unknown` **on purpose**, because a stage that could not be identified must not inherit a
+meaning. Routing brokerages through this model therefore resolved every discovered brokerage account to
+`Undeclared` — untradeable in every environment, production included, with **nothing the operator could declare to
+fix it** (found in the gh#653 onboarding walk, gh#778 review).
+
+**Decision: for a brokerage, the venue's live/paper flag is authoritative.** `Firm.ToConventions()` — the existing
+bridge from the persisted taxonomy to the domain value object — routes `FirmType.Brokerage` to
+`FirmConventions.ForBrokerage`, and resolution reads the flag through `ModeFor(stage, venueReportsSimulated)`. The
+adapter *passes* the flag; the conventions decide whether it may be *read*. At a prop firm it is still ignored
+entirely.
+
+**Rejected: a firm-level live/paper declaration for brokerages.** It costs a new stored concept and a UX to
+maintain it, but the real objection is that it asks the operator to restate something the venue already reports
+*truthfully* — which means it can now be **wrong**. A declaration saying "paper" over a live brokerage account is a
+lie the system would believe, and R-14's whole posture is that the dangerous direction is believing something
+tradeable that is not. The venue-flag path has one source, and it is the one that knows.
+
+This **scopes** R-14's "never derive mode from the venue flag" rather than weakening it: extending a safety rule
+past the case it was written for is how it turns into superstition. The `TradingMode` doc comment carries the same
+statement at the type it governs.
+
+**Still outstanding:** no brokerage venue adapter is wired (ProjectX is prop-firm-only; Tradovate / Rithmic /
+Webull are gh#66), so this resolves the *model* and is proven at the domain and bridge tiers. Enabling the
+onboarding walk's Brokerage option waits on a venue that can actually discover such an account.

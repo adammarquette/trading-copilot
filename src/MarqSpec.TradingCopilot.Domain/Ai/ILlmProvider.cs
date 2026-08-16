@@ -19,6 +19,24 @@ public interface ILlmProvider
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The completion text, why the model stopped, and token usage.</returns>
     Task<LlmCompletion> CompleteAsync(LlmRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Runs one completion, <b>streaming</b> the answer token-by-token (gh#906 inc 3b). <paramref name="onDelta"/> is
+    /// invoked for each text delta as it arrives; the returned <see cref="LlmCompletion"/> is the <b>accumulated</b>
+    /// result — the full text, the final stop reason, and usage — identical in shape to <see cref="CompleteAsync"/>,
+    /// so the caller prices and fail-closes it exactly the same way. Fail-closed by construction: a provider fault
+    /// throws rather than fabricating a completion, and a genuine caller cancellation propagates.
+    /// </summary>
+    /// <param name="request">The prompt, model tier, and desired response format.</param>
+    /// <param name="onDelta">
+    /// Called with each incremental text delta (never null; may be empty). It is a presentation side-channel — an
+    /// implementation must not let it swallow the accumulation, and a caller's <paramref name="onDelta"/> should not
+    /// throw (a throw aborts the stream).
+    /// </param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The accumulated completion — full text, stop reason, and usage.</returns>
+    Task<LlmCompletion> StreamAsync(
+        LlmRequest request, Func<string, CancellationToken, Task> onDelta, CancellationToken cancellationToken);
 }
 
 /// <summary>The model tier for a call (ADR-0008): cheap triage vs. deep synthesis. Both tiers are live (gh#449).</summary>

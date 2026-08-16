@@ -20,4 +20,16 @@ public sealed class StubLlmProvider : ILlmProvider
     /// <inheritdoc />
     public Task<LlmCompletion> CompleteAsync(LlmRequest request, CancellationToken cancellationToken) =>
         Task.FromResult(new LlmCompletion(CannedSuppressJson, LlmStopReason.Completed, LlmUsage.None));
+
+    /// <inheritdoc />
+    public async Task<LlmCompletion> StreamAsync(
+        LlmRequest request, Func<string, CancellationToken, Task> onDelta, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(onDelta);
+
+        // No I/O: emit the whole canned body as a single delta, so a stub build exercises the streaming path without
+        // inventing geometry, then return the same completion CompleteAsync would.
+        await onDelta(CannedSuppressJson, cancellationToken);
+        return new LlmCompletion(CannedSuppressJson, LlmStopReason.Completed, LlmUsage.None);
+    }
 }

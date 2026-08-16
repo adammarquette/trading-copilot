@@ -356,7 +356,26 @@ public static class ChatEndpoints
             .OrderBy(message => message.Sequence)
             .ToListAsync(cancellationToken);
 
-        ChatTurnResult turn = await turnService.CompleteAsync(history, cancellationToken);
+        // Forward each streamed token delta to the owner's connections as it arrives (inc 3b, gh#906) — presentation-
+        // only and FAIL-OPEN: a per-chunk push fault is logged and swallowed, so a broken connection never aborts the
+        // turn. A genuine caller cancellation still propagates and stops the stream.
+        async Task PushDeltaAsync(string delta, CancellationToken chunkToken)
+        {
+            try
+            {
+                await notifier.ChunkAsync(conversation.UserId, new RealtimeChatChunk(id, delta), chunkToken);
+            }
+            catch (OperationCanceledException) when (chunkToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                logger.LogWarning(error, "Chat turn realtime chunk push faulted for owner {Owner}; continuing the turn.", conversation.UserId);
+            }
+        }
+
+        ChatTurnResult turn = await turnService.StreamAsync(history, PushDeltaAsync, cancellationToken);
 
         // Meter (export-only, never throws) and ledger (durable, FAIL-OPEN) the call — success OR failure, so the
         // governor floor sees every billed turn. The owner is the conversation's (R-20); the clock is the turn's now.

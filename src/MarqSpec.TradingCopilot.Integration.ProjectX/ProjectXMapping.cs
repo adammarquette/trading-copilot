@@ -24,11 +24,17 @@ public static class ProjectXMapping
     /// <returns>The venue-neutral account.</returns>
     /// <remarks>
     /// <para>
-    /// <see cref="TradingMode"/> is resolved through <paramref name="conventions"/> — <b>not</b> from the
-    /// gateway's <c>simulated</c> flag. That flag says where an order executes, which on a prop platform is
-    /// close to orthogonal to what is at stake: a funded account reports <c>simulated=true</c> and executes on
-    /// a simulated engine, yet a breach costs a real payout. Reading it as economic stake classified exactly
-    /// the account that matters most as harmless (gh#60).
+    /// <see cref="TradingMode"/> is resolved through <paramref name="conventions"/>, which decide whether the
+    /// gateway's <c>simulated</c> flag may be consulted at all — this method <b>passes</b> the flag and never
+    /// applies it. At a <b>prop firm</b> it is ignored: that flag says where an order executes, which on a prop
+    /// platform is close to orthogonal to what is at stake — a funded account reports <c>simulated=true</c> and
+    /// executes on a simulated engine, yet a breach costs a real payout. Reading it as economic stake classified
+    /// exactly the account that matters most as harmless (gh#60).
+    /// </para>
+    /// <para>
+    /// At a <b>brokerage</b> the same flag <i>is</i> the answer (gh#780), because there a paper account is
+    /// practice and a live account is live. It is also carried onto the returned account raw, so the later
+    /// recomputes of the persisted mode — which have no venue call of their own — see the same input this one did.
     /// </para>
     /// <para>
     /// Both inputs are required rather than defaulted. An account whose stage is unknown, or whose firm has
@@ -47,9 +53,15 @@ public static class ProjectXMapping
             account.Balance,
             account.CanTrade,
             account.IsVisible,
-            conventions.ModeFor(stage))
+            // The venue's own routing flag is passed in, not applied: FirmConventions decides whether it may be
+            // read at all. At a prop firm it is ignored (a funded account reports `simulated` and is Live, R-14);
+            // at a brokerage it IS the answer (gh#780).
+            conventions.ModeFor(stage, account.Simulated))
         {
             Stage = stage,
+            // Carried raw so the LATER recomputes -- a stage override, a conventions re-declaration -- have the
+            // same input this one had. Those write points have no live venue call to ask again (gh#780).
+            VenueReportsSimulated = account.Simulated,
         };
     }
 
