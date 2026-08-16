@@ -77,6 +77,19 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// </summary>
     public const string JournalOutcomes = "trading.journal.outcomes";
 
+    /// <summary>
+    /// Stranded pre-transmit intents the runtime reconcile sweep newly detected, dimensioned by kind (gh#722) —
+    /// emitted once as a strand crosses the age bound, so a maybe-live order left <c>Taking</c> or conditional left
+    /// <c>Firing</c> awaiting operator reconcile raises an alert rather than living only in a log line.
+    /// </summary>
+    public const string ReconcileStrandsDetected = "trading.reconcile.strands_detected";
+
+    /// <summary>Reconcile-strand kind tag: an order stranded mid-take (<c>Taking</c>, gh#530).</summary>
+    public const string ReconcileStrandOrderTaking = "order-taking";
+
+    /// <summary>Reconcile-strand kind tag: a conditional stranded mid-fire (<c>Firing</c>, gh#577).</summary>
+    public const string ReconcileStrandConditionalFiring = "conditional-firing";
+
     /// <summary>Outcome tag: the round trip was journalled.</summary>
     public const string JournalWritten = "journalled";
 
@@ -165,6 +178,7 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     private readonly Histogram<double> _pipelineLag;
     private readonly Histogram<double> _backfillShortfall;
     private readonly Counter<long> _journalOutcomes;
+    private readonly Counter<long> _reconcileStrands;
 
     private int _killSwitchEngaged;
     private int _orphanedStops;
@@ -208,6 +222,10 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
 
         _journalOutcomes = _meter.CreateCounter<long>(
             JournalOutcomes, unit: "{outcome}", description: "Round-trip journaling outcomes, by outcome.");
+
+        _reconcileStrands = _meter.CreateCounter<long>(
+            ReconcileStrandsDetected, unit: "{strand}",
+            description: "Stranded pre-transmit intents the runtime reconcile sweep newly detected, by kind.");
 
         // Observable: state, not events. A gauge read on scrape reports what is true NOW, which is what a
         // dashboard needs for "are we currently killed / currently degraded".
@@ -299,6 +317,10 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <inheritdoc />
     public void RecordTradeJournalOutcome(string outcome) =>
         _journalOutcomes.Add(1, new KeyValuePair<string, object?>("outcome", outcome));
+
+    /// <inheritdoc />
+    public void RecordReconcileStrandDetected(string kind) =>
+        _reconcileStrands.Add(1, new KeyValuePair<string, object?>("kind", kind));
 
     /// <inheritdoc />
     public void Dispose() => _meter.Dispose();

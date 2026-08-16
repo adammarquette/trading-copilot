@@ -5,9 +5,10 @@ using Microsoft.EntityFrameworkCore;
 namespace MarqSpec.TradingCopilot.Api.Ai;
 
 /// <summary>
-/// The concrete <see cref="IEmbeddingOrphanStore"/> — a set-based anti-join DELETE over the polymorphic embedding
-/// table (gh#902), one owner kind at a time. Relational-only like the embed pass (gh#109): the <c>Vector</c> column
-/// has no in-memory-provider mapping, so this is exercised only at the QA integration tier (#902's paired card).
+/// The concrete <see cref="IEmbeddingOrphanStore"/> — set-based anti-join DELETEs over the polymorphic embedding
+/// table: orphaned-owner rows one owner kind at a time (gh#902), and crash-leaked stale-model duplicates (gh#915).
+/// Relational-only like the embed pass (gh#109): the <c>Vector</c> column has no in-memory-provider mapping, so these
+/// are exercised only at the QA integration tier (#902 / #915's paired cards).
 /// </summary>
 public sealed class EmbeddingOrphanStore : IEmbeddingOrphanStore
 {
@@ -39,4 +40,22 @@ public sealed class EmbeddingOrphanStore : IEmbeddingOrphanStore
         _ => throw new ArgumentOutOfRangeException(
             nameof(ownerKind), ownerKind, "Only producer-backed embedding owner kinds can be swept for orphans."),
     };
+
+    /// <inheritdoc />
+    public Task<int> DeleteStaleModelDuplicatesAsync(string currentModel, CancellationToken cancellationToken) =>
+        // Delete a stale-model row ONLY where a current-model row exists for the SAME owner. The self-EXISTS is the
+        // safety: an owner's sole vector (whatever its model) has no current-model sibling, so it is never touched --
+        // only a redundant duplicate the gh#889 sweep should have removed but a crash left behind. One atomic DELETE,
+        // so it needs no change tracker and cannot race a concurrent re-embed (a row being written for the current
+        // model only ever adds the sibling this looks for). That "cannot race" guarantee assumes a SINGLE current-model
+        // writer -- which this single-instance deployment is; two instances configured to DIFFERENT models could each
+        // delete the other's rows for an owner holding both, a storage/cost concern (a paid re-embed), never a trading
+        // one, and out of scope here. Owner-kind-agnostic: the current-model sibling proves legitimacy without a
+        // producer lookup, so no allow-list is needed here (unlike the orphaned-owner sweep).
+        _database.Embeddings
+            .Where(stale => stale.Model != currentModel
+                && _database.Embeddings.Any(current => current.OwnerKind == stale.OwnerKind
+                    && current.OwnerId == stale.OwnerId
+                    && current.Model == currentModel))
+            .ExecuteDeleteAsync(cancellationToken);
 }

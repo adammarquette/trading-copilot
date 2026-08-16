@@ -19,4 +19,17 @@ public interface IEmbeddingOrphanStore
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The number of orphaned rows deleted.</returns>
     Task<int> DeleteOrphansAsync(EmbeddingOwnerKind ownerKind, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes <b>crash-leaked stale-model duplicate</b> rows (gh#915) — a <c>Model != currentModel</c> row for an
+    /// owner that <b>also</b> has a <paramref name="currentModel"/> row. That pair is the residue of a re-embed whose
+    /// incremental stale-model sweep (gh#889) never ran (a crash between its <c>SaveChanges</c> and the sweep); the
+    /// owner still exists, so the orphaned-owner sweep keeps it. The current-model row's presence is the safety: it
+    /// proves the owner is legitimately embedded now, so its other-model row is a redundant leftover — never an
+    /// owner's <i>only</i> vector, which the current-model read filter degrades over gracefully rather than loses.
+    /// </summary>
+    /// <param name="currentModel">The provider's current model — the one every read pins to.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The number of stale-model duplicate rows deleted.</returns>
+    Task<int> DeleteStaleModelDuplicatesAsync(string currentModel, CancellationToken cancellationToken);
 }

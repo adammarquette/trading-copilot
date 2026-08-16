@@ -323,6 +323,25 @@ is written; the fill **veto** never regresses, because the trade read is a secon
 bracket's **exit** legs remain untracked (venue-spawned, no `Order` row), and `ProcessFlatAsync` cannot balance a
 round trip from an entry alone. gh#770 therefore stays open, blocked on **gh#731**'s bracket-leg tracking.
 
+**Update (2026-08-16, gh#770) — the exit half is still missing, but it is no longer silent.** A fill whose venue
+order key matches no `Order` this process holds used to be dropped with a log line and nothing more. That is the
+un-actable-but-observable shape this ADR already treats elsewhere (gh#527 / gh#850 in the flatten tiers), and the
+stakes here are the same: the dropped fill is usually the bracket's exit leg, so the money it represents leaves the
+account while the R-5 governor, the R-9 window and the R-4 throttle keep reading the headroom it should have
+consumed. It now journals **`fill.unmatched`** naming the account, both venue keys and the size — best-effort, so a
+recording fault cannot stall the consumer's cursor, and cancellation still stops the host.
+
+It **records the gap rather than closing it**, deliberately: attributing the fill would mean guessing which order a
+venue-spawned leg belongs to, and a wrong attribution *mis-states* realized P&L rather than merely missing it —
+worse, on the path that feeds a risk limit.
+
+**What still gates the real fix**, recorded because it is a venue fact rather than a scoping choice: the gateway's
+order model carries **no parent / linked-order field** (`Id · AccountId · ContractId · Side · Size · prices ·
+CustomTag`), and we set no tag on a leg the venue spawns. So journalling the legs depends on whether ProjectX
+copies the parent's `CustomTag` onto them — answerable only by observation against a practice account. If it does
+not, the only identification left is a heuristic over account + contract + side + time, which this model does not
+put on a risk-limit input.
+
 ## Update (2026-08-14) — a held account the venue roster does not report is recorded, not skipped in silence (gh#527)
 
 The primary tier enumerates the accounts to act on from **our** rows (the credential set this process serves, R-20
@@ -401,3 +420,38 @@ its fill lands, and a genuinely-never-arriving fill (a venue drop), remain the *
 DESIGN — the persistent backstop this ADR's layered model reserves for state-without-an-operator), alongside gh#770's
 adopt-time fill backfill. The recurring `deferred` metric keeps a stuck account observable meanwhile: `deferred` that
 never resolves to `journalled` is a closing fill that never came.
+
+## Update (2026-08-15) — a runtime detection sweep for stranded orders, propose-and-confirm (gh#722)
+
+A stranded `Taking` order or `Firing` conditional — a durable pre-transmit intent caught mid-flight, possibly live at
+the venue with no journal behind it — was resolved only two ways: the operator calling `POST /orders/{id}/reconcile`
+at runtime, or, at startup, `DecisionStateRehydrator` flagging `OrderMidTaking` / `ConditionalMidFiring` and engaging
+the kill switch `HaltOnly`. Neither is automatic *during a session*, so a strand that forms while the process is up
+sits until a human happens to notice. gh#722 closes that runtime gap — carefully, because an automatic actor on
+rehydrated state is the shape of the **rejected** "auto-resume … as-was" alternative above, and of the "never
+auto-act on rehydrated state" invariant.
+
+**The autonomy question was settled as PROPOSE-AND-CONFIRM (the operator's ratification).** The sweep **detects** a
+strand past an age bound and **raises an operator alert**; the operator confirms the resolution through the *existing*
+reconcile endpoint. The sweep **transmits nothing, adopts nothing, releases nothing, and changes no order state** — so
+this is **not** a supersession of the human-in-the-loop stance but an **addition** to it: a third detector (runtime),
+beside the operator's own eye and the restart rehydrator, all three of which still route the *action* through a human.
+The considered auto-adopt — autonomously promoting a maybe-live, kill-switch-invisible `Taking` order to
+tracked/cancellable, where *tracked* exposure is arguably safer than *untracked* — was weighed but **deliberately
+deferred**; it would reverse the stance, so it needs its own ratified card, not this one.
+
+**Mechanics that keep it inside the invariant:**
+- **Age by an in-memory first-seen register**, not a new persisted timestamp — so **no migration and no change to the
+  take path**. The two coverage windows are disjoint: runtime strands are seen becoming `Taking`/`Firing` by the sweep
+  and clocked; restart strands stay the rehydrator's job (the register starting empty at boot is therefore not a gap).
+  The bound (~2 min, configurable) mirrors the auto-flatten watchdog's grace and clears the send-resilience + reconnect
+  windows.
+- **Runs under `HaltOnly`** and never disengages it: detection reads and alerts only, and a strand is often *why* the
+  switch engaged, so halting the detector would deadlock recovery. The resume-trading ratification stays the operator's.
+- **Alerts once** per strand (idempotent) via the same operator-alert path the rehydrator uses, plus a strand-detected
+  metric, so a persistent strand is visible without re-paging every pass.
+
+Scope boundary: this is the **order-strand** detector (`Taking`/`Firing`). The gh#748 update above points here for its
+restart edge, but that — a round trip that *did not journal*, not an order stuck mid-send — is the **journal-side**
+reconcile, a sibling in the same "reconcile family" this ADR's layered model reserves; it and gh#770's adopt-time
+backfill remain their own follow-ups. The sweep's implementation and its independent QA are separate cards per gh#722.

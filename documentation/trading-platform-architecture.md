@@ -240,6 +240,12 @@ Two more run once, at startup, in the same scope as migrate + bootstrap:
   pending conditionals, hidden stops, active suggestions) and resumes *none* of it; on an **impossible
   cross-entity combination** a crash left, it engages the kill switch (`HaltOnly`) and alerts, **never repairing**.
   It reads across owners as background plumbing yet carries ownership on every row (R-20).
+- **`ReconcileSweepHost`** (gh#722) — the **runtime** sibling of the rehydrator: a periodic pass that detects an order
+  left `Taking` / a conditional left `Firing` past an age bound and **alerts** the operator to reconcile it (via
+  `POST /orders/{id}/reconcile`), **transmitting nothing and changing no order state** — *propose-and-confirm*, never
+  auto-acting on rehydrated state. Age is an in-memory first-seen register (no DB timestamp; the restart case stays the
+  rehydrator's); it runs under `HaltOnly` and never disengages, alerts each strand once, and carries ownership on every
+  strand (R-20).
 
 `PositionReconciliationService` backs `GET /accounts/{id}/positions` (gh#193): positions come from **venue truth**
 tagged `Live` / `Settlement` (a re-mark inside the maintenance window, derived per-instrument from `MarketSession`)
