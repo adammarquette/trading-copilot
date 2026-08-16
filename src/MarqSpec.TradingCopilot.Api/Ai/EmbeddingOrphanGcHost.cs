@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Domain.Ai;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -45,14 +46,20 @@ public sealed class EmbeddingOrphanGcHost : BackgroundService
     }
 
     /// <summary>
-    /// Sweeps every <see cref="EmbeddingOrphanSweep.SweepableKinds"/> once, best-effort per kind — a fault sweeping one
-    /// is logged and never stops the others; only a genuine caller cancellation propagates.
+    /// Runs one GC pass, best-effort: the orphaned-owner sweep over every <see cref="EmbeddingOrphanSweep.SweepableKinds"/>
+    /// (gh#902), then — when a current model is known — the crash-leaked stale-model backstop (gh#915). A fault in any
+    /// one step is logged and never stops the rest; only a genuine caller cancellation propagates.
     /// </summary>
     /// <param name="store">The orphan store seam.</param>
+    /// <param name="currentModel">
+    /// The embedding provider's current model, or <see langword="null"/> when no provider is configured — the
+    /// stale-model backstop is skipped in that case, since with no current model there is no duplicate to resolve.
+    /// </param>
     /// <param name="logger">The logger.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>The total number of orphaned rows deleted this sweep.</returns>
-    public static async Task<int> SweepAsync(IEmbeddingOrphanStore store, ILogger logger, CancellationToken cancellationToken)
+    /// <returns>The total number of rows deleted this pass.</returns>
+    public static async Task<int> SweepAsync(
+        IEmbeddingOrphanStore store, string? currentModel, ILogger logger, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(logger);
@@ -74,9 +81,27 @@ public sealed class EmbeddingOrphanGcHost : BackgroundService
             }
         }
 
+        // gh#915 crash-leaked stale-model backstop -- runs only when a current model is known (a provider is
+        // configured); with none there is no current-model sibling to prove a duplicate, so there is nothing to sweep.
+        if (currentModel is not null)
+        {
+            try
+            {
+                total += await store.DeleteStaleModelDuplicatesAsync(currentModel, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw; // host shutdown, not a fault to swallow
+            }
+            catch (Exception error)
+            {
+                logger.LogWarning(error, "Embedding stale-model backstop sweep failed; the harmless stale rows remain.");
+            }
+        }
+
         if (total > 0)
         {
-            logger.LogInformation("Embedding orphan GC swept {Count} orphaned row(s).", total);
+            logger.LogInformation("Embedding orphan GC swept {Count} row(s).", total);
         }
 
         return total;
@@ -95,7 +120,11 @@ public sealed class EmbeddingOrphanGcHost : BackgroundService
                 await using (AsyncServiceScope scope = _services.CreateAsyncScope())
                 {
                     IEmbeddingOrphanStore store = scope.ServiceProvider.GetRequiredService<IEmbeddingOrphanStore>();
-                    await SweepAsync(store, _logger, stoppingToken);
+                    // The backstop needs the model every read pins to; with no provider configured there is no
+                    // current model, so it is skipped (null) and only the orphaned-owner sweep runs.
+                    IEmbeddingProvider provider = scope.ServiceProvider.GetRequiredService<IEmbeddingProvider>();
+                    string? currentModel = provider.IsAvailable ? provider.Model : null;
+                    await SweepAsync(store, currentModel, _logger, stoppingToken);
                 }
 
                 await _delay(interval, stoppingToken);

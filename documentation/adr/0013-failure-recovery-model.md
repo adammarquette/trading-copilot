@@ -420,3 +420,38 @@ its fill lands, and a genuinely-never-arriving fill (a venue drop), remain the *
 DESIGN — the persistent backstop this ADR's layered model reserves for state-without-an-operator), alongside gh#770's
 adopt-time fill backfill. The recurring `deferred` metric keeps a stuck account observable meanwhile: `deferred` that
 never resolves to `journalled` is a closing fill that never came.
+
+## Update (2026-08-15) — a runtime detection sweep for stranded orders, propose-and-confirm (gh#722)
+
+A stranded `Taking` order or `Firing` conditional — a durable pre-transmit intent caught mid-flight, possibly live at
+the venue with no journal behind it — was resolved only two ways: the operator calling `POST /orders/{id}/reconcile`
+at runtime, or, at startup, `DecisionStateRehydrator` flagging `OrderMidTaking` / `ConditionalMidFiring` and engaging
+the kill switch `HaltOnly`. Neither is automatic *during a session*, so a strand that forms while the process is up
+sits until a human happens to notice. gh#722 closes that runtime gap — carefully, because an automatic actor on
+rehydrated state is the shape of the **rejected** "auto-resume … as-was" alternative above, and of the "never
+auto-act on rehydrated state" invariant.
+
+**The autonomy question was settled as PROPOSE-AND-CONFIRM (the operator's ratification).** The sweep **detects** a
+strand past an age bound and **raises an operator alert**; the operator confirms the resolution through the *existing*
+reconcile endpoint. The sweep **transmits nothing, adopts nothing, releases nothing, and changes no order state** — so
+this is **not** a supersession of the human-in-the-loop stance but an **addition** to it: a third detector (runtime),
+beside the operator's own eye and the restart rehydrator, all three of which still route the *action* through a human.
+The considered auto-adopt — autonomously promoting a maybe-live, kill-switch-invisible `Taking` order to
+tracked/cancellable, where *tracked* exposure is arguably safer than *untracked* — was weighed but **deliberately
+deferred**; it would reverse the stance, so it needs its own ratified card, not this one.
+
+**Mechanics that keep it inside the invariant:**
+- **Age by an in-memory first-seen register**, not a new persisted timestamp — so **no migration and no change to the
+  take path**. The two coverage windows are disjoint: runtime strands are seen becoming `Taking`/`Firing` by the sweep
+  and clocked; restart strands stay the rehydrator's job (the register starting empty at boot is therefore not a gap).
+  The bound (~2 min, configurable) mirrors the auto-flatten watchdog's grace and clears the send-resilience + reconnect
+  windows.
+- **Runs under `HaltOnly`** and never disengages it: detection reads and alerts only, and a strand is often *why* the
+  switch engaged, so halting the detector would deadlock recovery. The resume-trading ratification stays the operator's.
+- **Alerts once** per strand (idempotent) via the same operator-alert path the rehydrator uses, plus a strand-detected
+  metric, so a persistent strand is visible without re-paging every pass.
+
+Scope boundary: this is the **order-strand** detector (`Taking`/`Firing`). The gh#748 update above points here for its
+restart edge, but that — a round trip that *did not journal*, not an order stuck mid-send — is the **journal-side**
+reconcile, a sibling in the same "reconcile family" this ADR's layered model reserves; it and gh#770's adopt-time
+backfill remain their own follow-ups. The sweep's implementation and its independent QA are separate cards per gh#722.

@@ -287,7 +287,10 @@ public sealed class EmbeddingOrphanSweepIntegrationTests : IClassFixture<Embeddi
     {
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         IEmbeddingOrphanStore store = scope.ServiceProvider.GetRequiredService<IEmbeddingOrphanStore>();
-        return await EmbeddingOrphanGcHost.SweepAsync(store, NullLogger.Instance, CancellationToken.None);
+        // gh#915 widened SweepAsync with a current-model arg for the stale-model backstop; null runs the
+        // orphaned-owner sweep ONLY, which is exactly what these gh#902 cases assert. The backstop has its own
+        // integration coverage (#920).
+        return await EmbeddingOrphanGcHost.SweepAsync(store, currentModel: null, NullLogger.Instance, CancellationToken.None);
     }
 
     private async Task<List<EmbeddingRecord>> ReadEmbeddingsAsync(EmbeddingOwnerKind ownerKind, string ownerId)

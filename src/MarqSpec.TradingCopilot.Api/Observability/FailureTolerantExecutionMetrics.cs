@@ -98,6 +98,10 @@ public sealed class FailureTolerantExecutionMetrics : IExecutionMetrics
     public void RecordTradeJournalOutcome(string outcome) =>
         Safely(() => _inner.RecordTradeJournalOutcome(outcome), nameof(RecordTradeJournalOutcome));
 
+    /// <inheritdoc />
+    public void RecordReconcileStrandDetected(string kind) =>
+        Safely(() => _inner.RecordReconcileStrandDetected(kind), nameof(RecordReconcileStrandDetected));
+
     // Absorbed, never rethrown -- but never silent either: a sink that has been failing for a week must be
     // discoverable, so each fault is logged at error with the measurement that was lost.
     private void Safely(Action record, string measurement)

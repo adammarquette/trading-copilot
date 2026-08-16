@@ -316,3 +316,16 @@ GC'd to zero before it has one.
 The second row class the paragraph above lumped under gh#902 — **stale-model rows leaked by a crash** between a
 re-embed's `SaveChanges` and its sweep (the owner still *exists*, so this anti-join keeps it) — is **not** this
 increment. It is a bounded, storage-only residual split out to **gh#915**, whose natural home is this same host.
+
+## Update (2026-08-15) — the stale-model crash-leak backstop lands (gh#915)
+
+The residual gh#902 split out now ships in the same `EmbeddingOrphanGcHost`: after the orphaned-owner sweep, when a
+current model is known (a provider is configured), a second set-based `ExecuteDeleteAsync` removes **crash-leaked
+stale-model duplicates** — a `Model != current` row for an owner that **also** has a current-model row. That
+current-model sibling is the safety: it proves the owner is legitimately embedded now, so its other-model row is the
+redundant leftover a re-embed's incremental sweep (gh#889) should have removed, but a crash between its `SaveChanges`
+and that sweep left behind. An owner's *only* vector — whatever its model — has no current-model sibling, so it is
+never touched (the read filter degrades over it gracefully rather than losing it). One atomic self-`EXISTS` DELETE,
+**owner-kind-agnostic** (the sibling proves legitimacy without a producer lookup, so unlike the orphaned-owner sweep it
+needs no allow-list) and **best-effort** (a fault leaves the harmless rows). With no provider configured it is skipped —
+no current model, so no duplicate to resolve. The deferred "full GC" clause is now **closed**.
