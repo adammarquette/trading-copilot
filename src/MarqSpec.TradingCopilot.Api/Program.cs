@@ -399,7 +399,8 @@ builder.Services.AddHostedService<AccountEventStreamHost>();
 // as live and an unreachable venue is not shown as a stale live view.
 builder.Services.AddScoped<PositionReconciliationService>();
 // The read-only reconcile seam (gh#929) points at the same scoped instance -- the chat read_positions tool injects
-// IPositionReconciler (read only), never the concrete service (which also drives the safety-critical flatten).
+// IPositionReconciler (read only, fakeable in unit tests), never the concrete service, so its dependency is read-only
+// by its very type.
 builder.Services.AddScoped<IPositionReconciler>(provider => provider.GetRequiredService<PositionReconciliationService>());
 builder.Services.AddScoped<PositionExitService>();
 

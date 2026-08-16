@@ -92,6 +92,7 @@ public class ReadPositionsToolTests
         position.GetProperty("contract").GetString().Should().Be("CON.F.US.MES.U26");
         position.GetProperty("netQuantity").GetInt32().Should().Be(2);
         position.GetProperty("side").GetString().Should().Be("Long");
+        position.GetProperty("averagePrice").GetDecimal().Should().Be(5_300m); // decimal price, never a float
     }
 
     [Fact]
@@ -157,18 +158,36 @@ public class ReadPositionsToolTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_ShouldSkipInactiveAccounts()
+    public async Task ExecuteAsync_ShouldReportADeactivatedButStillOpenAccount_SoExposureIsNeverHidden()
     {
-        Guid active = Guid.NewGuid();
-        Guid inactive = Guid.NewGuid();
-        await SeedAsync(_owner, Owned(active, "ACTIVE"), Owned(inactive, "DEACTIVATED", active: false));
-        Reconciles(active, new PositionReconciliation(PositionMarkBasis.Live, [Position("CON.F.US.MES.U26", 1)]));
+        // Deactivating a connection is a soft-delete: it neither closes open venue positions nor drops the credential
+        // (gh#929 review). Filtering such an account out would fabricate a "flat" and hide live exposure -- the exact
+        // failure this tool exists to preclude. So a deactivated account is still reconciled; its basis tells the truth.
+        Guid deactivated = Guid.NewGuid();
+        await SeedAsync(_owner, Owned(deactivated, "DEACTIVATED-BUT-OPEN", active: false));
+        Reconciles(deactivated, new PositionReconciliation(PositionMarkBasis.Live, [Position("CON.F.US.MES.U26", 3)]));
 
         string result = await Tool().ExecuteAsync("{}", CancellationToken.None);
 
-        result.Should().Contain("ACTIVE").And.NotContain("DEACTIVATED");
-        // A deactivated login yields no venue truth, so it is never reconciled.
-        A.CallTo(() => _reconciler.ReconcileAsync(inactive, A<DateTimeOffset>._, A<CancellationToken>._)).MustNotHaveHappened();
+        JsonElement account = Parse(result).GetProperty("accounts")[0];
+        account.GetProperty("account").GetString().Should().Be("DEACTIVATED-BUT-OPEN");
+        account.GetProperty("positions")[0].GetProperty("netQuantity").GetInt32().Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldPropagateGenuineCallerCancellation_NotSwallowItToAnError()
+    {
+        Guid accountId = Guid.NewGuid();
+        await SeedAsync(_owner, Owned(accountId, "PRAC-50K"));
+        using CancellationTokenSource cts = new();
+        cts.Cancel();
+        A.CallTo(() => _reconciler.ReconcileAsync(accountId, A<DateTimeOffset>._, A<CancellationToken>._))
+            .Throws(new OperationCanceledException());
+
+        // A genuine caller cancellation is not a read fault to swallow to an error string -- it propagates.
+        Func<Task> act = () => Tool().ExecuteAsync("{}", cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
     }
 
     [Fact]

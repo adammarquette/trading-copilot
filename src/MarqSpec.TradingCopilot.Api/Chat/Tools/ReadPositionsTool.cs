@@ -56,12 +56,14 @@ public sealed class ReadPositionsTool : IChatTool
     {
         try
         {
-            // The operator's own ACTIVE accounts (the R-20 tenant filter scopes this to the caller). A deactivated
-            // login yields no venue truth, so reconciling it would only ever return Unknown -- skip it. AsNoTracking:
-            // a read-only tool never tracks on the write-capable request context.
+            // ALL of the operator's own accounts (the R-20 tenant filter scopes this to the caller). We deliberately do
+            // NOT filter on IsActive: deactivating a connection is a soft-delete that neither closes open venue
+            // positions nor drops the credential (gh#929 review), so a deactivated-but-open account still holds real
+            // exposure -- omitting it would hide a position and fabricate a "flat", the exact failure this tool exists
+            // to preclude (ADR-0013). The reconcile basis tells the truth instead: a genuinely unreachable account comes
+            // back declared-Unknown. AsNoTracking: a read-only tool never tracks on the write-capable request context.
             var accounts = await _database.Accounts
                 .AsNoTracking()
-                .Where(account => account.IsActive)
                 .OrderBy(account => account.Name)
                 .Select(account => new { account.Id, account.Name, account.Mode })
                 .ToListAsync(cancellationToken);
@@ -93,7 +95,8 @@ public sealed class ReadPositionsTool : IChatTool
                             netQuantity = position.NetQuantity,
                             side = position.IsLong ? "Long" : "Short",
                             averagePrice = position.AveragePrice.Value,
-                        }),
+                        })
+                        .ToList(),
                 });
             }
 

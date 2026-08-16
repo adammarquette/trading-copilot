@@ -53,8 +53,10 @@ The operator was asked (2026-08-15) and chose a **read-only** tool set for this 
 
 - ✅ `read_positions` (venue-truth) landed as its own increment (gh#929), completing the
   `get_quote` / `query_journal` / `read_positions` read triad. It depends on a new **read-only**
-  `IPositionReconciler` seam onto `PositionReconciliationService` (gh#193) — the tool injects the read, never the
-  concrete service that also drives the safety-critical flatten, so the read-only-by-construction rule holds. An
-  unreachable venue is reported **declared-unknown** (never a fabricated flat), and the tool reconciles only the
-  operator's own active accounts (R-20).
+  `IPositionReconciler` seam onto `PositionReconciliationService` (gh#193) — the tool injects the narrow read
+  interface, not the concrete service (which does live venue I/O on the execution-recovery paths), so the tool is
+  fakeable in unit tests and its dependency is read-only by its very type. An unreachable venue is reported
+  **declared-unknown** (never a fabricated flat), and it reconciles the operator's own accounts (R-20) — **all** of
+  them, deliberately not filtered by `IsActive`, because deactivation is a soft-delete that does not close open
+  positions, so filtering would hide live exposure and fabricate a flat.
 - Streaming a *tool-using* turn's final answer (removing the round-1 double-call) is inc 4b.
