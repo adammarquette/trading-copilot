@@ -166,8 +166,8 @@ public static class OutcomeEndpoints
             // and default views against the operator's confirmed removal, and leaving the audit trail claiming a
             // deletion that came back. Soft-delete is its correct removal: it KEEPS the row (so the writer never
             // recomposes) while excluding it from training and hiding it. Hard delete is for a record with no live
-            // re-deriving source; the untaken-suggestion outcome and the recomposition-suppression that make hard
-            // delete permanent land together with the untaken writer (gh#939).
+            // re-deriving source; an UNTAKEN outcome now has one too (its terminal suggestion, gh#939), so the
+            // recomposition-suppression that makes hard delete permanent for BOTH kinds is a tracked follow-on.
             return Results.Conflict(new
             {
                 error = "A trade-derived outcome cannot be hard-deleted — the journal would recompose it. Soft-delete "
