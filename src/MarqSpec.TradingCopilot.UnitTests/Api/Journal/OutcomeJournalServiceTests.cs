@@ -155,6 +155,29 @@ public class OutcomeJournalServiceTests
     }
 
     [Fact]
+    public async Task ComposeClosedTradeOutcomesAsync_ShouldNotRecomposeAnOutcome_WhenTheExistingOneIsSoftDeleted()
+    {
+        // A soft-deleted outcome KEEPS its row, so the anti-join (which keys on the presence of an outcome for the
+        // trade, not its Deleted flag) still sees it — the writer must not recompose a fresh, un-deleted outcome and
+        // resurrect it into the training set (gh#909 review; the stable removal that a hard delete of a trade-derived
+        // outcome would break, which is why hard delete refuses one).
+        await using TradingCopilotDbContext database =
+            Context(nameof(ComposeClosedTradeOutcomesAsync_ShouldNotRecomposeAnOutcome_WhenTheExistingOneIsSoftDeleted));
+        Trade trade = ClosedTrade(Guid.NewGuid(), 50m);
+        database.Trades.Add(trade);
+        Outcome soft = new() { Id = Guid.NewGuid(), UserId = trade.UserId, TradeId = trade.Id, Resolution = OutcomeResolution.Win };
+        soft.SoftDelete();
+        database.Outcomes.Add(soft);
+        await database.SaveChangesAsync();
+
+        int written = await Service(database).ComposeClosedTradeOutcomesAsync(CancellationToken.None);
+
+        written.Should().Be(0); // nothing recomposed
+        (await database.Outcomes.IgnoreQueryFilters().ToListAsync())
+            .Should().ContainSingle().Which.Deleted.Should().BeTrue(); // still just the soft-deleted one
+    }
+
+    [Fact]
     public void OutcomeTradeKeyIndex_ShouldMatchTheModelsRealIndexName_SoTheNarrowedCatchNeverSilentlyStopsMatching()
     {
         // Mirrors the TradeNaturalKeyIndex pin (gh#747). IsOutcomeTradeKeyViolation keys its idempotent-skip on the
