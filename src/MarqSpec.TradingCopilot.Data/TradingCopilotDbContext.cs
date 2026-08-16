@@ -717,6 +717,11 @@ public class TradingCopilotDbContext : TenantDbContext
             // a dedicated (OccurredAt) index is deferred until the ledger is large enough to warrant it.
             usage.HasIndex(u => new { u.UserId, u.OccurredAt });
 
+            // The per-suggestion cost read (gh#767) aggregates an owner's rows by the firing they served, so index the
+            // owner+firing pair. Filtered to the non-null firings -- most rows (chat, embeds) carry none, and only the
+            // firing-correlated ones are ever grouped by it.
+            usage.HasIndex(u => new { u.UserId, u.TriggerFiringId }).HasFilter("\"TriggerFiringId\" IS NOT NULL");
+
             usage.ToTable("AiUsage", table =>
             {
                 // Refusable-zero enums (gh#60): an unset feature or outcome is never stored, so a row can never read

@@ -53,6 +53,14 @@ public class AiUsageRecord : IUserOwned
     /// <summary>The W3C trace id of the invocation (ADR-0002), or <see langword="null"/> if none was active.</summary>
     public string? TraceId { get; set; }
 
+    /// <summary>
+    /// The trigger firing this call served (gh#767), or <see langword="null"/> for a call with no firing (a chat
+    /// turn, a news embedding). A <b>soft link</b> — it matches <see cref="Suggestion.TriggerFiringId"/>, so a
+    /// suggestion's total AI cost is the sum of the rows sharing its firing; not an FK, because the fail-open ledger
+    /// outlives the trigger it references (the same reason <see cref="Suggestion"/> soft-links the firing).
+    /// </summary>
+    public Guid? TriggerFiringId { get; set; }
+
     /// <summary>When the call happened (caller-supplied; the ledger never reads a clock).</summary>
     public DateTimeOffset OccurredAt { get; set; }
 }
