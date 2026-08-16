@@ -1,6 +1,7 @@
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Journal;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -25,8 +26,9 @@ namespace MarqSpec.TradingCopilot.Api.Journal;
 /// <b>Cross-owner sweep.</b> It runs from a background host that has no request user, so it reads across owners with
 /// <c>IgnoreQueryFilters</c> and stamps each outcome's <c>UserId</c> from its own trade (the R-20 filter scopes reads
 /// but does not stamp inserts). <b>Refuse-don't-guess</b> survives from the policy: a closed trade carrying no signed
-/// result is left un-outcomed rather than scored a guess. Only the closed-trade path lands here; composing outcomes
-/// for terminal <b>unfilled suggestions</b> is the paired follow-on on this card.
+/// result is left un-outcomed rather than scored a guess. A second sweep composes outcomes for terminal <b>unfilled
+/// suggestions</b> (gh#939) — an expired-void or passed suggestion that never became a trade — via the same
+/// idempotent, cross-owner shape, backstopped by the unique filtered index on <c>Outcome.SuggestionId</c>.
 /// </para>
 /// </remarks>
 public sealed class OutcomeJournalService
@@ -128,6 +130,112 @@ public sealed class OutcomeJournalService
     }
 
     /// <summary>
+    /// Composes outcomes for up to a bounded batch of terminal <b>unfilled</b> suggestions that lack one (gh#939): a
+    /// <see cref="SuggestionState.ExpiredVoid"/> suggestion that never filled → <see cref="OutcomeResolution.Expired"/>,
+    /// and a <b>passed</b> suggestion → <see cref="OutcomeResolution.NoFillScratch"/>. A <b>taken</b> suggestion is
+    /// skipped — its outcome comes from the closed trade (with a <c>TradeId</c>), never here.
+    /// </summary>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The number of outcomes written this pass.</returns>
+    public async Task<int> ComposeUnfilledSuggestionOutcomesAsync(CancellationToken cancellationToken)
+    {
+        // Suggestion ids that already carry an outcome — the anti-join (materialized, like the trade sweep). Cross-owner:
+        // no request user, so IgnoreQueryFilters throughout and each write stamps its owner from the suggestion.
+        List<Guid> alreadyOutcomed = await _database.Outcomes
+            .IgnoreQueryFilters()
+            .Where(outcome => outcome.SuggestionId != null)
+            .Select(outcome => outcome.SuggestionId!.Value)
+            .ToListAsync(cancellationToken);
+
+        // A TAKEN / MODIFIED suggestion produced a trade; its outcome is composed from the closed trade (with a
+        // TradeId), never here — so it is excluded even if the suggestion itself later reads ExpiredVoid.
+        List<Guid> taken = await _database.SuggestionDispositions
+            .IgnoreQueryFilters()
+            .Where(disposition => disposition.Kind == SuggestionDispositionKind.Taken
+                || disposition.Kind == SuggestionDispositionKind.Modified)
+            .Select(disposition => disposition.SuggestionId)
+            .ToListAsync(cancellationToken);
+
+        // A PASSED suggestion is a scratch — the operator's explicit decline, an actual resolution that wins over the
+        // clock's expiry (see the basis pick below).
+        List<Guid> passed = await _database.SuggestionDispositions
+            .IgnoreQueryFilters()
+            .Where(disposition => disposition.Kind == SuggestionDispositionKind.Passed)
+            .Select(disposition => disposition.SuggestionId)
+            .ToListAsync(cancellationToken);
+
+        // Terminal + unfilled + not-yet-outcomed: a passed suggestion (whatever its clock state), or one the clock
+        // expired void — but never a taken one.
+        List<Suggestion> pending = await _database.Suggestions
+            .AsNoTracking()
+            .IgnoreQueryFilters()
+            .Where(suggestion => !alreadyOutcomed.Contains(suggestion.Id)
+                && !taken.Contains(suggestion.Id)
+                && (passed.Contains(suggestion.Id) || suggestion.State == SuggestionState.ExpiredVoid))
+            .OrderBy(suggestion => suggestion.CreatedAt)
+            .Take(MaxPerPass)
+            .ToListAsync(cancellationToken);
+
+        HashSet<Guid> passedSet = [.. passed];
+        int written = 0;
+        foreach (Suggestion suggestion in pending)
+        {
+            // A pass (explicit decline) resolves to a scratch and wins over the clock's expiry.
+            OutcomeBasis basis = passedSet.Contains(suggestion.Id)
+                ? OutcomeBasis.Scratched
+                : OutcomeBasis.ExpiredUnfilled;
+            if (await TryComposeUnfilledSuggestionAsync(suggestion, basis, cancellationToken))
+            {
+                written++;
+            }
+        }
+
+        if (written > 0)
+        {
+            _logger.LogInformation("Composed {Count} unfilled-suggestion outcome(s).", written);
+        }
+
+        return written;
+    }
+
+    private async Task<bool> TryComposeUnfilledSuggestionAsync(
+        Suggestion suggestion, OutcomeBasis basis, CancellationToken cancellationToken)
+    {
+        // The policy maps ExpiredUnfilled → Expired and Scratched → NoFillScratch — there is no realized P&L for an
+        // unfilled suggestion. It never declines these two bases, so a false here would be a defect, not a skip.
+        if (!OutcomeResolutionPolicy.TryResolve(basis, realizedPnL: null, out OutcomeResolution resolution))
+        {
+            return false;
+        }
+
+        Outcome outcome = new()
+        {
+            Id = Guid.NewGuid(),
+            UserId = suggestion.UserId, // R-20: stamp the owner from the suggestion (the filter does not stamp inserts)
+            TradeId = null,             // untaken — no trade
+            SuggestionId = suggestion.Id,
+            Resolution = resolution,
+            Simulated = false,          // a real terminal disposition, never a counterfactual simulation (gh#832 [J2])
+        };
+        _database.Outcomes.Add(outcome);
+
+        try
+        {
+            await _database.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+        catch (DbUpdateException exception) when (IsOutcomeSuggestionKeyViolation(exception))
+        {
+            // A concurrent pass composed this suggestion's outcome first: the unique filtered index on SuggestionId
+            // rejected the second insert — idempotent by construction, the untaken path's backstop (mirrors TradeId).
+            _database.Entry(outcome).State = EntityState.Detached;
+            _logger.LogInformation(
+                "Suggestion {Suggestion} was already outcomed by a concurrent pass; idempotent skip.", suggestion.Id);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// The unique filtered index on <c>Outcome.TradeId</c> (gh#910) — one outcome per trade — and the <b>only</b>
     /// violation this writer treats as the benign idempotent replay; any other write fault propagates to the host's
     /// pass-level guard. Pinned to the index's real name by a model-metadata test, so a rename cannot silently demote
@@ -147,6 +255,28 @@ public sealed class OutcomeJournalService
         {
             SqlState: PostgresErrorCodes.UniqueViolation,
             ConstraintName: OutcomeTradeKeyIndex,
+        };
+    }
+
+    /// <summary>
+    /// The unique filtered index on <c>Outcome.SuggestionId</c> (gh#939) — one <b>untaken</b> outcome per suggestion —
+    /// the untaken path's idempotency backstop, mirroring <see cref="OutcomeTradeKeyIndex"/>. Filtered to
+    /// <c>SuggestionId IS NOT NULL AND TradeId IS NULL</c>: a <i>taken</i> suggestion can produce several trade legs
+    /// (gh#759), each a trade-derived outcome carrying the same <c>SuggestionId</c>, so uniqueness applies only to the
+    /// no-trade rows. Pinned to the model's real name by a metadata test (the gh#747 posture).
+    /// </summary>
+    internal const string OutcomeSuggestionKeyIndex = "IX_Outcomes_SuggestionId";
+
+    /// <summary>Whether a write fault is the <see cref="OutcomeSuggestionKeyIndex"/> unique violation — and only that.</summary>
+    /// <param name="exception">The write fault <c>SaveChanges</c> raised.</param>
+    /// <returns><see langword="true"/> only for the untaken-outcome-per-suggestion unique violation.</returns>
+    internal static bool IsOutcomeSuggestionKeyViolation(DbUpdateException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.UniqueViolation,
+            ConstraintName: OutcomeSuggestionKeyIndex,
         };
     }
 }

@@ -3,6 +3,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Journal;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -48,6 +49,47 @@ public class OutcomeJournalServiceTests
     private static async Task<List<Outcome>> ComposeAndReadAsync(TradingCopilotDbContext database)
     {
         await Service(database).ComposeClosedTradeOutcomesAsync(CancellationToken.None);
+        return await database.Outcomes.IgnoreQueryFilters().ToListAsync();
+    }
+
+    // A suggestion in a given lifecycle state (all required spine fields valid; in-memory ignores the CHECKs).
+    private static Suggestion NewSuggestion(Guid owner, SuggestionState state) => new()
+    {
+        Id = Guid.NewGuid(),
+        UserId = owner,
+        AccountId = Guid.NewGuid(),
+        Instrument = "ES",
+        Side = OrderSide.Buy,
+        Size = 1,
+        EntryPrice = 5000m,
+        StopPrice = 4990m,
+        TargetPrice = 5020m,
+        Mode = TradingMode.Practice,
+        State = state,
+        CreatedAt = new DateTimeOffset(2026, 8, 15, 14, 0, 0, TimeSpan.Zero),
+        Rationale = "r",
+        CitedIndicator = "atr",
+        CitedPeriod = 14,
+        CitedResolutionMinutes = 5,
+        Confidence = 50,
+        ExpiresAt = new DateTimeOffset(2026, 8, 15, 15, 0, 0, TimeSpan.Zero),
+    };
+
+    // The operator's disposition of a suggestion — Passed (declined), or Taken/Modified (a trade was taken).
+    private static SuggestionDisposition NewDisposition(Guid owner, Guid suggestionId, SuggestionDispositionKind kind) => new()
+    {
+        Id = Guid.NewGuid(),
+        UserId = owner,
+        SuggestionId = suggestionId,
+        Kind = kind,
+        Reasons = SuggestionPassReason.None,
+        Deviations = SuggestionDeviation.None,
+        CreatedAt = new DateTimeOffset(2026, 8, 15, 14, 30, 0, TimeSpan.Zero),
+    };
+
+    private static async Task<List<Outcome>> ComposeUnfilledAndReadAsync(TradingCopilotDbContext database)
+    {
+        await Service(database).ComposeUnfilledSuggestionOutcomesAsync(CancellationToken.None);
         return await database.Outcomes.IgnoreQueryFilters().ToListAsync();
     }
 
@@ -177,6 +219,115 @@ public class OutcomeJournalServiceTests
             .Should().ContainSingle().Which.Deleted.Should().BeTrue(); // still just the soft-deleted one
     }
 
+    // --- Untaken-suggestion outcomes (gh#939): a terminal UNFILLED suggestion → Expired / NoFillScratch ---
+
+    [Fact]
+    public async Task ComposeUnfilledSuggestionOutcomesAsync_ShouldComposeExpired_ForAnExpiredVoidUnfilledSuggestion()
+    {
+        await using TradingCopilotDbContext database = Context(nameof(ComposeUnfilledSuggestionOutcomesAsync_ShouldComposeExpired_ForAnExpiredVoidUnfilledSuggestion));
+        Suggestion suggestion = NewSuggestion(Guid.NewGuid(), SuggestionState.ExpiredVoid);
+        database.Suggestions.Add(suggestion);
+        await database.SaveChangesAsync();
+
+        Outcome outcome = (await ComposeUnfilledAndReadAsync(database)).Should().ContainSingle().Subject;
+
+        outcome.Resolution.Should().Be(OutcomeResolution.Expired);
+        outcome.SuggestionId.Should().Be(suggestion.Id);
+        outcome.TradeId.Should().BeNull(); // untaken — no trade
+        outcome.UserId.Should().Be(suggestion.UserId); // R-20: stamped from the suggestion
+        outcome.Simulated.Should().BeFalse(); // a real terminal disposition, not a simulation (gh#832 [J2])
+    }
+
+    [Fact]
+    public async Task ComposeUnfilledSuggestionOutcomesAsync_ShouldComposeNoFillScratch_ForAPassedSuggestion()
+    {
+        await using TradingCopilotDbContext database = Context(nameof(ComposeUnfilledSuggestionOutcomesAsync_ShouldComposeNoFillScratch_ForAPassedSuggestion));
+        Guid owner = Guid.NewGuid();
+        Suggestion suggestion = NewSuggestion(owner, SuggestionState.Active); // passed before it could expire
+        database.Suggestions.Add(suggestion);
+        database.SuggestionDispositions.Add(NewDisposition(owner, suggestion.Id, SuggestionDispositionKind.Passed));
+        await database.SaveChangesAsync();
+
+        Outcome outcome = (await ComposeUnfilledAndReadAsync(database)).Should().ContainSingle().Subject;
+
+        outcome.Resolution.Should().Be(OutcomeResolution.NoFillScratch);
+        outcome.SuggestionId.Should().Be(suggestion.Id);
+        outcome.TradeId.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(SuggestionDispositionKind.Taken)]
+    [InlineData(SuggestionDispositionKind.Modified)]
+    public async Task ComposeUnfilledSuggestionOutcomesAsync_ShouldSkipATakenSuggestion_TheClosedTradePathOwnsIt(
+        SuggestionDispositionKind takenKind)
+    {
+        // A taken/modified suggestion produced a trade — its outcome is composed from the closed trade (with a TradeId),
+        // never here. Even if the suggestion itself later reads ExpiredVoid, the untaken writer must not double-compose.
+        await using TradingCopilotDbContext database = Context(nameof(ComposeUnfilledSuggestionOutcomesAsync_ShouldSkipATakenSuggestion_TheClosedTradePathOwnsIt) + takenKind);
+        Guid owner = Guid.NewGuid();
+        Suggestion suggestion = NewSuggestion(owner, SuggestionState.ExpiredVoid);
+        database.Suggestions.Add(suggestion);
+        database.SuggestionDispositions.Add(NewDisposition(owner, suggestion.Id, takenKind));
+        await database.SaveChangesAsync();
+
+        (await ComposeUnfilledAndReadAsync(database)).Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(SuggestionState.Active)]
+    [InlineData(SuggestionState.Stale)]
+    public async Task ComposeUnfilledSuggestionOutcomesAsync_ShouldSkipASuggestionThatIsNotYetTerminal(SuggestionState state)
+    {
+        // Active / Stale with no disposition is still live — not yet resolved, so no outcome.
+        await using TradingCopilotDbContext database = Context(nameof(ComposeUnfilledSuggestionOutcomesAsync_ShouldSkipASuggestionThatIsNotYetTerminal) + state);
+        database.Suggestions.Add(NewSuggestion(Guid.NewGuid(), state));
+        await database.SaveChangesAsync();
+
+        (await ComposeUnfilledAndReadAsync(database)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ComposeUnfilledSuggestionOutcomesAsync_ShouldPreferScratch_WhenAnExpiredSuggestionWasAlsoPassed()
+    {
+        // A pass is an explicit operator decline — the resolution — so it wins over the clock's expiry.
+        await using TradingCopilotDbContext database = Context(nameof(ComposeUnfilledSuggestionOutcomesAsync_ShouldPreferScratch_WhenAnExpiredSuggestionWasAlsoPassed));
+        Guid owner = Guid.NewGuid();
+        Suggestion suggestion = NewSuggestion(owner, SuggestionState.ExpiredVoid);
+        database.Suggestions.Add(suggestion);
+        database.SuggestionDispositions.Add(NewDisposition(owner, suggestion.Id, SuggestionDispositionKind.Passed));
+        await database.SaveChangesAsync();
+
+        (await ComposeUnfilledAndReadAsync(database)).Should().ContainSingle()
+            .Which.Resolution.Should().Be(OutcomeResolution.NoFillScratch);
+    }
+
+    [Fact]
+    public async Task ComposeUnfilledSuggestionOutcomesAsync_ShouldBeIdempotent_AndSkipAnAlreadyOutcomedSuggestion()
+    {
+        await using TradingCopilotDbContext database = Context(nameof(ComposeUnfilledSuggestionOutcomesAsync_ShouldBeIdempotent_AndSkipAnAlreadyOutcomedSuggestion));
+        database.Suggestions.Add(NewSuggestion(Guid.NewGuid(), SuggestionState.ExpiredVoid));
+        await database.SaveChangesAsync();
+
+        await Service(database).ComposeUnfilledSuggestionOutcomesAsync(CancellationToken.None);
+        await Service(database).ComposeUnfilledSuggestionOutcomesAsync(CancellationToken.None); // second sweep adds nothing
+
+        (await database.Outcomes.IgnoreQueryFilters().ToListAsync()).Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task ComposeUnfilledSuggestionOutcomesAsync_ShouldComposeAcrossOwners_InOneUserlessSweep()
+    {
+        await using TradingCopilotDbContext database = Context(nameof(ComposeUnfilledSuggestionOutcomesAsync_ShouldComposeAcrossOwners_InOneUserlessSweep));
+        Guid alice = Guid.NewGuid();
+        Guid bob = Guid.NewGuid();
+        database.Suggestions.Add(NewSuggestion(alice, SuggestionState.ExpiredVoid));
+        database.Suggestions.Add(NewSuggestion(bob, SuggestionState.ExpiredVoid));
+        await database.SaveChangesAsync();
+
+        (await ComposeUnfilledAndReadAsync(database)).Select(outcome => outcome.UserId)
+            .Should().BeEquivalentTo(new[] { alice, bob });
+    }
+
     [Fact]
     public void OutcomeTradeKeyIndex_ShouldMatchTheModelsRealIndexName_SoTheNarrowedCatchNeverSilentlyStopsMatching()
     {
@@ -201,5 +352,28 @@ public class OutcomeJournalServiceTests
             OutcomeJournalService.OutcomeTradeKeyIndex,
             "IsOutcomeTradeKeyViolation matches on this exact name; if the model's index name drifts from the "
             + "constant, the narrowed catch stops recognising the idempotent replay");
+    }
+
+    [Fact]
+    public void OutcomeSuggestionKeyIndex_ShouldMatchTheModelsRealIndexName_SoTheNarrowedCatchNeverSilentlyStopsMatching()
+    {
+        // The gh#939 untaken-path mirror of the TradeId pin (gh#747): IsOutcomeSuggestionKeyViolation keys on this
+        // literal name. Build the model against Npgsql (offline; InMemory ignores indexes) and pin the single-property
+        // SuggestionId index's real relational name to the constant.
+        using TradingCopilotDbContext relational = new(
+            new DbContextOptionsBuilder<TradingCopilotDbContext>()
+                .UseNpgsql("Host=not-connected;Database=model-only", npgsql => npgsql.UseVector())
+                .Options,
+            new FixedUser(Guid.Empty));
+
+        string indexName = relational.Model.FindEntityType(typeof(Outcome))!
+            .GetIndexes()
+            .Single(index => index.Properties.Select(property => property.Name).SequenceEqual([nameof(Outcome.SuggestionId)]))
+            .GetDatabaseName()!;
+
+        indexName.Should().Be(
+            OutcomeJournalService.OutcomeSuggestionKeyIndex,
+            "IsOutcomeSuggestionKeyViolation matches on this exact name; a drift from the constant demotes the "
+            + "untaken path's idempotency backstop");
     }
 }
