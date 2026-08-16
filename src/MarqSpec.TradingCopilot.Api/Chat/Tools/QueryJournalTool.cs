@@ -60,6 +60,7 @@ public sealed class QueryJournalTool : IChatTool
             // Materialize the closed trades, then project in memory -- the enum ToString() renders client-side rather
             // than pushing an untranslatable expression into SQL. The tenant query filter scopes this to the owner (R-20).
             List<Trade> rows = await _database.Trades
+                .AsNoTracking() // a read-only tool never tracks -- the endpoint SaveChanges (UpdatedAt bump) must not see these
                 .Where(trade => trade.ClosedAt != null)
                 .OrderByDescending(trade => trade.ClosedAt)
                 .Take(limit)

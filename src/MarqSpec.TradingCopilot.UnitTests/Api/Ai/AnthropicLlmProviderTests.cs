@@ -44,7 +44,7 @@ public class AnthropicLlmProviderTests
         new(LlmModelTier.Deep, "sys", messages ?? [new LlmMessage(LlmRole.User, "hello")], LlmResponseFormat.Text, 512, tools);
 
     // A read-only tool definition, name/description/JSON-Schema -- shaped exactly like the ones IChatTool will offer.
-    private static readonly LlmToolDefinition SampleTool = new(
+    private static readonly LlmToolDefinition _sampleTool = new(
         "get_quote",
         "Get the latest quote for a contract.",
         """{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}""");
@@ -395,7 +395,7 @@ public class AnthropicLlmProviderTests
     public async Task CompleteAsync_ShouldSerializeOfferedTools_AsTopLevelDefinitions()
     {
         StubHandler handler = new(_ => Ok());
-        await Provider(handler).CompleteAsync(RequestWith(tools: [SampleTool]), CancellationToken.None);
+        await Provider(handler).CompleteAsync(RequestWith(tools: [_sampleTool]), CancellationToken.None);
 
         JsonNode tool = Body(handler)["tools"]![0]!;
         tool["name"]!.GetValue<string>().Should().Be("get_quote");
@@ -487,7 +487,7 @@ public class AnthropicLlmProviderTests
     {
         StubHandler handler = new(_ => ToolUseResponse());
         LlmCompletion completion =
-            await Provider(handler).CompleteAsync(RequestWith(tools: [SampleTool]), CancellationToken.None);
+            await Provider(handler).CompleteAsync(RequestWith(tools: [_sampleTool]), CancellationToken.None);
 
         completion.StopReason.Should().Be(LlmStopReason.ToolUse);
         completion.ToolCalls.Should().ContainSingle();
@@ -503,7 +503,7 @@ public class AnthropicLlmProviderTests
     {
         StubHandler handler = new(_ => ToolUseResponse(text: "checking the quote"));
         LlmCompletion completion =
-            await Provider(handler).CompleteAsync(RequestWith(tools: [SampleTool]), CancellationToken.None);
+            await Provider(handler).CompleteAsync(RequestWith(tools: [_sampleTool]), CancellationToken.None);
 
         completion.Text.Should().Be("checking the quote");
         completion.ToolCalls.Should().ContainSingle().Which.Name.Should().Be("get_quote");

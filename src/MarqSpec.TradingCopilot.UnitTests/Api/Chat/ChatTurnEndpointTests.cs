@@ -270,4 +270,34 @@ public class ChatTurnEndpointTests
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK); // presentation-only: a push fault never fails the turn
     }
+
+    [Fact]
+    public async Task TurnAsync_ShouldMeterAndLedgerEveryModelCall_WhenTheTurnMadeSeveral()
+    {
+        // A tool-using turn makes several model calls -> several cost rows (gh#925); the endpoint must meter + ledger
+        // EACH so the governor floor sees them all. A regression to first/last would silently under-count the budget.
+        Guid id = await SeedConversationAsync();
+        TurnReturns(new ChatTurnResult(true, "grounded answer", [Cost(usd: 0.01m), Cost(usd: 0.02m), Cost(usd: 0.03m)]));
+
+        IResult result = await Invoke(id, "what's my ES read?", At(4));
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _metrics.RecordLlmCall(A<AiCallCost>._)).MustHaveHappened(3, Times.Exactly);
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustHaveHappened(3, Times.Exactly);
+    }
+
+    [Fact]
+    public async Task TurnAsync_ShouldStillLedgerLaterCalls_WhenAnEarlierLedgerWriteFaults()
+    {
+        // Fail-open PER cost: a ledger fault on one call is logged and the rest still record; the turn stands (200).
+        Guid id = await SeedConversationAsync();
+        TurnReturns(new ChatTurnResult(true, "answer", [Cost(usd: 0.01m), Cost(usd: 0.02m)]));
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("ledger down")).Once();
+
+        IResult result = await Invoke(id, "hi", At(5));
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustHaveHappened(2, Times.Exactly);
+    }
 }
