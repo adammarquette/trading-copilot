@@ -70,6 +70,15 @@ jobs:
       - name: ADR decision-log invariants
         run: ./scripts/check-adr-decision-log.sh
 
+      # documentation/integration-test-audit.md §2 is the map an agent reads to answer "is this path already
+      # covered?", and it has drifted twice: gh#490 reconciled it by hand on 2026-07-30, yet the 2026-08-14 audit
+      # found 22 suites with no row and gh#862 found 27 two days later. A map missing a quarter of the territory
+      # answers that question wrong in both directions -- a suite gets rewritten because it looked unwritten, or a
+      # real gap stays invisible. The ADR index above does not drift for exactly one reason, and it is this line.
+      # Docs-only, no .NET, no network, ~2s -- sits with the other no-build gates ahead of restore (gh#862).
+      - name: Integration-test inventory (§2 matches the suites on disk)
+        run: ./scripts/check-integration-test-inventory.sh
+
       # claim.sh is the collision guard every session runs first (gh#375); when its branch-name match reports
       # "unclaimed" for a genuinely claimed issue, a parallel session double-works. gh#833 was exactly that -- a
       # Cursor Cloud branch carries the id in the MIDDLE (`cursor/<name>-<id>-<suffix>`), invisible to the old
