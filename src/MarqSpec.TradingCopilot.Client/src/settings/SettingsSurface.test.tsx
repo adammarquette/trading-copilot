@@ -23,6 +23,11 @@ vi.mock('./AiSpendSettings', () => ({
   AiSpendSettings: () => <div data-testid="ai-spend-settings" />,
 }));
 
+// ...and the AI cost-attribution section, for the same reason (its own load is covered in AiCostAttribution.test).
+vi.mock('./AiCostAttribution', () => ({
+  AiCostAttribution: () => <div data-testid="ai-cost-attribution" />,
+}));
+
 // Stub the onboarding walk for the same reason: the surface's job is to mount it in the empty branch and wire
 // finishing to the roster reload — the walk itself is covered in FirmOnboarding.test.
 vi.mock('../accounts/FirmOnboarding', () => ({
@@ -77,6 +82,7 @@ describe('SettingsSurface', () => {
     expect(screen.getByTestId('surface').dataset.surface).toBe('settings');
     expect(screen.getByTestId('risk-settings')).toBeTruthy();
     expect(screen.getByTestId('ai-spend-settings')).toBeTruthy();
+    expect(screen.getByTestId('ai-cost-attribution')).toBeTruthy();
   });
 
   it('scopes the risk section to the active account', () => {

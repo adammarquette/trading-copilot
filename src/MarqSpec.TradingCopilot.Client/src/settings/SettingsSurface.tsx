@@ -8,6 +8,7 @@ import { FirmOnboarding } from '../accounts/FirmOnboarding';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
 import type { Destination } from '../navigation/destinations';
+import { AiCostAttribution } from './AiCostAttribution';
 import { AiSpendSettings } from './AiSpendSettings';
 import { RiskSettings } from './RiskSettings';
 
@@ -78,6 +79,12 @@ export function SettingsSurface({ destination }: SettingsSurfaceProps) {
               AI usage &amp; spend
             </Typography>
             <AiSpendSettings />
+          </Box>
+          <Box>
+            <Typography variant="subtitle1" component="h3" sx={{ fontWeight: 600, mb: 1 }}>
+              AI cost attribution
+            </Typography>
+            <AiCostAttribution />
           </Box>
         </Stack>
       ) : null}
