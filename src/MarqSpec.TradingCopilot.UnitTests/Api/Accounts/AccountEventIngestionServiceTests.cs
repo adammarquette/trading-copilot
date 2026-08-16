@@ -8,6 +8,7 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Audit;
+using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -29,6 +30,7 @@ public class AccountEventIngestionServiceTests
     private readonly DateTimeOffset _now = new(2026, 1, 15, 14, 30, 0, TimeSpan.Zero);
     private readonly IAuditLog _auditLog = A.Fake<IAuditLog>();
     private readonly IAccountRealtimeNotifier _notifier = A.Fake<IAccountRealtimeNotifier>();
+    private readonly IEventLog _eventLog = A.Fake<IEventLog>();
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
@@ -41,6 +43,7 @@ public class AccountEventIngestionServiceTests
         new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
         _auditLog,
         _notifier,
+        _eventLog,
         Microsoft.Extensions.Options.Options.Create(new ProjectXConnectionOptions { CredentialKey = OurCredentialKey }),
         NullLogger<AccountEventIngestionService>.Instance);
 
@@ -136,6 +139,34 @@ public class AccountEventIngestionServiceTests
 
     private async Task<StopStaging?> StagingAsync(Guid orderId) =>
         (await Context().StopPlans.IgnoreQueryFilters().FirstOrDefaultAsync(plan => plan.OrderId == orderId))?.Staging;
+
+    [Fact]
+    public async Task ProcessAsync_ShouldJournalAnUnmatchedFill_WhenNoOrderCarriesItsVenueKey()
+    {
+        // gh#770. A fill whose venue order key matches no Order row is dropped -- and the commonest case is not a
+        // stray payload but the native bracket's EXIT leg, which the venue spawns with no Order of ours behind it.
+        // That fill is the closing side of a round trip: without it TradeJournalService composes no Trade, so the
+        // realized loss never reaches the R-5 governor, the R-9 window or the R-4 throttle, and they read free
+        // headroom that is not there.
+        //
+        // Journalling it does not fix the under-count. It makes it OBSERVABLE -- today the money goes missing and
+        // the only trace is a log line. Same treatment gh#527 / gh#850 gave the flatten tiers' silent skips.
+        Guid owner = Guid.NewGuid();
+        await SeedAccountAsync(owner, "9001");
+
+        await Service().ProcessAsync(Fill("9001", "no-such-order", "fill-1", quantity: 2), CancellationToken.None);
+
+        A.CallTo(() => _eventLog.AppendAsync(
+                A<EventDraft>.That.Matches(draft =>
+                    draft.Type == AccountEventIngestionService.UnmatchedFillEventType
+                    && draft.Payload.Contains("no-such-order", StringComparison.Ordinal)
+                    && draft.Payload.Contains("fill-1", StringComparison.Ordinal)),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+
+        // Still no Fill row: this records the gap, it does not invent the missing side of the trade.
+        (await FillsAsync()).Should().BeEmpty();
+    }
 
     [Fact]
     public async Task ProcessAsync_ShouldPersistFill_AndAdvanceToPartiallyFilled_WhenPartlyFilled()

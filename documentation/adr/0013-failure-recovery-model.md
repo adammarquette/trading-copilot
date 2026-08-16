@@ -323,6 +323,25 @@ is written; the fill **veto** never regresses, because the trade read is a secon
 bracket's **exit** legs remain untracked (venue-spawned, no `Order` row), and `ProcessFlatAsync` cannot balance a
 round trip from an entry alone. gh#770 therefore stays open, blocked on **gh#731**'s bracket-leg tracking.
 
+**Update (2026-08-16, gh#770) — the exit half is still missing, but it is no longer silent.** A fill whose venue
+order key matches no `Order` this process holds used to be dropped with a log line and nothing more. That is the
+un-actable-but-observable shape this ADR already treats elsewhere (gh#527 / gh#850 in the flatten tiers), and the
+stakes here are the same: the dropped fill is usually the bracket's exit leg, so the money it represents leaves the
+account while the R-5 governor, the R-9 window and the R-4 throttle keep reading the headroom it should have
+consumed. It now journals **`fill.unmatched`** naming the account, both venue keys and the size — best-effort, so a
+recording fault cannot stall the consumer's cursor, and cancellation still stops the host.
+
+It **records the gap rather than closing it**, deliberately: attributing the fill would mean guessing which order a
+venue-spawned leg belongs to, and a wrong attribution *mis-states* realized P&L rather than merely missing it —
+worse, on the path that feeds a risk limit.
+
+**What still gates the real fix**, recorded because it is a venue fact rather than a scoping choice: the gateway's
+order model carries **no parent / linked-order field** (`Id · AccountId · ContractId · Side · Size · prices ·
+CustomTag`), and we set no tag on a leg the venue spawns. So journalling the legs depends on whether ProjectX
+copies the parent's `CustomTag` onto them — answerable only by observation against a practice account. If it does
+not, the only identification left is a heuristic over account + contract + side + time, which this model does not
+put on a risk-limit input.
+
 ## Update (2026-08-14) — a held account the venue roster does not report is recorded, not skipped in silence (gh#527)
 
 The primary tier enumerates the accounts to act on from **our** rows (the credential set this process serves, R-20
