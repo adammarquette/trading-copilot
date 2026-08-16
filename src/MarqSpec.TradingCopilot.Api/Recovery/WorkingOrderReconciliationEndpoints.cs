@@ -1,6 +1,7 @@
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -90,17 +91,59 @@ public static class WorkingOrderReconciliationEndpoints
             .Select(order => new { Key = order.VenueOrderKey!, order.Id })
             .ToDictionaryAsync(row => row.Key, row => row.Id, cancellationToken);
 
+        // The PLATFORM-held staged-stop plan for each matched working order (ADR-0007, gh#865): the hidden working
+        // stop the operator will move, and the safety → working → entry band a move must stay inside. Unlike the rest
+        // of this read it is NOT venue truth — it never rests at the venue — so it is fetched from the local plan,
+        // keyed to the order by Order.Id. Keying on the journaled ids keeps it Working-scoped for free: a terminal
+        // order's id never enters `orderIds` (the join above is Working-only), so its plan is never surfaced — the
+        // operator cannot move a stop on an order that is gone. One plan per order (unique index), so a key is unique.
+        List<Guid> orderIds = [.. journaledIds.Values];
+        Dictionary<Guid, WorkingStopGeometry> plans = (await database.StopPlans
+            .Where(plan => orderIds.Contains(plan.OrderId))
+            .Select(plan => new { plan.OrderId, plan.ActualStopPrice, plan.Staging, plan.SafetyStopPrice, plan.EntryPrice })
+            .ToListAsync(cancellationToken))
+            .ToDictionary(
+                row => row.OrderId,
+                row => new WorkingStopGeometry(row.ActualStopPrice, row.Staging, row.SafetyStopPrice, row.EntryPrice));
+
         return Results.Ok(new RestingOrdersResponse(
             result.Basis.ToString(),
-            [.. result.Orders.Select(order => new RestingOrder(
-                order.VenueOrderKey,
-                journaledIds.TryGetValue(order.VenueOrderKey, out Guid orderId) ? orderId : null,
-                order.Contract.Key,
-                order.StopPrice?.Value,
-                order.LimitPrice?.Value,
-                order.Size,
-                order.StopPrice is not null))]));
+            [.. result.Orders.Select(order =>
+            {
+                Guid? orderId = journaledIds.TryGetValue(order.VenueOrderKey, out Guid matched) ? matched : null;
+                WorkingStopGeometry? plan = orderId is { } journaledId && plans.TryGetValue(journaledId, out WorkingStopGeometry? geometry)
+                    ? geometry
+                    : null;
+                return MapRestingOrder(order, orderId, plan);
+            })]));
     }
+
+    /// <summary>
+    /// Projects one venue-truth working order — with its journaled <c>Order.Id</c> and, when present, its
+    /// PLATFORM-held staged-stop plan — into the wire DTO (gh#865). Pure and side-effect-free: the relational fetch
+    /// happens in <see cref="ReadAsync"/>, so this shape assembly is unit-testable without a database.
+    /// </summary>
+    /// <param name="order">The venue-reported resting order.</param>
+    /// <param name="orderId">The journaled <c>Order.Id</c> matched by venue key, or <see langword="null"/> for an unjournaled leg (gh#656).</param>
+    /// <param name="plan">
+    /// The order's staged-stop plan (ADR-0007), or <see langword="null"/> when it carries none. The four platform-held
+    /// fields are present or absent as a whole — the working stop, its staging, and the safety / entry band surface
+    /// together or not at all — because a working stop without its staging or band is not safely movable.
+    /// </param>
+    /// <returns>The resting-order DTO.</returns>
+    internal static RestingOrder MapRestingOrder(WorkingOrder order, Guid? orderId, WorkingStopGeometry? plan) =>
+        new(
+            order.VenueOrderKey,
+            orderId,
+            order.Contract.Key,
+            order.StopPrice?.Value,
+            order.LimitPrice?.Value,
+            order.Size,
+            order.StopPrice is not null,
+            plan?.WorkingStopPrice,
+            plan?.Staging.ToString(),
+            plan?.SafetyStopPrice,
+            plan?.EntryPrice);
 }
 
 /// <summary>An account's resting orders from venue truth, and how far the read can be trusted (gh#381).</summary>
@@ -112,6 +155,13 @@ public static class WorkingOrderReconciliationEndpoints
 public sealed record RestingOrdersResponse(string MarkBasis, IReadOnlyList<RestingOrder> Orders);
 
 /// <summary>One order resting at the venue.</summary>
+/// <remarks>
+/// Everything here is <b>venue truth</b> — what the venue reports standing on its book — <i>except</i> the four
+/// trailing <c>*StopPrice</c> / <c>StopStaging</c> fields, which are <b>PLATFORM-held</b> (ADR-0007): the staged-stop
+/// plan the platform holds for this order, and which does <b>not</b> rest at the venue. They are carried here (gh#865)
+/// only so a move-stop UI can display the hidden working stop and pre-validate a move against its band; they are
+/// <see langword="null"/> for any order with no <c>StopPlanRecord</c> (a bare entry, or a venue-spawned leg).
+/// </remarks>
 /// <param name="VenueOrderKey">The venue's own order handle.</param>
 /// <param name="OrderId">
 /// The journaled <c>Order.Id</c> the write endpoints (<c>DELETE /orders/{id}</c>, <c>PATCH /orders/{id}/price</c>)
@@ -130,6 +180,27 @@ public sealed record RestingOrdersResponse(string MarkBasis, IReadOnlyList<Resti
 /// Whether this leg is protective — it carries a stop trigger. Surfaced explicitly so a caller does not have to
 /// re-derive the rule that a take-profit (limit-only) protects nothing about the loss.
 /// </param>
+/// <param name="WorkingStopPrice">
+/// <b>PLATFORM-held</b> (ADR-0007), not venue truth. The hidden working stop (<c>StopPlanRecord.ActualStopPrice</c>) —
+/// what the operator moves. <see langword="null"/> when the order carries no stop plan. The value the gh#267 write
+/// (<c>PATCH /orders/{id}</c>'s <c>workingStopPrice</c>) re-stages, exposed here for read.
+/// </param>
+/// <param name="StopStaging">
+/// <b>PLATFORM-held</b> (ADR-0007), not venue truth. Where the working stop rests (<c>StopPlanRecord.Staging</c>),
+/// as its name — <c>Hidden</c>, <c>Native</c>, <c>Orphaned</c>, <c>Retired</c>. <b>LOAD-BEARING</b>: only <c>Hidden</c>
+/// is locally movable; <c>Native</c> is a venue order and <c>Orphaned</c> re-arms on reconnect, so the UI gates the
+/// move control on this. <see langword="null"/> when the order carries no stop plan.
+/// </param>
+/// <param name="SafetyStopPrice">
+/// <b>PLATFORM-held</b> (ADR-0007), not venue truth. The catastrophic safety floor resting beyond the working stop
+/// (<c>StopPlanRecord.SafetyStopPrice</c>), so the client can pre-validate the <c>safety → working → entry</c> band.
+/// <see langword="null"/> when the order carries no stop plan.
+/// </param>
+/// <param name="EntryPrice">
+/// <b>PLATFORM-held</b> (ADR-0007), not venue truth. The entry the stops are measured from
+/// (<c>StopPlanRecord.EntryPrice</c>), the inner bound of the same band. <see langword="null"/> when the order
+/// carries no stop plan.
+/// </param>
 public sealed record RestingOrder(
     string VenueOrderKey,
     Guid? OrderId,
@@ -137,4 +208,24 @@ public sealed record RestingOrder(
     decimal? StopPrice,
     decimal? LimitPrice,
     int Size,
-    bool IsProtective);
+    bool IsProtective,
+    decimal? WorkingStopPrice = null,
+    string? StopStaging = null,
+    decimal? SafetyStopPrice = null,
+    decimal? EntryPrice = null);
+
+/// <summary>
+/// The PLATFORM-held staged-stop geometry for one working order (ADR-0007, gh#865): the hidden working stop and the
+/// <c>safety → working → entry</c> band it must stay inside. <b>None of this rests at the venue</b> — it is the local
+/// plan, carried alongside the venue-truth order so a move-stop UI can display the working stop and pre-validate a
+/// move. Present or absent as a whole: an order either has a <c>StopPlanRecord</c> or it does not.
+/// </summary>
+/// <param name="WorkingStopPrice">The hidden working stop (<c>StopPlanRecord.ActualStopPrice</c>) — what the operator moves.</param>
+/// <param name="Staging">Where the working stop rests (<c>StopPlanRecord.Staging</c>); only <see cref="StopStaging.Hidden"/> is locally movable.</param>
+/// <param name="SafetyStopPrice">The catastrophic safety floor beyond the working stop (<c>StopPlanRecord.SafetyStopPrice</c>).</param>
+/// <param name="EntryPrice">The entry the stops are measured from (<c>StopPlanRecord.EntryPrice</c>).</param>
+internal sealed record WorkingStopGeometry(
+    decimal WorkingStopPrice,
+    StopStaging Staging,
+    decimal SafetyStopPrice,
+    decimal EntryPrice);
