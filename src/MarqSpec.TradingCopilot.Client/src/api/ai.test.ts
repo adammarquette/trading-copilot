@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { type AiSpend, getAiSpend } from './ai';
+import { type AiAttribution, type AiSpend, getAiAttribution, getAiSpend } from './ai';
 
 function response(status: number, body?: unknown): Response {
   const text = body === undefined ? '' : JSON.stringify(body);
@@ -74,5 +74,63 @@ describe('ai spend client', () => {
     const result = await getAiSpend();
 
     expect(result.ok && result.data.dailyBudgetUsd).toBeNull();
+  });
+});
+
+const ATTRIBUTION: AiAttribution = {
+  from: '2026-07-01T05:00:00Z',
+  to: '2026-07-15T18:00:00Z',
+  suggestions: [
+    {
+      suggestionId: 's1',
+      instrument: 'ES',
+      side: 'Buy',
+      costUsd: 0.0077,
+      calls: 2,
+      escalated: true,
+      createdAt: '2026-07-15T14:00:00Z',
+    },
+  ],
+  takenTrades: [
+    {
+      tradeId: 't1',
+      instrument: 'ES',
+      realizedPnL: 125,
+      suggestionCostUsd: 0.0077,
+      closedAt: '2026-07-15T15:00:00Z',
+    },
+  ],
+  unattributedUsd: 0.0004,
+};
+
+describe('ai attribution client', () => {
+  it('reads attribution from /api/ai/attribution with no bounds by default', async () => {
+    const mock = stubFetch(() => Promise.resolve(response(200, ATTRIBUTION)));
+
+    const result = await getAiAttribution();
+
+    expect(mock.mock.calls[0][0]).toBe('/api/ai/attribution');
+    expect(result).toEqual({ ok: true, data: ATTRIBUTION });
+  });
+
+  it('passes from/to as query params when given', async () => {
+    const mock = stubFetch(() => Promise.resolve(response(200, ATTRIBUTION)));
+
+    await getAiAttribution('2026-07-01T00:00:00Z', '2026-07-31T00:00:00Z');
+
+    const url = String(mock.mock.calls[0][0]);
+    expect(url.startsWith('/api/ai/attribution?')).toBe(true);
+    const query = new URLSearchParams(url.slice(url.indexOf('?') + 1));
+    expect(query.get('from')).toBe('2026-07-01T00:00:00Z');
+    expect(query.get('to')).toBe('2026-07-31T00:00:00Z');
+  });
+
+  it('surfaces a 5xx as failed — never fabricated attribution', async () => {
+    stubFetch(() => Promise.resolve(response(500)));
+
+    const result = await getAiAttribution();
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.kind).toBe('failed');
   });
 });
