@@ -377,22 +377,27 @@ public static class ChatEndpoints
 
         ChatTurnResult turn = await turnService.StreamAsync(history, PushDeltaAsync, cancellationToken);
 
-        // Meter (export-only, never throws) and ledger (durable, FAIL-OPEN) the call — success OR failure, so the
-        // governor floor sees every billed turn. The owner is the conversation's (R-20); the clock is the turn's now.
-        metrics.RecordLlmCall(turn.Cost);
-        try
+        // Meter (export-only, never throws) and ledger (durable, FAIL-OPEN) EVERY model call the turn made — a
+        // tool-using turn makes several (gh#925) — success OR failure, so the governor floor sees each billed call.
+        // The owner is the conversation's (R-20); the clock is the turn's now. A ledger fault on one call is logged and
+        // the rest still record (fail-open); the turn stands regardless.
+        foreach (AiCallCost cost in turn.Costs)
         {
-            await ledger.RecordAsync(
-                new AiUsageEntry(conversation.UserId, turn.Cost, Activity.Current?.TraceId.ToString(), now),
-                cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception error)
-        {
-            logger.LogError(error, "Chat turn AI-usage ledger write faulted for owner {Owner}; the turn stands.", conversation.UserId);
+            metrics.RecordLlmCall(cost);
+            try
+            {
+                await ledger.RecordAsync(
+                    new AiUsageEntry(conversation.UserId, cost, Activity.Current?.TraceId.ToString(), now),
+                    cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                logger.LogError(error, "Chat turn AI-usage ledger write faulted for owner {Owner}; the turn stands.", conversation.UserId);
+            }
         }
 
         // Fail-closed: a refused / truncated / faulted turn is a 422 with the reason. The operator's turn stays saved
