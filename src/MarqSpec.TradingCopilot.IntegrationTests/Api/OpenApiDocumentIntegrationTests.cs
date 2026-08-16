@@ -84,6 +84,7 @@ public class OpenApiDocumentIntegrationTests : IClassFixture<PostgresApiFactory>
         ["/venues/setup"] = "Venues",
         ["/api/ai/spend"] = "AI",
         ["/conversations"] = "Chat",
+        ["/outcomes"] = "Journal",
     };
 
     /// <summary>
@@ -144,6 +145,7 @@ public class OpenApiDocumentIntegrationTests : IClassFixture<PostgresApiFactory>
         "Market data",
         "AI",
         "Chat",
+        "Journal",
     ];
 
     /// <summary>
@@ -220,7 +222,7 @@ public class OpenApiDocumentIntegrationTests : IClassFixture<PostgresApiFactory>
         // operations today; a document offering fewer than 55 has lost an area, whether or not it lost an anchor.
         paths.Should().NotBeEmpty("a document with no paths describes nothing");
         Operations(spec).Should().HaveCountGreaterThanOrEqualTo(55,
-            "the host maps 65 operations into the document; materially fewer means a group stopped being "
+            "the host maps 70 operations into the document; materially fewer means a group stopped being "
             + "described and the anchor checks below may be passing over a shrunken document");
 
         foreach (string anchor in AnchorPaths.Keys)
