@@ -65,6 +65,29 @@ mapfile -t DUPLICATE_BASENAMES < <(printf '%s\n' "${ON_DISK[@]}" | uniq -d)
 mapfile -t NAMED < <(grep '^|' "$INVENTORY" | awk -F'|' '{print $2}' \
     | grep -o '[A-Za-z0-9_]*\(IntegrationTests\|SmokeTests\)\.cs' | sort -u)
 
+# Two rows claiming the same suite is worse than none: they can disagree, and the check that guarantees a suite
+# is rostered says nothing about being rostered ONCE. gh#952 was exactly that -- a gh#381 "Proposed (suite not
+# yet written)" row left standing after gh#534 shipped the suite and added a second row saying Active. Both named
+# a real file, so both passed, and a reader landing on the stale one rewrites a suite that already exists.
+#
+# Counted over SOLE-subject rows only. A subject cell naming several suites at once is the sanctioned group row
+# -- the shared staging harness lists its members that way -- and its members legitimately keep rows of their own.
+# One awk pass rather than a shell loop over rows: the loop form spawned two subprocesses per row and took
+# minutes on Windows, the same cost that made the earlier nested-grep version unusable. A local check slow enough
+# to skip is one that gets skipped.
+mapfile -t DUPLICATE_ROWS < <(
+    awk -F'|' '
+        /^\|/ {
+            subject = $2; n = 0; last = ""
+            while (match(subject, /[A-Za-z0-9_]+(IntegrationTests|SmokeTests)\.cs/)) {
+                n++; last = substr(subject, RSTART, RLENGTH)
+                subject = substr(subject, RSTART + RLENGTH)
+            }
+            if (n == 1) { print last }   # sole-subject rows only; a group row lists its members and is exempt
+        }
+    ' "$INVENTORY" | sort | uniq -d
+)
+
 # Both directions of the set difference at once. `comm` rather than a nested grep loop on purpose: the loop form
 # spawns one subprocess per pair, which at 90 suites is ~8k processes -- imperceptible on the Linux runner, but
 # ~30s per invocation on a Windows dev box, and a local check slow enough to skip is one that gets skipped.
@@ -75,6 +98,17 @@ mapfile -t missing < <(comm -23 <(printf '%s\n' "${ON_DISK[@]}" | uniq) <(printf
 mapfile -t phantom < <(comm -13 <(printf '%s\n' "${ON_DISK[@]}" | uniq) <(printf '%s\n' "${NAMED[@]}"))
 
 status=0
+
+if [ ${#DUPLICATE_ROWS[@]} -gt 0 ]; then
+    status=1
+    echo "FAIL: ${#DUPLICATE_ROWS[@]} suite(s) are the subject of more than one row:" >&2
+    printf '  %s\n' "${DUPLICATE_ROWS[@]}" >&2
+    echo "" >&2
+    echo "Two rows for one suite can disagree, and one of them will be the stale one a reader acts on. Keep the" >&2
+    echo "row that tells the truth; if the other subsection still wants the cross-reference, leave a line of PROSE" >&2
+    echo "pointing at it (prose is not a row, so it does not trip this)." >&2
+    echo "" >&2
+fi
 
 if [ ${#DUPLICATE_BASENAMES[@]} -gt 0 ]; then
     status=1
@@ -120,7 +154,10 @@ elif [ "$stated" -ne "${#ON_DISK[@]}" ]; then
 fi
 
 if [ "$status" -eq 0 ]; then
-    echo "OK: all ${#ON_DISK[@]} integration/smoke suites have a row, every row names a real file, and the stated count matches."
+    # Says what is actually verified. It used to claim "every row names a real file", which the gh#948 narrowing
+    # to the row SUBJECT made false in the case that narrowing deliberately accepts: a description cell may
+    # cross-reference a suite that is not on disk, and this check passes it on purpose (gh#952).
+    echo "OK: all ${#ON_DISK[@]} integration/smoke suites are the subject of exactly one row, every row subject names a real file, and the stated count matches."
 fi
 
 exit "$status"
