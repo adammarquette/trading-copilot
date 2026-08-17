@@ -35,8 +35,8 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Signals;
 /// </para>
 /// <para>
 /// Two guards (the <c>SoftSignalFeedbacks_*</c> tests) write straight through the context to prove the DB-level
-/// <c>CK_SoftSignalFeedback_Kind_NotUnknown</c> check constraint and the <c>IX_SoftSignalFeedbacks_UserId_NewsDedupKey</c>
-/// unique index from the applied <c>AddSoftSignalFeedback</c> migration are live — invisible to any in-memory
+/// <c>CK_SoftSignalFeedback_Kind_NotUnknown</c> check constraint and the per-axis <c>UX_SoftSignalFeedback_Importance</c>
+/// filtered unique index from the applied <c>AddSoftSignalDirectionAxis</c> migration (gh#762) are live — invisible to any in-memory
 /// provider, and a second line of defense below the endpoint validation they also duplicate (mirrors the
 /// <c>NewsTopics_*</c> tests in <c>RelevanceRoutingIntegrationTests</c>).
 /// </para>
@@ -291,13 +291,15 @@ public sealed class NewsSalienceIntegrationTests : IClassFixture<SalienceTestPos
     }
 
     [Fact]
-    public async Task SoftSignalFeedbacks_ShouldRefuseADuplicateUserAndItem_ByTheUniqueIndex()
+    public async Task SoftSignalFeedbacks_ShouldRefuseADuplicateImportanceRating_ByTheAxisUniqueIndex()
     {
-        // NewsEndpoints.SetFeedbackAsync already upserts on (UserId, NewsDedupKey) above the database (the upsert
-        // test above). This proves the SAME one-feedback-per-operator-per-item invariant holds when written
-        // straight through the context -- IX_SoftSignalFeedbacks_UserId_NewsDedupKey (unique), not merely the
-        // endpoint's own read-then-write, which could race two concurrent writers without the index behind it
-        // (exactly the DbUpdateException race NewsEndpoints.SetFeedbackAsync itself recovers from).
+        // NewsEndpoints.SetFeedbackAsync already upserts within an axis on (UserId, NewsDedupKey) above the database
+        // (the upsert test above). This proves the SAME one-importance-rating-per-operator-per-item invariant holds
+        // when written straight through the context -- UX_SoftSignalFeedback_Importance (the ADR-0014 gh#762 filtered
+        // unique index over the Star/Mute kinds), not merely the endpoint's own read-then-write, which could race two
+        // concurrent writers without the index behind it (the DbUpdateException race SetFeedbackAsync recovers from).
+        // A DIRECTION rating (👍/👎) on the same item is a DIFFERENT axis and is NOT refused -- the two-axis
+        // independence and the direction index are QA #971's independent coverage.
         Guid userId = Guid.NewGuid();
         const string key = "https://example.com/salience-db-unique-index";
 
@@ -327,11 +329,11 @@ public sealed class NewsSalienceIntegrationTests : IClassFixture<SalienceTestPos
 
             Func<Task> save = () => database.SaveChangesAsync();
 
-            await save.Should().ThrowAsync<DbUpdateException>("one operator must never carry two feedback rows for the same item")
+            await save.Should().ThrowAsync<DbUpdateException>("one operator must never carry two importance (star/mute) rows for the same item")
                 .WithInnerException<DbUpdateException, PostgresException>()
                 .Where(error => error.SqlState == PostgresErrorCodes.UniqueViolation
-                    && (error.ConstraintName == "IX_SoftSignalFeedbacks_UserId_NewsDedupKey"
-                        || error.MessageText.Contains("IX_SoftSignalFeedbacks_UserId_NewsDedupKey", StringComparison.Ordinal)));
+                    && (error.ConstraintName == "UX_SoftSignalFeedback_Importance"
+                        || error.MessageText.Contains("UX_SoftSignalFeedback_Importance", StringComparison.Ordinal)));
         });
     }
 
