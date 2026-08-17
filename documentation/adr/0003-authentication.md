@@ -119,8 +119,16 @@ blotter the same throw takes out *positions* and *resting orders*: the reads the
 
 So the choice is now made by the **compiler**, not by a reviewer's memory: a reader that needs a payload cannot
 keep using `request` and dereference it. Adding the narrowing turned up **49** call sites, which is the number
-the sweep had to cover and is not a number anyone would have reached by grep. Prefer `requestJson` for anything
-with a body; `request` remains correct for a 204 (`DELETE`, `PATCH …/price`, feedback writes).
+the sweep had to cover and is not a number anyone would have reached by grep.
+
+Prefer `requestJson` for anything whose payload you read. `request` is for the calls that **ignore** the payload —
+which is not the same as "the server sends none". Only the relevance deletes actually answer `204`; the rest of
+the `request<void>` callers (`DELETE /orders/{id}`, `PATCH /orders/{id}/price`, `DELETE /conditionals/{id}`,
+`POST /kill-switch/disengage`, `PUT /accounts/{id}/risk`) return **200 with a JSON body the client discards**.
+That is safe — `request<void>` never dereferences it — but it is a *choice*, not an absence, and at least one of
+those bodies is worth reading: `PATCH …/price` carries `size` / `requestedSize` / `outcome`, so a **gate-approved
+downsize on a reprice is currently invisible to the operator** (raised separately; ADR-0007 owns the resize
+echo).
 
 **The belt gh#954 named and did not ship** landed here too: `SignInPage.onSubmit` awaited without a `try/catch`,
 so any *other* throw on that path — `storeToken` hitting a `localStorage` quota or private-mode failure — still

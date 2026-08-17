@@ -190,7 +190,10 @@ export async function requestJson<T>(
   if (!result.ok) {
     return result;
   }
-  if (result.data === undefined) {
+  // `== null` catches BOTH an absent body (`undefined`) and a literal JSON `null`, which parses fine and then
+  // throws on the same dereference. Nothing in this API emits `null` today — it takes a proxy or a contract
+  // drift — but the whole point of this seam is that the caller cannot be handed something it will crash on.
+  if (result.data == null) {
     // No `status`: the success branch does not carry one, and inventing `200` would be a guess (a 201 or 202 is
     // equally possible). Callers read `status` to spot a 401/404, and this is neither.
     return {

@@ -126,6 +126,16 @@ describe('request — the one JWT-attach path', () => {
     });
   });
 
+  it('requestJson maps a 2xx carrying a literal JSON null to failed (gh#966 review)', async () => {
+    // `null` parses fine, so an `=== undefined` guard would let it through — and it throws on the very same
+    // dereference the empty-body case does. Unreachable from this API today; it takes a proxy or contract drift.
+    stubFetch(() => Promise.resolve(rawResponse(200, 'null')));
+
+    const result = await requestJson<{ positions: unknown[] }>('GET', '/accounts/1/positions');
+
+    expect(result.ok).toBe(false);
+  });
+
   it('requestJson passes a present body through unchanged', async () => {
     // The control. Without it the case above passes against a `requestJson` that fails EVERY read.
     stubFetch(() => Promise.resolve(response(200, { positions: [1, 2] })));
