@@ -122,8 +122,8 @@ keep using `request` and dereference it. Adding the narrowing turned up **49** c
 the sweep had to cover and is not a number anyone would have reached by grep.
 
 Prefer `requestJson` for anything whose payload you read. `request` is for the calls that **ignore** the payload —
-which is not the same as "the server sends none". Of the nine `request<void>` callers, checked handler by
-handler:
+which is not the same as "the server sends none". The nine `request<void>` callers **as this sweep found them**,
+checked handler by handler — the next paragraph is why there are eight now:
 
 | answers `204` | answers `200` with a body the client discards |
 | --- | --- |
@@ -133,10 +133,10 @@ handler:
 | | `POST /kill-switch/disengage` |
 | | `PUT /accounts/{id}/risk` |
 
-Discarding is safe — `request<void>` never dereferences it — but it is a *choice*, not an absence, and at least
-one of those bodies is worth reading: `PATCH …/price` carries `size` / `requestedSize` / `outcome`, so a
-**gate-approved downsize on a reprice is currently invisible to the operator** (gh#969; ADR-0007 owns the resize
-echo).
+Discarding is safe — `request<void>` never dereferences it — but it is a *choice*, not an absence, and one of
+those bodies turned out to be worth reading: `PATCH …/price` carries `size` / `requestedSize` / `outcome`, so a
+**gate-approved downsize on a reprice was invisible to the operator**. That is gh#969, fixed below; ADR-0007 owns
+the resize echo. The other four remain deliberate discards.
 
 **A third of the family, resolved (gh#969) — a discarded 2xx body is a lost answer.** That reprice body is the one
 gh#969 stopped discarding — it lands on develop alongside this, so `PATCH /orders/{id}/price` leaves the
