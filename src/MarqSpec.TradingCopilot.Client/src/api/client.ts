@@ -281,11 +281,7 @@ function sessionFrom(result: ApiResult<TokenResponse | undefined>): ApiResult<vo
  */
 export async function signIn(credentials: LoginRequest): Promise<ApiResult<void>> {
   return sessionFrom(
-    await request<TokenResponse | undefined>(
-      'POST',
-      '/auth/login' satisfies keyof paths,
-      credentials,
-    ),
+    await request<TokenResponse>('POST', '/auth/login' satisfies keyof paths, credentials),
   );
 }
 
@@ -303,11 +299,7 @@ type AcceptInviteRequest = components['schemas']['AcceptInviteRequest'];
  */
 export async function acceptInvite(redemption: AcceptInviteRequest): Promise<ApiResult<void>> {
   return sessionFrom(
-    await request<TokenResponse | undefined>(
-      'POST',
-      '/auth/accept-invite' satisfies keyof paths,
-      redemption,
-    ),
+    await request<TokenResponse>('POST', '/auth/accept-invite' satisfies keyof paths, redemption),
   );
 }
 

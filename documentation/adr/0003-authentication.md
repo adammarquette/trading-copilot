@@ -122,13 +122,26 @@ keep using `request` and dereference it. Adding the narrowing turned up **49** c
 the sweep had to cover and is not a number anyone would have reached by grep.
 
 Prefer `requestJson` for anything whose payload you read. `request` is for the calls that **ignore** the payload —
-which is not the same as "the server sends none". Only the relevance deletes actually answer `204`; the rest of
-the `request<void>` callers (`DELETE /orders/{id}`, `PATCH /orders/{id}/price`, `DELETE /conditionals/{id}`,
-`POST /kill-switch/disengage`, `PUT /accounts/{id}/risk`) return **200 with a JSON body the client discards**.
-That is safe — `request<void>` never dereferences it — but it is a *choice*, not an absence, and at least one of
-those bodies is worth reading: `PATCH …/price` carries `size` / `requestedSize` / `outcome`, so a **gate-approved
-downsize on a reprice is currently invisible to the operator** (raised separately; ADR-0007 owns the resize
+which is not the same as "the server sends none". Of the nine `request<void>` callers, checked handler by
+handler:
+
+| answers `204` | answers `200` with a body the client discards |
+| --- | --- |
+| `PUT` / `DELETE /api/news/feedback` | `DELETE /orders/{id}` |
+| `DELETE /api/relevance/topics/{id}` | `PATCH /orders/{id}/price` |
+| `DELETE /api/relevance/maps/{ticker}/{instrument}` | `DELETE /conditionals/{id}` |
+| | `POST /kill-switch/disengage` |
+| | `PUT /accounts/{id}/risk` |
+
+Discarding is safe — `request<void>` never dereferences it — but it is a *choice*, not an absence, and at least
+one of those bodies is worth reading: `PATCH …/price` carries `size` / `requestedSize` / `outcome`, so a
+**gate-approved downsize on a reprice is currently invisible to the operator** (gh#969; ADR-0007 owns the resize
 echo).
+
+Recorded as a table rather than a sentence deliberately. Two successive attempts to state this in prose were
+wrong in the same way — a universal drawn from a partial survey ("the 9 genuine 204s", then "only the relevance
+deletes") — because the shape of the claim let a route go unchecked without looking unchecked. Nine rows cannot
+hide the one nobody opened.
 
 **The belt gh#954 named and did not ship** landed here too: `SignInPage.onSubmit` awaited without a `try/catch`,
 so any *other* throw on that path — `storeToken` hitting a `localStorage` quota or private-mode failure — still
