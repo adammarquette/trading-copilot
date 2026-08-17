@@ -55,4 +55,27 @@ public class SoftSignalKindAxisTests
             kind.Axis().Should().BeOneOf(SoftSignalAxis.Importance, SoftSignalAxis.Direction);
         }
     }
+
+    [Theory]
+    [InlineData(SoftSignalKind.Star, SoftSignalAxis.Importance)]
+    [InlineData(SoftSignalKind.Mute, SoftSignalAxis.Importance)]
+    [InlineData(SoftSignalKind.ThumbsUp, SoftSignalAxis.Direction)]
+    [InlineData(SoftSignalKind.ThumbsDown, SoftSignalAxis.Direction)]
+    public void TryAxis_OfEachRealKind_ReturnsTrueAndItsAxis(SoftSignalKind kind, SoftSignalAxis expected)
+    {
+        kind.TryAxis(out SoftSignalAxis axis).Should().BeTrue();
+        axis.Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData(SoftSignalKind.Unknown)]
+    [InlineData((SoftSignalKind)99)]
+    public void TryAxis_OfAnUnmappableKind_ReturnsFalse_WithoutThrowing(SoftSignalKind kind)
+    {
+        // The non-throwing READ-path variant (gh#762 review): an unmappable kind -- the refusable zero, or a
+        // stray/corrupt stored value the CK Kind<>0 does not forbid -- yields false + Unknown, so a feed read skips it
+        // rather than 500ing (mirrors SalienceProfile.Build's fail-safe skip). Axis() still throws for the write path.
+        kind.TryAxis(out SoftSignalAxis axis).Should().BeFalse();
+        axis.Should().Be(SoftSignalAxis.Unknown);
+    }
 }

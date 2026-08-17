@@ -376,6 +376,35 @@ public class NewsEndpointsTests
         rated.Direction.Should().Be(SoftSignalKind.ThumbsUp); // direction
     }
 
+    [Fact]
+    public async Task Feed_SkipsAStrayStoredKind_WithoutThrowing()
+    {
+        // gh#762 review: a read must tolerate a stray / corrupt stored kind. The CK "Kind <> 0" forbids only Unknown,
+        // not an out-of-range value, so GetFeedAsync splits axes via TryAxis -- an unmappable row maps to no axis and
+        // is skipped, never a 500 (on the pre-fix Axis() this feed read threw). The valid star still surfaces.
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.Star);
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            seed.SoftSignalFeedbacks.Add(new SoftSignalFeedback
+            {
+                Id = Guid.NewGuid(),
+                UserId = _operator,
+                NewsDedupKey = "item",
+                Kind = (SoftSignalKind)99, // an out-of-range value the CK Kind<>0 does not forbid
+                CreatedAt = _t,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext read = Context();
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
+
+        NewsFeedItemResponse rated = feed.Items.Single(item => item.DedupKey == "item");
+        rated.Feedback.Should().Be(SoftSignalKind.Star); // the valid importance row still surfaces
+        rated.Direction.Should().BeNull();               // the stray row maps to no axis -> skipped, not surfaced
+    }
+
     // ---- feed read ----
 
     [Fact]
