@@ -138,6 +138,24 @@ one of those bodies is worth reading: `PATCH …/price` carries `size` / `reques
 **gate-approved downsize on a reprice is currently invisible to the operator** (gh#969; ADR-0007 owns the resize
 echo).
 
+**A third of the family, resolved (gh#969) — a discarded 2xx body is a lost answer.** That reprice body is the one
+gh#969 stopped discarding — it lands on develop alongside this, so `PATCH /orders/{id}/price` leaves the
+`request<void>` set the moment the two merge. `repriceOrder` declared `request<void>`, reading the `200` and
+throwing it away — including the gate-approved-**size** echo (`size` vs `requestedSize`, `outcome = Resized`,
+gh#292) the server returns precisely so a downsize is not silent. Not a liveness failure (nothing strands), but the
+same root: a client that does not read what the server answered. It now reads the typed `RepriceResult` — and,
+because the one `PATCH /orders/{id}/price` route answers in **two shapes** (the full decision on an entry / size
+move; a bare `id` / `status` / `workingStopPrice` on a working-stop-only re-stage), the decision fields are typed
+optional so the type does not lie about the stop-only path. The blotter is ready to surface a gate-approved
+downsize. That surfacing is **dormant today**: no client resize control sends a `size` yet (the blotter's two
+reprice paths move entry and working-stop only), so the server always echoes `requestedSize: null` and the notice
+cannot fire for a real operator request until a resize UI lands (the client half of gh#292). What is fixed **now**
+is that the client no longer discards the answer; the downsize is surfaced the moment a resize can occur. The audit
+it triggered cleared the other `request<void>` callers returning a body: the order / conditional cancels and the
+kill-switch disengage return acks the consumer re-reads past, and `PUT /accounts/{id}/risk` echoes the exact profile
+it was sent (a full-field replace, no clamp) — so discarding those is correct, and only the reprice carried a
+gate-adjustable outcome.
+
 Recorded as a table rather than a sentence deliberately. Two successive attempts to state this in prose were
 wrong in the same way — a universal drawn from a partial survey ("the 9 genuine 204s", then "only the relevance
 deletes") — because the shape of the claim let a route go unchecked without looking unchecked. Nine rows cannot
