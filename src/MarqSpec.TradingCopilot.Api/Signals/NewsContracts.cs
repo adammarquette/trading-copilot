@@ -3,9 +3,13 @@ using MarqSpec.TradingCopilot.Domain.Signals;
 
 namespace MarqSpec.TradingCopilot.Api.Signals;
 
-/// <summary>A star/mute request on a news item (gh#27). The dedup key rides in the body — it is a URL, not path-safe.</summary>
+/// <summary>A rating request on a news item (gh#27, gh#762). The dedup key rides in the body — it is a URL, not path-safe.</summary>
 /// <param name="DedupKey">The rated item's dedup key (its <see cref="NewsRecord"/> primary key).</param>
-/// <param name="Kind">Star or mute (never <see cref="SoftSignalKind.Unknown"/>).</param>
+/// <param name="Kind">
+/// The rating — importance (<see cref="SoftSignalKind.Star"/> / <see cref="SoftSignalKind.Mute"/>) or direction
+/// (<see cref="SoftSignalKind.ThumbsUp"/> / <see cref="SoftSignalKind.ThumbsDown"/>); never
+/// <see cref="SoftSignalKind.Unknown"/>. It is applied within its own axis, independently of the other.
+/// </param>
 public sealed record NewsFeedbackRequest(string DedupKey, SoftSignalKind Kind);
 
 /// <summary>One explained reason an item was reweighted (gh#27) — so weighting is never a hidden score (ADR-0014).</summary>
@@ -22,9 +26,10 @@ public sealed record SalienceReasonResponse(string Dimension, string Value, doub
 }
 
 /// <summary>
-/// One ranked item in the operator's personalized news feed (gh#27, ADR-0014): the item, its base relevance, the
-/// personalized <see cref="Multiplier"/> and resulting <see cref="Salience"/>, the explanation, and the operator's
-/// own feedback on it (if any).
+/// One ranked item in the operator's personalized news feed (gh#27, gh#762, ADR-0014): the item, its base relevance,
+/// the personalized <see cref="Multiplier"/> and resulting <see cref="Salience"/>, the explanation, and the operator's
+/// own feedback on it (if any) — on both axes: importance (<see cref="Feedback"/>) and direction
+/// (<see cref="Direction"/>).
 /// </summary>
 public sealed record NewsFeedItemResponse(
     string DedupKey,
@@ -39,7 +44,9 @@ public sealed record NewsFeedItemResponse(
     double Salience,
     string WhyWeighted,
     IReadOnlyList<SalienceReasonResponse> Reasons,
-    SoftSignalKind? Feedback)
+    SoftSignalKind? Feedback,
+    SoftSignalKind? Direction,
+    string? DirectionReason)
 {
     /// <summary>Projects a scored news item into its feed view.</summary>
     /// <param name="item">The news item.</param>
@@ -47,7 +54,8 @@ public sealed record NewsFeedItemResponse(
     /// <param name="baseRelevance">Its base relevance (pre-personalization).</param>
     /// <param name="score">The personalized salience score.</param>
     /// <param name="salience">The resulting salience (<paramref name="baseRelevance"/> × multiplier).</param>
-    /// <param name="feedback">The operator's own star/mute on this item, or <see langword="null"/>.</param>
+    /// <param name="feedback">The operator's own <b>importance</b> rating (star/mute) on this item, or <see langword="null"/>.</param>
+    /// <param name="direction">The operator's own <b>direction</b> rating (👍/👎) on this item, or <see langword="null"/>. Salience-inert (gh#762).</param>
     /// <returns>The feed item.</returns>
     public static NewsFeedItemResponse From(
         NewsRecord item,
@@ -55,7 +63,8 @@ public sealed record NewsFeedItemResponse(
         double baseRelevance,
         SalienceScore score,
         double salience,
-        SoftSignalKind? feedback) =>
+        SoftSignalKind? feedback,
+        SoftSignalKind? direction) =>
         new(
             item.DedupKey,
             item.Title,
@@ -69,7 +78,22 @@ public sealed record NewsFeedItemResponse(
             Math.Round(salience, 4),
             Explain(score),
             [.. score.Reasons.Select(SalienceReasonResponse.From)],
-            feedback);
+            feedback,
+            direction,
+            ExplainDirection(direction));
+
+    // The operator's direction rating (gh#762) is a stored SENTIMENT fact for R-9 learning + display -- it is
+    // salience-INERT, so it carries its OWN plain-language reason, never a salience contribution / "why weighted".
+    // The wording states that direction does not change what surfaces, keeping the read honest about the two axes.
+    // Null when unrated, so a consumer can tell "not rated" from a real direction.
+    private static string? ExplainDirection(SoftSignalKind? direction) => direction switch
+    {
+        SoftSignalKind.ThumbsUp =>
+            "You rated this bullish (thumbs up). Direction feeds the learning loop (R-9); it does not change what surfaces.",
+        SoftSignalKind.ThumbsDown =>
+            "You rated this bearish (thumbs down). Direction feeds the learning loop (R-9); it does not change what surfaces.",
+        _ => null,
+    };
 
     // A one-line summary of the reasons; the structured Reasons carry the precise signed contributions behind it.
     private static string Explain(SalienceScore score)

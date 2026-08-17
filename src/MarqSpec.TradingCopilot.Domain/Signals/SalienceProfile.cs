@@ -28,17 +28,17 @@ public sealed class SalienceProfile
         Dictionary<(SalienceDimension, string), double> weights = [];
         foreach (SoftSignalRating rating in ratings)
         {
-            // Star raises, mute lowers; a kind that is neither contributes nothing (defensive — the store refuses Unknown).
-            double sign = rating.Kind switch
-            {
-                SoftSignalKind.Star => 1.0,
-                SoftSignalKind.Mute => -1.0,
-                _ => 0.0,
-            };
-            if (sign == 0.0)
+            // Importance ALONE feeds salience (ADR-0014, gh#762): only the Importance-axis kinds (Star / Mute)
+            // contribute. The Direction axis (ThumbsUp / ThumbsDown) is salience-INERT by construction — it feeds R-9
+            // learning + the read surface, never what surfaces — so a direction rating is skipped here, keeping the two
+            // axes orthogonal in effect as well as in storage. Anything else (the store-refused Unknown, or any future
+            // non-importance kind) is likewise skipped, so a new kind can never silently leak into surfacing.
+            if (rating.Kind is not (SoftSignalKind.Star or SoftSignalKind.Mute))
             {
                 continue;
             }
+
+            double sign = rating.Kind == SoftSignalKind.Star ? 1.0 : -1.0;
 
             double decay = RecencyDecay(rating.RatedAt, now, parameters.HalfLifeDays);
             if (decay <= 0.0)

@@ -4,9 +4,11 @@ using MarqSpec.TradingCopilot.Domain.Signals;
 namespace MarqSpec.TradingCopilot.Data.Entities;
 
 /// <summary>
-/// One operator's feedback on a news / soft-signal item (gh#27, ADR-0014) — the store behind importance
-/// <b>starring</b> and its <b>mute</b> inverse, and the entity that will also carry the deferred 👍/👎 sentiment
-/// axis (one feedback model for all three; R-2).
+/// One operator's feedback on a news / soft-signal item (gh#27, gh#762, ADR-0014) — one store spanning <b>two
+/// independent axes</b> (<see cref="SoftSignalAxis"/>): <b>importance</b> (<see cref="SoftSignalKind.Star"/> and its
+/// <see cref="SoftSignalKind.Mute"/> inverse → salience) and <b>direction</b> (👍/👎
+/// <see cref="SoftSignalKind.ThumbsUp"/> / <see cref="SoftSignalKind.ThumbsDown"/> → R-9 learning). One feedback model
+/// for all kinds; an operator may hold at most one row per axis on an item, independently.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -17,13 +19,16 @@ namespace MarqSpec.TradingCopilot.Data.Entities;
 /// </para>
 /// <para>
 /// It references the rated item by its <see cref="NewsDedupKey"/> (the news primary key) rather than a navigation,
-/// keeping the per-user table decoupled from the global news store. One feedback per operator per item — a unique
-/// <c>(UserId, NewsDedupKey)</c> index — so re-rating replaces rather than stacks; un-starring deletes the row.
+/// keeping the per-user table decoupled from the global news store. At most one row per operator, item, <b>and
+/// axis</b> — <b>two filtered unique indexes</b> over <c>(UserId, NewsDedupKey)</c>, one per axis (gh#762) — so
+/// re-rating within an axis replaces rather than stacks and leaves the other axis untouched; clearing deletes only
+/// that axis's row.
 /// </para>
 /// <para>
-/// <b>A soft salience weight, never a risk control</b> (ADR-0007 / ADR-0014): this row feeds only the news
-/// surfacing / retrieval salience (the <see cref="SalienceScorer"/>) and is structurally unreachable from the risk
-/// gate or order sizing.
+/// <b>Importance is a soft salience weight; direction is salience-inert; neither is a risk control</b> (ADR-0007 /
+/// ADR-0014). The importance row feeds the news surfacing / retrieval salience (the <see cref="SalienceScorer"/>); the
+/// direction row feeds only R-9 learning + the read surface and never reweights surfacing. Both are structurally
+/// unreachable from the risk gate or order sizing.
 /// </para>
 /// </remarks>
 public sealed class SoftSignalFeedback : IUserOwned
@@ -37,9 +42,16 @@ public sealed class SoftSignalFeedback : IUserOwned
     /// <summary>The rated item's dedup key — the <see cref="NewsRecord.DedupKey"/> primary key (a canonicalized URL).</summary>
     public required string NewsDedupKey { get; set; }
 
-    /// <summary>The kind of feedback — <see cref="SoftSignalKind.Star"/> or <see cref="SoftSignalKind.Mute"/> today.</summary>
+    /// <summary>
+    /// The kind of feedback — importance (<see cref="SoftSignalKind.Star"/> / <see cref="SoftSignalKind.Mute"/>) or
+    /// direction (<see cref="SoftSignalKind.ThumbsUp"/> / <see cref="SoftSignalKind.ThumbsDown"/>). Its axis
+    /// (<see cref="SoftSignalKindExtensions.Axis"/>) selects which filtered unique index it belongs to.
+    /// </summary>
     public SoftSignalKind Kind { get; set; }
 
-    /// <summary>When the operator gave this feedback (UTC) — the age input to the salience recency decay (gh#27).</summary>
+    /// <summary>
+    /// When the operator gave this feedback (UTC) — the age input to the salience recency decay for an importance row
+    /// (gh#27); for a direction row it is a plain provenance timestamp (direction is age-agnostic at rest, gh#762).
+    /// </summary>
     public required DateTimeOffset CreatedAt { get; set; }
 }
