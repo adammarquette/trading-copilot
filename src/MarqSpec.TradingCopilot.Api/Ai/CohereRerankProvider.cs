@@ -128,6 +128,15 @@ public sealed class CohereRerankProvider : IReranker
                 .Select(result => new RankedDocument(result.Index, result.RelevanceScore))
                 .ToList();
 
+            if (ranking.Count == 0)
+            {
+                // Every result was out of range (or the array was empty): the response maps to NO candidate, so the
+                // whole set is a bad shape -- like a null body. Degrade to passthrough rather than silently drop the
+                // ENTIRE candidate set and bill it as a success (the "never a dropped candidate set" guarantee).
+                _logger.LogWarning("Cohere rerank returned no in-range results — ranking degrades to passthrough for this call.");
+                return new RerankResult(Passthrough(documents.Count, topN), outcome, billedSearches, estimatedCostUsd);
+            }
+
             // A successful rerank consumed at least one search unit; default to 1 when the provider omits the block,
             // rather than under-count a call that plainly happened.
             billedSearches = body.Meta?.BilledUnits?.SearchUnits ?? 1;
