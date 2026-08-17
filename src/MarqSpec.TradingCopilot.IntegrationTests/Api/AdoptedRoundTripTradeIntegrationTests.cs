@@ -187,8 +187,11 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
         _factory.Logs.Clear();
 
         // The IDENTICAL event a redelivery of the venue's own trade record would carry — same venue order key
-        // (stamped by the adopt), same venue fill key (the one BackfillEntryFillsAsync wrote), same side and size.
-        // Only the wall-clock delivery instant differs, exactly as an at-least-once redelivery would look.
+        // (stamped by the adopt), same venue fill key (the one BackfillEntryFillsAsync wrote), same side, size
+        // AND fees as the original leg (TaggedFillLeg below seeds Fees: 1.24m; a mismatched value here would
+        // make this NOT actually the identical redelivery the comment claims, even though today's idempotency
+        // check keys only on { OrderId, VenueFillKey } and would not have caught the difference — gh#960
+        // review). Only the wall-clock delivery instant differs, exactly as an at-least-once redelivery would.
         scenario.Running.Stream.Arm(new FillEvent(
             VenueAccountId.Create(_projectx, scenario.VenueAccountKey),
             DateTimeOffset.UtcNow,
@@ -197,7 +200,7 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
             OrderSide.Buy,
             Quantity: Size,
             new Price(EntryPrice),
-            Fees: 0m,
+            Fees: 1.24m,
             Voided: false));
 
         bool skippedAsIdempotent = await WaitUntilAsync(() => Task.FromResult(_factory.Logs.Entries.Any(
@@ -318,58 +321,73 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
 
         RunningHost running = await StartHostAsync();
 
-        // Derived from the exit order's own fresh id, never a shared literal: the { OrderId, VenueFillKey }
-        // unique index is what makes a redelivery an idempotent no-op, and a fill key reused across scenarios
-        // would make THAT property indistinguishable from a genuine wiring defect (gh#960 review).
-        string exitVenueFillKey = $"F-EXIT-{exitOrderId:N}";
-
-        DateTimeOffset closedAt = DateTimeOffset.UtcNow;
-        running.Stream.Arm(new FillEvent(
-            VenueAccountId.Create(_projectx, venueAccountKey),
-            closedAt,
-            ExitVenueKey,
-            exitVenueFillKey,
-            OrderSide.Sell,
-            Quantity: Size,
-            new Price(ExitPrice),
-            Fees: 1.24m,
-            Voided: false));
-
-        bool exitIngested = await WaitUntilAsync(() => QueryDbAsync(database => database.Orders
-            .IgnoreQueryFilters().AsNoTracking().AnyAsync(order => order.Id == exitOrderId && order.Status == OrderStatus.Filled)));
-        if (!exitIngested)
+        // From here down, EVERY exit must either return the running host to the caller (which owns disposal via
+        // `await using Scenario`) or dispose it itself — an assertion throwing between StartAsync and the
+        // `return` below would otherwise leak a live AccountEventStreamHost for the rest of the test process,
+        // exactly the background interference the class remarks claim never happens (gh#960 review).
+        try
         {
-            // A prior run collided on the { OrderId, VenueFillKey } unique index on this order's VERY FIRST
-            // delivery -- which can only mean either a genuinely duplicate write already sits under this fresh
-            // GUID, or the order's status update did not persist despite the Fill row landing. Dump the exact
-            // row(s) and the order's live status so the next failure (if any) answers which, directly, instead
-            // of another round of inference from a captured log line.
-            List<Fill> exitFills = await EntryFillsAsync(exitOrderId);
-            Order exitOrderNow = await OrderAsync(exitOrderId);
-            exitIngested.Should().BeTrue(
-                "the closing FillEvent must be ingested through the real AccountEventIngestionService before the "
-                + "flat is delivered — this scenario is about composing, not about the gh#748 defer-then-retry "
-                + $"window (that is FlatBeforeFillAdverseOrderIntegrationTests' own subject). Exit order is now "
-                + $"{exitOrderNow.Status} with {exitFills.Count} Fill row(s) under it: ["
-                + string.Join(", ", exitFills.Select(fill => $"{{Id={fill.Id}, VenueFillKey={fill.VenueFillKey}}}"))
-                + "]. " + DescribeHostLogs());
+            // Derived from the exit order's own fresh id, never a shared literal: the { OrderId, VenueFillKey }
+            // unique index is what makes a redelivery an idempotent no-op, and a fill key reused across
+            // scenarios would make THAT property indistinguishable from a genuine wiring defect (gh#960 review).
+            string exitVenueFillKey = $"F-EXIT-{exitOrderId:N}";
+
+            DateTimeOffset closedAt = DateTimeOffset.UtcNow;
+            running.Stream.Arm(new FillEvent(
+                VenueAccountId.Create(_projectx, venueAccountKey),
+                closedAt,
+                ExitVenueKey,
+                exitVenueFillKey,
+                OrderSide.Sell,
+                Quantity: Size,
+                new Price(ExitPrice),
+                Fees: 1.24m,
+                Voided: false));
+
+            bool exitIngested = await WaitUntilAsync(() => QueryDbAsync(database => database.Orders
+                .IgnoreQueryFilters().AsNoTracking()
+                .AnyAsync(order => order.Id == exitOrderId && order.Status == OrderStatus.Filled)));
+            if (!exitIngested)
+            {
+                // A prior run collided on the { OrderId, VenueFillKey } unique index on this order's VERY FIRST
+                // delivery -- which can only mean either a genuinely duplicate write already sits under this
+                // fresh GUID, or the order's status update did not persist despite the Fill row landing. Dump
+                // the exact row(s) and the order's live status so the next failure (if any) answers which,
+                // directly, instead of another round of inference from a captured log line.
+                List<Fill> exitFills = await EntryFillsAsync(exitOrderId);
+                Order exitOrderNow = await OrderAsync(exitOrderId);
+                exitIngested.Should().BeTrue(
+                    "the closing FillEvent must be ingested through the real AccountEventIngestionService "
+                    + "before the flat is delivered — this scenario is about composing, not about the gh#748 "
+                    + "defer-then-retry window (that is FlatBeforeFillAdverseOrderIntegrationTests' own "
+                    + $"subject). Exit order is now {exitOrderNow.Status} with {exitFills.Count} Fill row(s) "
+                    + "under it: ["
+                    + string.Join(", ", exitFills.Select(fill => $"{{Id={fill.Id}, VenueFillKey={fill.VenueFillKey}}}"))
+                    + "]. " + DescribeHostLogs());
+            }
+
+            running.Stream.Arm(new PositionEvent(
+                VenueAccountId.Create(_projectx, venueAccountKey),
+                closedAt,
+                VenueContractId.Create(_projectx, ContractKey),
+                NetQuantity: 0,
+                new Price(ExitPrice)));
+
+            bool composed = await WaitUntilAsync(() => QueryDbAsync(database =>
+                database.Trades.IgnoreQueryFilters().AnyAsync(trade => trade.AccountId == accountId)));
+            composed.Should().BeTrue(
+                "the flat must trigger TradeJournalService.ProcessFlatAsync and compose the round trip from the "
+                + "adopt's backfilled entry leg plus the stream's own closing leg — without gh#770's backfill "
+                + "there is no opening leg to pair, and the window never reconciles to flat. "
+                + DescribeHostLogs());
+
+            return new Scenario(running, accountId, venueAccountKey, entryOrderId, entryFills[0].Id);
         }
-
-        running.Stream.Arm(new PositionEvent(
-            VenueAccountId.Create(_projectx, venueAccountKey),
-            closedAt,
-            VenueContractId.Create(_projectx, ContractKey),
-            NetQuantity: 0,
-            new Price(ExitPrice)));
-
-        bool composed = await WaitUntilAsync(() => QueryDbAsync(database =>
-            database.Trades.IgnoreQueryFilters().AnyAsync(trade => trade.AccountId == accountId)));
-        composed.Should().BeTrue(
-            "the flat must trigger TradeJournalService.ProcessFlatAsync and compose the round trip from the "
-            + "adopt's backfilled entry leg plus the stream's own closing leg — without gh#770's backfill there is "
-            + "no opening leg to pair, and the window never reconciles to flat. " + DescribeHostLogs());
-
-        return new Scenario(running, accountId, venueAccountKey, entryOrderId, entryFills[0].Id);
+        catch
+        {
+            await running.DisposeAsync();
+            throw;
+        }
     }
 
     /// <summary>
