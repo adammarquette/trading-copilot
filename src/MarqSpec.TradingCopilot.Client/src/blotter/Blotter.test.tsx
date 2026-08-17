@@ -41,7 +41,7 @@ const REPRICED: RepriceResult = {
   id: 'o1',
   status: 'Working',
   entryPrice: 4991,
-  workingStopPrice: null,
+  workingStopPrice: 4980,
   size: 1,
   requestedSize: null,
   outcome: 'Allowed',
@@ -526,9 +526,11 @@ describe('Blotter', () => {
       fireEvent.click(screen.getByRole('button', { name: /^reprice this order$/i }));
     });
 
+    // The full phrase, not just the digits: a swapped "approved 3 ... requested 2" must fail, the plural must agree
+    // with the approved 2, and the CONTRACT is named so a lingering notice cannot be misread as another order's
+    // (the operator reads this to learn their size was trimmed, so it has to be exact).
     const notice = screen.getByTestId('reprice-resized').textContent ?? '';
-    expect(notice).toContain('2'); // the gate-approved size the order now rests at
-    expect(notice).toContain('3'); // ...against what the operator requested
+    expect(notice).toContain('CON.F.US.MES.U26: gate approved 2 contracts — you requested 3.');
   });
 
   it('does not reprice twice when confirmed twice before the first resolves', async () => {

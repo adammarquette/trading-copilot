@@ -182,7 +182,10 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
           <Box
             sx={{ borderColor: 'divider', borderStyle: 'solid', borderWidth: '1px 0 0 0', p: 1.5 }}
           >
-            <Blotter accountId={activeAccountId} />
+            {/* Keyed by account so a switch REMOUNTS the blotter: no state (a gh#969 resize notice, a prior
+                account's venue view) survives into a different account's context — a fresh read, never stale
+                truth under the wrong header. */}
+            <Blotter key={activeAccountId} accountId={activeAccountId} />
           </Box>
         ) : null}
       </Box>

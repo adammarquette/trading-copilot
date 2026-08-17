@@ -463,7 +463,7 @@ describe('isApprovedDownsize', () => {
     id: 'o1',
     status: 'Working',
     entryPrice: 5010,
-    workingStopPrice: null,
+    workingStopPrice: 4996,
     size: 2,
     requestedSize: 3,
     outcome: 'Resized',
@@ -479,6 +479,13 @@ describe('isApprovedDownsize', () => {
 
   it('is false for a move that did not touch size (requestedSize null)', () => {
     expect(isApprovedDownsize({ ...base, requestedSize: null, outcome: 'Allowed' })).toBe(false);
+  });
+
+  it('is false on a working-stop-only re-stage body (the decision fields are absent)', () => {
+    // The move-stop path returns just id / status / workingStopPrice -- size, requestedSize and outcome are
+    // undefined on the wire, and the helper must read that as "no downsize" without throwing or mis-flagging (gh#969).
+    const restage: RepriceResult = { id: 'o1', status: 'Working', workingStopPrice: 4996 };
+    expect(isApprovedDownsize(restage)).toBe(false);
   });
 });
 

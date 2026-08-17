@@ -167,22 +167,26 @@ export interface RepriceRequest {
 }
 
 /**
- * What a completed reprice reports back (gh#969). The load-bearing pair is `size` vs `requestedSize`: on a resize
- * the gate can **honour a smaller quantity than asked** (`outcome === 'Resized'`, gh#292), and the server echoes
- * both so the operator is not left believing they got the size they requested. Read it — never discard it.
+ * What a completed reprice reports back (gh#969). **One endpoint, two shapes.** An **entry / size** move echoes the
+ * full gate decision — the load-bearing pair is `size` vs `requestedSize`, since on a resize the gate can **honour a
+ * smaller quantity than asked** (`outcome === 'Resized'`, gh#292), and the server returns both so the operator is not
+ * left believing they got the size they requested. A **working-stop-only** re-stage never resizes, so it returns just
+ * `id` / `status` / `workingStopPrice` and the decision fields are absent (hence optional here). Read the body —
+ * never discard it, on either path.
  */
 export interface RepriceResult {
   readonly id: string;
   readonly status: string;
-  readonly entryPrice: number;
-  /** The hidden working stop after the move, or `null` when the order has none. */
-  readonly workingStopPrice: number | null;
-  /** The quantity the order now rests at — the **gate-approved** size. */
-  readonly size: number;
-  /** The quantity the operator asked for, or `null` when the reprice did not touch size. */
-  readonly requestedSize: number | null;
-  /** The gate's verdict on the modify — `Allowed` / `Resized` / `Blocked`, or a pre-gate refusal name. */
-  readonly outcome: string;
+  /** The hidden working stop after the move — carried on **both** paths, always a number (a stopless order rests at its safety stop, never `null`). */
+  readonly workingStopPrice: number;
+  /** The new resting entry — an **entry** move only; absent on a working-stop-only re-stage. */
+  readonly entryPrice?: number;
+  /** The quantity the order now rests at — the **gate-approved** size. An entry / size move only; absent on a working-stop-only re-stage. */
+  readonly size?: number;
+  /** The quantity the operator asked for, `null` when the move did not touch size — an entry / size move only; absent on a working-stop-only re-stage. */
+  readonly requestedSize?: number | null;
+  /** The gate's verdict on the modify — `Allowed` / `Resized` / `Blocked`, or a pre-gate refusal name. An entry / size move only; absent on a working-stop-only re-stage. */
+  readonly outcome?: string;
 }
 
 /**
@@ -205,7 +209,8 @@ export function repriceOrder(
 export function isApprovedDownsize(result: RepriceResult): boolean {
   return (
     result.outcome === 'Resized' &&
-    result.requestedSize !== null &&
+    result.requestedSize != null &&
+    result.size != null &&
     result.size < result.requestedSize
   );
 }

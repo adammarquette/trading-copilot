@@ -181,6 +181,8 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   const openReprice = useCallback((order: BlotterRestingOrder) => {
     setRepricing(order);
     setRepriceRefusal(null);
+    setResizeNotice(null); // a fresh reprice interaction starts clean -- a prior order's downsize notice must not linger over it
+
     // Seed the new entry with the order's current resting price so the field is a nudge, not a blank; the market
     // price stays empty — it must be a fresh operator observation, never defaulted (that would disable the R-16
     // drift re-check, the exact mistake the suggestion card's reference input avoids).
@@ -232,6 +234,7 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
     repricingInFlight.current = true;
     setRepriceRefusal(null);
     const orderId = repricing.orderId;
+    const contract = repricing.contract;
 
     void repriceOrder(orderId, { entryPrice: newEntry, referencePrice: market })
       .then((result) => {
@@ -242,12 +245,14 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
           return;
         }
         // gh#969: a gate-approved downsize (gh#292) is echoed on the 200 body, not silent -- surface the honoured
-        // quantity so the operator is never left believing they got the size they asked for.
-        if (isApprovedDownsize(result.data)) {
-          setResizeNotice(
-            `Gate approved ${result.data.size} contract${result.data.size === 1 ? '' : 's'} — you requested ${result.data.requestedSize}.`,
-          );
-        }
+        // quantity so the operator is never left believing they got the size they asked for. The notice NAMES the
+        // contract so it cannot be misread as describing another resting order, and a clean (full-size) reprice
+        // CLEARS any prior notice rather than leaving it to mislead.
+        setResizeNotice(
+          isApprovedDownsize(result.data)
+            ? `${contract}: gate approved ${result.data.size} contract${result.data.size === 1 ? '' : 's'} — you requested ${result.data.requestedSize}.`
+            : null,
+        );
         setRepricing(null);
         // Re-read rather than assume the new price took: venue truth decides what is resting, not this click.
         load();
