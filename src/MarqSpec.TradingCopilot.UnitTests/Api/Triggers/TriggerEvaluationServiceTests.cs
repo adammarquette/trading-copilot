@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
@@ -46,7 +47,14 @@ public class TriggerEvaluationServiceTests
     private readonly ILlmMetrics _llmMetrics = A.Fake<ILlmMetrics>();
     private readonly ISessionDeadlineSource _deadlines = A.Fake<ISessionDeadlineSource>();
     private readonly ISuggestionRealtimeNotifier _suggestionNotifier = A.Fake<ISuggestionRealtimeNotifier>();
+    private readonly IPriceLevelSource _levels = A.Fake<IPriceLevelSource>();
+    private readonly IInstrumentSpecSource _specs = A.Fake<IInstrumentSpecSource>();
     private static DateTimeOffset Now { get; } = DateTimeOffset.UnixEpoch.AddYears(56);
+
+    // Every EXISTING test defaults to an INERT confluence (an empty ladder assembles no supporting factors), so the
+    // cited-factor set stays the N=1 single primary and every pre-gh#730 case is behaviour-unchanged -- mirroring the
+    // inert-governor idiom above. The gh#730 corroboration cases pass a configured ladder + arrange the reads.
+    private static readonly ConfluenceOptions _inertConfluence = new() { TimeframeMinutes = [] };
 
     // The cost a real LLM call surfaces (gh#431). Any non-null Cost makes the scan record a usage row; the SPECIFIC
     // values here don't matter to the pre-existing tests -- only that Cost is non-null so the recording path is exercised.
@@ -71,11 +79,12 @@ public class TriggerEvaluationServiceTests
     // so behaviour is byte-for-byte unchanged from before gh#448. The gh#448 cases pass a configured GovernorOptions.
     private TriggerEvaluationService Service(
         IAiUsageLedger? ledger = null, GovernorOptions? governor = null, IReviewEnrichmentSource? enrichment = null,
-        SuggestionOptions? suggestionOptions = null) => new(
+        SuggestionOptions? suggestionOptions = null, ConfluenceOptions? confluence = null) => new(
         Context(), Options, _indicators, _notifications, _reviewer, enrichment ?? _enrichment, ledger ?? _ledger,
         _llmMetrics, _deadlines, Microsoft.Extensions.Options.Options.Create(suggestionOptions ?? new SuggestionOptions()), new AiSpendGovernor(),
         Microsoft.Extensions.Options.Options.Create(governor ?? new GovernorOptions()),
-        _suggestionNotifier, new SuggestionThrottle(), NullLogger<TriggerEvaluationService>.Instance);
+        _suggestionNotifier, new SuggestionThrottle(), _levels, _specs,
+        Microsoft.Extensions.Options.Options.Create(confluence ?? _inertConfluence), NullLogger<TriggerEvaluationService>.Instance);
 
     // The reviewer returns an AgentReview: the outcome the route acts on plus the LLM-call cost(s) the scan ledgers,
     // one row per billed call (gh#449). Passing no costs defaults to a single _sampleCost, so every EXISTING caller
@@ -1169,7 +1178,8 @@ public class TriggerEvaluationServiceTests
         TriggerEvaluationService service = new ThrowingReadService(
             Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, _llmMetrics, _deadlines, Microsoft.Extensions.Options.Options.Create(new SuggestionOptions()), new AiSpendGovernor(),
             Microsoft.Extensions.Options.Options.Create(new GovernorOptions { DailyBudgetUsd = 10m }),
-            _suggestionNotifier, new SuggestionThrottle(), NullLogger<TriggerEvaluationService>.Instance);
+            _suggestionNotifier, new SuggestionThrottle(), _levels, _specs,
+            Microsoft.Extensions.Options.Options.Create(_inertConfluence), NullLogger<TriggerEvaluationService>.Instance);
 
         Func<Task> act = () => service.ScanAsync(Now, CancellationToken.None);
 
@@ -1428,6 +1438,140 @@ public class TriggerEvaluationServiceTests
         primary.TimeframeMinutes.Should().Be(Resolution, "the primary's timeframe is the fired bar size (old CitedResolutionMinutes)");
         primary.LevelId.Should().BeNull("today's issuance cites no level factor");
         staged.CitedFactors.Count(factor => !factor.IsPrimary).Should().Be(0, "no supporting factors are assembled yet");
+    }
+
+    // =====================================================================================================
+    // CONFLUENCE ASSEMBLY (gh#730, ADR-0026, R-4): at issuance, the fired signal (the primary) is corroborated
+    // against the SAME signal on the other ladder timeframes and the active levels near the entry, each appended as a
+    // SUPPORTING factor. A level never fires, so it is never primary. A confluence read fault falls back to today's
+    // N=1 single primary (fail-open) -- it must never abort the owner's pass or the fire.
+    // =====================================================================================================
+
+    // A contract spec that resolves a tick size, so the level proximity band can be measured.
+    private static InstrumentContractSpec SpecFor(decimal tickSize) =>
+        new(InstrumentSpec.Create(InstrumentId.Parse(Symbol), tickSize, 50m), 40);
+
+    // One active level zone on a timeframe -- the shape the venue-agnostic level read returns.
+    private static PriceLevel LevelZone(int timeframe, decimal bottom, decimal top) => new()
+    {
+        Id = Guid.NewGuid(),
+        Venue = "TOPSTEPX",
+        Instrument = Symbol,
+        TimeframeMinutes = timeframe,
+        Top = top,
+        Bottom = bottom,
+        Kind = PriceLevelKind.Support,
+        Significance = 5m,
+        FormedAtBucket = Now,
+        TouchCount = 2,
+        Active = true,
+        UpdatedAt = Now,
+    };
+
+    [Fact]
+    public async Task ScanAsync_ShouldStageAPrimaryPlusSupportingIndicatorAndLevel_WhenConfluenceCorroborates()
+    {
+        // The fired trigger is RSI(14) on the 1m (Resolution), BELOW 30. The ladder adds a 15m (which corroborates)
+        // and a 60m (which does not), plus an active 15m level the entry sits inside the band of.
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        ConfluenceOptions confluence = new() { KTicks = 8, FAtr = 0.5m, TimeframeMinutes = [15, 60] };
+
+        IndicatorReturns(25m); // the 1m fire read AND the 15m ladder read -> both satisfied (below 30)
+        A.CallTo(() => _indicators.GetValueAsync(
+                A<InstrumentId>._, A<string>._, A<int>._, 60, A<DateTimeOffset>._, A<CancellationToken>._))
+            .Returns(40m); // the 60m does NOT satisfy -> excluded
+
+        // The tick size resolves (band tick-arm = 8 * 0.25 = 2.0); ATR is unmeasured (null) so the tick arm stands.
+        InstrumentContractSpec? outSpec = SpecFor(0.25m);
+        A.CallTo(() => _specs.TryResolve(A<InstrumentId>._, out outSpec)).Returns(true);
+        IReadOnlyList<PriceLevel> activeLevels = [LevelZone(15, 98m, 99m)]; // entry 100 is 1.0 from the near edge <= 2.0
+        A.CallTo(() => _levels.GetActiveLevelsAsync(A<string>._, A<IReadOnlyCollection<int>>._, A<CancellationToken>._))
+            .Returns(activeLevels);
+
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        await Service(confluence: confluence).ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion suggestion = await reload.Suggestions.Include(s => s.CitedFactors).SingleAsync();
+
+        suggestion.CitedFactors.Should().HaveCount(3, "one primary indicator + one supporting indicator + one supporting level");
+        suggestion.CitedFactors.Count(f => f.IsPrimary).Should().Be(1, "exactly one primary (ADR-0026)");
+
+        CitedFactor primary = suggestion.CitedFactors.Single(f => f.IsPrimary);
+        primary.Kind.Should().Be(CitedFactorKind.Indicator);
+        primary.TimeframeMinutes.Should().Be(Resolution, "the fired smallest timeframe is the headline (gh#592)");
+
+        CitedFactor supportingIndicator = suggestion.CitedFactors
+            .Single(f => !f.IsPrimary && f.Kind == CitedFactorKind.Indicator);
+        supportingIndicator.TimeframeMinutes.Should().Be(15, "the 15m read the SAME signal");
+        supportingIndicator.Indicator.Should().Be(Indicator);
+        supportingIndicator.Period.Should().Be(Period);
+
+        CitedFactor level = suggestion.CitedFactors.Single(f => f.Kind == CitedFactorKind.Level);
+        level.IsPrimary.Should().BeFalse("a level never fires, so it is never primary (ADR-0026)");
+        level.TimeframeMinutes.Should().Be(15);
+        level.LevelTop.Should().Be(99m);
+        level.LevelBottom.Should().Be(98m);
+        level.LevelVenue.Should().Be("TOPSTEPX");
+        level.LevelId.Should().NotBeNull("the snapshot carries the soft level id");
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldStageTheSingleN1Factor_WhenConfluenceFindsNoCorroboration()
+    {
+        // A real ladder is configured, but nothing corroborates: the other timeframes cannot be measured (null) and
+        // no instrument spec resolves, so no level is read. The set degrades to today's N=1 single primary factor.
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        ConfluenceOptions confluence = new() { TimeframeMinutes = [15, 60] };
+
+        IndicatorReturns(25m); // the 1m fire read is satisfied...
+        A.CallTo(() => _indicators.GetValueAsync(
+                A<InstrumentId>._, A<string>._, A<int>._, 15, A<DateTimeOffset>._, A<CancellationToken>._))
+            .Returns((decimal?)null); // ...but the ladder timeframes cannot be measured -> no corroboration
+        A.CallTo(() => _indicators.GetValueAsync(
+                A<InstrumentId>._, A<string>._, A<int>._, 60, A<DateTimeOffset>._, A<CancellationToken>._))
+            .Returns((decimal?)null);
+        // No spec resolves (the fake's default TryResolve is false) -> no level read at all.
+
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
+
+        await Service(confluence: confluence).ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion suggestion = await reload.Suggestions.Include(s => s.CitedFactors).SingleAsync();
+        CitedFactor only = suggestion.CitedFactors.Should().ContainSingle().Subject;
+        only.IsPrimary.Should().BeTrue("the set of one is its own primary");
+        only.Kind.Should().Be(CitedFactorKind.Indicator);
+        only.TimeframeMinutes.Should().Be(Resolution);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldFallBackToN1_WhenAConfluenceReadFaults()
+    {
+        // FAIL-OPEN (mirrors the enrichment + governor reads): a confluence read fault must NEVER abort the fire. The
+        // 15m indicator WOULD corroborate, but the level read throws, so the WHOLE assembly degrades to the N=1 set --
+        // and fires == 1 proves the throw was contained, not unwound to the per-owner guard.
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed);
+        ConfluenceOptions confluence = new() { TimeframeMinutes = [15] };
+
+        IndicatorReturns(25m); // the 1m fire + the 15m ladder read both satisfied (would corroborate)
+        InstrumentContractSpec? outSpec = SpecFor(0.25m);
+        A.CallTo(() => _specs.TryResolve(A<InstrumentId>._, out outSpec)).Returns(true);
+        A.CallTo(() => _levels.GetActiveLevelsAsync(A<string>._, A<IReadOnlyCollection<int>>._, A<CancellationToken>._))
+            .ThrowsAsync(new InvalidOperationException("levels store down"));
+
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "x", 72));
+
+        int fires = await Service(confluence: confluence).ScanAsync(Now, CancellationToken.None); // must NOT propagate
+
+        fires.Should().Be(1, "a confluence read fault is contained, never unwound to abort the pass");
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion suggestion = await reload.Suggestions.Include(s => s.CitedFactors).SingleAsync();
+        suggestion.CitedFactors.Should().ContainSingle().Which.IsPrimary.Should().BeTrue("fail-open to the N=1 set");
     }
 
     [Fact]
@@ -2141,7 +2285,8 @@ public class TriggerEvaluationServiceTests
             Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, _llmMetrics, _deadlines,
             Microsoft.Extensions.Options.Options.Create(ThrottleOptions()), new AiSpendGovernor(),
             Microsoft.Extensions.Options.Options.Create(new GovernorOptions()),
-            _suggestionNotifier, new SuggestionThrottle(), NullLogger<TriggerEvaluationService>.Instance);
+            _suggestionNotifier, new SuggestionThrottle(), _levels, _specs,
+            Microsoft.Extensions.Options.Options.Create(_inertConfluence), NullLogger<TriggerEvaluationService>.Instance);
 
         Func<Task> act = () => service.ScanAsync(Now, CancellationToken.None);
 
@@ -2197,7 +2342,8 @@ public class TriggerEvaluationServiceTests
             Context(), Options, _indicators, _notifications, _reviewer, _enrichment, _ledger, _llmMetrics, _deadlines,
             Microsoft.Extensions.Options.Options.Create(ThrottleOptions()), new AiSpendGovernor(),
             Microsoft.Extensions.Options.Options.Create(new GovernorOptions()),
-            _suggestionNotifier, new SuggestionThrottle(), NullLogger<TriggerEvaluationService>.Instance);
+            _suggestionNotifier, new SuggestionThrottle(), _levels, _specs,
+            Microsoft.Extensions.Options.Options.Create(_inertConfluence), NullLogger<TriggerEvaluationService>.Instance);
 
         (RiskProfileRecord? Profile, decimal DayRealized) state =
             await probe.ProbeThrottleStateAsync(Context(), accountId, Now, CancellationToken.None);
@@ -2232,8 +2378,11 @@ public class TriggerEvaluationServiceTests
             IOptions<GovernorOptions> governorOptions,
             ISuggestionRealtimeNotifier suggestionNotifier,
             ISuggestionThrottle throttle,
+            IPriceLevelSource levels,
+            IInstrumentSpecSource specs,
+            IOptions<ConfluenceOptions> confluenceOptions,
             ILogger<TriggerEvaluationService> logger)
-            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, throttle, logger)
+            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, throttle, levels, specs, confluenceOptions, logger)
         {
         }
 
@@ -2264,8 +2413,11 @@ public class TriggerEvaluationServiceTests
             IOptions<GovernorOptions> governorOptions,
             ISuggestionRealtimeNotifier suggestionNotifier,
             ISuggestionThrottle throttle,
+            IPriceLevelSource levels,
+            IInstrumentSpecSource specs,
+            IOptions<ConfluenceOptions> confluenceOptions,
             ILogger<TriggerEvaluationService> logger)
-            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, throttle, logger)
+            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, throttle, levels, specs, confluenceOptions, logger)
         {
         }
 
@@ -2293,8 +2445,11 @@ public class TriggerEvaluationServiceTests
             IOptions<GovernorOptions> governorOptions,
             ISuggestionRealtimeNotifier suggestionNotifier,
             ISuggestionThrottle throttle,
+            IPriceLevelSource levels,
+            IInstrumentSpecSource specs,
+            IOptions<ConfluenceOptions> confluenceOptions,
             ILogger<TriggerEvaluationService> logger)
-            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, throttle, logger)
+            : base(discovery, options, indicators, notifications, reviewer, enrichmentSource, ledger, metrics, deadlines, suggestionOptions, governor, governorOptions, suggestionNotifier, throttle, levels, specs, confluenceOptions, logger)
         {
         }
 
