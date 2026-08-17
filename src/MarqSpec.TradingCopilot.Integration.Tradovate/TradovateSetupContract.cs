@@ -14,7 +14,7 @@ namespace MarqSpec.TradingCopilot.Integration.Tradovate;
 /// validates as required; the access-token application fields (<c>AppId</c>, <c>AppVersion</c>, <c>DeviceId</c>) and
 /// the OAuth pair (<c>Cid</c>, <c>Secret</c>) are optional, needed for API-key access. Only <c>Password</c> and the
 /// OAuth <c>Secret</c> are masked. The <em>endpoint model</em> (Tradovate's demo/live host pair) and the
-/// <em>mode-reporting mechanism</em> ADR-0023 §1 also names ride the venue-implementation increment (gh#41), where the
+/// <em>mode-reporting mechanism</em> ADR-0023 §1 also names ride the runtime venue increment (gh#977), where the
 /// demo/live pair is actually exercised; this increment carries identity and the credential schema, exactly as
 /// ProjectX's contract first landed.
 /// </remarks>

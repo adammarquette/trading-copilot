@@ -83,7 +83,7 @@ builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
 builder.Services.AddSingleton<IVenueSetupContract, ProjectXSetupContract>();
 
 // Tradovate self-describes its seven-field onboarding (ADR-0023, gh#41) — the case the fixed two-field form could not
-// serve. A declaration only (no credential values, no runtime venue yet); the execution adapter joins in gh#41.
+// serve. A declaration only (no credential values, no runtime venue yet); the execution adapter joins in gh#977.
 builder.Services.AddSingleton<IVenueSetupContract, TradovateSetupContract>();
 
 // Venue connection liveness (R-17, gh#209): a process-wide singleton over the venue's websocket client, so the
