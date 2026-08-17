@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, request, requestJson } from './client';
 
 /**
  * The order paths behind the ticket (gh#655, R-11 / R-12, ADR-0007).
@@ -88,7 +88,7 @@ export function sendOrder(
   accountId: string,
   order: SendOrderRequest,
 ): Promise<ApiResult<SendOrderResponse>> {
-  return request<SendOrderResponse>('POST', `/accounts/${accountId}/orders`, order);
+  return requestJson<SendOrderResponse>('POST', `/accounts/${accountId}/orders`, order);
 }
 
 /**
@@ -105,7 +105,7 @@ export function sendAsIsOrder(
   accountId: string,
   order: SendOrderRequest,
 ): Promise<ApiResult<SendOrderResponse>> {
-  return request<SendOrderResponse>('POST', `/accounts/${accountId}/orders/send-as-is`, order);
+  return requestJson<SendOrderResponse>('POST', `/accounts/${accountId}/orders/send-as-is`, order);
 }
 
 /** Stages an order and returns the gate's decision — **does not transmit**. Step one of arm → review → send. */
@@ -113,7 +113,7 @@ export function armOrder(
   accountId: string,
   order: SendOrderRequest,
 ): Promise<ApiResult<StagedOrderResponse>> {
-  return request<StagedOrderResponse>('POST', `/accounts/${accountId}/orders/arm`, order);
+  return requestJson<StagedOrderResponse>('POST', `/accounts/${accountId}/orders/arm`, order);
 }
 
 /**
@@ -133,12 +133,12 @@ export function editStagedOrder(
   orderId: string,
   order: SendOrderRequest,
 ): Promise<ApiResult<StagedOrderResponse>> {
-  return request<StagedOrderResponse>('PUT', `/orders/${orderId}`, order);
+  return requestJson<StagedOrderResponse>('PUT', `/orders/${orderId}`, order);
 }
 
 /** Transmits a staged order — the separate, explicit third step. */
 export function takeStagedOrder(orderId: string): Promise<ApiResult<SendOrderResponse>> {
-  return request<SendOrderResponse>('POST', `/orders/${orderId}/take`);
+  return requestJson<SendOrderResponse>('POST', `/orders/${orderId}/take`);
 }
 
 /** Cancels a staged or working order. */
@@ -233,7 +233,7 @@ export function createConditionalOrder(
   accountId: string,
   request_: CreateConditionalOrderRequest,
 ): Promise<ApiResult<ConditionalOrderResponse>> {
-  return request<ConditionalOrderResponse>(
+  return requestJson<ConditionalOrderResponse>(
     'POST',
     `/accounts/${accountId}/orders/conditional`,
     request_,

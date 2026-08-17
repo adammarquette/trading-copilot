@@ -6,6 +6,7 @@ import TextField from '@mui/material/TextField';
 import { useState, type FormEvent } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router';
 
+import type { ApiResult } from '../api/client';
 import { AuthLayout } from './AuthLayout';
 import { useAuth } from './AuthProvider';
 import { redirectTargetOf } from './redirect';
@@ -34,7 +35,19 @@ export function SignInPage() {
     event.preventDefault();
     setError(null);
     setSubmitting(true);
-    const result = await signIn({ email, password });
+    let result: ApiResult<void>;
+    try {
+      result = await signIn({ email, password });
+    } catch {
+      // The belt. gh#954 removed the client's own throw on an empty 2xx, but this await was still unguarded, so
+      // ANY other throw on the path reproduced the same failure: the handler unwound, `setSubmitting(false)`
+      // never ran, and the operator was left on a disabled button with no message and no way forward. The
+      // realistic remaining cause is `storeToken` — `localStorage.setItem` throws on a quota or in private mode.
+      // A surface must not be strandable by a throw it did not anticipate (gh#963).
+      setSubmitting(false);
+      setError('Sign-in could not be completed. Check your connection and try again.');
+      return;
+    }
     if (result.ok) {
       navigate(redirectTargetOf(location), { replace: true });
       return;

@@ -1,24 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./client', () => ({ request: vi.fn() }));
+vi.mock('./client', () => ({ request: vi.fn(), requestJson: vi.fn() }));
 
-import { request } from './client';
+import { requestJson } from './client';
 import { getPositions, getWorkingOrders } from './execution';
 
-const requestMock = vi.mocked(request);
+const requestJsonMock = vi.mocked(requestJson);
 
 beforeEach(() => {
-  requestMock.mockReset();
+  requestJsonMock.mockReset();
 });
 
 describe('getWorkingOrders', () => {
   it('reads the account orders route scoped to the instrument (gh#772)', async () => {
-    requestMock.mockResolvedValue({ ok: true, data: { markBasis: 'Live', orders: [] } });
+    requestJsonMock.mockResolvedValue({ ok: true, data: { markBasis: 'Live', orders: [] } });
 
     await getWorkingOrders('acc-1', 'ES');
 
-    expect(requestMock).toHaveBeenCalledOnce();
-    const [method, path] = requestMock.mock.calls[0];
+    expect(requestJsonMock).toHaveBeenCalledOnce();
+    const [method, path] = requestJsonMock.mock.calls[0];
     expect(method).toBe('GET');
     const url = new URL(path, 'http://local');
     expect(url.pathname).toBe('/accounts/acc-1/orders');
@@ -39,7 +39,7 @@ describe('getWorkingOrders', () => {
         },
       ],
     };
-    requestMock.mockResolvedValue({ ok: true, data });
+    requestJsonMock.mockResolvedValue({ ok: true, data });
 
     await expect(getWorkingOrders('acc-1', 'ES')).resolves.toEqual({ ok: true, data });
   });
@@ -51,7 +51,7 @@ describe('getWorkingOrders', () => {
       status: 400,
       reason: "No contract matches instrument 'ZZZZ'.",
     } as const;
-    requestMock.mockResolvedValue(refusal);
+    requestJsonMock.mockResolvedValue(refusal);
 
     await expect(getWorkingOrders('acc-1', 'ZZZZ')).resolves.toEqual(refusal);
   });
@@ -59,12 +59,12 @@ describe('getWorkingOrders', () => {
 
 describe('getPositions', () => {
   it('reads the account positions route scoped to the instrument (gh#772)', async () => {
-    requestMock.mockResolvedValue({ ok: true, data: { markBasis: 'Live', positions: [] } });
+    requestJsonMock.mockResolvedValue({ ok: true, data: { markBasis: 'Live', positions: [] } });
 
     await getPositions('acc-1', 'ES');
 
-    expect(requestMock).toHaveBeenCalledOnce();
-    const [method, path] = requestMock.mock.calls[0];
+    expect(requestJsonMock).toHaveBeenCalledOnce();
+    const [method, path] = requestJsonMock.mock.calls[0];
     expect(method).toBe('GET');
     const url = new URL(path, 'http://local');
     expect(url.pathname).toBe('/accounts/acc-1/positions');
@@ -78,7 +78,7 @@ describe('getPositions', () => {
         { contract: 'CON.F.US.MES.U26', netQuantity: 2, averagePrice: 5300, isFlat: false },
       ],
     };
-    requestMock.mockResolvedValue({ ok: true, data });
+    requestJsonMock.mockResolvedValue({ ok: true, data });
 
     await expect(getPositions('acc-1', 'ES')).resolves.toEqual({ ok: true, data });
   });

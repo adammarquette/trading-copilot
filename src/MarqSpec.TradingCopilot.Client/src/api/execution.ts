@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 
 /**
  * The operator's venue-truth resting orders and net position on an account, scoped to one instrument (gh#772) — the
@@ -50,7 +50,7 @@ export function getWorkingOrders(
   instrument: string,
 ): Promise<ApiResult<RestingOrders>> {
   const query = new URLSearchParams({ instrument });
-  return request<RestingOrders>('GET', `/accounts/${accountId}/orders?${query.toString()}`);
+  return requestJson<RestingOrders>('GET', `/accounts/${accountId}/orders?${query.toString()}`);
 }
 
 /**
@@ -63,7 +63,7 @@ export function getPositions(
   instrument: string,
 ): Promise<ApiResult<ReconciledPositions>> {
   const query = new URLSearchParams({ instrument });
-  return request<ReconciledPositions>(
+  return requestJson<ReconciledPositions>(
     'GET',
     `/accounts/${accountId}/positions?${query.toString()}`,
   );

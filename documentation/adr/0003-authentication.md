@@ -102,6 +102,30 @@ The rule the two share, and the one to apply to any future body read here: **a 2
 transport, not about the payload.** A surface may only ever be left in a state the operator can act on — an
 answer, an error with a retry, or a refusal — and never in one that requires reloading the page to escape.
 
+## Update (2026-08-17) — the rule gets a mechanism, not a third fix (gh#963)
+
+The same defect turned up a third time, on the **exposure reads**, so it was treated as a class. Forty-odd
+readers dereferenced `result.data.<prop>` on a body that can legitimately be `undefined`, each inside a
+`void …then(…)` with no `.catch`.
+
+The worst of them was not a stuck panel. `useExecutionOverlays` is written so an empty overlay reads as
+**declared-unknown rather than a confirmed flat book** (R-13 / R-19) — but the `TypeError` fired *before* the flag
+saying so was set, so the code guarding against "the chart looks flat" was the code that failed to run. On the
+blotter the same throw takes out *positions* and *resting orders*: the reads the operator uses to answer
+**"is protection actually standing at the venue?"**, answered instead by a panel that spins forever.
+
+- **`request<T>` now returns `ApiResult<T | undefined>`** — it always could, and now says so.
+- **`requestJson<T>`** is the call for a response that must carry a payload: an absent body is a `failed` read.
+
+So the choice is now made by the **compiler**, not by a reviewer's memory: a reader that needs a payload cannot
+keep using `request` and dereference it. Adding the narrowing turned up **49** call sites, which is the number
+the sweep had to cover and is not a number anyone would have reached by grep. Prefer `requestJson` for anything
+with a body; `request` remains correct for a 204 (`DELETE`, `PATCH …/price`, feedback writes).
+
+**The belt gh#954 named and did not ship** landed here too: `SignInPage.onSubmit` awaited without a `try/catch`,
+so any *other* throw on that path — `storeToken` hitting a `localStorage` quota or private-mode failure — still
+reproduced the dead submit button. A surface must not be strandable by a throw it did not anticipate.
+
 ## Follow-ups
 - Token **issuance + refresh** flow (login → JWT; refresh strategy; expiry).
 - **Signing-key** storage / rotation (server-side secret, §8).

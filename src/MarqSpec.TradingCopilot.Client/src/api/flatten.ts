@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 
 /**
  * The auto-flatten schedule behind the safety strip's countdown (gh#657, R-13).
@@ -38,7 +38,7 @@ export interface FlattenSchedule {
 
 /** The next auto-flatten deadline per governed market. A failure stays a failure — see {@link soonestArmed}. */
 export function getFlattenSchedule(): Promise<ApiResult<FlattenSchedule>> {
-  return request<FlattenSchedule>('GET', '/flatten/schedule');
+  return requestJson<FlattenSchedule>('GET', '/flatten/schedule');
 }
 
 /**

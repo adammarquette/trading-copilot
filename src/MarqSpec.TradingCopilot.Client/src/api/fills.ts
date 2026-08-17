@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 
 /**
  * The operator's journaled fills on an account for one instrument over a window (gh#792) — the read behind the
@@ -37,5 +37,5 @@ export function getFills(
   to: string,
 ): Promise<ApiResult<Fills>> {
   const query = new URLSearchParams({ instrument, from, to });
-  return request<Fills>('GET', `/accounts/${accountId}/fills?${query.toString()}`);
+  return requestJson<Fills>('GET', `/accounts/${accountId}/fills?${query.toString()}`);
 }

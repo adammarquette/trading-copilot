@@ -69,7 +69,7 @@ export async function request<T>(
   method: Method,
   path: string,
   body?: unknown,
-): Promise<ApiResult<T>> {
+): Promise<ApiResult<T | undefined>> {
   const headers: Record<string, string> = {};
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -163,6 +163,43 @@ export async function request<T>(
     status: response.status,
     error: `The request failed (${response.status}).`,
   };
+}
+
+/**
+ * {@link request} for a call that is supposed to come back **with a payload** — which is nearly all of them. A
+ * 2xx whose body is absent returns `failed` rather than a success carrying `undefined`.
+ *
+ * This exists because `request` legitimately answers `undefined` for an empty body (that is how a 204 is
+ * expressed), and ~40 readers dereferenced `result.data.<prop>` without allowing for it. On a `void …then(…)`
+ * path — the shape every read surface uses — the resulting `TypeError` is an unhandled rejection, so the panel
+ * never leaves its loading state (gh#963, third of the class after gh#951 and gh#954).
+ *
+ * The worst of those was not merely a stuck panel. `useExecutionOverlays` is written so an empty overlay reads as
+ * **declared-unknown rather than a confirmed flat book** (R-13 / R-19) — but the throw happened *before* the flag
+ * that says so was set, so the code guarding against "the chart looks flat" was the code that failed to run.
+ *
+ * `request` now returns `T | undefined`, so choosing between the two is a **compile-time** decision: a reader
+ * that needs a payload cannot silently keep using `request` and dereference it. That is the sweep, enforced.
+ */
+export async function requestJson<T>(
+  method: Method,
+  path: string,
+  body?: unknown,
+): Promise<ApiResult<T>> {
+  const result = await request<T>(method, path, body);
+  if (!result.ok) {
+    return result;
+  }
+  if (result.data === undefined) {
+    // No `status`: the success branch does not carry one, and inventing `200` would be a guess (a 201 or 202 is
+    // equally possible). Callers read `status` to spot a 401/404, and this is neither.
+    return {
+      ok: false,
+      kind: 'failed',
+      error: 'The response carried no data.',
+    };
+  }
+  return { ok: true, data: result.data };
 }
 
 async function readJsonOrUndefined(response: Response): Promise<unknown> {
@@ -284,5 +321,5 @@ export interface CurrentUser {
  * which the caller reads as "signed out"; it does not throw.
  */
 export async function getCurrentUser(): Promise<ApiResult<CurrentUser>> {
-  return request<CurrentUser>('GET', '/auth/me' satisfies keyof paths);
+  return requestJson<CurrentUser>('GET', '/auth/me' satisfies keyof paths);
 }

@@ -154,6 +154,24 @@ describe('SignInPage', () => {
     expect((button as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it('survives a THROW out of signIn — no dead submit button (gh#963)', async () => {
+    // The belt gh#954 described and did not ship. gh#954 removed the client's own throw on an empty 2xx, but
+    // `onSubmit` still awaited with no try/catch, so ANY other throw on that path reproduces the identical dead
+    // button — `storeToken` hitting a `localStorage.setItem` quota or private-mode failure is the realistic one.
+    // A surface must not be strandable by a throw it did not anticipate, so this rejects at the seam rather than
+    // modelling one specific cause.
+    const signIn = vi.fn().mockRejectedValue(new Error('QuotaExceededError'));
+    renderSignIn(auth({ signIn }));
+
+    fill('Email', 'operator@local');
+    fill('Password', 'pw');
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    const button = screen.getByRole('button', { name: 'Sign in' });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('distinguishes a connection failure from a rejected credential', async () => {
     const signIn = vi.fn().mockResolvedValue({
       ok: false,

@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 
 /**
  * The operator's own AI spend, from the durable `AIUsage` ledger (gh#741) — the read behind the "AI usage & spend"
@@ -48,7 +48,10 @@ export function getAiSpend(from?: string, to?: string): Promise<ApiResult<AiSpen
     query.set('to', to);
   }
   const suffix = query.toString();
-  return request<AiSpend>('GET', suffix.length === 0 ? '/api/ai/spend' : `/api/ai/spend?${suffix}`);
+  return requestJson<AiSpend>(
+    'GET',
+    suffix.length === 0 ? '/api/ai/spend' : `/api/ai/spend?${suffix}`,
+  );
 }
 
 /**
@@ -104,7 +107,7 @@ export function getAiAttribution(from?: string, to?: string): Promise<ApiResult<
     query.set('to', to);
   }
   const suffix = query.toString();
-  return request<AiAttribution>(
+  return requestJson<AiAttribution>(
     'GET',
     suffix.length === 0 ? '/api/ai/attribution' : `/api/ai/attribution?${suffix}`,
   );

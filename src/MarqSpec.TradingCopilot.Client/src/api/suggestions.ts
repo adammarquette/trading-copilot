@@ -1,5 +1,5 @@
 import type { TradingMode } from './accounts';
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 import type { components } from './schema';
 
 /**
@@ -180,7 +180,7 @@ export async function listActionableSuggestions(
   limit?: number,
 ): Promise<ApiResult<readonly Suggestion[]>> {
   const query = limit === undefined ? '' : `?limit=${String(limit)}`;
-  const result = await request<SuggestionListResponse>(
+  const result = await requestJson<SuggestionListResponse>(
     'GET',
     `/accounts/${accountId}/suggestions${query}`,
   );
@@ -189,7 +189,7 @@ export async function listActionableSuggestions(
 
 /** One suggestion by id, in **any** state — the journal outlives the decision window. */
 export async function getSuggestion(id: string): Promise<ApiResult<Suggestion>> {
-  return missingIsRefusal(await request<Suggestion>('GET', `/suggestions/${id}`));
+  return missingIsRefusal(await requestJson<Suggestion>('GET', `/suggestions/${id}`));
 }
 
 /**
@@ -210,7 +210,7 @@ export async function passSuggestion(
     note: trimmed === undefined || trimmed.length === 0 ? null : trimmed,
   };
   return missingIsRefusal(
-    await request<SuggestionDisposition>('POST', `/suggestions/${id}/pass`, body),
+    await requestJson<SuggestionDisposition>('POST', `/suggestions/${id}/pass`, body),
   );
 }
 
@@ -229,5 +229,5 @@ export async function takeSuggestion(
   referencePrice: number,
 ): Promise<ApiResult<StagedTicket>> {
   const body: TakeRequestBody = { referencePrice };
-  return missingIsRefusal(await request<StagedTicket>('POST', `/suggestions/${id}/take`, body));
+  return missingIsRefusal(await requestJson<StagedTicket>('POST', `/suggestions/${id}/take`, body));
 }

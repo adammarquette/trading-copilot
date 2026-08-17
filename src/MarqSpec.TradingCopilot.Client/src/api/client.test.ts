@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { acceptInvite, request, setOnUnauthenticated, signIn, signOut } from './client';
+import {
+  acceptInvite,
+  request,
+  requestJson,
+  setOnUnauthenticated,
+  signIn,
+  signOut,
+} from './client';
 import { readToken, storeToken } from './token';
 
 /** A stand-in for the parts of Response the client reads: `ok`, `status`, and a text body. */
@@ -101,6 +108,51 @@ describe('request — the one JWT-attach path', () => {
     const result = await request<{ value: number }>('GET', '/anything');
 
     expect(result.ok).toBe(false);
+  });
+
+  it('requestJson maps a 2xx with an EMPTY body to failed — the read has no payload (gh#963)', async () => {
+    // The third face of the gh#951/gh#954 class. An empty body does not fail to parse — it is the legitimate 204
+    // path — so `request` hands back `undefined` and every caller that dereferences `result.data.<prop>` throws.
+    // On a `void …then(…)` path (which is every read surface) that is an unhandled rejection: the panel never
+    // leaves its loading state. A read that was supposed to carry a payload and carried none is a FAILED read.
+    stubFetch(() => Promise.resolve(rawResponse(200, '')));
+
+    const result = await requestJson<{ positions: unknown[] }>('GET', '/accounts/1/positions');
+
+    expect(result).toEqual({
+      ok: false,
+      kind: 'failed',
+      error: 'The response carried no data.',
+    });
+  });
+
+  it('requestJson passes a present body through unchanged', async () => {
+    // The control. Without it the case above passes against a `requestJson` that fails EVERY read.
+    stubFetch(() => Promise.resolve(response(200, { positions: [1, 2] })));
+
+    const result = await requestJson<{ positions: number[] }>('GET', '/accounts/1/positions');
+
+    expect(result).toEqual({ ok: true, data: { positions: [1, 2] } });
+  });
+
+  it('requestJson keeps a refusal a refusal — it does not flatten 4xx answers into failures', async () => {
+    // The `refused` vs `failed` split (R-11) is the client's reason for existing; the new wrapper must not blunt
+    // it. A gate answer still arrives as an answer, with its reason and binding layer intact.
+    stubFetch(() =>
+      Promise.resolve(
+        response(409, { error: 'The daily loss limit is spent.', layer: 'DailyLossLimit' }),
+      ),
+    );
+
+    const result = await requestJson<unknown>('POST', '/accounts/1/orders', {});
+
+    expect(result).toEqual({
+      ok: false,
+      kind: 'refused',
+      status: 409,
+      reason: 'The daily loss limit is spent.',
+      layer: 'DailyLossLimit',
+    });
   });
 
   it('on a protected 401 clears the token, notifies, and returns failed — never retries', async () => {

@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 
 /**
  * The operator's connections and the trading accounts under them — the reads behind the R-14 account context
@@ -47,12 +47,12 @@ export interface Account {
 
 /** The operator's connections. */
 export function listConnections(): Promise<ApiResult<Connection[]>> {
-  return request<Connection[]>('GET', '/connections');
+  return requestJson<Connection[]>('GET', '/connections');
 }
 
 /** The accounts discovered under one connection. */
 export function listConnectionAccounts(connectionId: string): Promise<ApiResult<Account[]>> {
-  return request<Account[]>('GET', `/connections/${connectionId}/accounts`);
+  return requestJson<Account[]>('GET', `/connections/${connectionId}/accounts`);
 }
 
 /**

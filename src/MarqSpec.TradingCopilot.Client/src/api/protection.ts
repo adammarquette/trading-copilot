@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 
 /**
  * The operator's synthetic-protection state (gh#222, R-11 / R-19) — the ground truth behind the safety strip's
@@ -26,7 +26,7 @@ export interface ProtectionState {
 
 /** The current state. A failure stays a failure — it must never resolve to "protected". */
 export function getProtectionState(): Promise<ApiResult<ProtectionState>> {
-  return request<ProtectionState>('GET', '/protection');
+  return requestJson<ProtectionState>('GET', '/protection');
 }
 
 /**

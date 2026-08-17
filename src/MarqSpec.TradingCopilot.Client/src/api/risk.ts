@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, request, requestJson } from './client';
 
 /**
  * The account's declared risk profile and today's headroom — the reads and the one write behind the R-5 settings
@@ -110,7 +110,7 @@ export interface DailyHeadroom {
  * failed and should be retried. Every other non-2xx passes through as the {@link ApiResult} failure it is.
  */
 export async function getRiskProfile(accountId: string): Promise<ApiResult<RiskProfile | null>> {
-  const result = await request<RiskProfile>('GET', `/accounts/${accountId}/risk`);
+  const result = await requestJson<RiskProfile>('GET', `/accounts/${accountId}/risk`);
   if (!result.ok && result.status === 404) {
     return { ok: true, data: null };
   }
@@ -130,7 +130,7 @@ export function declareRiskProfile(
  * {@link getRiskProfile}: there is no governor to project against until one is declared.
  */
 export async function getHeadroom(accountId: string): Promise<ApiResult<DailyHeadroom | null>> {
-  const result = await request<DailyHeadroom>('GET', `/accounts/${accountId}/risk/headroom`);
+  const result = await requestJson<DailyHeadroom>('GET', `/accounts/${accountId}/risk/headroom`);
   if (!result.ok && result.status === 404) {
     return { ok: true, data: null };
   }

@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, request, requestJson } from './client';
 
 /**
  * The kill switch (gh#189, gh#657, R-11, ADR-0007) — the operator's process-wide panic control, and the reason
@@ -34,7 +34,7 @@ export interface EngageKillSwitchResult {
 
 /** The current state. Always read from the server: it outlives both the page and the process. */
 export function getKillSwitch(): Promise<ApiResult<KillSwitchState>> {
-  return request<KillSwitchState>('GET', '/kill-switch');
+  return requestJson<KillSwitchState>('GET', '/kill-switch');
 }
 
 /**
@@ -52,7 +52,11 @@ export function engageKillSwitch(
   mode: KillSwitchMode,
   reason: string | null,
 ): Promise<ApiResult<EngageKillSwitchResult>> {
-  return request<EngageKillSwitchResult>('POST', '/kill-switch', { mode, confirmed: true, reason });
+  return requestJson<EngageKillSwitchResult>('POST', '/kill-switch', {
+    mode,
+    confirmed: true,
+    reason,
+  });
 }
 
 /** Disengages the kill switch, re-enabling outbound orders. */

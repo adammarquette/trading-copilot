@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 
 /**
  * A venue's onboarding setup contract as served by `GET /venues/setup` (gh#64, ADR-0023): its identity and the
@@ -26,5 +26,5 @@ export interface VenueCredentialField {
  * (never a secret). A venue appears the moment its adapter is compiled in and its contract registered (ADR-0023).
  */
 export function getVenueSetup(): Promise<ApiResult<VenueSetup[]>> {
-  return request<VenueSetup[]>('GET', '/venues/setup');
+  return requestJson<VenueSetup[]>('GET', '/venues/setup');
 }
