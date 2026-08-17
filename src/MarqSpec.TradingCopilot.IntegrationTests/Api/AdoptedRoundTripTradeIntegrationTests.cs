@@ -295,7 +295,8 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
         exitIngested.Should().BeTrue(
             "the closing FillEvent must be ingested through the real AccountEventIngestionService before the flat "
             + "is delivered — this scenario is about composing, not about the gh#748 defer-then-retry window "
-            + "(that is FlatBeforeFillAdverseOrderIntegrationTests' own subject)");
+            + "(that is FlatBeforeFillAdverseOrderIntegrationTests' own subject). "
+            + DescribeHostLogs());
 
         running.Stream.Arm(new PositionEvent(
             VenueAccountId.Create(_projectx, venueAccountKey),
@@ -309,7 +310,7 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
         composed.Should().BeTrue(
             "the flat must trigger TradeJournalService.ProcessFlatAsync and compose the round trip from the "
             + "adopt's backfilled entry leg plus the stream's own closing leg — without gh#770's backfill there is "
-            + "no opening leg to pair, and the window never reconciles to flat");
+            + "no opening leg to pair, and the window never reconciles to flat. " + DescribeHostLogs());
 
         return new Scenario(running, accountId, venueAccountKey, entryOrderId, entryFills[0].Id);
     }
@@ -534,6 +535,16 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
     private static async Task<string> DescribeAsync(HttpResponseMessage response) =>
         $"(response was {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()})";
 
+    /// <summary>
+    /// The live host's own captured log tail, so a timed-out wait is diagnosable from the CI output alone rather
+    /// than guessed at — in particular it surfaces <c>AccountEventStreamHost</c>'s silent "the account-event host
+    /// is idle" (a withheld <see cref="Domain.Venue.VenueCapability.AccountStreaming"/> grant) or a dropped/
+    /// re-subscribed stream, either of which would otherwise look identical to a merely-slow CI runner.
+    /// </summary>
+    private string DescribeHostLogs() =>
+        "Captured host log tail: [" + string.Join(
+            " | ", _factory.Logs.Entries.TakeLast(20).Select(entry => $"{entry.Level}: {entry.Message}")) + "]";
+
     private async Task ExecuteDbContextAsync(Func<TradingCopilotDbContext, Task> action)
     {
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
@@ -549,7 +560,7 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
     /// <summary>Polls until <paramref name="condition"/> holds, returning <see langword="false"/> on timeout rather
     /// than throwing — the shape the sibling stream-driven suites use, so a genuine red reports as an assertion
     /// failure instead of an unhandled exception.</summary>
-    private static async Task<bool> WaitUntilAsync(Func<Task<bool>> condition, int attempts = 200, int delayMs = 50)
+    private static async Task<bool> WaitUntilAsync(Func<Task<bool>> condition, int attempts = 300, int delayMs = 50)
     {
         for (int attempt = 0; attempt < attempts; attempt++)
         {
