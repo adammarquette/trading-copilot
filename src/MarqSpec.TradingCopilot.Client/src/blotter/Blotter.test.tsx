@@ -9,7 +9,7 @@ import {
   getPositions,
   getRestingOrders,
 } from '../api/blotter';
-import { cancelOrder, repriceOrder } from '../api/orders';
+import { cancelOrder, type RepriceResult, repriceOrder } from '../api/orders';
 import type { RealtimeContextValue } from '../realtime/RealtimeProvider';
 import { useOptionalRealtime } from '../realtime/RealtimeProvider';
 import { Blotter } from './Blotter';
@@ -35,6 +35,17 @@ const realtime = vi.mocked(useOptionalRealtime);
 const cancel = vi.mocked(cancelOrder);
 const exit = vi.mocked(exitPosition);
 const reprice = vi.mocked(repriceOrder);
+
+// A benign reprice result — a full-size approval, no downsize (gh#969); tests that need a downsize override it.
+const REPRICED: RepriceResult = {
+  id: 'o1',
+  status: 'Working',
+  entryPrice: 4991,
+  workingStopPrice: null,
+  size: 1,
+  requestedSize: null,
+  outcome: 'Allowed',
+};
 
 const LONG: BlotterPosition = {
   contract: 'CON.F.US.MES.U26',
@@ -148,7 +159,7 @@ beforeEach(() => {
   wireRealtime();
   cancel.mockResolvedValue({ ok: true, data: undefined });
   exit.mockResolvedValue({ ok: true, data: { outcome: 'Flat', netQuantity: 0 } });
-  reprice.mockResolvedValue({ ok: true, data: undefined });
+  reprice.mockResolvedValue({ ok: true, data: REPRICED });
 });
 
 afterEach(() => {
@@ -495,13 +506,38 @@ describe('Blotter', () => {
     expect(positions).toHaveBeenCalledTimes(2);
   });
 
+  it('surfaces a gate-approved downsize rather than applying it silently (gh#969)', async () => {
+    // gh#292: a resize can be honoured at a SMALLER quantity than asked. The 200 body echoes it; the operator must
+    // see the approved size, not be left believing they got the size they requested.
+    reprice.mockResolvedValue({
+      ok: true,
+      data: { ...REPRICED, size: 2, requestedSize: 3, outcome: 'Resized' },
+    });
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /reprice/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('new-entry-price'), { target: { value: '4991' } });
+      fireEvent.change(screen.getByTestId('reprice-reference'), { target: { value: '4993' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reprice this order$/i }));
+    });
+
+    const notice = screen.getByTestId('reprice-resized').textContent ?? '';
+    expect(notice).toContain('2'); // the gate-approved size the order now rests at
+    expect(notice).toContain('3'); // ...against what the operator requested
+  });
+
   it('does not reprice twice when confirmed twice before the first resolves', async () => {
     // The same non-idempotent-transmit hazard as the cancel: a reprice reaches the venue, so a second click before
     // the first settles must not issue a second move.
     let release: () => void = () => {};
     reprice.mockReturnValue(
       new Promise((resolve) => {
-        release = () => resolve({ ok: true, data: undefined });
+        release = () => resolve({ ok: true, data: REPRICED });
       }),
     );
 
@@ -699,7 +735,7 @@ describe('Blotter', () => {
     let release: () => void = () => {};
     reprice.mockReturnValue(
       new Promise((resolve) => {
-        release = () => resolve({ ok: true, data: undefined });
+        release = () => resolve({ ok: true, data: REPRICED });
       }),
     );
     restingOrders.mockResolvedValue({ ok: true, data: live(HIDDEN_LONG) });

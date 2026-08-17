@@ -18,7 +18,7 @@ import {
   getPositions,
   getRestingOrders,
 } from '../api/blotter';
-import { cancelOrder, repriceOrder } from '../api/orders';
+import { cancelOrder, isApprovedDownsize, repriceOrder } from '../api/orders';
 import { useOptionalRealtime } from '../realtime/RealtimeProvider';
 
 /**
@@ -105,6 +105,10 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   const [movingStop, setMovingStop] = useState<BlotterRestingOrder | null>(null);
   const [newWorkingDraft, setNewWorkingDraft] = useState('');
   const [moveStopRefusal, setMoveStopRefusal] = useState<string | null>(null);
+
+  // gh#969: a gate-approved downsize on a reprice/resize (gh#292) is echoed, not silent. The sheet closes on
+  // success, so the honoured quantity is surfaced here, on the blotter, until the operator dismisses it.
+  const [resizeNotice, setResizeNotice] = useState<string | null>(null);
   const realtime = useOptionalRealtime();
   const mounted = useRef(true);
   const latest = useRef(0);
@@ -237,6 +241,13 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
           setRepriceRefusal(refusalText(result));
           return;
         }
+        // gh#969: a gate-approved downsize (gh#292) is echoed on the 200 body, not silent -- surface the honoured
+        // quantity so the operator is never left believing they got the size they asked for.
+        if (isApprovedDownsize(result.data)) {
+          setResizeNotice(
+            `Gate approved ${result.data.size} contract${result.data.size === 1 ? '' : 's'} — you requested ${result.data.requestedSize}.`,
+          );
+        }
         setRepricing(null);
         // Re-read rather than assume the new price took: venue truth decides what is resting, not this click.
         load();
@@ -322,6 +333,11 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
 
   return (
     <Box data-testid="blotter" sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      {resizeNotice !== null ? (
+        <Alert severity="info" onClose={() => setResizeNotice(null)} data-testid="reprice-resized">
+          {resizeNotice}
+        </Alert>
+      ) : null}
       {unavailable ? (
         <Alert severity="error">The venue read is unavailable — this view is not current.</Alert>
       ) : null}

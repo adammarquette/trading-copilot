@@ -167,15 +167,47 @@ export interface RepriceRequest {
 }
 
 /**
+ * What a completed reprice reports back (gh#969). The load-bearing pair is `size` vs `requestedSize`: on a resize
+ * the gate can **honour a smaller quantity than asked** (`outcome === 'Resized'`, gh#292), and the server echoes
+ * both so the operator is not left believing they got the size they requested. Read it — never discard it.
+ */
+export interface RepriceResult {
+  readonly id: string;
+  readonly status: string;
+  readonly entryPrice: number;
+  /** The hidden working stop after the move, or `null` when the order has none. */
+  readonly workingStopPrice: number | null;
+  /** The quantity the order now rests at — the **gate-approved** size. */
+  readonly size: number;
+  /** The quantity the operator asked for, or `null` when the reprice did not touch size. */
+  readonly requestedSize: number | null;
+  /** The gate's verdict on the modify — `Allowed` / `Resized` / `Blocked`, or a pre-gate refusal name. */
+  readonly outcome: string;
+}
+
+/**
  * Moves a resting working order in place (gh#259/#267/#278/#292) — keeping its queue position and its attached
  * protective bracket, rather than cancel-and-replace.
  *
  * Unlike a cancel, a reprice **can add risk** (a wider stop, an entry likelier to fill), so the server runs the
  * full send ladder and **re-gates** it before touching the venue. A refusal is the gate's answer, not an error to
- * swallow — it reaches the operator.
+ * swallow — it reaches the operator. The 200 body carries the gate-approved size + verdict (gh#969): read it, so a
+ * downsize is surfaced rather than silently applied.
  */
-export function repriceOrder(orderId: string, change: RepriceRequest): Promise<ApiResult<void>> {
-  return request<void>('PATCH', `/orders/${orderId}/price`, change);
+export function repriceOrder(
+  orderId: string,
+  change: RepriceRequest,
+): Promise<ApiResult<RepriceResult>> {
+  return request<RepriceResult>('PATCH', `/orders/${orderId}/price`, change);
+}
+
+/** Whether a completed reprice honoured a **smaller** quantity than the operator asked (gh#292/#969) — a gate-approved downsize. */
+export function isApprovedDownsize(result: RepriceResult): boolean {
+  return (
+    result.outcome === 'Resized' &&
+    result.requestedSize !== null &&
+    result.size < result.requestedSize
+  );
 }
 
 /**

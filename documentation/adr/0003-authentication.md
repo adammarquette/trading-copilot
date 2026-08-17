@@ -102,6 +102,16 @@ The rule the two share, and the one to apply to any future body read here: **a 2
 transport, not about the payload.** A surface may only ever be left in a state the operator can act on — an
 answer, an error with a retry, or a refusal — and never in one that requires reloading the page to escape.
 
+**A third of the family, resolved (gh#969) — a discarded 2xx body is a lost answer.** `repriceOrder` declared
+`request<void>`, reading the `200` and throwing it away — including the gate-approved-**size** echo (`size` vs
+`requestedSize`, `outcome = Resized`, gh#292) the server returns precisely so a downsize is not silent. Not a
+liveness failure (nothing strands), but the same root: a client that does not read what the server answered. It
+now reads the typed `RepriceResult` and surfaces a gate-approved downsize on the blotter, so a trimmed quantity is
+never silently applied. The audit it triggered cleared the other `request<void>` callers returning a body: the
+order / conditional cancels and the kill-switch disengage return acks the consumer re-reads past, and
+`PUT /accounts/{id}/risk` echoes the exact profile it was sent (a full-field replace, no clamp) — so discarding
+those is correct, and only the reprice carried a gate-adjustable outcome.
+
 ## Follow-ups
 - Token **issuance + refresh** flow (login → JWT; refresh strategy; expiry).
 - **Signing-key** storage / rotation (server-side secret, §8).

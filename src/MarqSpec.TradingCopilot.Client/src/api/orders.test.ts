@@ -11,6 +11,8 @@ import {
   cancelOrder,
   createConditionalOrder,
   editStagedOrder,
+  isApprovedDownsize,
+  type RepriceResult,
   repriceOrder,
   sendAsIsOrder,
   sendOrder,
@@ -428,6 +430,55 @@ describe('repriceOrder', () => {
     stubFetch(() => Promise.resolve(response(422, { error: 'would breach the drawdown floor' })));
 
     expect((await repriceOrder('o1', { entryPrice: 5010 })).ok).toBe(false);
+  });
+
+  it('reads the gate-approved size and verdict from the body — never discards it (gh#969)', async () => {
+    // The reprice/resize 200 body echoes the gate-approved size vs what was requested (gh#292); the client must read
+    // it, or a downsize is silent at the surface the operator looks at.
+    stubFetch(() =>
+      Promise.resolve(
+        response(200, {
+          id: 'o1',
+          status: 'Working',
+          entryPrice: 5010,
+          workingStopPrice: 4996,
+          size: 2,
+          requestedSize: 3,
+          outcome: 'Resized',
+        }),
+      ),
+    );
+
+    const result = await repriceOrder('o1', { size: 3 });
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.data.size).toBe(2); // the gate-approved size, not the 3 requested
+    expect(result.ok && result.data.requestedSize).toBe(3);
+    expect(result.ok && result.data.outcome).toBe('Resized');
+  });
+});
+
+describe('isApprovedDownsize', () => {
+  const base: RepriceResult = {
+    id: 'o1',
+    status: 'Working',
+    entryPrice: 5010,
+    workingStopPrice: null,
+    size: 2,
+    requestedSize: 3,
+    outcome: 'Resized',
+  };
+
+  it('is true only for a gate-honoured smaller quantity', () => {
+    expect(isApprovedDownsize(base)).toBe(true);
+  });
+
+  it('is false for a full-size approval (nothing was trimmed)', () => {
+    expect(isApprovedDownsize({ ...base, size: 3, outcome: 'Allowed' })).toBe(false);
+  });
+
+  it('is false for a move that did not touch size (requestedSize null)', () => {
+    expect(isApprovedDownsize({ ...base, requestedSize: null, outcome: 'Allowed' })).toBe(false);
   });
 });
 
