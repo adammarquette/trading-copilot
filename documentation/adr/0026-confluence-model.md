@@ -93,12 +93,14 @@ The **supporting** factors are now assembled at issuance. A pure, entity-free
 `Domain/Suggestions/ConfluenceAlignment.AlignSupporting` implements §3: an indicator corroborates when the **same
 signal** (`IndicatorThresholdCondition.Evaluate`) is satisfied on **another timeframe**; a level corroborates when
 the entry sits within `min(k ticks, f×ATR)` of its zone (the tick arm alone when ATR is unmeasurable). The scan
-(`TriggerEvaluationService.StageSuggestionAsync`) re-reads the same indicator across a configured timeframe ladder,
-reads active levels through a **new venue-agnostic `IPriceLevelSource` overload** (the scan holds only the neutral
-symbol; injecting the execution seam would break gate-below-model), sizes the band from the fired trigger's ATR and
-the instrument tick, and appends the aligned factors — running `DerivePrimary` over the **indicator** factors alone,
-so the fired signal stays primary and a **level is never primary** (§2). The band knobs are `ConfluenceOptions`
-(`KTicks` / `FAtr` / the ladder), `ValidateOnStart`-guarded.
+(`TriggerEvaluationService.StageSuggestionAsync`) re-reads the same indicator across the configured ladder's
+**higher** timeframes only — §3's "the larger ones are supporting" — reads active levels through a **new
+venue-agnostic `IPriceLevelSource` overload** (the scan holds only the neutral symbol; injecting the execution seam
+would break gate-below-model), sizes the band from the fired trigger's ATR and the instrument tick, and appends the
+aligned factors — running `DerivePrimary` (gh#592's smallest-timeframe min-rule) over the **indicator** factors
+alone. Because corroboration is higher-timeframe only, the fired signal is the smallest in that set, so it stays the
+primary/headline (§2) — a lower ladder rung can never steal it — and a **level is never primary**. The band knobs
+are `ConfluenceOptions` (`KTicks` / `FAtr` / the ladder), `ValidateOnStart`-guarded.
 
 **Fail-open:** a confluence read/assemble fault degrades to the N=1 single-factor set rather than aborting the
 owner's scan pass. **Two things deliberately not done:** the **rationale prose** is not folded (it is LLM-authored

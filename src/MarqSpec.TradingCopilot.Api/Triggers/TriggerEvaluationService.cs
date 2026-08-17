@@ -1051,9 +1051,11 @@ public class TriggerEvaluationService
             await AssembleSupportingAsync(trigger, suggest, now, cancellationToken);
 
         // DerivePrimary ranks the INDICATOR-arm factors ALONE — the fired signal plus any same-signal corroborators —
-        // so the smallest-timeframe SIGNAL is the headline (gh#592). A level never fires, so it is NEVER a primary
-        // candidate: the level factors are appended below as IsPrimary=false. IsPrimary is derived, never hand-set,
-        // even for the degenerate N=1 set of one. Everything is copied immutably at issuance (R-4).
+        // by gh#592's min-rule (smallest timeframe = headline). Corroboration is HIGHER-timeframe only (see the ladder
+        // skip in AssembleSupportingAsync), so the fired signal is the smallest in the set and stays the headline (§2):
+        // a lower rung can never steal primary. A level never fires, so it is NEVER a primary candidate: the level
+        // factors are appended below as IsPrimary=false. IsPrimary is derived, never hand-set, even for the degenerate
+        // N=1 set of one. Everything is copied immutably at issuance (R-4).
         List<CitedFactor> indicatorFactors = [primaryFactor];
         indicatorFactors.AddRange(supporting
             .Where(factor => factor.Kind == ConfluenceFactorKind.Indicator)
@@ -1167,12 +1169,14 @@ public class TriggerEvaluationService
         {
             InstrumentId instrument = InstrumentId.Parse(trigger.Symbol);
 
-            // 1. Indicator corroboration: read the SAME signal on each OTHER ladder timeframe, as of `now`. The fired
-            //    timeframe is the primary, so it is skipped -- it never corroborates itself.
+            // 1. Indicator corroboration: read the SAME signal on each HIGHER ladder timeframe, as of `now`. ONLY higher
+            //    ones corroborate (ADR-0026 §3 "the larger ones are supporting"): the fired signal is then the smallest
+            //    in the set, so DerivePrimary's min-rule keeps IT the primary/headline (§2). Reading a LOWER rung would
+            //    let it steal the headline and rebrand e.g. a 60m swing as a 15m scalp -- wrong R-4 / R-9 data.
             List<TimeframeReading> readings = [];
             foreach (int timeframe in _confluence.TimeframeMinutes)
             {
-                if (timeframe == trigger.ResolutionMinutes)
+                if (timeframe <= trigger.ResolutionMinutes)
                 {
                     continue;
                 }

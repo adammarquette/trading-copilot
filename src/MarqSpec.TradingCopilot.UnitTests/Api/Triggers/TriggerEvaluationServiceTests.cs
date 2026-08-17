@@ -132,6 +132,7 @@ public class TriggerEvaluationServiceTests
         decimal? hysteresis = null,
         Guid? accountId = null,
         int? size = null,
+        int resolution = Resolution,
         TriggerConfirmation confirmation = TriggerConfirmation.Confirmed)
     {
         Guid ownerId = owner ?? _operator;
@@ -144,7 +145,7 @@ public class TriggerEvaluationServiceTests
             Symbol = Symbol,
             Indicator = Indicator,
             Period = Period,
-            ResolutionMinutes = Resolution,
+            ResolutionMinutes = resolution,
             ConditionKind = TriggerConditionKind.IndicatorThreshold,
             Comparison = comparison,
             Threshold = threshold,
@@ -1516,6 +1517,38 @@ public class TriggerEvaluationServiceTests
         level.LevelBottom.Should().Be(98m);
         level.LevelVenue.Should().Be("TOPSTEPX");
         level.LevelId.Should().NotBeNull("the snapshot carries the soft level id");
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldKeepTheFiredSignalPrimary_WhenALowerLadderRungAlsoSatisfies()
+    {
+        // REGRESSION (review #968): the fired trigger is a 60m SWING; the ladder also carries a LOWER 15m rung that
+        // reads the SAME signal satisfied. Corroboration is HIGHER-timeframe only (ADR-0026 §3 "the larger ones are
+        // supporting"), so the fired 60m stays the primary/headline (§2) and the lower 15m is NOT cited at all -- a
+        // lower rung must never steal the headline and rebrand a 60m swing as a 15m scalp (R-4 headline, R-9 journal).
+        Guid accountId = await SeedAccountAsync();
+        await AddTriggerAsync(
+            route: TriggerRoute.AgentReview, accountId: accountId, size: 3, armState: TriggerArmState.Armed, resolution: 60);
+        ConfluenceOptions confluence = new() { TimeframeMinutes = [15, 60, 240] };
+
+        IndicatorReturns(25m); // the 60m fire, the lower 15m AND the higher 240m all read below 30 (all satisfied)
+
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "oversold", 72));
+
+        await Service(confluence: confluence).ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        Suggestion suggestion = await reload.Suggestions.Include(s => s.CitedFactors).SingleAsync();
+
+        suggestion.CitedFactors.Count(f => f.IsPrimary).Should().Be(1, "exactly one primary (ADR-0026)");
+        suggestion.CitedFactors.Single(f => f.IsPrimary).TimeframeMinutes
+            .Should().Be(60, "the FIRED signal is the headline; a lower rung never steals primary (ADR-0026 §2)");
+
+        // Only the fired 60m (primary) and the HIGHER 240m (supporting) are cited -- the lower 15m is never read.
+        suggestion.CitedFactors
+            .Where(f => f.Kind == CitedFactorKind.Indicator)
+            .Select(f => f.TimeframeMinutes)
+            .Should().BeEquivalentTo(new[] { 60, 240 }, "corroboration is higher-timeframe only; the lower 15m is excluded");
     }
 
     [Fact]
