@@ -76,6 +76,20 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// <see cref="FlatBeforeFillAdverseOrderPostgresFactory"/> and <see cref="TradeJournalWriteFaultPostgresFactory"/>
 /// use), so no background pass touches the seeded surface outside the window each case controls.
 /// </para>
+/// <para>
+/// <b>Each case discovers a DIFFERENT roster entry (a real regression this class found).</b>
+/// <c>AdversarialTestTradingVenue.GetAccountsAsync</c> returns the SAME fixed, caller-independent roster to
+/// every discover call, so two cases in this fixture both picking the roster's first tradeable account produce
+/// two DB <c>Account</c> rows sharing one <c>VenueAccountKey</c>. Every OTHER suite in this repo is blind to
+/// that — they route by the internal <c>Account.Id</c> GUID over HTTP — but a live
+/// <c>AccountEventStreamHost</c> resolves an inbound event by <c>VenueAccountKey + CredentialKey</c> ALONE
+/// (<c>AccountEventIngestionService.ResolveOwnerAsync</c> / <c>TradeJournalService.ResolveAccountAsync</c>),
+/// exactly as it would a real broker's genuinely-unique account number. Sharing the fake key let one case's
+/// closing fill resolve to the OTHER case's already-completed order and collide on ITS
+/// <c>{ OrderId, VenueFillKey }</c> — read, at first, as an inscrutable "already recorded" on what looked like
+/// a fresh delivery. Each case now passes a distinct <c>tradeableIndex</c> to
+/// <see cref="SetupTradeableAccountAsync"/>, whose own remarks carry the rest of this finding.
+/// </para>
 /// </remarks>
 public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<AdoptedRoundTripTradePostgresFactory>
 {
@@ -121,7 +135,7 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
     [Fact]
     public async Task AccountEventStreamHost_ShouldComposeExactlyOneRealizedTrade_WhenAnAdoptedStillOpenTakeIsLaterDrivenFlat()
     {
-        await using Scenario scenario = await BuildAdoptedRoundTripAsync("Topstep-960-Compose");
+        await using Scenario scenario = await BuildAdoptedRoundTripAsync("Topstep-960-Compose", tradeableIndex: 0);
 
         List<Trade> trades = await TradesAsync(scenario.AccountId);
         trades.Should().ContainSingle(
@@ -156,7 +170,7 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
     [Fact]
     public async Task AccountEventStreamHost_ShouldTreatARedeliveredEntryFill_AsAnIdempotentNoOp()
     {
-        await using Scenario scenario = await BuildAdoptedRoundTripAsync("Topstep-960-Replay");
+        await using Scenario scenario = await BuildAdoptedRoundTripAsync("Topstep-960-Replay", tradeableIndex: 1);
 
         List<Fill> beforeReplay = await EntryFillsAsync(scenario.EntryOrderId);
         beforeReplay.Should().ContainSingle();
@@ -230,12 +244,15 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
     /// for exactly the Trade this scenario's fills describe to compose. Left RUNNING on return — the replay case
     /// keeps driving events against it; the compose-only case disposes it immediately via <c>await using</c>.
     /// </summary>
-    private async Task<Scenario> BuildAdoptedRoundTripAsync(string firmName)
+    /// <param name="firmName">This scenario's firm — distinct per case, purely for readability in the DB.</param>
+    /// <param name="tradeableIndex">Which of the venue's fixed roster entries to discover — MUST be distinct per
+    /// case in this class fixture (see <see cref="SetupTradeableAccountAsync"/>'s own remarks for why).</param>
+    private async Task<Scenario> BuildAdoptedRoundTripAsync(string firmName, int tradeableIndex)
     {
         VenueFactory.ResetPositions();
 
         HttpClient client = await AuthenticatedClientAsync();
-        (Guid accountId, string venueAccountKey) = await SetupTradeableAccountAsync(client, firmName);
+        (Guid accountId, string venueAccountKey) = await SetupTradeableAccountAsync(client, firmName, tradeableIndex);
         await DeclareRiskProfileAsync(client, accountId);
 
         Guid entryOrderId = await StrandATakeAsync(client, accountId);
@@ -294,12 +311,17 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
 
         RunningHost running = await StartHostAsync();
 
+        // Derived from the exit order's own fresh id, never a shared literal: the { OrderId, VenueFillKey }
+        // unique index is what makes a redelivery an idempotent no-op, and a fill key reused across scenarios
+        // would make THAT property indistinguishable from a genuine wiring defect (gh#960 review).
+        string exitVenueFillKey = $"F-EXIT-{exitOrderId:N}";
+
         DateTimeOffset closedAt = DateTimeOffset.UtcNow;
         running.Stream.Arm(new FillEvent(
             VenueAccountId.Create(_projectx, venueAccountKey),
             closedAt,
             ExitVenueKey,
-            "F-EXIT-960",
+            exitVenueFillKey,
             OrderSide.Sell,
             Quantity: Size,
             new Price(ExitPrice),
@@ -308,11 +330,23 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
 
         bool exitIngested = await WaitUntilAsync(() => QueryDbAsync(database => database.Orders
             .IgnoreQueryFilters().AsNoTracking().AnyAsync(order => order.Id == exitOrderId && order.Status == OrderStatus.Filled)));
-        exitIngested.Should().BeTrue(
-            "the closing FillEvent must be ingested through the real AccountEventIngestionService before the flat "
-            + "is delivered — this scenario is about composing, not about the gh#748 defer-then-retry window "
-            + "(that is FlatBeforeFillAdverseOrderIntegrationTests' own subject). "
-            + DescribeHostLogs());
+        if (!exitIngested)
+        {
+            // A prior run collided on the { OrderId, VenueFillKey } unique index on this order's VERY FIRST
+            // delivery -- which can only mean either a genuinely duplicate write already sits under this fresh
+            // GUID, or the order's status update did not persist despite the Fill row landing. Dump the exact
+            // row(s) and the order's live status so the next failure (if any) answers which, directly, instead
+            // of another round of inference from a captured log line.
+            List<Fill> exitFills = await EntryFillsAsync(exitOrderId);
+            Order exitOrderNow = await OrderAsync(exitOrderId);
+            exitIngested.Should().BeTrue(
+                "the closing FillEvent must be ingested through the real AccountEventIngestionService before the "
+                + "flat is delivered — this scenario is about composing, not about the gh#748 defer-then-retry "
+                + $"window (that is FlatBeforeFillAdverseOrderIntegrationTests' own subject). Exit order is now "
+                + $"{exitOrderNow.Status} with {exitFills.Count} Fill row(s) under it: ["
+                + string.Join(", ", exitFills.Select(fill => $"{{Id={fill.Id}, VenueFillKey={fill.VenueFillKey}}}"))
+                + "]. " + DescribeHostLogs());
+        }
 
         running.Stream.Arm(new PositionEvent(
             VenueAccountId.Create(_projectx, venueAccountKey),
@@ -474,9 +508,24 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
         return client;
     }
 
-    /// <summary>Firm → conventions (no capital at risk ⇒ Practice) → connection → discovered tradeable account.</summary>
+    /// <summary>
+    /// Firm → conventions (no capital at risk ⇒ Practice) → connection → discovered tradeable account.
+    /// </summary>
+    /// <param name="tradeableIndex">
+    /// Which of the adversarial venue's <b>fixed, caller-independent</b> roster of tradeable accounts to pick —
+    /// every call discovers the SAME hardcoded <c>VenueAccountKey</c>s (<c>AdversarialTestTradingVenue.
+    /// GetAccountsAsync</c>), so two scenarios in one class picking index 0 both land on account
+    /// <c>PRAC-50K-101</c>. That collision is invisible to every OTHER suite (they route by the internal
+    /// <c>Account.Id</c> GUID over HTTP), but not to this one: <c>AccountEventIngestionService.ResolveOwnerAsync</c>
+    /// resolves an inbound account event by <c>VenueAccountKey + CredentialKey</c> ALONE — the same global
+    /// resolution a real broker's genuinely-unique account numbers make safe in production — so two DB
+    /// <c>Account</c> rows sharing one fake key make an event non-deterministically (in practice: whichever row
+    /// the unordered query happens to return first) attributable to the WRONG scenario's order, producing an
+    /// inexplicable "already recorded" collision on what looks like a fresh delivery (gh#960 review). Each
+    /// scenario in this class MUST pass a distinct index.
+    /// </param>
     private async Task<(Guid AccountId, string VenueAccountKey)> SetupTradeableAccountAsync(
-        HttpClient client, string firmName)
+        HttpClient client, string firmName, int tradeableIndex)
     {
         using HttpResponseMessage createFirm = await client.PostAsJsonAsync(
             "/firms", new CreateFirmRequest($"{firmName}-{Guid.NewGuid():N}", FirmType.PropFirm));
@@ -501,7 +550,12 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
         List<AccountResponse>? accounts = await discover.Content.ReadFromJsonAsync<List<AccountResponse>>(_jsonOptions);
         ArgumentNullException.ThrowIfNull(accounts);
 
-        AccountResponse tradeable = accounts.First(account => account.CanTrade);
+        // Ordered by VenueAccountKey (not the response's own, unspecified order) so "index 0 vs 1" is a
+        // deterministic, stable pick across runs, never an accident of the venue stub's list literal order.
+        AccountResponse tradeable = accounts
+            .Where(account => account.CanTrade)
+            .OrderBy(account => account.VenueAccountKey, StringComparer.Ordinal)
+            .ElementAt(tradeableIndex);
         return (tradeable.Id, tradeable.VenueAccountKey);
     }
 
