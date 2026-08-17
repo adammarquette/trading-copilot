@@ -55,6 +55,26 @@ public class AiRegistrationTests
     }
 
     [Fact]
+    public void AddTradingCopilotAi_ShouldBindTheUnavailableReranker_WhenNoCohereKeyIsConfigured()
+    {
+        // The rerank seam (gh#975) selects the SAME way as the embed provider and the LLM provider — by the presence
+        // of a key — so an unconfigured deployment gets the keyless passthrough default, never a missing dependency.
+        using ServiceProvider provider = Build(apiKey: null, cohereApiKey: null);
+
+        provider.GetRequiredService<IReranker>().Should().BeOfType<UnavailableReranker>(
+            "an unconfigured deployment must get the passthrough reranker, never a missing dependency");
+    }
+
+    [Fact]
+    public void AddTradingCopilotAi_ShouldBindTheCohereReranker_WhenACohereKeyIsConfigured()
+    {
+        using ServiceProvider provider = Build(apiKey: null, cohereApiKey: "cohere-test-key");
+
+        provider.GetRequiredService<IReranker>().Should().BeOfType<CohereRerankProvider>(
+            "a configured Cohere key wakes the real reranker through the same seam");
+    }
+
+    [Fact]
     public void AddTradingCopilotAi_ShouldRegisterTheLedgerNoLongerLivedThanItsDbContextOptions()
     {
         // The ledger injects the scoped DbContextOptions<TradingCopilotDbContext>. If it out-lives those options
@@ -103,12 +123,17 @@ public class AiRegistrationTests
             + "at startup");
     }
 
-    private static ServiceProvider Build(string? apiKey)
+    private static ServiceProvider Build(string? apiKey, string? cohereApiKey = null)
     {
         Dictionary<string, string?> settings = new();
         if (apiKey is not null)
         {
             settings["Llm:ApiKey"] = apiKey;
+        }
+
+        if (cohereApiKey is not null)
+        {
+            settings["Cohere:ApiKey"] = cohereApiKey;
         }
 
         IConfiguration config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();

@@ -121,6 +121,7 @@ escalation policy, the enrichment injection-surface argument) is untouched.)*
 | 2026-07-30 | the per-call budget-aware escalation skip landed; the pair-overrun is closed (gh#478) |
 | 2026-07-30 | the LLM-side meter landed; Grafana now sees true total AI spend (gh#477) |
 | 2026-08-15 | the stale-model embedding sweep rides the embed pass but costs no AI spend (gh#889) |
+| 2026-08-17 | the Cohere rerank provider landed behind an `IReranker` seam; no consumer / ledger write yet (gh#975) |
 
 ## Update (2026-07-28) — the deterministic mechanical route landed (gh#385)
 
@@ -388,6 +389,37 @@ migration is unchanged and already recorded (the ADR-0001 gh#881/gh#889 updates)
 the new model is one paid `EmbedAsync` per owner, cap-gated exactly like any other embed, so a large corpus re-embeds
 over several passes; the sweep is the free janitor that rides each of those passes, deleting only the rows the pass
 just superseded. No governor, meter, or ledger change.
+
+## Update (2026-08-17) — the Cohere rerank provider landed behind an `IReranker` seam (gh#975)
+
+A provider-neutral **`IReranker`** seam (Domain/Ai) + a **`CohereRerankProvider`** (Api/Ai) land the retrieval
+**rerank** half this ADR's stack has named from the start ("Cohere for embeddings **+ rerank**", engineering §2) —
+the cross-encoder second pass that sharpens a first-stage embedding / lexical recall. It is the **exact mirror of the
+gh#403 embed provider**, another layer of the same seam and cost model:
+- **Degrade-to-passthrough, never throw** (the embed provider's degrade-to-sparse, in rerank terms). A 429, a 5xx, a
+  transport fault, a bad-shape body, or an unconfigured deployment returns the candidates in their **original
+  (identity) order**, truncated to the caller's top-n — a correct if unsharpened answer, never an exception on a
+  retrieval path and never a dropped candidate set. Only a genuine caller cancellation propagates. The keyless
+  **`UnavailableReranker`** is the default until a key is present (the `UnavailableEmbeddingProvider` posture) and
+  never touches the network.
+- **Metered on every call** it makes, on the **same `MarqSpec.TradingCopilot.Ai` meter** as embeddings and LLM calls
+  (`ai.rerank.{calls, searches, cost_usd, latency}`, by model + outcome, low-cardinality; the ranked text is never a
+  tag) — so an unmetered rerank is never invisible spend, and a degrade is a visible zero-cost call, not an absence.
+- **Priced per _search_, not per token.** Cohere rerank bills one **search unit** per call (up to its per-call
+  document cap), so cost is a **single pinned `CohereOptions.UsdPerThousandSearches`** rate + an `EstimateRerankCost`,
+  distinct from the embed per-million-token rate — the same one-place, env-overridable pinning discipline (gh#403).
+- **DI switch in `AiRegistration`** (not `Program.cs`, where the embed switch sits) so the default-vs-provider
+  selection is **unit-tested**, exactly like the `ILlmProvider` switch beside it: `IReranker` resolves to
+  `CohereRerankProvider` when a Cohere key is present, `UnavailableReranker` otherwise. It reuses the named `cohere`
+  `HttpClient` and key the embed seam already registers.
+
+**Deliberately ahead of any consumer.** Nothing calls `RerankAsync` yet and **no `AIUsage` row is written** — the
+seam + adapter + default + metrics + pricing land first, and the ledger write is deferred to the first retrieval
+consumer, **exactly as the embed ledger write was deferred to gh#377** (gh#436). The result record already carries
+the spend facts (`Outcome` / `BilledSearches` / `EstimatedCostUsd`, mirroring `EmbeddingResult`) that consumer will
+ledger. **No schema, migration, or `AiUsageFeature.Rerank` value** in this increment — a ledger-write concern that
+belongs with the consumer. Still open: the first rerank consumer + its `AIUsage` write, and a governor tie-in for
+rerank spend if it proves material.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the

@@ -116,6 +116,27 @@ public static class AiRegistration
         // Enforcement lives below the model: it converses and reads, never proposes an order.
         services.AddScoped<IChatTurnService, ChatTurnService>();
 
+        // The rerank seam (gh#975, ADR-0008, engineering §2): the provider-neutral IReranker — Cohere's cross-encoder
+        // reranker when a Cohere key is present, the KEYLESS passthrough UnavailableReranker otherwise. The SAME switch
+        // shape as the embed provider (register concrete + keyless default + interface-by-IsConfigured) and the LLM
+        // provider above — placed HERE, not Program.cs where the embed switch sits, so the default-vs-provider
+        // selection is unit-testable (the LlmProvider posture). It lands AHEAD of any consumer: nothing calls
+        // RerankAsync yet and no AIUsage row is written (deferred to the first retrieval consumer, exactly as the embed
+        // ledger write was deferred to gh#377 / gh#436). CohereOptions is bound here so the switch reads IsConfigured;
+        // the embed seam in Program.cs binds the same "Cohere" section too, which is idempotent. The rerank provider
+        // reuses the named "cohere" HttpClient the embed seam registers. Metrics are REQUIRED, never optional — an
+        // unmetered call is invisible spend on the operator's own key (the gh#403 posture). Singletons like the embed
+        // provider + meter: stateless with no scoped dependency, so no captive-dependency risk.
+        services.Configure<CohereOptions>(config.GetSection(CohereOptions.SectionName));
+        services.AddSingleton<RerankMetrics>();
+        services.AddSingleton<IRerankMetrics>(provider => provider.GetRequiredService<RerankMetrics>());
+        services.AddSingleton<UnavailableReranker>();
+        services.AddSingleton<CohereRerankProvider>();
+        services.AddSingleton<IReranker>(provider =>
+            provider.GetRequiredService<IOptions<CohereOptions>>().Value.IsConfigured
+                ? provider.GetRequiredService<CohereRerankProvider>()
+                : provider.GetRequiredService<UnavailableReranker>());
+
         return services;
     }
 }
