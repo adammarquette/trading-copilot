@@ -40,6 +40,7 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.Finnhub;
 using MarqSpec.TradingCopilot.Integration.ProjectX;
 using MarqSpec.TradingCopilot.Integration.Tiingo;
+using MarqSpec.TradingCopilot.Integration.Tradovate;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
@@ -80,6 +81,10 @@ builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
 // singleton resolved by VenueId, never dynamically loaded (a venue places orders and auto-flattens, R-13). It holds
 // no credential values, so it is a plain singleton independent of the per-process credential set above.
 builder.Services.AddSingleton<IVenueSetupContract, ProjectXSetupContract>();
+
+// Tradovate self-describes its seven-field onboarding (ADR-0023, gh#41) — the case the fixed two-field form could not
+// serve. A declaration only (no credential values, no runtime venue yet); the execution adapter joins in gh#41.
+builder.Services.AddSingleton<IVenueSetupContract, TradovateSetupContract>();
 
 // Venue connection liveness (R-17, gh#209): a process-wide singleton over the venue's websocket client, so the
 // orphan guard can watch for a drop. One credential set per process (ADR-0015) -> one connection.

@@ -28,6 +28,7 @@
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Finnhub\MarqSpec.TradingCopilot.Integration.Finnhub.csproj" />
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.ProjectX\MarqSpec.TradingCopilot.Integration.ProjectX.csproj" />
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Tiingo\MarqSpec.TradingCopilot.Integration.Tiingo.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Tradovate\MarqSpec.TradingCopilot.Integration.Tradovate.csproj" />
   </ItemGroup>
 
   <ItemGroup>
