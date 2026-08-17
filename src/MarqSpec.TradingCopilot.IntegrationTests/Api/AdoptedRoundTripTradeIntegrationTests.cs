@@ -77,18 +77,23 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// use), so no background pass touches the seeded surface outside the window each case controls.
 /// </para>
 /// <para>
-/// <b>Each case discovers a DIFFERENT roster entry (a real regression this class found).</b>
+/// <b>One shared discovery, two distinct accounts (a real regression this class found, in two layers).</b>
 /// <c>AdversarialTestTradingVenue.GetAccountsAsync</c> returns the SAME fixed, caller-independent roster to
-/// every discover call, so two cases in this fixture both picking the roster's first tradeable account produce
-/// two DB <c>Account</c> rows sharing one <c>VenueAccountKey</c>. Every OTHER suite in this repo is blind to
-/// that — they route by the internal <c>Account.Id</c> GUID over HTTP — but a live
-/// <c>AccountEventStreamHost</c> resolves an inbound event by <c>VenueAccountKey + CredentialKey</c> ALONE
-/// (<c>AccountEventIngestionService.ResolveOwnerAsync</c> / <c>TradeJournalService.ResolveAccountAsync</c>),
-/// exactly as it would a real broker's genuinely-unique account number. Sharing the fake key let one case's
-/// closing fill resolve to the OTHER case's already-completed order and collide on ITS
-/// <c>{ OrderId, VenueFillKey }</c> — read, at first, as an inscrutable "already recorded" on what looked like
-/// a fresh delivery. Each case now passes a distinct <c>tradeableIndex</c> to
-/// <see cref="SetupTradeableAccountAsync"/>, whose own remarks carry the rest of this finding.
+/// every discover call. Every OTHER suite in this repo is blind to that — they route by the internal
+/// <c>Account.Id</c> GUID over HTTP — but a live <c>AccountEventStreamHost</c> resolves an inbound event by
+/// <c>VenueAccountKey + CredentialKey</c> ALONE (<c>AccountEventIngestionService.ResolveOwnerAsync</c> /
+/// <c>TradeJournalService.ResolveAccountAsync</c>), exactly as it would a real broker's genuinely-unique account
+/// number — so two DB <c>Account</c> rows sharing one fake key make that resolution ambiguous. <b>Layer one:</b>
+/// two cases each picking the roster's first tradeable account both land on <c>PRAC-50K-101</c> directly — one
+/// case's closing fill resolves to the OTHER's already-completed order and collides on its
+/// <c>{ OrderId, VenueFillKey }</c>, read at first as an inscrutable "already recorded" on what looked like a
+/// fresh delivery. <b>Layer two, once each case picked a DIFFERENT index:</b> <c>ConnectionEndpoints.
+/// DiscoverAccountsAsync</c> upserts the ENTIRE roster under whichever connection discovers it, so two cases
+/// each creating their OWN connection still each end up with all four keys, twice over — an event can now
+/// resolve to the OTHER case's untouched duplicate of the SAME key and report "unknown order" for a
+/// <c>VenueOrderKey</c> that is very much seeded, just on the row this query didn't land on. The fix is
+/// <see cref="SharedTradeableAccountsAsync"/>: ONE discovery for the whole fixture, so each of the four keys
+/// exists exactly once, and the two cases pick DIFFERENT indices into that single result.
 /// </para>
 /// </remarks>
 public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<AdoptedRoundTripTradePostgresFactory>
@@ -118,6 +123,9 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
 
     private static readonly VenueId _projectx = VenueId.Parse("projectx");
 
+    /// <summary>Memoized across every case in this class — see <see cref="SharedTradeableAccountsAsync"/>.</summary>
+    private static Task<IReadOnlyList<(Guid AccountId, string VenueAccountKey)>>? _sharedTradeableAccountsTask;
+
     private readonly AdoptedRoundTripTradePostgresFactory _factory;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -135,7 +143,7 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
     [Fact]
     public async Task AccountEventStreamHost_ShouldComposeExactlyOneRealizedTrade_WhenAnAdoptedStillOpenTakeIsLaterDrivenFlat()
     {
-        await using Scenario scenario = await BuildAdoptedRoundTripAsync("Topstep-960-Compose", tradeableIndex: 0);
+        await using Scenario scenario = await BuildAdoptedRoundTripAsync(tradeableIndex: 0);
 
         List<Trade> trades = await TradesAsync(scenario.AccountId);
         trades.Should().ContainSingle(
@@ -170,7 +178,7 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
     [Fact]
     public async Task AccountEventStreamHost_ShouldTreatARedeliveredEntryFill_AsAnIdempotentNoOp()
     {
-        await using Scenario scenario = await BuildAdoptedRoundTripAsync("Topstep-960-Replay", tradeableIndex: 1);
+        await using Scenario scenario = await BuildAdoptedRoundTripAsync(tradeableIndex: 1);
 
         List<Fill> beforeReplay = await EntryFillsAsync(scenario.EntryOrderId);
         beforeReplay.Should().ContainSingle();
@@ -244,15 +252,14 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
     /// for exactly the Trade this scenario's fills describe to compose. Left RUNNING on return — the replay case
     /// keeps driving events against it; the compose-only case disposes it immediately via <c>await using</c>.
     /// </summary>
-    /// <param name="firmName">This scenario's firm — distinct per case, purely for readability in the DB.</param>
-    /// <param name="tradeableIndex">Which of the venue's fixed roster entries to discover — MUST be distinct per
-    /// case in this class fixture (see <see cref="SetupTradeableAccountAsync"/>'s own remarks for why).</param>
-    private async Task<Scenario> BuildAdoptedRoundTripAsync(string firmName, int tradeableIndex)
+    /// <param name="tradeableIndex">Which of the ONE shared discovery's roster entries to use — MUST be distinct
+    /// per case in this class fixture (see <see cref="SharedTradeableAccountsAsync"/>'s own remarks for why).</param>
+    private async Task<Scenario> BuildAdoptedRoundTripAsync(int tradeableIndex)
     {
         VenueFactory.ResetPositions();
 
         HttpClient client = await AuthenticatedClientAsync();
-        (Guid accountId, string venueAccountKey) = await SetupTradeableAccountAsync(client, firmName, tradeableIndex);
+        (Guid accountId, string venueAccountKey) = await SetupTradeableAccountAsync(client, tradeableIndex);
         await DeclareRiskProfileAsync(client, accountId);
 
         Guid entryOrderId = await StrandATakeAsync(client, accountId);
@@ -509,26 +516,34 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
     }
 
     /// <summary>
-    /// Firm → conventions (no capital at risk ⇒ Practice) → connection → discovered tradeable account.
+    /// The ONE firm → conventions → connection → discover flow this whole class fixture ever runs, memoized
+    /// across every case (xUnit constructs a fresh test-class instance per <c>[Fact]</c>, so this has to be
+    /// <c>static</c> to actually be shared — the point of it).
     /// </summary>
-    /// <param name="tradeableIndex">
-    /// Which of the adversarial venue's <b>fixed, caller-independent</b> roster of tradeable accounts to pick —
-    /// every call discovers the SAME hardcoded <c>VenueAccountKey</c>s (<c>AdversarialTestTradingVenue.
-    /// GetAccountsAsync</c>), so two scenarios in one class picking index 0 both land on account
-    /// <c>PRAC-50K-101</c>. That collision is invisible to every OTHER suite (they route by the internal
-    /// <c>Account.Id</c> GUID over HTTP), but not to this one: <c>AccountEventIngestionService.ResolveOwnerAsync</c>
-    /// resolves an inbound account event by <c>VenueAccountKey + CredentialKey</c> ALONE — the same global
-    /// resolution a real broker's genuinely-unique account numbers make safe in production — so two DB
-    /// <c>Account</c> rows sharing one fake key make an event non-deterministically (in practice: whichever row
-    /// the unordered query happens to return first) attributable to the WRONG scenario's order, producing an
-    /// inexplicable "already recorded" collision on what looks like a fresh delivery (gh#960 review). Each
-    /// scenario in this class MUST pass a distinct index.
-    /// </param>
-    private async Task<(Guid AccountId, string VenueAccountKey)> SetupTradeableAccountAsync(
-        HttpClient client, string firmName, int tradeableIndex)
+    /// <remarks>
+    /// <b>Why one discovery, not one per case (a real regression this class found).</b>
+    /// <c>ConnectionEndpoints.DiscoverAccountsAsync</c> upserts EVERY entry of
+    /// <c>AdversarialTestTradingVenue.GetAccountsAsync</c>'s fixed roster under whichever connection calls it —
+    /// so a SECOND connection discovering the SAME fixed roster does not avoid the first connection's accounts,
+    /// it DUPLICATES all of them again under itself. Two cases each creating their own connection therefore
+    /// leaves every one of the four fake <c>VenueAccountKey</c>s sitting on TWO different DB <c>Account</c> rows
+    /// — regardless of which index each case later picks for its own use — and
+    /// <c>AccountEventIngestionService.ResolveOwnerAsync</c> resolves an inbound event by
+    /// <c>VenueAccountKey + CredentialKey</c> ALONE, so it cannot tell those two rows apart: an event for one
+    /// case's account can resolve to the OTHER case's untouched duplicate of the SAME key, which then reports
+    /// "unknown order" for a `VenueOrderKey` that is very much seeded — just under the row this query didn't
+    /// land on. A single shared connection makes each of the four keys exist EXACTLY once in the whole fixture,
+    /// which is what index-based picking actually needed to be race-proof.
+    /// </remarks>
+    private Task<IReadOnlyList<(Guid AccountId, string VenueAccountKey)>> SharedTradeableAccountsAsync(
+        HttpClient client) =>
+        _sharedTradeableAccountsTask ??= DiscoverTradeableAccountsAsync(client);
+
+    private async Task<IReadOnlyList<(Guid AccountId, string VenueAccountKey)>> DiscoverTradeableAccountsAsync(
+        HttpClient client)
     {
         using HttpResponseMessage createFirm = await client.PostAsJsonAsync(
-            "/firms", new CreateFirmRequest($"{firmName}-{Guid.NewGuid():N}", FirmType.PropFirm));
+            "/firms", new CreateFirmRequest($"Topstep-960-{Guid.NewGuid():N}", FirmType.PropFirm));
         FirmResponse? firm = await createFirm.Content.ReadFromJsonAsync<FirmResponse>(_jsonOptions);
         ArgumentNullException.ThrowIfNull(firm);
 
@@ -552,11 +567,22 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
 
         // Ordered by VenueAccountKey (not the response's own, unspecified order) so "index 0 vs 1" is a
         // deterministic, stable pick across runs, never an accident of the venue stub's list literal order.
-        AccountResponse tradeable = accounts
+        return [.. accounts
             .Where(account => account.CanTrade)
             .OrderBy(account => account.VenueAccountKey, StringComparer.Ordinal)
-            .ElementAt(tradeableIndex);
-        return (tradeable.Id, tradeable.VenueAccountKey);
+            .Select(account => (account.Id, account.VenueAccountKey))];
+    }
+
+    /// <param name="tradeableIndex">
+    /// Which of the ONE shared discovery's tradeable accounts to use — MUST be distinct per case in this class
+    /// (see <see cref="SharedTradeableAccountsAsync"/>'s remarks for why sharing the discovery, not just
+    /// picking different indices, is what actually makes that safe).
+    /// </param>
+    private async Task<(Guid AccountId, string VenueAccountKey)> SetupTradeableAccountAsync(
+        HttpClient client, int tradeableIndex)
+    {
+        IReadOnlyList<(Guid AccountId, string VenueAccountKey)> accounts = await SharedTradeableAccountsAsync(client);
+        return accounts[tradeableIndex];
     }
 
     private async Task DeclareRiskProfileAsync(HttpClient client, Guid accountId)
