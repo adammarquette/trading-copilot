@@ -92,8 +92,10 @@ public static class NewsEndpoints
                     // Split the operator's own feedback by axis (gh#762): the importance kind (star/mute) drives the
                     // salience column; the direction kind (👍/👎) is surfaced as a stored, salience-inert sentiment fact.
                     IEnumerable<SoftSignalFeedback> own = ownFeedback[item.DedupKey];
-                    SoftSignalKind? importance = own.FirstOrDefault(f => f.Kind.Axis() == SoftSignalAxis.Importance)?.Kind;
-                    SoftSignalKind? direction = own.FirstOrDefault(f => f.Kind.Axis() == SoftSignalAxis.Direction)?.Kind;
+                    // TryAxis, not Axis(): a read must never 500 on a stray/corrupt stored kind the CK does not forbid --
+                    // an unmappable row is simply skipped (mirrors SalienceProfile.Build's fail-safe skip).
+                    SoftSignalKind? importance = own.FirstOrDefault(f => f.Kind.TryAxis(out SoftSignalAxis a) && a == SoftSignalAxis.Importance)?.Kind;
+                    SoftSignalKind? direction = own.FirstOrDefault(f => f.Kind.TryAxis(out SoftSignalAxis a) && a == SoftSignalAxis.Direction)?.Kind;
                     return NewsFeedItemResponse.From(
                         item, dimensions, baseRelevance, score, baseRelevance * score.Multiplier, importance, direction);
                 })
@@ -223,7 +225,7 @@ public static class NewsEndpoints
         List<SoftSignalFeedback> rows = await database.SoftSignalFeedbacks
             .Where(feedback => feedback.NewsDedupKey == dedupKey)
             .ToListAsync(cancellationToken);
-        return rows.FirstOrDefault(feedback => feedback.Kind.Axis() == axis);
+        return rows.FirstOrDefault(feedback => feedback.Kind.TryAxis(out SoftSignalAxis rowAxis) && rowAxis == axis);
     }
 
     // Apply a re-rating: a genuine kind change resets the recency clock; re-applying the SAME kind is a true no-op, so
