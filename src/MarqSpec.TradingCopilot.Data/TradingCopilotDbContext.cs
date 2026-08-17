@@ -460,11 +460,15 @@ public class TradingCopilotDbContext : TenantDbContext
 
             // Cascade: an outcome dies WITH its suggestion (gh#939, operator decision 2026-08-16), settling the orphan
             // the gh#832 comment flagged -- an untaken outcome (no TradeId) that SetNull would have stranded against
-            // CK_Outcomes_ParentPresent when a suggestion is deleted. Safe because a suggestion is append-only and is
-            // only ever deleted via an account-removal cascade (Suggestion.AccountId cascades), where the outcome
-            // should die anyway -- a TAKEN suggestion's outcome already dies via its Trade's cascade above. Postgres
-            // permits the two cascade paths to one Outcome row (Trade and Suggestion); a row reached by both is
-            // deleted once.
+            // CK_Outcomes_ParentPresent when a suggestion is deleted. The safety rests on a CONVENTION, not an enforced
+            // invariant: a suggestion is append-only, so in production it is only ever removed via an account-removal
+            // cascade (Suggestion.AccountId cascades), where the outcome should die anyway -- a TAKEN suggestion's
+            // outcome already dies via its Trade's cascade above. The DB nonetheless ALLOWS a direct suggestion delete
+            // (no production path does one today), and under Cascade that would also delete a trade-derived outcome
+            // carrying this SuggestionId -- a lineage loss SetNull avoided; acceptable only while no such path exists,
+            // and the reason the untaken path (gh#955) will suppress recomposition rather than lean on deletes.
+            // Postgres permits the two cascade paths to one Outcome row (Trade and Suggestion); a row reached by both
+            // is deleted once. (Account-cascade over a supersede chain still meets Suggestion.SupersedesId's RESTRICT.)
             outcome.HasOne<Suggestion>()
                 .WithMany()
                 .HasForeignKey(o => o.SuggestionId)

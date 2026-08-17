@@ -156,6 +156,18 @@ public sealed class OutcomeJournalService
             .Select(disposition => disposition.SuggestionId)
             .ToListAsync(cancellationToken);
 
+        // A suggestion an ORDER was armed from is taken WHATEVER its disposition row says (gh#939 review): the take
+        // path writes the disposition in a best-effort unit of work AFTER the order is Working and swallows faults,
+        // and a pass/take race can leave a taken suggestion journaled Passed — so the disposition alone is not a
+        // reliable "untaken" signal. Order.SuggestionId is the durable armed fact; a suggestion it names is excluded,
+        // so the closed-trade sweep (once its position closes) is the one and only writer of that suggestion's
+        // outcome — never a spurious untaken row alongside the eventual trade one.
+        List<Guid> armed = await _database.Orders
+            .IgnoreQueryFilters()
+            .Where(order => order.SuggestionId != null)
+            .Select(order => order.SuggestionId!.Value)
+            .ToListAsync(cancellationToken);
+
         // A PASSED suggestion is a scratch — the operator's explicit decline, an actual resolution that wins over the
         // clock's expiry (see the basis pick below).
         List<Guid> passed = await _database.SuggestionDispositions
@@ -171,6 +183,7 @@ public sealed class OutcomeJournalService
             .IgnoreQueryFilters()
             .Where(suggestion => !alreadyOutcomed.Contains(suggestion.Id)
                 && !taken.Contains(suggestion.Id)
+                && !armed.Contains(suggestion.Id)
                 && (passed.Contains(suggestion.Id) || suggestion.State == SuggestionState.ExpiredVoid))
             .OrderBy(suggestion => suggestion.CreatedAt)
             .Take(MaxPerPass)

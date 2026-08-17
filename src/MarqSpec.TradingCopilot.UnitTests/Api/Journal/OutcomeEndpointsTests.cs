@@ -219,42 +219,28 @@ public class OutcomeEndpointsTests
         return audit;
     }
 
-    [Fact]
-    public async Task HardDeleteAsync_ShouldRemoveTheOutcome_AndReturnNoContent()
+    [Theory]
+    [InlineData(false)] // trade-derived (TradeId set) — the closed-trade sweep recomposes it
+    [InlineData(true)]  // untaken (SuggestionId only) — the unfilled-suggestion sweep recomposes it (gh#939)
+    public async Task HardDeleteAsync_ShouldRefuseAJournalDerivedOutcome_With409_AndNeitherRemoveNorAudit(bool untaken)
     {
-        Guid id = await SeedUntakenOutcomeAsync(); // hard delete serves a record with no live re-deriving source
+        // Every outcome is a projection the OutcomeJournalService recomposes — a closed trade (gh#909) or a terminal
+        // suggestion (gh#939) — so a hard delete would resurrect it against the operator's confirmed removal. It is
+        // refused across the board until the recomposition-suppression lands (gh#955); soft-delete is the removal (it
+        // keeps the row, so the writer never recomposes). CK_Outcomes_ParentPresent guarantees a parent, so every
+        // outcome hits this refusal.
+        Guid id = untaken ? await SeedUntakenOutcomeAsync() : await SeedOutcomeAsync();
+        IAuditLog audit = OkAudit();
 
         await using TradingCopilotDbContext context = Context();
-        IResult result = await OutcomeEndpoints.HardDeleteAsync(id, _now, context, OkAudit(), NullLoggerFactory.Instance, default);
+        IResult result = await OutcomeEndpoints.HardDeleteAsync(id, _now, context, audit, NullLoggerFactory.Instance, default);
 
-        StatusOf(result).Should().Be(StatusCodes.Status204NoContent);
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        A.CallTo(() => audit.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
+            .MustNotHaveHappened(); // refused: nothing removed, so nothing audited
 
         await using TradingCopilotDbContext verify = Context();
-        (await verify.Outcomes.AnyAsync(outcome => outcome.Id == id)).Should().BeFalse(); // the content is gone
-    }
-
-    [Fact]
-    public async Task HardDeleteAsync_ShouldAuditTheDeletion_NamingTheOutcomeAndResolution()
-    {
-        Guid id = await SeedUntakenOutcomeAsync(configure: outcome => outcome.Resolution = OutcomeResolution.Loss);
-
-        IReadOnlyCollection<AuditRecord>? captured = null;
-        IAuditLog audit = A.Fake<IAuditLog>();
-        A.CallTo(() => audit.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
-            .Invokes((IReadOnlyCollection<AuditRecord> records, CancellationToken _) => captured = records)
-            .Returns(Task.CompletedTask);
-
-        await using TradingCopilotDbContext context = Context();
-        await OutcomeEndpoints.HardDeleteAsync(id, _now, context, audit, NullLoggerFactory.Instance, default);
-
-        AuditRecord record = captured.Should().ContainSingle().Subject;
-        record.Action.Should().Be(AuditAction.OutcomeHardDeleted);
-        record.Placement.Should().Be(AuditPlacement.None); // concerns no protective leg
-        record.Source.Should().BeNull(); // CK_AuditRecords_Source_MatchesAction: a non-5/6/7 action carries no source
-        record.SyntheticRisk.Should().BeFalse();
-        record.UserId.Should().Be(_operator); // the outcome's owner (R-20)
-        record.RecordedAt.Should().Be(_now);
-        record.Detail.Should().Contain(id.ToString()).And.Contain("Loss"); // the fact outlives the content
+        (await verify.Outcomes.AnyAsync(outcome => outcome.Id == id)).Should().BeTrue(); // the row stays
     }
 
     [Fact]
@@ -275,42 +261,4 @@ public class OutcomeEndpointsTests
         (await verify.Outcomes.AnyAsync(outcome => outcome.Id == id)).Should().BeTrue(); // untouched
     }
 
-    [Fact]
-    public async Task HardDeleteAsync_ShouldStillRemoveTheOutcome_WhenTheAuditWriteFaults()
-    {
-        // R-15: the removal is the operator's confirmed, committed action; a transient audit fault is logged, never
-        // surfaced, and must not resurrect a row the operator deliberately removed.
-        Guid id = await SeedUntakenOutcomeAsync();
-        IAuditLog audit = A.Fake<IAuditLog>();
-        A.CallTo(() => audit.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
-            .Throws(new InvalidOperationException("audit store unavailable"));
-
-        await using TradingCopilotDbContext context = Context();
-        IResult result = await OutcomeEndpoints.HardDeleteAsync(id, _now, context, audit, NullLoggerFactory.Instance, default);
-
-        StatusOf(result).Should().Be(StatusCodes.Status204NoContent);
-
-        await using TradingCopilotDbContext verify = Context();
-        (await verify.Outcomes.AnyAsync(outcome => outcome.Id == id)).Should().BeFalse(); // the delete stands
-    }
-
-    [Fact]
-    public async Task HardDeleteAsync_ShouldRefuseATradeLinkedOutcome_With409_AndNeitherRemoveNorAudit()
-    {
-        // A trade-derived outcome is a projection of a closed Trade — the OutcomeJournalService would recompose it on
-        // the next sweep, resurrecting it against the operator's confirmed removal (gh#909 review). Refuse it; soft-delete
-        // is its stable removal (it keeps the row, so the writer never recomposes).
-        Guid id = await SeedOutcomeAsync(); // trade-linked (TradeId set) by default
-        IAuditLog audit = OkAudit();
-
-        await using TradingCopilotDbContext context = Context();
-        IResult result = await OutcomeEndpoints.HardDeleteAsync(id, _now, context, audit, NullLoggerFactory.Instance, default);
-
-        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
-        A.CallTo(() => audit.WriteAsync(A<IReadOnlyCollection<AuditRecord>>._, A<CancellationToken>._))
-            .MustNotHaveHappened(); // refused: nothing removed, so nothing audited
-
-        await using TradingCopilotDbContext verify = Context();
-        (await verify.Outcomes.AnyAsync(outcome => outcome.Id == id)).Should().BeTrue(); // the row stays
-    }
 }

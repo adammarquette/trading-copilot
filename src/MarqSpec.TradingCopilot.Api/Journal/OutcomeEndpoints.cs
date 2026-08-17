@@ -158,20 +158,22 @@ public static class OutcomeEndpoints
             return Results.NotFound(); // not found / not owned (R-20) — never a disclosure
         }
 
-        if (outcome.TradeId is not null)
+        if (outcome.TradeId is not null || outcome.SuggestionId is not null)
         {
-            // A trade-derived outcome is a PROJECTION of a closed Trade, so hard-deleting the row does not stick: the
-            // OutcomeJournalService anti-join keys on the presence of an outcome row for the trade, so the next sweep
-            // (≤ one poll interval) recomposes it — with the R-15 flags defaulting off — resurrecting it into training
+            // EVERY outcome is a PROJECTION the OutcomeJournalService recomposes: the closed-trade sweep for a TradeId,
+            // the unfilled-suggestion sweep for a SuggestionId (gh#939). Hard-deleting the row only has the next sweep
+            // (≤ one poll interval) recompose it — with the R-15 flags defaulting off — resurrecting it into training
             // and default views against the operator's confirmed removal, and leaving the audit trail claiming a
-            // deletion that came back. Soft-delete is its correct removal: it KEEPS the row (so the writer never
-            // recomposes) while excluding it from training and hiding it. Hard delete is for a record with no live
-            // re-deriving source; an UNTAKEN outcome now has one too (its terminal suggestion, gh#939), so the
-            // recomposition-suppression that makes hard delete permanent for BOTH kinds is a tracked follow-on.
+            // deletion that came back. CK_Outcomes_ParentPresent guarantees at least one parent, so hard delete is
+            // refused across the board and soft-delete is the removal: it KEEPS the row (so the writer never
+            // recomposes) while excluding it from training and hiding it. Functional hard delete awaits a
+            // recomposition-suppression mechanism — a tombstone the writer's anti-joins consult (gh#955); the
+            // remove-and-audit below is that mechanism, gated here until the suppression lands.
             return Results.Conflict(new
             {
-                error = "A trade-derived outcome cannot be hard-deleted — the journal would recompose it. Soft-delete "
-                    + "removes it from training and default views. Hard delete is for records with no live source (gh#939).",
+                error = "This outcome is derived from the journal (a closed trade or a terminal suggestion) and would "
+                    + "be recomposed, so it cannot be hard-deleted. Soft-delete removes it from training and default "
+                    + "views. Functional hard delete awaits a recomposition-suppression mechanism (gh#955).",
             });
         }
 
