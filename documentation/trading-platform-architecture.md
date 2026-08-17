@@ -80,10 +80,10 @@ label is the point: ProjectX's `ApiKey` is really the *username* and `ApiSecret`
 lived only in an `.env.example` comment. Discovery stays **compile-time** — the contract is declared in source and
 registered at the composition root, never dynamically loaded, since a venue places orders and auto-flattens (R-13) —
 and a declaration is never an enforcement point (the gate is, ADR-0007). *Shipped so far: identity + credential
-schema — ProjectX **and** Tradovate now declare theirs (gh#41's 7-field case is onboardable), served over HTTP at
-**`GET /venues/setup`** — schema only, no credential value ever leaves (ADR-0015) — for onboarding to render from;
-Tradovate's endpoint model, mode-reporting mechanism, and its runtime execution adapter still land with the rest of
-gh#41.*
+schema — ProjectX **and** Tradovate now declare theirs, served over HTTP at **`GET /venues/setup`** — schema only, no
+credential value ever leaves (ADR-0015) — for onboarding to render from. Tradovate's schema is served, not yet wired:
+the form that renders its 7 fields and the connection path that accepts it stay gated to ProjectX (gh#61 / gh#60), and
+its endpoint model, mode-reporting mechanism, and runtime execution adapter land with gh#977.*
 
 **What must not leak across it:** transport shape (ProjectX = one realtime host, two SignalR hubs; Tradovate =
 two separate sockets), auth scheme, and how the venue expresses its **execution mode** (ProjectX exposes a

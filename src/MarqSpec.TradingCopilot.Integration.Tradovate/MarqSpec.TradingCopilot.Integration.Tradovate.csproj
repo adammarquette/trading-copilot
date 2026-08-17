@@ -3,7 +3,7 @@
   <ItemGroup>
     <!-- The setup-time half of the Tradovate adapter (ADR-0023, gh#41): a credential-schema declaration, so it needs
          Domain alone. Common settings (net10.0, nullable, warnings-as-errors) come from ../Directory.Build.props. The
-         Tradovate gateway client (external/) and the runtime venue join with the execution-adapter increment, which is
+         Tradovate gateway client (external/) and the runtime venue join with the execution-adapter increment (gh#977),
          when the submodule pin advances from the PRD-only commit to the built client. -->
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Domain\MarqSpec.TradingCopilot.Domain.csproj" />
   </ItemGroup>
