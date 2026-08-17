@@ -86,3 +86,22 @@ primary factor for back-compat.
 **The assembly sub-issue remains** — populating the *supporting* factors (multi-timeframe corroboration + aligned
 levels) waits on gh#595's frozen output contract (§1). The proximity band `min(k ticks, f×ATR)` and the lookback
 window (§3) are that sub-issue's options, deliberately not pulled into the model.
+
+## Update (2026-08-17, gh#730) — the assembly sub-issue shipped; gh#593 build is complete
+
+The **supporting** factors are now assembled at issuance. A pure, entity-free
+`Domain/Suggestions/ConfluenceAlignment.AlignSupporting` implements §3: an indicator corroborates when the **same
+signal** (`IndicatorThresholdCondition.Evaluate`) is satisfied on **another timeframe**; a level corroborates when
+the entry sits within `min(k ticks, f×ATR)` of its zone (the tick arm alone when ATR is unmeasurable). The scan
+(`TriggerEvaluationService.StageSuggestionAsync`) re-reads the same indicator across a configured timeframe ladder,
+reads active levels through a **new venue-agnostic `IPriceLevelSource` overload** (the scan holds only the neutral
+symbol; injecting the execution seam would break gate-below-model), sizes the band from the fired trigger's ATR and
+the instrument tick, and appends the aligned factors — running `DerivePrimary` over the **indicator** factors alone,
+so the fired signal stays primary and a **level is never primary** (§2). The band knobs are `ConfluenceOptions`
+(`KTicks` / `FAtr` / the ladder), `ValidateOnStart`-guarded.
+
+**Fail-open:** a confluence read/assemble fault degrades to the N=1 single-factor set rather than aborting the
+owner's scan pass. **Two things deliberately not done:** the **rationale prose** is not folded (it is LLM-authored
+verbatim, gh#542 — the confluence rides the cited-factor *set*, not the reviewer's text); and a bar-count
+**lookback** window is not added (the indicator read is point-in-time; a series read `IIndicatorSource` does not
+expose). Both are noted for a follow-up if wanted.
