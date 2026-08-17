@@ -21,10 +21,16 @@
 #      that suite's row, and treating it as one would let a suite ship with no row at all (PR #945 review).
 #   2. No suite is the subject of MORE THAN ONE row. Two rows can disagree, and the reader acts on whichever
 #      they land on -- gh#952 was a "suite not yet written" row left standing after the suite shipped and got a
-#      second row. A GROUP row naming several suites at once is exempt: the staging harness and the
-#      SuggestionDrift trio list their members that way, and those members keep rows of their own. The exemption
-#      is row-shaped, not member-shaped, so a duplicate CAN be laundered by adding a second name to the
-#      offending subject cell -- accepted, because the alternative is failing the legitimate group rows.
+#      second row. Counted over SOLE-subject rows only, which exempts a GROUP row naming several suites at once.
+#
+#      The exemption rests on ONE live case, so do not read it as broader than it is. §2 has two group rows (the
+#      staging harness, 2 members; the SuggestionDrift trio, 3) covering 5 members, of which exactly ONE --
+#      `BracketSizingStagingIntegrationTests.cs` -- also carries its own row. Counting group members instead of
+#      rows reddens that one suite and nothing else; the other four members appear only in their group row and
+#      are unaffected either way. Measured at gh#972; re-measure rather than trusting this sentence.
+#
+#      The exemption is row-shaped, not member-shaped, so a duplicate CAN be laundered by adding a second suite
+#      name to the offending subject cell. Accepted as the cost of not failing that one legitimate row.
 #   3. Every suite a row's subject names still exists (a row for a deleted -- or never-written -- file sends the
 #      next reader looking for something that is not there; the two found in the gh#862 audit had never existed
 #      in any commit, on any branch). Scoped the same way, so §2 can still DISCUSS a suite it does not list.
