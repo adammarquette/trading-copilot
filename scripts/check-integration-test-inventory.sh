@@ -19,12 +19,28 @@
 #   1. Every *IntegrationTests.cs / *SmokeTests.cs file is the SUBJECT of a row -- named in the row's first
 #      cell, not merely mentioned somewhere in one. A description cell cross-referencing another suite is not
 #      that suite's row, and treating it as one would let a suite ship with no row at all (PR #945 review).
-#   2. Every suite a row's subject names still exists (a row for a deleted -- or never-written -- file sends the
+#   2. No suite is the subject of MORE THAN ONE row. Two rows can disagree, and the reader acts on whichever
+#      they land on -- gh#952 was a "suite not yet written" row left standing after the suite shipped and got a
+#      second row. Counted over SOLE-subject rows only, which exempts a GROUP row naming several suites at once.
+#
+#      The exemption rests on ONE live case, so do not read it as broader than it is. §2 has two group rows (the
+#      staging harness, 2 members; the SuggestionDrift trio, 3) covering 5 members, of which exactly ONE --
+#      `BracketSizingStagingIntegrationTests.cs` -- also carries its own row. Counting group members instead of
+#      rows reddens that one suite and nothing else; the other four members appear only in their group row and
+#      are unaffected either way. Measured at gh#972; re-measure rather than trusting this sentence.
+#
+#      The exemption is row-shaped, not member-shaped, so a duplicate CAN be laundered by adding a second suite
+#      name to the offending subject cell. Accepted as the cost of not failing that one legitimate row.
+#   3. Every suite a row's subject names still exists (a row for a deleted -- or never-written -- file sends the
 #      next reader looking for something that is not there; the two found in the gh#862 audit had never existed
 #      in any commit, on any branch). Scoped the same way, so §2 can still DISCUSS a suite it does not list.
-#   3. No two suite files share a basename, which the inventory's name-keyed rows cannot express.
-#   4. The stated total matches the real one, so a future drift is visible in the document itself rather than
+#   4. No two suite files share a basename, which the inventory's name-keyed rows cannot express.
+#   5. The stated total matches the real one, so a future drift is visible in the document itself rather than
 #      only in this check's output.
+#
+# What it does NOT check: whether a row's STATUS is true. A row is a claim that a suite exists; nothing here can
+# tell you "Proposed" has outlived the suite shipping. That is the gh#952 defect's other half, and it stays a
+# human obligation -- when a suite ships, retire the proposal row that asked for it.
 #
 # Deliberately SDK-free and dependency-free (grep + find), so it runs in the fast tier beside
 # check-doc-duplication.sh and check-env-forwarding.sh rather than waiting on a build.
@@ -65,6 +81,29 @@ mapfile -t DUPLICATE_BASENAMES < <(printf '%s\n' "${ON_DISK[@]}" | uniq -d)
 mapfile -t NAMED < <(grep '^|' "$INVENTORY" | awk -F'|' '{print $2}' \
     | grep -o '[A-Za-z0-9_]*\(IntegrationTests\|SmokeTests\)\.cs' | sort -u)
 
+# Two rows claiming the same suite is worse than none: they can disagree, and the check that guarantees a suite
+# is rostered says nothing about being rostered ONCE. gh#952 was exactly that -- a gh#381 "Proposed (suite not
+# yet written)" row left standing after gh#534 shipped the suite and added a second row saying Active. Both named
+# a real file, so both passed, and a reader landing on the stale one rewrites a suite that already exists.
+#
+# Counted over SOLE-subject rows only. A subject cell naming several suites at once is the sanctioned group row
+# -- the shared staging harness lists its members that way -- and its members legitimately keep rows of their own.
+# One awk pass rather than a shell loop over rows: the loop form spawned two subprocesses per row and took
+# minutes on Windows, the same cost that made the earlier nested-grep version unusable. A local check slow enough
+# to skip is one that gets skipped.
+mapfile -t DUPLICATE_ROWS < <(
+    awk -F'|' '
+        /^\|/ {
+            subject = $2; n = 0; last = ""
+            while (match(subject, /[A-Za-z0-9_]+(IntegrationTests|SmokeTests)\.cs/)) {
+                n++; last = substr(subject, RSTART, RLENGTH)
+                subject = substr(subject, RSTART + RLENGTH)
+            }
+            if (n == 1) { print last }   # sole-subject rows only; a group row lists its members and is exempt
+        }
+    ' "$INVENTORY" | sort | uniq -d
+)
+
 # Both directions of the set difference at once. `comm` rather than a nested grep loop on purpose: the loop form
 # spawns one subprocess per pair, which at 90 suites is ~8k processes -- imperceptible on the Linux runner, but
 # ~30s per invocation on a Windows dev box, and a local check slow enough to skip is one that gets skipped.
@@ -75,6 +114,17 @@ mapfile -t missing < <(comm -23 <(printf '%s\n' "${ON_DISK[@]}" | uniq) <(printf
 mapfile -t phantom < <(comm -13 <(printf '%s\n' "${ON_DISK[@]}" | uniq) <(printf '%s\n' "${NAMED[@]}"))
 
 status=0
+
+if [ ${#DUPLICATE_ROWS[@]} -gt 0 ]; then
+    status=1
+    echo "FAIL: ${#DUPLICATE_ROWS[@]} suite(s) are the subject of more than one row:" >&2
+    printf '  %s\n' "${DUPLICATE_ROWS[@]}" >&2
+    echo "" >&2
+    echo "Two rows for one suite can disagree, and one of them will be the stale one a reader acts on. Keep the" >&2
+    echo "row that tells the truth; if the other subsection still wants the cross-reference, leave a line of PROSE" >&2
+    echo "pointing at it (prose is not a row, so it does not trip this)." >&2
+    echo "" >&2
+fi
 
 if [ ${#DUPLICATE_BASENAMES[@]} -gt 0 ]; then
     status=1
@@ -120,7 +170,10 @@ elif [ "$stated" -ne "${#ON_DISK[@]}" ]; then
 fi
 
 if [ "$status" -eq 0 ]; then
-    echo "OK: all ${#ON_DISK[@]} integration/smoke suites have a row, every row names a real file, and the stated count matches."
+    # Says what is actually verified. It used to claim "every row names a real file", which the gh#948 narrowing
+    # to the row SUBJECT made false in the case that narrowing deliberately accepts: a description cell may
+    # cross-reference a suite that is not on disk, and this check passes it on purpose (gh#952).
+    echo "OK: all ${#ON_DISK[@]} integration/smoke suites are the subject of exactly one row, every row subject names a real file, and the stated count matches."
 fi
 
 exit "$status"
