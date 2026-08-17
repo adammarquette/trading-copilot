@@ -19,12 +19,22 @@
 #   1. Every *IntegrationTests.cs / *SmokeTests.cs file is the SUBJECT of a row -- named in the row's first
 #      cell, not merely mentioned somewhere in one. A description cell cross-referencing another suite is not
 #      that suite's row, and treating it as one would let a suite ship with no row at all (PR #945 review).
-#   2. Every suite a row's subject names still exists (a row for a deleted -- or never-written -- file sends the
+#   2. No suite is the subject of MORE THAN ONE row. Two rows can disagree, and the reader acts on whichever
+#      they land on -- gh#952 was a "suite not yet written" row left standing after the suite shipped and got a
+#      second row. A GROUP row naming several suites at once is exempt: the staging harness and the
+#      SuggestionDrift trio list their members that way, and those members keep rows of their own. The exemption
+#      is row-shaped, not member-shaped, so a duplicate CAN be laundered by adding a second name to the
+#      offending subject cell -- accepted, because the alternative is failing the legitimate group rows.
+#   3. Every suite a row's subject names still exists (a row for a deleted -- or never-written -- file sends the
 #      next reader looking for something that is not there; the two found in the gh#862 audit had never existed
 #      in any commit, on any branch). Scoped the same way, so §2 can still DISCUSS a suite it does not list.
-#   3. No two suite files share a basename, which the inventory's name-keyed rows cannot express.
-#   4. The stated total matches the real one, so a future drift is visible in the document itself rather than
+#   4. No two suite files share a basename, which the inventory's name-keyed rows cannot express.
+#   5. The stated total matches the real one, so a future drift is visible in the document itself rather than
 #      only in this check's output.
+#
+# What it does NOT check: whether a row's STATUS is true. A row is a claim that a suite exists; nothing here can
+# tell you "Proposed" has outlived the suite shipping. That is the gh#952 defect's other half, and it stays a
+# human obligation -- when a suite ships, retire the proposal row that asked for it.
 #
 # Deliberately SDK-free and dependency-free (grep + find), so it runs in the fast tier beside
 # check-doc-duplication.sh and check-env-forwarding.sh rather than waiting on a build.
