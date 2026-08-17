@@ -276,6 +276,22 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
         Guid exitOrderId = await SeedWorkingExitOrderAsync(adopted.UserId, accountId);
 
         VenueFactory.MakeAccountStreamingSupported();
+
+        // Prove the TWO preconditions AccountEventStreamHost itself checks before it will consume a single
+        // event — on the SAME production code paths it uses (VenueCapabilities.Supports,
+        // AccountEventIngestionService.DiscoverAccountsAsync) — so a genuine wiring gap here fails LOUDLY and
+        // immediately, rather than as an inscrutable timeout whose captured-log tail the poll's own EF Core
+        // command-logging noise can drown out.
+        VenueFactory.Create(FirmConventions.None).Capabilities.Supports(VenueCapability.AccountStreaming)
+            .Should().BeTrue(
+                "AccountEventStreamHost refuses to stream AT ALL without this grant — it logs once and goes "
+                + "idle for the rest of the process, which otherwise looks identical to a merely-slow CI runner");
+        (await DiscoverableAccountsAsync()).Should().Contain(
+            candidate => candidate.Key == venueAccountKey,
+            "AccountEventStreamHost subscribes only to what DiscoverAccountsAsync returns — an account this "
+            + "suite's own HTTP setup created but this query cannot see would leave the host subscribed to "
+            + "nothing, and every event armed below would sit in the stream's channel forever unconsumed");
+
         RunningHost running = await StartHostAsync();
 
         DateTimeOffset closedAt = DateTimeOffset.UtcNow;
@@ -382,6 +398,19 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
         });
 
         return exitOrderId;
+    }
+
+    /// <summary>
+    /// Calls <see cref="AccountEventIngestionService.DiscoverAccountsAsync"/> directly — the exact query
+    /// <c>AccountEventStreamHost</c> runs to decide what to subscribe to — so this suite can prove an account is
+    /// discoverable BEFORE relying on a live host to have done so silently.
+    /// </summary>
+    private async Task<IReadOnlyList<VenueAccountId>> DiscoverableAccountsAsync()
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        return await scope.ServiceProvider
+            .GetRequiredService<AccountEventIngestionService>()
+            .DiscoverAccountsAsync(CancellationToken.None);
     }
 
     /// <summary>
@@ -536,14 +565,21 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
         $"(response was {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()})";
 
     /// <summary>
-    /// The live host's own captured log tail, so a timed-out wait is diagnosable from the CI output alone rather
-    /// than guessed at — in particular it surfaces <c>AccountEventStreamHost</c>'s silent "the account-event host
-    /// is idle" (a withheld <see cref="Domain.Venue.VenueCapability.AccountStreaming"/> grant) or a dropped/
-    /// re-subscribed stream, either of which would otherwise look identical to a merely-slow CI runner.
+    /// The live host's own captured application-level log lines, so a timed-out wait is diagnosable from the CI
+    /// output alone rather than guessed at — in particular it surfaces <c>AccountEventStreamHost</c>'s silent
+    /// "the account-event host is idle" or a dropped/re-subscribed stream. Excludes
+    /// <c>Microsoft.EntityFrameworkCore</c>'s own command-execution logging: this suite's OWN repeated
+    /// <c>WaitUntilAsync</c> polling emits one such line per attempt, and a plain <c>TakeLast</c> over the whole
+    /// captured stream lets that self-inflicted noise silently push out the one line that would have answered
+    /// the question (gh#960 review).
     /// </summary>
     private string DescribeHostLogs() =>
-        "Captured host log tail: [" + string.Join(
-            " | ", _factory.Logs.Entries.TakeLast(20).Select(entry => $"{entry.Level}: {entry.Message}")) + "]";
+        "Captured application log tail (EF Core command logging excluded): [" + string.Join(
+            " | ",
+            _factory.Logs.Records
+                .Where(record => !record.Category.StartsWith("Microsoft.EntityFrameworkCore", StringComparison.Ordinal))
+                .TakeLast(20)
+                .Select(record => $"{record.Category}/{record.Level}: {record.Message}")) + "]";
 
     private async Task ExecuteDbContextAsync(Func<TradingCopilotDbContext, Task> action)
     {
