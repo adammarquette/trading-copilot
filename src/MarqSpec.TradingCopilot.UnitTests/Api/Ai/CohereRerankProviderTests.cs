@@ -196,6 +196,21 @@ public class CohereRerankProviderTests
     }
 
     [Fact]
+    public async Task RerankAsync_ShouldDegradeToPassthrough_WhenEveryResultIndexIsOutOfRange()
+    {
+        // review #980: results that ALL point outside the candidate set map to NO candidate -- a bad shape for the
+        // WHOLE set (like a null body), not a partial drop. It must degrade to identity order and a zero-cost fault,
+        // NOT emit an empty ranking silently billed as a success (the "never a dropped candidate set" guarantee).
+        StubHandler handler = new() { Body = RankedResponse(3, (7, 0.9), (8, 0.8)) };
+
+        RerankResult result = await Provider(handler).RerankAsync("q", Docs(3), topN: 3, CancellationToken.None);
+
+        result.Outcome.Should().Be(RerankOutcome.Failed);
+        result.Ranking.Select(r => r.Index).Should().Equal(new[] { 0, 1, 2 }, "every returned index is out of range -> passthrough, not an empty success");
+        result.BilledSearches.Should().Be(0, "a bad-shape response is a zero-cost degrade, not a billed success");
+    }
+
+    [Fact]
     public async Task RerankAsync_ShouldTruncatePassthroughToTopN_OnADegrade()
     {
         // The identity fallback still honours the caller's top-n: it asked for 2, a degrade returns the first 2.
