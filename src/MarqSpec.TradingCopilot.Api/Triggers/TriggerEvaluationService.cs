@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
@@ -71,6 +72,9 @@ public class TriggerEvaluationService
     private readonly int _throttleFullWindowCap;
     private readonly int _throttleConvictionFloor;
     private readonly ISuggestionRealtimeNotifier _suggestionNotifier;
+    private readonly IPriceLevelSource _levels;
+    private readonly IInstrumentSpecSource _specs;
+    private readonly ConfluenceOptions _confluence;
     private readonly ILogger<TriggerEvaluationService> _logger;
 
     /// <summary>Creates the service.</summary>
@@ -117,6 +121,17 @@ public class TriggerEvaluationService
     /// account's headroom as data — never a gate/venue dependency (the gh#402 gate-below-model discipline) — it
     /// suppresses or caps issuance as daily-drawdown headroom depletes. Inert unless <see cref="SuggestionOptions.ThrottleEnabled"/>.
     /// </param>
+    /// <param name="levels">
+    /// The venue-agnostic key-level read seam (gh#730, gh#596): confluence corroborates a fired signal against the
+    /// active levels near the entry. A read-only market-data seam (levels are shared / global, R-20), never a venue /
+    /// gate dependency — the assembly stays below the model.
+    /// </param>
+    /// <param name="specs">
+    /// The per-instrument contract-facts seam (gh#541): supplies the tick size the level proximity band is measured
+    /// in. A miss leaves the band unmeasurable, so no level is cited (cannot measure ⇒ do not fabricate) — never a
+    /// substituted tick.
+    /// </param>
+    /// <param name="confluenceOptions">The confluence-assembly knobs (gh#730): the proximity band and the corroboration ladder.</param>
     /// <param name="logger">The logger.</param>
     public TriggerEvaluationService(
         TradingCopilotDbContext discovery,
@@ -133,10 +148,14 @@ public class TriggerEvaluationService
         IOptions<GovernorOptions> governorOptions,
         ISuggestionRealtimeNotifier suggestionNotifier,
         ISuggestionThrottle throttle,
+        IPriceLevelSource levels,
+        IInstrumentSpecSource specs,
+        IOptions<ConfluenceOptions> confluenceOptions,
         ILogger<TriggerEvaluationService> logger)
     {
         ArgumentNullException.ThrowIfNull(governorOptions);
         ArgumentNullException.ThrowIfNull(suggestionOptions);
+        ArgumentNullException.ThrowIfNull(confluenceOptions);
 
         _discovery = discovery;
         _options = options;
@@ -151,6 +170,9 @@ public class TriggerEvaluationService
         _governor = governor;
         _budget = governorOptions.Value.ToBudget(); // null == inert (no cap configured); computed once per pass
         _suggestionNotifier = suggestionNotifier;
+        _levels = levels;
+        _specs = specs;
+        _confluence = confluenceOptions.Value;
         _throttle = throttle;
         _throttleEnabled = suggestionOptions.Value.ThrottleEnabled;
         _throttleThreshold = suggestionOptions.Value.ThrottleThresholdFraction;
@@ -1010,29 +1032,66 @@ public class TriggerEvaluationService
         // so a trace joins to the row — and, via the ledger's now-populated trace id, to the spend that bought it.
         Activity.Current?.SetTag("suggestion.id", suggestionId.ToString());
 
-        // The cited-factor set (gh#729, ADR-0026, R-4). Today's N=1 case: ONE primary Indicator factor copied from
-        // the fired trigger, zero supporting — assembling supporting factors across timeframes/levels is a separate
-        // sub-issue gated on gh#595's contract. DerivePrimary flags the primary by gh#592's min-rule, so IsPrimary is
-        // never hand-set even for the set of one. UserId is the suggestion's owner (R-20). The indicator identity is
-        // COPIED, exactly as the old CitedIndicator columns were: it lives on the mutable, deletable TriggerRecord
-        // while R-4 needs the citation readable after the trigger is edited or deleted.
-        List<CitedFactor> citedFactors =
-        [
-            new CitedFactor
+        // The cited-factor set (gh#729 model, gh#730 assembly; ADR-0026, R-4). The fired trigger is the primary
+        // INDICATOR factor, COPIED — indicator/period live on the mutable, deletable TriggerRecord while R-4 needs the
+        // citation readable after the trigger is edited or deleted, exactly as the old CitedIndicator columns were.
+        CitedFactor primaryFactor = new()
+        {
+            Id = Guid.NewGuid(),
+            UserId = owner,
+            Kind = CitedFactorKind.Indicator,
+            TimeframeMinutes = trigger.ResolutionMinutes,
+            Indicator = trigger.Indicator,
+            Period = trigger.Period,
+        };
+
+        // CONFLUENCE ASSEMBLY (gh#730): corroborate the fire against the SAME signal on the other ladder timeframes
+        // and the active levels near the entry. FAIL-OPEN — a read/assemble fault returns empty, degrading to N=1.
+        IReadOnlyList<ConfluenceFactor> supporting =
+            await AssembleSupportingAsync(trigger, suggest, now, cancellationToken);
+
+        // DerivePrimary ranks the INDICATOR-arm factors ALONE — the fired signal plus any same-signal corroborators —
+        // by gh#592's min-rule (smallest timeframe = headline). Corroboration is HIGHER-timeframe only (see the ladder
+        // skip in AssembleSupportingAsync), so the fired signal is the smallest in the set and stays the headline (§2):
+        // a lower rung can never steal primary. A level never fires, so it is NEVER a primary candidate: the level
+        // factors are appended below as IsPrimary=false. IsPrimary is derived, never hand-set, even for the degenerate
+        // N=1 set of one. Everything is copied immutably at issuance (R-4).
+        List<CitedFactor> indicatorFactors = [primaryFactor];
+        indicatorFactors.AddRange(supporting
+            .Where(factor => factor.Kind == ConfluenceFactorKind.Indicator)
+            .Select(factor => new CitedFactor
             {
                 Id = Guid.NewGuid(),
                 UserId = owner,
                 Kind = CitedFactorKind.Indicator,
-                TimeframeMinutes = trigger.ResolutionMinutes,
-                Indicator = trigger.Indicator,
-                Period = trigger.Period,
-            },
-        ];
+                TimeframeMinutes = factor.TimeframeMinutes,
+                Indicator = factor.Indicator,
+                Period = factor.Period,
+            }));
+
         foreach (CitedFactorPrimary<CitedFactor> ranked in
-            CitedFactorSet.DerivePrimary(citedFactors, factor => factor.TimeframeMinutes))
+            CitedFactorSet.DerivePrimary(indicatorFactors, factor => factor.TimeframeMinutes))
         {
             ranked.Factor.IsPrimary = ranked.IsPrimary;
         }
+
+        List<CitedFactor> citedFactors = [.. indicatorFactors];
+        citedFactors.AddRange(supporting
+            .Where(factor => factor.Kind == ConfluenceFactorKind.Level)
+            .Select(factor => new CitedFactor
+            {
+                Id = Guid.NewGuid(),
+                UserId = owner,
+                Kind = CitedFactorKind.Level,
+                IsPrimary = false, // a level does not fire, so it is never the primary (ADR-0026)
+                TimeframeMinutes = factor.TimeframeMinutes,
+                LevelId = factor.LevelId,
+                LevelVenue = factor.LevelVenue,
+                LevelKind = (int?)factor.LevelKind,
+                LevelTop = factor.LevelTop,
+                LevelBottom = factor.LevelBottom,
+                LevelSignificance = factor.LevelSignificance,
+            }));
 
         database.Suggestions.Add(new Suggestion
         {
@@ -1084,6 +1143,96 @@ public class TriggerEvaluationService
             + FormattableString.Invariant($"Valid until {MarketClock.ToMarketTime(expiresAt):HH:mm} CT."),
             dedupKey));
     }
+
+    /// <summary>
+    /// Assembles the <b>supporting</b> cited factors for a fire (gh#730, ADR-0026 §3), <b>fail-open</b>: corroborate
+    /// the fired primary against the SAME signal on the other ladder timeframes and the active levels near the entry.
+    /// Any read / assemble fault (or a contract-violating throw from a seam) logs and returns empty, so issuance
+    /// degrades to the N=1 single primary factor rather than aborting the owner's pass or the fire — the enrichment /
+    /// governor posture. Only the caller's own cancellation escapes.
+    /// </summary>
+    /// <param name="trigger">The fired trigger — its <see cref="TriggerRecord.ToCondition"/> is the primary signal.</param>
+    /// <param name="suggest">The proposal — its entry price anchors the level proximity band.</param>
+    /// <param name="now">The moment to read as of; the service never reads a clock.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The supporting factors, or empty on the inert ladder or any fault (N=1).</returns>
+    private async Task<IReadOnlyList<ConfluenceFactor>> AssembleSupportingAsync(
+        TriggerRecord trigger, ReviewOutcome.Suggest suggest, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // The inert / opt-out ladder: assemble nothing and pay no reads, so every suggestion stays the N=1 set of one.
+        if (_confluence.TimeframeMinutes.Count == 0)
+        {
+            return [];
+        }
+
+        try
+        {
+            InstrumentId instrument = InstrumentId.Parse(trigger.Symbol);
+
+            // 1. Indicator corroboration: read the SAME signal on each HIGHER ladder timeframe, as of `now`. ONLY higher
+            //    ones corroborate (ADR-0026 §3 "the larger ones are supporting"): the fired signal is then the smallest
+            //    in the set, so DerivePrimary's min-rule keeps IT the primary/headline (§2). Reading a LOWER rung would
+            //    let it steal the headline and rebrand e.g. a 60m swing as a 15m scalp -- wrong R-4 / R-9 data.
+            List<TimeframeReading> readings = [];
+            foreach (int timeframe in _confluence.TimeframeMinutes)
+            {
+                if (timeframe <= trigger.ResolutionMinutes)
+                {
+                    continue;
+                }
+
+                decimal? value = await _indicators.GetValueAsync(
+                    instrument, trigger.Indicator, trigger.Period, timeframe, now, cancellationToken);
+                readings.Add(new TimeframeReading(timeframe, value));
+            }
+
+            // 2. Level corroboration: the active zones near the entry, measured by a tick/ATR proximity band. The band
+            //    needs the instrument's tick size; on a miss we cannot measure proximity, so we cite NO level (the
+            //    KeyLevels "cannot measure => do not fabricate" posture) while still corroborating indicators. ATR is a
+            //    value (gh#311): a null ATR leaves the tick arm alone, never a fabricated width.
+            IReadOnlyList<AlignableLevel> levels = [];
+            decimal tickSize = 0m;
+            decimal? atr = null;
+            if (_specs.TryResolve(instrument, out InstrumentContractSpec? spec))
+            {
+                tickSize = spec.Spec.TickSize;
+                atr = await _indicators.GetAverageTrueRangeAsync(instrument, trigger.ResolutionMinutes, now, cancellationToken);
+                IReadOnlyList<PriceLevel> priceLevels =
+                    await _levels.GetActiveLevelsAsync(instrument.ToString(), _confluence.TimeframeMinutes, cancellationToken);
+                levels = [.. priceLevels.Select(ToAlignableLevel)];
+            }
+
+            ConfluenceBand band = new(tickSize, atr, _confluence.KTicks, _confluence.FAtr);
+
+            return ConfluenceAlignment.AlignSupporting(
+                trigger.ToCondition(), trigger.ResolutionMinutes, readings, levels, suggest.EntryPrice, band);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // FAIL-OPEN (mirrors BuildEnrichmentAsync + the AI-spend governor's spend read): confluence adds context to
+            // a suggestion; a fault must never cost the fire. The whole read+assemble degrades to the N=1 single
+            // primary factor, and the next fire re-reads fresh. DO NOT "fix" this to abort -- that would take down the
+            // co-located mechanical route too (the per-owner guard discards the pass on a throw).
+            _logger.LogError(
+                error, "Confluence assembly faulted for trigger {Id}; citing the single primary factor (N=1).", trigger.Id);
+            return [];
+        }
+    }
+
+    // Maps a persisted level to the entity-free alignment input: PriceLevelKind -> KeyLevelKind BY VALUE (the enums are
+    // kept numerically identical, gh#626). The id + venue ride along so a corroborating factor snapshots them (R-4).
+    private static AlignableLevel ToAlignableLevel(PriceLevel level) => new(
+        level.TimeframeMinutes,
+        (KeyLevelKind)(int)level.Kind,
+        level.Top,
+        level.Bottom,
+        level.Significance,
+        level.Id,
+        level.Venue);
 
     /// <summary>
     /// Pushes one suggestion lifecycle change to the owning operator's realtime connections, best-effort (gh#684).
