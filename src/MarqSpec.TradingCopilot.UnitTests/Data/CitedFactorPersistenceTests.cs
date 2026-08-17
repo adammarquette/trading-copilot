@@ -199,4 +199,63 @@ public class CitedFactorPersistenceTests
         snapshot.LevelVenue.Should().Be("TOPSTEPX");
         snapshot.LevelId.Should().Be(levelId, "a soft reference survives the source's deletion — there is no FK");
     }
+
+    [Fact]
+    public async Task AMixedIndicatorAndLevelSet_RoundTrips_WithOneIndicatorPrimaryAndTheLevelSupporting()
+    {
+        // gh#730 assembly: a suggestion cites a MIXED set — a primary indicator, a supporting indicator, and a
+        // supporting LEVEL snapshot (never primary, since a level does not fire). All three round-trip; exactly one
+        // primary; and the level keeps its immutable snapshot columns.
+        Guid owner = Guid.NewGuid();
+        string database = Guid.NewGuid().ToString();
+        Guid suggestionId;
+
+        await using (TradingCopilotDbContext seed = Context(owner, database))
+        {
+            Suggestion suggestion = NewSuggestion(owner);
+            suggestionId = suggestion.Id;
+
+            // Two indicator arms (5m fired + 60m supporting); the min-rule flags the 5m as primary.
+            foreach (CitedFactor factor in IndicatorFactors(owner, ("rsi", 14, 5), ("rsi", 14, 60)))
+            {
+                suggestion.CitedFactors.Add(factor);
+            }
+
+            // ...plus a supporting level snapshot, appended as IsPrimary=false (a level never fires).
+            suggestion.CitedFactors.Add(new CitedFactor
+            {
+                Id = Guid.NewGuid(),
+                UserId = owner,
+                Kind = CitedFactorKind.Level,
+                IsPrimary = false,
+                TimeframeMinutes = 60,
+                LevelId = Guid.NewGuid(),
+                LevelVenue = "TOPSTEPX",
+                LevelKind = (int)PriceLevelKind.Support,
+                LevelTop = 5205.0m,
+                LevelBottom = 5200.0m,
+                LevelSignificance = 6.5m,
+            });
+
+            seed.Suggestions.Add(suggestion);
+            await seed.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext read = Context(owner, database);
+        Suggestion loaded = await read.Suggestions
+            .Include(suggestion => suggestion.CitedFactors)
+            .SingleAsync(suggestion => suggestion.Id == suggestionId);
+
+        loaded.CitedFactors.Should().HaveCount(3);
+        loaded.CitedFactors.Count(factor => factor.IsPrimary).Should().Be(1, "exactly one primary (ADR-0026)");
+        loaded.CitedFactors.Single(factor => factor.IsPrimary).Should().Match<CitedFactor>(
+            factor => factor.Kind == CitedFactorKind.Indicator && factor.TimeframeMinutes == 5,
+            "the smallest-timeframe INDICATOR is primary, never the level");
+
+        CitedFactor level = loaded.CitedFactors.Single(factor => factor.Kind == CitedFactorKind.Level);
+        level.IsPrimary.Should().BeFalse();
+        level.LevelTop.Should().Be(5205.0m);
+        level.LevelBottom.Should().Be(5200.0m);
+        level.LevelSignificance.Should().Be(6.5m);
+    }
 }

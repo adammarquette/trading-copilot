@@ -74,4 +74,18 @@ public class CitedFactorSetTests
         CitedFactorSet.DerivePrimary(Array.Empty<Factor>(), factor => factor.TimeframeMinutes)
             .Should().BeEmpty("no factors, no primary");
     }
+
+    [Fact]
+    public void DerivePrimary_ShouldKeepTheFiredIndicatorPrimary_WhenFedTheIndicatorArmsAlone()
+    {
+        // gh#730: a level never fires (ADR-0026), so it never contends for primary. Issuance enforces this by running
+        // DerivePrimary over the INDICATOR-arm factors ALONE -- so even a level on a SMALLER timeframe than the fired
+        // signal cannot steal the headline, because it is simply not in this input. Here the fired 5m indicator stays
+        // primary though the suggestion also cites a 1m level (appended separately as IsPrimary=false, never fed here).
+        IReadOnlyList<CitedFactorPrimary<Factor>> ranked = Derive(
+            new Factor("fired-5m-indicator", 5), new Factor("supporting-60m-indicator", 60));
+
+        ranked.Single(r => r.IsPrimary).Factor.Tag.Should().Be("fired-5m-indicator",
+            "the smallest INDICATOR is the headline; the 1m level is never a primary candidate");
+    }
 }
