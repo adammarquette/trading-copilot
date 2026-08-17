@@ -379,9 +379,19 @@ public class SuggestionDriftIntegrationTests : IClassFixture<OcoExitTestPostgres
                 State = state,
                 CreatedAt = Now.AddHours(-1),
                 Rationale = "seeded for the drift guard suite (gh#632)",
-                CitedIndicator = "rsi",
-                CitedPeriod = 14,
-                CitedResolutionMinutes = 5,
+                CitedFactors =
+                [
+                    new CitedFactor
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = userId ?? operatorId,
+                        Kind = CitedFactorKind.Indicator,
+                        IsPrimary = true,
+                        TimeframeMinutes = 5,
+                        Indicator = "rsi",
+                        Period = 14,
+                    },
+                ],
                 Confidence = 60,
                 ExpiresAt = expiresAt,
                 StateChangedAt = stateChangedAt,

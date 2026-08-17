@@ -69,9 +69,19 @@ public class OutcomeJournalServiceTests
         State = state,
         CreatedAt = new DateTimeOffset(2026, 8, 15, 14, 0, 0, TimeSpan.Zero),
         Rationale = "r",
-        CitedIndicator = "atr",
-        CitedPeriod = 14,
-        CitedResolutionMinutes = 5,
+        CitedFactors =
+        [
+            new CitedFactor
+            {
+                Id = Guid.NewGuid(),
+                UserId = owner,
+                Kind = CitedFactorKind.Indicator,
+                IsPrimary = true,
+                TimeframeMinutes = 5,
+                Indicator = "atr",
+                Period = 14,
+            },
+        ],
         Confidence = 50,
         ExpiresAt = new DateTimeOffset(2026, 8, 15, 15, 0, 0, TimeSpan.Zero),
     };

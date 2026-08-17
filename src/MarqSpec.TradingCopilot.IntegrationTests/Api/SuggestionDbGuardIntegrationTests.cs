@@ -190,9 +190,19 @@ public sealed class SuggestionDbGuardIntegrationTests
         State = SuggestionState.Active,
         CreatedAt = DateTimeOffset.UtcNow,
         Rationale = "A test setup.",
-        CitedIndicator = "EMA",
-        CitedPeriod = 20,
-        CitedResolutionMinutes = 5,
+        CitedFactors =
+        [
+            new CitedFactor
+            {
+                Id = Guid.NewGuid(),
+                UserId = operatorId,
+                Kind = CitedFactorKind.Indicator,
+                IsPrimary = true,
+                TimeframeMinutes = 5,
+                Indicator = "EMA",
+                Period = 20,
+            },
+        ],
         Confidence = 50,
         ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(30),
     };

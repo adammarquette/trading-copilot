@@ -86,9 +86,19 @@ public class SuggestionDriftServiceTests
             State = state,
             CreatedAt = _now.AddMinutes(-5),
             Rationale = "oversold bounce",
-            CitedIndicator = "rsi",
-            CitedPeriod = 14,
-            CitedResolutionMinutes = 1,
+            CitedFactors =
+            [
+                new CitedFactor
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = ownerId,
+                    Kind = CitedFactorKind.Indicator,
+                    IsPrimary = true,
+                    TimeframeMinutes = 1,
+                    Indicator = "rsi",
+                    Period = 14,
+                },
+            ],
             Confidence = 72,
             ExpiresAt = _now.AddMinutes(60),
         });

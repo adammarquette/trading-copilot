@@ -276,9 +276,19 @@ public class SuggestionLifecycleRestartIntegrationTests : IClassFixture<Rehydrat
                 Mode = TradingMode.Practice,
                 State = state,
                 Rationale = "seeded",
-                CitedIndicator = "rsi",
-                CitedPeriod = 14,
-                CitedResolutionMinutes = 1,
+                CitedFactors =
+                [
+                    new CitedFactor
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = operatorId,
+                        Kind = CitedFactorKind.Indicator,
+                        IsPrimary = true,
+                        TimeframeMinutes = 1,
+                        Indicator = "rsi",
+                        Period = 14,
+                    },
+                ],
                 Confidence = 50,
                 CreatedAt = createdAt,
                 ExpiresAt = expiresAt,

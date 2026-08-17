@@ -1010,6 +1010,30 @@ public class TriggerEvaluationService
         // so a trace joins to the row — and, via the ledger's now-populated trace id, to the spend that bought it.
         Activity.Current?.SetTag("suggestion.id", suggestionId.ToString());
 
+        // The cited-factor set (gh#729, ADR-0026, R-4). Today's N=1 case: ONE primary Indicator factor copied from
+        // the fired trigger, zero supporting — assembling supporting factors across timeframes/levels is a separate
+        // sub-issue gated on gh#595's contract. DerivePrimary flags the primary by gh#592's min-rule, so IsPrimary is
+        // never hand-set even for the set of one. UserId is the suggestion's owner (R-20). The indicator identity is
+        // COPIED, exactly as the old CitedIndicator columns were: it lives on the mutable, deletable TriggerRecord
+        // while R-4 needs the citation readable after the trigger is edited or deleted.
+        List<CitedFactor> citedFactors =
+        [
+            new CitedFactor
+            {
+                Id = Guid.NewGuid(),
+                UserId = owner,
+                Kind = CitedFactorKind.Indicator,
+                TimeframeMinutes = trigger.ResolutionMinutes,
+                Indicator = trigger.Indicator,
+                Period = trigger.Period,
+            },
+        ];
+        foreach (CitedFactorPrimary<CitedFactor> ranked in
+            CitedFactorSet.DerivePrimary(citedFactors, factor => factor.TimeframeMinutes))
+        {
+            ranked.Factor.IsPrimary = ranked.IsPrimary;
+        }
+
         database.Suggestions.Add(new Suggestion
         {
             Id = suggestionId,
@@ -1029,13 +1053,10 @@ public class TriggerEvaluationService
             // validated at the reviewer's parse boundary, so anything unusable never reached here.
             Rationale = suggest.Rationale,
 
-            // The cited signal (gh#542): a soft link to the firing, plus the indicator identity COPIED, because
-            // indicator/period/resolution live on the mutable, deletable TriggerRecord and R-4 needs the citation to
-            // stay readable after the trigger is edited or deleted.
+            // The cited signal (gh#542, gh#729): a soft link to the firing, plus the cited-factor set assembled above
+            // — the indicator identity now lives on the primary CitedFactor rather than three columns here.
             TriggerFiringId = firingId,
-            CitedIndicator = trigger.Indicator,
-            CitedPeriod = trigger.Period,
-            CitedResolutionMinutes = trigger.ResolutionMinutes,
+            CitedFactors = citedFactors,
 
             // Display only (gh#543) -- it changes nothing about size, geometry or whether this row is written.
             Confidence = suggest.Confidence,

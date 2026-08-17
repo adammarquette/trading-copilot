@@ -25,8 +25,8 @@ namespace MarqSpec.TradingCopilot.Api.Suggestions;
 /// <param name="Instrument">The venue-neutral instrument symbol.</param>
 /// <param name="TimeframeMinutes">
 /// The suggestion's <b>headline timeframe</b> (gh#592, R-4) — the bar size it is framed on, so the card can tell a
-/// scalp from a swing. In today's single-signal model it is the cited indicator's resolution (see
-/// <paramref name="CitedResolutionMinutes"/>), surfaced here as a first-class attribute rather than provenance.
+/// scalp from a swing. It is the <b>primary</b> cited factor's timeframe (gh#729): the smallest-timeframe factor is
+/// the headline (gh#592's min-rule), surfaced here as a first-class attribute rather than provenance.
 /// </param>
 /// <param name="Side">The proposed direction.</param>
 /// <param name="Size">The proposed size in contracts — the operator's trigger's, never the model's.</param>
@@ -49,9 +49,12 @@ namespace MarqSpec.TradingCopilot.Api.Suggestions;
 /// The model's plain-language reasoning (gh#542). <b>Untrusted display data</b> — render it as text, never as markup,
 /// and never feed it back into a prompt as instruction.
 /// </param>
-/// <param name="CitedIndicator">The R-22 indicator that fired, copied at issuance so the citation survives the trigger (gh#542).</param>
-/// <param name="CitedPeriod">The fired indicator's period (gh#542).</param>
-/// <param name="CitedResolutionMinutes">The bar size the fired indicator was computed over (gh#542).</param>
+/// <param name="CitedIndicator">
+/// The R-22 indicator that fired — reconstructed from the <b>primary</b> cited factor (gh#729) for API back-compat;
+/// in today's N=1 model the primary is always an indicator factor, so this is its <c>Indicator</c> (gh#542).
+/// </param>
+/// <param name="CitedPeriod">The primary cited factor's period (gh#542, gh#729).</param>
+/// <param name="CitedResolutionMinutes">The primary cited factor's timeframe — the headline resolution (gh#592, gh#729).</param>
 /// <param name="Confidence">The model's confidence, 0–100 (gh#543) — <b>display only</b>; it moves nothing.</param>
 /// <param name="ExpiresAt">
 /// When the suggestion stops being actionable (gh#544) — the system's value, clamped to the session's auto-flatten
@@ -70,6 +73,11 @@ namespace MarqSpec.TradingCopilot.Api.Suggestions;
 /// <param name="SupersedesId">
 /// The suggestion this one supersedes (gh#550), or <see langword="null"/> for the first version — the link a client
 /// follows to walk the chain by id back through its history.
+/// </param>
+/// <param name="CitedFactors">
+/// The full cited-factor set (gh#729, ADR-0026) — why the suggestion fired, one <see cref="CitedFactorResponse.IsPrimary"/>
+/// headline and zero-or-more supporting. Today always a single primary indicator factor; the scalar
+/// <paramref name="CitedIndicator"/> / <paramref name="TimeframeMinutes"/> fields above are the primary's, kept for back-compat.
 /// </param>
 /// <param name="Disposition">
 /// The operator's recorded disposition (gh#547 pass / gh#549 take) with its deviations, present only on the get-by-id
@@ -100,6 +108,7 @@ public sealed record SuggestionResponse(
     DateTimeOffset? StateChangedAt,
     int Version,
     Guid? SupersedesId,
+    IReadOnlyList<CitedFactorResponse> CitedFactors,
     SuggestionDispositionResponse? Disposition = null)
 {
     /// <summary>Projects a persisted suggestion into its API view.</summary>
@@ -118,11 +127,17 @@ public sealed record SuggestionResponse(
     {
         ArgumentNullException.ThrowIfNull(suggestion);
 
+        // The headline is the PRIMARY cited factor (gh#729, ADR-0026): its timeframe is the suggestion's headline
+        // (gh#592's min-rule) and — while today's set is always one Indicator factor — its indicator identity
+        // reconstructs the old CitedIndicator / CitedPeriod / CitedResolutionMinutes for API back-compat. Reads must
+        // Include the set; a suggestion with an unloaded (empty) set degrades to the null-object defaults below.
+        CitedFactor? primary = suggestion.CitedFactors.FirstOrDefault(factor => factor.IsPrimary);
+
         return new SuggestionResponse(
             suggestion.Id,
             suggestion.AccountId,
             suggestion.Instrument,
-            suggestion.TimeframeMinutes,
+            primary?.TimeframeMinutes ?? 0,
             suggestion.Side,
             suggestion.Size,
             suggestion.EntryPrice,
@@ -135,14 +150,18 @@ public sealed record SuggestionResponse(
             MoneyOf(spec, suggestion.EntryPrice, suggestion.StopPrice, suggestion.Size),
             MoneyOf(spec, suggestion.EntryPrice, suggestion.TargetPrice, suggestion.Size),
             suggestion.Rationale,
-            suggestion.CitedIndicator,
-            suggestion.CitedPeriod,
-            suggestion.CitedResolutionMinutes,
+            primary?.Indicator ?? string.Empty,
+            primary?.Period ?? 0,
+            primary?.TimeframeMinutes ?? 0,
             suggestion.Confidence,
             suggestion.ExpiresAt,
             suggestion.StateChangedAt,
             suggestion.Version,
             suggestion.SupersedesId,
+            [.. suggestion.CitedFactors
+                .OrderByDescending(factor => factor.IsPrimary)
+                .ThenBy(factor => factor.TimeframeMinutes)
+                .Select(CitedFactorResponse.From)],
             disposition is null ? null : SuggestionDispositionResponse.From(disposition));
     }
 
@@ -160,6 +179,57 @@ public sealed record SuggestionResponse(
     {
         decimal risk = Math.Abs(entry - stop);
         return risk == 0m ? null : Math.Abs(target - entry) / risk;
+    }
+}
+
+/// <summary>
+/// One member of a suggestion's cited-factor set (gh#729, ADR-0026, R-4) — an indicator read or a level snapshot,
+/// flagged <see cref="IsPrimary"/> if it is the headline (the smallest timeframe, gh#592). The arm fields are
+/// mutually exclusive by <see cref="Kind"/>: an indicator factor carries <see cref="Indicator"/> / <see cref="Period"/>,
+/// a level factor the <c>Level*</c> snapshot.
+/// </summary>
+/// <param name="Kind">Whether the factor cites an indicator read or a price level.</param>
+/// <param name="IsPrimary">Whether this is the suggestion's primary (headline) factor — exactly one per suggestion.</param>
+/// <param name="TimeframeMinutes">The timeframe the factor is read on; the primary's is the suggestion's headline.</param>
+/// <param name="Indicator">The fired indicator (indicator arm), or <see langword="null"/> for a level factor.</param>
+/// <param name="Period">The fired indicator's period (indicator arm), or <see langword="null"/> for a level factor.</param>
+/// <param name="LevelId">The source level's soft id (level arm; no FK), or <see langword="null"/> for an indicator factor.</param>
+/// <param name="LevelVenue">The snapshotted venue (level arm), or <see langword="null"/>.</param>
+/// <param name="LevelKind">The snapshotted level side as its int value (level arm), or <see langword="null"/>.</param>
+/// <param name="LevelTop">The snapshotted zone top (level arm), or <see langword="null"/>.</param>
+/// <param name="LevelBottom">The snapshotted zone bottom (level arm), or <see langword="null"/>.</param>
+/// <param name="LevelSignificance">The snapshotted detector significance (level arm), or <see langword="null"/>.</param>
+public sealed record CitedFactorResponse(
+    CitedFactorKind Kind,
+    bool IsPrimary,
+    int TimeframeMinutes,
+    string? Indicator,
+    int? Period,
+    Guid? LevelId,
+    string? LevelVenue,
+    int? LevelKind,
+    decimal? LevelTop,
+    decimal? LevelBottom,
+    decimal? LevelSignificance)
+{
+    /// <summary>Projects a persisted cited factor into its API view.</summary>
+    /// <param name="factor">The persisted factor.</param>
+    /// <returns>The response.</returns>
+    public static CitedFactorResponse From(CitedFactor factor)
+    {
+        ArgumentNullException.ThrowIfNull(factor);
+        return new CitedFactorResponse(
+            factor.Kind,
+            factor.IsPrimary,
+            factor.TimeframeMinutes,
+            factor.Indicator,
+            factor.Period,
+            factor.LevelId,
+            factor.LevelVenue,
+            factor.LevelKind,
+            factor.LevelTop,
+            factor.LevelBottom,
+            factor.LevelSignificance);
     }
 }
 

@@ -30,9 +30,6 @@ public class SuggestionDispositionTakeTests
             State = SuggestionState.Active,
             CreatedAt = _now,
             Rationale = "seeded",
-            CitedIndicator = "rsi",
-            CitedPeriod = 14,
-            CitedResolutionMinutes = 1,
             Confidence = 60,
             ExpiresAt = _now.AddHours(1),
         };

@@ -86,9 +86,19 @@ public class ExecutionJournalTests
                 // Required since gh#542/#543/#544. This suite round-trips the journal spine and its links, which
                 // these fields do not affect; ExpiresAt sits after CreatedAt so the CHECK is satisfied.
                 Rationale = "seeded",
-                CitedIndicator = "rsi",
-                CitedPeriod = 14,
-                CitedResolutionMinutes = 1,
+                CitedFactors =
+                [
+                    new CitedFactor
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = _operator,
+                        Kind = CitedFactorKind.Indicator,
+                        IsPrimary = true,
+                        TimeframeMinutes = 1,
+                        Indicator = "rsi",
+                        Period = 14,
+                    },
+                ],
                 Confidence = 60,
                 ExpiresAt = new DateTimeOffset(2026, 7, 22, 15, 30, 0, TimeSpan.Zero),
             });

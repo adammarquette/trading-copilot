@@ -933,9 +933,19 @@ public class TradeJournalServiceTests
                 Mode = TradingMode.Practice,
                 State = SuggestionState.Active,
                 Rationale = "confluence",
-                CitedIndicator = "EMA",
-                CitedPeriod = 20,
-                CitedResolutionMinutes = 5,
+                CitedFactors =
+                [
+                    new CitedFactor
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = owner,
+                        Kind = CitedFactorKind.Indicator,
+                        IsPrimary = true,
+                        TimeframeMinutes = 5,
+                        Indicator = "EMA",
+                        Period = 20,
+                    },
+                ],
                 Confidence = 70,
                 CreatedAt = _now,
                 ExpiresAt = _now.AddMinutes(15),

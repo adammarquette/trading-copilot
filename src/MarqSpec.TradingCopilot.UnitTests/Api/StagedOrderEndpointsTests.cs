@@ -2008,9 +2008,19 @@ public class StagedOrderEndpointsTests
             State = SuggestionState.Active,
             CreatedAt = DateTimeOffset.UnixEpoch,
             Rationale = "seeded",
-            CitedIndicator = "rsi",
-            CitedPeriod = 14,
-            CitedResolutionMinutes = 1,
+            CitedFactors =
+            [
+                new CitedFactor
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = _operator,
+                    Kind = CitedFactorKind.Indicator,
+                    IsPrimary = true,
+                    TimeframeMinutes = 1,
+                    Indicator = "rsi",
+                    Period = 14,
+                },
+            ],
             Confidence = 60,
             ExpiresAt = DateTimeOffset.UnixEpoch.AddYears(60),
         });

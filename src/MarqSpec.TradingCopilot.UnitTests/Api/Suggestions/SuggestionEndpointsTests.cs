@@ -77,9 +77,21 @@ public class SuggestionEndpointsTests
             State = state,
             CreatedAt = createdAt ?? _t,
             Rationale = "oversold bounce",
-            CitedIndicator = "rsi",
-            CitedPeriod = 14,
-            CitedResolutionMinutes = 1,
+            // The N=1 cited-factor set (gh#729): one primary indicator factor. The read model reconstructs the
+            // headline TimeframeMinutes / CitedIndicator / CitedPeriod / CitedResolutionMinutes from it.
+            CitedFactors =
+            [
+                new CitedFactor
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = ownerId,
+                    Kind = CitedFactorKind.Indicator,
+                    IsPrimary = true,
+                    TimeframeMinutes = 1,
+                    Indicator = "rsi",
+                    Period = 14,
+                },
+            ],
             Confidence = 72,
             ExpiresAt = (createdAt ?? _t).AddMinutes(60),
             Version = version,
@@ -361,6 +373,40 @@ public class SuggestionEndpointsTests
         SuggestionResponse item = ItemOf(await GetAsync(id));
 
         item.TimeframeMinutes.Should().Be(item.CitedResolutionMinutes);
+    }
+
+    [Fact]
+    public async Task GetAsync_ShouldProjectTheCitedFactorSet_WithThePrimaryFlagged_AndTheHeadlineIsThePrimarys()
+    {
+        // gh#729/ADR-0026: the read model projects the whole cited-factor set, exactly one primary flagged, and the
+        // headline TimeframeMinutes is the primary's (gh#592's min-rule). SeedAsync gives the 1-minute primary; add a
+        // larger supporting factor so the projection is exercised beyond the degenerate set-of-one.
+        Guid id = await SeedAsync();
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            seed.CitedFactors.Add(new CitedFactor
+            {
+                Id = Guid.NewGuid(),
+                UserId = _operator,
+                SuggestionId = id,
+                Kind = CitedFactorKind.Indicator,
+                IsPrimary = false,
+                TimeframeMinutes = 60,
+                Indicator = "rsi",
+                Period = 14,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        SuggestionResponse item = ItemOf(await GetAsync(id));
+
+        item.CitedFactors.Should().HaveCount(2, "the primary plus the supporting factor");
+        item.CitedFactors.Count(factor => factor.IsPrimary).Should().Be(1, "exactly one primary (ADR-0026)");
+        item.CitedFactors.Single(factor => factor.IsPrimary).TimeframeMinutes.Should().Be(1,
+            "the smallest-timeframe factor is the headline");
+        item.CitedFactors[0].IsPrimary.Should().BeTrue("the set is projected primary-first");
+        item.TimeframeMinutes.Should().Be(1, "the headline timeframe is the primary factor's (gh#592/gh#729)");
+        item.CitedIndicator.Should().Be("rsi", "the scalar citation is reconstructed from the primary for back-compat");
     }
 
     [Fact]
