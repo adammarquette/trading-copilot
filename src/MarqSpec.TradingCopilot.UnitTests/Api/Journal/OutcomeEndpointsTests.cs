@@ -279,6 +279,34 @@ public class OutcomeEndpointsTests
     }
 
     [Fact]
+    public async Task HardDeleteAsync_ShouldKeyTheTombstoneOnTradeId_WhenTheOutcomeCarriesBothATradeAndASuggestion()
+    {
+        // A trade-derived outcome carries its suggestion LINEAGE, so both ids are set — the common taken-suggestion
+        // case. The tombstone must key on the recomposition source (the TradeId, the closed-trade sweep's key) and
+        // leave SuggestionId null. Asserted with LITERAL expectations, not a mirror of the production ternary, so a
+        // regression that copied the lineage SuggestionId instead would be caught here.
+        Guid trade = Guid.NewGuid();
+        Guid suggestion = Guid.NewGuid();
+        Guid id = await SeedOutcomeAsync(configure: outcome =>
+        {
+            outcome.TradeId = trade;
+            outcome.SuggestionId = suggestion;
+        });
+        IAuditLog audit = OkAudit();
+
+        await using TradingCopilotDbContext context = Context();
+        IResult result = await OutcomeEndpoints.HardDeleteAsync(id, _now, context, audit, NullLoggerFactory.Instance, default);
+
+        StatusOf(result).Should().Be(StatusCodes.Status204NoContent);
+
+        await using TradingCopilotDbContext verify = Context();
+        OutcomeSuppression tombstone = (await verify.OutcomeSuppressions.IgnoreQueryFilters().ToListAsync())
+            .Should().ContainSingle().Subject;
+        tombstone.TradeId.Should().Be(trade);       // keyed on the recomposition source
+        tombstone.SuggestionId.Should().BeNull();   // NOT the lineage suggestion — the closed-trade sweep is the recomposer
+    }
+
+    [Fact]
     public async Task HardDeleteAsync_ShouldReturnNotFound_ForAForeignOutcome_AndNeitherDeleteNorAudit()
     {
         Guid strangerOwner = Guid.NewGuid();
