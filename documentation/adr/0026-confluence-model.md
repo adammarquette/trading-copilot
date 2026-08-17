@@ -70,3 +70,19 @@ added later without re-opening this decision.
 gh#728 says "this becomes ADR-0021". **0021 was already taken** (the realtime hub contract) by the time the
 decision was made; the ADR numbers had reached 0025, so this is **0026**. Recorded because the card's own text
 still points at the wrong number.
+
+## Update (2026-08-17, gh#729) — the model sub-issue shipped
+
+The **cited-factor set** this ADR decided is built: a `CitedFactor` child collection on `Suggestion`
+(`IUserOwned`, FK-cascade) with a `Kind` discriminator (indicator | level), an `IsPrimary` flag, a
+`TimeframeMinutes`, an indicator arm, and a **copied level-snapshot** arm — a snapshot, **not** an FK to the
+mutable `PriceLevel`, so a cited level stays immutable once issued (R-4). The pure `CitedFactorSet.DerivePrimary`
+flags the single **smallest-timeframe** factor (§3); a partial unique index `(SuggestionId) WHERE IsPrimary`
+backstops "at most one primary"; and the `AddSuggestionCitedFactors` migration backfills every existing
+suggestion into one primary Indicator factor and **drops** the old `Suggestion.Cited*` columns (single source of
+truth). Issuance stages the **N=1** "set of one" (§2); the read model reconstructs the old headline from the
+primary factor for back-compat.
+
+**The assembly sub-issue remains** — populating the *supporting* factors (multi-timeframe corroboration + aligned
+levels) waits on gh#595's frozen output contract (§1). The proximity band `min(k ticks, f×ATR)` and the lookback
+window (§3) are that sub-issue's options, deliberately not pulled into the model.
