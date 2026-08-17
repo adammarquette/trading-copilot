@@ -545,9 +545,19 @@ public class ReconcileAdoptStillOpenIntegrationTests : IClassFixture<OcoExitTest
                 State = SuggestionState.Active,
                 CreatedAt = created,
                 Rationale = "seeded so the adopt has a disposition to journal (gh#769)",
-                CitedIndicator = "rsi",
-                CitedPeriod = 14,
-                CitedResolutionMinutes = 5,
+                CitedFactors =
+                [
+                    new CitedFactor
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = armed.UserId,
+                        Kind = CitedFactorKind.Indicator,
+                        IsPrimary = true,
+                        TimeframeMinutes = 5,
+                        Indicator = "rsi",
+                        Period = 14,
+                    },
+                ],
                 Confidence = 60,
                 ExpiresAt = created.AddHours(1), // CK_Suggestions_ExpiresAfterCreated
             });

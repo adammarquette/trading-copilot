@@ -1405,22 +1405,29 @@ public class TriggerEvaluationServiceTests
         await Service().ScanAsync(Now, CancellationToken.None);
 
         await using TradingCopilotDbContext reload = Context();
-        return await reload.Suggestions.SingleAsync();
+        return await reload.Suggestions.Include(suggestion => suggestion.CitedFactors).SingleAsync();
     }
 
     [Fact]
-    public async Task ScanAsync_ShouldPersistTheRationaleAndCopyTheCitedSignal()
+    public async Task ScanAsync_ShouldPersistTheRationaleAndCiteOnePrimaryIndicatorFactor_CopiedFromTheTrigger()
     {
+        // gh#729/ADR-0026: issuance stages the N=1 cited-factor set — ONE primary Indicator factor copied from the
+        // fired trigger, ZERO supporting (assembly across timeframes/levels is gated on gh#595). COPIED, not joined:
+        // indicator/period/resolution live on the mutable, deletable TriggerRecord, so the factor is snapshotted to
+        // stay readable after the trigger is edited or deleted. IsPrimary is derived by the min-rule, never hand-set.
         Suggestion staged = await StageAndReadAsync(rationale: "reclaimed the band on rising delta");
 
         staged.Rationale.Should().Be("reclaimed the band on rising delta");
-
-        // COPIED, not joined: indicator/period/resolution live on the mutable, deletable TriggerRecord, so the
-        // citation is snapshotted here to stay readable after the trigger is edited or deleted.
-        staged.CitedIndicator.Should().Be(Indicator);
-        staged.CitedPeriod.Should().Be(Period);
-        staged.CitedResolutionMinutes.Should().Be(Resolution);
         staged.TriggerFiringId.Should().NotBeNull();
+
+        CitedFactor primary = staged.CitedFactors.Should().ContainSingle().Subject;
+        primary.IsPrimary.Should().BeTrue("the set of one is its own primary");
+        primary.Kind.Should().Be(CitedFactorKind.Indicator);
+        primary.Indicator.Should().Be(Indicator);
+        primary.Period.Should().Be(Period);
+        primary.TimeframeMinutes.Should().Be(Resolution, "the primary's timeframe is the fired bar size (old CitedResolutionMinutes)");
+        primary.LevelId.Should().BeNull("today's issuance cites no level factor");
+        staged.CitedFactors.Count(factor => !factor.IsPrimary).Should().Be(0, "no supporting factors are assembled yet");
     }
 
     [Fact]
@@ -1882,9 +1889,19 @@ public class TriggerEvaluationServiceTests
             State = SuggestionState.Active,
             CreatedAt = Now,
             Rationale = "seeded incumbent",
-            CitedIndicator = Indicator,
-            CitedPeriod = Period,
-            CitedResolutionMinutes = Resolution,
+            CitedFactors =
+            [
+                new CitedFactor
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = ownerId,
+                    Kind = CitedFactorKind.Indicator,
+                    IsPrimary = true,
+                    TimeframeMinutes = Resolution,
+                    Indicator = Indicator,
+                    Period = Period,
+                },
+            ],
             Confidence = 80,
             ExpiresAt = Now.AddHours(1),
         });

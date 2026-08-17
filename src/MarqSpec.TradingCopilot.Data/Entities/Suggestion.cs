@@ -1,4 +1,3 @@
-using System.ComponentModel.DataAnnotations.Schema;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
@@ -87,20 +86,6 @@ public class Suggestion : IUserOwned
     public Guid? TriggerFiringId { get; set; }
 
     /// <summary>
-    /// The R-22 indicator that fired, <b>copied at issuance</b> (gh#542). Copied rather than joined because
-    /// indicator / period / resolution live on the mutable, deletable <c>TriggerRecord</c> while R-4 requires the
-    /// cited signal to stay readable forever — the same reason <c>TriggerFiringRecord</c> copies threshold and
-    /// comparison.
-    /// </summary>
-    public required string CitedIndicator { get; set; }
-
-    /// <summary>The fired indicator's period, copied at issuance (gh#542).</summary>
-    public required int CitedPeriod { get; set; }
-
-    /// <summary>The bar size the fired indicator was computed over, copied at issuance (gh#542).</summary>
-    public required int CitedResolutionMinutes { get; set; }
-
-    /// <summary>
     /// The model's confidence, 0–100 (gh#543, R-4). A DB check pins the range; the reviewer fails closed on a
     /// missing or out-of-range value.
     /// </summary>
@@ -117,17 +102,6 @@ public class Suggestion : IUserOwned
     /// A DB check pins it strictly after <see cref="CreatedAt"/>.
     /// </summary>
     public required DateTimeOffset ExpiresAt { get; set; }
-
-    /// <summary>
-    /// The suggestion's <b>headline timeframe</b> in minutes (R-4, gh#592) — the bar size it is framed on, so a
-    /// reader can tell a scalp from a swing. In the single-cited-signal model that exists today it <b>is</b> the
-    /// cited indicator's resolution (Adam, 2026-08-02), so this is a computed accessor over
-    /// <see cref="CitedResolutionMinutes"/> — <b>never a second stored column</b>, no duplicate source of truth.
-    /// <c>[NotMapped]</c>, so it adds no schema. The "smallest of several aligning timeframes, larger as supporting
-    /// confluence" case needs a multi-signal model that does not exist yet — that is gh#593.
-    /// </summary>
-    [NotMapped]
-    public int TimeframeMinutes => CitedResolutionMinutes;
 
     /// <summary>
     /// When the lifecycle <see cref="State"/> last changed (gh#545) — ADR-0013's invariant that <i>every recovery
@@ -158,4 +132,13 @@ public class Suggestion : IUserOwned
     /// at it, so the lineage the R-9 learning loop reads never silently vanishes. Set once at issuance, never changed.
     /// </remarks>
     public Guid? SupersedesId { get; set; }
+
+    /// <summary>
+    /// The <b>cited-factor set</b> (gh#729, ADR-0026, R-4) — why this suggestion fired. Exactly one factor is the
+    /// <see cref="CitedFactor.IsPrimary"/> headline (the smallest timeframe, gh#592), the rest supporting. Today
+    /// every suggestion is the degenerate N=1 case: one primary <see cref="CitedFactorKind.Indicator"/> factor, no
+    /// supporting — the single-cited-signal behaviour that superseded the old <c>CitedIndicator</c> /
+    /// <c>CitedPeriod</c> / <c>CitedResolutionMinutes</c> columns. Cascade child of this suggestion.
+    /// </summary>
+    public ICollection<CitedFactor> CitedFactors { get; set; } = [];
 }

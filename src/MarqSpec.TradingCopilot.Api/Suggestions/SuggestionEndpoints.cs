@@ -107,6 +107,7 @@ public static class SuggestionEndpoints
         // id and by an explicit ExpiredVoid filter — the journal keeps the whole chain.
         IQueryable<Suggestion> query = database.Suggestions
             .AsNoTracking()
+            .Include(suggestion => suggestion.CitedFactors) // the read model reconstructs the headline from the primary (gh#729)
             .Where(suggestion => suggestion.AccountId == accountId && suggestion.State == wanted);
 
         // The default actionable surface excludes suggestions the operator has already dispositioned (gh#547): a
@@ -147,6 +148,7 @@ public static class SuggestionEndpoints
 
         Suggestion? suggestion = await database.Suggestions
             .AsNoTracking()
+            .Include(candidate => candidate.CitedFactors) // the read model reconstructs the headline from the primary (gh#729)
             .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
 
         if (suggestion is null)

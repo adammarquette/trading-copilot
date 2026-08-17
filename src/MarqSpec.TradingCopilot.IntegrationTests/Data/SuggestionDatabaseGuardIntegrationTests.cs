@@ -444,9 +444,19 @@ public class SuggestionDatabaseGuardIntegrationTests : IClassFixture<StubbedVenu
         State = SuggestionState.Active,
         CreatedAt = DateTimeOffset.UtcNow,
         Rationale = "seeded",
-        CitedIndicator = "rsi",
-        CitedPeriod = 14,
-        CitedResolutionMinutes = 1,
+        CitedFactors =
+        [
+            new CitedFactor
+            {
+                Id = Guid.NewGuid(),
+                UserId = operatorId,
+                Kind = CitedFactorKind.Indicator,
+                IsPrimary = true,
+                TimeframeMinutes = 1,
+                Indicator = "rsi",
+                Period = 14,
+            },
+        ],
         Confidence = 50,
         ExpiresAt = DateTimeOffset.UtcNow.AddHours(1),
     };

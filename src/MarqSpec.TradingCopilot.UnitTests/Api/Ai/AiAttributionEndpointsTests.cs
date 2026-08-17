@@ -69,9 +69,19 @@ public class AiAttributionEndpointsTests
             State = SuggestionState.Active,
             CreatedAt = createdAt,
             Rationale = "oversold",
-            CitedIndicator = "RSI",
-            CitedPeriod = 14,
-            CitedResolutionMinutes = 5,
+            CitedFactors =
+            [
+                new CitedFactor
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = owner,
+                    Kind = CitedFactorKind.Indicator,
+                    IsPrimary = true,
+                    TimeframeMinutes = 5,
+                    Indicator = "RSI",
+                    Period = 14,
+                },
+            ],
             Confidence = 70,
             ExpiresAt = createdAt.AddHours(1),
             TriggerFiringId = firing,

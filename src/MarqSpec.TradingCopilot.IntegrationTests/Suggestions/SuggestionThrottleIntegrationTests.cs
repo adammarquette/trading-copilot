@@ -514,9 +514,19 @@ public class SuggestionThrottleIntegrationTests : IClassFixture<SuggestionThrott
                 State = SuggestionState.Active,
                 CreatedAt = createdAtUtc,
                 Rationale = "seed",
-                CitedIndicator = "rsi",
-                CitedPeriod = 14,
-                CitedResolutionMinutes = 5,
+                CitedFactors =
+                [
+                    new CitedFactor
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = userId,
+                        Kind = CitedFactorKind.Indicator,
+                        IsPrimary = true,
+                        TimeframeMinutes = 5,
+                        Indicator = "rsi",
+                        Period = 14,
+                    },
+                ],
                 Confidence = confidence,
                 ExpiresAt = createdAtUtc.AddHours(1),
             });

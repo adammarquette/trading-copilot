@@ -687,9 +687,19 @@ public class SuggestionTakeIntegrationTests : IClassFixture<OcoExitTestPostgresF
                 // Required since gh#542/#543/#544; ExpiresAt must clear CK_Suggestions_ExpiresAfterCreated, so it
                 // sits strictly after CreatedAt.
                 Rationale = "seeded for the take-path suite (gh#614)",
-                CitedIndicator = "rsi",
-                CitedPeriod = 14,
-                CitedResolutionMinutes = 5,
+                CitedFactors =
+                [
+                    new CitedFactor
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = operatorId,
+                        Kind = CitedFactorKind.Indicator,
+                        IsPrimary = true,
+                        TimeframeMinutes = 5,
+                        Indicator = "rsi",
+                        Period = 14,
+                    },
+                ],
                 Confidence = 60,
                 ExpiresAt = expiresAt ?? created.AddHours(1),
             });

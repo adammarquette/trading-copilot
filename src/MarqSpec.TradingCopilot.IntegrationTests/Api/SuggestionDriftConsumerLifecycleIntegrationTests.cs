@@ -164,9 +164,19 @@ public class SuggestionDriftConsumerLifecycleIntegrationTests : IClassFixture<Su
                 State = SuggestionState.Active,
                 CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-1),
                 Rationale = "seeded for the drift consumer lifecycle suite (gh#632)",
-                CitedIndicator = "rsi",
-                CitedPeriod = 14,
-                CitedResolutionMinutes = 5,
+                CitedFactors =
+                [
+                    new CitedFactor
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = operatorId,
+                        Kind = CitedFactorKind.Indicator,
+                        IsPrimary = true,
+                        TimeframeMinutes = 5,
+                        Indicator = "rsi",
+                        Period = 14,
+                    },
+                ],
                 Confidence = 60,
                 ExpiresAt = DateTimeOffset.UtcNow.AddHours(2),
             });

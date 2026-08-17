@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using MarqSpec.TradingCopilot.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -13,9 +14,11 @@ using Pgvector;
 namespace MarqSpec.TradingCopilot.Data.Migrations
 {
     [DbContext(typeof(TradingCopilotDbContext))]
-    partial class TradingCopilotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260817001825_AddSuggestionCitedFactors")]
+    partial class AddSuggestionCitedFactors
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1137,9 +1140,7 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("SuggestionId")
-                        .IsUnique()
-                        .HasFilter("\"SuggestionId\" IS NOT NULL AND \"TradeId\" IS NULL");
+                    b.HasIndex("SuggestionId");
 
                     b.HasIndex("TradeId")
                         .IsUnique()
@@ -1925,7 +1926,7 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                     b.HasOne("MarqSpec.TradingCopilot.Data.Entities.Suggestion", null)
                         .WithMany()
                         .HasForeignKey("SuggestionId")
-                        .OnDelete(DeleteBehavior.Cascade);
+                        .OnDelete(DeleteBehavior.SetNull);
 
                     b.HasOne("MarqSpec.TradingCopilot.Data.Entities.Trade", null)
                         .WithMany()

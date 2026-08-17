@@ -43,6 +43,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Operator dispositions of a suggestion (gh#547, R-4/R-8/R-9). Operator-owned; append-only, one per suggestion.</summary>
     public DbSet<SuggestionDisposition> SuggestionDispositions => Set<SuggestionDisposition>();
 
+    /// <summary>The cited-factor set behind each suggestion (gh#729, ADR-0026, R-4). Operator-owned; one primary + supporting.</summary>
+    public DbSet<CitedFactor> CitedFactors => Set<CitedFactor>();
+
     /// <summary>Journaled orders — the journal spine (gh#7). Operator-owned; mode-guarded (R-14).</summary>
     public DbSet<Order> Orders => Set<Order>();
 
@@ -260,7 +263,6 @@ public class TradingCopilotDbContext : TenantDbContext
             // persisted mode) is a cross-table rule a single-row CHECK cannot express; it lives in the
             // enforce_mode_matches_account constraint trigger added by the AddExecutionJournal migration.
             suggestion.Property(s => s.Rationale).HasMaxLength(2000);
-            suggestion.Property(s => s.CitedIndicator).HasMaxLength(32);
 
             suggestion.ToTable(table =>
             {
@@ -321,6 +323,63 @@ public class TradingCopilotDbContext : TenantDbContext
                         + "AND \"TakenSize\" IS NOT NULL) "
                         + "OR (\"Kind\" = 3 AND \"TakenEntryPrice\" IS NULL AND \"TakenStopPrice\" IS NULL "
                         + "AND \"TakenTargetPrice\" IS NULL AND \"TakenSize\" IS NULL)");
+            });
+        });
+
+        modelBuilder.Entity<CitedFactor>(factor =>
+        {
+            // Child of its suggestion (gh#729): cascade like SuggestionDisposition — a factor never outlives the
+            // suggestion it cites. WithMany wires the CitedFactors navigation so the read model can Include the set.
+            factor.HasOne<Suggestion>()
+                .WithMany(suggestion => suggestion.CitedFactors)
+                .HasForeignKey(f => f.SuggestionId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // The Include join reads a suggestion's whole set; the FK index carries it.
+            factor.HasIndex(f => f.SuggestionId)
+                .HasDatabaseName("IX_SuggestionCitedFactors_SuggestionId");
+
+            // Exactly one primary per suggestion (ADR-0026) — a PARTIAL unique index over the primary rows only, so
+            // supporting factors stay unconstrained in number. Safe as a unique index here (unlike the supersede
+            // single-incumbent, gh#455): issuance stages exactly one primary per suggestion, so it never self-conflicts.
+            factor.HasIndex(f => f.SuggestionId, "UX_SuggestionCitedFactors_OnePrimary")
+                .IsUnique()
+                .HasFilter("\"IsPrimary\"");
+
+            // The indicator arm copies the fired read exactly as Suggestion.CitedIndicator did (same 32 cap); the
+            // level snapshot mirrors PriceLevel's own widths and 18,8 price precision.
+            factor.Property(f => f.Indicator).HasMaxLength(CitedFactor.IndicatorMaxLength);
+            factor.Property(f => f.LevelVenue).HasMaxLength(CitedFactor.LevelVenueMaxLength);
+            factor.Property(f => f.LevelTop).HasPrecision(18, 8);
+            factor.Property(f => f.LevelBottom).HasPrecision(18, 8);
+            factor.Property(f => f.LevelSignificance).HasPrecision(18, 8);
+
+            factor.ToTable("SuggestionCitedFactors", table =>
+            {
+                // Fail-closed zeros: a factor always has a kind and a real timeframe (the refusable-zero pattern).
+                table.HasCheckConstraint("CK_SuggestionCitedFactors_Kind_NotUnknown", "\"Kind\" <> 0");
+                table.HasCheckConstraint("CK_SuggestionCitedFactors_Timeframe_Positive", "\"TimeframeMinutes\" > 0");
+
+                // The kind/arm pairing, below the model (mirrors CK_SuggestionDispositions_TakeSnapshot): an Indicator
+                // (1) fills the indicator columns and nulls the whole level snapshot; a Level (2) is the exact reverse.
+                // This refuses a half-built row that bypassed issuance — the arm can never disagree with the kind.
+                table.HasCheckConstraint(
+                    "CK_SuggestionCitedFactors_KindColumns",
+                    "(\"Kind\" = 1 AND \"Indicator\" IS NOT NULL AND \"Period\" IS NOT NULL "
+                        + "AND \"LevelId\" IS NULL AND \"LevelVenue\" IS NULL AND \"LevelKind\" IS NULL "
+                        + "AND \"LevelTop\" IS NULL AND \"LevelBottom\" IS NULL AND \"LevelSignificance\" IS NULL) "
+                        + "OR (\"Kind\" = 2 AND \"Indicator\" IS NULL AND \"Period\" IS NULL "
+                        + "AND \"LevelId\" IS NOT NULL AND \"LevelVenue\" IS NOT NULL AND \"LevelKind\" IS NOT NULL "
+                        + "AND \"LevelTop\" IS NOT NULL AND \"LevelBottom\" IS NOT NULL AND \"LevelSignificance\" IS NOT NULL)");
+
+                // When the level arm is present it is a well-formed zone (mirrors PriceLevel's own checks): an ordered
+                // band with a real side. NULL passes, so the indicator arm is unaffected.
+                table.HasCheckConstraint(
+                    "CK_SuggestionCitedFactors_LevelZoneOrdered",
+                    "\"LevelTop\" IS NULL OR \"LevelBottom\" IS NULL OR \"LevelTop\" > \"LevelBottom\"");
+                table.HasCheckConstraint(
+                    "CK_SuggestionCitedFactors_LevelKind_NotUnknown",
+                    "\"LevelKind\" IS NULL OR \"LevelKind\" <> 0");
             });
         });
 
