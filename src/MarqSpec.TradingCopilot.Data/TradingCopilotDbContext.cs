@@ -962,15 +962,24 @@ public class TradingCopilotDbContext : TenantDbContext
             // the per-user table decoupled from the global news store.
             feedback.Property(f => f.NewsDedupKey).HasMaxLength(512);
 
-            // One feedback per operator per item: re-rating replaces rather than stacks, and un-starring deletes the
-            // row. The index leads with UserId so it also serves the per-operator profile read (all of an owner's
-            // feedback); the R-20 default-deny filter (TenantDbContext) already scopes every read to the owner.
-            feedback.HasIndex(f => new { f.UserId, f.NewsDedupKey }).IsUnique();
+            // TWO independent axes, TWO filtered unique indexes (gh#762, correcting the gh#27 single index). Importance
+            // (Star=1 / Mute=2) and direction (ThumbsUp=3 / ThumbsDown=4) each hold at MOST ONE row per (operator,
+            // item) -- but INDEPENDENTLY, so an operator may hold an importance AND a direction row on the same item
+            // (an important AND bearish story). A single (UserId, NewsDedupKey) index would force one axis to overwrite
+            // the other. Each leads with UserId so it also serves the per-operator profile read (all of an owner's
+            // feedback); the R-20 default-deny filter (TenantDbContext) already scopes every read to the owner. The
+            // filters pin the integer kind values -- SoftSignalKind.Axis is the source of truth for the split.
+            feedback.HasIndex(f => new { f.UserId, f.NewsDedupKey }, "UX_SoftSignalFeedback_Importance")
+                .IsUnique()
+                .HasFilter("\"Kind\" IN (1, 2)");
+            feedback.HasIndex(f => new { f.UserId, f.NewsDedupKey }, "UX_SoftSignalFeedback_Direction")
+                .IsUnique()
+                .HasFilter("\"Kind\" IN (3, 4)");
 
             feedback.ToTable(table =>
             {
                 // Refusable zero (gh#60 pattern): a feedback row can never be stored with an unset kind -- it must be
-                // a star or a mute, never a no-op sitting in the store contributing neither.
+                // a real kind on one of the two axes (star/mute or 👍/👎), never a no-op sitting in the store.
                 table.HasCheckConstraint("CK_SoftSignalFeedback_Kind_NotUnknown", "\"Kind\" <> 0");
             });
         });

@@ -95,6 +95,12 @@ public class NewsEndpointsTests
             new NewsFeedbackRequest(dedupKey, kind), new FixedUser(asUser ?? _operator), context, default);
     }
 
+    private async Task<IResult> ClearAsync(string dedupKey, SoftSignalAxis? axis = null, Guid? asUser = null)
+    {
+        await using TradingCopilotDbContext context = Context(asUser);
+        return await NewsEndpoints.ClearFeedbackAsync(dedupKey, axis, context, default);
+    }
+
     // ---- feedback write ----
 
     [Fact]
@@ -159,7 +165,7 @@ public class NewsEndpointsTests
 
         await using (TradingCopilotDbContext context = Context())
         {
-            IResult cleared = await NewsEndpoints.ClearFeedbackAsync("item", context, default);
+            IResult cleared = await NewsEndpoints.ClearFeedbackAsync("item", null, context, default);
             StatusOf(cleared).Should().Be(StatusCodes.Status204NoContent);
         }
 
@@ -171,8 +177,232 @@ public class NewsEndpointsTests
     public async Task Clear_WhenAbsent_Is404()
     {
         await using TradingCopilotDbContext context = Context();
-        IResult result = await NewsEndpoints.ClearFeedbackAsync("nope", context, default);
+        IResult result = await NewsEndpoints.ClearFeedbackAsync("nope", null, context, default);
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    // ---- direction axis (gh#762): independent of importance ----
+
+    [Fact]
+    public async Task RateDirection_CreatesADirectionRow_OwnedByTheCaller()
+    {
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+
+        IResult result = await RateAsync("item", SoftSignalKind.ThumbsUp);
+
+        StatusOf(result).Should().Be(StatusCodes.Status204NoContent);
+        await using TradingCopilotDbContext verify = Context();
+        SoftSignalFeedback row = await verify.SoftSignalFeedbacks.SingleAsync();
+        row.UserId.Should().Be(_operator);
+        row.Kind.Should().Be(SoftSignalKind.ThumbsUp);
+    }
+
+    [Fact]
+    public async Task ReRatingDirection_Replaces_RatherThanStacks()
+    {
+        await SeedNewsAsync("item", _t);
+        await RateAsync("item", SoftSignalKind.ThumbsUp);
+
+        await RateAsync("item", SoftSignalKind.ThumbsDown);
+
+        await using TradingCopilotDbContext verify = Context();
+        SoftSignalFeedback row = await verify.SoftSignalFeedbacks.SingleAsync(); // still exactly one direction row
+        row.Kind.Should().Be(SoftSignalKind.ThumbsDown);
+    }
+
+    [Fact]
+    public async Task SettingDirection_LeavesTheImportanceRow_Untouched()
+    {
+        // Cross-axis independence: an operator may hold BOTH an importance and a direction row on one item. Setting
+        // the direction must not disturb the star -- two rows survive, one per axis.
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.Star);
+
+        await RateAsync("item", SoftSignalKind.ThumbsDown);
+
+        await using TradingCopilotDbContext verify = Context();
+        List<SoftSignalFeedback> rows = await verify.SoftSignalFeedbacks.ToListAsync();
+        rows.Should().HaveCount(2);
+        rows.Select(r => r.Kind).Should().BeEquivalentTo([SoftSignalKind.Star, SoftSignalKind.ThumbsDown]);
+    }
+
+    [Fact]
+    public async Task SettingImportance_LeavesTheDirectionRow_Untouched()
+    {
+        // ...and the reverse: a star lands alongside an existing 👎 without replacing it.
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.ThumbsDown);
+
+        await RateAsync("item", SoftSignalKind.Star);
+
+        await using TradingCopilotDbContext verify = Context();
+        List<SoftSignalFeedback> rows = await verify.SoftSignalFeedbacks.ToListAsync();
+        rows.Should().HaveCount(2);
+        rows.Select(r => r.Kind).Should().BeEquivalentTo([SoftSignalKind.ThumbsDown, SoftSignalKind.Star]);
+    }
+
+    [Fact]
+    public async Task ReRatingImportance_LeavesTheDirectionRow_Untouched()
+    {
+        // Replacing WITHIN the importance axis (star -> mute) must not touch the direction row -- the replace is
+        // scoped to the request's axis, never the whole item.
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.Star);
+        await RateAsync("item", SoftSignalKind.ThumbsUp);
+
+        await RateAsync("item", SoftSignalKind.Mute); // re-rate importance
+
+        await using TradingCopilotDbContext verify = Context();
+        List<SoftSignalFeedback> rows = await verify.SoftSignalFeedbacks.ToListAsync();
+        rows.Select(r => r.Kind).Should().BeEquivalentTo([SoftSignalKind.Mute, SoftSignalKind.ThumbsUp]);
+    }
+
+    [Fact]
+    public async Task ClearingDirection_DeletesOnlyTheDirectionRow()
+    {
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.Star);
+        await RateAsync("item", SoftSignalKind.ThumbsUp);
+
+        IResult cleared = await ClearAsync("item", SoftSignalAxis.Direction);
+
+        StatusOf(cleared).Should().Be(StatusCodes.Status204NoContent);
+        await using TradingCopilotDbContext verify = Context();
+        SoftSignalFeedback row = await verify.SoftSignalFeedbacks.SingleAsync(); // the star survives
+        row.Kind.Should().Be(SoftSignalKind.Star);
+    }
+
+    [Fact]
+    public async Task ClearingImportance_DeletesOnlyTheImportanceRow()
+    {
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.Star);
+        await RateAsync("item", SoftSignalKind.ThumbsUp);
+
+        IResult cleared = await ClearAsync("item", SoftSignalAxis.Importance);
+
+        StatusOf(cleared).Should().Be(StatusCodes.Status204NoContent);
+        await using TradingCopilotDbContext verify = Context();
+        SoftSignalFeedback row = await verify.SoftSignalFeedbacks.SingleAsync(); // the 👍 survives
+        row.Kind.Should().Be(SoftSignalKind.ThumbsUp);
+    }
+
+    [Fact]
+    public async Task Clear_WithoutAnAxis_DefaultsToImportance()
+    {
+        // Backward compatibility (the pre-gh#762 DELETE contract): no axis clears the star/mute, leaving direction.
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.Mute);
+        await RateAsync("item", SoftSignalKind.ThumbsUp);
+
+        IResult cleared = await ClearAsync("item"); // no axis
+
+        StatusOf(cleared).Should().Be(StatusCodes.Status204NoContent);
+        await using TradingCopilotDbContext verify = Context();
+        SoftSignalFeedback row = await verify.SoftSignalFeedbacks.SingleAsync();
+        row.Kind.Should().Be(SoftSignalKind.ThumbsUp);
+    }
+
+    [Fact]
+    public async Task ClearingDirection_WhenOnlyImportanceExists_Is404()
+    {
+        // Clearing an axis with no row on it is a clean 404 -- the other axis's row is not collateral.
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.Star);
+
+        IResult cleared = await ClearAsync("item", SoftSignalAxis.Direction);
+
+        StatusOf(cleared).Should().Be(StatusCodes.Status404NotFound);
+        await using TradingCopilotDbContext verify = Context();
+        (await verify.SoftSignalFeedbacks.SingleAsync()).Kind.Should().Be(SoftSignalKind.Star); // untouched
+    }
+
+    [Fact]
+    public async Task Clear_WithAnUnknownAxis_Is400()
+    {
+        await SeedNewsAsync("item", _t);
+        await RateAsync("item", SoftSignalKind.Star);
+
+        IResult result = await ClearAsync("item", SoftSignalAxis.Unknown);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+    }
+
+    [Fact]
+    public async Task Feed_SurfacesTheDirectionRating_WithAnExplanation()
+    {
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.ThumbsUp);
+
+        await using TradingCopilotDbContext read = Context();
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
+
+        NewsFeedItemResponse rated = feed.Items.Single(item => item.DedupKey == "item");
+        rated.Direction.Should().Be(SoftSignalKind.ThumbsUp);
+        rated.DirectionReason.Should().NotBeNullOrWhiteSpace();
+        rated.DirectionReason.Should().Contain("bullish");
+    }
+
+    [Fact]
+    public async Task Feed_ADirectionRating_DoesNotReweightSurfacing()
+    {
+        // gh#762: direction is salience-INERT end to end. A 👍/👎 leaves the item's multiplier at base -- it never
+        // reorders the feed the way a star does -- while still being surfaced on the read.
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.ThumbsUp);
+
+        await using TradingCopilotDbContext read = Context();
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
+
+        NewsFeedItemResponse rated = feed.Items.Single(item => item.DedupKey == "item");
+        rated.Multiplier.Should().Be(1.0); // direction never boosts salience
+        rated.Direction.Should().Be(SoftSignalKind.ThumbsUp);
+    }
+
+    [Fact]
+    public async Task Feed_SurfacesBothAxes_WhenAnItemIsStarredAndRated()
+    {
+        // An item carrying BOTH a star and a 👍 surfaces both independently (and the read does not choke on the two
+        // rows-per-item the two axes allow -- a regression guard on the per-item feedback grouping).
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.Star);
+        await RateAsync("item", SoftSignalKind.ThumbsUp);
+
+        await using TradingCopilotDbContext read = Context();
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
+
+        NewsFeedItemResponse rated = feed.Items.Single(item => item.DedupKey == "item");
+        rated.Feedback.Should().Be(SoftSignalKind.Star);      // importance
+        rated.Direction.Should().Be(SoftSignalKind.ThumbsUp); // direction
+    }
+
+    [Fact]
+    public async Task Feed_SkipsAStrayStoredKind_WithoutThrowing()
+    {
+        // gh#762 review: a read must tolerate a stray / corrupt stored kind. The CK "Kind <> 0" forbids only Unknown,
+        // not an out-of-range value, so GetFeedAsync splits axes via TryAxis -- an unmappable row maps to no axis and
+        // is skipped, never a 500 (on the pre-fix Axis() this feed read threw). The valid star still surfaces.
+        await SeedNewsAsync("item", _t, instruments: ["ES"]);
+        await RateAsync("item", SoftSignalKind.Star);
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            seed.SoftSignalFeedbacks.Add(new SoftSignalFeedback
+            {
+                Id = Guid.NewGuid(),
+                UserId = _operator,
+                NewsDedupKey = "item",
+                Kind = (SoftSignalKind)99, // an out-of-range value the CK Kind<>0 does not forbid
+                CreatedAt = _t,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext read = Context();
+        NewsFeedResponse feed = FeedOf(await NewsEndpoints.GetFeedAsync(50, read, _options, Axis(), default));
+
+        NewsFeedItemResponse rated = feed.Items.Single(item => item.DedupKey == "item");
+        rated.Feedback.Should().Be(SoftSignalKind.Star); // the valid importance row still surfaces
+        rated.Direction.Should().BeNull();               // the stray row maps to no axis -> skipped, not surfaced
     }
 
     // ---- feed read ----
@@ -354,7 +584,7 @@ public class NewsEndpointsTests
         await RateAsync("item", asUser: _operator);
 
         await using TradingCopilotDbContext asOther = Context(_other);
-        IResult result = await NewsEndpoints.ClearFeedbackAsync("item", asOther, default);
+        IResult result = await NewsEndpoints.ClearFeedbackAsync("item", null, asOther, default);
 
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound); // invisible to the other operator (R-20)
     }

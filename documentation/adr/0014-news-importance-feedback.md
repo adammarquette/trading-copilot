@@ -58,6 +58,7 @@ two in step when an entry is appended (gh#600).
 |---|---|
 | 2026-08-14 | the SemanticEmbedding salience dimension is activated (gh#853) |
 | 2026-08-14 | semantic **topic** match — a news item matched to a topic by embedding proximity — is live (gh#854) |
+| 2026-08-16 | sentiment (👍/👎 **direction**) is activated, operator-rated; classifier still deferred (gh#762) |
 
 ## Update (2026-08-14) — the SemanticEmbedding salience dimension is activated (gh#853)
 
@@ -109,6 +110,37 @@ passes: it is a **one-way data hint, never a gate**, so relevance still never wa
 feature can't stall the core pass. Topics are embedded **first** in the pass (a bounded, cheap set), so semantic topic
 match comes online even during a large news backlog rather than waiting for it to drain. A non-positive match threshold
 disables the semantic path outright, so the fail-safe can't be inverted into match-everything.
+
+## Update (2026-08-16) — sentiment (👍/👎 direction) is activated, operator-rated (gh#762)
+
+The **sentiment (direction)** axis the *Context* and *Decision* named as deferred is now **live** as an **operator
+👍/👎 rating** — the free, R-9-feeding half of R-2's `and/or`. The **cheap-model classifier** stays **deferred** (a
+follow-on): when it lands it routes through `IAiSpendGovernor`, cap-gated + **fail-open**, the `NewsEmbeddingService`
+pattern (ADR-0008). Operator rating ships first because it is **free**, feeds R-9's learning loop **directly**, and
+mirrors the existing star/mute inverse — so it needs no per-article model spend to prove the axis end to end.
+
+**One entity, independent axes — correcting the gh#27 store.** `SoftSignalKind` gains **`ThumbsUp` / `ThumbsDown`**,
+so the single `SoftSignalFeedback` entity still spans every kind (the *Decision*'s "one feedback model"). But
+importance (**magnitude** → salience) and sentiment (**direction** → learning) are **distinct axes** (Context): an
+operator may hold **both** on one item — an *important* **and** *bearish* story. The gh#27 store keyed **one row per
+`(UserId, NewsDedupKey)`**, which would force one axis to overwrite the other. That is corrected to **two filtered
+unique indexes** — one over the **importance** kinds (`Star` / `Mute`), one over the **direction** kinds (`ThumbsUp`
+/ `ThumbsDown`) — so each axis holds at most one row per item, **independently**. Re-rating a direction replaces the
+direction row and leaves the importance row untouched, and vice versa; clearing a rating deletes only its axis's row.
+
+**Sentiment is salience-inert, and never a risk control.** Direction feeds **R-9's learning loop** and the news
+**read surface** only. It is **excluded from the `SalienceProfile`**, which continues to accumulate `Star` / `Mute`
+**alone** — so a 👍/👎 **never reweights what surfaces** (importance does that), and the two axes stay orthogonal in
+effect as well as in storage. And, exactly like importance, direction is **structurally unreachable from the risk
+gate**: the sentiment kinds live in `Domain.Signals`, which the `Domain.Risk` ↔ `Domain.Signals` structural guard
+already forbids risk from referencing — **extended here to name the sentiment kinds explicitly**, so the coverage is
+on the record rather than incidental. The paired QA (gh#362 → gh#762's QA card) extends the byte-identical-gate
+assertion to a maximally-👍/👎 signal.
+
+**v1 bounds (deliberate, not oversights):** operator rating **only** (classifier deferred); direction is a **stored
+fact for learning + display**, not yet folded into any suggestion or relevance score — that is R-9's consumer, when
+it lands; **one direction per item** (re-rating replaces), the star/mute pattern; and, like the star axis, direction
+is **age-agnostic** at rest (the learning consumer owns any recency treatment).
 
 ## Follow-ups
 - Define the **aggregation**: how stars map to per-dimension weights (instrument / topic / source / entity /

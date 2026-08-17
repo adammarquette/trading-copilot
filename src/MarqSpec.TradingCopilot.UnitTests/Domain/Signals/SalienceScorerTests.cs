@@ -26,6 +26,12 @@ public class SalienceScorerTests
     private static SoftSignalRating Mute(NewsDimensions dims, DateTimeOffset? at = null) =>
         new(SoftSignalKind.Mute, dims, at ?? _now);
 
+    private static SoftSignalRating ThumbsUp(NewsDimensions dims, DateTimeOffset? at = null) =>
+        new(SoftSignalKind.ThumbsUp, dims, at ?? _now);
+
+    private static SoftSignalRating ThumbsDown(NewsDimensions dims, DateTimeOffset? at = null) =>
+        new(SoftSignalKind.ThumbsDown, dims, at ?? _now);
+
     private static SalienceScore Score(IReadOnlyList<SoftSignalRating> feedback, NewsDimensions item) =>
         SalienceScorer.Score(SalienceProfile.Build(feedback, _now, _params), item, _params);
 
@@ -128,6 +134,39 @@ public class SalienceScorerTests
         List<SoftSignalRating> stars = [.. Enumerable.Range(0, 50).Select(_ => Star(es))];
 
         Score(stars, es).Multiplier.Should().Be(_params.MultiplierCap);
+    }
+
+    [Fact]
+    public void ADirectionRating_IsSalienceInert_ContributingNothing()
+    {
+        // gh#762: the direction axis (👍/👎) feeds R-9 learning + the read surface, NEVER surfacing. A ThumbsUp or
+        // ThumbsDown -- even on an item sharing EVERY dimension with the scored item -- must leave the multiplier at
+        // base (1) with no reasons, so importance and direction stay orthogonal in EFFECT, not just in storage.
+        NewsDimensions es = Dims(instruments: ["ES"], topics: ["fomc"], sources: ["finnhub"]);
+
+        SalienceScore up = Score([ThumbsUp(es)], es);
+        SalienceScore down = Score([ThumbsDown(es)], es);
+        SalienceScore both = Score([ThumbsUp(es), ThumbsDown(es)], es);
+
+        up.Multiplier.Should().Be(1.0);
+        up.Reasons.Should().BeEmpty();
+        down.Multiplier.Should().Be(1.0);
+        down.Reasons.Should().BeEmpty();
+        both.Multiplier.Should().Be(1.0);
+        both.Reasons.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void ADirectionRating_DoesNotPerturb_AnImportanceStar()
+    {
+        // Direction rows travel through the SAME profile builder as stars (the endpoint hands all feedback in); prove
+        // they don't dilute or amplify the star's weight -- the boost is identical with or without a 👍/👎 alongside.
+        NewsDimensions es = Dims(instruments: ["ES"]);
+
+        double starOnly = Score([Star(es)], es).Multiplier;
+        double starPlusDirection = Score([Star(es), ThumbsUp(es), ThumbsDown(es)], es).Multiplier;
+
+        starPlusDirection.Should().Be(starOnly);
     }
 
     [Fact]
