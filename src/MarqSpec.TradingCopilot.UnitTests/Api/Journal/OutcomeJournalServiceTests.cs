@@ -2,6 +2,7 @@ using MarqSpec.TradingCopilot.Api.Journal;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Execution;
 using MarqSpec.TradingCopilot.Domain.Journal;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
@@ -92,6 +93,22 @@ public class OutcomeJournalServiceTests
         await Service(database).ComposeUnfilledSuggestionOutcomesAsync(CancellationToken.None);
         return await database.Outcomes.IgnoreQueryFilters().ToListAsync();
     }
+
+    // An order armed from a suggestion (the durable "taken" signal, whatever the disposition table says).
+    private static Order NewOrder(Guid owner, Guid suggestionId) => new()
+    {
+        Id = Guid.NewGuid(),
+        UserId = owner,
+        AccountId = Guid.NewGuid(),
+        SuggestionId = suggestionId,
+        Instrument = "CON.F.US.MES.U26",
+        Side = OrderSide.Buy,
+        Size = 1,
+        Type = OrderType.Market,
+        Status = OrderStatus.Working,
+        Mode = TradingMode.Practice,
+        PlacedAt = new DateTimeOffset(2026, 8, 15, 14, 15, 0, TimeSpan.Zero),
+    };
 
     [Theory]
     [InlineData(120.50, OutcomeResolution.Win)]
@@ -326,6 +343,24 @@ public class OutcomeJournalServiceTests
 
         (await ComposeUnfilledAndReadAsync(database)).Select(outcome => outcome.UserId)
             .Should().BeEquivalentTo(new[] { alice, bob });
+    }
+
+    [Fact]
+    public async Task ComposeUnfilledSuggestionOutcomesAsync_ShouldSkipASuggestionAnOrderWasArmedFrom_EvenWithoutATakenDisposition()
+    {
+        // The disposition table is not a reliable "untaken" signal (gh#939 review): the take path writes it best-effort
+        // and swallows faults, and a pass/take race can leave a taken suggestion journaled Passed. A suggestion an ORDER
+        // was armed from is taken — its closed trade will own the outcome — so the untaken sweep must skip it and never
+        // compose a spurious untaken row alongside the eventual trade one.
+        await using TradingCopilotDbContext database =
+            Context(nameof(ComposeUnfilledSuggestionOutcomesAsync_ShouldSkipASuggestionAnOrderWasArmedFrom_EvenWithoutATakenDisposition));
+        Guid owner = Guid.NewGuid();
+        Suggestion suggestion = NewSuggestion(owner, SuggestionState.ExpiredVoid); // looks terminal to the clock, but...
+        database.Suggestions.Add(suggestion);
+        database.Orders.Add(NewOrder(owner, suggestion.Id)); // ...an order was armed from it — it was taken
+        await database.SaveChangesAsync();
+
+        (await ComposeUnfilledAndReadAsync(database)).Should().BeEmpty();
     }
 
     [Fact]
