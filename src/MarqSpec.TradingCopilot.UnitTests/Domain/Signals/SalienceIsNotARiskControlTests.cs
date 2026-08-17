@@ -45,6 +45,26 @@ public class SalienceIsNotARiskControlTests
             + "salience must stay a read-side weight");
     }
 
+    [Fact]
+    public void TheSentimentKinds_LiveInTheGuardedSignalsNamespace()
+    {
+        // gh#762: name the direction axis explicitly, so its coverage by the risk<->signals structural guard is ON THE
+        // RECORD rather than incidental. ThumbsUp / ThumbsDown are SoftSignalKind values, and SoftSignalKind lives in
+        // Domain.Signals -- the namespace NoRiskType_ReferencesTheSignalsNamespace forbids any risk type from touching.
+        // So a risk type that took a sentiment kind (directly or via SoftSignalKind) would already fail that guard;
+        // this pins the intent that direction feedback, like importance, is structurally unreachable from enforcement.
+        Enum.IsDefined(SoftSignalKind.ThumbsUp).Should().BeTrue();
+        Enum.IsDefined(SoftSignalKind.ThumbsDown).Should().BeTrue();
+        typeof(SoftSignalKind).Namespace.Should().Be(SignalsNamespace);
+        typeof(SoftSignalAxis).Namespace.Should().Be(SignalsNamespace);
+
+        Assembly domain = typeof(SalienceScorer).Assembly;
+        HashSet<Type> signalsTypes = [.. domain.GetTypes().Where(type => type.Namespace == SignalsNamespace)];
+        signalsTypes.Should().Contain(
+            typeof(SoftSignalKind),
+            "the sentiment kinds' enum must sit in the guarded namespace for the structural guard to cover them");
+    }
+
     // Every type on a type's member surface: field + property types, method return + parameter types, constructor
     // parameter types (public and non-public). A salience input wired into the gate surfaces here.
     private static IEnumerable<Type> SurfaceTypes(Type type)
