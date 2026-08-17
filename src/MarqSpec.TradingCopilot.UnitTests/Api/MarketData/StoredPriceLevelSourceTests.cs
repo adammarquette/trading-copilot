@@ -194,4 +194,72 @@ public class StoredPriceLevelSourceTests
 
         await act.Should().ThrowAsync<ArgumentNullException>();
     }
+
+    // ---- The venue-agnostic overload (gh#730): the SAME rules, but NO venue filter -- it reads every venue's active
+    //      levels for the instrument, because the confluence scan holds only the venue-neutral symbol (gate-below-model,
+    //      mirroring StoredIndicatorSource). Its own public method, so it carries its own coverage. ----
+
+    private async Task<IReadOnlyList<PriceLevel>> GetAnyVenueAsync(
+        string instrument = "ES", params int[] timeframes)
+    {
+        await using TradingCopilotDbContext context = Context();
+        return await new StoredPriceLevelSource(context).GetActiveLevelsAsync(instrument, timeframes, default);
+    }
+
+    [Fact]
+    public async Task GetActiveLevelsAsync_VenueAgnostic_ShouldReturnLevelsAcrossEveryVenue()
+    {
+        // The distinguishing behavior: unlike the venue-taking overload, this returns the instrument's active levels
+        // from ALL venues at once. A venue filter here would be the defect (the scan has no venue to filter on).
+        PriceLevel onProjectX = Level(venue: "projectx", timeframe: 60);
+        PriceLevel onFinnhub = Level(venue: "finnhub", timeframe: 60);
+        await SeedAsync(onProjectX, onFinnhub);
+
+        IReadOnlyList<PriceLevel> levels = await GetAnyVenueAsync(instrument: "ES", timeframes: 60);
+
+        levels.Select(level => level.Id).Should().BeEquivalentTo([onProjectX.Id, onFinnhub.Id],
+            "the venue-agnostic overload reads every venue's active levels for the symbol");
+    }
+
+    [Fact]
+    public async Task GetActiveLevelsAsync_VenueAgnostic_ShouldStillExcludeRetiredAndUnrequestedTimeframes()
+    {
+        PriceLevel wanted = Level(venue: "projectx", timeframe: 60, active: true);
+        await SeedAsync(
+            wanted,
+            Level(venue: "finnhub", timeframe: 60, active: false), // retired -> excluded even across venues
+            Level(venue: "finnhub", timeframe: 5, active: true));  // unrequested timeframe -> excluded
+
+        IReadOnlyList<PriceLevel> levels = await GetAnyVenueAsync(instrument: "ES", timeframes: 60);
+
+        levels.Should().ContainSingle().Which.Id.Should().Be(wanted.Id);
+    }
+
+    [Fact]
+    public async Task GetActiveLevelsAsync_VenueAgnostic_ShouldReturnEmpty_ForAnEmptyTimeframeSet()
+    {
+        await SeedAsync(Level());
+
+        (await GetAnyVenueAsync(instrument: "ES", timeframes: [])).Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task GetActiveLevelsAsync_VenueAgnostic_ShouldRejectABlankInstrument(string instrument)
+    {
+        await using TradingCopilotDbContext context = Context();
+        Func<Task> act = () => new StoredPriceLevelSource(context).GetActiveLevelsAsync(instrument, [60], default);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Fact]
+    public async Task GetActiveLevelsAsync_VenueAgnostic_ShouldRejectANullTimeframeSet()
+    {
+        await using TradingCopilotDbContext context = Context();
+        Func<Task> act = () => new StoredPriceLevelSource(context).GetActiveLevelsAsync("ES", null!, default);
+
+        await act.Should().ThrowAsync<ArgumentNullException>();
+    }
 }
