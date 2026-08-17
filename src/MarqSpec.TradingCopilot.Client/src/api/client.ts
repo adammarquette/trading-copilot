@@ -204,21 +204,49 @@ interface TokenResponse {
 }
 
 /**
+ * Turns a token-exchange response into a session, or into a **failed** result — the shared tail of
+ * {@link signIn} and {@link acceptInvite}, which differ only in route and body.
+ *
+ * A 2xx is not on its own proof that there is a token to store, and the two ways it is not are different from
+ * the one gh#951 closed. An **empty** body parses to `undefined` — that is the legitimate 204 path, so the
+ * parse guard never fires — and a proxy or a contract drift can return JSON of its own. Dereferencing that threw
+ * `TypeError` out of an un-caught `await` in the sign-in form, so `setSubmitting(false)` never ran and the
+ * operator was left on a dead submit button with no error, on the surface that gates every other surface
+ * (gh#954). A 2xx carrying no usable token is therefore a `failed` sign-in, which the existing error branch
+ * already renders.
+ *
+ * The type check is `typeof === 'string'`, not `'token' in data`: a non-string token would otherwise be stored
+ * as `[object Object]`, which is **worse than a refusal** — the app looks signed in and every later call 401s.
+ */
+function sessionFrom(result: ApiResult<TokenResponse | undefined>): ApiResult<void> {
+  if (!result.ok) {
+    return result;
+  }
+  const token = result.data?.token;
+  if (typeof token !== 'string' || token.length === 0) {
+    return {
+      ok: false,
+      kind: 'failed',
+      error: 'Sign-in did not return a session token.',
+    };
+  }
+  storeToken(token);
+  return { ok: true, data: undefined };
+}
+
+/**
  * Signs in and stores the JWT. On success the token is the only thing that changes; every later call carries it.
  * A bad password returns `failed` with `status: 401` — the sign-in surface renders that as "check your
  * credentials", distinct from a mid-session 401 (which redirects), because sign-in is an anonymous path.
  */
 export async function signIn(credentials: LoginRequest): Promise<ApiResult<void>> {
-  const result = await request<TokenResponse>(
-    'POST',
-    '/auth/login' satisfies keyof paths,
-    credentials,
+  return sessionFrom(
+    await request<TokenResponse | undefined>(
+      'POST',
+      '/auth/login' satisfies keyof paths,
+      credentials,
+    ),
   );
-  if (result.ok) {
-    storeToken(result.data.token);
-    return { ok: true, data: undefined };
-  }
-  return result;
 }
 
 /** Signs the operator out locally by dropping the token. The next protected call will 401 and route to sign-in. */
@@ -234,16 +262,13 @@ type AcceptInviteRequest = components['schemas']['AcceptInviteRequest'];
  * mentee observers), so this redeems the token the endpoint already accepts and nothing more.
  */
 export async function acceptInvite(redemption: AcceptInviteRequest): Promise<ApiResult<void>> {
-  const result = await request<TokenResponse>(
-    'POST',
-    '/auth/accept-invite' satisfies keyof paths,
-    redemption,
+  return sessionFrom(
+    await request<TokenResponse | undefined>(
+      'POST',
+      '/auth/accept-invite' satisfies keyof paths,
+      redemption,
+    ),
   );
-  if (result.ok) {
-    storeToken(result.data.token);
-    return { ok: true, data: undefined };
-  }
-  return result;
 }
 
 /** The signed-in operator, from `GET /auth/me` (an anonymous-object response the spec does not type, so named here). */

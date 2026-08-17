@@ -77,6 +77,31 @@ since this ADR is where the client's error model and the "one attach path" claim
   resolve to the same global — with the anonymous `/health` probe the one allow-listed exception; a new one is a
   deliberate, reviewable edit to that list.
 
+## Update (2026-08-17) — a 2xx is not on its own a success (gh#951, gh#954)
+
+Two defects of one family, recorded together because the second is what proved the first was a class rather than
+an instance. Both were **read-surface liveness** failures, and both were invisible to the type system: the client
+declares what a 2xx body *will* be, and neither case is a lie the compiler can see.
+
+- **A 2xx whose body does not parse is a `failed` read (gh#951).** `request()` wrapped only the `fetch` call in
+  try/catch; the body read — `JSON.parse` — sat outside it, so a `200` carrying an HTML error page or a truncated
+  body threw *after* the promise had been handed to the caller. Every read surface consumes this as
+  `void getX().then(...)` with no `.catch`, so the rejection was unhandled and the surface sat on its
+  `LoadingState` **forever**, with no error and no retry. This was not a new contract — `failed` already named
+  "an unparseable body" as one of its cases, and the 4xx path already behaved this way via `readRefusal` — the
+  2xx path was simply the asymmetry.
+- **A 2xx carrying no usable token is a `failed` sign-in (gh#954).** An **empty** body does not fail to parse: it
+  is the legitimate 204 path, returning `undefined`, so gh#951's guard never fires. `signIn` / `acceptInvite`
+  dereferenced it as `result.data.token`, throwing `TypeError` out of `SignInPage.onSubmit`'s un-caught `await`,
+  so `setSubmitting(false)` never ran — a **dead submit button, no alert, no way forward**, on the surface that
+  gates every other surface. The token is now validated as a non-empty **string** before a session is stored:
+  a `'token' in data` check would pass for a non-string and store `[object Object]`, which is worse than a clean
+  refusal because the app then looks signed in and every later call 401s.
+
+The rule the two share, and the one to apply to any future body read here: **a 2xx is a statement about the
+transport, not about the payload.** A surface may only ever be left in a state the operator can act on — an
+answer, an error with a retry, or a refusal — and never in one that requires reloading the page to escape.
+
 ## Follow-ups
 - Token **issuance + refresh** flow (login → JWT; refresh strategy; expiry).
 - **Signing-key** storage / rotation (server-side secret, §8).

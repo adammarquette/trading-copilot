@@ -132,6 +132,28 @@ describe('SignInPage', () => {
     expect(screen.queryByTestId('dest')).toBeNull();
   });
 
+  it('recovers the form when a 2xx carries no session token — no dead submit button (gh#954)', async () => {
+    // The end the gh#954 defect was felt at. `signIn` used to THROW here (an empty 2xx body dereferenced as
+    // `undefined.token`), and since `onSubmit` awaits without a try/catch, `setSubmitting(false)` never ran: the
+    // button stayed disabled with no alert and no way forward, on the surface that gates every other surface.
+    // The seam now answers `failed`, so this asserts the two things that were missing — an alert IS shown, and
+    // the button is usable again. Deliberately not a `.rejects` test: the point is that nothing throws at all.
+    const signIn = vi.fn().mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      error: 'Sign-in did not return a session token.',
+    } satisfies ApiResult<void>);
+    renderSignIn(auth({ signIn }));
+
+    fill('Email', 'operator@local');
+    fill('Password', 'pw');
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    const button = screen.getByRole('button', { name: 'Sign in' });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('distinguishes a connection failure from a rejected credential', async () => {
     const signIn = vi.fn().mockResolvedValue({
       ok: false,

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { request, setOnUnauthenticated, signIn, signOut } from './client';
+import { acceptInvite, request, setOnUnauthenticated, signIn, signOut } from './client';
 import { readToken, storeToken } from './token';
 
 /** A stand-in for the parts of Response the client reads: `ok`, `status`, and a text body. */
@@ -227,6 +227,51 @@ describe('signIn / signOut', () => {
     if (!result.ok) {
       expect(result.status).toBe(401);
     }
+    expect(readToken()).toBeNull();
+  });
+
+  // gh#954 — a 2xx whose body carries no usable token. gh#951 guarded a body that FAILS TO PARSE; an empty body
+  // does not fail to parse, it is the legitimate `undefined` (204) path, so it flowed straight through to
+  // `storeToken(result.data.token)` and threw `TypeError: Cannot read properties of undefined`. That rejection
+  // escaped `SignInPage.onSubmit`'s un-caught await, so `setSubmitting(false)` never ran and the operator was
+  // left on a dead submit button with no error — on the one surface that gates every other surface.
+  it('treats a 2xx with an EMPTY body as a failed sign-in, never a throw (gh#954)', async () => {
+    stubFetch(() => Promise.resolve(rawResponse(200, '')));
+
+    const result = await signIn({ email: 'op@local', password: 'pw' });
+
+    expect(result.ok).toBe(false);
+    expect(readToken()).toBeNull();
+  });
+
+  it('treats a 2xx whose body has no token as a failed sign-in (gh#954)', async () => {
+    // Parses fine, carries nothing usable — a proxy substituting its own JSON, or a contract drift.
+    stubFetch(() => Promise.resolve(response(200, { somethingElse: true })));
+
+    const result = await signIn({ email: 'op@local', password: 'pw' });
+
+    expect(result.ok).toBe(false);
+    expect(readToken()).toBeNull();
+  });
+
+  it('treats a 2xx whose token is not a string as a failed sign-in (gh#954)', async () => {
+    // The half-guard this case exists to stop: a `token in data` check passes here and stores `[object Object]`,
+    // which is a *stored session that cannot work* — worse than a clean refusal, because the app looks signed in.
+    stubFetch(() => Promise.resolve(response(200, { token: { nested: 'no' } })));
+
+    const result = await signIn({ email: 'op@local', password: 'pw' });
+
+    expect(result.ok).toBe(false);
+    expect(readToken()).toBeNull();
+  });
+
+  it('treats a 2xx with an empty body as a failed accept-invite (gh#954)', async () => {
+    // Same seam, same dereference — acceptInvite is signIn's twin and would otherwise keep the defect alive.
+    stubFetch(() => Promise.resolve(rawResponse(200, '')));
+
+    const result = await acceptInvite({ token: 'invite', displayName: 'Op', password: 'pw' });
+
+    expect(result.ok).toBe(false);
     expect(readToken()).toBeNull();
   });
 
