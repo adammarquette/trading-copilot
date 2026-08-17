@@ -402,15 +402,23 @@ public sealed class AdoptedRoundTripTradeIntegrationTests : IClassFixture<Adopte
         VenueFactory.MakePlaceOrderThrow(() => new VenueRefusalException(
             "accepted but returned no order id", VenueRefusalKind.Indeterminate));
 
+        HttpResponseMessage? take = null;
         try
         {
-            using HttpResponseMessage take = await client.PostAsync($"/orders/{orderId}/take", null);
-            take.StatusCode.Should().NotBe(
-                HttpStatusCode.OK, "a maybe-live fault must never report the take as succeeded");
+            take = await client.PostAsync($"/orders/{orderId}/take", null);
         }
         catch (Exception)
         {
-            // Tolerated: the property under test is the durable DB state, not whether the fault escaped the request.
+            // Tolerated: the property under test is the durable DB state, not whether the fault escaped the
+            // request. But the assertion below is NOT inside this catch (gh#960 review) -- if the request DID
+            // come back, its status is a real fact this fixture must check, and a failure of that check must
+            // fail the test rather than being silently absorbed as "the fault escaped, as expected."
+        }
+
+        using (take)
+        {
+            take?.StatusCode.Should().NotBe(
+                HttpStatusCode.OK, "a maybe-live fault must never report the take as succeeded");
         }
 
         VenueFactory.ClearPlaceOrderFaults();
