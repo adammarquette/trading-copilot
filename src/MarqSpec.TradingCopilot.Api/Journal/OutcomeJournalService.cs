@@ -66,10 +66,19 @@ public sealed class OutcomeJournalService
             .Select(outcome => outcome.TradeId!.Value)
             .ToListAsync(cancellationToken);
 
+        // A hard-deleted outcome leaves a recomposition-suppression tombstone keyed on its trade (gh#955) — anti-join
+        // it too, so the sweep never re-derives an outcome the operator confirmed removing. Cross-owner: IgnoreQueryFilters.
+        List<Guid> suppressed = await _database.OutcomeSuppressions
+            .IgnoreQueryFilters()
+            .Where(suppression => suppression.TradeId != null)
+            .Select(suppression => suppression.TradeId!.Value)
+            .ToListAsync(cancellationToken);
+
         List<Trade> pending = await _database.Trades
             .AsNoTracking()
             .IgnoreQueryFilters()
-            .Where(trade => trade.ClosedAt != null && trade.RealizedPnL != null && !alreadyOutcomed.Contains(trade.Id))
+            .Where(trade => trade.ClosedAt != null && trade.RealizedPnL != null
+                && !alreadyOutcomed.Contains(trade.Id) && !suppressed.Contains(trade.Id))
             .OrderBy(trade => trade.ClosedAt)
             .Take(MaxPerPass)
             .ToListAsync(cancellationToken);
@@ -147,6 +156,14 @@ public sealed class OutcomeJournalService
             .Select(outcome => outcome.SuggestionId!.Value)
             .ToListAsync(cancellationToken);
 
+        // A hard-deleted untaken outcome leaves a suppression tombstone keyed on its suggestion (gh#955) — anti-join it,
+        // so the sweep does not re-derive an outcome the operator confirmed removing (the untaken mirror of the trade sweep).
+        List<Guid> suppressed = await _database.OutcomeSuppressions
+            .IgnoreQueryFilters()
+            .Where(suppression => suppression.SuggestionId != null)
+            .Select(suppression => suppression.SuggestionId!.Value)
+            .ToListAsync(cancellationToken);
+
         // A TAKEN / MODIFIED suggestion produced a trade; its outcome is composed from the closed trade (with a
         // TradeId), never here — so it is excluded even if the suggestion itself later reads ExpiredVoid.
         List<Guid> taken = await _database.SuggestionDispositions
@@ -182,6 +199,7 @@ public sealed class OutcomeJournalService
             .AsNoTracking()
             .IgnoreQueryFilters()
             .Where(suggestion => !alreadyOutcomed.Contains(suggestion.Id)
+                && !suppressed.Contains(suggestion.Id)
                 && !taken.Contains(suggestion.Id)
                 && !armed.Contains(suggestion.Id)
                 && (passed.Contains(suggestion.Id) || suggestion.State == SuggestionState.ExpiredVoid))

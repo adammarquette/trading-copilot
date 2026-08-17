@@ -97,6 +97,8 @@ erDiagram
 
   Trade         ||--o{ TradeFeedback          : "annotated by"
   Trade         ||--o| Outcome                : resolves
+  Trade         ||--o| OutcomeSuppression     : "hard-delete tombstone"
+  Suggestion    ||--o| OutcomeSuppression     : "hard-delete tombstone"
 
   Rule          ||--o{ Trigger                : "compiles to"
   Trigger       ||--o{ TriggerFiring          : "fires"
@@ -120,7 +122,7 @@ identifier, so a domain is never renumbered.
 | **§4** | [Orders & execution](data-dictionary/04-orders-execution.md) | 7301 | Order, Fill, Bracket/OCO, StopPlan, ConditionalOrder, KillSwitchState, NotificationOutbox — **the largest domain** |
 | **§5** | [Risk](data-dictionary/05-risk.md) | 1542 | RiskProfile / Limits, GateDecision |
 | **§6** | [Suggestions](data-dictionary/06-suggestions.md) | 3272 | Suggestion, SuggestionDisposition, MarketSnapshot, CitedFactor |
-| **§7** | [Journal & outcomes](data-dictionary/07-journal-outcomes.md) | 403 | Trade, TradeFeedback, Outcome |
+| **§7** | [Journal & outcomes](data-dictionary/07-journal-outcomes.md) | 403 | Trade, TradeFeedback, Outcome, OutcomeSuppression |
 | **§8** | [Rulebook & triggers](data-dictionary/08-rulebook-triggers.md) | 1421 | Rule, Trigger / Condition, TriggerFiring |
 | **§9** | [Non-market / soft signals](data-dictionary/09-soft-signals.md) | 1271 | SoftSignal (NewsItem), NewsTopic, RelevanceConfig / TopicMap, SoftSignalFeedback |
 | **§10** | [Vectors & retrieval](data-dictionary/10-vectors-retrieval.md) | 417 | Embedding — the polymorphic `VEC` row |

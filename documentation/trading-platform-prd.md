@@ -284,7 +284,7 @@ then [Nice-to-Have (P1)](#nice-to-have-p1) · [Future Considerations (P2)](#futu
 - [ ] The soft-delete audit trail preserves the original record and the exclusion (what, when, why-optional)
 - [x] Reports can be toggled to show figures inclusive vs. exclusive of soft-deleted records, so the honest picture stays recoverable
 - [x] **Training-exclusion and display-visibility are independent controls**, not one flag: the operator can **exclude a trade from AI training while keeping it visible** in the journal (a legitimate loss worth reviewing but not learning from), or hide a record from default views without touching training. Soft-delete is the combined shortcut (both, reversible); `training_excluded` and `hidden_from_user` are separately settable (data dictionary)
-- [ ] Hard delete requires explicit confirmation; the fact that a deletion occurred is logged even though the content is gone <!-- endpoint + audit built (gh#909); functionally refused for trade-derived outcomes (the writer would recompose), so lands with the untaken path gh#939 -->
+- [ ] Hard delete requires explicit confirmation; the fact that a deletion occurred is logged even though the content is gone <!-- endpoint + audit built (gh#909); a recomposition-suppression tombstone (both sweeps anti-join it) makes it STICK for both trade-derived and untaken outcomes (gh#955); the SPA confirmation UX is still to come -->
 - [ ] Neither operation affects broker/account records — removal is local to this platform's journal and learning signal
 
 <a id="r-16"></a>
