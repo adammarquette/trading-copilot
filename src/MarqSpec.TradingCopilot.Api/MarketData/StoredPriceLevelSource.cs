@@ -47,4 +47,33 @@ public sealed class StoredPriceLevelSource : IPriceLevelSource
             .ThenByDescending(level => level.Significance)
             .ToListAsync(cancellationToken);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<PriceLevel>> GetActiveLevelsAsync(
+        string instrument,
+        IReadOnlyCollection<int> timeframeMinutes,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(instrument);
+        ArgumentNullException.ThrowIfNull(timeframeMinutes);
+
+        // An empty set asks for no timeframes -- return nothing rather than everything, so a caller must name the
+        // timeframes it wants (the venue-taking overload's rule).
+        if (timeframeMinutes.Count == 0)
+        {
+            return [];
+        }
+
+        // No Venue filter (the venue-agnostic overload, gh#730): the scan holds only the venue-neutral symbol, so this
+        // reads every venue's active levels for it -- exactly as StoredIndicatorSource reads indicator values without a
+        // venue. PriceLevel is shared / global market data (not IUserOwned), so there is no owner filter to cross.
+        return await _database.PriceLevels
+            .AsNoTracking()
+            .Where(level => level.Instrument == instrument
+                && level.Active
+                && timeframeMinutes.Contains(level.TimeframeMinutes))
+            .OrderBy(level => level.TimeframeMinutes)
+            .ThenByDescending(level => level.Significance)
+            .ToListAsync(cancellationToken);
+    }
 }

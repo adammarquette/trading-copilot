@@ -280,6 +280,16 @@ builder.Services.AddTradingCopilotAi(builder.Configuration);
 // stages a Suggestion (never an order), and advises. Reads indicators globally (derived market data), reads/writes
 // triggers per-owner (R-20). Harmless with no triggers, so it always runs.
 builder.Services.Configure<TriggerOptions>(builder.Configuration.GetSection(TriggerOptions.SectionName));
+// Confluence assembly (gh#730, ADR-0026 §3): the proximity band + corroboration ladder issuance uses to cite the
+// supporting factors. It feeds the HOSTED scan (TriggerEvaluationService, below), so validate on start -- a
+// non-positive KTicks/FAtr would mint a zero/negative band that silently mis-measures every level, and a non-positive
+// ladder entry a nonsensical timeframe (the KeyLevelDetectorOptions idiom). An empty ladder is a valid, inert opt-out.
+builder.Services.AddOptions<ConfluenceOptions>()
+    .Bind(builder.Configuration.GetSection(ConfluenceOptions.SectionName))
+    .Validate(
+        options => options.Validate(),
+        "Confluence: require KTicks > 0, FAtr > 0, and every TimeframeMinutes entry > 0.")
+    .ValidateOnStart();
 builder.Services.AddScoped<TriggerEvaluationService>();
 builder.Services.AddHostedService<TriggerScanHost>();
 
