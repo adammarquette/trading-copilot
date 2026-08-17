@@ -167,15 +167,52 @@ export interface RepriceRequest {
 }
 
 /**
+ * What a completed reprice reports back (gh#969). **One endpoint, two shapes.** An **entry / size** move echoes the
+ * full gate decision — the load-bearing pair is `size` vs `requestedSize`, since on a resize the gate can **honour a
+ * smaller quantity than asked** (`outcome === 'Resized'`, gh#292), and the server returns both so the operator is not
+ * left believing they got the size they requested. A **working-stop-only** re-stage never resizes, so it returns just
+ * `id` / `status` / `workingStopPrice` and the decision fields are absent (hence optional here). Read the body —
+ * never discard it, on either path.
+ */
+export interface RepriceResult {
+  readonly id: string;
+  readonly status: string;
+  /** The hidden working stop after the move — carried on **both** paths, always a number (a stopless order rests at its safety stop, never `null`). */
+  readonly workingStopPrice: number;
+  /** The new resting entry — an **entry** move only; absent on a working-stop-only re-stage. */
+  readonly entryPrice?: number;
+  /** The quantity the order now rests at — the **gate-approved** size. An entry / size move only; absent on a working-stop-only re-stage. */
+  readonly size?: number;
+  /** The quantity the operator asked for, `null` when the move did not touch size — an entry / size move only; absent on a working-stop-only re-stage. */
+  readonly requestedSize?: number | null;
+  /** The gate's verdict on the modify — `Allowed` / `Resized` / `Blocked`, or a pre-gate refusal name. An entry / size move only; absent on a working-stop-only re-stage. */
+  readonly outcome?: string;
+}
+
+/**
  * Moves a resting working order in place (gh#259/#267/#278/#292) — keeping its queue position and its attached
  * protective bracket, rather than cancel-and-replace.
  *
  * Unlike a cancel, a reprice **can add risk** (a wider stop, an entry likelier to fill), so the server runs the
  * full send ladder and **re-gates** it before touching the venue. A refusal is the gate's answer, not an error to
- * swallow — it reaches the operator.
+ * swallow — it reaches the operator. The 200 body carries the gate-approved size + verdict (gh#969): read it, so a
+ * downsize is surfaced rather than silently applied.
  */
-export function repriceOrder(orderId: string, change: RepriceRequest): Promise<ApiResult<void>> {
-  return request<void>('PATCH', `/orders/${orderId}/price`, change);
+export function repriceOrder(
+  orderId: string,
+  change: RepriceRequest,
+): Promise<ApiResult<RepriceResult>> {
+  return request<RepriceResult>('PATCH', `/orders/${orderId}/price`, change);
+}
+
+/** Whether a completed reprice honoured a **smaller** quantity than the operator asked (gh#292/#969) — a gate-approved downsize. */
+export function isApprovedDownsize(result: RepriceResult): boolean {
+  return (
+    result.outcome === 'Resized' &&
+    result.requestedSize != null &&
+    result.size != null &&
+    result.size < result.requestedSize
+  );
 }
 
 /**
