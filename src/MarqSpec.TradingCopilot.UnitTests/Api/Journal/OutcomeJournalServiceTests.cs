@@ -246,6 +246,31 @@ public class OutcomeJournalServiceTests
             .Should().ContainSingle().Which.Deleted.Should().BeTrue(); // still just the soft-deleted one
     }
 
+    [Fact]
+    public async Task ComposeClosedTradeOutcomesAsync_ShouldSkipATrade_WhenAHardDeleteSuppressedItsOutcome()
+    {
+        // A hard delete removes the outcome row but leaves a recomposition-suppression tombstone keyed on the trade
+        // (gh#955). The closed-trade sweep must anti-join it — otherwise the next pass recomposes the very outcome the
+        // operator confirmed removing. This is what makes a hard delete STICK (soft-delete keeps the row instead).
+        await using TradingCopilotDbContext database =
+            Context(nameof(ComposeClosedTradeOutcomesAsync_ShouldSkipATrade_WhenAHardDeleteSuppressedItsOutcome));
+        Trade trade = ClosedTrade(Guid.NewGuid(), 50m);
+        database.Trades.Add(trade);
+        database.OutcomeSuppressions.Add(new OutcomeSuppression
+        {
+            Id = Guid.NewGuid(),
+            UserId = trade.UserId,
+            TradeId = trade.Id,
+            CreatedAt = trade.ClosedAt!.Value,
+        });
+        await database.SaveChangesAsync();
+
+        int written = await Service(database).ComposeClosedTradeOutcomesAsync(CancellationToken.None);
+
+        written.Should().Be(0);
+        (await database.Outcomes.IgnoreQueryFilters().ToListAsync()).Should().BeEmpty(); // suppressed — never recomposed
+    }
+
     // --- Untaken-suggestion outcomes (gh#939): a terminal UNFILLED suggestion → Expired / NoFillScratch ---
 
     [Fact]
@@ -371,6 +396,30 @@ public class OutcomeJournalServiceTests
         await database.SaveChangesAsync();
 
         (await ComposeUnfilledAndReadAsync(database)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ComposeUnfilledSuggestionOutcomesAsync_ShouldSkipASuggestion_WhenAHardDeleteSuppressedItsOutcome()
+    {
+        // The untaken mirror of the trade case (gh#955): a hard delete of an untaken outcome leaves a suppression
+        // tombstone keyed on the suggestion, and the unfilled sweep must anti-join it so the outcome is not recomposed.
+        await using TradingCopilotDbContext database =
+            Context(nameof(ComposeUnfilledSuggestionOutcomesAsync_ShouldSkipASuggestion_WhenAHardDeleteSuppressedItsOutcome));
+        Suggestion suggestion = NewSuggestion(Guid.NewGuid(), SuggestionState.ExpiredVoid);
+        database.Suggestions.Add(suggestion);
+        database.OutcomeSuppressions.Add(new OutcomeSuppression
+        {
+            Id = Guid.NewGuid(),
+            UserId = suggestion.UserId,
+            SuggestionId = suggestion.Id,
+            CreatedAt = suggestion.CreatedAt,
+        });
+        await database.SaveChangesAsync();
+
+        int written = await Service(database).ComposeUnfilledSuggestionOutcomesAsync(CancellationToken.None);
+
+        written.Should().Be(0);
+        (await database.Outcomes.IgnoreQueryFilters().ToListAsync()).Should().BeEmpty(); // suppressed — never recomposed
     }
 
     [Fact]

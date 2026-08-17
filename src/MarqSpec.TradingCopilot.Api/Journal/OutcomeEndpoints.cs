@@ -27,11 +27,11 @@ namespace MarqSpec.TradingCopilot.Api.Journal;
 /// </para>
 /// <para>
 /// <b>Removals span the reversible controls and the one irreversible one.</b> Soft-delete / restore and the two
-/// toggles are undoable; <b>hard delete</b> is the confirmed exception — it removes the row and records the <b>fact</b>
-/// of the deletion to the audit trail (R-15), so the removal outlives the content. A <b>trade-derived</b> outcome is
-/// <b>refused</b> (a 409) — the journal writer would recompose it, so soft-delete is its removal; hard delete serves a
-/// record with <b>no live re-deriving source</b> (the untaken-suggestion path lands with gh#939). Nothing here touches
-/// a broker or account record.
+/// toggles are undoable; <b>hard delete</b> is the confirmed exception — it removes the row, writes a
+/// recomposition-suppression tombstone in the <b>same unit of work</b> so the journal writer does not re-derive it
+/// (gh#955), and records the <b>fact</b> of the deletion to the audit trail (R-15), so the removal both sticks and
+/// outlives the content. Soft-delete stays the reversible removal (it keeps the row, so the writer never recomposes).
+/// Nothing here touches a broker or account record.
 /// </para>
 /// </remarks>
 public static class OutcomeEndpoints
@@ -59,7 +59,7 @@ public static class OutcomeEndpoints
         group.MapDelete("/{id:guid}", (Guid id, TradingCopilotDbContext database, IAuditLog auditLog,
             ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
             HardDeleteAsync(id, DateTimeOffset.UtcNow, database, auditLog, loggerFactory, cancellationToken))
-            .WithSummary("Hard-delete an outcome with no live source (R-15) — the confirmed, irreversible removal (a trade-derived outcome is refused; soft-delete removes it). The deletion is audited.");
+            .WithSummary("Hard-delete an outcome (R-15) — the confirmed, irreversible removal: it removes the row and suppresses its recomposition (gh#955), then audits the deletion. Soft-delete is the reversible removal.");
 
         return endpoints;
     }
@@ -158,29 +158,26 @@ public static class OutcomeEndpoints
             return Results.NotFound(); // not found / not owned (R-20) — never a disclosure
         }
 
-        if (outcome.TradeId is not null || outcome.SuggestionId is not null)
-        {
-            // EVERY outcome is a PROJECTION the OutcomeJournalService recomposes: the closed-trade sweep for a TradeId,
-            // the unfilled-suggestion sweep for a SuggestionId (gh#939). Hard-deleting the row only has the next sweep
-            // (≤ one poll interval) recompose it — with the R-15 flags defaulting off — resurrecting it into training
-            // and default views against the operator's confirmed removal, and leaving the audit trail claiming a
-            // deletion that came back. CK_Outcomes_ParentPresent guarantees at least one parent, so hard delete is
-            // refused across the board and soft-delete is the removal: it KEEPS the row (so the writer never
-            // recomposes) while excluding it from training and hiding it. Functional hard delete awaits a
-            // recomposition-suppression mechanism — a tombstone the writer's anti-joins consult (gh#955); the
-            // remove-and-audit below is that mechanism, gated here until the suppression lands.
-            return Results.Conflict(new
-            {
-                error = "This outcome is derived from the journal (a closed trade or a terminal suggestion) and would "
-                    + "be recomposed, so it cannot be hard-deleted. Soft-delete removes it from training and default "
-                    + "views. Functional hard delete awaits a recomposition-suppression mechanism (gh#955).",
-            });
-        }
-
-        // Capture what the audit names BEFORE the row is gone.
+        // Capture what the audit + tombstone name BEFORE the row is gone.
         Guid owner = outcome.UserId;
         OutcomeResolution resolution = outcome.Resolution;
 
+        // Write a recomposition-suppression tombstone in the SAME unit of work as the remove, so the hard delete STICKS
+        // (gh#955). EVERY outcome is a projection the OutcomeJournalService recomposes — the closed-trade sweep for a
+        // TradeId, the unfilled-suggestion sweep for a SuggestionId (gh#939) — and both sweeps anti-join this tombstone.
+        // Without it the next pass (≤ one poll interval) would re-derive the row, with the R-15 flags defaulting off,
+        // against the operator's confirmed removal, and leave the audit trail claiming a deletion that came back. Keyed
+        // on the outcome's OWN recomposition source: its TradeId when it had a trade (else the closed-trade sweep would
+        // recompose it), otherwise its SuggestionId — exactly one, which CK_Outcomes_ParentPresent guarantees is present.
+        // (Soft-delete stays the reversible removal: it KEEPS the row, so the writer never recomposes and needs no tombstone.)
+        database.OutcomeSuppressions.Add(new OutcomeSuppression
+        {
+            Id = Guid.NewGuid(),
+            UserId = owner,
+            TradeId = outcome.TradeId,
+            SuggestionId = outcome.TradeId is not null ? null : outcome.SuggestionId,
+            CreatedAt = now,
+        });
         database.Outcomes.Remove(outcome);
         await database.SaveChangesAsync(cancellationToken);
 

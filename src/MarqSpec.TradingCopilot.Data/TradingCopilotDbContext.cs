@@ -58,6 +58,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Journal outcomes — how a suggestion / trade resolved, with the R-15 removal flags (gh#832). Operator-owned.</summary>
     public DbSet<Outcome> Outcomes => Set<Outcome>();
 
+    /// <summary>Recomposition-suppression tombstones — a hard-deleted outcome's source, so no sweep re-derives it (gh#955). Operator-owned.</summary>
+    public DbSet<OutcomeSuppression> OutcomeSuppressions => Set<OutcomeSuppression>();
+
     /// <summary>Declared per-account risk rules (R-5, gh#10). Operator-owned; one per account.</summary>
     public DbSet<RiskProfileRecord> RiskProfiles => Set<RiskProfileRecord>();
 
@@ -547,6 +550,40 @@ public class TradingCopilotDbContext : TenantDbContext
             // no trade. OutcomeJournalService.OutcomeSuggestionKeyIndex pins this name; a metadata test guards it.
             outcome.HasIndex(o => o.SuggestionId).IsUnique()
                 .HasFilter("\"SuggestionId\" IS NOT NULL AND \"TradeId\" IS NULL");
+        });
+
+        modelBuilder.Entity<OutcomeSuppression>(suppression =>
+        {
+            suppression.ToTable("OutcomeSuppressions", table =>
+            {
+                // A tombstone suppresses EXACTLY ONE recomposition source -- the closed-trade sweep's TradeId or the
+                // unfilled sweep's SuggestionId, never both -- so it silences precisely the sweep that would re-derive
+                // the row. num_nonnulls states the one-key shape the writer always builds; a defaulted two-null row, or
+                // a both-set one, cannot be stored even by a direct write.
+                table.HasCheckConstraint(
+                    "CK_OutcomeSuppressions_OneParent",
+                    "num_nonnulls(\"TradeId\", \"SuggestionId\") = 1");
+            });
+
+            // Dies WITH its source (Cascade, mirroring Outcome's own FKs): removing the operator's account cascades the
+            // trade / suggestion away and the tombstone with it, so a suppression never outlives what it suppresses -- a
+            // gone source composes nothing, so nothing is left to suppress. Each row sets exactly one key, so it is
+            // reached by exactly one of the two cascade paths.
+            suppression.HasOne<Trade>()
+                .WithMany()
+                .HasForeignKey(s => s.TradeId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            suppression.HasOne<Suggestion>()
+                .WithMany()
+                .HasForeignKey(s => s.SuggestionId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // One suppression per source -- the hard delete is idempotent against a replay, and only one outcome ever
+            // exists per trade (IX_Outcomes_TradeId) or per untaken suggestion (IX_Outcomes_SuggestionId) to delete.
+            // Filtered to the non-null key: every row of the opposite kind leaves this column null.
+            suppression.HasIndex(s => s.TradeId).IsUnique().HasFilter("\"TradeId\" IS NOT NULL");
+            suppression.HasIndex(s => s.SuggestionId).IsUnique().HasFilter("\"SuggestionId\" IS NOT NULL");
         });
 
         modelBuilder.Entity<RiskProfileRecord>(profile =>
