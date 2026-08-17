@@ -69,7 +69,7 @@ export async function request<T>(
   method: Method,
   path: string,
   body?: unknown,
-): Promise<ApiResult<T>> {
+): Promise<ApiResult<T | undefined>> {
   const headers: Record<string, string> = {};
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -165,6 +165,46 @@ export async function request<T>(
   };
 }
 
+/**
+ * {@link request} for a call that is supposed to come back **with a payload** — which is nearly all of them. A
+ * 2xx whose body is absent returns `failed` rather than a success carrying `undefined`.
+ *
+ * This exists because `request` legitimately answers `undefined` for an empty body (that is how a 204 is
+ * expressed), and ~40 readers dereferenced `result.data.<prop>` without allowing for it. On a `void …then(…)`
+ * path — the shape every read surface uses — the resulting `TypeError` is an unhandled rejection, so the panel
+ * never leaves its loading state (gh#963, third of the class after gh#951 and gh#954).
+ *
+ * The worst of those was not merely a stuck panel. `useExecutionOverlays` is written so an empty overlay reads as
+ * **declared-unknown rather than a confirmed flat book** (R-13 / R-19) — but the throw happened *before* the flag
+ * that says so was set, so the code guarding against "the chart looks flat" was the code that failed to run.
+ *
+ * `request` now returns `T | undefined`, so choosing between the two is a **compile-time** decision: a reader
+ * that needs a payload cannot silently keep using `request` and dereference it. That is the sweep, enforced.
+ */
+export async function requestJson<T>(
+  method: Method,
+  path: string,
+  body?: unknown,
+): Promise<ApiResult<T>> {
+  const result = await request<T>(method, path, body);
+  if (!result.ok) {
+    return result;
+  }
+  // `== null` catches BOTH an absent body (`undefined`) and a literal JSON `null`, which parses fine and then
+  // throws on the same dereference. Nothing in this API emits `null` today — it takes a proxy or a contract
+  // drift — but the whole point of this seam is that the caller cannot be handed something it will crash on.
+  if (result.data == null) {
+    // No `status`: the success branch does not carry one, and inventing `200` would be a guess (a 201 or 202 is
+    // equally possible). Callers read `status` to spot a 401/404, and this is neither.
+    return {
+      ok: false,
+      kind: 'failed',
+      error: 'The response carried no data.',
+    };
+  }
+  return { ok: true, data: result.data };
+}
+
 async function readJsonOrUndefined(response: Response): Promise<unknown> {
   const text = await response.text();
   if (text.length === 0) {
@@ -241,11 +281,7 @@ function sessionFrom(result: ApiResult<TokenResponse | undefined>): ApiResult<vo
  */
 export async function signIn(credentials: LoginRequest): Promise<ApiResult<void>> {
   return sessionFrom(
-    await request<TokenResponse | undefined>(
-      'POST',
-      '/auth/login' satisfies keyof paths,
-      credentials,
-    ),
+    await request<TokenResponse>('POST', '/auth/login' satisfies keyof paths, credentials),
   );
 }
 
@@ -263,11 +299,7 @@ type AcceptInviteRequest = components['schemas']['AcceptInviteRequest'];
  */
 export async function acceptInvite(redemption: AcceptInviteRequest): Promise<ApiResult<void>> {
   return sessionFrom(
-    await request<TokenResponse | undefined>(
-      'POST',
-      '/auth/accept-invite' satisfies keyof paths,
-      redemption,
-    ),
+    await request<TokenResponse>('POST', '/auth/accept-invite' satisfies keyof paths, redemption),
   );
 }
 
@@ -284,5 +316,5 @@ export interface CurrentUser {
  * which the caller reads as "signed out"; it does not throw.
  */
 export async function getCurrentUser(): Promise<ApiResult<CurrentUser>> {
-  return request<CurrentUser>('GET', '/auth/me' satisfies keyof paths);
+  return requestJson<CurrentUser>('GET', '/auth/me' satisfies keyof paths);
 }

@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, request, requestJson } from './client';
 
 /**
  * News relevance configuration (gh#742, of gh#658; R-2/R-6/R-7, gh#359): the ticker↔instrument maps and the topics
@@ -44,12 +44,12 @@ export interface TopicInput {
 
 /** Every ticker↔instrument map (deployment-global). */
 export function listMaps(): Promise<ApiResult<TickerMap[]>> {
-  return request<TickerMap[]>('GET', '/api/relevance/maps');
+  return requestJson<TickerMap[]>('GET', '/api/relevance/maps');
 }
 
 /** Creates a ticker↔instrument map. The server normalizes ticker/instrument casing. */
 export function createMap(map: TickerMap): Promise<ApiResult<TickerMap>> {
-  return request<TickerMap>('POST', '/api/relevance/maps', map);
+  return requestJson<TickerMap>('POST', '/api/relevance/maps', map);
 }
 
 /**
@@ -65,17 +65,17 @@ export function deleteMap(ticker: string, instrument: string): Promise<ApiResult
 
 /** Every relevance topic (deployment-global). */
 export function listTopics(): Promise<ApiResult<Topic[]>> {
-  return request<Topic[]>('GET', '/api/relevance/topics');
+  return requestJson<Topic[]>('GET', '/api/relevance/topics');
 }
 
 /** Creates a topic. */
 export function createTopic(topic: TopicInput): Promise<ApiResult<Topic>> {
-  return request<Topic>('POST', '/api/relevance/topics', topic);
+  return requestJson<Topic>('POST', '/api/relevance/topics', topic);
 }
 
 /** Replaces a topic whole (PATCH — the server never merges a partial). */
 export function updateTopic(id: string, topic: TopicInput): Promise<ApiResult<Topic>> {
-  return request<Topic>('PATCH', `/api/relevance/topics/${id}`, topic);
+  return requestJson<Topic>('PATCH', `/api/relevance/topics/${id}`, topic);
 }
 
 /** Deletes a topic. */

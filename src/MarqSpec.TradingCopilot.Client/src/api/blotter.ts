@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 
 /**
  * The live blotter's reads — positions and resting orders from **venue truth** (gh#656, R-11 / R-3, ADR-0013).
@@ -95,7 +95,10 @@ function toView<T>(raw: RawView<T>, items: readonly T[] | undefined): VenueView<
 export async function getPositions(
   accountId: string,
 ): Promise<ApiResult<VenueView<BlotterPosition>>> {
-  const result = await request<RawView<BlotterPosition>>('GET', `/accounts/${accountId}/positions`);
+  const result = await requestJson<RawView<BlotterPosition>>(
+    'GET',
+    `/accounts/${accountId}/positions`,
+  );
 
   return result.ok ? { ok: true, data: toView(result.data, result.data.positions) } : result;
 }
@@ -104,7 +107,7 @@ export async function getPositions(
 export async function getRestingOrders(
   accountId: string,
 ): Promise<ApiResult<VenueView<BlotterRestingOrder>>> {
-  const result = await request<RawView<BlotterRestingOrder>>(
+  const result = await requestJson<RawView<BlotterRestingOrder>>(
     'GET',
     `/accounts/${accountId}/orders`,
   );
@@ -133,7 +136,7 @@ export function exitPosition(
   accountId: string,
   instrument: string,
 ): Promise<ApiResult<PositionExitResult>> {
-  return request<PositionExitResult>(
+  return requestJson<PositionExitResult>(
     'POST',
     `/accounts/${accountId}/positions/${encodeURIComponent(instrument)}/exit`,
   );

@@ -1,5 +1,5 @@
 import type { Account, Connection } from './accounts';
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 
 // The walk's writes return the same shapes the read paths serve — re-exported so a caller has one import site
 // for everything onboarding.
@@ -63,7 +63,7 @@ export interface CreateConnectionInput {
 
 /** Registers a firm the operator trades with. The name is unique within the operator's workspace. */
 export function createFirm(input: CreateFirmInput): Promise<ApiResult<Firm>> {
-  return request<Firm>('POST', '/firms', input);
+  return requestJson<Firm>('POST', '/firms', input);
 }
 
 /**
@@ -74,12 +74,12 @@ export function declareConventions(
   firmId: string,
   conventions: readonly StageConvention[],
 ): Promise<ApiResult<Firm>> {
-  return request<Firm>('PUT', `/firms/${firmId}/conventions`, { conventions });
+  return requestJson<Firm>('PUT', `/firms/${firmId}/conventions`, { conventions });
 }
 
 /** Adds a login for a firm on a platform (one per firm × platform). Returns the connection; never a secret. */
 export function createConnection(input: CreateConnectionInput): Promise<ApiResult<Connection>> {
-  return request<Connection>('POST', '/connections', input);
+  return requestJson<Connection>('POST', '/connections', input);
 }
 
 /**
@@ -88,5 +88,5 @@ export function createConnection(input: CreateConnectionInput): Promise<ApiResul
  * the same {@link Account} shape the read paths serve.
  */
 export function discoverAccounts(connectionId: string): Promise<ApiResult<Account[]>> {
-  return request<Account[]>('POST', `/connections/${connectionId}/accounts/discover`);
+  return requestJson<Account[]>('POST', `/connections/${connectionId}/accounts/discover`);
 }

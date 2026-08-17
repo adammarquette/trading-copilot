@@ -1,27 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./client', () => ({ request: vi.fn() }));
+vi.mock('./client', () => ({ request: vi.fn(), requestJson: vi.fn() }));
 
-import { request } from './client';
+import { requestJson } from './client';
 import { getBars, getIndicators, getLevels } from './marketData';
 
-const requestMock = vi.mocked(request);
+const requestJsonMock = vi.mocked(requestJson);
 
 beforeEach(() => {
-  requestMock.mockReset();
+  requestJsonMock.mockReset();
 });
 
 describe('getBars', () => {
   it('reads the bars route with the venue/instrument/resolution/window as query params', async () => {
-    requestMock.mockResolvedValue({
+    requestJsonMock.mockResolvedValue({
       ok: true,
       data: { venue: 'topstepx', instrument: 'ES', resolutionMinutes: 1, bars: [] },
     });
 
     await getBars('topstepx', 'ES', 1, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');
 
-    expect(requestMock).toHaveBeenCalledOnce();
-    const [method, path] = requestMock.mock.calls[0];
+    expect(requestJsonMock).toHaveBeenCalledOnce();
+    const [method, path] = requestJsonMock.mock.calls[0];
     expect(method).toBe('GET');
     const url = new URL(path, 'http://local');
     expect(url.pathname).toBe('/api/marketdata/bars');
@@ -48,7 +48,7 @@ describe('getBars', () => {
         },
       ],
     };
-    requestMock.mockResolvedValue({ ok: true, data: wireSeries });
+    requestJsonMock.mockResolvedValue({ ok: true, data: wireSeries });
 
     await expect(getBars('topstepx', 'ES', 1, 'a', 'b')).resolves.toEqual({
       ok: true,
@@ -57,7 +57,7 @@ describe('getBars', () => {
   });
 
   it('passes a refusal through unchanged (the window-too-wide bound is the gate answer, not an error)', async () => {
-    requestMock.mockResolvedValue({
+    requestJsonMock.mockResolvedValue({
       ok: false,
       kind: 'refused',
       status: 400,
@@ -75,7 +75,7 @@ describe('getBars', () => {
 
 describe('getIndicators', () => {
   it('reads the indicators route with the indicator + period among the query params', async () => {
-    requestMock.mockResolvedValue({
+    requestJsonMock.mockResolvedValue({
       ok: true,
       data: {
         venue: 'projectx',
@@ -97,7 +97,7 @@ describe('getIndicators', () => {
       '2026-01-02T00:00:00Z',
     );
 
-    const [method, path] = requestMock.mock.calls[0];
+    const [method, path] = requestJsonMock.mock.calls[0];
     expect(method).toBe('GET');
     const url = new URL(path, 'http://local');
     expect(url.pathname).toBe('/api/marketdata/indicators');
@@ -119,7 +119,7 @@ describe('getIndicators', () => {
       period: 14,
       points: [{ bucketStart: '2026-01-01T00:00:00Z', value: 62.5 }],
     };
-    requestMock.mockResolvedValue({ ok: true, data: series });
+    requestJsonMock.mockResolvedValue({ ok: true, data: series });
 
     await expect(getIndicators('projectx', 'ES', 1, 'rsi', 14, 'a', 'b')).resolves.toEqual({
       ok: true,
@@ -128,7 +128,7 @@ describe('getIndicators', () => {
   });
 
   it('passes an unknown-indicator refusal through unchanged (the closed vocabulary is the gate answer)', async () => {
-    requestMock.mockResolvedValue({
+    requestJsonMock.mockResolvedValue({
       ok: false,
       kind: 'refused',
       status: 400,
@@ -146,15 +146,15 @@ describe('getIndicators', () => {
 
 describe('getLevels', () => {
   it('reads the levels route with the venue/instrument + each timeframe as a repeated query param', async () => {
-    requestMock.mockResolvedValue({
+    requestJsonMock.mockResolvedValue({
       ok: true,
       data: { venue: 'projectx', instrument: 'ES', levels: [] },
     });
 
     await getLevels('projectx', 'ES', [1, 60]);
 
-    expect(requestMock).toHaveBeenCalledOnce();
-    const [method, path] = requestMock.mock.calls[0];
+    expect(requestJsonMock).toHaveBeenCalledOnce();
+    const [method, path] = requestJsonMock.mock.calls[0];
     expect(method).toBe('GET');
     const url = new URL(path, 'http://local');
     expect(url.pathname).toBe('/api/marketdata/levels');
@@ -180,13 +180,13 @@ describe('getLevels', () => {
         },
       ],
     };
-    requestMock.mockResolvedValue({ ok: true, data: levels });
+    requestJsonMock.mockResolvedValue({ ok: true, data: levels });
 
     await expect(getLevels('projectx', 'ES', [60])).resolves.toEqual({ ok: true, data: levels });
   });
 
   it('passes a refusal through unchanged (an empty/invalid timeframe set is the gate answer, not an error)', async () => {
-    requestMock.mockResolvedValue({
+    requestJsonMock.mockResolvedValue({
       ok: false,
       kind: 'refused',
       status: 400,

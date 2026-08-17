@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, request, requestJson } from './client';
 import { SoftSignalKind } from './relevance';
 
 /**
@@ -44,7 +44,7 @@ export interface NewsFeedItem {
  */
 export async function getNewsFeed(limit?: number): Promise<ApiResult<NewsFeedItem[]>> {
   const query = limit === undefined ? '' : `?limit=${String(limit)}`;
-  const result = await request<{ items: NewsFeedItem[] }>('GET', `/api/news${query}`);
+  const result = await requestJson<{ items: NewsFeedItem[] }>('GET', `/api/news${query}`);
   return result.ok ? { ok: true, data: result.data.items } : result;
 }
 

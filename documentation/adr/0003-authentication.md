@@ -102,21 +102,68 @@ The rule the two share, and the one to apply to any future body read here: **a 2
 transport, not about the payload.** A surface may only ever be left in a state the operator can act on — an
 answer, an error with a retry, or a refusal — and never in one that requires reloading the page to escape.
 
-**A third of the family, resolved (gh#969) — a discarded 2xx body is a lost answer.** `repriceOrder` declared
-`request<void>`, reading the `200` and throwing it away — including the gate-approved-**size** echo (`size` vs
-`requestedSize`, `outcome = Resized`, gh#292) the server returns precisely so a downsize is not silent. Not a
-liveness failure (nothing strands), but the same root: a client that does not read what the server answered. It now
-reads the typed `RepriceResult` — and, because the one `PATCH /orders/{id}/price` route answers in **two shapes**
-(the full decision on an entry / size move; a bare `id` / `status` / `workingStopPrice` on a working-stop-only
-re-stage), the decision fields are typed optional so the type does not lie about the stop-only path. The blotter is
-ready to surface a gate-approved downsize. That surfacing is **dormant today**: no client resize control sends a
-`size` yet (the blotter's two reprice paths move entry and working-stop only), so the server always echoes
-`requestedSize: null` and the notice cannot fire for a real operator request until a resize UI lands (the client
-half of gh#292). What is fixed **now** is that the client no longer discards the answer; the downsize is surfaced
-the moment a resize can occur. The audit it triggered cleared the other `request<void>` callers returning a body:
-the order / conditional cancels and the kill-switch disengage return acks the consumer re-reads past, and
-`PUT /accounts/{id}/risk` echoes the exact profile it was sent (a full-field replace, no clamp) — so discarding
-those is correct, and only the reprice carried a gate-adjustable outcome.
+## Update (2026-08-17) — the rule gets a mechanism, not a third fix (gh#963)
+
+The same defect turned up a third time, on the **exposure reads**, so it was treated as a class. Forty-odd
+readers dereferenced `result.data.<prop>` on a body that can legitimately be `undefined`, each inside a
+`void …then(…)` with no `.catch`.
+
+The worst of them was not a stuck panel. `useExecutionOverlays` is written so an empty overlay reads as
+**declared-unknown rather than a confirmed flat book** (R-13 / R-19) — but the `TypeError` fired *before* the flag
+saying so was set, so the code guarding against "the chart looks flat" was the code that failed to run. On the
+blotter the same throw takes out *positions* and *resting orders*: the reads the operator uses to answer
+**"is protection actually standing at the venue?"**, answered instead by a panel that spins forever.
+
+- **`request<T>` now returns `ApiResult<T | undefined>`** — it always could, and now says so.
+- **`requestJson<T>`** is the call for a response that must carry a payload: an absent body is a `failed` read.
+
+So the choice is now made by the **compiler**, not by a reviewer's memory: a reader that needs a payload cannot
+keep using `request` and dereference it. Adding the narrowing turned up **49** call sites, which is the number
+the sweep had to cover and is not a number anyone would have reached by grep.
+
+Prefer `requestJson` for anything whose payload you read. `request` is for the calls that **ignore** the payload —
+which is not the same as "the server sends none". The nine `request<void>` callers **as this sweep found them**,
+checked handler by handler — the next paragraph is why there are eight now:
+
+| answers `204` | answers `200` with a body the client discards |
+| --- | --- |
+| `PUT` / `DELETE /api/news/feedback` | `DELETE /orders/{id}` |
+| `DELETE /api/relevance/topics/{id}` | `PATCH /orders/{id}/price` |
+| `DELETE /api/relevance/maps/{ticker}/{instrument}` | `DELETE /conditionals/{id}` |
+| | `POST /kill-switch/disengage` |
+| | `PUT /accounts/{id}/risk` |
+
+Discarding is safe — `request<void>` never dereferences it — but it is a *choice*, not an absence, and one of
+those bodies turned out to be worth reading: `PATCH …/price` carries `size` / `requestedSize` / `outcome`, so a
+**gate-approved downsize on a reprice was invisible to the operator**. That is gh#969, fixed below; ADR-0007 owns
+the resize echo. The other four remain deliberate discards.
+
+**A third of the family, resolved (gh#969) — a discarded 2xx body is a lost answer.** That reprice body is the one
+gh#969 stopped discarding — it lands on develop alongside this, so `PATCH /orders/{id}/price` leaves the
+`request<void>` set the moment the two merge. `repriceOrder` declared `request<void>`, reading the `200` and
+throwing it away — including the gate-approved-**size** echo (`size` vs `requestedSize`, `outcome = Resized`,
+gh#292) the server returns precisely so a downsize is not silent. Not a liveness failure (nothing strands), but the
+same root: a client that does not read what the server answered. It now reads the typed `RepriceResult` — and,
+because the one `PATCH /orders/{id}/price` route answers in **two shapes** (the full decision on an entry / size
+move; a bare `id` / `status` / `workingStopPrice` on a working-stop-only re-stage), the decision fields are typed
+optional so the type does not lie about the stop-only path. The blotter is ready to surface a gate-approved
+downsize. That surfacing is **dormant today**: no client resize control sends a `size` yet (the blotter's two
+reprice paths move entry and working-stop only), so the server always echoes `requestedSize: null` and the notice
+cannot fire for a real operator request until a resize UI lands (the client half of gh#292). What is fixed **now**
+is that the client no longer discards the answer; the downsize is surfaced the moment a resize can occur. The audit
+it triggered cleared the other `request<void>` callers returning a body: the order / conditional cancels and the
+kill-switch disengage return acks the consumer re-reads past, and `PUT /accounts/{id}/risk` echoes the exact profile
+it was sent (a full-field replace, no clamp) — so discarding those is correct, and only the reprice carried a
+gate-adjustable outcome.
+
+Recorded as a table rather than a sentence deliberately. Two successive attempts to state this in prose were
+wrong in the same way — a universal drawn from a partial survey ("the 9 genuine 204s", then "only the relevance
+deletes") — because the shape of the claim let a route go unchecked without looking unchecked. Nine rows cannot
+hide the one nobody opened.
+
+**The belt gh#954 named and did not ship** landed here too: `SignInPage.onSubmit` awaited without a `try/catch`,
+so any *other* throw on that path — `storeToken` hitting a `localStorage` quota or private-mode failure — still
+reproduced the dead submit button. A surface must not be strandable by a throw it did not anticipate.
 
 ## Follow-ups
 - Token **issuance + refresh** flow (login → JWT; refresh strategy; expiry).

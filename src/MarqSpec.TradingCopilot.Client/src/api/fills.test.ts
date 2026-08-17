@@ -1,24 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./client', () => ({ request: vi.fn() }));
+vi.mock('./client', () => ({ request: vi.fn(), requestJson: vi.fn() }));
 
-import { request } from './client';
+import { requestJson } from './client';
 import { getFills } from './fills';
 
-const requestMock = vi.mocked(request);
+const requestJsonMock = vi.mocked(requestJson);
 
 beforeEach(() => {
-  requestMock.mockReset();
+  requestJsonMock.mockReset();
 });
 
 describe('getFills', () => {
   it('reads the account fills route scoped to the instrument and window (gh#792)', async () => {
-    requestMock.mockResolvedValue({ ok: true, data: { fills: [] } });
+    requestJsonMock.mockResolvedValue({ ok: true, data: { fills: [] } });
 
     await getFills('acc-1', 'ES', '2026-07-28T00:00:00Z', '2026-07-29T00:00:00Z');
 
-    expect(requestMock).toHaveBeenCalledOnce();
-    const [method, path] = requestMock.mock.calls[0];
+    expect(requestJsonMock).toHaveBeenCalledOnce();
+    const [method, path] = requestJsonMock.mock.calls[0];
     expect(method).toBe('GET');
     const url = new URL(path, 'http://local');
     expect(url.pathname).toBe('/accounts/acc-1/fills');
@@ -40,7 +40,7 @@ describe('getFills', () => {
         },
       ],
     };
-    requestMock.mockResolvedValue({ ok: true, data });
+    requestJsonMock.mockResolvedValue({ ok: true, data });
 
     await expect(getFills('acc-1', 'ES', 'a', 'b')).resolves.toEqual({ ok: true, data });
   });
@@ -52,7 +52,7 @@ describe('getFills', () => {
       status: 400,
       reason: 'the window returns more than 1000 fills; narrow it.',
     } as const;
-    requestMock.mockResolvedValue(refusal);
+    requestJsonMock.mockResolvedValue(refusal);
 
     await expect(getFills('acc-1', 'ES', 'a', 'b')).resolves.toEqual(refusal);
   });

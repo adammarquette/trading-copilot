@@ -1,4 +1,4 @@
-import { type ApiResult, request } from './client';
+import { type ApiResult, requestJson } from './client';
 
 /**
  * One OHLCV bar, as the market-data read serves it (gh#644). `bucketStart` is the bucket's open time (ISO-8601 UTC);
@@ -44,7 +44,7 @@ export function getBars(
     from,
     to,
   });
-  return request<BarSeries>('GET', `/api/marketdata/bars?${query.toString()}`);
+  return requestJson<BarSeries>('GET', `/api/marketdata/bars?${query.toString()}`);
 }
 
 /** One value of a pre-computed indicator series (gh#644): the bucket's open time (ISO-8601 UTC) and the value. */
@@ -90,7 +90,7 @@ export function getIndicators(
     from,
     to,
   });
-  return request<IndicatorSeries>('GET', `/api/marketdata/indicators?${query.toString()}`);
+  return requestJson<IndicatorSeries>('GET', `/api/marketdata/indicators?${query.toString()}`);
 }
 
 /**
@@ -135,5 +135,5 @@ export function getLevels(
 ): Promise<ApiResult<PriceLevels>> {
   const query = new URLSearchParams({ venue, instrument });
   timeframes.forEach((timeframe) => query.append('timeframes', String(timeframe)));
-  return request<PriceLevels>('GET', `/api/marketdata/levels?${query.toString()}`);
+  return requestJson<PriceLevels>('GET', `/api/marketdata/levels?${query.toString()}`);
 }
