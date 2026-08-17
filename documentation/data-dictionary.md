@@ -84,6 +84,7 @@ erDiagram
   Suggestion    ||--o| Trade                  : becomes
   Suggestion    ||--o| Outcome                : scored
   Suggestion    ||--o| Suggestion             : supersedes
+  Suggestion    ||--o{ CitedFactor            : cites
 
   Order         ||--o{ Fill                   : fills
   Fill          |o--o{ Trade                  : "opens + closes (natural key; a spanning exit closes two)"
@@ -118,7 +119,7 @@ identifier, so a domain is never renumbered.
 | **§3** | [Account & positions](data-dictionary/03-account-positions.md) | 1657 | Account, Position, AccountSnapshot, plus the trading-account parity notes |
 | **§4** | [Orders & execution](data-dictionary/04-orders-execution.md) | 7301 | Order, Fill, Bracket/OCO, StopPlan, ConditionalOrder, KillSwitchState, NotificationOutbox — **the largest domain** |
 | **§5** | [Risk](data-dictionary/05-risk.md) | 1542 | RiskProfile / Limits, GateDecision |
-| **§6** | [Suggestions](data-dictionary/06-suggestions.md) | 3272 | Suggestion, SuggestionDisposition, MarketSnapshot |
+| **§6** | [Suggestions](data-dictionary/06-suggestions.md) | 3272 | Suggestion, SuggestionDisposition, MarketSnapshot, CitedFactor |
 | **§7** | [Journal & outcomes](data-dictionary/07-journal-outcomes.md) | 403 | Trade, TradeFeedback, Outcome |
 | **§8** | [Rulebook & triggers](data-dictionary/08-rulebook-triggers.md) | 1421 | Rule, Trigger / Condition, TriggerFiring |
 | **§9** | [Non-market / soft signals](data-dictionary/09-soft-signals.md) | 1271 | SoftSignal (NewsItem), NewsTopic, RelevanceConfig / TopicMap, SoftSignalFeedback |
@@ -146,7 +147,7 @@ identifier, so a domain is never renumbered.
   added to the acknowledged-globals list** above — it is a normally-owned entity that simply has one non-operator
   owner.
   **All operator-owned data** — Firm / FirmStageConvention, Connection, Account, Position, AccountSnapshot, RiskProfile, GateDecision, Suggestion
-  (+ disposition / snapshot), Order / Fill / StopPlan / ConditionalOrder / Bracket, Trade / TradeFeedback / Outcome,
+  (+ disposition / snapshot / cited factors), Order / Fill / StopPlan / ConditionalOrder / Bracket, Trade / TradeFeedback / Outcome,
   Rule / Trigger, RelevanceConfig, Embedding, Conversation / ChatMessage, AuditRecord, AIUsage, SoftSignalFeedback — carries an **owning
   `user_id`** and is **filtered by the authenticated user at the data layer** (row-level scoping, **default-deny**),
   enforced below the UI. With **one operator per deployment** (ADR-0017) this is a **fail-closed safety property**,
