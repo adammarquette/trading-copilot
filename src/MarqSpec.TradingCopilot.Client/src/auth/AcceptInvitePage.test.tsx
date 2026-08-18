@@ -123,6 +123,25 @@ describe('AcceptInvitePage', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('Check your connection');
   });
 
+  it('survives a THROW out of acceptInvite — no dead submit button (gh#973)', async () => {
+    // The same belt SignInPage gained in gh#963, on the same code path: `acceptInvite` and `signIn` share
+    // `sessionFrom` -> `storeToken`, so a `localStorage.setItem` failure (quota, or Safari private mode) throws
+    // in exactly the same place. Unguarded, the handler unwinds, `setSubmitting(false)` never runs, and the
+    // operator is left on a disabled button with no message and no way forward. Rejecting at the seam rather
+    // than modelling one specific cause: a surface must not be strandable by a throw it did not anticipate.
+    const acceptInvite = vi.fn().mockRejectedValue(new Error('QuotaExceededError'));
+    renderAccept(auth({ acceptInvite }), '/accept-invite?token=t');
+
+    fill('Display name', 'New Operator');
+    fill('Choose a password', 'pw');
+    fireEvent.click(screen.getByRole('button', { name: 'Accept invitation' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('could not be redeemed');
+    const button = screen.getByRole('button', { name: 'Accept invitation' });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByTestId('dest')).toBeNull();
+  });
+
   it('redirects to the workspace when already signed in', () => {
     renderAccept(
       auth({

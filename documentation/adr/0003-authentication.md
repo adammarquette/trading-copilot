@@ -165,6 +165,19 @@ hide the one nobody opened.
 so any *other* throw on that path — `storeToken` hitting a `localStorage` quota or private-mode failure — still
 reproduced the dead submit button. A surface must not be strandable by a throw it did not anticipate.
 
+## Update (2026-08-18) — the belt covers both credential surfaces (gh#973)
+
+`AcceptInvitePage.onSubmit` still awaited without a `try/catch`, so the guard gh#963 put on `SignInPage` covered
+one of the two surfaces that reach `storeToken`. Not an analogous path — the **same** one: `acceptInvite` and
+`signIn` both go through `sessionFrom` → `storeToken`, so a `localStorage.setItem` failure (quota, or Safari
+private mode) throws in exactly the same place and strands the form identically. It now guards, with the
+regression proved red first.
+
+Recorded because the *scope* of the earlier entry was wrong rather than its reasoning: "a surface must not be
+strandable by a throw it did not anticipate" was written as a rule and applied to one surface. When a rule like
+that lands, the question to ask is which **other** callers of the same path it already governs — the answer here
+was one, found only because a reviewer went looking.
+
 ## Follow-ups
 - Token **issuance + refresh** flow (login → JWT; refresh strategy; expiry).
 - **Signing-key** storage / rotation (server-side secret, §8).
