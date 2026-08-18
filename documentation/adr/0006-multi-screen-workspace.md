@@ -78,9 +78,15 @@ panel detaches into its own window, and that window carries the safety strip.
   converting it to a singleton, which this increment deliberately does not.
 - **The safety strip is in every window — decided, and drawn in the wireframes.** The "Watch" this task carried
   (does a detached window carry the kill switch + time-to-flat countdown?) is settled the way the Decision above
-  and ADR-0005 already point: **yes, always.** `DetachedPanelFrame` mounts the same `SafetyRegion` the shell does,
-  and even a mistyped `/panel/…` URL renders inside that frame — a wrong address is never a window without a kill
-  switch. Execution stays single-authority; a pop-out is a **view**, never a second execution path.
+  and ADR-0005 already point: **yes, always — present and functional in every window.** `DetachedPanelFrame`
+  mounts the same `SafetyRegion` the shell does, and even a mistyped `/panel/…` URL renders inside that frame — a
+  wrong address is never a window without a kill switch. Both controls **act** from any window, and execution stays
+  single-authority: a pop-out is a **view**, never a second execution path, and the kill switch / auto-flatten stay
+  **server-enforced** regardless of what any window displays. One caveat, tracked in **gh#985**: the *displayed*
+  kill / countdown state is not yet **live-synced across windows** — `KillSwitchControl` / `TimeToFlat` read on
+  mount + their own actions (as the single-window shell does today), so a second window's *display* can lag a
+  disengage by up to the countdown's refresh. Enforcement is unaffected; the fix is to have them re-read on the
+  realtime safety events, as `ProtectionStatus` already does.
 - **Auth across windows (R-18) is same-origin storage.** The JWT lives in `localStorage` (ADR-0003), shared across
   same-origin windows, so a pop-out boots authenticated through `RequireAuth` without re-prompting.
 
