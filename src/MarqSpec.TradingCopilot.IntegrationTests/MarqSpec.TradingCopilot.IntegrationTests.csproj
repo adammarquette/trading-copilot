@@ -39,4 +39,11 @@
     <Content Include="..\..\observability\**\*.*" LinkBase="observability" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- The audit doc the InventoryIdentifierLiveSchema suite harvests §2's "proven by name" identifiers from
+       (gh#981), copied next to the test binary under documentation/ for the same BaseDirectory-not-source-tree
+       reason as the observability assets above. -->
+  <ItemGroup>
+    <Content Include="..\..\documentation\integration-test-audit.md" LinkBase="documentation" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
