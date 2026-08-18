@@ -60,9 +60,41 @@ must **not require an install**, and must **never introduce a second execution p
 - **Pop-out lifecycle** (reconnect / resume on reopen) leans on the existing idempotent-resume — exercise it per
   window.
 
+## Update (2026-08-17) — the pop-out foundation lands (gh#651, increment 1)
+
+The first slice of the decision above is built, in `src/MarqSpec.TradingCopilot.Client/src/panels`: a workspace
+panel detaches into its own window, and that window carries the safety strip.
+
+- **Route-addressable pop-outs.** A detached panel is the *same* single-origin SPA loaded fresh at
+  `/panel/:panelId` (`DetachedPanelPage`), so it is bookmarkable and reopenable on its monitor. `detachPanel(id)`
+  is a `window.open` to that route under a **deterministic per-panel window name**, so re-detaching *focuses* the
+  window it already opened rather than stacking duplicates. The **suggestion feed** and the **live blotter** are
+  the first two detachable panels; the chart (which needs the cross-window linked-instrument channel) and chat
+  (not yet built) follow.
+- **Each window is its own SignalR client — for free.** `RealtimeProvider` is **mount-scoped** (a component that
+  owns one connection), not a module singleton, so a pop-out — a separate document with its own React root — opens
+  its **own** connection and tears it down when the window closes. The "connection manager per-window" this ADR
+  called for is a property of *where the provider sits*, not new machinery; the trap the issue flagged was
+  converting it to a singleton, which this increment deliberately does not.
+- **The safety strip is in every window — decided, and drawn in the wireframes.** The "Watch" this task carried
+  (does a detached window carry the kill switch + time-to-flat countdown?) is settled the way the Decision above
+  and ADR-0005 already point: **yes, always.** `DetachedPanelFrame` mounts the same `SafetyRegion` the shell does,
+  and even a mistyped `/panel/…` URL renders inside that frame — a wrong address is never a window without a kill
+  switch. Execution stays single-authority; a pop-out is a **view**, never a second execution path.
+- **Auth across windows (R-18) is same-origin storage.** The JWT lives in `localStorage` (ADR-0003), shared across
+  same-origin windows, so a pop-out boots authenticated through `RequireAuth` without re-prompting.
+
+**Deferred to later increments** (each an enhancement on this foundation, none of it changing the decision):
+layout persistence + reattach-on-restart (the acceptance's *"survives a restart in its last layout"*), the
+`BroadcastChannel` linked-instrument / crosshair coordination, the **chart** panel, and the Window Management API
+auto-placement.
+
 ## Follow-ups
-- Define **layout presets** + persistence (server-saved per operator vs. `localStorage`).
-- Design **token/session sharing across same-origin windows** (R-18) and **per-window SignalR resume**.
+- Define **layout presets** + persistence (server-saved per operator vs. `localStorage`). *(gh#651 increment 2.)*
+- Design **token/session sharing across same-origin windows** (R-18) and **per-window SignalR resume**. *(The
+  same-origin-`localStorage` half landed with gh#651 increment 1; per-window resume rides the existing
+  idempotent-resume, exercised per window.)*
 - **Spike** the Window Management API placement with a manual-drag fallback.
-- Extend the wireframes with a **detached / multi-screen arrangement**.
+- ~~Extend the wireframes with a **detached / multi-screen arrangement**.~~ *Done (gh#651): the "Detached —
+  multi-screen desk" screen.*
 - Author **Playwright E2E UI tests** covering pop-out window detachment, SignalR multi-window state resume, and `BroadcastChannel` local UI state sync once the SPA lands.

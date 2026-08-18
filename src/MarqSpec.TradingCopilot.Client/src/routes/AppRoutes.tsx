@@ -8,6 +8,7 @@ import { SignInPage } from '../auth/SignInPage';
 import { EmptyState } from '../components/EmptyState';
 import { AppShell } from '../layout/AppShell';
 import { type Destination, destinations } from '../navigation/destinations';
+import { DetachedPanelPage } from '../panels/DetachedPanelPage';
 import { RealtimeProvider } from '../realtime/RealtimeProvider';
 import { SurfacePlaceholder } from './SurfacePlaceholder';
 
@@ -85,6 +86,25 @@ export function AppRoutes() {
           )}
           <Route path="*" element={<NotFoundSurface />} />
         </Route>
+
+        {/*
+          Detached pop-out panels (gh#651, ADR-0006). The SAME authenticated providers as the shell — so each
+          pop-out is its OWN SignalR client (RealtimeProvider is mount-scoped, one connection per window, torn
+          down with it) with the JWT shared same-origin (ADR-0003) — but a LEAN frame ({@link DetachedPanelPage})
+          instead of the full shell: a single-panel window is not a place you navigate from. Multi-window is a
+          VIEW concern only; no pop-out is ever a second execution path. The static `/panel/` segment outranks the
+          shell's `*` catch-all above, so a panel URL lands here rather than on the 404.
+        */}
+        <Route
+          path="/panel/:panelId"
+          element={
+            <RealtimeProvider>
+              <AccountProvider>
+                <DetachedPanelPage />
+              </AccountProvider>
+            </RealtimeProvider>
+          }
+        />
       </Route>
     </Routes>
   );

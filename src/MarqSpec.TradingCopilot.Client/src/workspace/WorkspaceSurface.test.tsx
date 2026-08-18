@@ -147,6 +147,15 @@ describe('WorkspaceSurface', () => {
     expect(screen.getByTestId('panel-stub')).toBeTruthy();
   });
 
+  it('offers a pop-out control for the suggestions feed and the live blotter (gh#651)', () => {
+    // The entry points to ADR-0006 multi-screen: each detaches the panel into its own window. The account is
+    // ready (beforeEach), so the blotter — and its control — are mounted.
+    render(<WorkspaceSurface destination={destination} />);
+
+    expect(screen.getByTestId('detach-suggestions')).toBeTruthy();
+    expect(screen.getByTestId('detach-blotter')).toBeTruthy();
+  });
+
   it('drives the chart with the default venue / instrument / resolution', () => {
     render(<WorkspaceSurface destination={destination} />);
 
