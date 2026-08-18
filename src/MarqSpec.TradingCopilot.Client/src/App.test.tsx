@@ -136,6 +136,21 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: 'Back to the workspace' })).toBeTruthy();
   });
 
+  it('routes a detached-panel URL to its lean pop-out frame, not the shell or the 404 (gh#651)', async () => {
+    // A pop-out loads the SAME SPA at /panel/:id (ADR-0006). The static `/panel/` segment must outrank the shell's
+    // `*` catch-all, or a detached window would render the 404 inside the full shell instead of the lean frame.
+    render(
+      <MemoryRouter initialEntries={['/panel/suggestions']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('detached-panel-frame')).toBeTruthy();
+    // ...and it is the LEAN frame, not the full workspace shell wrapping a mis-routed panel.
+    expect(screen.queryByTestId('surface')).toBeNull();
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+  });
+
   it.each(ALL_WINDOW_SIZE_CLASSES)('renders a complete shell at %s', async (sizeClass) => {
     setWindowSizeClass(sizeClass);
 

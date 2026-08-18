@@ -12,6 +12,7 @@ import { useSuggestionZones } from '../chart/useSuggestionZones';
 import type { Destination } from '../navigation/destinations';
 import { useOptionalAccounts } from '../accounts/AccountProvider';
 import { Blotter } from '../blotter/Blotter';
+import { PanelDetachButton } from '../panels/PanelDetachButton';
 import { SuggestionsPanel } from '../suggestions/SuggestionsPanel';
 
 /**
@@ -173,6 +174,11 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
           borderWidth: { xs: '1px 0 0 0', md: '0 0 0 1px' },
         }}
       >
+        {/* Pop the suggestion feed onto a second monitor (gh#651): the same panel, its own window and realtime
+            connection, carrying the safety strip. A view convenience — the docked copy here is unchanged. */}
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 0.5, pt: 0.5 }}>
+          <PanelDetachButton panelId="suggestions" label="Suggestions" />
+        </Box>
         <SuggestionsPanel />
         {/* The live blotter (gh#656) — venue truth for positions and resting orders, beside the decision
             surface rather than a separate screen: managing what is live is part of the same loop as deciding
@@ -182,6 +188,9 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
           <Box
             sx={{ borderColor: 'divider', borderStyle: 'solid', borderWidth: '1px 0 0 0', p: 1.5 }}
           >
+            <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 0.5 }}>
+              <PanelDetachButton panelId="blotter" label="Positions & orders" />
+            </Box>
             {/* Keyed by account so a switch REMOUNTS the blotter: no state (a gh#969 resize notice, a prior
                 account's venue view) survives into a different account's context — a fresh read, never stale
                 truth under the wrong header. */}
