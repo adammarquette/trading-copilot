@@ -1,4 +1,4 @@
-import { cleanup, screen } from '@testing-library/react';
+import { cleanup, fireEvent, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { useOptionalAccounts } from '../accounts/AccountProvider';
@@ -37,5 +37,25 @@ describe('DetachedBlotter', () => {
 
     expect(screen.queryByTestId('blotter-stub')).toBeNull();
     expect(screen.getByTestId('detached-blotter-no-account')).toBeTruthy();
+  });
+
+  it('surfaces an account-load error with a retry — the lean pop-out has no switcher to recover from', () => {
+    // Without this, an errored account load in a detached window is invisible AND unrecoverable: the reload lives on
+    // the app-bar switcher the lean frame omits. Still no blotter, so it never reads as flat.
+    const reload = vi.fn();
+    accounts.mockReturnValue({
+      status: 'error',
+      message: 'the venue is unreachable',
+      reload,
+    } as ReturnType<typeof useOptionalAccounts>);
+
+    renderWithProviders(<DetachedBlotter />);
+
+    expect(screen.queryByTestId('blotter-stub')).toBeNull();
+    expect(screen.getByTestId('detached-blotter-error').textContent).toContain(
+      'the venue is unreachable',
+    );
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(reload).toHaveBeenCalled();
   });
 });

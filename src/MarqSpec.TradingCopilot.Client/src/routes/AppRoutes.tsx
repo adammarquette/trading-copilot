@@ -93,7 +93,9 @@ export function AppRoutes() {
           down with it) with the JWT shared same-origin (ADR-0003) — but a LEAN frame ({@link DetachedPanelPage})
           instead of the full shell: a single-panel window is not a place you navigate from. Multi-window is a
           VIEW concern only; no pop-out is ever a second execution path. The static `/panel/` segment outranks the
-          shell's `*` catch-all above, so a panel URL lands here rather than on the 404.
+          shell's `*` catch-all above, so a panel URL lands here rather than on the 404. A bare `/panel` or a
+          trailing-slash `/panel/` has no `:panelId` and falls THROUGH to that catch-all — harmless, since
+          `detachPanel` always appends an id and the shell 404 still carries the safety strip.
         */}
         <Route
           path="/panel/:panelId"

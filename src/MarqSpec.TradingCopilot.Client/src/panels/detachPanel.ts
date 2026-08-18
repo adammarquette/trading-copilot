@@ -18,9 +18,9 @@ export function panelRoute(panelId: string): string {
 
 /**
  * Detaches a panel into its own window. The window **name** is deterministic per panel, so re-detaching the same
- * panel focuses the pop-out it already opened rather than stacking duplicates (the browser reuses a window of the
- * same name). Returns the handle, or `null` when the browser blocked the pop-up — the caller stays on its feet
- * rather than dereferencing it.
+ * panel **reuses** the window it already opened rather than stacking duplicates — the browser re-targets that named
+ * window (navigating it, possibly a brief reload) and `focus()` raises it. Returns the handle, or `null` when the
+ * browser blocked the pop-up — the caller stays on its feet rather than dereferencing it.
  */
 export function detachPanel(panelId: string): Window | null {
   const handle = window.open(
