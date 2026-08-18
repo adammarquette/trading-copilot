@@ -6,6 +6,7 @@ import TextField from '@mui/material/TextField';
 import { useState, type FormEvent } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router';
 
+import type { ApiResult } from '../api/client';
 import { AuthLayout } from './AuthLayout';
 import { useAuth } from './AuthProvider';
 
@@ -36,7 +37,19 @@ export function AcceptInvitePage() {
     event.preventDefault();
     setError(null);
     setSubmitting(true);
-    const result = await acceptInvite({ token, password, displayName });
+    let result: ApiResult<void>;
+    try {
+      result = await acceptInvite({ token, password, displayName });
+    } catch {
+      // The same belt SignInPage carries (gh#963), on the same path: `acceptInvite` and `signIn` share
+      // `sessionFrom` -> `storeToken`, so a `localStorage.setItem` failure (quota, private mode) throws here
+      // too. Unguarded, the handler unwinds, `setSubmitting(false)` never runs, and the operator is left on a
+      // disabled button with no message and no way forward. A surface must not be strandable by a throw it did
+      // not anticipate (gh#973).
+      setSubmitting(false);
+      setError('The invitation could not be redeemed. Check your connection and try again.');
+      return;
+    }
     if (result.ok) {
       navigate('/', { replace: true });
       return;
