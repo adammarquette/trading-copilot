@@ -27,8 +27,17 @@ export function loadDetachedPanels(): ReadonlySet<string> {
   }
 }
 
-/** Persists the detached-panel set, storing only known panel ids (a stale id is dropped on the way out too). */
+/**
+ * Persists the detached-panel set, storing only known panel ids (a stale id is dropped on the way out too).
+ * **Best-effort, and guarded like the load path:** a full or blocked store (`QuotaExceededError`, private mode)
+ * must not throw out of the render effect that calls this and take the workspace surface down with it. A lost write
+ * just means the layout is not remembered on the next reload.
+ */
 export function saveDetachedPanels(ids: ReadonlySet<string>): void {
-  const known = [...ids].filter((id) => panelById(id) !== undefined);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(known));
+  try {
+    const known = [...ids].filter((id) => panelById(id) !== undefined);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(known));
+  } catch {
+    // swallow — persistence is a convenience, never a reason to crash the trading surface.
+  }
 }
