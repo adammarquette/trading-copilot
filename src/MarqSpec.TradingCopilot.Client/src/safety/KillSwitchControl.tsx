@@ -17,7 +17,9 @@ import {
   disengageKillSwitch,
   engageKillSwitch,
   getKillSwitch,
+  isKillSwitchEvent,
 } from '../api/killSwitch';
+import { useOptionalRealtime } from '../realtime/RealtimeProvider';
 
 /**
  * The kill switch, in the safety strip's second reserved slot (gh#657, gh#189, R-11, ADR-0007).
@@ -40,7 +42,10 @@ export function KillSwitchControl() {
   const [confirming, setConfirming] = useState(false);
   const [mode, setMode] = useState<KillSwitchMode>(KillSwitchMode.FlattenAll);
   const [failure, setFailure] = useState<string | null>(null);
+  const realtime = useOptionalRealtime();
   const mounted = useRef(true);
+  /** Monotonic read generation — only the newest in-flight read may write state. */
+  const latestRequest = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -49,20 +54,49 @@ export function KillSwitchControl() {
     };
   }, []);
 
-  const load = useCallback(
-    () =>
-      getKillSwitch().then((result) => {
-        if (mounted.current && result.ok) {
-          setState(result.data);
-        }
-      }),
-    [],
-  );
+  const load = useCallback(() => {
+    // Ordering is by request GENERATION, not arrival. The mount read races the first broadcast, and a resync can
+    // fire while a read is in flight; under HTTP/2 multiplexing a slow first connection or a retry can land them out
+    // of order. Without this, an older "engaged" answer resolving late would overwrite a newer "disengaged" one (or
+    // the reverse) and put the strip into exactly the dangerous, wrong state this control exists to prevent
+    // (ProtectionStatus's #777 lesson). `mounted` guards post-unmount writes and says nothing about ordering.
+    const generation = ++latestRequest.current;
+
+    return getKillSwitch().then((result) => {
+      if (mounted.current && generation === latestRequest.current && result.ok) {
+        setState(result.data);
+      }
+    });
+  }, []);
 
   // The initial state is already null (rendered as not-engaged chrome), so nothing is set synchronously here.
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The read is the truth; the broadcast is only the prompt to take it again (ProtectionStatus's posture). Without
+  // this, a SECOND window — a gh#651 pop-out, or the same tab after a reconnect — keeps showing whatever it last
+  // read: an operator who disengaged in the main window still sees ENGAGED on the other monitor. The server
+  // broadcasts every engage / disengage / escalation on the safety-strip channel; re-read on each, and on a resync
+  // (the retention-gap / reconnect re-fetch). A replayed event is safe — it triggers a re-read, and the READ is
+  // what renders, so no is-this-live reasoning is needed here.
+  useEffect(() => {
+    if (realtime === null) {
+      return;
+    }
+
+    const stopEvents = realtime.onEvent((event) => {
+      if (isKillSwitchEvent(event.type)) {
+        void load();
+      }
+    });
+    const stopResync = realtime.onResync(() => void load());
+
+    return () => {
+      stopEvents();
+      stopResync();
+    };
+  }, [realtime, load]);
 
   const confirmEngage = useCallback(async () => {
     const result = await engageKillSwitch(mode, null);

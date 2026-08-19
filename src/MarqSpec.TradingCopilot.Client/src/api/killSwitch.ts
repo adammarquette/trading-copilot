@@ -63,3 +63,25 @@ export function engageKillSwitch(
 export function disengageKillSwitch(): Promise<ApiResult<void>> {
   return request<void>('POST', '/kill-switch/disengage');
 }
+
+/**
+ * The broadcast event types that mean the kill-switch state changed. All three belong: `engaged` and `disengaged`
+ * are the operator's own toggles (which a *second* window, a pop-out per gh#651, will not otherwise learn about),
+ * and `escalated` is the watchdog's automatic escalation — each changes what the strip must show.
+ *
+ * Mirrors `KillSwitchService.EngagedEventType` / `DisengagedEventType` / `EscalatedEventType`.
+ */
+const KILL_SWITCH_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'killswitch.engaged',
+  'killswitch.disengaged',
+  'killswitch.escalated',
+]);
+
+/**
+ * Whether a broadcast event should trigger a kill-switch re-read. An exact-match set, not a `startsWith` prefix:
+ * the safety strip's other signals share this channel, and a prefix test would quietly adopt any future
+ * `killswitch.*` type — including one that means something else (the {@link isProtectionEvent} reasoning).
+ */
+export function isKillSwitchEvent(type: string): boolean {
+  return KILL_SWITCH_EVENT_TYPES.has(type);
+}

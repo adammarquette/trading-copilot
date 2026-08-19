@@ -8,18 +8,55 @@ import {
   engageKillSwitch,
   getKillSwitch,
 } from '../api/killSwitch';
+import type { RealtimeContextValue } from '../realtime/RealtimeProvider';
+import { useOptionalRealtime } from '../realtime/RealtimeProvider';
+import type { RealtimeEvent } from '../realtime/messages';
 import { KillSwitchControl } from './KillSwitchControl';
 
 vi.mock('../api/killSwitch', async (importOriginal) => ({
+  // isKillSwitchEvent stays REAL — it is the tested filter; stubbing it would let this suite pass while the control
+  // re-read on every market quote (or on nothing at all).
   ...(await importOriginal<typeof import('../api/killSwitch')>()),
   getKillSwitch: vi.fn(),
   engageKillSwitch: vi.fn(),
   disengageKillSwitch: vi.fn(),
 }));
 
+vi.mock('../realtime/RealtimeProvider', () => ({ useOptionalRealtime: vi.fn() }));
+
 const readState = vi.mocked(getKillSwitch);
 const engage = vi.mocked(engageKillSwitch);
 const disengage = vi.mocked(disengageKillSwitch);
+const realtime = vi.mocked(useOptionalRealtime);
+
+/** Captures the control's event/resync subscriptions so a test can fire them like the socket would. */
+function wireRealtime() {
+  const handlers: {
+    event: ((event: RealtimeEvent, historical: boolean) => void)[];
+    resync: (() => void)[];
+  } = { event: [], resync: [] };
+
+  realtime.mockReturnValue({
+    connectionState: 'live',
+    onEvent: (handler: (event: RealtimeEvent, historical: boolean) => void) => {
+      handlers.event.push(handler);
+      return () => {};
+    },
+    onResync: (handler: () => void) => {
+      handlers.resync.push(handler);
+      return () => {};
+    },
+    onOrderState: () => () => {},
+    onFill: () => () => {},
+    onSuggestion: () => () => {},
+  } as unknown as RealtimeContextValue);
+
+  return handlers;
+}
+
+function killEvent(type: string): RealtimeEvent {
+  return { sequence: 1, type, occurredAt: '2026-08-11T12:00:00Z', payload: '{}' };
+}
 
 const DISENGAGED: KillSwitchState = {
   engaged: false,
@@ -57,6 +94,7 @@ beforeEach(() => {
     data: { mode: 'FlattenAll', cancelledOrders: 0, flattenedPositions: 0 },
   });
   disengage.mockResolvedValue({ ok: true, data: undefined });
+  wireRealtime();
 });
 
 afterEach(() => {
@@ -154,6 +192,109 @@ describe('KillSwitchControl', () => {
 
     await renderControl();
     await click(screen.getByRole('button', { name: /disengage/i }));
+
+    expect(control().textContent?.toLowerCase()).toContain('engaged');
+  });
+
+  it('re-reads when another window broadcasts an engage (gh#985)', async () => {
+    // The cross-window staleness this card fixes: this window loaded disengaged; the operator engages the kill
+    // switch in a pop-out (gh#651), which broadcasts killswitch.engaged. Without the subscription this window keeps
+    // showing KILL as if trading were still enabled.
+    const handlers = wireRealtime();
+    await renderControl();
+    expect(control().textContent?.toLowerCase()).not.toContain('engaged');
+    readState.mockResolvedValue({ ok: true, data: ENGAGED });
+
+    await act(async () => {
+      handlers.event.forEach((handler) => handler(killEvent('killswitch.engaged'), false));
+    });
+
+    expect(readState).toHaveBeenCalledTimes(2);
+    expect(control().textContent?.toLowerCase()).toContain('engaged');
+  });
+
+  it('re-reads when another window broadcasts a disengage, dropping the stale ENGAGED', async () => {
+    // The dangerous direction: this window shows ENGAGED, the operator disengages elsewhere. A window left on
+    // ENGAGED tells the operator trading is halted when it is not.
+    readState.mockResolvedValue({ ok: true, data: ENGAGED });
+    const handlers = wireRealtime();
+    await renderControl();
+    expect(control().textContent?.toLowerCase()).toContain('engaged');
+    readState.mockResolvedValue({ ok: true, data: DISENGAGED });
+
+    await act(async () => {
+      handlers.event.forEach((handler) => handler(killEvent('killswitch.disengaged'), false));
+    });
+
+    expect(control().textContent?.toLowerCase()).not.toContain('engaged');
+  });
+
+  it('re-reads on a resync, the reconnect / retention-gap re-fetch', async () => {
+    const handlers = wireRealtime();
+    await renderControl();
+    readState.mockResolvedValue({ ok: true, data: ENGAGED });
+
+    await act(async () => {
+      handlers.resync.forEach((handler) => handler());
+    });
+
+    expect(control().textContent?.toLowerCase()).toContain('engaged');
+  });
+
+  it('ignores unrelated traffic on the shared safety-strip channel', async () => {
+    const handlers = wireRealtime();
+    await renderControl();
+
+    await act(async () => {
+      handlers.event.forEach((handler) => handler(killEvent('protection.orphaned'), false));
+      handlers.event.forEach((handler) => handler(killEvent('market.quote'), false));
+    });
+
+    expect(readState).toHaveBeenCalledTimes(1); // just the mount read
+  });
+
+  it('ignores a superseded read that lands after a newer one', async () => {
+    // ProtectionStatus's #777 lesson, here on the kill switch: the mount read (engaged) resolves LATE, after a
+    // broadcast-driven read (disengaged) already landed. Ordering is by generation, so the stale ENGAGED must not
+    // overwrite the newer DISENGAGED — otherwise the strip claims trading is halted when it is not.
+    let resolveMount: (value: { ok: true; data: KillSwitchState }) => void = () => {};
+    readState.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveMount = resolve;
+      }),
+    );
+    const handlers = wireRealtime();
+    render(<KillSwitchControl />);
+    await act(async () => {});
+
+    let resolveEvent: (value: { ok: true; data: KillSwitchState }) => void = () => {};
+    readState.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveEvent = resolve;
+      }),
+    );
+    await act(async () => {
+      handlers.event.forEach((handler) => handler(killEvent('killswitch.disengaged'), false));
+    });
+
+    // The newer (broadcast) read lands first: disengaged.
+    await act(async () => {
+      resolveEvent({ ok: true, data: DISENGAGED });
+    });
+    expect(control().textContent?.toLowerCase()).not.toContain('engaged');
+
+    // The older (mount) read resolves late with the stale ENGAGED. It must not win.
+    await act(async () => {
+      resolveMount({ ok: true, data: ENGAGED });
+    });
+    expect(control().textContent?.toLowerCase()).not.toContain('engaged');
+  });
+
+  it('renders without a realtime provider, so the shell can mount it before the socket exists', async () => {
+    realtime.mockReturnValue(null);
+    readState.mockResolvedValue({ ok: true, data: ENGAGED });
+
+    await renderControl();
 
     expect(control().textContent?.toLowerCase()).toContain('engaged');
   });
