@@ -22,6 +22,13 @@ import {
 import { useOptionalRealtime } from '../realtime/RealtimeProvider';
 
 /**
+ * A low-frequency backstop re-read. The realtime events + resync are the primary refresh path; this only bounds the
+ * window in which a broadcast-driven re-read that hit a transient failure (which correctly leaves the last state)
+ * could strand a window on a stale kill state — matching TimeToFlat's schedule refresh (gh#985 review).
+ */
+const REFRESH_MS = 5 * 60 * 1000;
+
+/**
  * The kill switch, in the safety strip's second reserved slot (gh#657, gh#189, R-11, ADR-0007).
  *
  * Three things about this control are safety properties rather than styling:
@@ -69,9 +76,14 @@ export function KillSwitchControl() {
     });
   }, []);
 
-  // The initial state is already null (rendered as not-engaged chrome), so nothing is set synchronously here.
+  // The initial state is already null (rendered as not-engaged chrome), so nothing is set synchronously here. The
+  // interval is the backstop above: it bounds the staleness a missed or failed event-driven read could leave, on a
+  // control that misleads in BOTH directions (a stale ENGAGED says trading is halted when it is not; a stale
+  // disengaged, the reverse) — unlike ProtectionStatus's single alarming state.
   useEffect(() => {
     void load();
+    const refresh = setInterval(() => void load(), REFRESH_MS);
+    return () => clearInterval(refresh);
   }, [load]);
 
   // The read is the truth; the broadcast is only the prompt to take it again (ProtectionStatus's posture). Without

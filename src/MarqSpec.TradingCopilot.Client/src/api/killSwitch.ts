@@ -67,7 +67,8 @@ export function disengageKillSwitch(): Promise<ApiResult<void>> {
 /**
  * The broadcast event types that mean the kill-switch state changed. All three belong: `engaged` and `disengaged`
  * are the operator's own toggles (which a *second* window, a pop-out per gh#651, will not otherwise learn about),
- * and `escalated` is the watchdog's automatic escalation — each changes what the strip must show.
+ * and `escalated` fires when the kill switch **could not confirm an account flat — positions remain open** (gh#529),
+ * which the operator must see immediately. Each changes what the strip must show.
  *
  * Mirrors `KillSwitchService.EngagedEventType` / `DisengagedEventType` / `EscalatedEventType`.
  */
