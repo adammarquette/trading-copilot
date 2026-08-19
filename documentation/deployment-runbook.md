@@ -286,8 +286,18 @@ into a rubber stamp.
 
 | Secret | Purpose | Set |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | Runs the reviewer. **Not yet set** — until it is, the job skips with a notice rather than failing the PR (gh#811). | ☐ |
+| `ANTHROPIC_API_KEY` | Runs the reviewer. **Set (gh#811)** — but see the credit note below: the key authenticates, yet the model call still needs a funded account. | ☑ |
 | `REVIEWER_APP_ID` · `REVIEWER_APP_INSTALLATION_ID` · `REVIEWER_APP_PRIVATE_KEY` | Mint the App token the review is posted under (setup below). | ☑ 2026-07-24 |
+
+**The key's Anthropic account must hold credit — a console-only setting the pipeline cannot see.** With the
+key provisioned but its account unfunded, the model call returns HTTP 400 `Credit balance is too low` on
+**every** PR (gh#994). The `Review` step now classifies that (and any API-layer refusal the PR author cannot
+fix — a bad key, a rate limit, an overloaded/5xx backend) as **infra** and **skips with a `::warning::`
+rather than reddening the PR** — the same posture as an absent key, because a red check nobody can fix trains
+people to ignore reds. A *genuine* reviewer/workflow failure (a crash, a non-API error) still reddens. So a
+red `reviewer` check now means a real bug; a **warning-and-skip** means *fund the account* (add credit at the
+Anthropic console for the key's org). The classifier is `scripts/lib/reviewer-outcome.sh`, pinned by
+`scripts/tests/reviewer-outcome.test.sh` in CI.
 
 **Neither of these is what supplies a binding verdict today.** That is the reviewer an **author agent spawns**
 once its PR is green (`gh#815`) — same contract, but its verdict line *is* binding, and the author blocks on it

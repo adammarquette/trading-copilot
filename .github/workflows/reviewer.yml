@@ -103,6 +103,7 @@ jobs:
           git diff --merge-base "origin/$BASE_REF" HEAD --stat | tail -1
 
       - name: Review
+        id: review
         if: steps.creds.outputs.ready == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -111,6 +112,7 @@ jobs:
           TRUNCATED: ${{ steps.diff.outputs.truncated }}
         run: |
           set -uo pipefail
+          source scripts/lib/reviewer-outcome.sh
 
           # `--bare` is what makes this deterministic: it skips auto-discovery of hooks, plugins, MCP
           # servers, auto memory and CLAUDE.md, so a stray file in a runner's home directory cannot
@@ -137,8 +139,24 @@ jobs:
             < /tmp/pr.diff > /tmp/review.json
           rc=$?
           set -e
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::the reviewer exited $rc"
+
+          # Classify the CLI outcome (gh#994). An Anthropic API / provisioning refusal the PR author
+          # CANNOT fix — no credit, a bad key, a rate limit, an overloaded/5xx backend — degrades to a
+          # CLEAN SKIP with a loud notice, the same posture the unprovisioned-key guard above takes,
+          # because a red check nobody can fix trains people to ignore reds. A genuine reviewer /
+          # invocation failure (a crash, a non-API error) still reddens, so a real regression stays seen.
+          outcome="$(classify_review_outcome "$rc" /tmp/review.json)"
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
+
+          if [ "$outcome" = "infra" ]; then
+            status="$(jq -r '.api_error_status // "?"' /tmp/review.json 2>/dev/null || echo "?")"
+            reason="$(jq -r '.result // "unknown API error"' /tmp/review.json 2>/dev/null || echo "unknown API error")"
+            echo "::warning::reviewer skipped — the Anthropic API rejected the request (HTTP ${status}: ${reason}). This is an account / provisioning issue (see the deployment runbook, Automated code review), not this PR's diff; the human review still gates."
+            exit 0
+          fi
+
+          if [ "$outcome" = "fail" ]; then
+            echo "::error::the reviewer exited $rc without producing a review — not an API error, so a reviewer/workflow bug rather than the diff."
             head -c 2000 /tmp/review.json || true
             exit "$rc"
           fi
@@ -164,7 +182,8 @@ jobs:
           echo "review body: $(wc -c < /tmp/review.md) bytes"
 
       - name: Post as trading-copilot-reviewer[bot]
-        if: steps.creds.outputs.ready == 'true'
+        # outcome=='ok' only: an infra skip produced no /tmp/review.md, and a fail already exited the job.
+        if: steps.creds.outputs.ready == 'true' && steps.review.outputs.outcome == 'ok'
         env:
           REVIEWER_APP_ID: ${{ secrets.REVIEWER_APP_ID }}
           REVIEWER_APP_INSTALLATION_ID: ${{ secrets.REVIEWER_APP_INSTALLATION_ID }}
