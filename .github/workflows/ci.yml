@@ -95,6 +95,14 @@ jobs:
       - name: Submodule-pin merge-base diff (guard correctness)
         run: ./scripts/tests/submodule-pins.test.sh
 
+      # gh#994: the advisory `reviewer` workflow degrades an Anthropic API / provisioning failure the PR
+      # author cannot fix (no credit, 401, 429, 5xx) to a clean skip instead of reddening every PR -- a red
+      # check nobody can fix trains people to ignore reds. This runs the shared classifier against the
+      # verbatim result JSON of that failure so the degrade cannot regress into a red-on-every-PR, while a
+      # genuine reviewer failure still reddens. No .NET, no network -- sits with the other no-build checks.
+      - name: Reviewer outcome classifier (degrade API errors, keep real failures red)
+        run: ./scripts/tests/reviewer-outcome.test.sh
+
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 
