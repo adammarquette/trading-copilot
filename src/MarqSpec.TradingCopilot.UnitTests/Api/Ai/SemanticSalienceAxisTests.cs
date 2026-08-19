@@ -147,7 +147,7 @@ public class SemanticSalienceAxisTests
     public async Task ForCandidatesAsync_DegradesToEmpty_WhenTheSeamFaults(Exception fault)
     {
         // The read is off the trading path. A pgvector outage (or any read fault) must degrade the feed to its
-        // categorical axes, never surface as an error to the operator's news feed (mirrors NewsSemanticSearch).
+        // categorical axes, never surface as an error to the operator's news feed (the shared gh#109 degrade posture).
         A.CallTo(() => _provider.IsAvailable).Returns(true);
         A.CallTo(() => _similarity.GetVectorsAsync(A<IReadOnlyCollection<string>>._, A<CancellationToken>._))
             .Throws(fault);

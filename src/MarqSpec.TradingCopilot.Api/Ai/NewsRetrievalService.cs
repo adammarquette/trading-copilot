@@ -136,7 +136,7 @@ public sealed class NewsRetrievalService : INewsRetrievalService
         if (!_embeddingProvider.IsAvailable)
         {
             // No provider: semantic retrieval is simply off (gh#109). No embed (no paid call) and no ledger row -- an
-            // empty result the consumer degrades on, exactly as NewsSemanticSearch does.
+            // empty result the consumer degrades on, the shared degrade posture for the news-embedding read seam.
             return [];
         }
 
