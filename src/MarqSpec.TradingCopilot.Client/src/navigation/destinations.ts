@@ -8,6 +8,7 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import type { ComponentType } from 'react';
 
 import { NewsSurface } from '../news/NewsSurface';
+import { RulebookSurface } from '../triggers/RulebookSurface';
 import { SettingsSurface } from '../settings/SettingsSurface';
 import { WorkspaceSurface } from '../workspace/WorkspaceSurface';
 
@@ -89,6 +90,7 @@ export const destinations: readonly Destination[] = [
     requirement: 'R-7',
     Icon: RuleIcon,
     tier: 'primary',
+    Surface: RulebookSurface,
   },
   {
     id: 'news',
