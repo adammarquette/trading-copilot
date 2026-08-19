@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { type FlattenSchedule, getFlattenSchedule, remainingMs, soonestArmed } from './flatten';
+import {
+  type FlattenSchedule,
+  getFlattenSchedule,
+  isFlattenEvent,
+  remainingMs,
+  soonestArmed,
+} from './flatten';
 
 function response(status: number, body?: unknown): Response {
   const text = body === undefined ? '' : JSON.stringify(body);
@@ -124,5 +130,25 @@ describe('remainingMs', () => {
     // Past the deadline the honest display is 00:00 and a flatten in progress, not a negative number that reads
     // like time remaining.
     expect(remainingMs(SCHEDULE.markets[0], SCHEDULE.asOf, 60 * 60 * 1000)).toBe(0);
+  });
+});
+
+describe('isFlattenEvent', () => {
+  it('matches the per-deadline outcomes that mean the countdown should re-read', () => {
+    // `executed` rolls the countdown to the next session; the others fire as a deadline is reached (gh#985).
+    expect(isFlattenEvent('flatten.executed')).toBe(true);
+    expect(isFlattenEvent('flatten.warning')).toBe(true);
+    expect(isFlattenEvent('flatten.missed')).toBe(true);
+    expect(isFlattenEvent('flatten.escalated')).toBe(true);
+    expect(isFlattenEvent('flatten.disabled')).toBe(true);
+  });
+
+  it('ignores unrelated channel traffic and the watchdog’s own health events', () => {
+    // An exact-match set: the watchdog's flatten.watchdog.* events are its health, not the displayed schedule, and
+    // a future flatten.* type must be adopted deliberately rather than by a prefix shortcut.
+    expect(isFlattenEvent('flatten.watchdog.saved')).toBe(false);
+    expect(isFlattenEvent('killswitch.engaged')).toBe(false);
+    expect(isFlattenEvent('protection.orphaned')).toBe(false);
+    expect(isFlattenEvent('market.quote')).toBe(false);
   });
 });

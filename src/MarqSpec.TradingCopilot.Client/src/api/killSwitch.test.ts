@@ -6,6 +6,7 @@ import {
   disengageKillSwitch,
   engageKillSwitch,
   getKillSwitch,
+  isKillSwitchEvent,
 } from './killSwitch';
 
 function response(status: number, body?: unknown): Response {
@@ -126,5 +127,24 @@ describe('disengageKillSwitch', () => {
 
     expect(String(fetchMock.mock.calls[0][0])).toContain('/kill-switch/disengage');
     expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
+  });
+});
+
+describe('isKillSwitchEvent', () => {
+  it('matches every broadcast that changes the kill-switch state', () => {
+    // The strip's second window must re-read on each: an operator's engage / disengage in one window, and the
+    // watchdog's escalation, are exactly what a stale pop-out would otherwise miss (gh#985).
+    expect(isKillSwitchEvent('killswitch.engaged')).toBe(true);
+    expect(isKillSwitchEvent('killswitch.disengaged')).toBe(true);
+    expect(isKillSwitchEvent('killswitch.escalated')).toBe(true);
+  });
+
+  it('ignores the other traffic on the shared safety-strip channel', () => {
+    // An exact-match set, not a prefix: protection and flatten events (and market quotes) ride the same channel,
+    // and a re-read on each would be wasteful churn — and a future killswitch.* type must be adopted deliberately.
+    expect(isKillSwitchEvent('protection.orphaned')).toBe(false);
+    expect(isKillSwitchEvent('flatten.executed')).toBe(false);
+    expect(isKillSwitchEvent('market.quote')).toBe(false);
+    expect(isKillSwitchEvent('killswitch.something-new')).toBe(false);
   });
 });
