@@ -150,6 +150,8 @@ export function TriggersSurface() {
         }
         setBusyId(null);
         if (!result.ok) {
+          // The row STAYS. Removing it on a failed delete would tell the operator a trigger is gone while it is
+          // still standing at the server and still able to fire (gh#993 review).
           setActionError(result.kind === 'refused' ? result.reason : result.error);
           return;
         }
@@ -230,6 +232,7 @@ export function TriggersSurface() {
                   <Button
                     size="small"
                     variant="contained"
+                    aria-label={`Confirm ${conditionOf(trigger)}`}
                     disabled={busyId === trigger.id}
                     onClick={() => onConfirm(trigger.id)}
                   >
@@ -239,6 +242,7 @@ export function TriggersSurface() {
                 <Button
                   size="small"
                   color="error"
+                  aria-label={`Delete ${conditionOf(trigger)}`}
                   disabled={busyId === trigger.id}
                   onClick={() => onDelete(trigger.id)}
                 >

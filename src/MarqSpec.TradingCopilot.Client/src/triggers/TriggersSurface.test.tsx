@@ -101,7 +101,7 @@ describe('TriggersSurface', () => {
     } satisfies ApiResult<Trigger>);
 
     renderSurface();
-    fireEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Confirm / }));
 
     expect(await screen.findByText(/switched off/i)).toBeTruthy();
     expect(screen.queryByText('Live')).toBeNull();
@@ -120,14 +120,14 @@ describe('TriggersSurface', () => {
     } satisfies ApiResult<Trigger>);
 
     renderSurface();
-    fireEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Confirm / }));
 
     expect((await screen.findByRole('alert')).textContent).toBe(
       'That trigger was edited since you loaded it.',
     );
     // Still inert, and still offering the action — a failed confirm must never read as a successful one.
     expect(screen.getByText('Will not fire')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Confirm' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Confirm / })).toBeTruthy();
   });
 
   it('a THROW out of confirm does not strand the row busy (gh#951 family)', async () => {
@@ -138,13 +138,13 @@ describe('TriggersSurface', () => {
     confirmMock.mockRejectedValue(new Error('boom'));
 
     renderSurface();
-    fireEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Confirm / }));
 
     expect(await screen.findByRole('alert')).toBeTruthy();
     await waitFor(() =>
-      expect((screen.getByRole('button', { name: 'Confirm' }) as HTMLButtonElement).disabled).toBe(
-        false,
-      ),
+      expect(
+        (screen.getByRole('button', { name: /^Confirm / }) as HTMLButtonElement).disabled,
+      ).toBe(false),
     );
   });
 
@@ -153,9 +153,60 @@ describe('TriggersSurface', () => {
     deleteMock.mockResolvedValue({ ok: true, data: undefined });
 
     renderSurface();
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Delete / }));
 
     await waitFor(() => expect(screen.queryByTestId('trigger-row')).toBeNull());
+  });
+
+  it('a FAILED delete keeps the row — never reports a live trigger as gone (gh#993 review)', async () => {
+    // The gap the #993 review found: the suite passed with the row filter above the ok-guard, so a failed delete
+    // could remove the row and tell the operator a trigger is gone while it is still standing at the server and
+    // still able to fire. Worse than a stuck spinner — the operator stops expecting an alert that can still come.
+    listMock.mockResolvedValue({ ok: true, data: [trigger()] } satisfies ApiResult<Trigger[]>);
+    deleteMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      status: 500,
+      error: 'The trigger could not be deleted.',
+    });
+
+    renderSurface();
+    fireEvent.click(await screen.findByRole('button', { name: /^Delete / }));
+
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.getByTestId('trigger-row')).toBeTruthy();
+    expect(screen.getByText('ES rsi(14) 5m above 70')).toBeTruthy();
+  });
+
+  it('a THROW out of delete also keeps the row', async () => {
+    listMock.mockResolvedValue({ ok: true, data: [trigger()] } satisfies ApiResult<Trigger[]>);
+    deleteMock.mockRejectedValue(new Error('boom'));
+
+    renderSurface();
+    fireEvent.click(await screen.findByRole('button', { name: /^Delete / }));
+
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.getByTestId('trigger-row')).toBeTruthy();
+  });
+
+  it('acts on the row whose button was pressed, with several rows on screen', async () => {
+    // Per-row actions need per-row handles. Without the aria-label the two Delete buttons are indistinguishable
+    // to an assistive client and to this test, and a wrong-row delete would look identical to a right-row one.
+    listMock.mockResolvedValue({
+      ok: true,
+      data: [
+        trigger({ id: 'a', symbol: 'ES' }),
+        trigger({ id: 'b', symbol: 'NQ', enabled: true, confirmation: 0 }),
+      ],
+    } satisfies ApiResult<Trigger[]>);
+    deleteMock.mockResolvedValue({ ok: true, data: undefined });
+
+    renderSurface();
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete NQ rsi(14) 5m above 70' }));
+
+    await waitFor(() => expect(screen.queryByText('NQ rsi(14) 5m above 70')).toBeNull());
+    expect(screen.getByText('ES rsi(14) 5m above 70')).toBeTruthy();
+    expect(deleteMock).toHaveBeenCalledWith('b');
   });
 
   it('shows an empty state that says a new trigger does not fire until confirmed', async () => {

@@ -45,8 +45,11 @@ export const TriggerRoute = {
 } as const;
 
 /**
- * Where the trigger sits in its fire/re-arm cycle. Mirrors `TriggerArmState`. Read-only here: the scan owns it,
- * and it is shown so a *held* trigger is not mistaken for a broken one.
+ * Where the trigger sits in its fire/re-arm cycle. Mirrors `TriggerArmState`. Read-only: the scan owns it.
+ *
+ * **Not surfaced yet.** Carried on {@link Trigger} because the read returns it, but no surface renders it — a
+ * `Fired` (held) trigger and an `Armed` one look identical today. Worth showing in the authoring increment, so a
+ * debounced trigger is not mistaken for a broken one.
  */
 export const TriggerArmState = {
   /** Never evaluated since creation / re-enable / edit — the next scan seeds silently, without firing. */
@@ -90,9 +93,14 @@ export interface Trigger {
 }
 
 /**
- * Whether this trigger can actually fire. Both conditions, deliberately in one place: every surface that answers
- * "is this live?" must answer it the same way, and the combination — enabled but unconfirmed — is the one an
- * operator is most likely to misread.
+ * Whether this trigger can actually fire, as far as a client can tell. In one place deliberately: every surface
+ * answering "is this live?" must answer it the same way, and the combination — enabled but unconfirmed — is the
+ * one an operator is most likely to misread.
+ *
+ * **Not the scan's full predicate.** The server also requires a real {@link TriggerRoute}; a row with
+ * `Route.Unknown` would read as live here and still never fire. That is unreachable today — the route is refused
+ * at the boundary, absent from the patch DTO, and backstopped by `CK_Triggers_Route_NotUnknown` — so this is
+ * recorded rather than defended against. If a route ever becomes patchable, this predicate has to grow with it.
  */
 export function willFire(trigger: Trigger): boolean {
   return trigger.enabled && trigger.confirmation === TriggerConfirmation.Confirmed;
