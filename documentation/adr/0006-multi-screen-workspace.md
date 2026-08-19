@@ -84,10 +84,12 @@ panel detaches into its own window, and that window carries the safety strip.
   single-authority: a pop-out is a **view**, never a second execution path, and the kill switch / auto-flatten stay
   **server-enforced** regardless of what any window displays. The *displayed* kill / countdown state is now
   **live-synced across windows too (gh#985)**: `KillSwitchControl` and `TimeToFlat` subscribe to the realtime
-  safety-strip events (`killswitch.*` / the auto-flatten outcomes) and `onResync`, re-reading on each — the READ is
-  the truth, the broadcast only the prompt — exactly as `ProtectionStatus` already did. So an engage / disengage in
-  one window, or a fired auto-flatten, refreshes every other window's display promptly rather than lagging by the
-  periodic refresh; a stale pop-out never claims trading is halted when it is not (or the reverse).
+  safety-strip events (an exact set — the kill-switch engage / disengage / escalate events, and the deadline-passed
+  auto-flatten outcomes) plus `onResync`, re-reading on each — the READ is the truth, the broadcast only the prompt —
+  exactly as `ProtectionStatus` already did. So an engage / disengage in one window, or a fired auto-flatten,
+  refreshes every other window's display promptly rather than lagging by the periodic refresh; a stale pop-out never
+  claims trading is halted when it is not (or the reverse). A low-frequency backstop re-read on the kill switch
+  bounds the staleness a missed or failed event read could otherwise leave on that bidirectionally-read control.
 - **Auth across windows (R-18) is same-origin storage.** The JWT lives in `localStorage` (ADR-0003), shared across
   same-origin windows, so a pop-out boots authenticated through `RequireAuth` without re-prompting.
 

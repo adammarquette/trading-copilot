@@ -298,4 +298,24 @@ describe('KillSwitchControl', () => {
 
     expect(control().textContent?.toLowerCase()).toContain('engaged');
   });
+
+  it('re-reads on a low-frequency backstop, bounding a missed or failed event read (gh#985 review)', async () => {
+    // The kill switch misleads in BOTH directions, so unlike ProtectionStatus it does not rely on events + resync
+    // alone: a periodic re-read recovers a window whose broadcast-driven read hit a transient failure (which
+    // correctly leaves the last state, so it would otherwise stay stale until the next event).
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<KillSwitchControl />);
+      await act(async () => {});
+      expect(readState).toHaveBeenCalledTimes(1); // the mount read
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      });
+
+      expect(readState.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

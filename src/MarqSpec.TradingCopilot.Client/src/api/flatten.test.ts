@@ -134,21 +134,22 @@ describe('remainingMs', () => {
 });
 
 describe('isFlattenEvent', () => {
-  it('matches the per-deadline outcomes that mean the countdown should re-read', () => {
-    // `executed` rolls the countdown to the next session; the others fire as a deadline is reached (gh#985).
+  it('matches the outcomes that mean a governed deadline PASSED — the countdown should roll', () => {
+    // Only these change the displayed schedule: after the deadline passes, soonest-armed rolls to the next session
+    // and the display would otherwise sit at 00:00 until the ~5-minute refresh (gh#985).
     expect(isFlattenEvent('flatten.executed')).toBe(true);
-    expect(isFlattenEvent('flatten.warning')).toBe(true);
     expect(isFlattenEvent('flatten.missed')).toBe(true);
     expect(isFlattenEvent('flatten.escalated')).toBe(true);
-    expect(isFlattenEvent('flatten.disabled')).toBe(true);
   });
 
-  it('ignores unrelated channel traffic and the watchdog’s own health events', () => {
-    // An exact-match set: the watchdog's flatten.watchdog.* events are its health, not the displayed schedule, and
-    // a future flatten.* type must be adopted deliberately rather than by a prefix shortcut.
+  it('ignores pre-deadline, non-rolling, and unrelated traffic', () => {
+    // `warning` fires BEFORE the deadline (nothing has rolled, and a failed warning-driven re-read would blank the
+    // ticking countdown at the worst moment); `disabled` concerns a market the countdown already excludes; the
+    // watchdog's events are its own health. An exact set, so a future flatten.* type is adopted deliberately.
+    expect(isFlattenEvent('flatten.warning')).toBe(false);
+    expect(isFlattenEvent('flatten.disabled')).toBe(false);
     expect(isFlattenEvent('flatten.watchdog.saved')).toBe(false);
     expect(isFlattenEvent('killswitch.engaged')).toBe(false);
-    expect(isFlattenEvent('protection.orphaned')).toBe(false);
     expect(isFlattenEvent('market.quote')).toBe(false);
   });
 });
