@@ -19,5 +19,10 @@ govern every domain, and the routing table. Cited elsewhere as **data dictionary
 > the text, and reranks the candidates, reading the returned **list order** (authoritative on both the reranked and
 > the passthrough path). It ledgers the rerank call under `AiUsageFeature.Chat` (and the query-embed under `Embed`)
 > stamped to the operator (ADR-0008) — the deferred first consumer the gh#975 seam landed ahead of, exactly as
-> gh#377 was for the embed ledger write.
+> gh#377 was for the embed ledger write. **Shared into a pipeline (gh#995, ADR-0027):** that embed → recall → hydrate
+> → rerank flow is now the scoped, read-only **`INewsRetrievalService`** — the `search_news` tool is a thin adapter
+> over it, and **always-on chat grounding** is its **second consumer**, retrieving news for **every** chat turn as
+> untrusted **user-role** context (placed on the operator's final turn, **never** the system prompt) and ledgering the
+> same `Embed` + `Chat` spend stamped to the operator. One pipeline, two callers, rather than two drifting copies; the
+> grounding it feeds is **ephemeral** (§12 — read each turn, persisted nowhere).
 

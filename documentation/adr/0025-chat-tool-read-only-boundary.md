@@ -72,4 +72,13 @@ The operator was asked (2026-08-15) and chose a **read-only** tool set for this 
   order) — and, per point 4, it ledgers its own embed (`Embed`) and rerank (`Chat`) spend
   ([ADR-0008](0008-ai-invocation-cost-model.md)). The read set is now
   `get_quote` / `query_journal` / `read_positions` / `search_news`.
+- ✅ **Always-on grounding** (gh#995, inc 5, [ADR-0027](0027-always-on-retrieval-grounding.md)) extends this
+  boundary from *model-elective* retrieval to *every* turn: the `search_news` embed → recall → hydrate → rerank
+  pipeline is extracted into a shared, read-only-by-construction `INewsRetrievalService` (the tool becomes a thin
+  adapter over it), and every turn retrieves a little news for the operator's message. The retrieved text stays
+  **untrusted display data the model reads, never instruction** — this closing note made literal: it is placed as
+  **user-role content** behind a fixed data-not-instructions envelope and **never** the fixed system prompt (which
+  still holds no risk limits or account state), carrying the same injection-sentinel guard as the message-content
+  path. It rides this increment's **single** governor gate + fail-open ledger, is threshold-skipped before the cap,
+  and fails open to a history-only turn — so grounding never widens the execution surface or the instruction surface.
 - Streaming a *tool-using* turn's final answer (removing the round-1 double-call) is inc 4b.
