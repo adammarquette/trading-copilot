@@ -59,12 +59,17 @@ public class TradovateMappingTests
     }
 
     [Fact]
-    public void ToVenueAccount_ShouldResolveUndeclared_OnAnUnknownHost_EvenForABrokerage()
+    public void IsSimulatedHost_ShouldClassifyByHostComponent_NotASubstringOfTheWholeUrl()
     {
-        VenueAccount account = TradovateMapping.ToVenueAccount(
-            Account(9001), balance: 0m, Tradovate, FirmConventions.ForBrokerage("t"), venueReportsSimulated: null);
+        // A live host with a demo-looking query must NOT read as Practice: the classification is on the URL's host
+        // component, never a substring of the whole string.
+        TradovateMapping.IsSimulatedHost("https://live.tradovateapi.com/v1?ref=demo.tradovateapi.com").Should().BeFalse();
+    }
 
-        account.Mode.Should().Be(TradingMode.Undeclared);
+    [Fact]
+    public void IsSimulatedHost_ShouldBeNull_ForAnUnparseableValue()
+    {
+        TradovateMapping.IsSimulatedHost("not a url").Should().BeNull();
     }
 
     [Fact]
@@ -136,12 +141,24 @@ public class TradovateMappingTests
     }
 
     [Fact]
-    public void ToPositionSnapshot_ShouldTreatAnAbsentNetPriceAsZero()
+    public void ToPositionSnapshot_ShouldTreatAnAbsentNetPriceAsZero_ForAFlatPosition()
     {
+        // A flat position's price is immaterial; only a HELD one is required to carry a price (below).
         PositionSnapshot snapshot = TradovateMapping.ToPositionSnapshot(
             Position(accountId: 9001, contractId: 7, netPos: 0, netPrice: null), Tradovate);
 
         snapshot.AveragePrice.Should().Be(new Price(0m));
+    }
+
+    [Fact]
+    public void ToPositionSnapshot_ShouldThrow_ForAHeldPositionWithNoNetPrice()
+    {
+        // Absent != zero: an OPEN position (netPos != 0) with a null netPrice must not fabricate a 0 average entry —
+        // that would feed a wrong unrealised-P&L basis to any risk / P&L consumer, so refuse it loudly.
+        Action act = () => TradovateMapping.ToPositionSnapshot(
+            Position(accountId: 9001, contractId: 7, netPos: 2, netPrice: null), Tradovate);
+
+        act.Should().Throw<TradovateVenueException>();
     }
 
     [Fact]

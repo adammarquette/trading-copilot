@@ -95,20 +95,28 @@ public sealed class TradovateVenue : ITradingVenue
     /// <inheritdoc />
     public async Task<IReadOnlyList<VenueAccount>> GetAccountsAsync(CancellationToken cancellationToken = default)
     {
+        // Tradovate is a brokerage (gh#780): mode follows the venue's own host, and there is one host per process, so
+        // every discovered account takes the same demo/live flag. Resolve it once and REFUSE the whole discovery on an
+        // unrecognised host — we cannot know whether such a host is practice or live, and mapping an account off an
+        // unknown flag would let it persist as live-tradeable downstream (the fail-open the read-time Undeclared alone
+        // does not prevent, because the raw flag is recomputed at write points).
+        if (TradovateMapping.IsSimulatedHost(_api.ConfiguredHost) is not { } venueReportsSimulated)
+        {
+            throw new TradovateVenueException(
+                "The configured Tradovate host is neither the demo nor the live host, so an account's practice-vs-live "
+                + "mode cannot be classified. Configure a recognised Tradovate host.");
+        }
+
         IReadOnlyList<ClientModels.Account> accounts = await _api.GetAccountsAsync(cancellationToken);
         IReadOnlyList<ClientModels.CashBalance> balances = await _api.GetCashBalancesAsync(cancellationToken);
 
-        // Tradovate is a brokerage (gh#780): mode follows the venue's own host, and there is one host per process, so
-        // every discovered account takes the same demo/live flag. An unrecognised host yields null -> Undeclared ->
-        // tradeable nowhere (fail closed), never a defaulted live/practice.
-        bool? venueReportsSimulated = TradovateMapping.IsSimulatedHost(_api.ConfiguredHost);
-
-        // Balance is a separate cash-balance read, not on the account, so join by account id. A single cash-balance
-        // row per account is assumed (the futures case); an account with none reads a zero balance rather than
-        // failing the whole discovery.
+        // Balance is a separate cash-balance read, not on the account, so join by account id. A single (settlement)
+        // cash-balance row per account is assumed — the futures case; when several exist (multi-currency) the lowest
+        // currency id is taken deterministically, pending fuller multi-currency support (gh#977). An account with none
+        // reads a zero balance rather than failing the whole discovery.
         Dictionary<long, decimal> balanceByAccount = balances
             .GroupBy(balance => balance.AccountId)
-            .ToDictionary(group => group.Key, group => group.First().Amount);
+            .ToDictionary(group => group.Key, group => group.OrderBy(balance => balance.CurrencyId).First().Amount);
 
         return
         [
