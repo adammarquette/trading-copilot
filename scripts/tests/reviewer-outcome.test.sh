@@ -11,8 +11,8 @@
 # case on every PR -- exactly the "red check nobody can fix" its own header warns trains people to ignore
 # reds. The `fail` assertions are the not-weakened control: a real reviewer bug must still redden.
 #
-# Hermetic -- no network, no gh, no claude, no .NET; jq only (already required by reviewer.yml). Runs
-# beside the other no-build shell gates in ci.yml.
+# Hermetic and dependency-free -- no network, no gh, no claude, no jq, no .NET (the classifier is pure
+# bash) -- so it runs in any bash beside the other no-build shell gates in ci.yml.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
