@@ -46,7 +46,9 @@ alternatives (Kafka / NATS / Redis Streams), and consequences: [ADR-0001](adr/00
 
 ### Venue abstraction — the broker seam (R-17)
 Everything below depends on venue-neutral interfaces, never on a broker SDK. They live in
-`MarqSpec.TradingCopilot.Domain/Venue/`; each venue ships an adapter behind them (v1: ProjectX/TopstepX).
+`MarqSpec.TradingCopilot.Domain/Venue/`; each venue ships an adapter behind them (v1: ProjectX/TopstepX; a
+read-only Tradovate adapter — contract / account / position reads, with mode host-derived for a brokerage (gh#780) —
+is landing behind the same seam, gh#977, with market data, execution, and composition-root wiring to follow).
 
 **Decomposed into three slices**, so a component depends on the narrowest one that does its job:
 
