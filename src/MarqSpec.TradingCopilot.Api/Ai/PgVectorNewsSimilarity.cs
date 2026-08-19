@@ -17,8 +17,9 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// <b>Relational-only, by design (gh#109).</b> <see cref="EmbeddingRecord"/>'s <c>Vector</c> column has no
 /// in-memory-provider mapping — <see cref="TradingCopilotDbContext"/> <c>Ignore()</c>s the entity off Postgres — so
 /// the <c>CosineDistance</c> operator this query orders by exists only on the relational provider. Coverage is
-/// therefore integration-tier (QA #855), which is exactly why
-/// <see cref="NewsSemanticSearch"/> depends on the <see cref="INewsEmbeddingSimilarity"/> seam and not on this type:
+/// therefore integration-tier (QA #855), which is exactly why the seam's consumers — the news feed's
+/// <see cref="SemanticSalienceAxis"/> and the <see cref="INewsRetrievalService"/> pipeline — depend on the
+/// <see cref="INewsEmbeddingSimilarity"/> seam and not on this type:
 /// the decision logic stays unit-testable against a fake while the real read is proven against real Postgres.
 /// </para>
 /// <para>

@@ -14,7 +14,7 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Degrade, never throw</b> — the gh#109 posture, mirroring <see cref="NewsSemanticSearch"/> exactly. Several
+/// <b>Degrade, never throw</b> — the gh#109 posture the news-embedding read seam's consumers share. Several
 /// independent things leave the axis off on a healthy deployment: no embedding provider (so <c>IsAvailable</c> is
 /// false), nothing starred, no candidates, no starred item embedded yet, or a <c>pgvector</c> read that faults. Each
 /// yields an empty map so the feed keeps working on its categorical axes; none surfaces as an error. Only a genuine
