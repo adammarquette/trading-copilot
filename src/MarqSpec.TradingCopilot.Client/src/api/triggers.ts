@@ -99,8 +99,11 @@ export interface Trigger {
  *
  * **Not the scan's full predicate.** The server also requires a real {@link TriggerRoute}; a row with
  * `Route.Unknown` would read as live here and still never fire. That is unreachable today — the route is refused
- * at the boundary, absent from the patch DTO, and backstopped by `CK_Triggers_Route_NotUnknown` — so this is
- * recorded rather than defended against. If a route ever becomes patchable, this predicate has to grow with it.
+ * at the boundary, absent from the patch DTO, and backstopped by `CK_Triggers_Route_NotUnknown` (live in the
+ * current model snapshot, not just the migration that added it) — so this is recorded rather than defended
+ * against. **Two things would break it**, and the second is the likelier: a route becoming patchable, or a THIRD
+ * `TriggerRoute` member — a new value passes the not-Unknown check and the boundary refusal alike, while the
+ * scan's whitelist still excludes it, so this would say "Live" for a trigger that never fires.
  */
 export function willFire(trigger: Trigger): boolean {
   return trigger.enabled && trigger.confirmation === TriggerConfirmation.Confirmed;

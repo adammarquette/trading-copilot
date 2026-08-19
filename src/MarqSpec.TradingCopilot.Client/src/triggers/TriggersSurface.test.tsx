@@ -209,6 +209,45 @@ describe('TriggersSurface', () => {
     expect(deleteMock).toHaveBeenCalledWith('b');
   });
 
+  it('confirming updates ONLY the row acted on, with several rows on screen (gh#993 review)', async () => {
+    // The delete bug, one handler over: `map(() => updated)` writes the confirmed trigger over every row, so a
+    // second, still-unconfirmed trigger would render as Live and the operator would rely on an alert that cannot
+    // fire. Found because the reviewer mutated the sibling of a handler I had just fixed rather than the one.
+    listMock.mockResolvedValue({
+      ok: true,
+      data: [
+        trigger({ id: 'a', symbol: 'ES', enabled: true, confirmation: 0 }),
+        trigger({ id: 'b', symbol: 'NQ', enabled: true, confirmation: 0 }),
+      ],
+    } satisfies ApiResult<Trigger[]>);
+    confirmMock.mockResolvedValue({
+      ok: true,
+      data: trigger({ id: 'a', symbol: 'ES', enabled: true, confirmation: 1 }),
+    } satisfies ApiResult<Trigger>);
+
+    renderSurface();
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm ES rsi(14) 5m above 70' }));
+
+    // The confirmed one goes Live; the untouched one must still say it will not fire.
+    expect(await screen.findByText('Live')).toBeTruthy();
+    expect(screen.getAllByText('Will not fire')).toHaveLength(1);
+    expect(confirmMock).toHaveBeenCalledWith('a');
+  });
+
+  it('a trigger that is neither confirmed nor switched on says both, not just the switch', async () => {
+    // The fourth quadrant. If this branch claimed the trigger were confirmed, the operator would flip the switch
+    // and wait on an alert that still cannot arrive — a wrong next step, not merely an incomplete message.
+    listMock.mockResolvedValue({
+      ok: true,
+      data: [trigger({ enabled: false, confirmation: 0 })],
+    } satisfies ApiResult<Trigger[]>);
+
+    renderSurface();
+
+    expect(await screen.findByText('Will not fire')).toBeTruthy();
+    expect(screen.getByText(/Not confirmed, and switched off/i)).toBeTruthy();
+  });
+
   it('shows an empty state that says a new trigger does not fire until confirmed', async () => {
     listMock.mockResolvedValue({ ok: true, data: [] } satisfies ApiResult<Trigger[]>);
 
