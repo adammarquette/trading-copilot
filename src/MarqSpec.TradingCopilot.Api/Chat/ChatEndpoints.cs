@@ -41,6 +41,9 @@ public static class ChatEndpoints
     /// <summary>The most conversations one list read may return.</summary>
     private const int MaxPageSize = 200;
 
+    /// <summary>How many news items to ground a chat turn on (gh#995) — a small top-k the reranker sharpens.</summary>
+    private const int GroundingTopK = 4;
+
     /// <summary>Maps the chat CRUD endpoints. All require authentication.</summary>
     /// <param name="endpoints">The endpoint route builder.</param>
     /// <returns>The same builder, for chaining.</returns>
@@ -62,11 +65,11 @@ public static class ChatEndpoints
             AppendAsync(id, request, DateTimeOffset.UtcNow, database, cancellationToken))
             .WithSummary("Append a message to a conversation.");
         group.MapPost("/{id:guid}/turns", (Guid id, ChatTurnRequest? request, TradingCopilotDbContext database,
-            IChatTurnService turnService, IAiSpendGovernor governor, IOptions<GovernorOptions> governorOptions,
-            IAiUsageLedger ledger, ILlmMetrics metrics, IChatRealtimeNotifier notifier, ILoggerFactory loggerFactory,
-            CancellationToken cancellationToken) =>
-            TurnAsync(id, request, DateTimeOffset.UtcNow, database, turnService, governor, governorOptions, ledger,
-                metrics, notifier, loggerFactory, cancellationToken))
+            IChatTurnService turnService, INewsRetrievalService retrieval, IAiSpendGovernor governor,
+            IOptions<GovernorOptions> governorOptions, IAiUsageLedger ledger, ILlmMetrics metrics,
+            IChatRealtimeNotifier notifier, ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
+            TurnAsync(id, request, DateTimeOffset.UtcNow, database, turnService, retrieval, governor, governorOptions,
+                ledger, metrics, notifier, loggerFactory, cancellationToken))
             .WithSummary("Take a grounded co-pilot chat turn.");
 
         return endpoints;
@@ -246,6 +249,14 @@ public static class ChatEndpoints
     /// and <b>no assistant turn is invented</b>. Enforcement lives below the model: nothing here proposes an order.
     /// </para>
     /// <para>
+    /// <b>Always-on news grounding (gh#995, ADR-0027).</b> After the gate passes and the turn is persisted, the
+    /// read-only retrieval pipeline fetches a little news context for the operator's message, handed to the model as
+    /// <b>untrusted data</b> (user-role content, never the system prompt). It is fully <b>fail-open</b> — any fault
+    /// degrades to an un-grounded (history-only) turn — and is <b>skipped</b> once spend crosses the pre-alert
+    /// threshold, shedding its extra embed + rerank before the hard cap would 429 the chat call. No second governor
+    /// gate runs; a 429-blocked turn never reaches retrieval.
+    /// </para>
+    /// <para>
     /// <b>Presentation-only push.</b> On success the reply is pushed per-owner over the hub (ADR-0021) <b>after</b> the
     /// write commits, and that push's failure never fails the turn — the REST response already carries the answer to
     /// the initiating caller. Token streaming (3b) extends the provider seam and is deferred (gh#906).
@@ -256,6 +267,7 @@ public static class ChatEndpoints
     /// <param name="now">The clock, injected so timestamps and the spend window are testable.</param>
     /// <param name="database">The scoped, R-20-filtered database.</param>
     /// <param name="turnService">Runs the model over the thread and prices the call.</param>
+    /// <param name="retrieval">The read-only news retrieval pipeline for always-on grounding (gh#995).</param>
     /// <param name="governor">The pure AI-spend gate.</param>
     /// <param name="governorOptions">The daily-budget config (inert when unset).</param>
     /// <param name="ledger">The durable, fail-open AI-usage ledger.</param>
@@ -270,6 +282,7 @@ public static class ChatEndpoints
         DateTimeOffset now,
         TradingCopilotDbContext database,
         IChatTurnService turnService,
+        INewsRetrievalService retrieval,
         IAiSpendGovernor governor,
         IOptions<GovernorOptions> governorOptions,
         IAiUsageLedger ledger,
@@ -280,6 +293,7 @@ public static class ChatEndpoints
     {
         ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(turnService);
+        ArgumentNullException.ThrowIfNull(retrieval);
         ArgumentNullException.ThrowIfNull(governor);
         ArgumentNullException.ThrowIfNull(governorOptions);
         ArgumentNullException.ThrowIfNull(ledger);
@@ -311,6 +325,10 @@ public static class ChatEndpoints
         // GOVERNOR GATE (gh#448, ADR-0008): cap deployment-wide daily AI spend before the call — inert until a budget
         // is configured. The windowed read crosses R-20 with IgnoreQueryFilters (one shared account funds every user)
         // and is FAIL-OPEN: a spend-read fault leaves the decision null and the turn proceeds un-gated.
+        // groundingSuppressed degrades always-on grounding (gh#995) OFF once spend crosses the pre-alert threshold —
+        // grounding bills an extra embed + rerank, so it is the first thing to shed as the cap nears, though the chat
+        // call itself still runs until the hard cap 429s it below. Fail-open / un-gated leaves it false (grounding on).
+        bool groundingSuppressed = false;
         AiSpendBudget? budget = governorOptions.Value.ToBudget();
         if (budget is not null)
         {
@@ -338,6 +356,8 @@ public static class ChatEndpoints
                 // Nothing persisted, no call made: the operator retries when the daily budget resets.
                 return Results.Json(new { error = decision.Reason }, statusCode: StatusCodes.Status429TooManyRequests);
             }
+
+            groundingSuppressed = decision?.ThresholdReached ?? false;
         }
 
         // Persist the operator's turn BEFORE the call, so a later LLM fault never loses it (fail-closed keeps it).
@@ -375,7 +395,32 @@ public static class ChatEndpoints
             }
         }
 
-        ChatTurnResult turn = await turnService.StreamAsync(history, PushDeltaAsync, cancellationToken);
+        // ALWAYS-ON NEWS GROUNDING (gh#995, R-6, ADR-0027): now the gate has passed and the operator's turn is
+        // persisted, retrieve a little news context for their message and hand it to the model as UNTRUSTED DATA
+        // (placed as user-role content, never the system prompt — the service is read-only by construction). It is
+        // fully FAIL-OPEN: any throw degrades to an un-grounded (history-only) turn, belt-and-suspenders over the
+        // pipeline's own degrade-to-empty. It is skipped once spend crossed the pre-alert threshold (grounding bills an
+        // embed + rerank); no second governor gate runs — the spend it bills is ledgered fail-open and seen by the next
+        // turn's floor — and a 429-blocked turn returned above, so it never reaches here.
+        IReadOnlyList<RetrievedNewsItem> grounding = [];
+        if (!groundingSuppressed)
+        {
+            try
+            {
+                grounding = await retrieval.RetrieveAsync(request.Content, GroundingTopK, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                logger.LogWarning(
+                    error, "Chat turn news grounding faulted for owner {Owner}; running the turn history-only.", conversation.UserId);
+            }
+        }
+
+        ChatTurnResult turn = await turnService.StreamAsync(history, grounding, PushDeltaAsync, cancellationToken);
 
         // Meter (export-only, never throws) and ledger (durable, FAIL-OPEN) EVERY model call the turn made — a
         // tool-using turn makes several (gh#925) — success OR failure, so the governor floor sees each billed call.

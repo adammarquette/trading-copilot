@@ -111,13 +111,20 @@ public static class AiRegistration
         services.AddScoped<IChatTool, GetQuoteTool>();
         services.AddScoped<IChatTool, ReadPositionsTool>();
 
-        // search_news (gh#987, ADR-0025 / ADR-0008): the FIRST IReranker consumer -- a read-only semantic search over
-        // the deployment-global news feed (embed the query -> nearest-news recall -> hydrate -> rerank). Read-only by
-        // construction like its siblings: it injects only read / compute seams (embed provider, nearest-news read,
-        // reranker), the read-only DbContext, and the fail-open spend ledger, reaching no order / write path. It
-        // ledgers its own embed (Embed) and rerank (Chat) spend stamped to the operator; the clock is the shared
+        // The shared news retrieval pipeline (gh#995, ADR-0027 / ADR-0025 / ADR-0008): embed the query -> nearest-news
+        // recall -> hydrate -> rerank, ledgering its own embed (Embed) + rerank (Chat) spend stamped to the operator.
+        // The FIRST IReranker consumer's core (gh#987), now shared by the search_news tool AND always-on chat grounding
+        // (gh#995) rather than two copies. SCOPED -- it injects the scoped DbContext (R-20 owner-filtered) + the scoped
+        // ledger, so a singleton would be a captive dependency failing ValidateScopes at startup. Read-only by
+        // construction: it injects only read / compute seams (embed provider, nearest-news read, reranker), the
+        // read-only DbContext, and the fail-open spend ledger, reaching no order / write path. The clock is the shared
         // TimeProvider (TryAdd so this registration stands alone even without the notification host that also adds it).
         services.TryAddSingleton(TimeProvider.System);
+        services.AddScoped<INewsRetrievalService, NewsRetrievalService>();
+
+        // search_news (gh#987, ADR-0025): a thin read-only IChatTool adapter over the pipeline above. SCOPED like its
+        // siblings -- it holds the scoped pipeline, so a singleton would be a captive dependency. ChatTurnService
+        // resolves IEnumerable<IChatTool> -- the full registered set -- and offers it to the model.
         services.AddScoped<IChatTool, SearchNewsTool>();
 
         // The grounded chat turn (gh#906 / gh#925, R-6): runs the model over a conversation's history, runs any
