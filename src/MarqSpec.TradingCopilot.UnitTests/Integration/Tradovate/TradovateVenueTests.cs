@@ -69,6 +69,16 @@ public class TradovateVenueTests
     }
 
     [Fact]
+    public async Task GetAccountsAsync_ShouldThrow_OnAnUnrecognisedHost_SoNoAccountIsMappedOffAnUnknownMode()
+    {
+        // The fail-open guard (review of #990): an unrecognised host cannot be classified practice-vs-live, so the
+        // whole discovery is refused rather than mapping an account whose raw flag would later persist as Live.
+        Func<Task> act = () => CreateVenue(host: "https://api.tradovate.com").GetAccountsAsync();
+
+        await act.Should().ThrowAsync<TradovateVenueException>();
+    }
+
+    [Fact]
     public async Task GetPositionsAsync_ShouldFilterToTheAccountAndSkipFlat()
     {
         IReadOnlyList<ClientModels.Position> positions =

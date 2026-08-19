@@ -47,6 +47,17 @@ public static class TradovateMapping
     {
         ArgumentNullException.ThrowIfNull(position);
 
+        // A held position must carry its average entry price. `netPrice` is nullable on the wire and absent ≠ zero
+        // (the client contract) — fabricating a 0 basis for an open position would feed a wildly wrong unrealised
+        // P&L to any risk / P&L consumer, so refuse it loudly rather than invent a price. A flat position (netPos 0)
+        // is filtered out by the caller before this; its price is immaterial, so the fallback below is unreached there.
+        if (position.NetPos != 0 && position.NetPrice is null)
+        {
+            throw new TradovateVenueException(
+                $"Tradovate reported an open position ({position.NetPos} on contract {position.ContractId}) with no "
+                + "net price, which cannot be mapped to an average entry price.");
+        }
+
         return new PositionSnapshot(
             VenueAccountId.Create(venue, position.AccountId.ToString(CultureInfo.InvariantCulture)),
             VenueContractId.Create(venue, position.ContractId.ToString(CultureInfo.InvariantCulture)),
@@ -59,23 +70,27 @@ public static class TradovateMapping
     /// <param name="balance">The account's cash balance, read separately and joined by the caller.</param>
     /// <param name="venue">The venue to tag it with.</param>
     /// <param name="conventions">The firm's conventions — for Tradovate, a brokerage's (gh#780).</param>
-    /// <param name="venueReportsSimulated">Whether the venue's own host is demo/paper; <see langword="null"/> if unknown.</param>
+    /// <param name="venueReportsSimulated">
+    /// Whether the venue's own host is demo/paper (<see langword="true"/>) or live (<see langword="false"/>).
+    /// <b>Non-nullable by design</b>: the caller must resolve the host <em>before</em> mapping and refuse an
+    /// unrecognised one — see <see cref="IsSimulatedHost"/>. An account whose host could not be classified must not
+    /// be mapped at all, because coercing an unknown flag to <see langword="false"/> here would let it persist as
+    /// <see cref="TradingMode.Live"/> once the recompute reads the stored flag (the fail-open this signature prevents).
+    /// </param>
     /// <returns>The venue-neutral account.</returns>
     /// <exception cref="TradovateVenueException">The account has no id.</exception>
     /// <remarks>
     /// <see cref="TradingMode"/> is resolved through <paramref name="conventions"/>. Tradovate is a brokerage
     /// (gh#780), so its conventions are <see cref="FirmConventions.ForBrokerage"/> and mode follows the venue's own
-    /// host: <paramref name="venueReportsSimulated"/> is <see langword="true"/> on a demo host, <see langword="false"/>
-    /// on a live host, and <see langword="null"/> on an unrecognised one — which resolves to
-    /// <see cref="TradingMode.Undeclared"/> (tradeable nowhere), never a defaulted mode. The stage is always
-    /// <see cref="AccountStage.Unknown"/>: a brokerage has no evaluation / funded ladder encoded in a name.
+    /// host: a demo host is <see cref="TradingMode.Practice"/>, a live host is <see cref="TradingMode.Live"/>. The
+    /// stage is always <see cref="AccountStage.Unknown"/>: a brokerage has no evaluation / funded ladder in a name.
     /// </remarks>
     public static VenueAccount ToVenueAccount(
         ClientModels.Account account,
         decimal balance,
         VenueId venue,
         FirmConventions conventions,
-        bool? venueReportsSimulated)
+        bool venueReportsSimulated)
     {
         ArgumentNullException.ThrowIfNull(account);
         ArgumentNullException.ThrowIfNull(conventions);
@@ -93,7 +108,9 @@ public static class TradovateMapping
                 conventions.ModeFor(AccountStage.Unknown, venueReportsSimulated))
             {
                 Stage = AccountStage.Unknown,
-                VenueReportsSimulated = venueReportsSimulated ?? false,
+                // A resolved true/false, never a coerced null: the caller has already refused an unclassifiable host,
+                // so the raw flag persisted here cannot silently recompute to Live downstream.
+                VenueReportsSimulated = venueReportsSimulated,
             }
             : throw new TradovateVenueException($"Tradovate returned account '{account.Name}' with no id.");
     }
@@ -109,12 +126,21 @@ public static class TradovateMapping
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(configuredHost);
 
-        if (configuredHost.Contains("demo.tradovateapi.com", StringComparison.OrdinalIgnoreCase))
+        // Compare the URL's HOST component, not a substring of the whole URL: a path or query could otherwise spoof
+        // the classification (e.g. a live host with `?ref=demo.tradovateapi.com`). An unparseable value, or any host
+        // that is neither Tradovate's demo nor live host, resolves to null — the caller then refuses the account
+        // rather than defaulting it to a real mode.
+        if (!Uri.TryCreate(configuredHost, UriKind.Absolute, out Uri? uri))
+        {
+            return null;
+        }
+
+        if (string.Equals(uri.Host, "demo.tradovateapi.com", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
 
-        if (configuredHost.Contains("live.tradovateapi.com", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(uri.Host, "live.tradovateapi.com", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
