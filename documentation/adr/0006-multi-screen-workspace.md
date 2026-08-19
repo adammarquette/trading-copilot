@@ -92,14 +92,22 @@ panel detaches into its own window, and that window carries the safety strip.
   bounds the staleness a missed or failed event read could otherwise leave on that bidirectionally-read control.
 - **Auth across windows (R-18) is same-origin storage.** The JWT lives in `localStorage` (ADR-0003), shared across
   same-origin windows, so a pop-out boots authenticated through `RequireAuth` without re-prompting.
+- **Layout persistence + reattach landed (gh#651 increment 2).** Which panels are detached is persisted to
+  `localStorage` (`panelLayout` / `usePanelLayout`) and restored on load, so a reload reflects the last pop-out
+  layout rather than silently re-docking — the acceptance's *"survives a restart in its last layout"*. The panel
+  control is now a **dock toggle** (pop out when docked, reattach when detached), and reattach closes the window this
+  tab opened. Two cross-window limits are deliberately left to the `BroadcastChannel` increment: a browser cannot
+  re-open a window without a user gesture (so a reload shows the detached panels *as* detached, with a reattach
+  affordance, rather than auto-reopening them), and reattaching a pop-out that outlived a main-window reload re-docks
+  the layout but cannot itself close that now-orphaned window.
 
-**Deferred to later increments** (each an enhancement on this foundation, none of it changing the decision):
-layout persistence + reattach-on-restart (the acceptance's *"survives a restart in its last layout"*), the
-`BroadcastChannel` linked-instrument / crosshair coordination, the **chart** panel, and the Window Management API
-auto-placement.
+**Deferred to later increments** (each an enhancement on this foundation, none of it changing the decision): the
+`BroadcastChannel` linked-instrument / crosshair coordination (and the cross-window reattach-close / auto-reopen it
+enables), the **chart** panel, and the Window Management API auto-placement.
 
 ## Follow-ups
-- Define **layout presets** + persistence (server-saved per operator vs. `localStorage`). *(gh#651 increment 2.)*
+- Define **layout presets** + persistence. *(The detached-set persistence landed in gh#651 increment 2 —
+  `localStorage`; server-saved presets per operator remain.)*
 - Design **token/session sharing across same-origin windows** (R-18) and **per-window SignalR resume**. *(The
   same-origin-`localStorage` half landed with gh#651 increment 1; per-window resume rides the existing
   idempotent-resume, exercised per window.)*

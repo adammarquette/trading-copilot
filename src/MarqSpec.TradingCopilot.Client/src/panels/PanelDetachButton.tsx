@@ -1,28 +1,53 @@
+import CloseFullscreenIcon from '@mui/icons-material/CloseFullscreen';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 
-import { detachPanel } from './detachPanel';
-
 export interface PanelDetachButtonProps {
-  /** The registry id of the panel to pop out ({@link DETACHABLE_PANELS}). */
+  /** The registry id of the panel ({@link DETACHABLE_PANELS}). */
   readonly panelId: string;
   /** The panel's human name, for the control's accessible label and tooltip. */
   readonly label: string;
+  /** Whether the panel is currently popped out — the control toggles between pop-out and reattach. */
+  readonly detached: boolean;
+  readonly onDetach: (panelId: string) => void;
+  readonly onReattach: (panelId: string) => void;
 }
 
 /**
- * The "pop out" control on a dockable workspace panel (gh#651). One click detaches the panel into its own window
- * ({@link detachPanel}); re-clicking focuses the window it already opened rather than stacking duplicates.
+ * The dock toggle on a workspace panel (gh#651): **"pop out"** when the panel is docked, **"reattach"** when it is
+ * in its own window. The detached state is the operator's persisted layout ({@link usePanelLayout}), so a reload
+ * shows the reattach affordance for a panel that was popped out — the layout survives the restart.
  */
-export function PanelDetachButton({ panelId, label }: PanelDetachButtonProps): React.JSX.Element {
+export function PanelDetachButton({
+  panelId,
+  label,
+  detached,
+  onDetach,
+  onReattach,
+}: PanelDetachButtonProps): React.JSX.Element {
+  if (detached) {
+    return (
+      <Tooltip title={`Reattach ${label}`}>
+        <IconButton
+          size="small"
+          aria-label={`Reattach ${label} into this window`}
+          data-testid={`reattach-${panelId}`}
+          onClick={() => onReattach(panelId)}
+        >
+          <CloseFullscreenIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+    );
+  }
+
   return (
     <Tooltip title={`Pop out ${label}`}>
       <IconButton
         size="small"
         aria-label={`Pop out ${label} into its own window`}
         data-testid={`detach-${panelId}`}
-        onClick={() => detachPanel(panelId)}
+        onClick={() => onDetach(panelId)}
       >
         <OpenInNewIcon fontSize="small" />
       </IconButton>
