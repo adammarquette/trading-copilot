@@ -6,9 +6,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   type FlattenSchedule,
   getFlattenSchedule,
+  isFlattenEvent,
   remainingMs,
   soonestArmed,
 } from '../api/flatten';
+import { useOptionalRealtime } from '../realtime/RealtimeProvider';
 
 /** How often the schedule is re-read: re-syncs `asOf` and rolls to the next session without a reload. */
 const REFRESH_MS = 5 * 60 * 1000;
@@ -34,7 +36,10 @@ export function TimeToFlat() {
   const [unavailable, setUnavailable] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const fetchedAt = useRef(0);
+  const realtime = useOptionalRealtime();
   const mounted = useRef(true);
+  /** Monotonic read generation — only the newest in-flight read may write the schedule. */
+  const latestRequest = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -44,8 +49,13 @@ export function TimeToFlat() {
   }, []);
 
   const load = useCallback(() => {
+    // Ordering is by request GENERATION, not arrival: an event-driven re-read races the periodic refresh and the
+    // mount read, and an older schedule resolving late must not overwrite a newer one (a stale `asOf` would drift
+    // the countdown). `mounted` guards post-unmount writes and says nothing about ordering.
+    const generation = ++latestRequest.current;
+
     void getFlattenSchedule().then((result) => {
-      if (!mounted.current) {
+      if (!mounted.current || generation !== latestRequest.current) {
         return;
       }
       if (result.ok) {
@@ -67,6 +77,29 @@ export function TimeToFlat() {
     const refresh = setInterval(load, REFRESH_MS);
     return () => clearInterval(refresh);
   }, [load]);
+
+  // Re-read the moment auto-flatten acts, rather than waiting up to REFRESH_MS: after a deadline fires the
+  // soonest-armed rolls to the next session, and a second window (a gh#651 pop-out) or a reconnected tab would
+  // otherwise sit at 00:00 — or on a now-passed deadline — until the periodic refresh caught up. onResync covers the
+  // retention-gap / reconnect re-fetch. The arming itself is deployed config, so this reacts to a deadline being
+  // acted on, not to a runtime arm/disarm. The read is the truth; the event is only the prompt.
+  useEffect(() => {
+    if (realtime === null) {
+      return;
+    }
+
+    const stopEvents = realtime.onEvent((event) => {
+      if (isFlattenEvent(event.type)) {
+        load();
+      }
+    });
+    const stopResync = realtime.onResync(load);
+
+    return () => {
+      stopEvents();
+      stopResync();
+    };
+  }, [realtime, load]);
 
   useEffect(() => {
     const tick = setInterval(() => setElapsedMs(Date.now() - fetchedAt.current), TICK_MS);

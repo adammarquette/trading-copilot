@@ -81,3 +81,32 @@ export function remainingMs(
 
   return total > 0 ? total : 0;
 }
+
+/**
+ * The broadcast event types that mean the countdown should re-read the schedule. The *arming* is deployed config,
+ * static within a session — so what the strip reacts to at runtime is a **deadline PASSING**, after which the
+ * soonest-armed rolls to the next session (otherwise the display sits at 00:00 until the ~5-minute refresh). Only
+ * the `AutoFlattenService` outcomes that mean a governed deadline has passed belong: `executed` (flattened),
+ * `missed`, and `escalated`.
+ *
+ * Deliberately EXCLUDED, and each for a reason (the exact-set reasoning):
+ * - `flatten.warning` fires *before* the deadline — nothing has rolled, the local tick already shows the right
+ *   number, and because a failed read renders "unavailable", a transient failure of a warning-driven re-read would
+ *   blank the ticking countdown in the final minutes, exactly where the pre-realtime code kept ticking through it.
+ * - `flatten.disabled` concerns a market the countdown already excludes (`soonestArmed` skips disabled markets).
+ * - `flatten.watchdog.*` (and `unconfigured` / `unrostered`) are health / not-governed signals, not the schedule.
+ */
+const FLATTEN_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'flatten.executed',
+  'flatten.missed',
+  'flatten.escalated',
+]);
+
+/**
+ * Whether a broadcast event should trigger an auto-flatten schedule re-read. An exact-match set, not a `startsWith`
+ * prefix — the strip's other signals (and the watchdog's own events) share this channel (the {@link isProtectionEvent}
+ * reasoning).
+ */
+export function isFlattenEvent(type: string): boolean {
+  return FLATTEN_EVENT_TYPES.has(type);
+}

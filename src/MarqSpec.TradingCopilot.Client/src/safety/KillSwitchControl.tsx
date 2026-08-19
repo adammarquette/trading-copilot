@@ -17,7 +17,16 @@ import {
   disengageKillSwitch,
   engageKillSwitch,
   getKillSwitch,
+  isKillSwitchEvent,
 } from '../api/killSwitch';
+import { useOptionalRealtime } from '../realtime/RealtimeProvider';
+
+/**
+ * A low-frequency backstop re-read. The realtime events + resync are the primary refresh path; this only bounds the
+ * window in which a broadcast-driven re-read that hit a transient failure (which correctly leaves the last state)
+ * could strand a window on a stale kill state — matching TimeToFlat's schedule refresh (gh#985 review).
+ */
+const REFRESH_MS = 5 * 60 * 1000;
 
 /**
  * The kill switch, in the safety strip's second reserved slot (gh#657, gh#189, R-11, ADR-0007).
@@ -40,7 +49,10 @@ export function KillSwitchControl() {
   const [confirming, setConfirming] = useState(false);
   const [mode, setMode] = useState<KillSwitchMode>(KillSwitchMode.FlattenAll);
   const [failure, setFailure] = useState<string | null>(null);
+  const realtime = useOptionalRealtime();
   const mounted = useRef(true);
+  /** Monotonic read generation — only the newest in-flight read may write state. */
+  const latestRequest = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -49,20 +61,54 @@ export function KillSwitchControl() {
     };
   }, []);
 
-  const load = useCallback(
-    () =>
-      getKillSwitch().then((result) => {
-        if (mounted.current && result.ok) {
-          setState(result.data);
-        }
-      }),
-    [],
-  );
+  const load = useCallback(() => {
+    // Ordering is by request GENERATION, not arrival. The mount read races the first broadcast, and a resync can
+    // fire while a read is in flight; under HTTP/2 multiplexing a slow first connection or a retry can land them out
+    // of order. Without this, an older "engaged" answer resolving late would overwrite a newer "disengaged" one (or
+    // the reverse) and put the strip into exactly the dangerous, wrong state this control exists to prevent
+    // (ProtectionStatus's #777 lesson). `mounted` guards post-unmount writes and says nothing about ordering.
+    const generation = ++latestRequest.current;
 
-  // The initial state is already null (rendered as not-engaged chrome), so nothing is set synchronously here.
+    return getKillSwitch().then((result) => {
+      if (mounted.current && generation === latestRequest.current && result.ok) {
+        setState(result.data);
+      }
+    });
+  }, []);
+
+  // The initial state is already null (rendered as not-engaged chrome), so nothing is set synchronously here. The
+  // interval is the backstop above: it bounds the staleness a missed or failed event-driven read could leave, on a
+  // control that misleads in BOTH directions (a stale ENGAGED says trading is halted when it is not; a stale
+  // disengaged, the reverse) — unlike ProtectionStatus's single alarming state.
   useEffect(() => {
     void load();
+    const refresh = setInterval(() => void load(), REFRESH_MS);
+    return () => clearInterval(refresh);
   }, [load]);
+
+  // The read is the truth; the broadcast is only the prompt to take it again (ProtectionStatus's posture). Without
+  // this, a SECOND window — a gh#651 pop-out, or the same tab after a reconnect — keeps showing whatever it last
+  // read: an operator who disengaged in the main window still sees ENGAGED on the other monitor. The server
+  // broadcasts every engage / disengage / escalation on the safety-strip channel; re-read on each, and on a resync
+  // (the retention-gap / reconnect re-fetch). A replayed event is safe — it triggers a re-read, and the READ is
+  // what renders, so no is-this-live reasoning is needed here.
+  useEffect(() => {
+    if (realtime === null) {
+      return;
+    }
+
+    const stopEvents = realtime.onEvent((event) => {
+      if (isKillSwitchEvent(event.type)) {
+        void load();
+      }
+    });
+    const stopResync = realtime.onResync(() => void load());
+
+    return () => {
+      stopEvents();
+      stopResync();
+    };
+  }, [realtime, load]);
 
   const confirmEngage = useCallback(async () => {
     const result = await engageKillSwitch(mode, null);
