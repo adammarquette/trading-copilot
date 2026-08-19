@@ -100,8 +100,11 @@ public static class TradovateMapping
                 VenueAccountId.Create(venue, id.ToString(CultureInfo.InvariantCulture)),
                 account.Name,
                 balance,
-                // Active and not read-only: Tradovate marks a view-only account Readonly, which cannot be traded.
-                CanTrade: account.Active && account.Readonly != true,
+                // Active AND explicitly not read-only. CanTrade is the gate OrderExecutionService checks before it
+                // places an order, so an UNKNOWN (null) Readonly must fail closed to not-tradable rather than be
+                // assumed tradable — hence `== false`, not `!= true` (review #990). If Tradovate turns out to report
+                // null for normal accounts, slice 3's real-account wiring (gh#977) revisits this with live data.
+                CanTrade: account.Active && account.Readonly == false,
                 // Tradovate carries no per-account visibility flag; visibility is the operator's local toggle, so a
                 // discovered account starts visible and the operator hides what they do not want to see.
                 IsVisible: true,

@@ -97,7 +97,7 @@ public class TradovateMappingTests
     }
 
     [Theory]
-    [InlineData(true, false, true)]    // active, not read-only -> tradeable
+    [InlineData(true, false, true)]    // active, explicitly not read-only -> tradeable
     [InlineData(true, true, false)]    // active but read-only -> not tradeable
     [InlineData(false, false, false)]  // inactive -> not tradeable
     public void ToVenueAccount_ShouldSetCanTrade_FromActiveAndReadonly(bool active, bool isReadonly, bool expected)
@@ -106,6 +106,17 @@ public class TradovateMappingTests
             Account(9001, active: active, isReadonly: isReadonly), balance: 0m, Tradovate, FirmConventions.ForBrokerage("t"), venueReportsSimulated: true);
 
         account.CanTrade.Should().Be(expected);
+    }
+
+    [Fact]
+    public void ToVenueAccount_ShouldNotBeTradable_WhenReadonlyIsUnknown()
+    {
+        // Fail-closed (review #990): an unknown (null) Readonly must not be assumed tradable — CanTrade is the gate
+        // OrderExecutionService checks, so an unclassifiable read-only status defaults to not-tradable.
+        VenueAccount account = TradovateMapping.ToVenueAccount(
+            Account(9001, active: true, isReadonly: null), balance: 0m, Tradovate, FirmConventions.ForBrokerage("t"), venueReportsSimulated: true);
+
+        account.CanTrade.Should().BeFalse();
     }
 
     [Fact]
@@ -203,7 +214,7 @@ public class TradovateMappingTests
         act.Should().Throw<ArgumentException>();
     }
 
-    private static ClientModels.Account Account(long? id, string name = "Acct", bool active = true, bool isReadonly = false) =>
+    private static ClientModels.Account Account(long? id, string name = "Acct", bool active = true, bool? isReadonly = false) =>
         new()
         {
             Id = id,
