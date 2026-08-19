@@ -39,6 +39,16 @@ describe('usePanelLayout', () => {
     expect(loadDetachedPanels().has('blotter')).toBe(false);
   });
 
+  it('stays docked when the browser blocks the pop-up, so the panel is never stranded on a phantom reattach', () => {
+    detach.mockReturnValue(null); // blocked pop-up
+    const { result } = renderHook(() => usePanelLayout());
+
+    act(() => result.current.detach('blotter'));
+
+    expect(result.current.isDetached('blotter')).toBe(false);
+    expect(loadDetachedPanels().has('blotter')).toBe(false);
+  });
+
   it('restores the persisted layout on mount, so a reload reflects the last pop-out set', () => {
     saveDetachedPanels(new Set(['suggestions']));
 
