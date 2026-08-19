@@ -181,7 +181,7 @@ public class NewsRetrievalServiceTests
         IReadOnlyList<RetrievedNewsItem> items = await Service().RetrieveAsync("x", 5, CancellationToken.None);
 
         items.Should().BeEmpty();
-        // No provider: no paid embed call and no spend row (mirrors NewsSemanticSearch's "no spend when unavailable").
+        // No provider: no paid embed call and no spend row (the "no spend when the provider is unavailable" posture).
         A.CallTo(() => _embed.EmbedQueryAsync(A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
         A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustNotHaveHappened();
     }

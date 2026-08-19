@@ -293,7 +293,7 @@ public sealed class NewsEmbeddingModelScopedReadIntegrationTests : IClassFixture
     }
 
     // The three reads below each resolve INewsEmbeddingSimilarity -- the REAL DI-registered seam, exactly what
-    // NewsSemanticSearch/relevance consume in production -- from a throwaway scope, so a fix landing in
+    // relevance and retrieval consume in production -- from a throwaway scope, so a fix landing in
     // PgVectorNewsSimilarity is what this suite actually observes rather than a private in-suite query.
 
     private async Task<IReadOnlyList<StoredEmbedding>> GetVectorsAsync(IReadOnlyCollection<string> ownerIds)
