@@ -83,6 +83,7 @@ const destination = { id: 'workspace', path: '/', label: 'Workspace' } as unknow
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  localStorage.clear(); // the pop-out layout hook (gh#651) reads localStorage — keep panels at the docked default
 });
 
 beforeEach(() => {
@@ -154,6 +155,19 @@ describe('WorkspaceSurface', () => {
 
     expect(screen.getByTestId('detach-suggestions')).toBeTruthy();
     expect(screen.getByTestId('detach-blotter')).toBeTruthy();
+  });
+
+  it('restores a persisted detached panel as reattachable on load (gh#651 inc 2)', () => {
+    // The layout survives a restart: a panel popped out in a prior session is restored from localStorage as
+    // detached, so the workspace offers to reattach it rather than silently re-docking.
+    localStorage.setItem('tc.detached-panels', JSON.stringify(['blotter']));
+
+    render(<WorkspaceSurface destination={destination} />);
+
+    expect(screen.getByTestId('reattach-blotter')).toBeTruthy();
+    expect(screen.queryByTestId('detach-blotter')).toBeNull();
+    // The suggestions panel was not detached, so its control still offers pop-out.
+    expect(screen.getByTestId('detach-suggestions')).toBeTruthy();
   });
 
   it('drives the chart with the default venue / instrument / resolution', () => {

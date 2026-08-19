@@ -13,6 +13,7 @@ import type { Destination } from '../navigation/destinations';
 import { useOptionalAccounts } from '../accounts/AccountProvider';
 import { Blotter } from '../blotter/Blotter';
 import { PanelDetachButton } from '../panels/PanelDetachButton';
+import { usePanelLayout } from '../panels/usePanelLayout';
 import { SuggestionsPanel } from '../suggestions/SuggestionsPanel';
 
 /**
@@ -56,6 +57,9 @@ export interface WorkspaceSurfaceProps {
  * cards (gh#655 / gh#656 / gh#727) and join this layout as they land.
  */
 export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.JSX.Element {
+  // The pop-out layout (gh#651): mounted ONCE here and threaded to each panel's dock toggle, so the detached set is
+  // shared and persisted — a per-button copy would each hold a separate, diverging set.
+  const panelLayout = usePanelLayout();
   const [instrument, setInstrument] = useState(DEFAULT_INSTRUMENT);
   const [resolution, setResolution] = useState(RESOLUTIONS[0].minutes);
   const [enabledIndicators, setEnabledIndicators] = useState<ReadonlySet<string>>(
@@ -177,7 +181,13 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
         {/* Pop the suggestion feed onto a second monitor (gh#651): the same panel, its own window and realtime
             connection, carrying the safety strip. A view convenience — the docked copy here is unchanged. */}
         <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 0.5, pt: 0.5 }}>
-          <PanelDetachButton panelId="suggestions" label="Suggestions" />
+          <PanelDetachButton
+            panelId="suggestions"
+            label="Suggestions"
+            detached={panelLayout.isDetached('suggestions')}
+            onDetach={panelLayout.detach}
+            onReattach={panelLayout.reattach}
+          />
         </Box>
         <SuggestionsPanel />
         {/* The live blotter (gh#656) — venue truth for positions and resting orders, beside the decision
@@ -189,7 +199,13 @@ export function WorkspaceSurface({ destination }: WorkspaceSurfaceProps): React.
             sx={{ borderColor: 'divider', borderStyle: 'solid', borderWidth: '1px 0 0 0', p: 1.5 }}
           >
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 0.5 }}>
-              <PanelDetachButton panelId="blotter" label="Positions & orders" />
+              <PanelDetachButton
+                panelId="blotter"
+                label="Positions & orders"
+                detached={panelLayout.isDetached('blotter')}
+                onDetach={panelLayout.detach}
+                onReattach={panelLayout.reattach}
+              />
             </Box>
             {/* Keyed by account so a switch REMOUNTS the blotter: no state (a gh#969 resize notice, a prior
                 account's venue view) survives into a different account's context — a fresh read, never stale
