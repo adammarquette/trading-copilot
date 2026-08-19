@@ -14,6 +14,10 @@ govern every domain, and the routing table. Cited elsewhere as **data dictionary
 > (Cohere `rerank-english-v3.0`), the cross-encoder counterpart of the `Embedding` write path's `IEmbeddingProvider`.
 > It **stores nothing** — no entity, no migration — so it has no row above; it **degrades to a passthrough
 > (identity-order) result rather than throwing**, meters every call on the `MarqSpec.TradingCopilot.Ai` meter, and
-> prices per **search** from a single pinned `CohereOptions` rate (ADR-0008). **No consumer or `AIUsage` write is
-> wired yet** — the seam lands ahead of its first consumer, the gh#377 embed-ledger deferral.
+> prices per **search** from a single pinned `CohereOptions` rate (ADR-0008). **First consumer: the read-only
+> `search_news` chat tool (gh#987)** — it embeds the query, recalls nearest news via `NearestNewsAsync`, hydrates
+> the text, and reranks the candidates, reading the returned **list order** (authoritative on both the reranked and
+> the passthrough path). It ledgers the rerank call under `AiUsageFeature.Chat` (and the query-embed under `Embed`)
+> stamped to the operator (ADR-0008) — the deferred first consumer the gh#975 seam landed ahead of, exactly as
+> gh#377 was for the embed ledger write.
 
