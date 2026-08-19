@@ -59,4 +59,17 @@ The operator was asked (2026-08-15) and chose a **read-only** tool set for this 
   **declared-unknown** (never a fabricated flat), and it reconciles the operator's own accounts (R-20) — **all** of
   them, deliberately not filtered by `IsActive`, because deactivation is a soft-delete that does not close open
   positions, so filtering would hide live exposure and fabricate a flat.
+- ✅ `search_news` (gh#987) landed as a fourth read-only tool and the **first `IReranker` consumer** (gh#975): a
+  semantic search over the operator's ingested news feed (embed the query → nearest-news recall → hydrate →
+  rerank → top-k). It stays read-only **by its very construction** — it injects only read / compute seams (the
+  embedding provider, the `INewsEmbeddingSimilarity` read, the `IReranker`), the scoped `TradingCopilotDbContext`
+  used read-only, and the fail-open AI-spend ledger — reaching no order / execution / write type. News is the
+  **R-20 global exception** (a `NewsRecord` is not `IUserOwned`), so the hydrate read carries no owner filter, like
+  `get_quote`; the spend it bills is still stamped to the operator. Consistent with point 5 above, **retrieved news
+  text is untrusted display data the model reads, never instruction** (enforcement stays below the model). It
+  **degrades, never throws**: no embedding provider / a null query vector / a faulting pgvector read collapse to an
+  empty result, and an unavailable rerank degrades to the recall's identity order (the tool reads the seam's list
+  order) — and, per point 4, it ledgers its own embed (`Embed`) and rerank (`Chat`) spend
+  ([ADR-0008](0008-ai-invocation-cost-model.md)). The read set is now
+  `get_quote` / `query_journal` / `read_positions` / `search_news`.
 - Streaming a *tool-using* turn's final answer (removing the round-1 double-call) is inc 4b.

@@ -122,6 +122,7 @@ escalation policy, the enrichment injection-surface argument) is untouched.)*
 | 2026-07-30 | the LLM-side meter landed; Grafana now sees true total AI spend (gh#477) |
 | 2026-08-15 | the stale-model embedding sweep rides the embed pass but costs no AI spend (gh#889) |
 | 2026-08-17 | the Cohere rerank provider landed behind an `IReranker` seam; no consumer / ledger write yet (gh#975) |
+| 2026-08-18 | the first rerank consumer landed: `search_news` ledgers embed→Embed, rerank→Chat (gh#987) |
 
 ## Update (2026-07-28) — the deterministic mechanical route landed (gh#385)
 
@@ -420,6 +421,33 @@ the spend facts (`Outcome` / `BilledSearches` / `EstimatedCostUsd`, mirroring `E
 ledger. **No schema, migration, or `AiUsageFeature.Rerank` value** in this increment — a ledger-write concern that
 belongs with the consumer. Still open: the first rerank consumer + its `AIUsage` write, and a governor tie-in for
 rerank spend if it proves material.
+
+## Update (2026-08-18) — the first rerank consumer landed; the retrieval-tool ledger mapping is pinned (gh#987)
+
+The gh#975 seam's deferred *"first rerank consumer + its `AIUsage` write"* is closed. The read-only **`search_news`**
+chat tool (R-6, [ADR-0025](0025-chat-tool-read-only-boundary.md)) is the first `IReranker` consumer: it embeds the
+query, recalls the nearest news, hydrates it, and reranks the candidates — **ledgering both AI calls it makes**,
+stamped to the **operator** (`ICurrentUser`, R-20). Not the `SystemOwner` sentinel: unlike `NewsEmbeddingService`'s
+deployment-global news embedding (gh#436, infrastructure cost), a retrieval query is *an operator's own decision-
+support call*, so its spend is the operator's. The mapping is pinned, mirroring the gh#436 embed decision:
+- **The query-embed → `Feature = Embed`**, byte-for-byte as `NewsEmbeddingService` records it — `Tier = null`,
+  `OutputTokens = 0`, the provider-priced tokens / cost riding the `EmbeddingResult`, and `EmbeddingOutcome` mapped
+  onto `AiUsageOutcome` (Embedded → Succeeded, RateLimited → RateLimited, Failed → Failed).
+- **The rerank call → `Feature = Chat`** — **reusing the chat feature rather than adding an `AiUsageFeature.Rerank`
+  value** (no new enum member, no migration in this increment; the gh#975 note anticipated deferring that to the
+  consumer, and the consumer chose reuse). `Tier = null` (rerank has no model tier, like an embedding — the
+  `n_Tier_NotUnknownOrNull` check admits null), and `RerankOutcome` is mapped the same way (Reranked → Succeeded,
+  RateLimited → RateLimited, Failed → Failed). Rerank bills per **search**, not per token, so the billed
+  **search-unit count** rides `InputTokens` (the input-quantity column, as the embed row uses it for billed tokens)
+  with `OutputTokens = 0`; the governor-relevant figure is the `EstimatedCostUsd`, and a degrade is a real
+  zero-cost row, not an absence.
+
+Both writes are **fail-open**, guarded at the tool boundary exactly as the news-embedding pass guards its own — a
+bookkeeping fault is logged and swallowed, never faulting the retrieval. A **degraded deployment** (no embedding
+provider) short-circuits *before* the embed call, so it never pays for — or ledgers — a query it would discard; a
+null query vector still ledgers the *attempted* embed (an attempt is spend) but makes no rerank call. **Still open**
+(unchanged from gh#975): a **governor tie-in for rerank spend** — the tool ledgers the spend floor today, but the
+daily cap does not yet gate a retrieval-tool rerank; that is a later call if rerank spend proves material.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the

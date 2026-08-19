@@ -6,6 +6,7 @@ using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Triggers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.Api.Ai;
@@ -109,6 +110,15 @@ public static class AiRegistration
         services.AddScoped<IChatTool, QueryJournalTool>();
         services.AddScoped<IChatTool, GetQuoteTool>();
         services.AddScoped<IChatTool, ReadPositionsTool>();
+
+        // search_news (gh#987, ADR-0025 / ADR-0008): the FIRST IReranker consumer -- a read-only semantic search over
+        // the deployment-global news feed (embed the query -> nearest-news recall -> hydrate -> rerank). Read-only by
+        // construction like its siblings: it injects only read / compute seams (embed provider, nearest-news read,
+        // reranker), the read-only DbContext, and the fail-open spend ledger, reaching no order / write path. It
+        // ledgers its own embed (Embed) and rerank (Chat) spend stamped to the operator; the clock is the shared
+        // TimeProvider (TryAdd so this registration stands alone even without the notification host that also adds it).
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddScoped<IChatTool, SearchNewsTool>();
 
         // The grounded chat turn (gh#906 / gh#925, R-6): runs the model over a conversation's history, runs any
         // read-only tool calls in a bounded loop, and prices every call. Scoped like the reviewer beside it — it wraps
