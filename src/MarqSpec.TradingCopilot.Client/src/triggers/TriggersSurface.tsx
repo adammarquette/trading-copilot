@@ -62,8 +62,24 @@ function inertReason(trigger: Trigger): string | null {
 
 export function TriggersSurface() {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
-  const [busyId, setBusyId] = useState<string | null>(null);
+  // A SET, not a single slot. `disabled` is keyed per row, so one shared slot lets a second action on another
+  // row clear the first row's busy state while its request is still in flight — the operator can re-press, and
+  // the second request 404s and reports "could not be deleted" for a delete that in fact succeeded (gh#993
+  // review, round 4). Increment 2 puts four handlers on this, so a single slot gets worse, not better.
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const markBusy = useCallback((id: string, busy: boolean) => {
+    setBusyIds((current) => {
+      const next = new Set(current);
+      if (busy) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return next;
+    });
+  }, []);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -108,66 +124,72 @@ export function TriggersSurface() {
   }, [load]);
 
   /** Confirms one trigger and replaces that row with what the server returned — never with an assumed state. */
-  const onConfirm = useCallback((id: string) => {
-    setActionError(null);
-    setBusyId(id);
-    void confirmTrigger(id)
-      .then((result) => {
-        if (!mounted.current) {
-          return;
-        }
-        setBusyId(null);
-        if (!result.ok) {
-          // The row is left exactly as it was: a failed confirm must never look like a successful one.
-          setActionError(result.kind === 'refused' ? result.reason : result.error);
-          return;
-        }
-        const updated = result.data;
-        setState((current) =>
-          current.kind === 'loaded'
-            ? {
-                kind: 'loaded',
-                triggers: current.triggers.map((t) => (t.id === updated.id ? updated : t)),
-              }
-            : current,
-        );
-      })
-      .catch(() => {
-        if (mounted.current) {
-          setBusyId(null);
-          setActionError('The trigger could not be confirmed.');
-        }
-      });
-  }, []);
+  const onConfirm = useCallback(
+    (id: string) => {
+      setActionError(null);
+      markBusy(id, true);
+      void confirmTrigger(id)
+        .then((result) => {
+          if (!mounted.current) {
+            return;
+          }
+          markBusy(id, false);
+          if (!result.ok) {
+            // The row is left exactly as it was: a failed confirm must never look like a successful one.
+            setActionError(result.kind === 'refused' ? result.reason : result.error);
+            return;
+          }
+          const updated = result.data;
+          setState((current) =>
+            current.kind === 'loaded'
+              ? {
+                  kind: 'loaded',
+                  triggers: current.triggers.map((t) => (t.id === updated.id ? updated : t)),
+                }
+              : current,
+          );
+        })
+        .catch(() => {
+          if (mounted.current) {
+            markBusy(id, false);
+            setActionError('The trigger could not be confirmed.');
+          }
+        });
+    },
+    [markBusy],
+  );
 
-  const onDelete = useCallback((id: string) => {
-    setActionError(null);
-    setBusyId(id);
-    void deleteTrigger(id)
-      .then((result) => {
-        if (!mounted.current) {
-          return;
-        }
-        setBusyId(null);
-        if (!result.ok) {
-          // The row STAYS. Removing it on a failed delete would tell the operator a trigger is gone while it is
-          // still standing at the server and still able to fire (gh#993 review).
-          setActionError(result.kind === 'refused' ? result.reason : result.error);
-          return;
-        }
-        setState((current) =>
-          current.kind === 'loaded'
-            ? { kind: 'loaded', triggers: current.triggers.filter((t) => t.id !== id) }
-            : current,
-        );
-      })
-      .catch(() => {
-        if (mounted.current) {
-          setBusyId(null);
-          setActionError('The trigger could not be deleted.');
-        }
-      });
-  }, []);
+  const onDelete = useCallback(
+    (id: string) => {
+      setActionError(null);
+      markBusy(id, true);
+      void deleteTrigger(id)
+        .then((result) => {
+          if (!mounted.current) {
+            return;
+          }
+          markBusy(id, false);
+          if (!result.ok) {
+            // The row STAYS. Removing it on a failed delete would tell the operator a trigger is gone while it is
+            // still standing at the server and still able to fire (gh#993 review).
+            setActionError(result.kind === 'refused' ? result.reason : result.error);
+            return;
+          }
+          setState((current) =>
+            current.kind === 'loaded'
+              ? { kind: 'loaded', triggers: current.triggers.filter((t) => t.id !== id) }
+              : current,
+          );
+        })
+        .catch(() => {
+          if (mounted.current) {
+            markBusy(id, false);
+            setActionError('The trigger could not be deleted.');
+          }
+        });
+    },
+    [markBusy],
+  );
 
   if (state.kind === 'loading') {
     return <LoadingState label="Loading triggers" />;
@@ -233,7 +255,7 @@ export function TriggersSurface() {
                     size="small"
                     variant="contained"
                     aria-label={`Confirm ${conditionOf(trigger)}`}
-                    disabled={busyId === trigger.id}
+                    disabled={busyIds.has(trigger.id)}
                     onClick={() => onConfirm(trigger.id)}
                   >
                     Confirm
@@ -243,7 +265,7 @@ export function TriggersSurface() {
                   size="small"
                   color="error"
                   aria-label={`Delete ${conditionOf(trigger)}`}
-                  disabled={busyId === trigger.id}
+                  disabled={busyIds.has(trigger.id)}
                   onClick={() => onDelete(trigger.id)}
                 >
                   Delete

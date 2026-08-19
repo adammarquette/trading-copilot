@@ -18,6 +18,9 @@ vi.mock('../api/triggers', async (importOriginal) => {
   };
 });
 
+/** One message for both arms, so the assertion cannot pass by matching the wrong one. */
+const MESSAGE = 'That trigger could not be updated.';
+
 const listMock = vi.mocked(listTriggers);
 const confirmMock = vi.mocked(confirmTrigger);
 const deleteMock = vi.mocked(deleteTrigger);
@@ -117,51 +120,6 @@ describe('TriggersSurface', () => {
     await waitFor(() => expect(screen.queryByTestId('trigger-row')).toBeNull());
   });
 
-  it('acts on the row whose button was pressed, with several rows on screen', async () => {
-    // Per-row actions need per-row handles. Without the aria-label the two Delete buttons are indistinguishable
-    // to an assistive client and to this test, and a wrong-row delete would look identical to a right-row one.
-    listMock.mockResolvedValue({
-      ok: true,
-      data: [
-        trigger({ id: 'a', symbol: 'ES' }),
-        trigger({ id: 'b', symbol: 'NQ', enabled: true, confirmation: 0 }),
-      ],
-    } satisfies ApiResult<Trigger[]>);
-    deleteMock.mockResolvedValue({ ok: true, data: undefined });
-
-    renderSurface();
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete NQ rsi(14) 5m above 70' }));
-
-    await waitFor(() => expect(screen.queryByText('NQ rsi(14) 5m above 70')).toBeNull());
-    expect(screen.getByText('ES rsi(14) 5m above 70')).toBeTruthy();
-    expect(deleteMock).toHaveBeenCalledWith('b');
-  });
-
-  it('confirming updates ONLY the row acted on, with several rows on screen (gh#993 review)', async () => {
-    // The delete bug, one handler over: `map(() => updated)` writes the confirmed trigger over every row, so a
-    // second, still-unconfirmed trigger would render as Live and the operator would rely on an alert that cannot
-    // fire. Found because the reviewer mutated the sibling of a handler I had just fixed rather than the one.
-    listMock.mockResolvedValue({
-      ok: true,
-      data: [
-        trigger({ id: 'a', symbol: 'ES', enabled: true, confirmation: 0 }),
-        trigger({ id: 'b', symbol: 'NQ', enabled: true, confirmation: 0 }),
-      ],
-    } satisfies ApiResult<Trigger[]>);
-    confirmMock.mockResolvedValue({
-      ok: true,
-      data: trigger({ id: 'a', symbol: 'ES', enabled: true, confirmation: 1 }),
-    } satisfies ApiResult<Trigger>);
-
-    renderSurface();
-    fireEvent.click(await screen.findByRole('button', { name: 'Confirm ES rsi(14) 5m above 70' }));
-
-    // The confirmed one goes Live; the untouched one must still say it will not fire.
-    expect(await screen.findByText('Live')).toBeTruthy();
-    expect(screen.getAllByText('Will not fire')).toHaveLength(1);
-    expect(confirmMock).toHaveBeenCalledWith('a');
-  });
-
   it('a trigger that is neither confirmed nor switched on says both, not just the switch', async () => {
     // The fourth quadrant. If this branch claimed the trigger were confirmed, the operator would flip the switch
     // and wait on an alert that still cannot arrive — a wrong next step, not merely an incomplete message.
@@ -192,28 +150,60 @@ describe('TriggersSurface', () => {
   describe.each(ROW_ACTIONS)(
     '$action — the invariants both row actions share',
     ({ button, mockOf }) => {
-      it('a refusal surfaces its reason and leaves the row standing', async () => {
-        // A row that vanishes, or silently stays, on a refused action tells the operator something untrue about a
-        // trigger that is still exactly as it was.
+      // The result KIND is a second dimension, not a fixed choice. The first consolidation used `refused` for
+      // both handlers, which SWAPPED the arm delete exercised — its hand-written case used `failed` — rather than
+      // adding one, and `failed` is the likelier delete outcome: a 5xx or a dropped connection beats a 409
+      // (gh#993 review, round 4).
+      it.each([
+        { kind: 'refused', result: { ok: false, kind: 'refused', status: 409, reason: MESSAGE } },
+        { kind: 'failed', result: { ok: false, kind: 'failed', status: 500, error: MESSAGE } },
+      ] as const)(
+        'a $kind result surfaces its message and leaves the row standing',
+        async ({ result }) => {
+          // A row that vanishes, or silently stays, on a refused action tells the operator something untrue about a
+          // trigger that is still exactly as it was.
+          listMock.mockResolvedValue({
+            ok: true,
+            data: [trigger({ enabled: true, confirmation: 0 })],
+          } satisfies ApiResult<Trigger[]>);
+          mockOf().mockResolvedValue(result);
+
+          renderSurface();
+          fireEvent.click(await screen.findByRole('button', { name: button }));
+
+          expect((await screen.findByRole('alert')).textContent).toBe(MESSAGE);
+          expect(screen.getByTestId('trigger-row')).toBeTruthy();
+          expect(screen.getByText('Will not fire')).toBeTruthy();
+        },
+      );
+
+      it('acts on the row whose button was pressed, and leaves the other alone', async () => {
+        // Per-row targeting is ONE property of both handlers, and it sat outside this table as two hand-kept
+        // copies — the very shape the table exists to end, and the one that would drift first at increment 2.
         listMock.mockResolvedValue({
           ok: true,
-          data: [trigger({ enabled: true, confirmation: 0 })],
+          data: [
+            trigger({ id: 'a', symbol: 'ES', enabled: true, confirmation: 0 }),
+            trigger({ id: 'b', symbol: 'NQ', enabled: true, confirmation: 0 }),
+          ],
         } satisfies ApiResult<Trigger[]>);
+        // Cast because the two mocks' resolved types intersect to `Trigger & void`; this case asserts only which
+        // ROW was acted on, which is the property both handlers share — the shape of the payload is each
+        // handler's own business and is asserted in its own success case below.
         mockOf().mockResolvedValue({
-          ok: false,
-          kind: 'refused',
-          status: 409,
-          reason: 'That trigger was edited since you loaded it.',
-        });
+          ok: true,
+          data: trigger({ id: 'a', symbol: 'ES', enabled: true, confirmation: 1 }),
+        } as never);
 
         renderSurface();
-        fireEvent.click(await screen.findByRole('button', { name: button }));
-
-        expect((await screen.findByRole('alert')).textContent).toBe(
-          'That trigger was edited since you loaded it.',
+        fireEvent.click(
+          await screen.findByRole('button', { name: new RegExp(button.source + 'ES ') }),
         );
-        expect(screen.getByTestId('trigger-row')).toBeTruthy();
-        expect(screen.getByText('Will not fire')).toBeTruthy();
+
+        // Whatever the action did to row A, row B must be untouched — still present, still inert.
+        await waitFor(() => expect(mockOf()).toHaveBeenCalledWith('a'));
+        expect(screen.getByText('NQ rsi(14) 5m above 70')).toBeTruthy();
+        expect(screen.getByText(/never confirmed/i)).toBeTruthy();
       });
 
       it('a THROW leaves the row present and its buttons usable — never stranded busy', async () => {
@@ -241,6 +231,36 @@ describe('TriggersSurface', () => {
       });
     },
   );
+
+  it('an action on one row does not re-enable another row still in flight (gh#993 review)', async () => {
+    // `busyId` was a single slot while `disabled` is keyed per row, so acting on row B cleared row A's busy state
+    // mid-request. The operator could then re-press A's Delete; the second request 404s and reports "could not be
+    // deleted" for a delete that had in fact succeeded.
+    listMock.mockResolvedValue({
+      ok: true,
+      data: [
+        trigger({ id: 'a', symbol: 'ES', enabled: true, confirmation: 0 }),
+        trigger({ id: 'b', symbol: 'NQ', enabled: true, confirmation: 0 }),
+      ],
+    } satisfies ApiResult<Trigger[]>);
+    // Row A's delete never settles — it is still in flight for the whole test.
+    deleteMock.mockReturnValue(new Promise(() => {}));
+    confirmMock.mockResolvedValue({
+      ok: true,
+      data: trigger({ id: 'b', symbol: 'NQ', enabled: true, confirmation: 1 }),
+    } satisfies ApiResult<Trigger>);
+
+    renderSurface();
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete ES rsi(14) 5m above 70' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm NQ rsi(14) 5m above 70' }));
+
+    // B settles; A must still be busy, because A's own request has not.
+    await waitFor(() => expect(screen.getByText('Live')).toBeTruthy());
+    expect(
+      (screen.getByRole('button', { name: 'Delete ES rsi(14) 5m above 70' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
 
   it('shows an empty state that says a new trigger does not fire until confirmed', async () => {
     listMock.mockResolvedValue({ ok: true, data: [] } satisfies ApiResult<Trigger[]>);
