@@ -37,9 +37,12 @@ export function usePanelLayout(): PanelLayout {
 
   const detach = useCallback((panelId: string) => {
     const handle = detachPanel(panelId);
-    if (handle !== null) {
-      windows.current.set(panelId, handle);
+    if (handle === null) {
+      // The browser blocked the pop-up: no window opened, so stay DOCKED. Flipping to a "reattach" control for a
+      // window that does not exist would strand the panel — invisible here and nowhere else. The operator retries.
+      return;
     }
+    windows.current.set(panelId, handle);
     setDetached((current) => (current.has(panelId) ? current : new Set(current).add(panelId)));
   }, []);
 
