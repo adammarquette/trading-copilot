@@ -93,10 +93,12 @@ panel detaches into its own window, and that window carries the safety strip.
 - **Auth across windows (R-18) is same-origin storage.** The JWT lives in `localStorage` (ADR-0003), shared across
   same-origin windows, so a pop-out boots authenticated through `RequireAuth` without re-prompting.
 - **Layout persistence + reattach landed (gh#651 increment 2).** Which panels are detached is persisted to
-  `localStorage` (`panelLayout` / `usePanelLayout`) and restored on load, so a reload reflects the last pop-out
-  layout rather than silently re-docking — the acceptance's *"survives a restart in its last layout"*. The panel
-  control is now a **dock toggle** (pop out when docked, reattach when detached), and reattach closes the window this
-  tab opened. Two cross-window limits are deliberately left to the `BroadcastChannel` increment: a browser cannot
+  `localStorage` (`panelLayout` / `usePanelLayout`) and restored on load, so a reload **remembers which panels were
+  detached and offers to reattach them** rather than silently re-docking. The panel control is now a **dock toggle**
+  (pop out when docked, reattach when detached), and reattach closes the window this tab opened. This is the layout
+  *preference* surviving — a step toward the acceptance's *"survives a restart in its last layout"*, not the full
+  window arrangement: the pop-out **windows themselves do not reappear** (a browser cannot reopen a window without a
+  user gesture), so auto-reopen rides the `BroadcastChannel` increment below. Two cross-window limits are deliberately left to the `BroadcastChannel` increment: a browser cannot
   re-open a window without a user gesture (so a reload shows the detached panels *as* detached, with a reattach
   affordance, rather than auto-reopening them), and reattaching a pop-out that outlived a main-window reload re-docks
   the layout but cannot itself close that now-orphaned window.
