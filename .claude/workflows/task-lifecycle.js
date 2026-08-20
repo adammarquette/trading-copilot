@@ -45,17 +45,30 @@ const ACTIONABLE_COLUMNS = ['Planning', 'Current ToDo', 'In Progress', 'Review']
 // `safety-critical` label floors the tier at top regardless of the nominal score — safety can only RAISE it.
 // Tiers are named as tiers, not model ids, so the mapping survives model changes; the model id is resolved here.
 function tierFor(issue) {
-  if (issue.safetyCritical) return { model: 'opus', effort: 'high', tier: 'top (safety-critical floor ≥4)' }
-  switch (issue.workEstimate) {
-    case 1:  return { model: 'haiku',  effort: 'low',    tier: '1 — trivial/mechanical' }
-    case 2:  return { model: 'haiku',  effort: 'medium', tier: '2 — simple' }
-    case 3:  return { model: 'sonnet', effort: 'medium', tier: '3 — moderate' }
-    case 4:  return { model: 'opus',   effort: 'high',   tier: '4 — complex' }
-    case 5:  return { model: 'opus',   effort: 'max',    tier: '5 — critical/deep' }
-    // An actionable card with no Work Estimate is itself a board defect (it cannot be routed by the rubric); read
-    // it at a mid tier and let the proposal flag the missing estimate rather than guessing high or low.
-    default: return { model: 'sonnet', effort: 'medium', tier: 'unestimated (defect — propose adding one)' }
+  // Nominal tier from the Work Estimate (project-board-workflow "Tagging & model routing"; work-estimate-rubric.md).
+  const byEstimate = {
+    1: { model: 'haiku',  effort: 'low',    rank: 1, tier: '1 — trivial/mechanical' },
+    2: { model: 'haiku',  effort: 'medium', rank: 2, tier: '2 — simple' },
+    3: { model: 'sonnet', effort: 'medium', rank: 3, tier: '3 — moderate' },
+    4: { model: 'opus',   effort: 'high',   rank: 4, tier: '4 — complex' },
+    5: { model: 'opus',   effort: 'max',    rank: 5, tier: '5 — critical/deep' },
   }
+  // An actionable card with no Work Estimate is itself a board defect (it cannot be routed by the rubric); read it
+  // at a mid tier and let the proposal flag the missing estimate rather than guessing high or low.
+  const nominal = byEstimate[issue.workEstimate] ||
+    { model: 'sonnet', effort: 'medium', rank: 3, tier: 'unestimated (defect — propose adding one)' }
+
+  // `safety-critical` is a FLOOR at top tier (≥ Work Estimate 4): it can only RAISE the tier, never lower it. So a
+  // WE5 safety-critical card KEEPS opus/max (already above the floor); a WE1 safety-critical card RISES to the
+  // opus/high floor. Composing the floor with the nominal estimate — rather than flattening every safety-critical
+  // card to the floor — is what honours "safety can only raise, never lower" for a WE5 card.
+  if (issue.safetyCritical && nominal.rank < 4) {
+    return { model: 'opus', effort: 'high', rank: 4, tier: `top (safety-critical floor ≥4, raised from "${nominal.tier}")` }
+  }
+  if (issue.safetyCritical) {
+    return { ...nominal, tier: `${nominal.tier} · safety-critical (already at/above the ≥4 floor)` }
+  }
+  return nominal
 }
 
 // The role that owns a card, from its work:* label (project-board-workflow "Tagging & model routing").
