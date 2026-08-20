@@ -17,6 +17,7 @@ import {
 } from '../api/triggers';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
+import { TriggerForm } from './TriggerForm';
 
 /**
  * The standing-triggers surface (gh#991, split from gh#660; R-7 / R-4, ADR-0008).
@@ -28,7 +29,7 @@ import { LoadingState } from '../components/LoadingState';
  * with the one question that matters, *will this fire?*, and answers **"Will not fire"** in words rather than
  * leaving the operator to combine two flags correctly.
  *
- * Authoring is deliberately not here (inc 2): the create form carries ten fields and would bury this.
+ * Authoring is {@link TriggerForm}, above the list (gh#1003).
  */
 type LoadState =
   | { readonly kind: 'loading' }
@@ -206,6 +207,20 @@ export function TriggersSurface() {
     [markBusy, markError],
   );
 
+  /**
+   * Folds a newly authored trigger into the list without a reload. **Appended**, because `ListTriggersAsync`
+   * orders by `CreatedAt` ascending: prepending put the new row at the top until the next load and then moved it
+   * to the bottom, which reads as the surface losing track of it (gh#1005 review). It arrives UNCONFIRMED, so
+   * the row states it will not fire — creating and arming stay two deliberate acts (gh#1003).
+   */
+  const onCreated = useCallback((trigger: Trigger) => {
+    setState((current) =>
+      current.kind === 'loaded'
+        ? { kind: 'loaded', triggers: [...current.triggers, trigger] }
+        : current,
+    );
+  }, []);
+
   if (state.kind === 'loading') {
     return <LoadingState label="Loading triggers" />;
   }
@@ -227,16 +242,20 @@ export function TriggersSurface() {
 
   if (state.triggers.length === 0) {
     return (
-      <EmptyState
-        title="No triggers yet"
-        description="A trigger watches one indicator on one instrument and alerts you when it crosses your threshold. A new trigger does not fire until you confirm it."
-        tag="R-7"
-      />
+      <Stack spacing={2} data-testid="triggers-surface">
+        <TriggerForm onCreated={onCreated} />
+        <EmptyState
+          title="No triggers yet"
+          description="A trigger watches one indicator on one instrument and alerts you when it crosses your threshold. A new trigger does not fire until you confirm it."
+          tag="R-7"
+        />
+      </Stack>
     );
   }
 
   return (
     <Stack spacing={2} data-testid="triggers-surface">
+      <TriggerForm onCreated={onCreated} />
       {state.triggers.map((trigger) => {
         const inert = inertReason(trigger);
         return (
