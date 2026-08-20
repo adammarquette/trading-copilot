@@ -176,6 +176,24 @@ public static class TradovateMapping
             : throw new ArgumentException($"'{account.Key}' is not a Tradovate account id.", nameof(account));
     }
 
+    /// <summary>Parses a venue-qualified contract handle back into the integer id Tradovate expects.</summary>
+    /// <param name="contract">The venue-qualified contract.</param>
+    /// <param name="venue">This adapter's venue — the contract must belong to it.</param>
+    /// <returns>Tradovate's numeric contract id.</returns>
+    /// <exception cref="ArgumentException">The contract belongs to another venue, or its key is not a Tradovate contract id.</exception>
+    /// <remarks>
+    /// The qualifier is checked, not assumed: contract handles collide across venues, so a <c>projectx:</c> contract
+    /// must never be sent to Tradovate on a colliding key (R-17).
+    /// </remarks>
+    public static long ToContractId(VenueContractId contract, VenueId venue)
+    {
+        EnsureBelongsTo(contract.Venue, venue, contract.ToString());
+
+        return long.TryParse(contract.Key, NumberStyles.Integer, CultureInfo.InvariantCulture, out long id)
+            ? id
+            : throw new ArgumentException($"'{contract.Key}' is not a Tradovate contract id.", nameof(contract));
+    }
+
     /// <summary>Builds a Tradovate chart request for a contract over a time range at a bar size.</summary>
     /// <param name="contract">The venue-qualified contract.</param>
     /// <param name="from">Start of the range, the oldest edge.</param>
@@ -192,7 +210,7 @@ public static class TradovateMapping
         TimeSpan barSize,
         VenueId venue)
     {
-        EnsureBelongsTo(contract.Venue, venue, contract.ToString());
+        long contractId = ToContractId(contract, venue);
 
         if (from > to)
         {
@@ -200,10 +218,6 @@ public static class TradovateMapping
             // reads downstream as "no bars in this window" rather than "you asked for a nonsense window". Refuse it.
             throw new ArgumentException($"The bar range is inverted: from ({from:o}) is after to ({to:o}).", nameof(from));
         }
-
-        long contractId = long.TryParse(contract.Key, NumberStyles.Integer, CultureInfo.InvariantCulture, out long id)
-            ? id
-            : throw new ArgumentException($"'{contract.Key}' is not a Tradovate contract id.", nameof(contract));
 
         (ClientModels.ChartUnderlyingType underlyingType, int elementSize) = ToChartUnit(barSize);
 
@@ -261,6 +275,23 @@ public static class TradovateMapping
             new Price(bar.Low),
             new Price(bar.Close),
             (long)(bar.Volume ?? 0m));
+    }
+
+    /// <summary>Builds the venue-neutral quote from a resolved best bid/ask — a running snapshot the adapter keeps.</summary>
+    /// <param name="timestamp">When the quote last changed.</param>
+    /// <param name="bid">The best bid price.</param>
+    /// <param name="ask">The best ask price.</param>
+    /// <param name="bidSize">Resting bid size, or <see langword="null"/> when the socket omitted it (absent ≠ zero).</param>
+    /// <param name="askSize">Resting ask size, or <see langword="null"/>.</param>
+    /// <returns>The venue-neutral quote.</returns>
+    /// <remarks>
+    /// It takes a resolved bid + ask rather than a client <c>Quote</c> because Tradovate's quote events are
+    /// incremental (bid-only / ask-only / last-trade), so the complete snapshot the neutral <see cref="Quote"/> needs
+    /// is assembled by the adapter across events, not carried on any single one.
+    /// </remarks>
+    public static Quote ToQuote(DateTimeOffset timestamp, decimal bid, decimal ask, long? bidSize, long? askSize)
+    {
+        return new Quote(timestamp, new Price(bid), new Price(ask), bidSize, askSize);
     }
 
     private static void EnsureBelongsTo(VenueId actual, VenueId expected, string qualified)

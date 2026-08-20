@@ -215,6 +215,29 @@ public class TradovateMappingTests
     }
 
     [Fact]
+    public void ToContractId_ShouldParseAnOwnedContract()
+    {
+        TradovateMapping.ToContractId(VenueContractId.Create(Tradovate, "7"), Tradovate).Should().Be(7L);
+    }
+
+    [Fact]
+    public void ToContractId_ShouldThrow_ForAForeignVenueContract()
+    {
+        // projectx:7 must never resolve to Tradovate contract 7 (a different instrument on a colliding key).
+        Action act = () => TradovateMapping.ToContractId(VenueContractId.Create(VenueId.Parse("projectx"), "7"), Tradovate);
+
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void ToContractId_ShouldThrow_ForANonNumericContractKey()
+    {
+        Action act = () => TradovateMapping.ToContractId(VenueContractId.Create(Tradovate, "ESM24"), Tradovate);
+
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
     public void ToChartUnit_ShouldMapWholeMinutesToMinuteBars()
     {
         TradovateMapping.ToChartUnit(TimeSpan.FromMinutes(5)).Should().Be((ClientModels.ChartUnderlyingType.MinuteBar, 5));
@@ -349,6 +372,28 @@ public class TradovateMappingTests
         });
 
         bar.Volume.Should().Be(0L);
+    }
+
+    [Fact]
+    public void ToQuote_ShouldBuildACompleteBidAskSnapshot()
+    {
+        Quote quote = TradovateMapping.ToQuote(DateTimeOffset.UnixEpoch, 5000m, 5001m, 3L, 4L);
+
+        quote.Timestamp.Should().Be(DateTimeOffset.UnixEpoch);
+        quote.Bid.Should().Be(new Price(5000m));
+        quote.Ask.Should().Be(new Price(5001m));
+        quote.BidSize.Should().Be(3L);
+        quote.AskSize.Should().Be(4L);
+    }
+
+    [Fact]
+    public void ToQuote_ShouldKeepAbsentSizesNull()
+    {
+        // Absent size is not zero (client contract): a null size stays null through the mapping.
+        Quote quote = TradovateMapping.ToQuote(DateTimeOffset.UnixEpoch, 5000m, 5001m, null, null);
+
+        quote.BidSize.Should().BeNull();
+        quote.AskSize.Should().BeNull();
     }
 
     private static ClientModels.Account Account(long? id, string name = "Acct", bool active = true, bool? isReadonly = false) =>
