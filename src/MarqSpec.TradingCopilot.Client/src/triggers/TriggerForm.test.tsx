@@ -181,6 +181,32 @@ describe('TriggerForm', () => {
     expect(createMock.mock.calls[0][0].hysteresis).toBe(2.5);
   });
 
+  it('transmits the agent-review fields on a VALID agent-review create (gh#1005 review)', async () => {
+    // Both other agent-review cases assert refusals, so the TRUE branch of the form's headline conditional never
+    // executed: dropping `size` or `accountId` from the body left every test green while making an agent-review
+    // trigger impossible to author at all. This is the case that fails when that happens.
+    createMock.mockResolvedValue({
+      ok: true,
+      data: created({ route: 2, accountId: 'acct-7', size: 3 }),
+    } satisfies ApiResult<Trigger>);
+    renderForm();
+
+    fillMinimum();
+    selectRoute('agent review');
+    fireEvent.change(screen.getByLabelText(/Account/i), { target: { value: 'acct-7' } });
+    fireEvent.change(screen.getByLabelText(/^Size/i), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
+
+    await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+    const sent = createMock.mock.calls[0][0];
+    expect(sent.route).toBe(2);
+    expect(sent.accountId).toBe('acct-7');
+    expect(sent.size).toBe(3);
+    // The comparison is a select whose value is a number on the wire; a default-swap here would author the
+    // opposite condition and read as correct.
+    expect(sent.comparison).toBe(2);
+  });
+
   it("renders the server's refusal in its own words, and keeps what was typed", async () => {
     // The server owns the vocabulary of its refusals (ADR-0003 maps a 4xx `{error}` to `refused`). Re-typing a
     // form because the server said no is a punishment for the server's opinion.
