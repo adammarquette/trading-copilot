@@ -799,6 +799,18 @@ public class TradingCopilotDbContext : TenantDbContext
                 table.HasCheckConstraint(
                     "CK_Triggers_Mechanical_NoAccount",
                     "\"Route\" = 2 OR (\"AccountId\" IS NULL AND \"Size\" IS NULL)");
+
+                // The threshold must sit inside its indicator's meaningful range, or the debounce seeds straight to
+                // Fired and holds there — ADR-0019's silent monitor reached from authoring (gh#1007). Below
+                // TriggerThreshold's endpoint refusal so a NON-API writer (a script, a replayed request) cannot bypass
+                // it. Per-indicator because the indicator's own semantics decide, not "reject zero": RSI is bounded
+                // 0–100 (a value at/beyond a bound makes one inclusive direction always- or never-true); ATR is a
+                // non-negative magnitude. The migration adds this NOT VALID, so it enforces every NEW write without
+                // failing the deploy on a row authored before the gate existed.
+                table.HasCheckConstraint(
+                    "CK_Triggers_Threshold_InIndicatorRange",
+                    "(\"Indicator\" = 'rsi' AND \"Threshold\" > 0 AND \"Threshold\" < 100) "
+                    + "OR (\"Indicator\" = 'atr' AND \"Threshold\" > 0)");
             });
         });
 

@@ -121,6 +121,67 @@ public class TriggerEndpointsTests
     }
 
     [Fact]
+    public async Task Create_ShouldRefuse_WhenTheThresholdWouldBePermanentlySatisfied()
+    {
+        // gh#1007: "rsi at or above 0" — a threshold at/beyond the indicator's 0–100 range — seeds the debounce
+        // straight to Fired and holds it there (ADR-0019's silent monitor). Refused whole; nothing partially stored.
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+            ValidRequest() with { Comparison = IndicatorComparison.Above, Threshold = 0m },
+            new FixedUser(_operator),
+            context,
+            CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Triggers.AnyAsync()).Should().BeFalse("a refused trigger is never partially stored");
+    }
+
+    [Fact]
+    public async Task Create_ShouldJudgeTheThresholdByTheIndicator_NotByRejectingZero()
+    {
+        // The rule is the indicator's own semantics: atr 0 is invalid (atr is never negative), but rsi 50 is fine —
+        // "reject zero" would be both too strict and, for an rsi threshold beyond 100, too lax.
+        await using TradingCopilotDbContext context = Context();
+
+        IResult atr = await TriggerEndpoints.CreateTriggerAsync(
+            ValidRequest() with { Indicator = "atr", Comparison = IndicatorComparison.Above, Threshold = 0m },
+            new FixedUser(_operator),
+            context,
+            CancellationToken.None);
+        StatusOf(atr).Should().Be(StatusCodes.Status400BadRequest);
+
+        IResult rsi = await TriggerEndpoints.CreateTriggerAsync(
+            ValidRequest() with { Threshold = 50m },
+            new FixedUser(_operator),
+            context,
+            CancellationToken.None);
+        StatusOf(rsi).Should().Be(StatusCodes.Status201Created);
+    }
+
+    [Fact]
+    public async Task Patch_ShouldRefuse_WhenTheNewThresholdIsOutOfRange()
+    {
+        // Patch is the second writer that had the same gap (gh#1007). Validated against the trigger's STORED
+        // indicator (rsi here); a refused patch leaves the stored threshold untouched.
+        Guid id = await SeedTriggerAsync(_operator);
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await TriggerEndpoints.PatchTriggerAsync(
+            id,
+            new PatchTriggerRequest(Threshold: 100m),
+            new FixedUser(_operator),
+            context,
+            CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Triggers.SingleAsync()).Threshold.Should().Be(
+            30m, "a refused patch leaves the stored threshold untouched");
+    }
+
+    [Fact]
     public async Task GetTrigger_ShouldExposeTheSourceOrigin_WhenAuthoredFromARuleAndConversation()
     {
         // A trigger a rule minted from a conversation must answer "why does this exist?" at the READ path — the origin
