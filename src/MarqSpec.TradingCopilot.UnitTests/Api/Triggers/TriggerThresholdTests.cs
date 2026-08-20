@@ -46,4 +46,13 @@ public class TriggerThresholdTests
     {
         TriggerThreshold.Refusal(AtrIndicator.IndicatorName, threshold).Should().Contain("ATR");
     }
+
+    [Fact]
+    public void Refusal_ShouldFailClosed_ForAnIndicatorWithNoRuleYet()
+    {
+        // The guard against the gh#1007 review's silent trap: an indicator added to the endpoints' known set but not
+        // given a bound here must be REFUSED — in lockstep with the closed-world DB CHECK — never silently accept
+        // every threshold and reopen the vulnerability. A missing rule is loud (no trigger authors), not silent.
+        TriggerThreshold.Refusal("ema", 50m).Should().Contain("ema");
+    }
 }

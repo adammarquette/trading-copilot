@@ -14,9 +14,10 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
             // (gh#1007) — WITHOUT failing this migration on a trigger row authored before the gate existed. A
             // permanently-satisfied trigger (a threshold at or beyond its indicator's range) is exactly the pre-fix
             // data this might meet, and a failed migration would block the whole deploy, the safety-critical hosts
-            // included. Such a row survives until it is next written, at which point the constraint applies to the new
-            // values; the operator can fix it via the now-validated PATCH. (EF's AddCheckConstraint would emit a
-            // VALIDATED constraint that checks existing rows, hence the raw SQL here.)
+            // included. Such a row survives until it is next written, at which point Postgres re-checks the whole new
+            // row against the constraint — so the operator repairs it by PATCHing it to a VALID threshold, or by
+            // deleting it; a partial patch that leaves the out-of-range threshold in place is itself refused. (EF's
+            // AddCheckConstraint would emit a VALIDATED constraint that checks existing rows, hence the raw SQL here.)
             migrationBuilder.Sql(
                 "ALTER TABLE \"Triggers\" ADD CONSTRAINT \"CK_Triggers_Threshold_InIndicatorRange\" "
                 + "CHECK ((\"Indicator\" = 'rsi' AND \"Threshold\" > 0 AND \"Threshold\" < 100) "

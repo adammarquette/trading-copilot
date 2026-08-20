@@ -18,7 +18,10 @@ namespace MarqSpec.TradingCopilot.Api.Triggers;
 /// <item><b>ATR</b> is a non-negative magnitude (an average of true ranges); a non-positive threshold makes
 /// <c>atr ≥ t</c> always-true. It is unbounded above, so the rule is simply <c>t &gt; 0</c>.</item>
 /// </list>
-/// This is the endpoint-side refusal; <c>CK_Triggers_Threshold_InIndicatorRange</c> backstops it below any writer.
+/// The exact-extreme thresholds (<c>rsi</c> 0 / 100, <c>atr</c> 0) are therefore <b>deliberately un-authorable</b>: a
+/// trigger that can fire only at an indicator's absolute extreme is indistinguishable from one that never fires — the
+/// same silent-monitor risk. This is the endpoint-side refusal; <c>CK_Triggers_Threshold_InIndicatorRange</c>
+/// backstops it below any writer, and the two are kept in lockstep (see the default arm below).
 /// </remarks>
 internal static class TriggerThreshold
 {
@@ -36,8 +39,12 @@ internal static class TriggerThreshold
                 ? null
                 : "An ATR threshold must be positive — ATR is never negative, so a non-positive one makes the trigger "
                   + "permanently satisfied (ADR-0019).",
-            // An unknown indicator is refused before this reaches here (the endpoints' known-indicator gate), so
-            // there is no threshold rule to add for it — never second-guess that refusal from here.
-            _ => null,
+            // Fail CLOSED, in lockstep with the closed-world DB CHECK (CK_Triggers_Threshold_InIndicatorRange refuses
+            // any Indicator that is not rsi/atr). An indicator reaches here ONLY once it is in the endpoints'
+            // known-indicator gate, so this fires only for a NEW indicator whose bound nobody added yet — refusing it
+            // makes that omission loud (no trigger authors for it) rather than silently reopening gh#1007 by accepting
+            // every threshold. Add the indicator's rule above AND its arm to the CHECK, together.
+            _ => $"No threshold rule is defined for the '{indicator}' indicator — add its bound to TriggerThreshold "
+                 + "and CK_Triggers_Threshold_InIndicatorRange before authoring triggers for it (gh#1007).",
         };
 }
