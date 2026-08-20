@@ -12,6 +12,13 @@ namespace MarqSpec.TradingCopilot.Integration.Tradovate;
 /// </summary>
 public static class TradovateMapping
 {
+    /// <summary>
+    /// The cap on bars a single <see cref="ToChartRequest"/> asks for, as the ProjectX adapter pins (its <c>limit: 1000</c>).
+    /// Without it Tradovate returns however many it chooses for the range, so a caller cannot tell a clipped series from
+    /// a complete one; with it the far edge is truncated deterministically. Surfaced on <c>GetBarsAsync</c>.
+    /// </summary>
+    private const int MaxBars = 1000;
+
     /// <summary>Maps a Tradovate contract onto the venue-neutral resolved contract, paired with its instrument.</summary>
     /// <param name="contract">The Tradovate contract.</param>
     /// <param name="instrument">The instrument it was resolved for.</param>
@@ -187,6 +194,13 @@ public static class TradovateMapping
     {
         EnsureBelongsTo(contract.Venue, venue, contract.ToString());
 
+        if (from > to)
+        {
+            // An inverted range would build a well-formed request with the edges swapped and come back empty, which
+            // reads downstream as "no bars in this window" rather than "you asked for a nonsense window". Refuse it.
+            throw new ArgumentException($"The bar range is inverted: from ({from:o}) is after to ({to:o}).", nameof(from));
+        }
+
         long contractId = long.TryParse(contract.Key, NumberStyles.Integer, CultureInfo.InvariantCulture, out long id)
             ? id
             : throw new ArgumentException($"'{contract.Key}' is not a Tradovate contract id.", nameof(contract));
@@ -198,8 +212,9 @@ public static class TradovateMapping
             ContractId = contractId,
             UnderlyingType = underlyingType,
             ElementSize = elementSize,
-            ClosestTimestamp = to,   // the newest edge of the range
-            AsFarAsTimestamp = from, // the oldest edge
+            ClosestTimestamp = to,     // the newest edge of the range
+            AsFarAsTimestamp = from,   // the oldest edge
+            AsMuchAsElements = MaxBars, // an explicit cap, so a clipped series is not mistaken for a complete one
         };
     }
 

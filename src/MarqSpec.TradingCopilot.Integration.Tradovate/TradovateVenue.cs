@@ -77,6 +77,10 @@ public sealed class TradovateVenue : ITradingVenue
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// The returned series is capped (<see cref="TradovateMapping"/> pins the chart request's element count, as the
+    /// ProjectX adapter does); a range wanting more bars than the cap is truncated at its far edge.
+    /// </remarks>
     public async Task<IReadOnlyList<Bar>> GetBarsAsync(
         VenueContractId contract,
         DateTimeOffset from,
@@ -86,18 +90,27 @@ public sealed class TradovateVenue : ITradingVenue
     {
         Capabilities.Require(VenueCapability.HistoricalBars);
 
+        // Map (and validate) before touching the socket: a foreign-venue contract or a bad range throws here, never
+        // opening a connection for a request that was invalid.
         ClientModels.ChartRequest request = TradovateMapping.ToChartRequest(contract, from, to, barSize, Id);
 
-        // md/getChart runs over the market-data socket, which does not auto-connect and throws if it is down — so
-        // ensure it is up first. Connecting is idempotent and the socket is process-wide, so a connection host wiring
-        // it later is unaffected; the ProjectX adapter likewise connects its market hub before a market-data read.
+        // The market-data socket is a process-wide singleton owned by the connection host (gh#977's connection slice),
+        // NOT by this per-call read. Connecting here would be unsafe: ConnectMarketDataAsync is not idempotent — it
+        // tears the transport down and reconnects WITHOUT replaying subscriptions — so a bars read arriving mid-stream
+        // would silently destroy another consumer's live quotes. Fail loudly if the socket is down; the host connects it.
         if (_webSocket.MarketDataState != ClientModels.ConnectionState.Connected)
         {
-            await _webSocket.ConnectMarketDataAsync(cancellationToken);
+            throw new TradovateVenueException(
+                "The Tradovate market-data socket is not connected; historical bars require the connection host to have "
+                + "connected it first (gh#977). A bars read never manages the shared socket's lifecycle.");
         }
 
         IReadOnlyList<ClientModels.ChartBar> bars = await _webSocket.GetHistoricalBarsAsync(request, cancellationToken);
-        return [.. bars.Select(TradovateMapping.ToBar)];
+
+        // IMarketDataSource.GetBarsAsync promises ascending time order (it is the R-1 journaling / replay series), but
+        // the socket returns bars in wire order — and md/getChart's multi-chart branch concatenates across chart
+        // objects — so sort rather than trust the arrival order.
+        return [.. bars.Select(TradovateMapping.ToBar).OrderBy(bar => bar.OpenTime)];
     }
 
     /// <inheritdoc />
