@@ -9,9 +9,9 @@ using ClientModels = MarqSpec.Client.Tradovate.Api.Models;
 namespace MarqSpec.TradingCopilot.UnitTests.Integration.Tradovate;
 
 /// <summary>
-/// The read-only Tradovate venue (gh#977 slice 1). It reads accounts (with host-derived mode and joined balances) and
-/// positions, resolves contracts, and refuses market-data and execution loudly through the capability seam until
-/// those slices land — so nothing partial or silent reaches a caller.
+/// The Tradovate venue (gh#977). It reads accounts (with host-derived mode and joined balances) and positions,
+/// resolves contracts, serves historical bars, and streams live quotes; execution still refuses loudly through the
+/// capability seam until its slice lands — so nothing partial or silent reaches a caller.
 /// </summary>
 public class TradovateVenueTests
 {
@@ -32,12 +32,12 @@ public class TradovateVenueTests
     }
 
     [Fact]
-    public void Capabilities_ShouldGrantHistoricalBars_ButNotQuotesOrExecution()
+    public void Capabilities_ShouldGrantBarsAndQuotes_ButNotExecution()
     {
         VenueCapabilities capabilities = CreateVenue().Capabilities;
 
         capabilities.Supports(VenueCapability.HistoricalBars).Should().BeTrue();
-        capabilities.Supports(VenueCapability.Quotes).Should().BeFalse();
+        capabilities.Supports(VenueCapability.Quotes).Should().BeTrue();
         capabilities.Supports(VenueCapability.ClosePosition).Should().BeFalse();
     }
 
@@ -204,12 +204,197 @@ public class TradovateVenueTests
     }
 
     [Fact]
-    public void StreamQuotesAsync_ShouldRefuse_WhileQuotesAreUngranted()
+    public void StreamQuotesAsync_ShouldNotSubscribe_WhenTheSequenceIsNeverEnumerated()
     {
-        // Eager refusal: the capability is checked when the sequence is requested, not on the first read.
-        Action act = () => CreateVenue().StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"));
+        // Subscription lives inside the iterator, so an unconsumed stream leaves no handler or subscription behind.
+        _ = CreateVenue().StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"));
 
-        act.Should().Throw<VenueCapabilityNotSupportedException>();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync(A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public void StreamQuotesAsync_ShouldThrow_ForAForeignVenueContract()
+    {
+        // Eager qualifier guard: a projectx: contract fails at the call, before any iterator work.
+        Action act = () => CreateVenue().StreamQuotesAsync(VenueContractId.Create(VenueId.Parse("projectx"), "7"));
+
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Theory]
+    [InlineData(ClientModels.ConnectionState.Disconnected)]
+    [InlineData(ClientModels.ConnectionState.Connecting)]
+    [InlineData(ClientModels.ConnectionState.Reconnecting)]
+    public async Task StreamQuotesAsync_ShouldThrowAndNeverConnectOrSubscribe_WhenTheSocketIsNotConnected(ClientModels.ConnectionState state)
+    {
+        // A quote stream must never drive the shared, process-wide socket's lifecycle: ConnectMarketDataAsync is NOT
+        // idempotent (it reconnects without replaying subscriptions), so any non-Connected state fails loudly instead.
+        A.CallTo(() => _webSocket.MarketDataState).Returns(state);
+        Func<Task> consume = async () =>
+        {
+            await foreach (Quote _ in CreateVenue().StreamQuotesAsync(VenueContractId.Create(Tradovate, "7")))
+            {
+            }
+        };
+
+        await consume.Should().ThrowAsync<TradovateVenueException>();
+        A.CallTo(() => _webSocket.ConnectMarketDataAsync(A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync(A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task StreamQuotesAsync_ShouldNotReemitTheBook_ForATradeOnlyFrame()
+    {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+        TaskCompletionSource subscribed = new();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._)).Invokes(() => subscribed.TrySetResult());
+
+        IAsyncEnumerator<Quote> quotes = CreateVenue()
+            .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
+        try
+        {
+            ValueTask<bool> first = quotes.MoveNextAsync();
+            await subscribed.Task;
+
+            // Establish a complete book, consume it, then a trade-only frame (fresh timestamp, no bid/ask), then a
+            // real ask move. The trade frame must NOT re-emit the unchanged book under its advancing timestamp.
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch, BidPrice = 5000m, AskPrice = 5001m });
+            (await first).Should().BeTrue();
+            quotes.Current.Ask.Should().Be(new Price(5001m));
+
+            ValueTask<bool> next = quotes.MoveNextAsync();
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch.AddSeconds(1), LastPrice = 5000.5m, LastSize = 2 });
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch.AddSeconds(2), AskPrice = 5002m });
+
+            // The next quote is the ask move at +2s, not a re-emit of the old book at +1s.
+            (await next).Should().BeTrue();
+            quotes.Current.Ask.Should().Be(new Price(5002m));
+            quotes.Current.Timestamp.Should().Be(DateTimeOffset.UnixEpoch.AddSeconds(2));
+        }
+        finally
+        {
+            await quotes.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task StreamQuotesAsync_ShouldYieldACompleteQuote_WhenBothSidesArePublished()
+    {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+        TaskCompletionSource subscribed = new();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._)).Invokes(() => subscribed.TrySetResult());
+
+        IAsyncEnumerator<Quote> quotes = CreateVenue()
+            .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
+        try
+        {
+            ValueTask<bool> next = quotes.MoveNextAsync();
+            await subscribed.Task; // the handler is attached before subscribe, so once that runs a tick is captured
+
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote
+            {
+                ContractId = 7,
+                Timestamp = DateTimeOffset.UnixEpoch,
+                BidPrice = 5000m,
+                BidSize = 3,
+                AskPrice = 5001m,
+                AskSize = 4,
+            });
+
+            (await next).Should().BeTrue();
+            quotes.Current.Bid.Should().Be(new Price(5000m));
+            quotes.Current.Ask.Should().Be(new Price(5001m));
+            quotes.Current.BidSize.Should().Be(3L);
+            quotes.Current.AskSize.Should().Be(4L);
+        }
+        finally
+        {
+            await quotes.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task StreamQuotesAsync_ShouldAssembleACompleteQuote_FromIncrementalBidThenAskUpdates()
+    {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+        TaskCompletionSource subscribed = new();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._)).Invokes(() => subscribed.TrySetResult());
+
+        IAsyncEnumerator<Quote> quotes = CreateVenue()
+            .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
+        try
+        {
+            ValueTask<bool> next = quotes.MoveNextAsync();
+            await subscribed.Task;
+
+            // Bid-only first: no complete snapshot yet, so nothing is emitted. Then the ask completes it.
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch, BidPrice = 5000m, BidSize = 3 });
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch.AddSeconds(1), AskPrice = 5001m, AskSize = 4 });
+
+            (await next).Should().BeTrue();
+            quotes.Current.Bid.Should().Be(new Price(5000m));
+            quotes.Current.Ask.Should().Be(new Price(5001m));
+        }
+        finally
+        {
+            await quotes.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task StreamQuotesAsync_ShouldIgnoreQuotesForAnotherContract()
+    {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+        TaskCompletionSource subscribed = new();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._)).Invokes(() => subscribed.TrySetResult());
+
+        IAsyncEnumerator<Quote> quotes = CreateVenue()
+            .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
+        try
+        {
+            ValueTask<bool> next = quotes.MoveNextAsync();
+            await subscribed.Task;
+
+            // Another contract's complete quote must not surface on this stream; this contract's does.
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 99, Timestamp = DateTimeOffset.UnixEpoch, BidPrice = 1m, AskPrice = 2m });
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch, BidPrice = 5000m, AskPrice = 5001m });
+
+            (await next).Should().BeTrue();
+            quotes.Current.Bid.Should().Be(new Price(5000m));
+        }
+        finally
+        {
+            await quotes.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task StreamQuotesAsync_ShouldUnsubscribe_WhenTheStreamIsDisposed()
+    {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+        TaskCompletionSource subscribed = new();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._)).Invokes(() => subscribed.TrySetResult());
+
+        IAsyncEnumerator<Quote> quotes = CreateVenue()
+            .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
+        ValueTask<bool> next = quotes.MoveNextAsync();
+        await subscribed.Task;
+        _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch, BidPrice = 5000m, AskPrice = 5001m });
+        (await next).Should().BeTrue(); // a quote arrived; the iterator is now parked at its yield
+
+        await quotes.DisposeAsync(); // disposing a consumer that walks away runs the iterator's finally
+
+        A.CallTo(() => _webSocket.UnsubscribeQuoteAsync("7", A<CancellationToken>._)).MustHaveHappened();
     }
 
     [Fact]

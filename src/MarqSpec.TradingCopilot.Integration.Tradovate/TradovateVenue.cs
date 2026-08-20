@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using MarqSpec.Client.Tradovate;
 using MarqSpec.Client.Tradovate.WebSocket;
 using MarqSpec.TradingCopilot.Domain;
@@ -9,13 +12,16 @@ namespace MarqSpec.TradingCopilot.Integration.Tradovate;
 
 /// <summary>
 /// The Tradovate venue adapter behind <see cref="ITradingVenue"/> (R-17, gh#41 / gh#977). It serves contract
-/// resolution, account / position reads, and <b>historical bars</b>; live-quote streaming and execution are ungranted
-/// and refuse loudly through the capability seam (or as <see cref="NotSupportedException"/>) until their slices land
+/// resolution, account / position reads, <b>historical bars</b>, and <b>live quotes</b>; execution is ungranted
+/// and refuses loudly through the capability seam (or as <see cref="NotSupportedException"/>) until its slice lands
 /// (gh#977). Every Tradovate-specific detail — integer ids, an already-signed net position, demo-vs-live as the mode
-/// source (a brokerage, gh#780), bars over the market-data socket — stops here so the core sees only the neutral model.
+/// source (a brokerage, gh#780), bars and quotes over the market-data socket — stops here so the core sees only the neutral model.
 /// </summary>
 public sealed class TradovateVenue : ITradingVenue
 {
+    /// <summary>How many quotes may queue for a slow consumer before the oldest are dropped — a stale best bid/ask is worth less than the current one.</summary>
+    private const int QuoteBufferSize = 1_024;
+
     private readonly ITradovateApiClient _api;
     private readonly ITradovateWebSocketClient _webSocket;
     private readonly FirmConventions _conventions;
@@ -47,12 +53,12 @@ public sealed class TradovateVenue : ITradingVenue
     public VenueId Id { get; } = VenueId.Parse("tradovate");
 
     /// <summary>
-    /// What this adapter delivers through <see cref="ITradingVenue"/>: <see cref="VenueCapability.HistoricalBars"/>.
-    /// Contract resolution and account / position reads are not capability-gated and work regardless; live quotes,
-    /// execution, and position-close are ungranted, so those paths refuse at the seam rather than doing something
-    /// partial (their slices land in gh#977).
+    /// What this adapter delivers through <see cref="ITradingVenue"/>: <see cref="VenueCapability.HistoricalBars"/>
+    /// and <see cref="VenueCapability.Quotes"/>. Contract resolution and account / position reads are not
+    /// capability-gated and work regardless; execution and position-close are ungranted, so those paths refuse at the
+    /// seam rather than doing something partial (their slice lands in gh#977).
     /// </summary>
-    public VenueCapabilities Capabilities { get; } = VenueCapabilities.Of(VenueCapability.HistoricalBars);
+    public VenueCapabilities Capabilities { get; } = VenueCapabilities.Of(VenueCapability.HistoricalBars | VenueCapability.Quotes);
 
     /// <summary>
     /// The Tradovate derivation-logic version (ADR-0009). <b>1</b> — the initial read slice: mode from the configured
@@ -118,9 +124,111 @@ public sealed class TradovateVenue : ITradingVenue
         VenueContractId contract,
         CancellationToken cancellationToken = default)
     {
-        // Eager refusal (like the ProjectX adapter): a missing capability fails at the call, not on the first read.
+        // Eager (like the ProjectX adapter): a missing capability, or a foreign / non-numeric contract, fails at the
+        // call, not on the first read. Everything after runs inside the iterator, so an unconsumed stream leaves no
+        // handler or subscription behind.
         Capabilities.Require(VenueCapability.Quotes);
-        throw new UnreachableException();
+        long contractId = TradovateMapping.ToContractId(contract, Id);
+
+        return ReadQuotesAsync(contractId, cancellationToken);
+    }
+
+    private async IAsyncEnumerable<Quote> ReadQuotesAsync(
+        long contractId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // The stream does NOT connect the shared, process-wide market-data socket: ConnectMarketDataAsync is not
+        // idempotent (it reconnects without replaying subscriptions), so connecting here would silently drop other
+        // consumers' subscriptions. The connection host owns the socket (gh#977); fail loud if it is down.
+        if (_webSocket.MarketDataState != ClientModels.ConnectionState.Connected)
+        {
+            throw new TradovateVenueException(
+                "The Tradovate market-data socket is not connected; a quote stream requires the connection host to have "
+                + "connected it first (gh#977).");
+        }
+
+        Channel<Quote> quotes = Channel.CreateBounded<Quote>(new BoundedChannelOptions(QuoteBufferSize)
+        {
+            // Shed the oldest under back-pressure rather than let a slow consumer grow the buffer without bound.
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+        });
+
+        // Tradovate's quote events are INCREMENTAL — a single event may carry only the bid, only the ask, or a last
+        // trade, and every field is nullable — but the neutral Quote is a complete bid+ask snapshot. Hold the
+        // last-known sides for this contract and emit a complete snapshot once both are known. A lock serializes the
+        // update and the emit together, so quotes stay ordered even if the socket dispatches events concurrently.
+        object gate = new();
+        decimal? bid = null;
+        decimal? ask = null;
+        long? bidSize = null;
+        long? askSize = null;
+        DateTimeOffset? at = null;
+
+        void OnQuote(object? sender, ClientModels.Quote quote)
+        {
+            // One socket carries every subscribed contract, so filter down to this one by the id we subscribed with.
+            if (quote.ContractId != contractId)
+            {
+                return;
+            }
+
+            // Only a bid or ask entry moves top-of-book. Tradovate also sends trade / volume / high / settlement
+            // frames that carry a fresh timestamp but no bid or ask; re-emitting an unchanged book under an advancing
+            // timestamp would mislead a consumer reading Quote.Timestamp as "when the book last changed", so skip them.
+            if (quote.BidPrice is null && quote.AskPrice is null)
+            {
+                return;
+            }
+
+            // Emitting under the lock is safe and cannot stall the socket's read loop: a bounded DropOldest channel
+            // sheds the oldest and returns rather than waiting, and it does not run the reader's continuation inline
+            // (AllowSynchronousContinuations stays false), so TryWrite neither blocks nor re-enters this handler.
+            lock (gate)
+            {
+                if (quote.BidPrice is { } bidPrice)
+                {
+                    bid = bidPrice;
+                    bidSize = quote.BidSize;
+                }
+
+                if (quote.AskPrice is { } askPrice)
+                {
+                    ask = askPrice;
+                    askSize = quote.AskSize;
+                }
+
+                if (quote.Timestamp is { } timestamp)
+                {
+                    at = timestamp;
+                }
+
+                if (bid is { } currentBid && ask is { } currentAsk && at is { } lastChange)
+                {
+                    quotes.Writer.TryWrite(TradovateMapping.ToQuote(lastChange, currentBid, currentAsk, bidSize, askSize));
+                }
+            }
+        }
+
+        // Attach the handler BEFORE subscribing, so a tick published between the subscribe and the first read is not
+        // lost. Registration and cleanup share this iterator's lifecycle: detach + unsubscribe on every exit
+        // (cancellation included), so an abandoned stream cannot leave a handler and a filling channel behind.
+        string subscribeKey = contractId.ToString(CultureInfo.InvariantCulture);
+        _webSocket.QuoteReceived += OnQuote;
+        try
+        {
+            await _webSocket.SubscribeQuoteAsync(subscribeKey, cancellationToken);
+
+            await foreach (Quote quote in quotes.Reader.ReadAllAsync(cancellationToken))
+            {
+                yield return quote;
+            }
+        }
+        finally
+        {
+            _webSocket.QuoteReceived -= OnQuote;
+            await _webSocket.UnsubscribeQuoteAsync(subscribeKey, CancellationToken.None);
+        }
     }
 
     /// <inheritdoc />
