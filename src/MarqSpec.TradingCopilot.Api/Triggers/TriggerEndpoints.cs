@@ -234,6 +234,14 @@ public static class TriggerEndpoints
             return Results.BadRequest(new { error = "The hysteresis band must be positive when set — null means none." });
         }
 
+        // Patch is the second writer that had the gh#1007 gap. Validated whole here, BEFORE any field is applied
+        // (the top-guard shape) — against the trigger's STORED indicator, since patch cannot change the indicator.
+        if (request.Threshold is { } proposedThreshold
+            && TriggerThreshold.Refusal(trigger.Indicator, proposedThreshold) is { } thresholdRefusal)
+        {
+            return Results.BadRequest(new { error = thresholdRefusal });
+        }
+
         if (request.Enabled is { } enabled)
         {
             trigger.Enabled = enabled;
@@ -241,13 +249,6 @@ public static class TriggerEndpoints
 
         if (request.Threshold is { } threshold)
         {
-            // Patch is a second writer, and had the same gap (gh#1007). Validated against the trigger's STORED
-            // indicator — patch cannot change the indicator, so the bound is the existing one's.
-            if (TriggerThreshold.Refusal(trigger.Indicator, threshold) is { } thresholdRefusal)
-            {
-                return Results.BadRequest(new { error = thresholdRefusal });
-            }
-
             trigger.Threshold = threshold;
         }
 

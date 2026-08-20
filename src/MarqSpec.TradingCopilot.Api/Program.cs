@@ -238,7 +238,9 @@ builder.Services.AddOptions<SuggestionOptions>()
 builder.Services.Configure<IndicatorOptions>(builder.Configuration.GetSection(IndicatorOptions.SectionName));
 builder.Services.Configure<MarketDataReadOptions>(builder.Configuration.GetSection(MarketDataReadOptions.SectionName));
 // The bar-derived indicator set (R-22): ATR at the safety band's period + RSI. Built from options in one place
-// (IndicatorSet), so the safety band's producer cannot be configured away. A third indicator is one line there.
+// (IndicatorSet), so the safety band's producer cannot be configured away. A third indicator is one line here — but
+// it is also a trigger-threshold subject: give it a bound in TriggerThreshold + the CK_Triggers_Threshold_InIndicatorRange
+// arm (both fail closed for an unruled indicator, gh#1007) and the TriggerEndpoints _knownIndicators gate, together.
 builder.Services.AddSingleton<IReadOnlyList<IIndicator>>(sp =>
     IndicatorSet.FromOptions(sp.GetRequiredService<IOptions<IndicatorOptions>>().Value));
 builder.Services.AddScoped<IndicatorProjectionService>();
