@@ -15,6 +15,9 @@ vi.mock('../api/triggers', async (importOriginal) => {
 
 const createMock = vi.mocked(createTrigger);
 
+/** A real GUID: the server binds `Guid? AccountId`, so anything else is refused before the handler runs. */
+const ACCOUNT = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+
 function created(overrides: Partial<Trigger> = {}): Trigger {
   return {
     id: 'new-1',
@@ -160,12 +163,40 @@ describe('TriggerForm', () => {
 
     fillMinimum();
     selectRoute('agent review');
-    fireEvent.change(screen.getByLabelText(/Account/i), { target: { value: 'acct-1' } });
+    fireEvent.change(screen.getByLabelText(/Account/i), { target: { value: ACCOUNT } });
     fireEvent.change(screen.getByLabelText(/^Size/i), { target: { value: 'abc' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
 
     expect(await screen.findByRole('alert')).toBeTruthy();
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a malformed account id here rather than as a bare 400 (gh#1005 review)', async () => {
+    // A non-GUID fails MODEL BINDING, which answers 400 with ProblemDetails and no `{ error }` — the one refusal
+    // on this endpoint the client cannot render in the server's words, so it degraded to "The request failed
+    // (400)." A well-formed but unknown id is a different case: the server owns that and answers 404 WITH words.
+    renderForm();
+
+    fillMinimum();
+    selectRoute('agent review');
+    fireEvent.change(screen.getByLabelText(/Account/i), { target: { value: 'not-a-guid' } });
+    fireEvent.change(screen.getByLabelText(/^Size/i), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('not valid');
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('submits on Enter, not only by clicking the button', async () => {
+    // It is a real <form>, so Enter from any field submits — the behaviour an operator expects, and what makes
+    // `required` on the agent-review fields more than an asterisk.
+    createMock.mockResolvedValue({ ok: true, data: created() } satisfies ApiResult<Trigger>);
+    renderForm();
+
+    fillMinimum();
+    fireEvent.submit(screen.getByTestId('trigger-form'));
+
+    await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
   });
 
   it('accepts a valid optional re-arm band, and omits it when left blank', async () => {
@@ -187,20 +218,20 @@ describe('TriggerForm', () => {
     // trigger impossible to author at all. This is the case that fails when that happens.
     createMock.mockResolvedValue({
       ok: true,
-      data: created({ route: 2, accountId: 'acct-7', size: 3 }),
+      data: created({ route: 2, accountId: ACCOUNT, size: 3 }),
     } satisfies ApiResult<Trigger>);
     renderForm();
 
     fillMinimum();
     selectRoute('agent review');
-    fireEvent.change(screen.getByLabelText(/Account/i), { target: { value: 'acct-7' } });
+    fireEvent.change(screen.getByLabelText(/Account/i), { target: { value: ACCOUNT } });
     fireEvent.change(screen.getByLabelText(/^Size/i), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
 
     await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
     const sent = createMock.mock.calls[0][0];
     expect(sent.route).toBe(2);
-    expect(sent.accountId).toBe('acct-7');
+    expect(sent.accountId).toBe(ACCOUNT);
     expect(sent.size).toBe(3);
     // The comparison is a select whose value is a number on the wire; a default-swap here would author the
     // opposite condition and read as correct.

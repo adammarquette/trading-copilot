@@ -4,7 +4,7 @@ import Button from '@mui/material/Button';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   IndicatorComparison,
@@ -19,20 +19,12 @@ interface TriggerFormProps {
   readonly onCreated: (trigger: Trigger) => void;
 }
 
+/** A GUID, the shape `accountId` binds to server-side. */
+const ACCOUNT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** The R-22 indicators the endpoint accepts, case-insensitive. */
 const INDICATORS = ['rsi', 'atr'] as const;
 
-/**
- * Authoring a standing trigger (gh#1003, increment 2 of gh#991).
- *
- * **Creating is not arming.** The server defaults a new trigger to `Unconfirmed`, which is inert regardless of
- * `enabled` (gh#470), so this form ends by telling the operator a second deliberate act is still required. A form
- * that fell silent on success would leave them believing they had armed something.
- *
- * One conditional matters enough to enforce here rather than let the server teach it: an **agent-review** route
- * needs an account and a positive size. The server refuses either omission by name, and that refusal is rendered
- * verbatim when it happens — but discovering a required field by submitting is a poor way to learn a form.
- */
 /**
  * Parses one numeric field, or returns null when it is not a number.
  *
@@ -60,6 +52,17 @@ function parseNumber(raw: string): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
+/**
+ * Authoring a standing trigger (gh#1003, increment 2 of gh#991).
+ *
+ * **Creating is not arming.** The server defaults a new trigger to `Unconfirmed`, which is inert regardless of
+ * `enabled` (gh#470), so this form ends by telling the operator a second deliberate act is still required. A form
+ * that fell silent on success would leave them believing they had armed something.
+ *
+ * One conditional matters enough to enforce here rather than let the server teach it: an **agent-review** route
+ * needs an account and a positive size. The server refuses either omission by name, and that refusal is rendered
+ * verbatim when it happens — but discovering a required field by submitting is a poor way to learn a form.
+ */
 export function TriggerForm({ onCreated }: TriggerFormProps) {
   const [symbol, setSymbol] = useState('');
   const [indicator, setIndicator] = useState<string>(INDICATORS[0]);
@@ -90,15 +93,22 @@ export function TriggerForm({ onCreated }: TriggerFormProps) {
     setNotice(null);
 
     // Required numerics first, named individually: an operator handed "check your input" for a form with five
-    // numbers in it has to find the bad one themselves.
-    const required: ReadonlyArray<readonly [string, number | null]> = [
-      ['Period', parseNumber(period)],
-      ['Bar size', parseNumber(resolution)],
-      ['Threshold', parseNumber(threshold)],
-    ];
-    const bad = required.find(([, parsed]) => parsed === null);
-    if (bad !== undefined) {
-      setError(`${bad[0]} must be a number.`);
+    // numbers in it has to find the bad one themselves. Checked one at a time rather than through a table so the
+    // values NARROW — the earlier version re-parsed into the body with `?? 0`, and 0 is precisely the blank
+    // Threshold this guard exists to reject, so a fallback there would have restored the defect (gh#1005 review).
+    const parsedPeriod = parseNumber(period);
+    if (parsedPeriod === null) {
+      setError('Period must be a number.');
+      return;
+    }
+    const parsedResolution = parseNumber(resolution);
+    if (parsedResolution === null) {
+      setError('Bar size must be a number.');
+      return;
+    }
+    const parsedThreshold = parseNumber(threshold);
+    if (parsedThreshold === null) {
+      setError('Threshold must be a number.');
       return;
     }
 
@@ -120,13 +130,24 @@ export function TriggerForm({ onCreated }: TriggerFormProps) {
       return;
     }
 
+    // A malformed account id fails MODEL BINDING, which answers 400 with ProblemDetails and no `{ error }` — the
+    // one refusal on this endpoint the client cannot render in the server's words, so it degrades to "The request
+    // failed (400)." Caught here instead, because "that is not an account id" is more use than a status code. An
+    // id that is well-formed but unknown still belongs to the server, which answers 404 WITH words (gh#1005).
+    if (isAgentReview && !ACCOUNT_ID.test(accountId.trim())) {
+      setError(
+        'That account id is not valid — copy it from the account you want to issue against.',
+      );
+      return;
+    }
+
     const body: NewTrigger = {
       symbol: symbol.trim(),
       indicator,
-      period: parseNumber(period) ?? 0,
-      resolutionMinutes: parseNumber(resolution) ?? 0,
+      period: parsedPeriod,
+      resolutionMinutes: parsedResolution,
       comparison: Number(comparison),
-      threshold: parseNumber(threshold) ?? 0,
+      threshold: parsedThreshold,
       route: Number(route),
       hysteresis: parsedHysteresis,
       accountId: isAgentReview ? accountId.trim() : null,
@@ -179,8 +200,25 @@ export function TriggerForm({ onCreated }: TriggerFormProps) {
     threshold,
   ]);
 
+  /**
+   * A real form submit rather than a button `onClick`, so Enter submits from any field — the behaviour an
+   * operator expects from a form, and the thing that makes `required` on the agent-review fields more than an
+   * asterisk (gh#1005 review). `noValidate` because the checks above own the refusals and phrase them; the
+   * browser's own bubbles would say something less useful and in a different voice.
+   */
+  const handleSubmit = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      onSubmit();
+    },
+    [onSubmit],
+  );
+
   return (
     <Box
+      component="form"
+      noValidate
+      onSubmit={handleSubmit}
       data-testid="trigger-form"
       sx={{ border: 1, borderColor: 'divider', borderRadius: 1, p: 2 }}
     >
@@ -288,7 +326,7 @@ export function TriggerForm({ onCreated }: TriggerFormProps) {
         ) : null}
 
         <Box>
-          <Button variant="contained" disabled={submitting} onClick={onSubmit}>
+          <Button type="submit" variant="contained" disabled={submitting}>
             Create trigger
           </Button>
         </Box>
