@@ -19,6 +19,9 @@ interface TriggerFormProps {
   readonly onCreated: (trigger: Trigger) => void;
 }
 
+/** The R-22 indicators the endpoint accepts, case-insensitive. */
+const INDICATORS = ['rsi', 'atr'] as const;
+
 /**
  * Authoring a standing trigger (gh#1003, increment 2 of gh#991).
  *
@@ -30,7 +33,32 @@ interface TriggerFormProps {
  * needs an account and a positive size. The server refuses either omission by name, and that refusal is rendered
  * verbatim when it happens — but discovering a required field by submitting is a poor way to learn a form.
  */
-const INDICATORS = ['rsi', 'atr'] as const;
+/**
+ * Parses one numeric field, or returns null when it is not a number.
+ *
+ * Every numeric field goes through this rather than bare `Number()`, because `Number()` turns the two things an
+ * operator actually types wrong into values that look deliberate: `Number('')` is **0**, and `Number('5o')` is
+ * **NaN**, which `JSON.stringify` emits as **null** (gh#1005 review):
+ *
+ * - a blank **threshold** posts `0`. The endpoint validates every other field and never touches `Threshold`, and
+ *   the column carries no CHECK — so `ES rsi(14) above 0` is stored, is permanently satisfied, seeds straight to
+ *   `Fired` and debounces forever. A trigger that renders **Live** and can never fire: ADR-0019's silent monitor,
+ *   authored rather than drifted into. The server-side half is gh#1007; today this is the only thing refusing it.
+ * - a mistyped **re-arm band** posts `null`, which the server reads as "no dead-band" rather than as garbage, so
+ *   a chattering trigger loses its suppression — and on the agent-review route that means repeated sized
+ *   suggestions against a real account.
+ *
+ * The previous `Number(size) <= 0` guard was defeated the same way: `NaN <= 0` is `false`, so it read as a bounds
+ * check and was really a comparison against NaN.
+ */
+function parseNumber(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
+}
 
 export function TriggerForm({ onCreated }: TriggerFormProps) {
   const [symbol, setSymbol] = useState('');
@@ -61,8 +89,33 @@ export function TriggerForm({ onCreated }: TriggerFormProps) {
     setError(null);
     setNotice(null);
 
+    // Required numerics first, named individually: an operator handed "check your input" for a form with five
+    // numbers in it has to find the bad one themselves.
+    const required: ReadonlyArray<readonly [string, number | null]> = [
+      ['Period', parseNumber(period)],
+      ['Bar size', parseNumber(resolution)],
+      ['Threshold', parseNumber(threshold)],
+    ];
+    const bad = required.find(([, parsed]) => parsed === null);
+    if (bad !== undefined) {
+      setError(`${bad[0]} must be a number.`);
+      return;
+    }
+
+    // Optional, but "left blank" and "typed wrong" are different answers: blank means no band, garbage is a
+    // mistake the operator should get back rather than have silently discarded.
+    const parsedHysteresis = hysteresis.trim().length === 0 ? null : parseNumber(hysteresis);
+    if (hysteresis.trim().length > 0 && parsedHysteresis === null) {
+      setError('The re-arm band must be a number, or left blank for none.');
+      return;
+    }
+
     // The one conditional the server owns and the form should not make you discover by submitting.
-    if (isAgentReview && (accountId.trim().length === 0 || Number(size) <= 0)) {
+    const parsedSize = parseNumber(size);
+    if (
+      isAgentReview &&
+      (accountId.trim().length === 0 || parsedSize === null || parsedSize <= 0)
+    ) {
       setError('An agent-review trigger needs an account to issue against, and a positive size.');
       return;
     }
@@ -70,14 +123,14 @@ export function TriggerForm({ onCreated }: TriggerFormProps) {
     const body: NewTrigger = {
       symbol: symbol.trim(),
       indicator,
-      period: Number(period),
-      resolutionMinutes: Number(resolution),
+      period: parseNumber(period) ?? 0,
+      resolutionMinutes: parseNumber(resolution) ?? 0,
       comparison: Number(comparison),
-      threshold: Number(threshold),
+      threshold: parseNumber(threshold) ?? 0,
       route: Number(route),
-      hysteresis: hysteresis.trim().length === 0 ? null : Number(hysteresis),
+      hysteresis: parsedHysteresis,
       accountId: isAgentReview ? accountId.trim() : null,
-      size: isAgentReview ? Number(size) : null,
+      size: isAgentReview ? parsedSize : null,
     };
 
     setSubmitting(true);
