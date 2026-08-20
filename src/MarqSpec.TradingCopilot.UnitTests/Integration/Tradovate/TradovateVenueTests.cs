@@ -9,9 +9,9 @@ using ClientModels = MarqSpec.Client.Tradovate.Api.Models;
 namespace MarqSpec.TradingCopilot.UnitTests.Integration.Tradovate;
 
 /// <summary>
-/// The read-only Tradovate venue (gh#977 slice 1). It reads accounts (with host-derived mode and joined balances) and
-/// positions, resolves contracts, and refuses market-data and execution loudly through the capability seam until
-/// those slices land — so nothing partial or silent reaches a caller.
+/// The Tradovate venue (gh#977). It reads accounts (with host-derived mode and joined balances) and positions,
+/// resolves contracts, serves historical bars, and streams live quotes; execution still refuses loudly through the
+/// capability seam until its slice lands — so nothing partial or silent reaches a caller.
 /// </summary>
 public class TradovateVenueTests
 {
@@ -221,10 +221,15 @@ public class TradovateVenueTests
         act.Should().Throw<ArgumentException>();
     }
 
-    [Fact]
-    public async Task StreamQuotesAsync_ShouldThrowAndNeverSubscribe_WhenTheSocketIsNotConnected()
+    [Theory]
+    [InlineData(ClientModels.ConnectionState.Disconnected)]
+    [InlineData(ClientModels.ConnectionState.Connecting)]
+    [InlineData(ClientModels.ConnectionState.Reconnecting)]
+    public async Task StreamQuotesAsync_ShouldThrowAndNeverConnectOrSubscribe_WhenTheSocketIsNotConnected(ClientModels.ConnectionState state)
     {
-        // Default MarketDataState is Disconnected: the stream fails loud rather than connect the shared socket.
+        // A quote stream must never drive the shared, process-wide socket's lifecycle: ConnectMarketDataAsync is NOT
+        // idempotent (it reconnects without replaying subscriptions), so any non-Connected state fails loudly instead.
+        A.CallTo(() => _webSocket.MarketDataState).Returns(state);
         Func<Task> consume = async () =>
         {
             await foreach (Quote _ in CreateVenue().StreamQuotesAsync(VenueContractId.Create(Tradovate, "7")))
@@ -233,7 +238,45 @@ public class TradovateVenueTests
         };
 
         await consume.Should().ThrowAsync<TradovateVenueException>();
+        A.CallTo(() => _webSocket.ConnectMarketDataAsync(A<CancellationToken>._)).MustNotHaveHappened();
         A.CallTo(() => _webSocket.SubscribeQuoteAsync(A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task StreamQuotesAsync_ShouldNotReemitTheBook_ForATradeOnlyFrame()
+    {
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+        TaskCompletionSource subscribed = new();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._)).Invokes(() => subscribed.TrySetResult());
+
+        IAsyncEnumerator<Quote> quotes = CreateVenue()
+            .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
+        try
+        {
+            ValueTask<bool> first = quotes.MoveNextAsync();
+            await subscribed.Task;
+
+            // Establish a complete book, consume it, then a trade-only frame (fresh timestamp, no bid/ask), then a
+            // real ask move. The trade frame must NOT re-emit the unchanged book under its advancing timestamp.
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch, BidPrice = 5000m, AskPrice = 5001m });
+            (await first).Should().BeTrue();
+            quotes.Current.Ask.Should().Be(new Price(5001m));
+
+            ValueTask<bool> next = quotes.MoveNextAsync();
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch.AddSeconds(1), LastPrice = 5000.5m, LastSize = 2 });
+            _webSocket.QuoteReceived += Raise.With(new ClientModels.Quote { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch.AddSeconds(2), AskPrice = 5002m });
+
+            // The next quote is the ask move at +2s, not a re-emit of the old book at +1s.
+            (await next).Should().BeTrue();
+            quotes.Current.Ask.Should().Be(new Price(5002m));
+            quotes.Current.Timestamp.Should().Be(DateTimeOffset.UnixEpoch.AddSeconds(2));
+        }
+        finally
+        {
+            await quotes.DisposeAsync();
+        }
     }
 
     [Fact]
