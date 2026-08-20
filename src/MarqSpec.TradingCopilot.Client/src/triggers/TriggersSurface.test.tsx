@@ -2,7 +2,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ApiResult } from '../api/client';
-import { type Trigger, confirmTrigger, deleteTrigger, listTriggers } from '../api/triggers';
+import {
+  type Trigger,
+  confirmTrigger,
+  createTrigger,
+  deleteTrigger,
+  listTriggers,
+} from '../api/triggers';
 import { ThemeModeProvider } from '../theme/ThemeModeProvider';
 import { TriggersSurface } from './TriggersSurface';
 
@@ -15,6 +21,7 @@ vi.mock('../api/triggers', async (importOriginal) => {
     listTriggers: vi.fn(),
     confirmTrigger: vi.fn(),
     deleteTrigger: vi.fn(),
+    createTrigger: vi.fn(),
   };
 });
 
@@ -24,6 +31,7 @@ const MESSAGE = 'That trigger could not be updated.';
 const listMock = vi.mocked(listTriggers);
 const confirmMock = vi.mocked(confirmTrigger);
 const deleteMock = vi.mocked(deleteTrigger);
+const createMock = vi.mocked(createTrigger);
 
 function trigger(overrides: Partial<Trigger> = {}): Trigger {
   return {
@@ -260,6 +268,31 @@ describe('TriggersSurface', () => {
       (screen.getByRole('button', { name: 'Delete ES rsi(14) 5m above 70' }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
+  });
+
+  it('a created trigger joins the list UNCONFIRMED — authoring is not arming (gh#1003)', async () => {
+    // The composition, not the form in isolation: the surface must fold the server's row in without a reload and
+    // it must land saying it will not fire. If authoring silently produced a Live row, the confirm gate gh#470
+    // exists to enforce would be bypassed at the only place the operator looks.
+    listMock.mockResolvedValue({ ok: true, data: [] } satisfies ApiResult<Trigger[]>);
+    createMock.mockResolvedValue({
+      ok: true,
+      data: trigger({ id: 'new', symbol: 'NQ', enabled: true, confirmation: 0 }),
+    } satisfies ApiResult<Trigger>);
+
+    renderSurface();
+
+    // The empty state is where a fresh deployment starts, so the form has to be reachable from it.
+    expect(await screen.findByTestId('empty-state')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/Instrument/i), { target: { value: 'NQ' } });
+    fireEvent.change(screen.getByLabelText(/Period/i), { target: { value: '14' } });
+    fireEvent.change(screen.getByLabelText(/Bar size/i), { target: { value: '5' } });
+    fireEvent.change(screen.getByLabelText(/Threshold/i), { target: { value: '70' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
+
+    expect(await screen.findByText('NQ rsi(14) 5m above 70')).toBeTruthy();
+    expect(screen.getByText('Will not fire')).toBeTruthy();
+    expect(screen.queryByText('Live')).toBeNull();
   });
 
   it('shows an empty state that says a new trigger does not fire until confirmed', async () => {

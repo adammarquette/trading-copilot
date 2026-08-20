@@ -109,6 +109,36 @@ export function willFire(trigger: Trigger): boolean {
   return trigger.enabled && trigger.confirmation === TriggerConfirmation.Confirmed;
 }
 
+/**
+ * What authoring a trigger sends. Mirrors `CreateTriggerRequest`.
+ *
+ * `accountId` and `size` are optional in general but **required when `route` is `AgentReview`** — the server
+ * refuses either omission by name. That conditional is the form's, not this type's: encoding it here would need a
+ * discriminated union the endpoint does not actually have.
+ */
+export interface NewTrigger {
+  readonly symbol: string;
+  readonly indicator: string;
+  readonly period: number;
+  readonly resolutionMinutes: number;
+  readonly comparison: number;
+  readonly threshold: number;
+  readonly route: number;
+  readonly hysteresis?: number | null;
+  readonly severity?: number;
+  readonly accountId?: string | null;
+  readonly size?: number | null;
+}
+
+/**
+ * Authors a trigger. Answers **201** with the created row, which arrives **unconfirmed** — creating is not
+ * arming, and the surface has to say so (gh#1003). Returning the server's row rather than echoing the request is
+ * what makes that visible instead of assumed.
+ */
+export function createTrigger(trigger: NewTrigger): Promise<ApiResult<Trigger>> {
+  return requestJson<Trigger>('POST', '/api/triggers', trigger);
+}
+
 /** The operator's triggers. Owner-scoped server-side (R-20); the client adds no filter of its own. */
 export function listTriggers(): Promise<ApiResult<Trigger[]>> {
   return requestJson<Trigger[]>('GET', '/api/triggers');
