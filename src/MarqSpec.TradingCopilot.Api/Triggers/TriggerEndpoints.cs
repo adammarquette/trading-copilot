@@ -97,6 +97,14 @@ public static class TriggerEndpoints
             return Results.BadRequest(new { error = "The hysteresis band must be positive when set — null means none." });
         }
 
+        // The threshold must sit inside the indicator's meaningful range, or the debounce seeds straight to Fired and
+        // holds there — ADR-0019's silent monitor, reached from authoring (gh#1007). Validated against the RESOLVED
+        // indicator, because the bound is the indicator's own semantics, not a blanket rule (TriggerThreshold).
+        if (TriggerThreshold.Refusal(indicatorName, request.Threshold) is { } thresholdRefusal)
+        {
+            return Results.BadRequest(new { error = thresholdRefusal });
+        }
+
         // Account + size are the agent-review route's alone: it issues a sized suggestion against an account on fire,
         // where a mechanical trigger only alerts. Validated whole here (the DB check constraints are the backstop):
         // an agent-review trigger REQUIRES an owned, mode-declared account and a positive size; a mechanical trigger
@@ -233,6 +241,13 @@ public static class TriggerEndpoints
 
         if (request.Threshold is { } threshold)
         {
+            // Patch is a second writer, and had the same gap (gh#1007). Validated against the trigger's STORED
+            // indicator — patch cannot change the indicator, so the bound is the existing one's.
+            if (TriggerThreshold.Refusal(trigger.Indicator, threshold) is { } thresholdRefusal)
+            {
+                return Results.BadRequest(new { error = thresholdRefusal });
+            }
+
             trigger.Threshold = threshold;
         }
 
