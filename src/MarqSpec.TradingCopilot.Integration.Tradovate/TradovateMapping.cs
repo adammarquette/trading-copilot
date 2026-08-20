@@ -169,6 +169,85 @@ public static class TradovateMapping
             : throw new ArgumentException($"'{account.Key}' is not a Tradovate account id.", nameof(account));
     }
 
+    /// <summary>Builds a Tradovate chart request for a contract over a time range at a bar size.</summary>
+    /// <param name="contract">The venue-qualified contract.</param>
+    /// <param name="from">Start of the range, the oldest edge.</param>
+    /// <param name="to">End of the range, the newest edge.</param>
+    /// <param name="barSize">The bar duration.</param>
+    /// <param name="venue">This adapter's venue — the contract must belong to it.</param>
+    /// <returns>The chart request.</returns>
+    /// <exception cref="ArgumentException">The contract belongs to another venue, or its key is not a Tradovate contract id.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The bar size is not a positive whole number of minutes.</exception>
+    public static ClientModels.ChartRequest ToChartRequest(
+        VenueContractId contract,
+        DateTimeOffset from,
+        DateTimeOffset to,
+        TimeSpan barSize,
+        VenueId venue)
+    {
+        EnsureBelongsTo(contract.Venue, venue, contract.ToString());
+
+        long contractId = long.TryParse(contract.Key, NumberStyles.Integer, CultureInfo.InvariantCulture, out long id)
+            ? id
+            : throw new ArgumentException($"'{contract.Key}' is not a Tradovate contract id.", nameof(contract));
+
+        (ClientModels.ChartUnderlyingType underlyingType, int elementSize) = ToChartUnit(barSize);
+
+        return new ClientModels.ChartRequest
+        {
+            ContractId = contractId,
+            UnderlyingType = underlyingType,
+            ElementSize = elementSize,
+            ClosestTimestamp = to,   // the newest edge of the range
+            AsFarAsTimestamp = from, // the oldest edge
+        };
+    }
+
+    /// <summary>Expresses a bar duration as Tradovate's chart underlying type plus an element size.</summary>
+    /// <param name="barSize">The bar duration.</param>
+    /// <returns>The underlying type and element size.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The duration is not a positive whole number of minutes. Tradovate's time bars are minute and daily; there are no
+    /// sub-minute time bars, and a tick bar is a count of ticks (not a duration), so it is not reachable from a <see cref="TimeSpan"/>.
+    /// </exception>
+    public static (ClientModels.ChartUnderlyingType UnderlyingType, int ElementSize) ToChartUnit(TimeSpan barSize)
+    {
+        if (barSize <= TimeSpan.Zero || barSize.Ticks % TimeSpan.TicksPerMinute != 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(barSize), barSize,
+                "A Tradovate bar size must be a positive whole number of minutes (minute and daily bars only, no sub-minute time bars).");
+        }
+
+        long minutes = barSize.Ticks / TimeSpan.TicksPerMinute;
+        const long MinutesPerDay = 24 * 60;
+
+        // Coarsest exact unit: whole days as a daily bar, otherwise minutes (an hour is 60 minute-elements — Tradovate has no hour bar).
+        return minutes % MinutesPerDay == 0
+            ? (ClientModels.ChartUnderlyingType.DailyBar, (int)(minutes / MinutesPerDay))
+            : (ClientModels.ChartUnderlyingType.MinuteBar, (int)minutes);
+    }
+
+    /// <summary>Maps a Tradovate chart bar onto the venue-neutral bar.</summary>
+    /// <param name="bar">The Tradovate chart bar.</param>
+    /// <returns>The venue-neutral bar.</returns>
+    /// <remarks>
+    /// The domain bar carries an integer volume; Tradovate's <c>volume</c> is nullable and the domain has no way to
+    /// represent "absent", so an omitted volume becomes 0 (a whole-contract count for futures).
+    /// </remarks>
+    public static Bar ToBar(ClientModels.ChartBar bar)
+    {
+        ArgumentNullException.ThrowIfNull(bar);
+
+        return new Bar(
+            bar.Timestamp,
+            new Price(bar.Open),
+            new Price(bar.High),
+            new Price(bar.Low),
+            new Price(bar.Close),
+            (long)(bar.Volume ?? 0m));
+    }
+
     private static void EnsureBelongsTo(VenueId actual, VenueId expected, string qualified)
     {
         if (actual != expected)
