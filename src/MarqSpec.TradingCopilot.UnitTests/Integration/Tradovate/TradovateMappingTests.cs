@@ -244,9 +244,23 @@ public class TradovateMappingTests
     }
 
     [Fact]
+    public void ToChartUnit_ShouldMapMultipleWholeDaysToDailyBars()
+    {
+        TradovateMapping.ToChartUnit(TimeSpan.FromDays(2)).Should().Be((ClientModels.ChartUnderlyingType.DailyBar, 2));
+    }
+
+    [Fact]
     public void ToChartUnit_ShouldThrow_ForAZeroBar()
     {
         Action act = () => TradovateMapping.ToChartUnit(TimeSpan.Zero);
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void ToChartUnit_ShouldThrow_ForANegativeBar()
+    {
+        Action act = () => TradovateMapping.ToChartUnit(TimeSpan.FromMinutes(-5));
 
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
@@ -265,6 +279,18 @@ public class TradovateMappingTests
         request.ElementSize.Should().Be(5);
         request.AsFarAsTimestamp.Should().Be(from); // oldest edge
         request.ClosestTimestamp.Should().Be(to);   // newest edge
+        request.AsMuchAsElements.Should().Be(1000); // an explicit cap, not left unbounded
+    }
+
+    [Fact]
+    public void ToChartRequest_ShouldThrow_ForAnInvertedRange()
+    {
+        // from after to is a nonsense window; a swapped-edge request would come back empty and read as "no bars".
+        Action act = () => TradovateMapping.ToChartRequest(
+            VenueContractId.Create(Tradovate, "123"),
+            DateTimeOffset.UnixEpoch.AddHours(1), DateTimeOffset.UnixEpoch, TimeSpan.FromMinutes(1), Tradovate);
+
+        act.Should().Throw<ArgumentException>();
     }
 
     [Fact]
