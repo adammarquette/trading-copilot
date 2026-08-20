@@ -48,8 +48,10 @@ export const TriggerRoute = {
  * Where the trigger sits in its fire/re-arm cycle. Mirrors `TriggerArmState`. Read-only: the scan owns it.
  *
  * **Not surfaced yet.** Carried on {@link Trigger} because the read returns it, but no surface renders it — a
- * `Fired` (held) trigger and an `Armed` one look identical today. Worth showing in the authoring increment, so a
- * debounced trigger is not mistaken for a broken one.
+ * `Fired` (held) trigger and an `Armed` one look identical today. The note previously said "worth showing in the
+ * authoring increment"; that increment is gh#1003 and it does not show it, so the promise is retired rather than
+ * left to outlive its truth again. It remains worth showing — as its own change, with the display decision made
+ * deliberately rather than as a rider.
  */
 export const TriggerArmState = {
   /** Never evaluated since creation / re-enable / edit — the next scan seeds silently, without firing. */
@@ -115,6 +117,9 @@ export function willFire(trigger: Trigger): boolean {
  * `accountId` and `size` are optional in general but **required when `route` is `AgentReview`** — the server
  * refuses either omission by name. That conditional is the form's, not this type's: encoding it here would need a
  * discriminated union the endpoint does not actually have.
+ *
+ * `severity` is deliberately absent: the form offers no control for it, so declaring it here would be surface
+ * with no way to exercise it. The endpoint defaults it to `Notify`; add it back with the control, not before.
  */
 export interface NewTrigger {
   readonly symbol: string;
@@ -125,7 +130,6 @@ export interface NewTrigger {
   readonly threshold: number;
   readonly route: number;
   readonly hysteresis?: number | null;
-  readonly severity?: number;
   readonly accountId?: string | null;
   readonly size?: number | null;
 }

@@ -295,6 +295,33 @@ describe('TriggersSurface', () => {
     expect(screen.queryByText('Live')).toBeNull();
   });
 
+  it('places a created trigger where a reload will leave it (gh#1005 review)', async () => {
+    // `ListTriggersAsync` orders by CreatedAt ascending, so a newly created row belongs at the END. Prepending
+    // put it at the top until the next load and then moved it to the bottom, which reads as the surface losing
+    // track of the thing just created. Asserted against the server's ordering rather than a preference.
+    listMock.mockResolvedValue({
+      ok: true,
+      data: [trigger({ id: 'old', symbol: 'ES' })],
+    } satisfies ApiResult<Trigger[]>);
+    createMock.mockResolvedValue({
+      ok: true,
+      data: trigger({ id: 'new', symbol: 'NQ', confirmation: 0 }),
+    } satisfies ApiResult<Trigger>);
+
+    renderSurface();
+    await screen.findByText('ES rsi(14) 5m above 70');
+    fireEvent.change(screen.getByLabelText(/Instrument/i), { target: { value: 'NQ' } });
+    fireEvent.change(screen.getByLabelText(/Period/i), { target: { value: '14' } });
+    fireEvent.change(screen.getByLabelText(/Bar size/i), { target: { value: '5' } });
+    fireEvent.change(screen.getByLabelText(/Threshold/i), { target: { value: '70' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
+
+    await screen.findByText('NQ rsi(14) 5m above 70');
+    const rendered = screen.getAllByTestId('trigger-row').map((row) => row.textContent ?? '');
+    expect(rendered[0]).toContain('ES');
+    expect(rendered[rendered.length - 1]).toContain('NQ');
+  });
+
   it('shows an empty state that says a new trigger does not fire until confirmed', async () => {
     listMock.mockResolvedValue({ ok: true, data: [] } satisfies ApiResult<Trigger[]>);
 

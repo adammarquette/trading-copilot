@@ -126,6 +126,61 @@ describe('TriggerForm', () => {
     await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
   });
 
+  // One pattern, not four bugs: `Number()` over unvalidated free text. The fields differ only in whether
+  // something downstream happens to catch the result, which is why they are a table — a field added to the form
+  // without a parse guard should fail here rather than depend on the server having an opinion (gh#1005 review).
+  it.each([
+    {
+      field: 'Threshold',
+      value: '',
+      why: 'blank becomes 0, and a trigger above 0 is permanently satisfied — it renders Live and can never fire',
+    },
+    { field: 'Period', value: '', why: 'blank becomes 0 and the server refuses it' },
+    { field: 'Bar size', value: 'x', why: 'garbage becomes NaN, which serialises to null' },
+    {
+      field: 'Re-arm band',
+      value: '5o',
+      why: 'NaN serialises to null, the server treats null as "no band", and the create SUCCEEDS with no dead-band',
+    },
+  ])('refuses a $field that is not a number ($why)', async ({ field, value }) => {
+    renderForm();
+
+    fillMinimum();
+    fireEvent.change(screen.getByLabelText(new RegExp(field, 'i')), { target: { value } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
+
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a non-numeric size on the agent-review route', async () => {
+    // `Number('abc') <= 0` is FALSE, so the existing guard let garbage through — the check read as a bounds test
+    // and was really a comparison against NaN.
+    renderForm();
+
+    fillMinimum();
+    selectRoute('agent review');
+    fireEvent.change(screen.getByLabelText(/Account/i), { target: { value: 'acct-1' } });
+    fireEvent.change(screen.getByLabelText(/^Size/i), { target: { value: 'abc' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
+
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts a valid optional re-arm band, and omits it when left blank', async () => {
+    // The control for the parse table: without it, a form that refused EVERY optional value would pass those.
+    createMock.mockResolvedValue({ ok: true, data: created() } satisfies ApiResult<Trigger>);
+    renderForm();
+
+    fillMinimum();
+    fireEvent.change(screen.getByLabelText(/Re-arm band/i), { target: { value: '2.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
+
+    await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+    expect(createMock.mock.calls[0][0].hysteresis).toBe(2.5);
+  });
+
   it("renders the server's refusal in its own words, and keeps what was typed", async () => {
     // The server owns the vocabulary of its refusals (ADR-0003 maps a 4xx `{error}` to `refused`). Re-typing a
     // form because the server said no is a punishment for the server's opinion.

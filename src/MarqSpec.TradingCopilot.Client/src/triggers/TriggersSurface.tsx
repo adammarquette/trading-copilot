@@ -193,14 +193,15 @@ export function TriggersSurface() {
   );
 
   /**
-   * Folds a newly authored trigger into the list without a reload. Prepended rather than appended so the thing
-   * just created is where the operator is looking — and it arrives UNCONFIRMED, so the row states it will not
-   * fire. Creating and arming stay two deliberate acts (gh#1003).
+   * Folds a newly authored trigger into the list without a reload. **Appended**, because `ListTriggersAsync`
+   * orders by `CreatedAt` ascending: prepending put the new row at the top until the next load and then moved it
+   * to the bottom, which reads as the surface losing track of it (gh#1005 review). It arrives UNCONFIRMED, so
+   * the row states it will not fire — creating and arming stay two deliberate acts (gh#1003).
    */
   const onCreated = useCallback((trigger: Trigger) => {
     setState((current) =>
       current.kind === 'loaded'
-        ? { kind: 'loaded', triggers: [trigger, ...current.triggers] }
+        ? { kind: 'loaded', triggers: [...current.triggers, trigger] }
         : current,
     );
   }, []);
