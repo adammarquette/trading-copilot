@@ -116,7 +116,10 @@ describe('TriggerForm', () => {
     selectRoute('agent review');
     fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
 
-    expect(await screen.findByRole('alert')).toBeTruthy();
+    // The MESSAGE, not merely that one appeared. Deleting the presence branch left 45/45 green while handing
+    // "Size must be a positive whole number." to an operator who typed nothing at all — exactly the confusion
+    // splitting the two checks exists to avoid (gh#1005 review).
+    expect((await screen.findByRole('alert')).textContent).toContain('needs an account');
     expect(createMock).not.toHaveBeenCalled();
   });
 
