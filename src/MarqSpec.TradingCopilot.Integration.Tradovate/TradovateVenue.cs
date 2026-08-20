@@ -173,6 +173,14 @@ public sealed class TradovateVenue : ITradingVenue
                 return;
             }
 
+            // Only a bid or ask entry moves top-of-book. Tradovate also sends trade / volume / high / settlement
+            // frames that carry a fresh timestamp but no bid or ask; re-emitting an unchanged book under an advancing
+            // timestamp would mislead a consumer reading Quote.Timestamp as "when the book last changed", so skip them.
+            if (quote.BidPrice is null && quote.AskPrice is null)
+            {
+                return;
+            }
+
             // Emitting under the lock is safe and cannot stall the socket's read loop: a bounded DropOldest channel
             // sheds the oldest and returns rather than waiting, and it does not run the reader's continuation inline
             // (AllowSynchronousContinuations stays false), so TryWrite neither blocks nor re-enters this handler.
