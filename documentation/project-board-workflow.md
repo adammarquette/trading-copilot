@@ -268,6 +268,15 @@ field** — the field that keeps finished or freshly-filed work from stranding i
 - Every **forward** gate (`Backlog → Planning → Current ToDo → In Progress`) stays **manual** — those are human /
   agent judgment.
 
+**The agentic complement.** The mechanical `Status` moves above are the gate-free ones a GitHub Action should
+perform; the *judgment-gated* moves have an advisory counterpart — the **task-lifecycle workflow**
+([`.claude/workflows/task-lifecycle.js`](../.claude/workflows/task-lifecycle.js),
+[ADR-0028](adr/0028-task-lifecycle-graph-workflow.md), gh#750). It reads the board, routes each actionable card to
+its role agent at its Work-Estimate tier, and **proposes** the next move — writing nothing to GitHub, so the
+maintainer still makes every forward decision. It is a Workflow-tool script rather than an Action *because* it
+proposes rather than acts; [ADR-0028](adr/0028-task-lifecycle-graph-workflow.md) records why the two automations
+are complementary, not alternatives.
+
 > **Enable-state (2026-07-24 — both now enabled).** *Item added → `Status: Backlog`* was already **on**; only
 > *Item closed → `Status: Done`* was **off and unconfigured** ("a value is required"). That single gap is why a
 > triage pass found **9 closed issues stranded outside Done** (the `closed → Done` gap), while just **5 legacy
