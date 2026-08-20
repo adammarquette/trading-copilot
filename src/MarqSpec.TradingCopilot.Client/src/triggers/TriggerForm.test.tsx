@@ -86,6 +86,8 @@ describe('TriggerForm', () => {
     expect(sent.period).toBe(14);
     expect(sent.resolutionMinutes).toBe(5);
     expect(sent.threshold).toBe(70);
+    // The last transmitted field with nothing pinning it: `indicator -> 'atr'` survived 41/41.
+    expect(sent.indicator).toBe('rsi');
     expect(onCreated).toHaveBeenCalledWith(created());
   });
 
@@ -197,6 +199,50 @@ describe('TriggerForm', () => {
     fireEvent.submit(screen.getByTestId('trigger-form'));
 
     await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+  });
+
+  // The same bare-400 class the account-id guard closes, on the fields that are `int` SERVER-SIDE. `parseNumber`
+  // accepts any finite number, so 14.5 passes every guard and reaches the endpoint — where STJ cannot narrow a
+  // fractional number to `int`, giving the same wordless 400. Threshold and Hysteresis are `decimal` and are
+  // deliberately NOT here: fractional is correct for them (gh#1005 review).
+  it.each([
+    { field: 'Period', value: '14.5' },
+    { field: 'Bar size', value: '5.5' },
+  ])('refuses a fractional $field — the server takes an int', async ({ field, value }) => {
+    renderForm();
+
+    fillMinimum();
+    fireEvent.change(screen.getByLabelText(new RegExp(field, 'i')), { target: { value } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('whole number');
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a fractional size on the agent-review route', async () => {
+    renderForm();
+
+    fillMinimum();
+    selectRoute('agent review');
+    fireEvent.change(screen.getByLabelText(/Account/i), { target: { value: ACCOUNT } });
+    fireEvent.change(screen.getByLabelText(/^Size/i), { target: { value: '2.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('whole number');
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts a fractional THRESHOLD — decimal server-side, unlike the counts', async () => {
+    // The control that stops the integer rule spreading to fields it does not belong to.
+    createMock.mockResolvedValue({ ok: true, data: created() } satisfies ApiResult<Trigger>);
+    renderForm();
+
+    fillMinimum();
+    fireEvent.change(screen.getByLabelText(/Threshold/i), { target: { value: '70.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create trigger' }));
+
+    await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+    expect(createMock.mock.calls[0][0].threshold).toBe(70.5);
   });
 
   it('accepts a valid optional re-arm band, and omits it when left blank', async () => {

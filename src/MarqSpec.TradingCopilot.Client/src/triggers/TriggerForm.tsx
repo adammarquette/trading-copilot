@@ -53,6 +53,23 @@ function parseNumber(raw: string): number | null {
 }
 
 /**
+ * Parses a field the server takes as an `int`, or returns null.
+ *
+ * Separate from {@link parseNumber} because the endpoint's types are not uniform: `Period`, `ResolutionMinutes`
+ * and `Size` are **`int`**, while `Threshold` and `Hysteresis` are **`decimal`**. A fractional count passes a
+ * finite-number check, reaches the endpoint, and fails there in the one way the client cannot phrase — System.Text
+ * .Json will not narrow `14.5` to `int`, so the operator gets the same wordless 400 the account-id guard exists to
+ * avoid (gh#1005 review).
+ *
+ * The split is deliberate rather than tidy: applying the integer rule to `Threshold` would refuse a perfectly
+ * valid `70.5`, which is a worse failure than the one being fixed.
+ */
+function parseInteger(raw: string): number | null {
+  const value = parseNumber(raw);
+  return value !== null && Number.isInteger(value) ? value : null;
+}
+
+/**
  * Authoring a standing trigger (gh#1003, increment 2 of gh#991).
  *
  * **Creating is not arming.** The server defaults a new trigger to `Unconfirmed`, which is inert regardless of
@@ -96,14 +113,14 @@ export function TriggerForm({ onCreated }: TriggerFormProps) {
     // numbers in it has to find the bad one themselves. Checked one at a time rather than through a table so the
     // values NARROW — the earlier version re-parsed into the body with `?? 0`, and 0 is precisely the blank
     // Threshold this guard exists to reject, so a fallback there would have restored the defect (gh#1005 review).
-    const parsedPeriod = parseNumber(period);
+    const parsedPeriod = parseInteger(period);
     if (parsedPeriod === null) {
-      setError('Period must be a number.');
+      setError('Period must be a whole number.');
       return;
     }
-    const parsedResolution = parseNumber(resolution);
+    const parsedResolution = parseInteger(resolution);
     if (parsedResolution === null) {
-      setError('Bar size must be a number.');
+      setError('Bar size must be a whole number of minutes.');
       return;
     }
     const parsedThreshold = parseNumber(threshold);
@@ -121,12 +138,15 @@ export function TriggerForm({ onCreated }: TriggerFormProps) {
     }
 
     // The one conditional the server owns and the form should not make you discover by submitting.
-    const parsedSize = parseNumber(size);
-    if (
-      isAgentReview &&
-      (accountId.trim().length === 0 || parsedSize === null || parsedSize <= 0)
-    ) {
-      setError('An agent-review trigger needs an account to issue against, and a positive size.');
+    const parsedSize = parseInteger(size);
+    if (isAgentReview && (accountId.trim().length === 0 || size.trim().length === 0)) {
+      setError('An agent-review trigger needs an account to issue against, and a size.');
+      return;
+    }
+    // Split from the presence check so the message names the actual problem: "needs a size" is unhelpful when a
+    // size was typed and the objection is its shape.
+    if (isAgentReview && (parsedSize === null || parsedSize <= 0)) {
+      setError('Size must be a positive whole number.');
       return;
     }
 

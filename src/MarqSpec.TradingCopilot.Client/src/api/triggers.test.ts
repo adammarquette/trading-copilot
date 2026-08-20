@@ -16,6 +16,11 @@ import {
 const requestJsonMock = vi.mocked(requestJson);
 const requestMock = vi.mocked(request);
 
+/** Real GUIDs: `accountId` binds to `Guid?` and the id routes are constrained `{id:guid}`, so anything else is
+ * refused before a handler runs. Fixtures that could not survive the real endpoint teach the wrong shape. */
+const ACCOUNT = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+const TRIGGER_ID = '9c5b94b1-35ad-49bb-b118-8e8fc24abf80';
+
 /**
  * The wire contract of the triggers client.
  *
@@ -71,28 +76,28 @@ describe('the triggers wire contract', () => {
   it('carries the agent-review fields when they are set', async () => {
     // The route the surface tests never exercise successfully — both of their agent-review cases assert refusals,
     // so the TRUE branch of the form's conditional had nothing pinning it (gh#1005 review).
-    const sent: NewTrigger = { ...body(), route: 2, accountId: 'acct-7', size: 3 };
+    const sent: NewTrigger = { ...body(), route: 2, accountId: ACCOUNT, size: 3 };
 
     await createTrigger(sent);
 
     const payload = requestJsonMock.mock.calls[0][2] as NewTrigger;
     expect(payload.route).toBe(2);
-    expect(payload.accountId).toBe('acct-7');
+    expect(payload.accountId).toBe(ACCOUNT);
     expect(payload.size).toBe(3);
   });
 
   it('confirms via the id-scoped confirm route', async () => {
-    await confirmTrigger('t-9');
+    await confirmTrigger(TRIGGER_ID);
 
-    expect(requestJsonMock).toHaveBeenCalledWith('POST', '/api/triggers/t-9/confirm');
+    expect(requestJsonMock).toHaveBeenCalledWith('POST', `/api/triggers/${TRIGGER_ID}/confirm`);
   });
 
   it('deletes via the id-scoped route, and does not expect a payload', async () => {
     // Delete is a genuine 204, so it takes `request` rather than `requestJson` — using the payload-requiring
     // wrapper would turn every successful delete into a failed read (gh#963).
-    await deleteTrigger('t-9');
+    await deleteTrigger(TRIGGER_ID);
 
-    expect(requestMock).toHaveBeenCalledWith('DELETE', '/api/triggers/t-9');
+    expect(requestMock).toHaveBeenCalledWith('DELETE', `/api/triggers/${TRIGGER_ID}`);
     expect(requestJsonMock).not.toHaveBeenCalled();
   });
 
