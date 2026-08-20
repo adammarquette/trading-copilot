@@ -1,5 +1,6 @@
 using FakeItEasy;
 using MarqSpec.Client.Tradovate;
+using MarqSpec.Client.Tradovate.WebSocket;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.Tradovate;
@@ -16,11 +17,12 @@ public class TradovateVenueTests
 {
     private static VenueId Tradovate { get; } = VenueId.Parse("tradovate");
     private readonly ITradovateApiClient _api = A.Fake<ITradovateApiClient>();
+    private readonly ITradovateWebSocketClient _webSocket = A.Fake<ITradovateWebSocketClient>();
 
     private TradovateVenue CreateVenue(string host = "https://demo.tradovateapi.com/v1", FirmConventions? conventions = null)
     {
         A.CallTo(() => _api.ConfiguredHost).Returns(host);
-        return new TradovateVenue(_api, conventions ?? FirmConventions.ForBrokerage("Tradovate"));
+        return new TradovateVenue(_api, _webSocket, conventions ?? FirmConventions.ForBrokerage("Tradovate"));
     }
 
     [Fact]
@@ -30,9 +32,13 @@ public class TradovateVenueTests
     }
 
     [Fact]
-    public void Capabilities_ShouldGrantNothing_InTheReadOnlySlice()
+    public void Capabilities_ShouldGrantHistoricalBars_ButNotQuotesOrExecution()
     {
-        CreateVenue().Capabilities.Should().Be(VenueCapabilities.None);
+        VenueCapabilities capabilities = CreateVenue().Capabilities;
+
+        capabilities.Supports(VenueCapability.HistoricalBars).Should().BeTrue();
+        capabilities.Supports(VenueCapability.Quotes).Should().BeFalse();
+        capabilities.Supports(VenueCapability.ClosePosition).Should().BeFalse();
     }
 
     [Fact]
@@ -128,12 +134,73 @@ public class TradovateVenueTests
     }
 
     [Fact]
-    public async Task GetBarsAsync_ShouldRefuse_WhileBarsAreUngranted()
+    public async Task GetBarsAsync_ShouldMapTheBars_WhenTheMarketDataSocketIsConnected()
     {
-        Func<Task> act = () => CreateVenue().GetBarsAsync(
-            VenueContractId.Create(Tradovate, "7"), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, TimeSpan.FromMinutes(1));
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+        IReadOnlyList<ClientModels.ChartBar> chartBars =
+        [
+            new ClientModels.ChartBar { Timestamp = DateTimeOffset.UnixEpoch, Open = 5000m, High = 5010m, Low = 4990m, Close = 5005m, Volume = 1234m },
+        ];
+        A.CallTo(() => _webSocket.GetHistoricalBarsAsync(A<ClientModels.ChartRequest>._, A<CancellationToken>._)).Returns(chartBars);
 
-        await act.Should().ThrowAsync<VenueCapabilityNotSupportedException>();
+        IReadOnlyList<Bar> bars = await CreateVenue().GetBarsAsync(
+            VenueContractId.Create(Tradovate, "7"), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddHours(1), TimeSpan.FromMinutes(5));
+
+        bars.Should().ContainSingle();
+        bars.Single().Close.Should().Be(new Price(5005m));
+        bars.Single().Volume.Should().Be(1234L);
+    }
+
+    [Fact]
+    public async Task GetBarsAsync_ShouldReturnBarsInAscendingTimeOrder_EvenWhenTheSocketReturnsThemUnordered()
+    {
+        // IMarketDataSource promises ascending order; the socket does not, so the adapter must sort (R-1 replay).
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+        IReadOnlyList<ClientModels.ChartBar> outOfOrder =
+        [
+            ChartBar(DateTimeOffset.UnixEpoch.AddMinutes(2)),
+            ChartBar(DateTimeOffset.UnixEpoch),
+            ChartBar(DateTimeOffset.UnixEpoch.AddMinutes(1)),
+        ];
+        A.CallTo(() => _webSocket.GetHistoricalBarsAsync(A<ClientModels.ChartRequest>._, A<CancellationToken>._)).Returns(outOfOrder);
+
+        IReadOnlyList<Bar> bars = await CreateVenue().GetBarsAsync(
+            VenueContractId.Create(Tradovate, "7"), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddMinutes(5), TimeSpan.FromMinutes(1));
+
+        bars.Select(bar => bar.OpenTime).Should().BeInAscendingOrder();
+    }
+
+    [Theory]
+    [InlineData(ClientModels.ConnectionState.Disconnected)]
+    [InlineData(ClientModels.ConnectionState.Connecting)]
+    [InlineData(ClientModels.ConnectionState.Reconnecting)]
+    public async Task GetBarsAsync_ShouldThrowAndNeverConnect_WhenTheSocketIsNotConnected(ClientModels.ConnectionState state)
+    {
+        // A bars read must never drive the shared, process-wide socket's lifecycle: ConnectMarketDataAsync is NOT
+        // idempotent (it reconnects without replaying subscriptions), so any non-Connected state fails loudly instead.
+        A.CallTo(() => _webSocket.MarketDataState).Returns(state);
+
+        Func<Task> act = () => CreateVenue().GetBarsAsync(
+            VenueContractId.Create(Tradovate, "7"), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddMinutes(5), TimeSpan.FromMinutes(1));
+
+        await act.Should().ThrowAsync<TradovateVenueException>();
+        A.CallTo(() => _webSocket.ConnectMarketDataAsync(A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _webSocket.GetHistoricalBarsAsync(A<ClientModels.ChartRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task GetBarsAsync_ShouldNotTouchTheSocket_ForAForeignVenueContract()
+    {
+        // The mapping (venue-qualifier guard) throws before any socket call — hoisting the socket work above the
+        // mapping would open a connection for a request that was never valid.
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+
+        Func<Task> act = () => CreateVenue().GetBarsAsync(
+            VenueContractId.Create(VenueId.Parse("projectx"), "7"), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddMinutes(5), TimeSpan.FromMinutes(1));
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        A.CallTo(() => _webSocket.ConnectMarketDataAsync(A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _webSocket.GetHistoricalBarsAsync(A<ClientModels.ChartRequest>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
     [Fact]
@@ -211,4 +278,7 @@ public class TradovateVenueTests
             SoldValue = 0m,
             PrevPos = 0,
         };
+
+    private static ClientModels.ChartBar ChartBar(DateTimeOffset timestamp) =>
+        new() { Timestamp = timestamp, Open = 1m, High = 1m, Low = 1m, Close = 1m, Volume = 1m };
 }

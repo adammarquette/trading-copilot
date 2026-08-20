@@ -68,7 +68,10 @@ export function TriggersSurface() {
   // the second request 404s and reports "could not be deleted" for a delete that in fact succeeded (gh#993
   // review, round 4). Increment 2 puts four handlers on this, so a single slot gets worse, not better.
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [actionError, setActionError] = useState<string | null>(null);
+  // Per-row, keyed like `busyIds`. A single shared slot let a second row's refusal silently REPLACE the first's,
+  // with neither message tied to its row (gh#1002) — and two rows can be in flight at once (that is exactly why
+  // `busyIds` was made per-row, gh#993 round 4), so an error must belong to the row whose action produced it.
+  const [actionErrors, setActionErrors] = useState<ReadonlyMap<string, string>>(() => new Map());
 
   const markBusy = useCallback((id: string, busy: boolean) => {
     setBusyIds((current) => {
@@ -77,6 +80,18 @@ export function TriggersSurface() {
         next.add(id);
       } else {
         next.delete(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const markError = useCallback((id: string, message: string | null) => {
+    setActionErrors((current) => {
+      const next = new Map(current);
+      if (message === null) {
+        next.delete(id);
+      } else {
+        next.set(id, message);
       }
       return next;
     });
@@ -127,7 +142,7 @@ export function TriggersSurface() {
   /** Confirms one trigger and replaces that row with what the server returned — never with an assumed state. */
   const onConfirm = useCallback(
     (id: string) => {
-      setActionError(null);
+      markError(id, null);
       markBusy(id, true);
       void confirmTrigger(id)
         .then((result) => {
@@ -137,7 +152,7 @@ export function TriggersSurface() {
           markBusy(id, false);
           if (!result.ok) {
             // The row is left exactly as it was: a failed confirm must never look like a successful one.
-            setActionError(result.kind === 'refused' ? result.reason : result.error);
+            markError(id, result.kind === 'refused' ? result.reason : result.error);
             return;
           }
           const updated = result.data;
@@ -153,16 +168,16 @@ export function TriggersSurface() {
         .catch(() => {
           if (mounted.current) {
             markBusy(id, false);
-            setActionError('The trigger could not be confirmed.');
+            markError(id, 'The trigger could not be confirmed.');
           }
         });
     },
-    [markBusy],
+    [markBusy, markError],
   );
 
   const onDelete = useCallback(
     (id: string) => {
-      setActionError(null);
+      markError(id, null);
       markBusy(id, true);
       void deleteTrigger(id)
         .then((result) => {
@@ -173,7 +188,7 @@ export function TriggersSurface() {
           if (!result.ok) {
             // The row STAYS. Removing it on a failed delete would tell the operator a trigger is gone while it is
             // still standing at the server and still able to fire (gh#993 review).
-            setActionError(result.kind === 'refused' ? result.reason : result.error);
+            markError(id, result.kind === 'refused' ? result.reason : result.error);
             return;
           }
           setState((current) =>
@@ -185,11 +200,11 @@ export function TriggersSurface() {
         .catch(() => {
           if (mounted.current) {
             markBusy(id, false);
-            setActionError('The trigger could not be deleted.');
+            markError(id, 'The trigger could not be deleted.');
           }
         });
     },
-    [markBusy],
+    [markBusy, markError],
   );
 
   /**
@@ -241,11 +256,6 @@ export function TriggersSurface() {
   return (
     <Stack spacing={2} data-testid="triggers-surface">
       <TriggerForm onCreated={onCreated} />
-      {actionError ? (
-        <Alert severity="error" role="alert">
-          {actionError}
-        </Alert>
-      ) : null}
       {state.triggers.map((trigger) => {
         const inert = inertReason(trigger);
         return (
@@ -290,6 +300,13 @@ export function TriggersSurface() {
                   Delete
                 </Button>
               </Stack>
+              {/* The error belongs to THIS row (gh#1002): a second row's refusal can no longer replace it, and it
+                  sits beside the action it came from rather than in one banner that named no row. */}
+              {actionErrors.has(trigger.id) ? (
+                <Alert severity="error" role="alert" data-testid={`trigger-error-${trigger.id}`}>
+                  {actionErrors.get(trigger.id)}
+                </Alert>
+              ) : null}
             </Stack>
           </Box>
         );

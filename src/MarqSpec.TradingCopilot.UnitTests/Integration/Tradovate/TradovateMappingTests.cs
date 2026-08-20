@@ -214,6 +214,143 @@ public class TradovateMappingTests
         act.Should().Throw<ArgumentException>();
     }
 
+    [Fact]
+    public void ToChartUnit_ShouldMapWholeMinutesToMinuteBars()
+    {
+        TradovateMapping.ToChartUnit(TimeSpan.FromMinutes(5)).Should().Be((ClientModels.ChartUnderlyingType.MinuteBar, 5));
+    }
+
+    [Fact]
+    public void ToChartUnit_ShouldMapAnHourTo60MinuteElements_NotAnHourBar()
+    {
+        // Tradovate has no hour bar; an hour is 60 minute-elements.
+        TradovateMapping.ToChartUnit(TimeSpan.FromHours(1)).Should().Be((ClientModels.ChartUnderlyingType.MinuteBar, 60));
+    }
+
+    [Fact]
+    public void ToChartUnit_ShouldMapWholeDaysToDailyBars()
+    {
+        TradovateMapping.ToChartUnit(TimeSpan.FromDays(1)).Should().Be((ClientModels.ChartUnderlyingType.DailyBar, 1));
+    }
+
+    [Theory]
+    [InlineData(30)] // 30s — sub-minute
+    [InlineData(90)] // 90s — not a whole minute
+    public void ToChartUnit_ShouldThrow_ForASubMinuteOrFractionalBar(int seconds)
+    {
+        Action act = () => TradovateMapping.ToChartUnit(TimeSpan.FromSeconds(seconds));
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void ToChartUnit_ShouldMapMultipleWholeDaysToDailyBars()
+    {
+        TradovateMapping.ToChartUnit(TimeSpan.FromDays(2)).Should().Be((ClientModels.ChartUnderlyingType.DailyBar, 2));
+    }
+
+    [Fact]
+    public void ToChartUnit_ShouldThrow_ForAZeroBar()
+    {
+        Action act = () => TradovateMapping.ToChartUnit(TimeSpan.Zero);
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void ToChartUnit_ShouldThrow_ForANegativeBar()
+    {
+        Action act = () => TradovateMapping.ToChartUnit(TimeSpan.FromMinutes(-5));
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void ToChartRequest_ShouldCarryTheContractIdRangeAndUnit()
+    {
+        DateTimeOffset from = DateTimeOffset.UnixEpoch;
+        DateTimeOffset to = from.AddHours(1);
+
+        ClientModels.ChartRequest request = TradovateMapping.ToChartRequest(
+            VenueContractId.Create(Tradovate, "123"), from, to, TimeSpan.FromMinutes(5), Tradovate);
+
+        request.ContractId.Should().Be(123L);
+        request.UnderlyingType.Should().Be(ClientModels.ChartUnderlyingType.MinuteBar);
+        request.ElementSize.Should().Be(5);
+        request.AsFarAsTimestamp.Should().Be(from); // oldest edge
+        request.ClosestTimestamp.Should().Be(to);   // newest edge
+        request.AsMuchAsElements.Should().Be(1000); // an explicit cap, not left unbounded
+    }
+
+    [Fact]
+    public void ToChartRequest_ShouldThrow_ForAnInvertedRange()
+    {
+        // from after to is a nonsense window; a swapped-edge request would come back empty and read as "no bars".
+        Action act = () => TradovateMapping.ToChartRequest(
+            VenueContractId.Create(Tradovate, "123"),
+            DateTimeOffset.UnixEpoch.AddHours(1), DateTimeOffset.UnixEpoch, TimeSpan.FromMinutes(1), Tradovate);
+
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void ToChartRequest_ShouldThrow_ForAForeignVenueContract()
+    {
+        Action act = () => TradovateMapping.ToChartRequest(
+            VenueContractId.Create(VenueId.Parse("projectx"), "123"),
+            DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddMinutes(1), TimeSpan.FromMinutes(1), Tradovate);
+
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void ToChartRequest_ShouldThrow_ForANonNumericContractKey()
+    {
+        Action act = () => TradovateMapping.ToChartRequest(
+            VenueContractId.Create(Tradovate, "ES"),
+            DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddMinutes(1), TimeSpan.FromMinutes(1), Tradovate);
+
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void ToBar_ShouldMapOhlcvWithTheTimestamp()
+    {
+        Bar bar = TradovateMapping.ToBar(new ClientModels.ChartBar
+        {
+            Timestamp = DateTimeOffset.UnixEpoch,
+            Open = 5000m,
+            High = 5010m,
+            Low = 4990m,
+            Close = 5005m,
+            Volume = 1234m,
+        });
+
+        bar.OpenTime.Should().Be(DateTimeOffset.UnixEpoch);
+        bar.Open.Should().Be(new Price(5000m));
+        bar.High.Should().Be(new Price(5010m));
+        bar.Low.Should().Be(new Price(4990m));
+        bar.Close.Should().Be(new Price(5005m));
+        bar.Volume.Should().Be(1234L);
+    }
+
+    [Fact]
+    public void ToBar_ShouldTreatAnAbsentVolumeAsZero()
+    {
+        // The domain bar has an integer volume with no "absent"; an omitted volume maps to 0.
+        Bar bar = TradovateMapping.ToBar(new ClientModels.ChartBar
+        {
+            Timestamp = DateTimeOffset.UnixEpoch,
+            Open = 1m,
+            High = 1m,
+            Low = 1m,
+            Close = 1m,
+            Volume = null,
+        });
+
+        bar.Volume.Should().Be(0L);
+    }
+
     private static ClientModels.Account Account(long? id, string name = "Acct", bool active = true, bool? isReadonly = false) =>
         new()
         {

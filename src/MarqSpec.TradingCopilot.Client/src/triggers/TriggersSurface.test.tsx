@@ -214,6 +214,33 @@ describe('TriggersSurface', () => {
         expect(screen.getByText(/never confirmed/i)).toBeTruthy();
       });
 
+      it('keeps each row’s error to its own row when TWO rows fail (gh#1002)', async () => {
+        // The collision this card fixes: with one shared banner, row B's refusal silently REPLACED A's, and
+        // neither message named its row. A single-row test cannot see it — it takes two. Per-row errors keep both,
+        // each beside the action it came from. Driven through the ROW_ACTIONS table so it holds for EVERY action.
+        listMock.mockResolvedValue({
+          ok: true,
+          data: [
+            trigger({ id: 'a', symbol: 'ES', enabled: true, confirmation: 0 }),
+            trigger({ id: 'b', symbol: 'NQ', enabled: true, confirmation: 0 }),
+          ],
+        } satisfies ApiResult<Trigger[]>);
+        // A distinct refusal per click, so a shared slot would leave only the LAST on screen.
+        mockOf()
+          .mockResolvedValueOnce({ ok: false, kind: 'refused', status: 409, reason: 'refused-A' })
+          .mockResolvedValueOnce({ ok: false, kind: 'refused', status: 409, reason: 'refused-B' });
+
+        renderSurface();
+        fireEvent.click(
+          await screen.findByRole('button', { name: new RegExp(button.source + 'ES ') }),
+        );
+        fireEvent.click(screen.getByRole('button', { name: new RegExp(button.source + 'NQ ') }));
+
+        // BOTH stand — B's message did not replace A's.
+        expect(await screen.findByText('refused-A')).toBeTruthy();
+        expect(await screen.findByText('refused-B')).toBeTruthy();
+      });
+
       it('a THROW leaves the row present and its buttons usable — never stranded busy', async () => {
         // `busyId` gates BOTH buttons on the row, so a catch that forgets to clear it kills Confirm and Delete
         // together until a reload. That is the gh#951 / gh#973 stranding family, at row scope.
