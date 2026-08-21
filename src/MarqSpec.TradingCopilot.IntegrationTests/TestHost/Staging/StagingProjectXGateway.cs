@@ -225,6 +225,69 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
         _orderExecutor.PlaceOrderAsync(request, cancellationToken);
 
     /// <summary>
+    /// Every resting leg of <paramref name="type"/> on the contract — the plural, non-throwing counterpart to
+    /// <see cref="ProtectiveStop"/>, for callers that must survive a <b>mid-transition</b> read.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ProtectiveStop"/> uses <c>SingleOrDefault</c>, which is right for a settled account but throws if
+    /// a read lands while the gateway is replacing a leg — a gateway that implements "auto-reduce" as
+    /// cancel-and-replace shows <b>two</b> legs for an instant, and an <c>InvalidOperationException</c> there is
+    /// indistinguishable from a harness fault. Returning the set lets the caller poll until it settles and then
+    /// assert the count explicitly, so the transient state fails on the thing it guards or not at all (gh#1012).
+    /// </remarks>
+    public static IReadOnlyList<Order> RestingLegs(
+        IReadOnlyList<Order> openOrders, OrderType type, string contractIdHint)
+    {
+        ArgumentNullException.ThrowIfNull(openOrders);
+        return [.. openOrders.Where(order => order.Type == type
+            && order.ContractId.Contains(contractIdHint, StringComparison.OrdinalIgnoreCase))];
+    }
+
+    /// <summary>
+    /// Partially closes an open position at the gateway — the raw <c>partialCloseContract</c> call
+    /// (<c>PartialClosePositionAsync</c>), issued <b>directly</b> against the reserved practice account (gh#1012).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this goes direct, and why that is not the gh#668 loophole widening.</b> The copilot has <b>no reduce
+    /// path at all</b>: gh#928 — capability flag, <c>ReducePositionAsync</c>, <c>PositionReduceService</c>,
+    /// <c>POST /accounts/{id}/positions/{instrument}/reduce</c> — is unimplemented, and gh#928's own text blocks it
+    /// on <i>this</i> verification landing first. There is therefore no app surface to ask the question through,
+    /// and the question — <i>what does ProjectX do to an attached OCO bracket when the position under it is
+    /// partially closed?</i> — is a property of the <b>gateway</b>, not of any copilot code. It would read the same
+    /// whether the reduce shipped or not.
+    /// </para>
+    /// <para>
+    /// The entry this reduces is still placed <b>through the deployed app and its real risk gate</b>; only the
+    /// partial close itself is issued here. PRACTICE ONLY (R-14). A partial close only ever <b>reduces</b>
+    /// exposure, so a direct call cannot open a position the gate never saw — the property that makes the full
+    /// exit gate-exempt in the first place (ADR-0007).
+    /// </para>
+    /// </remarks>
+    public async Task<PartialClosePositionResponse> PartialCloseAsync(
+        int accountId, string contractId, int size, CancellationToken cancellationToken = default) =>
+        await _api.PartialClosePositionAsync(accountId, contractId, size, cancellationToken);
+
+    /// <summary>
+    /// The account's net signed quantity on the contract right now — positive long, negative short, 0 flat.
+    /// </summary>
+    /// <remarks>
+    /// <b>Sums every matching row and skips zero-size ones</b>, rather than taking the first match.
+    /// <see cref="HasOpenPositionAsync"/> already filters <c>Size != 0</c>, which is the standing evidence that the
+    /// gateway can report a zero-size row for a contract; a bare "first match" would then return <c>0</c> whenever
+    /// a stale row happened to sort ahead of the live one, and every caller polling on this value would time out
+    /// into a <b>spurious red</b> (gh#1012).
+    /// </remarks>
+    public async Task<int> NetQuantityAsync(int accountId, string contractIdHint, CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<Position> positions = await OpenPositionsAsync(accountId, cancellationToken);
+        return positions
+            .Where(position => position.Size != 0
+                && position.ContractId.Contains(contractIdHint, StringComparison.OrdinalIgnoreCase))
+            .Sum(position => position.Type == PositionType.Short ? -position.Size : position.Size);
+    }
+
+    /// <summary>
     /// The ProjectX-qualified account handle the venue-neutral seam takes, from the gateway's own integer account id
     /// (<see cref="ResolveAccountIdAsync"/>). Qualified rather than bare so a foreign handle cannot reach ProjectX on
     /// a colliding key (R-17).
