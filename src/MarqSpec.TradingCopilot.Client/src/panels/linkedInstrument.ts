@@ -159,9 +159,16 @@ export function useLinkedInstrument(initial: string): [string, (next: string) =>
     };
   }, []);
 
+  // gh#1017: mirror the CURRENT instrument to sessionStorage on every change — a local selection OR one received
+  // over the channel — so a window opened from here seeds on what is actually on screen, not only on locally-picked
+  // symbols. Keyed on `instrument`, so the broadcast-receive path (which updates `instrument` through the plain
+  // setInstrument, not setLinkedInstrument) is covered too, not just the local set.
+  useEffect(() => {
+    writeLinkedInstrumentSeed(instrument);
+  }, [instrument]);
+
   const setLinkedInstrument = useCallback((next: string) => {
     setInstrument(next);
-    writeLinkedInstrumentSeed(next); // gh#1017: seed a pop-out opened from this window with the current instrument
     channelRef.current?.postMessage(encodeInstrumentMessage(next, WINDOW_ORIGIN));
   }, []);
 
