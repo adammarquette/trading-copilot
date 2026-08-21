@@ -279,8 +279,10 @@ configuration that lives only in a provider console is otherwise invisible to an
    | `STAGING_PROJECTX_API_KEY` / `STAGING_PROJECTX_API_SECRET` | Direct ProjectX **practice** credentials, to read the resting protective-stop leg the app does not surface (bracket gates). |
    | `STAGING_PROJECTX_API_BASE_URL` | *(optional)* the ProjectX gateway URL; the client defaults it. |
 
-   Run them from the **Actions** tab (*Staging execution gates* → **Run workflow**) for an on-demand finding, or
-   they run automatically on a `staging` promotion.
+   Run them from the **Actions** tab (*Staging execution gates* → **Run workflow**), **after** a staging promotion
+   has deployed. *(An automatic on-promotion trigger is deferred on purpose: firing on `push:staging` would race
+   the asynchronous Railway deploy and false-green the just-promoted code — it needs a deploy-completion signal, a
+   follow-up once staging deploy is wired. See the workflow header.)*
 
    > ⚠️ **The ProjectX credential mapping is the safety-critical step in this entire setup.** `dev` and `staging`
    > are **practice-only**; a **live** account belongs to `production` and nowhere else (R-14). Nothing below this
