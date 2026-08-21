@@ -76,6 +76,38 @@ export function isEchoInstrumentMessage(message: InstrumentMessage, origin: stri
   return message.origin === origin;
 }
 
+/** The sessionStorage key the current instrument is mirrored under, for a window opened from here to seed from. */
+const LINKED_INSTRUMENT_SEED_KEY = 'tc.linked-instrument.seed';
+
+/**
+ * Persist the current instrument to `sessionStorage` (gh#1017). A `window.open()`ed pop-out inherits a **copy** of its
+ * opener's sessionStorage at open time, so mirroring the instrument here lets a freshly detached chart open on the
+ * instrument the docked window was showing — passive shared storage, not a handshake, so neither window authors the
+ * other's state. Best-effort: a disabled / quota-exceeded sessionStorage is swallowed (the seed is a convenience).
+ */
+export function writeLinkedInstrumentSeed(instrument: string): void {
+  try {
+    globalThis.sessionStorage?.setItem(LINKED_INSTRUMENT_SEED_KEY, instrument);
+  } catch {
+    // sessionStorage can throw (private-mode quota, disabled); never crash for an open-time convenience.
+  }
+}
+
+/**
+ * The instrument a window opened from here should seed on (gh#1017) — the value {@link writeLinkedInstrumentSeed} last
+ * mirrored to `sessionStorage`, or `null` when there is none (a fresh session, an empty or unreadable value) so the
+ * caller falls back to its own default. Ongoing cross-window sync still rides the channel; this is only the open-time
+ * seed, so a detached chart starts on the docked instrument instead of a fixed default.
+ */
+export function readLinkedInstrumentSeed(): string | null {
+  try {
+    const seed = globalThis.sessionStorage?.getItem(LINKED_INSTRUMENT_SEED_KEY);
+    return seed !== null && seed !== undefined && seed.length > 0 ? seed : null;
+  } catch {
+    return null; // an unreadable sessionStorage must never crash the chart — degrade to the default
+  }
+}
+
 /** Open the linked-instrument channel, or `null` if the environment has no `BroadcastChannel` (degrade to local-only). */
 function openLinkedInstrumentChannel(): BroadcastChannel | null {
   const Channel = globalThis.BroadcastChannel;
@@ -129,6 +161,7 @@ export function useLinkedInstrument(initial: string): [string, (next: string) =>
 
   const setLinkedInstrument = useCallback((next: string) => {
     setInstrument(next);
+    writeLinkedInstrumentSeed(next); // gh#1017: seed a pop-out opened from this window with the current instrument
     channelRef.current?.postMessage(encodeInstrumentMessage(next, WINDOW_ORIGIN));
   }, []);
 
