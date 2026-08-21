@@ -225,16 +225,22 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
         _orderExecutor.PlaceOrderAsync(request, cancellationToken);
 
     /// <summary>
-    /// The single resting protective <b>take-profit</b> leg on the contract, if one stands — the OCO sibling of
-    /// <see cref="ProtectiveStop"/>, materialised as a native <see cref="OrderType.Limit"/> order when the entry
-    /// carried a profit target. Safe to filter on <c>Limit</c> only <b>after the entry has filled</b>: the entry
-    /// itself is a resting limit until then, and on a serialized, flat-at-start account it is the only other one.
+    /// Every resting leg of <paramref name="type"/> on the contract — the plural, non-throwing counterpart to
+    /// <see cref="ProtectiveStop"/>, for callers that must survive a <b>mid-transition</b> read.
     /// </summary>
-    public static Order? ProtectiveTakeProfit(IReadOnlyList<Order> openOrders, string contractIdHint)
+    /// <remarks>
+    /// <see cref="ProtectiveStop"/> uses <c>SingleOrDefault</c>, which is right for a settled account but throws if
+    /// a read lands while the gateway is replacing a leg — a gateway that implements "auto-reduce" as
+    /// cancel-and-replace shows <b>two</b> legs for an instant, and an <c>InvalidOperationException</c> there is
+    /// indistinguishable from a harness fault. Returning the set lets the caller poll until it settles and then
+    /// assert the count explicitly, so the transient state fails on the thing it guards or not at all (gh#1012).
+    /// </remarks>
+    public static IReadOnlyList<Order> RestingLegs(
+        IReadOnlyList<Order> openOrders, OrderType type, string contractIdHint)
     {
         ArgumentNullException.ThrowIfNull(openOrders);
-        return openOrders.SingleOrDefault(order => order.Type == OrderType.Limit
-            && order.ContractId.Contains(contractIdHint, StringComparison.OrdinalIgnoreCase));
+        return [.. openOrders.Where(order => order.Type == type
+            && order.ContractId.Contains(contractIdHint, StringComparison.OrdinalIgnoreCase))];
     }
 
     /// <summary>
@@ -262,15 +268,23 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
         int accountId, string contractId, int size, CancellationToken cancellationToken = default) =>
         await _api.PartialClosePositionAsync(accountId, contractId, size, cancellationToken);
 
-    /// <summary>The account's net signed quantity on the contract right now — positive long, negative short, 0 flat.</summary>
+    /// <summary>
+    /// The account's net signed quantity on the contract right now — positive long, negative short, 0 flat.
+    /// </summary>
+    /// <remarks>
+    /// <b>Sums every matching row and skips zero-size ones</b>, rather than taking the first match.
+    /// <see cref="HasOpenPositionAsync"/> already filters <c>Size != 0</c>, which is the standing evidence that the
+    /// gateway can report a zero-size row for a contract; a bare "first match" would then return <c>0</c> whenever
+    /// a stale row happened to sort ahead of the live one, and every caller polling on this value would time out
+    /// into a <b>spurious red</b> (gh#1012).
+    /// </remarks>
     public async Task<int> NetQuantityAsync(int accountId, string contractIdHint, CancellationToken cancellationToken = default)
     {
         IReadOnlyList<Position> positions = await OpenPositionsAsync(accountId, cancellationToken);
-        Position? position = positions.FirstOrDefault(candidate =>
-            candidate.ContractId.Contains(contractIdHint, StringComparison.OrdinalIgnoreCase));
-        return position is null
-            ? 0
-            : position.Type == PositionType.Short ? -position.Size : position.Size;
+        return positions
+            .Where(position => position.Size != 0
+                && position.ContractId.Contains(contractIdHint, StringComparison.OrdinalIgnoreCase))
+            .Sum(position => position.Type == PositionType.Short ? -position.Size : position.Size);
     }
 
     /// <summary>
