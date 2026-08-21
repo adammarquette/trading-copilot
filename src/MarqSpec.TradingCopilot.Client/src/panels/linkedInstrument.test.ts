@@ -194,4 +194,21 @@ describe('sessionStorage open-time seed (gh#1017)', () => {
 
     expect(readLinkedInstrumentSeed()).toBe('NQ');
   });
+
+  it('persists a broadcast-received instrument as the seed too, not only a local selection', () => {
+    // The broadcast-receive path updates `instrument` through the plain setInstrument, not setLinkedInstrument — the
+    // seed must still follow it, so a chart detached from a window showing a *synced* symbol (one it only knows via
+    // another window's selection) opens on that symbol, not the default. This is the gh#1017 bug in a two-window relay.
+    const restore = installFakeBroadcastChannel();
+    try {
+      renderHook(() => useLinkedInstrument('ES'));
+      const peer = new FakeBroadcastChannel(LINKED_INSTRUMENT_CHANNEL);
+
+      act(() => peer.postMessage(encodeInstrumentMessage('NQ', 'another-window')));
+
+      expect(readLinkedInstrumentSeed()).toBe('NQ');
+    } finally {
+      restore();
+    }
+  });
 });
