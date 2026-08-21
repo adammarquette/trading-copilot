@@ -8,11 +8,14 @@ import {
   decodeInstrumentMessage,
   encodeInstrumentMessage,
   isEchoInstrumentMessage,
+  readLinkedInstrumentSeed,
   useLinkedInstrument,
+  writeLinkedInstrumentSeed,
 } from './linkedInstrument';
 
 afterEach(() => {
   FakeBroadcastChannel.reset();
+  sessionStorage.clear();
 });
 
 describe('encode / decode', () => {
@@ -165,5 +168,30 @@ describe('useLinkedInstrument', () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe('sessionStorage open-time seed (gh#1017)', () => {
+  it('round-trips the seed through write → read', () => {
+    writeLinkedInstrumentSeed('NQ');
+
+    expect(readLinkedInstrumentSeed()).toBe('NQ');
+  });
+
+  it('reads null when nothing has been seeded, or an empty value was stored', () => {
+    expect(readLinkedInstrumentSeed()).toBeNull();
+
+    writeLinkedInstrumentSeed('');
+    expect(readLinkedInstrumentSeed()).toBeNull();
+  });
+
+  it('set() persists the instrument as the seed, so a window opened from here starts on it', () => {
+    // sessionStorage is COPIED to a window.open()ed child at open time, so persisting the current instrument here
+    // seeds a freshly-detached chart on it (gh#1017) — passive shared storage, neither window authoritative.
+    const { result } = renderHook(() => useLinkedInstrument('ES'));
+
+    act(() => result.current[1]('NQ'));
+
+    expect(readLinkedInstrumentSeed()).toBe('NQ');
   });
 });

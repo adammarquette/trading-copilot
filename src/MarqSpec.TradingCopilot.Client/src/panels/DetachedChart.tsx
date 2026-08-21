@@ -1,5 +1,5 @@
 import { ChartWorkspace, DEFAULT_INSTRUMENT } from '../chart/ChartWorkspace';
-import { useLinkedInstrument } from './linkedInstrument';
+import { readLinkedInstrumentSeed, useLinkedInstrument } from './linkedInstrument';
 
 /**
  * The central chart as a standalone pop-out panel (gh#1015, ADR-0006). It renders the **same** chart column the
@@ -12,6 +12,11 @@ import { useLinkedInstrument } from './linkedInstrument';
  * carries, and it inherits the safety strip from {@link DetachedPanelFrame} for free.
  */
 export function DetachedChart(): React.JSX.Element {
-  const [instrument, setInstrument] = useLinkedInstrument(DEFAULT_INSTRUMENT);
+  // gh#1017: seed on the opener's last instrument (mirrored to sessionStorage, which a window.open()ed child inherits
+  // a copy of at open) so a chart detached while the docked window shows NQ opens on NQ, not the default. Neither
+  // window is authoritative — the seed is passive shared storage; ongoing sync rides the linked-instrument channel.
+  const [instrument, setInstrument] = useLinkedInstrument(
+    readLinkedInstrumentSeed() ?? DEFAULT_INSTRUMENT,
+  );
   return <ChartWorkspace instrument={instrument} onInstrument={setInstrument} />;
 }

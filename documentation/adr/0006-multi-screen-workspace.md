@@ -145,6 +145,18 @@ unmount / degrade behavior, the registry entry, and the docked / detached compos
 already named in the Follow-ups below (*"`BroadcastChannel` local UI state sync"*), which a browser, not jsdom, must
 exercise.
 
+## Update (2026-08-20) — a detached chart opens on the docked instrument (gh#1017)
+
+Increment 3 seeded a detached chart on the fixed default (`ES`), so the channel only synced it from the *next*
+selection — detaching while the docked window showed NQ opened on ES, the wrong symbol for the primary "detach to
+watch the current chart on a second monitor" case. It now **seeds on the opener's current instrument**:
+`useLinkedInstrument` mirrors the instrument to `sessionStorage`, which a `window.open()`ed child inherits a **copy**
+of at open, and `DetachedChart` reads it as its initial (falling back to the default when absent). This is **passive
+shared storage, not a handshake** — no window queries or owns the other's state, so the neither-authoritative
+invariant holds; ongoing sync still rides the `BroadcastChannel`, and the docked window's own default-open is
+unchanged (only a detached chart seeds). The read / write are tolerant (a disabled sessionStorage degrades to the
+default, never throws) and unit-tested; the copy-on-open itself is the Playwright E2E named below.
+
 ## Follow-ups
 - Define **layout presets** + persistence. *(The detached-set persistence landed in gh#651 increment 2 —
   `localStorage`; server-saved presets per operator remain.)*
