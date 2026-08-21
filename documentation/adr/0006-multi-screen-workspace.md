@@ -107,6 +107,44 @@ panel detaches into its own window, and that window carries the safety strip.
 `BroadcastChannel` linked-instrument / crosshair coordination (and the cross-window reattach-close / auto-reopen it
 enables), the **chart** panel, and the Window Management API auto-placement.
 
+## Update (2026-08-20) — the chart panel + linked-instrument channel land (gh#1015, increment 3)
+
+The chart becomes the third detachable panel, and the `BroadcastChannel` coordination the Decision called for is
+built for its first payload — the **active instrument** — completing gh#651's scope. In
+`src/MarqSpec.TradingCopilot.Client/src`:
+
+- **A cross-window linked-instrument channel — neither window authoritative.** `panels/linkedInstrument.ts` opens a
+  same-origin `BroadcastChannel` (`tc.linked-instrument`) carrying a typed `{ kind: 'instrument'; instrument; origin }`
+  envelope. Each window holds its **own** local mirror of the charted instrument and *broadcasts* a change rather than
+  commanding one: `useLinkedInstrument(initial)` updates local state **and** posts on `set`, and applies an inbound
+  message only when it is **not this window's own echo** (a per-window `origin` id — `crypto.randomUUID()` — is stamped
+  on every post and compared on receipt). So selecting ES in the docked workspace moves a detached chart, and selecting
+  NQ in the detached chart moves the docked one, with **no window owning the other's state** — last write wins. This is
+  the ADR's *"local UI coordination, not the data backbone"* line held exactly: the channel carries a **symbol**, never
+  a risk limit or an order; market / account / execution truth still rides SignalR from the server. The message logic is
+  **pure** (`encode` / `decode` tolerating malformed input by returning `null`, never throwing / `isEcho`) so it
+  unit-tests with zero DOM, and the hook **degrades to a local-only mirror** when `BroadcastChannel` is absent (an older
+  browser) rather than throwing — the app's degrade-never-crash posture.
+- **The chart is now a detachable pop-out panel.** It registers in `DETACHABLE_PANELS` (`panels/panelRegistry.ts`) and
+  detaches / reattaches / survives a reload exactly as the suggestion feed and blotter do (the gh#651 increment-2
+  `usePanelLayout` machinery, unchanged). A shared `chart/ChartWorkspace` column (the chart + its instrument /
+  resolution / indicator controls + the suggestion / execution / fill overlay hooks) is extracted from
+  `WorkspaceSurface` and rendered **identically** docked and in the detached `panels/DetachedChart` pop-out — one
+  column, no JSX duplication. Resolution / indicators / the level overlay stay **per-window** view state (only the
+  instrument is linked); the docked `WorkspaceSurface` now drives its instrument through `useLinkedInstrument` instead
+  of local `useState`, its behavior otherwise unchanged.
+- **The detached chart carries the safety strip — for free.** As a registry panel it frames through
+  `DetachedPanelFrame` like the others, so the kill switch + time-to-flat countdown are present and functional in the
+  chart's own window too (the ADR-0005/0006 invariant), and execution stays single-authority: the pop-out chart is a
+  **view**, never a second execution path.
+- **Chat stays out.** The chat panel remains deferred (gh#18, not yet built); only the chart joined this increment.
+
+The **unit-testable seam** is what landed here — the pure message functions, the hook's post / apply / echo-suppress /
+unmount / degrade behavior, the registry entry, and the docked / detached composition all have vitest coverage. The
+**multi-window** behavior itself (two real windows syncing over a real `BroadcastChannel`) is the **Playwright E2E**
+already named in the Follow-ups below (*"`BroadcastChannel` local UI state sync"*), which a browser, not jsdom, must
+exercise.
+
 ## Follow-ups
 - Define **layout presets** + persistence. *(The detached-set persistence landed in gh#651 increment 2 —
   `localStorage`; server-saved presets per operator remain.)*

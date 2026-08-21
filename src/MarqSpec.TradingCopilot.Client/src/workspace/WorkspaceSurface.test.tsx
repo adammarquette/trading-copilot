@@ -1,6 +1,9 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { FakeBroadcastChannel, installFakeBroadcastChannel } from '../testing/fakeBroadcastChannel';
+import { LINKED_INSTRUMENT_CHANNEL, decodeInstrumentMessage } from '../panels/linkedInstrument';
+
 // Stub the chart (its own suite covers it, and it would open a real canvas) and the panel (its own suite covers the
 // R-14 scoping). The chart stub reflects its props as data-attributes so the composition + retargeting are assertable.
 vi.mock('../chart/MarketChart', () => ({
@@ -80,13 +83,20 @@ import { WorkspaceSurface } from './WorkspaceSurface';
 
 const destination = { id: 'workspace', path: '/', label: 'Workspace' } as unknown as Destination;
 
+let restoreBroadcastChannel: () => void;
+
 afterEach(() => {
   cleanup();
+  restoreBroadcastChannel();
+  FakeBroadcastChannel.reset();
   vi.clearAllMocks();
   localStorage.clear(); // the pop-out layout hook (gh#651) reads localStorage — keep panels at the docked default
 });
 
 beforeEach(() => {
+  // The workspace links its instrument across windows over BroadcastChannel (gh#1015); a deterministic in-memory
+  // fake keeps that off the environment's global and lets the broadcast be captured.
+  restoreBroadcastChannel = installFakeBroadcastChannel();
   useSuggestionZonesMock.mockReturnValue({ zones: [], stale: false });
   useExecutionOverlaysMock.mockReturnValue({
     overlay: { orders: [], position: null },
@@ -188,6 +198,30 @@ describe('WorkspaceSurface', () => {
     expect(screen.getByTestId('chart-stub').dataset.instrument).toBe('ES');
 
     fireEvent.submit(input.closest('form') as HTMLFormElement);
+    expect(screen.getByTestId('chart-stub').dataset.instrument).toBe('NQ');
+  });
+
+  it('offers a pop-out control for the chart (gh#1015)', () => {
+    // The chart joins the detachable panels: it can be popped onto its own monitor like the suggestions feed and blotter.
+    render(<WorkspaceSurface destination={destination} />);
+
+    expect(screen.getByTestId('detach-chart')).toBeTruthy();
+  });
+
+  it('broadcasts a committed instrument on the linked channel so a detached chart follows (gh#1015)', () => {
+    // A peer window (e.g. a detached chart) listens on the channel; committing an instrument here must reach it, so
+    // the two windows stay on the same symbol — neither authoritative, this window just broadcasts its last write.
+    const received: unknown[] = [];
+    const peer = new FakeBroadcastChannel(LINKED_INSTRUMENT_CHANNEL);
+    peer.addEventListener('message', (event) => received.push(event.data));
+
+    render(<WorkspaceSurface destination={destination} />);
+    const input = screen.getByLabelText('Instrument');
+    fireEvent.change(input, { target: { value: 'nq' } });
+    fireEvent.submit(input.closest('form') as HTMLFormElement);
+
+    expect(received.map((data) => decodeInstrumentMessage(data)?.instrument)).toContain('NQ');
+    // And the local chart moved too — the broadcast is a mirror of local state, not a replacement for it.
     expect(screen.getByTestId('chart-stub').dataset.instrument).toBe('NQ');
   });
 
