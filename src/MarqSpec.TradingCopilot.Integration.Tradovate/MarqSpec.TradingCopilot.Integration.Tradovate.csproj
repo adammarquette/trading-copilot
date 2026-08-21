@@ -6,7 +6,7 @@
     <ProjectReference Include="..\MarqSpec.TradingCopilot.Domain\MarqSpec.TradingCopilot.Domain.csproj" />
     <!-- The Tradovate gateway client, pinned as a submodule under external/ (its develop tip, the built client). It
          keeps its own style and warnings-as-errors bar, so it is referenced rather than carved out. TradovateVenue
-         (gh#977) consumes it; the runtime wiring into the composition root follows with the connection slice. -->
+         (gh#977) consumes it; the runtime wiring into the composition root follows in a later gh#977 slice. -->
     <ProjectReference Include="..\..\external\MarqSpec.Client.Tradovate\MarqSpec.Client.Tradovate\MarqSpec.Client.Tradovate.csproj" />
   </ItemGroup>
 
