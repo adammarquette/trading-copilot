@@ -1,4 +1,3 @@
-using System.Net;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost.Staging;
 using Xunit;
@@ -152,10 +151,9 @@ public sealed class BracketAfterPartialCloseStagingIntegrationTests : StagingVen
             decimal marketable = isLong
                 ? market + (40m * contract.TickSize)
                 : market - (40m * contract.TickSize);
-            using HttpResponseMessage fill = await ModifyAsync(
+            using HttpResponseMessage _ = await ModifyAsync(
                 app, placed.OrderId!.Value,
                 new ModifyWorkingOrderRequest(EntryPrice: marketable, ReferencePrice: marketable));
-            _ = fill.StatusCode;
 
             bool filled = await WaitUntilAsync(
                 async () => Math.Abs(await gateway.NetQuantityAsync(gatewayAccountId, symbol)) == EntrySize,
