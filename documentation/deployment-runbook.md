@@ -7,8 +7,9 @@ concrete **resources and procedures** for deploying and operating the platform.
 **Status:** living — the local stack and the CI → GHCR image pipeline are **real** (`src/` is the actual solution;
 pipeline steps 1–3 below run on every merge). **Steps 4 and 6 — deploy and verify — are now wired in
 `ci.yml` (`gh#379`) but inert**: they skip until the operator creates the `dev` / `staging` Railway environments
-and sets the deploy-hook secrets (*Operator setup* steps 4–5). Step 5, the staging integration tier, is still
-unwired. The cloud environments still need creating, so nothing deploys today.
+and sets the deploy-hook secrets (*Operator setup* steps 4–5). Step 5, the staging integration tier, is now
+**wired** (`.github/workflows/staging-gates.yml`, `gh#1019`) and inert until its `STAGING_*` secrets are set. The
+cloud environments still need creating, so nothing deploys today.
 
 **Contents** — this is a runbook, so open the procedure you need; nobody should be reading it end to end.
 
@@ -261,6 +262,25 @@ configuration that lives only in a provider console is otherwise invisible to an
    The application's own secrets (ProjectX credentials + endpoints, DB connection, OTLP) are **Railway
    environment variables**, never GitHub secrets and never in source — CI triggers a deploy, it does not carry
    the app's configuration.
+
+   **The staging integration tier is the exception — its `STAGING_*` values ARE GitHub Actions secrets**, because
+   the `staging-gates.yml` gates (`gh#1019`) run *in CI*, not in the app, and read them from the job environment.
+   They are **PRACTICE-ONLY** (R-14 — the warning below applies to them in full); absent, the gates **skip by
+   construction** (reported in the run, never a silent green). The canonical list is `StagingConfig` — set all of
+   these for the venue-execution and direct-gateway bracket gates (`gh#1012`, `gh#293`, `gh#269`):
+
+   | Secret (GitHub Actions) | Purpose |
+   |---|---|
+   | `STAGING_API_BASE_URL` | The deployed staging API the gates place their order *through* (its real risk gate). |
+   | `STAGING_OPERATOR_EMAIL` / `STAGING_OPERATOR_PASSWORD` | A staging operator login for the gates. |
+   | `STAGING_PROJECTX_CREDENTIAL_KEY` | The ProjectX credential key the staging app serves. |
+   | `STAGING_PROJECTX_PRACTICE_ACCOUNT` | The **reserved practice account** key the gates trade on. |
+   | `STAGING_EXECUTION_INSTRUMENT` | The instrument the gates trade (e.g. `MES`). |
+   | `STAGING_PROJECTX_API_KEY` / `STAGING_PROJECTX_API_SECRET` | Direct ProjectX **practice** credentials, to read the resting protective-stop leg the app does not surface (bracket gates). |
+   | `STAGING_PROJECTX_API_BASE_URL` | *(optional)* the ProjectX gateway URL; the client defaults it. |
+
+   Run them from the **Actions** tab (*Staging execution gates* → **Run workflow**) for an on-demand finding, or
+   they run automatically on a `staging` promotion.
 
    > ⚠️ **The ProjectX credential mapping is the safety-critical step in this entire setup.** `dev` and `staging`
    > are **practice-only**; a **live** account belongs to `production` and nowhere else (R-14). Nothing below this
