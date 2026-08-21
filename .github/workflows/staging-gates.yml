@@ -1,0 +1,91 @@
+name: Staging execution gates
+
+# The staging venue-execution gates (gh#269, gh#293, gh#1012) run the `Category=Staging` integration suite against
+# the DEPLOYED staging instance and a RESERVED ProjectX practice account (R-14). They cannot run pre-merge -- there
+# is no staging environment there, so their `[Staging*Fact]` attributes skip them by construction -- and the
+# pre-merge `integration tests` job carries no `STAGING_*` env, so they stay skipped there too even though its
+# `Category!=Smoke` filter includes them. THIS workflow is the only place the credentials are forwarded, and so the
+# only place the gates actually run (gh#1019). It is NOT a required pre-merge check: it is post-merge / on-demand
+# against staging -- the on-demand realization of the platform contract's "integration tests run against staging
+# after merge" (the operator runs it once a promotion has DEPLOYED).
+on:
+  # ON DEMAND ONLY. An automatic push:staging trigger is intentionally omitted: it would race ci.yml's ASYNCHRONOUS
+  # Railway deploy (both fire on the same push), so the gates would authenticate to the PREVIOUS staging build
+  # still answering /ready and report a false GREEN on the just-promoted code -- and the entry leg runs through the
+  # versioned app, so this is not hypothetical (gh#1019 review). A correctly-sequenced automatic run needs a deploy
+  # COMPLETION signal, not just a push: a `/version == github.sha` assertion, or a workflow_run chained on CI's
+  # verify job. That is a follow-up, due once the staging deploy is actually wired (runbook, Operator setup 4-5).
+  workflow_dispatch: {}
+
+# Least privilege: the gates read secrets and run tests; they never write to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  # The gates place REAL orders on ONE reserved practice account -- place, partial-close, then read the resting
+  # bracket back, each run needing to see only its OWN order. Two overlapping runs corrupt each other's baseline,
+  # so never overlap; and never cancel a run mid-flight, which could strand a live practice order on the account.
+  group: staging-execution-gates
+  cancel-in-progress: false
+
+jobs:
+  staging-gates:
+    name: staging execution gates (venue truth)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20     # real venue round-trips; bound it so a hung run cannot hold the serialized lock forever
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true  # the ProjectX adapter builds against the external/ submodule
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore src/MarqSpec.TradingCopilot.slnx
+
+      # Wait for the deployed staging instance to serve before the gates authenticate to it -- if staging is briefly
+      # unreachable (e.g. a deploy the operator just kicked off is still settling), a transient 502 would falsely
+      # RED a safety gate. /ready (not /health) is the deep check -- it answers non-200 while the database is
+      # unreachable, which is exactly the not-yet-settled window we must not test through. Best-effort: with no
+      # STAGING_API_BASE_URL the gates skip by construction anyway, so this only warns and proceeds to report skips.
+      - name: Wait for staging to be ready
+        env:
+          BASE: ${{ secrets.STAGING_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE:-}" ]; then
+            echo "::warning::STAGING_API_BASE_URL is unset -- the staging gates will SKIP by construction. Set the STAGING_* secrets (runbook: Operator setup step 5) to run them."
+            exit 0
+          fi
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail --max-time 10 "${BASE%/}/ready" >/dev/null; then
+              echo "Staging is ready."
+              exit 0
+            fi
+            echo "Staging not ready yet (attempt ${attempt}/30)..."
+            sleep 6
+          done
+          echo "::error::Staging /ready did not become ready within the retry budget; the gates cannot run against it."
+          exit 1
+
+      # PRACTICE-ONLY credentials (R-14) -- staging is never a live account. Absent => the [Staging*Fact] gates skip
+      # (reported, never a silent green); present => they place a real practice order, partial-close it, and read
+      # the resting protective bracket back. This is the ONLY job that forwards STAGING_*, so it is the only job
+      # that can reach the venue. Category=Staging ALSO tags the observability suite (gh#234, [StagingObservabilityFact]),
+      # which needs STAGING_PROMETHEUS_URL / LOKI_URL / TEMPO_URL; this venue-execution workflow does not forward those,
+      # so that slice skips here by design -- it is a separate tier, wired separately.
+      - name: Staging execution gates (Category=Staging)
+        env:
+          STAGING_API_BASE_URL: ${{ secrets.STAGING_API_BASE_URL }}
+          STAGING_OPERATOR_EMAIL: ${{ secrets.STAGING_OPERATOR_EMAIL }}
+          STAGING_OPERATOR_PASSWORD: ${{ secrets.STAGING_OPERATOR_PASSWORD }}
+          STAGING_PROJECTX_CREDENTIAL_KEY: ${{ secrets.STAGING_PROJECTX_CREDENTIAL_KEY }}
+          STAGING_PROJECTX_PRACTICE_ACCOUNT: ${{ secrets.STAGING_PROJECTX_PRACTICE_ACCOUNT }}
+          STAGING_EXECUTION_INSTRUMENT: ${{ secrets.STAGING_EXECUTION_INSTRUMENT }}
+          STAGING_PROJECTX_API_KEY: ${{ secrets.STAGING_PROJECTX_API_KEY }}
+          STAGING_PROJECTX_API_SECRET: ${{ secrets.STAGING_PROJECTX_API_SECRET }}
+          STAGING_PROJECTX_API_BASE_URL: ${{ secrets.STAGING_PROJECTX_API_BASE_URL }}
+        run: dotnet test src/MarqSpec.TradingCopilot.IntegrationTests/MarqSpec.TradingCopilot.IntegrationTests.csproj --configuration Release --filter "Category=Staging"
