@@ -443,6 +443,8 @@ builder.Services.AddScoped<PositionReconciliationService>();
 // by its very type.
 builder.Services.AddScoped<IPositionReconciler>(provider => provider.GetRequiredService<PositionReconciliationService>());
 builder.Services.AddScoped<PositionExitService>();
+// The sized partial-close sibling of the full exit (gh#928): reduce a position toward flat without flattening it.
+builder.Services.AddScoped<PositionReduceService>();
 
 // The resting-orders sibling of the positions read (gh#381): venue truth for the working orders standing on an
 // account, including the attached protective bracket and its SIZE. Read-only -- the gate is untouched.
