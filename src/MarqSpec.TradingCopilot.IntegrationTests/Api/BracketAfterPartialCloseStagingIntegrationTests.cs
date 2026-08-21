@@ -14,7 +14,7 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// <para>
 /// <b>The hazard.</b> The always-native safety bracket carries <b>no size field</b> (<c>PlaceOrderBracket =
 /// {ticks, type}</c>) — the gateway attaches it on fill, sized to the realized fill (gh#293). Nothing in the copilot
-/// can then resize it: the client's modify request has no bracket field. So if a position is reduced underneath a
+/// can then resize it: the client's modify request has no bracket field at all. So if a position is reduced underneath a
 /// bracket the gateway does <b>not</b> auto-manage, the resting protective stop still covers the <i>original</i>
 /// quantity. Reduce long-2 → long-1 and a stop still sized 2 would, on trigger, sell 2 against a 1-long —
 /// <b>overshooting into a short-1</b>. A protective mechanism would have <i>created</i> exposure, which is the exact
@@ -55,6 +55,18 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 /// its real risk gate.
 /// </para>
 /// <para>
+/// <b>Read a missing leg here against the known client/swagger bracket-shape mismatch before calling it a
+/// lifecycle finding.</b> The authoritative <c>swagger.json</c> declares <c>PlaceOrderBracket</c> as
+/// <c>{ticks, type}</c>, while the vendored C# <c>OrderBracket</c> exposes <c>StopPrice</c> / <c>LimitPrice</c> /
+/// <c>TrailPrice</c> and <c>ProjectXVenue.PlaceOrderAsync</c> populates the price fields — no <c>ticks</c> is ever
+/// transmitted. gh#293 flagged this and deliberately scoped it out (client-repo reconciliation), and it is still
+/// unreconciled. This suite is the <b>first</b> thing in the tree to attach a <i>take-profit</i> bracket against the
+/// live gateway, so if a baseline leg never appears, the first hypothesis is that the bracket was silently
+/// degraded <b>at placement</b> — a client defect — not that the gateway did something to it on the partial close.
+/// The two are distinguishable by where it fails: a placement degradation reddens the <b>baseline</b> assertions at
+/// step 3, a lifecycle finding only the <b>gate</b> assertions at step 5.
+/// </para>
+/// <para>
 /// SKIPS pre-merge via <see cref="StagingGatewayFactAttribute"/>; serialized onto the reserved PRACTICE account
 /// (R-14).
 /// </para>
@@ -63,10 +75,22 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 [Collection(StagingExecutionCollection.Name)]
 public sealed class BracketAfterPartialCloseStagingIntegrationTests : StagingVenueExecutionSuite
 {
-    /// <summary>How many contracts the entry opens, and how many of them the partial close takes off.</summary>
-    private const int EntrySize = 2;
+    /// <summary>
+    /// How many contracts the entry opens, and how many of them the partial close takes off.
+    /// </summary>
+    /// <remarks>
+    /// <b>3 and 1, deliberately, so the three quantities are pairwise distinct.</b> At 2 and 1 the expected
+    /// surviving size (1) equals the <i>closed</i> size (1), and a gateway that sized the surviving leg to the
+    /// amount closed — or that left behind a leg the close itself created — would satisfy the gate for the wrong
+    /// reason. With `N=3, M=1` the remainder (2), the close (1) and the original (3) are all different, so each
+    /// prove-the-red row below fails on its own distinct value.
+    /// </remarks>
+    private const int EntrySize = 3;
     private const int CloseSize = 1;
     private const int Remainder = EntrySize - CloseSize;
+
+    /// <summary>How long a venue-side leg adjustment is given to settle before its size is believed.</summary>
+    private static TimeSpan LegSettleWindow => TimeSpan.FromSeconds(20);
 
     /// <summary>
     /// <b>Long.</b> Fill long-2 under a native protective stop sized 2, <c>partialCloseContract</c> 1, then read the
@@ -130,13 +154,21 @@ public sealed class BracketAfterPartialCloseStagingIntegrationTests : StagingVen
 
         try
         {
-            // 1. Place a resting bracketed entry at the full size. The target, when asked for, sits 40 ticks the
-            //    profitable way from the entry so the OCO take-profit leg is attached alongside the stop.
-            decimal entry = isLong
-                ? market - (40m * contract.TickSize)
-                : market + (40m * contract.TickSize);
+            // 1. Place a resting bracketed entry at the full size.
+            //
+            //    The target, when asked for, is measured from the price the entry will END at (`marketable`), NOT
+            //    from where it starts. A modify rebuilds the proposal with the order's STORED take-profit and
+            //    re-runs the winning-side check, so a target set 40 ticks beyond the resting entry would sit on the
+            //    wrong side of the repriced one at step 2 — refused as WrongSideTarget, never transmitted, the entry
+            //    left resting off-market, and the failure would surface as a fill timeout pointing nowhere near its
+            //    cause. Measured from `marketable`, the target is on the winning side both before and after.
+            decimal marketable = isLong
+                ? market + (40m * contract.TickSize)
+                : market - (40m * contract.TickSize);
             decimal? target = withTakeProfit
-                ? (isLong ? entry + (40m * contract.TickSize) : entry - (40m * contract.TickSize))
+                ? (isLong
+                    ? marketable + (40m * contract.TickSize)
+                    : marketable - (40m * contract.TickSize))
                 : null;
 
             SendOrderResponse placed = isLong
@@ -148,9 +180,6 @@ public sealed class BracketAfterPartialCloseStagingIntegrationTests : StagingVen
 
             // 2. Realize the fill — reprice the resting entry to marketable. The app may answer Conflict if the fill
             //    lands mid-modify (benign); venue truth is the oracle, not the app's response.
-            decimal marketable = isLong
-                ? market + (40m * contract.TickSize)
-                : market - (40m * contract.TickSize);
             using HttpResponseMessage _ = await ModifyAsync(
                 app, placed.OrderId!.Value,
                 new ModifyWorkingOrderRequest(EntryPrice: marketable, ReferencePrice: marketable));
@@ -166,16 +195,19 @@ public sealed class BracketAfterPartialCloseStagingIntegrationTests : StagingVen
             int signedBefore = await gateway.NetQuantityAsync(gatewayAccountId, symbol);
             signedBefore.Should().Be(isLong ? EntrySize : -EntrySize, "the fill opened the full position, correctly signed");
 
-            IReadOnlyList<ClientModels.Order> restingBefore = await gateway.OpenOrdersAsync(gatewayAccountId);
-            ClientModels.Order? stopBefore = StagingProjectXGateway.ProtectiveStop(restingBefore, symbol);
-            stopBefore.Should().NotBeNull("the always-native safety bracket materialised a protective stop on fill");
-            stopBefore!.Size.Should().Be(EntrySize, "the on-fill bracket sized to the realized fill (the gh#293 result)");
+            // The bracket attaches asynchronously too, so poll for the settled leg rather than racing the gateway.
+            IReadOnlyList<ClientModels.Order> stopsBefore = await SettledLegsAsync(
+                gateway, gatewayAccountId, symbol, ClientModels.OrderType.Stop, EntrySize);
+            stopsBefore.Should().ContainSingle("exactly one native protective stop rests after the fill");
+            stopsBefore[0].Size.Should().Be(EntrySize, "the on-fill bracket sized to the realized fill (the gh#293 result)");
 
             if (withTakeProfit)
             {
-                ClientModels.Order? takeProfitBefore = StagingProjectXGateway.ProtectiveTakeProfit(restingBefore, symbol);
-                takeProfitBefore.Should().NotBeNull("the profit target materialised the OCO take-profit leg on fill");
-                takeProfitBefore!.Size.Should().Be(EntrySize, "the take-profit leg also sized to the realized fill");
+                IReadOnlyList<ClientModels.Order> targetsBefore = await SettledLegsAsync(
+                    gateway, gatewayAccountId, symbol, ClientModels.OrderType.Limit, EntrySize);
+                targetsBefore.Should().ContainSingle(
+                    "exactly one OCO take-profit leg rests after the fill — the entry limit has left the book");
+                targetsBefore[0].Size.Should().Be(EntrySize, "the take-profit leg also sized to the realized fill");
             }
 
             // 4. The operation under test: partially close the POSITION at the gateway. Nothing here touches the
@@ -191,23 +223,32 @@ public sealed class BracketAfterPartialCloseStagingIntegrationTests : StagingVen
             reduced.Should().BeTrue("the partial close left exactly the remainder open at the venue");
 
             // 5. THE GATE. Venue truth after the reduce: every resting protective leg must now cover the remainder.
-            IReadOnlyList<ClientModels.Order> restingAfter = await gateway.OpenOrdersAsync(gatewayAccountId);
-            ClientModels.Order? stopAfter = StagingProjectXGateway.ProtectiveStop(restingAfter, symbol);
+            //    Polled to a settled value — a venue-side OCO adjustment need not land in the same instant the
+            //    positions endpoint reports N-M, and a one-beat lag read as "the gateway did nothing" would
+            //    manufacture a false finding on the gate that blocks gh#928.
+            IReadOnlyList<ClientModels.Order> stopsAfter = await SettledLegsAsync(
+                gateway, gatewayAccountId, symbol, ClientModels.OrderType.Stop, Remainder);
 
-            stopAfter.Should().NotBeNull(
+            stopsAfter.Should().NotBeEmpty(
                 "a partial close must not leave the surviving remainder naked — a cancelled bracket is a gate failure "
                 + "(gh#1012), not a pass");
-            stopAfter!.Size.Should().Be(Remainder,
+            stopsAfter.Should().ContainSingle(
+                "the bracket must settle to exactly one protective stop, not a half-finished replace");
+            stopsAfter[0].Size.Should().Be(Remainder,
                 "the gateway must auto-reduce the position-linked bracket to the surviving quantity; a stop still "
                 + "sized {0} against a {1}-lot position overshoots on trigger and OPENS an opposing position "
                 + "(gh#1012 ⇒ gh#928)", EntrySize, Remainder);
 
             if (withTakeProfit)
             {
-                ClientModels.Order? takeProfitAfter = StagingProjectXGateway.ProtectiveTakeProfit(restingAfter, symbol);
-                takeProfitAfter.Should().NotBeNull(
+                IReadOnlyList<ClientModels.Order> targetsAfter = await SettledLegsAsync(
+                    gateway, gatewayAccountId, symbol, ClientModels.OrderType.Limit, Remainder);
+
+                targetsAfter.Should().NotBeEmpty(
                     "the OCO take-profit leg must survive a partial close of the position it protects");
-                takeProfitAfter!.Size.Should().Be(Remainder,
+                targetsAfter.Should().ContainSingle(
+                    "the take-profit leg must settle to exactly one resting order");
+                targetsAfter[0].Size.Should().Be(Remainder,
                     "the take-profit leg must auto-reduce with its OCO sibling; an over-sized target fills {0} against "
                     + "a {1}-lot position and flips the account at the target (gh#1012)", EntrySize, Remainder);
             }
@@ -218,5 +259,36 @@ public sealed class BracketAfterPartialCloseStagingIntegrationTests : StagingVen
             // resting on a practice account after a failed assertion is a real position.
             await gateway.FlattenAsync(gatewayAccountId, contract.Id);
         }
+    }
+
+    /// <summary>
+    /// The resting legs of <paramref name="type"/> on the contract, polled until exactly one of them covers
+    /// <paramref name="expectedSize"/> or <see cref="LegSettleWindow"/> elapses — then returned <b>as last
+    /// observed</b>, whatever that is.
+    /// </summary>
+    /// <remarks>
+    /// The window is a <b>settle</b> allowance, never a pass condition: this returns the venue's real state on
+    /// timeout rather than throwing, so the caller's own assertions render the verdict and a genuine failure still
+    /// reddens on the size it actually saw. Polling only removes the race — a bracket adjustment that lands a beat
+    /// after the position read, or a cancel-and-replace caught mid-flight — which on this gate would otherwise be
+    /// indistinguishable from the gateway not managing the bracket at all (gh#1012).
+    /// </remarks>
+    private static async Task<IReadOnlyList<ClientModels.Order>> SettledLegsAsync(
+        StagingProjectXGateway gateway,
+        int gatewayAccountId,
+        string symbol,
+        ClientModels.OrderType type,
+        int expectedSize)
+    {
+        IReadOnlyList<ClientModels.Order> legs = [];
+        await WaitUntilAsync(
+            async () =>
+            {
+                IReadOnlyList<ClientModels.Order> resting = await gateway.OpenOrdersAsync(gatewayAccountId);
+                legs = StagingProjectXGateway.RestingLegs(resting, type, symbol);
+                return legs.Count == 1 && legs[0].Size == expectedSize;
+            },
+            LegSettleWindow);
+        return legs;
     }
 }

@@ -112,6 +112,14 @@ public abstract class StagingVenueExecutionSuite
     /// An optional profit target, which makes the app attach the <b>take-profit (OCO) leg</b> of the native bracket
     /// alongside the protective stop (gh#1012 needs both legs present to observe what a partial close does to them).
     /// <see langword="null"/> — the default every earlier gate uses — attaches the stop leg only.
+    /// <para>
+    /// <b>Absolute, and it must outlive every later reprice.</b> A modify rebuilds the proposal with the order's
+    /// <i>stored</i> take-profit and re-runs the winning-side check, so a target chosen against <i>this</i> resting
+    /// entry is refused (<c>WrongSideTarget</c>, nothing transmitted) the moment a suite reprices the entry past
+    /// it — and a reprice-to-marketable is exactly how these gates realize a fill. Choose the target against the
+    /// price the entry will <b>end at</b>, not the one it starts at: for a long it must stay strictly above the
+    /// final entry, for a short strictly below.
+    /// </para>
     /// </param>
     protected static async Task<SendOrderResponse> PlaceRestingLongAsync(
         HttpClient client,
@@ -158,6 +166,8 @@ public abstract class StagingVenueExecutionSuite
     /// <b>above</b> the entry, an optional <paramref name="target"/> <b>below</b> it — because a short is protected
     /// by a buy-stop overhead. Needed because the bracket-after-partial-close hazard is direction-symmetric: an
     /// over-sized buy-stop against a reduced short overshoots into an unwanted <i>long</i> just as readily.
+    /// <paramref name="target"/> carries the same reprice constraint documented on
+    /// <see cref="PlaceRestingLongAsync"/>, mirrored: it must stay strictly <b>below</b> the final entry.
     /// </summary>
     protected static async Task<SendOrderResponse> PlaceRestingShortAsync(
         HttpClient client,
