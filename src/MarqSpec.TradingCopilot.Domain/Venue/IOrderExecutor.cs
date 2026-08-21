@@ -70,6 +70,40 @@ public interface IOrderExecutor : IVenue
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Reduces a position by <paramref name="quantity"/> contracts — a sized partial close <b>toward flat</b>
+    /// (gh#928, R-11), the primitive the operator's per-position reduce sits on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A <b>reducing</b> action: it lowers exposure, so it rides the same native close seam as
+    /// <see cref="ClosePositionAsync"/> and <b>not</b> the order-placement path. An opposing order would be a
+    /// <i>send</i>, gated by R-5 / R-16 / R-12 — and a gate refusing a risk-<i>lowering</i> action is the wrong
+    /// answer, a different thing from refusing to <i>raise</i> risk (gh#928). This transmits a close; it does not
+    /// decide.
+    /// </para>
+    /// <para>
+    /// A <b>default-throwing capability</b>, like <see cref="ModifyOrderAsync"/>: a venue that cannot size a
+    /// partial close refuses <b>loudly</b> (R-17) rather than silently closing the whole position or doing
+    /// nothing. An adapter that can — and advertises <see cref="VenueCapability.ReducePosition"/> — overrides
+    /// this. Returns the venue's own post-reduce snapshot so the caller <b>verifies</b> the reduction against
+    /// venue truth (ADR-0013), never assumes it: a partial close the venue accepted while still reporting the
+    /// original size is not a reduction, and must not read as done.
+    /// </para>
+    /// </remarks>
+    /// <param name="account">The account holding the position.</param>
+    /// <param name="contract">The contract to reduce.</param>
+    /// <param name="quantity">How many contracts to take off — a positive count. Sizing is the caller's.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The venue's position snapshot after the partial close.</returns>
+    /// <exception cref="NotSupportedException">This venue cannot size a partial close.</exception>
+    Task<PositionSnapshot> ReducePositionAsync(
+        VenueAccountId account,
+        VenueContractId contract,
+        int quantity,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("This venue does not support reducing a position by a sized partial close.");
+
+    /// <summary>
     /// Lists the orders <b>resting live at the venue</b> for an account (gh#183) — the venue's own truth, used by
     /// OCO-cancel-on-exit to find the protective legs still standing on a contract that has gone flat.
     /// </summary>

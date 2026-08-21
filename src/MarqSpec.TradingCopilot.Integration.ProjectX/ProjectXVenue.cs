@@ -85,7 +85,10 @@ public sealed class ProjectXVenue : ITradingVenue
         | VenueCapability.AccountStreaming
         // In-place order modify (gh#259): the gateway's modify endpoint, now reached through the neutral contract
         // so an operator can reprice a resting working order without a cancel/replace.
-        | VenueCapability.ModifyOrder);
+        | VenueCapability.ModifyOrder
+        // Sizing a partial close (gh#928): the gateway's partialCloseContract endpoint, reached through the
+        // neutral contract so an operator can take part of a position off without flattening it.
+        | VenueCapability.ReducePosition);
 
     /// <summary>
     /// The ProjectX derivation-logic version (ADR-0009, gh#9). History: <b>1</b> — the conservative PRAC-only
@@ -330,6 +333,42 @@ public sealed class ProjectXVenue : ITradingVenue
 
         // Read the position back rather than assuming the close worked: the venue is the source of truth for
         // whether we are flat, and auto-flatten reconciles against exactly this (ADR-0013).
+        IEnumerable<ClientModels.Position> remaining = await _api.GetOpenPositionsAsync(accountId, cancellationToken);
+        ClientModels.Position? open = remaining.FirstOrDefault(
+            position => string.Equals(position.ContractId, contractKey, StringComparison.Ordinal));
+
+        return open is null
+            ? new PositionSnapshot(account, contract, 0, new Price(0m))
+            : ProjectXMapping.ToPositionSnapshot(open, Id);
+    }
+
+    /// <inheritdoc />
+    public async Task<PositionSnapshot> ReducePositionAsync(
+        VenueAccountId account,
+        VenueContractId contract,
+        int quantity,
+        CancellationToken cancellationToken = default)
+    {
+        Capabilities.Require(VenueCapability.ReducePosition);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(quantity);
+
+        int accountId = ProjectXMapping.ToAccountId(account, Id);
+        string contractKey = ProjectXMapping.ToContractKey(contract, Id);
+
+        ClientModels.PartialClosePositionResponse response =
+            await _api.PartialClosePositionAsync(accountId, contractKey, quantity, cancellationToken);
+
+        if (!response.Success)
+        {
+            throw new ProjectXVenueException(
+                $"ProjectX refused to reduce {contract} by {quantity}: {response.ErrorMessage ?? "no reason given"}.",
+                response.ErrorCode);
+        }
+
+        // Read the position back rather than assuming the reduce worked (ADR-0013) -- exactly as ClosePositionAsync
+        // does. The venue is the truth for what REMAINS, and the operator's "only a verified reduction is success"
+        // rule sits entirely on this read being honest: a partialClose the gateway accepted while still reporting
+        // the original size must surface as the original size, so the caller above can refuse to call it done.
         IEnumerable<ClientModels.Position> remaining = await _api.GetOpenPositionsAsync(accountId, cancellationToken);
         ClientModels.Position? open = remaining.FirstOrDefault(
             position => string.Equals(position.ContractId, contractKey, StringComparison.Ordinal));

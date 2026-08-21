@@ -52,4 +52,12 @@ public enum VenueCapability
     /// a context source at the seam instead of discovering the difference at execution time.
     /// </remarks>
     ContextTrades = 1 << 9,
+
+    /// <summary>
+    /// Sizing a partial close — taking a position <b>part-way toward flat</b> by fewer contracts than it holds
+    /// (gh#928). Deliberately distinct from <see cref="ClosePosition"/>: a venue can close a position outright
+    /// without being able to size a partial, so a caller that needs the sized variant must check for <i>this</i>
+    /// and degrade loudly (R-17) rather than fall back to flattening the whole thing.
+    /// </summary>
+    ReducePosition = 1 << 10,
 }
