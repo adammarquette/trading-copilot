@@ -132,6 +132,16 @@ public class PositionReduceEndpointTests
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
     }
 
+    [Fact]
+    public async Task ReduceAsync_ShouldReturnBadRequest_WhenTheRequestBodyIsMissing()
+    {
+        // A minimal-API bind can hand a null body; it is a client mistake — a 400, never a venue call.
+        IResult result = await PositionReconciliationEndpoints.ReduceAsync(
+            Guid.NewGuid(), "MES", null!, Service(), CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+    }
+
     // --- The outcome -> status mapping: the safety-critical half ---
 
     [Fact]
@@ -180,6 +190,10 @@ public class PositionReduceEndpointTests
         IResult result = await Reduce(accountId, "MES", 3); // holds 3
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+        // The body carries the current open size, so the operator can correct rather than guess.
+        PositionReduceResponse body = (PositionReduceResponse)((IValueHttpResult)result).Value!;
+        body.Outcome.Should().Be(nameof(PositionReduceOutcome.ExceedsPosition));
+        body.NetQuantity.Should().Be(3);
         A.CallTo(() => _venue.ReducePositionAsync(
             A<VenueAccountId>._, A<VenueContractId>._, A<int>._, A<CancellationToken>._)).MustNotHaveHappened();
     }

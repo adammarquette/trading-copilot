@@ -15,12 +15,17 @@ public enum PositionReduceOutcome
     /// <summary>Never a valid outcome — the fail-closed zero.</summary>
     Unknown = 0,
 
-    /// <summary>The venue reports strictly-smaller same-side (or flat) exposure — the reduction is verified.</summary>
+    /// <summary>
+    /// The venue reports the position smaller by <b>exactly the requested amount</b>, same side — the reduction is
+    /// verified against what was asked, not merely against direction.
+    /// </summary>
     Reduced = 1,
 
     /// <summary>
-    /// The partial close was accepted but the venue still reports the original exposure — <b>not done</b>. A
-    /// reversed position (opposite side) lands here too: a flip is never a reduction, however small its size.
+    /// The venue did <b>not</b> report the exact requested reduction — <b>not done</b>. Covers the original size
+    /// still standing, <b>less</b> off than asked (a partial execution), <b>more</b> off than asked (a protective
+    /// stop or a concurrent exit fired, up to and including all the way to flat), and a <b>side flip</b> (a reversal
+    /// is never a reduction, however small its magnitude). Read from venue truth after the attempt.
     /// </summary>
     NotReduced = 2,
 
@@ -63,10 +68,10 @@ public sealed record PositionReduceResult(PositionReduceOutcome Outcome, int Net
 /// </para>
 /// <para>
 /// <b>Only a verified reduction is success.</b> The outcome is read from what the venue reports <i>after</i> the
-/// attempt (ADR-0013): strictly-smaller same-side exposure is <see cref="PositionReduceOutcome.Reduced"/>; the
-/// original size still standing, or a side flip, is <see cref="PositionReduceOutcome.NotReduced"/>; a venue fault
-/// is <see cref="PositionReduceOutcome.Unreachable"/> — never reduced. Reporting an unverified reduce as done would
-/// tell the operator their exposure is smaller than it is.
+/// attempt (ADR-0013): the position smaller by <b>exactly the requested amount</b>, same side, is <see cref="PositionReduceOutcome.Reduced"/>;
+/// anything else — the original size still standing, <b>less</b> off than asked (a partial execution), <b>more</b> off (a stop or a concurrent exit fired, up to flat), or a side flip — is <see cref="PositionReduceOutcome.NotReduced"/>; a venue fault
+/// is <see cref="PositionReduceOutcome.Unreachable"/> — never reduced. Reporting anything but the exact reduction as done would
+/// leave the operator to notice from the NetQuantity that they got something other than what they asked.
 /// </para>
 /// <para>
 /// <b>Known limitation — the protective bracket is left as-is (gh#928, pre-live gate to follow).</b> The
@@ -171,14 +176,19 @@ public sealed class PositionReduceService
             PositionSnapshot after = await venue.ReducePositionAsync(
                 venueAccount.Id, resolved.Contract, quantity, cancellationToken);
 
-            // Verified, not assumed. A reduction moves TOWARD flat: same side with strictly less size, or flat. A
-            // side flip is a reversal, not a reduction, and must never read as done however small it is.
-            bool reducedTowardFlat =
-                after.NetQuantity == 0
-                || (Math.Sign(after.NetQuantity) == Math.Sign(beforeQuantity)
-                    && Math.Abs(after.NetQuantity) < beforeMagnitude);
+            // Verified against what was ASKED, not just direction (gh#928). Success is the venue reporting the
+            // position smaller by EXACTLY `quantity`, same side. Everything else is "not done": a partial execution
+            // that closed LESS than asked (more exposure remains than the operator targeted), a close that took off
+            // MORE (a protective stop or a concurrent exit fired), a side flip, and no change at all. The operator
+            // asked for a specific reduction, so anything other than that is a state they must SEE and act on — never
+            // a green "reduced" whose NetQuantity they have to notice is wrong themselves. (The strict-partial guard
+            // above means the exact target `beforeMagnitude - quantity` is always >= 1, so a same-side match can
+            // never be flat; a close all the way to flat is therefore an over-execution, reported not-done.)
+            bool reducedByExactlyRequested =
+                Math.Sign(after.NetQuantity) == Math.Sign(beforeQuantity)
+                && Math.Abs(after.NetQuantity) == beforeMagnitude - quantity;
 
-            return reducedTowardFlat
+            return reducedByExactlyRequested
                 ? new PositionReduceResult(PositionReduceOutcome.Reduced, after.NetQuantity)
                 : new PositionReduceResult(PositionReduceOutcome.NotReduced, after.NetQuantity);
         }

@@ -110,8 +110,10 @@ public class PositionReduceServiceTests
         Service().ReduceAsync(accountId, InstrumentId.Parse("MES"), quantity, CancellationToken.None);
 
     [Fact]
-    public async Task ReduceAsync_ShouldReportReduced_WhenTheVenueReportsStrictlySmallerSameSideExposure()
+    public async Task ReduceAsync_ShouldReportReduced_WhenTheVenueClosedExactlyTheRequestedAmount()
     {
+        // Verified against what was ASKED, not just direction: long 3, reduce by 1, venue reports long 2 — exactly
+        // the requested delta. That, and only that, is a clean Reduced.
         Guid accountId = await SeedAccountAsync();
         Holds(3);
         ReducesTo(2);
@@ -125,16 +127,35 @@ public class PositionReduceServiceTests
     }
 
     [Fact]
-    public async Task ReduceAsync_ShouldReportReduced_WhenTheVenueReportsFlat()
+    public async Task ReduceAsync_ShouldReportNotReduced_WhenTheVenueClosedLessThanRequested()
     {
-        // A reduce the venue took all the way to flat is still a reduction (exposure is strictly less — gone).
+        // The gh#928-review finding: a partial close that closed LESS than asked must NOT read as a clean reduction.
+        // Asked to take 3 off a long 5 (expecting 2 left); the venue only closed 1, so 4 remain — more exposure than
+        // the operator targeted. Not-done, with the true net (4), never a green Reduced they have to catch.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReducesTo(4);
+
+        PositionReduceResult? result = await Reduce(accountId, 3);
+
+        result!.Outcome.Should().Be(PositionReduceOutcome.NotReduced);
+        result.NetQuantity.Should().Be(4);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldReportNotReduced_WhenTheVenueClosedMoreThanRequested()
+    {
+        // The over-execution mirror (adversarial-review P2): a reduce-by-1 that came back FLAT closed MORE than
+        // asked — a protective stop or a concurrent exit fired — so it is not the reduction the operator asked for
+        // (they meant to keep 2 on). Not-done with the true net (0), never a clean "reduced" masking a dangling
+        // bracket / unexpected flat. (OcoExitService cancels the legs on the flat; this makes the operator SEE it.)
         Guid accountId = await SeedAccountAsync();
         Holds(3);
         ReducesTo(0);
 
         PositionReduceResult? result = await Reduce(accountId, 1);
 
-        result!.Outcome.Should().Be(PositionReduceOutcome.Reduced);
+        result!.Outcome.Should().Be(PositionReduceOutcome.NotReduced);
         result.NetQuantity.Should().Be(0);
     }
 
