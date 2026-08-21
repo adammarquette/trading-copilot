@@ -175,6 +175,7 @@ for validating heading-order/index against the trail in CI rather than by hand �
 | 2026-08-05 | [the client no longer retries a place, so the definitive classification is sound (gh#673)](#update-2026-08-05--the-client-no-longer-retries-a-place-so-the-definitive-classification-is-sound-gh673) |
 | 2026-08-09 | [the R-4 suggestion throttle is wired into the scan (gh#551)](#update-2026-08-09--the-r-4-suggestion-throttle-is-wired-into-the-scan-gh551) |
 | 2026-08-13 | [withdraw a pending conditional via the order API (gh#655)](#update-2026-08-13--withdraw-a-pending-conditional-via-the-order-api-gh655) |
+| 2026-08-21 | [the reduce's bracket gate is scaffolded, and the reduce stays unbuilt behind it (gh#1012)](#update-2026-08-21--the-reduces-bracket-gate-is-scaffolded-and-the-reduce-stays-unbuilt-behind-it-gh1012) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 
@@ -1218,6 +1219,31 @@ cancel (gh#250), and the operator-facing counterpart to the watcher's own cancel
   operator request, unlike the watcher, which try-locks so it never waits).
 - The `OrderTicket` surface (gh#655) offers **Withdraw** on a pending conditional and keeps the pending panel up on a
   refused withdrawal — the conditional is still live, so the surface must not imply it is gone.
+
+## Update (2026-08-21) — the reduce's bracket gate is scaffolded, and the reduce stays unbuilt behind it (gh#1012)
+
+The **partial exit** (gh#928) is the one reducing action this ADR does not yet describe, because it does not yet
+exist: there is no `VenueCapability.ReducePosition`, no `IOrderExecutor.ReducePositionAsync`, no
+`PositionReduceService`, and no `POST /accounts/{id}/positions/{instrument}/reduce`. gh#928 blocks its own backend
+increment on a practice-account verification landing first, and this is that verification —
+`Api/BracketAfterPartialCloseStagingIntegrationTests.cs`, the same shape as the gh#293 gate recorded above.
+
+**The question it settles.** The always-native safety bracket carries no size of its own; the gateway attaches it on
+fill, sized to the realized fill (gh#293), and nothing in the copilot can resize it afterwards — the client's modify
+request has no bracket field. So a position reduced *underneath* a bracket the gateway does not auto-manage leaves a
+protective leg covering the **original** quantity. Reduce long-2 → long-1 and a stop still sized 2 sells 2 against a
+1-long on trigger, **overshooting into a short-1**: a protective mechanism that *creates* exposure, which is the
+`OrphanGuardService` / gh#277 hazard class this ADR already treats as a defect wherever else it appears. The mirror
+outcome — the gateway **cancelling** the bracket — leaves the remainder **naked**, and is no better. Only an
+auto-reduce to the surviving quantity clears the gate, and the suite asserts exactly that, for a long, a short, and
+the take-profit (OCO) leg.
+
+**Unresolved, deliberately.** The suite is scaffolded and **has not been run**: the authoring environment had no
+practice credentials, so it skips by construction like every other staging gate. **No behaviour has been observed**,
+and nothing may treat the gate as cleared. If the first staging run comes back red, that red *is* the finding, and
+gh#928's reduce must itself resize or cancel the bracket — or refuse a reduce that would desync it — before any
+funded use. Until the run happens, the reduce simply stays unbuilt, which is the safe default and the one gh#928
+already chose.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the

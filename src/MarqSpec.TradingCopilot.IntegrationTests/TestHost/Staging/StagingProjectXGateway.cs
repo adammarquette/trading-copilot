@@ -225,6 +225,55 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
         _orderExecutor.PlaceOrderAsync(request, cancellationToken);
 
     /// <summary>
+    /// The single resting protective <b>take-profit</b> leg on the contract, if one stands — the OCO sibling of
+    /// <see cref="ProtectiveStop"/>, materialised as a native <see cref="OrderType.Limit"/> order when the entry
+    /// carried a profit target. Safe to filter on <c>Limit</c> only <b>after the entry has filled</b>: the entry
+    /// itself is a resting limit until then, and on a serialized, flat-at-start account it is the only other one.
+    /// </summary>
+    public static Order? ProtectiveTakeProfit(IReadOnlyList<Order> openOrders, string contractIdHint)
+    {
+        ArgumentNullException.ThrowIfNull(openOrders);
+        return openOrders.SingleOrDefault(order => order.Type == OrderType.Limit
+            && order.ContractId.Contains(contractIdHint, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Partially closes an open position at the gateway — the raw <c>partialCloseContract</c> call
+    /// (<c>PartialClosePositionAsync</c>), issued <b>directly</b> against the reserved practice account (gh#1012).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this goes direct, and why that is not the gh#668 loophole widening.</b> The copilot has <b>no reduce
+    /// path at all</b>: gh#928 — capability flag, <c>ReducePositionAsync</c>, <c>PositionReduceService</c>,
+    /// <c>POST /accounts/{id}/positions/{instrument}/reduce</c> — is unimplemented, and gh#928's own text blocks it
+    /// on <i>this</i> verification landing first. There is therefore no app surface to ask the question through,
+    /// and the question — <i>what does ProjectX do to an attached OCO bracket when the position under it is
+    /// partially closed?</i> — is a property of the <b>gateway</b>, not of any copilot code. It would read the same
+    /// whether the reduce shipped or not.
+    /// </para>
+    /// <para>
+    /// The entry this reduces is still placed <b>through the deployed app and its real risk gate</b>; only the
+    /// partial close itself is issued here. PRACTICE ONLY (R-14). A partial close only ever <b>reduces</b>
+    /// exposure, so a direct call cannot open a position the gate never saw — the property that makes the full
+    /// exit gate-exempt in the first place (ADR-0007).
+    /// </para>
+    /// </remarks>
+    public async Task<PartialClosePositionResponse> PartialCloseAsync(
+        int accountId, string contractId, int size, CancellationToken cancellationToken = default) =>
+        await _api.PartialClosePositionAsync(accountId, contractId, size, cancellationToken);
+
+    /// <summary>The account's net signed quantity on the contract right now — positive long, negative short, 0 flat.</summary>
+    public async Task<int> NetQuantityAsync(int accountId, string contractIdHint, CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<Position> positions = await OpenPositionsAsync(accountId, cancellationToken);
+        Position? position = positions.FirstOrDefault(candidate =>
+            candidate.ContractId.Contains(contractIdHint, StringComparison.OrdinalIgnoreCase));
+        return position is null
+            ? 0
+            : position.Type == PositionType.Short ? -position.Size : position.Size;
+    }
+
+    /// <summary>
     /// The ProjectX-qualified account handle the venue-neutral seam takes, from the gateway's own integer account id
     /// (<see cref="ResolveAccountIdAsync"/>). Qualified rather than bare so a foreign handle cannot reach ProjectX on
     /// a colliding key (R-17).

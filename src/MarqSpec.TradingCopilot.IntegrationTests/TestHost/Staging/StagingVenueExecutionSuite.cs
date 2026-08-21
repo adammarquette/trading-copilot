@@ -108,6 +108,11 @@ public abstract class StagingVenueExecutionSuite
     /// order id). The entry sits <paramref name="ticksBelowMarket"/> below the reference so it rests <i>Working</i>,
     /// giving a window to modify before it fills.
     /// </summary>
+    /// <param name="target">
+    /// An optional profit target, which makes the app attach the <b>take-profit (OCO) leg</b> of the native bracket
+    /// alongside the protective stop (gh#1012 needs both legs present to observe what a partial close does to them).
+    /// <see langword="null"/> — the default every earlier gate uses — attaches the stop leg only.
+    /// </param>
     protected static async Task<SendOrderResponse> PlaceRestingLongAsync(
         HttpClient client,
         Guid accountId,
@@ -116,7 +121,8 @@ public abstract class StagingVenueExecutionSuite
         decimal pointValue,
         int quantity,
         decimal market,
-        int ticksBelowMarket = 40)
+        int ticksBelowMarket = 40,
+        decimal? target = null)
     {
         decimal entry = market - (ticksBelowMarket * tickSize);
         decimal workingStop = entry - (10 * tickSize);
@@ -137,7 +143,52 @@ public abstract class StagingVenueExecutionSuite
                 Stop: workingStop,
                 SafetyStop: safetyStop,
                 ReferencePrice: entry,
-                Type: OrderType.Limit));
+                Type: OrderType.Limit,
+                Target: target));
+        response.EnsureSuccessStatusCode();
+        SendOrderResponse? sent = await response.Content.ReadFromJsonAsync<SendOrderResponse>(JsonSerializerOptions.Web);
+        ArgumentNullException.ThrowIfNull(sent);
+        return sent;
+    }
+
+    /// <summary>
+    /// The short-side mirror of <see cref="PlaceRestingLongAsync"/> (gh#1012): a <b>resting short limit</b>
+    /// <paramref name="ticksAboveMarket"/> above the market, carrying a safety stop so the app attaches the
+    /// always-native protective bracket. Every price relation inverts — the working and safety stops sit
+    /// <b>above</b> the entry, an optional <paramref name="target"/> <b>below</b> it — because a short is protected
+    /// by a buy-stop overhead. Needed because the bracket-after-partial-close hazard is direction-symmetric: an
+    /// over-sized buy-stop against a reduced short overshoots into an unwanted <i>long</i> just as readily.
+    /// </summary>
+    protected static async Task<SendOrderResponse> PlaceRestingShortAsync(
+        HttpClient client,
+        Guid accountId,
+        string symbol,
+        decimal tickSize,
+        decimal pointValue,
+        int quantity,
+        decimal market,
+        int ticksAboveMarket = 40,
+        decimal? target = null)
+    {
+        decimal entry = market + (ticksAboveMarket * tickSize);
+        decimal workingStop = entry + (10 * tickSize);
+        decimal safetyStop = entry + (20 * tickSize);
+
+        // ReferencePrice == Entry, as above: these gates test bracket behaviour, not the R-16 fat-finger band.
+        using HttpResponseMessage response = await client.PostAsJsonAsync(
+            $"/accounts/{accountId}/orders",
+            new SendOrderRequest(
+                Symbol: symbol,
+                TickSize: tickSize,
+                PointValue: pointValue,
+                Side: OrderSide.Sell,
+                Quantity: quantity,
+                Entry: entry,
+                Stop: workingStop,
+                SafetyStop: safetyStop,
+                ReferencePrice: entry,
+                Type: OrderType.Limit,
+                Target: target));
         response.EnsureSuccessStatusCode();
         SendOrderResponse? sent = await response.Content.ReadFromJsonAsync<SendOrderResponse>(JsonSerializerOptions.Web);
         ArgumentNullException.ThrowIfNull(sent);
