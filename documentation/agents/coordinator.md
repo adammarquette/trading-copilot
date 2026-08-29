@@ -36,11 +36,12 @@ back to **Planning** saying what is missing, and it gets re-scored.
 
 **Pick order**, so two coordinator sessions do not thrash:
 
-1. `Review` whose current head has no reviewer verdict, or the named SHA is behind HEAD, **and** no author is
+1. Conflicted PR — re-dispatch the implementer on the **same** claim. Do not launch a reviewer
+2. `Review` whose current head has no reviewer verdict, or the named SHA is behind HEAD, **and** no author is
    running the watch-verdict loop — launch a reviewer
-2. Changes-requested, conflicts, or red CI with no live implementer — re-dispatch on the **same** claim
-3. `In Progress` whose branch tip is stale ≥ 4 hours — announce on the issue, then re-claim
-4. Ready `Current ToDo`, top of the column first
+3. Changes-requested or red CI with no live implementer — re-dispatch on the **same** claim
+4. `In Progress` whose branch tip is stale ≥ 4 hours — announce on the issue, then re-claim
+5. Ready `Current ToDo`, top of the column first
 
 Several issues may be in flight. Each gets its own worktree via `scripts/claim.sh`. **Never `cd` into someone
 else's tree.**
@@ -91,14 +92,32 @@ The reviewer posts a verdict and names the head SHA. Verdicts arrive as a first 
   the maintainer's ([board](../project-board-workflow.md)).
 - **Request changes** with no live author → re-dispatch the implementer on the same claim. They move it to
   `In Progress` while they fix and to `Review` when they push.
-- **Conflicts or red CI** with no live implementer → re-dispatch on the same claim. You do not resolve merge
-  conflicts or apply review findings in the product tree — that is implementing.
+- **Conflicts** → see *Merge conflicts*. Re-dispatch; do not resolve; do not launch a reviewer.
+- **Red CI** with no live implementer → re-dispatch on the same claim. You do not apply review findings in
+  the product tree — that is implementing.
 
 Any unresolved finding wins.
+
+## Merge conflicts
+
+A conflicted PR is not red CI and is not a missing reviewer. GitHub reports `CONFLICTING` / `dirty` and
+**starts no checks**, which reads as "no checks reported" rather than as a conflict. Check mergeability
+**before** waiting on `watch-verdict.sh checks` or launching a reviewer.
+
+- **Detect.** `CONFLICTING` or `dirty` on an open PR against `develop`. `UNKNOWN` is GitHub still computing —
+  wait, do not treat it as a conflict.
+- **Do not review it.** A verdict on a conflicted head is a verdict on a diff that cannot land. Do not wait
+  out CI that will never start ([engineering §10](../trading-platform-engineering.md)).
+- **Re-dispatch the implementer on the same claim.** They rebase onto `origin/develop` — do not merge
+  `develop` in; a merge commit makes rebase-merge impossible (engineering §10). You do not resolve the
+  conflict.
+- **After they push.** The named verdict SHA is behind HEAD. If no author is running the loop, launch a
+  reviewer on the new head.
 
 ## What you do not do
 
 - **Implement** — including resolving merge conflicts and applying review findings. Send those back.
+- **Review a conflicted head** — re-dispatch; do not wear that hat either.
 - **Review** — launch a reviewer; do not wear that hat.
 - **Merge or close** — see the [root contract](../../AGENTS.md). Approved and green is not permission to merge.
 - **Move a `PullRequest` item** — the issue beside it is the card.
@@ -110,5 +129,5 @@ Any unresolved finding wins.
 ## Definition of done
 
 Every dispatched issue matched its hat and tier · in-flight work watched · stalls announced on the issue
-before takeover · every `Review` PR has a reviewer on the current head or an author running the loop ·
-nothing merged.
+before takeover · conflicted PRs re-dispatched, never reviewed · every mergeable `Review` PR has a reviewer
+on the current head or an author running the loop · nothing merged.
