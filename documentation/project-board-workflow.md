@@ -3,7 +3,8 @@
 > **Adopted:** 2026-07-23 (gh#136). **Board:**
 > [Trading Copilot, project #2](https://github.com/users/adammarquette/projects/2) (public).
 > **Relates to:** [`CONTRIBUTING.md`](../CONTRIBUTING.md) (branching + Definition of Done), root
-> [`AGENTS.md`](../AGENTS.md) (the four agent role contracts), engineering guide
+> [`AGENTS.md`](../AGENTS.md) (the five agent role contracts, including the
+> [coordinator](agents/coordinator.md)), engineering guide
 > [§10](trading-platform-engineering.md) (Git workflow / CI/CD), and the
 > [Work Estimate rubric](work-estimate-rubric.md).
 
