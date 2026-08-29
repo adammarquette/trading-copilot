@@ -12,6 +12,7 @@ so they cost context only when they apply.
 | writing integration or smoke tests | [`IntegrationTests/AGENTS.md`](src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) — QA | on your first read in that project |
 | **reviewing any change** | [`agents/code-reviewer.md`](documentation/agents/code-reviewer.md) | **open it yourself** |
 | **touching CI/CD, the image, compose, or deploy** | [`agents/platform.md`](documentation/agents/platform.md) | **open it yourself** |
+| **assigning work from the board, or driving a task to approval** | [`agents/coordinator.md`](documentation/agents/coordinator.md) | **open it yourself** |
 
 The subtree contracts load by directory proximity — **lazily, when you first read a file there, not at session
 start**. The role contracts follow *what you are doing* rather than where a file sits, and never auto-load.

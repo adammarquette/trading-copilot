@@ -10,8 +10,9 @@ right moment.
 | **QA Agent** — integration + smoke tests, written independently | [`src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md`](../../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) | **automatically**, in that project |
 | **Code Reviewer** — reviewing changes anywhere | [`code-reviewer.md`](code-reviewer.md) | **on demand** — open it when you take the hat; also **passed explicitly** to the reviewer an author agent spawns once its PR is green (gh#815) |
 | **Platform Agent** — CI/CD, image, compose, deploy | [`platform.md`](platform.md) | **on demand** (a stub sits in `.github/workflows/`) |
+| **Coordinator** — assigning work from the board, driving a task to approval | [`coordinator.md`](coordinator.md) | **on demand** — open it yourself; never auto-loads |
 
-Universal rules that bind all four: the root [`AGENTS.md`](../../AGENTS.md).
+Universal rules that bind all five: the root [`AGENTS.md`](../../AGENTS.md).
 
 ## Why they are not all in this folder
 
@@ -21,9 +22,9 @@ Universal rules that bind all four: the root [`AGENTS.md`](../../AGENTS.md).
   they apply, and moving them here would mean an agent writing C# no longer receives the coding standards
   unprompted. It would also break `AGENTS.md`-by-directory discovery for other tools, which is why the repo
   standardised on `AGENTS.md` over `CLAUDE.md` in the first place.
-- **Role-scoped** contracts (Reviewer, Platform) follow *what you are doing*, not where a file sits. Filing them
-  under a directory loaded them for whoever edited that directory — never the person in the role — so they live
-  here and are opened deliberately. See gh#146.
+- **Role-scoped** contracts (Reviewer, Platform, Coordinator) follow *what you are doing*, not where a file sits.
+  Filing them under a directory loaded them for whoever edited that directory — never the person in the role —
+  so they live here and are opened deliberately. See gh#146.
 
 The rule, in one line: **put a contract where it must be to load when it applies** — and catalogue them all here.
 

@@ -9,7 +9,8 @@
 One number, applied as the repo label **`Work Estimate: 1`**–**`5`** during **Planning** (before an item is
 promoted to Current ToDo). It routes work to a **model tier**: cheap models for low estimates, the most capable
 for high ones. It is a **guideline for dispatch, not a contract** — a mis-score costs money or quality, not
-correctness, because enforcement always lives below the model.
+correctness, because enforcement always lives below the model. The
+[coordinator](agents/coordinator.md) is who dispatches from this number.
 
 **It estimates the *capability the work demands* — its reasoning difficulty and blast radius — not the time or
 line-count it takes.** A 300-line mechanical rename is a *low* estimate; a one-line change to the auto-flatten

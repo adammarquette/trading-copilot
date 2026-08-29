@@ -94,8 +94,8 @@ tears it down.
 This repo is built to be navigated by AI coding agents as much as by people. Two entry points, in this order:
 
 1. **[`AGENTS.md`](AGENTS.md)** — the rules every agent follows (imported by `CLAUDE.md`, so it loads itself).
-   It routes you to your **role contract** — Coding, QA, Code Reviewer or Platform — which holds the rules the
-   root file deliberately does not repeat.
+   It routes you to your **role contract** — Coding, QA, Code Reviewer, Platform or Coordinator — which holds
+   the rules the root file deliberately does not repeat.
 2. **[`documentation/README.md`](documentation/README.md)** — the map of the documentation layer: what each
    document is, when to open it, and what it costs to read. **Go through the map; do not sweep the folder.**
 
