@@ -83,7 +83,7 @@ exactly as before.
 `IMAGE_TAG` selects the published build (default `develop`; e.g. `IMAGE_TAG=staging docker compose up -d`).
 The dev override (`docker-compose.dev.yml`) builds from your working tree and tags it `trading-copilot:local`, a
 distinct name so a later `docker compose pull` cannot clobber your build. Building needs a **recursive clone**
-(the Dockerfile copies the `external/` submodule).
+(the Dockerfile copies the four `external/` client submodules).
 
 > **Before the image is published-and-public, the default pull fails.** The GHCR package is created on the first
 > merge to `develop`, **private** until the operator flips it public (below). Until that flip, `docker compose up`

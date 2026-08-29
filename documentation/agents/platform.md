@@ -46,7 +46,7 @@ staging ← `staging`, production ← `main` — on the one-way ladder in [`CONT
 
 Five constraints that bite in CI:
 
-- The repo has a **submodule** under `external/` — checkout needs `submodules: true`.
+- The repo has **four submodules** under `external/` (ProjectX, Tradovate, Finnhub, Tiingo) — checkout needs `submodules: true`. All four are public; a private one 404s `GITHUB_TOKEN` and fails every checkout (gh#1023).
 - `dotnet format` must run with `--exclude external/`, or it reformats vendored code.
 - **The compose `environment:` map is an ALLOWLIST.** A key documented in `.env.example` but not named there is
   read for interpolation and then **silently dropped** — the operator sets it, the app never sees it, and nothing
