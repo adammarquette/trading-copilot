@@ -194,7 +194,7 @@ for the branching model, commit conventions, and the test-first Definition of Do
 **Direction is maintainer-led.** Adam Marquette is the final authority on scope, architecture, and what merges.
 Contributions are reviewed on their merits and on fit with the direction here; there is no obligation to accept
 any change, and a declined PR is not a judgement on its quality. If you want the project to go somewhere it
-isn't going, **fork it** — the licence exists so you can, and a fork is a legitimate outcome rather than a
+isn't going, **fork it** — and treat a fork as a legitimate outcome rather than a
 failure. Safety-critical areas (the risk gate, execution, auto-flatten, the kill switch) carry a higher bar:
 expect design discussion before implementation.
 
@@ -202,11 +202,6 @@ expect design discussion before implementation.
 
 - **`MarqSpec.Client.ProjectX`** — the ProjectX / TopstepX client used for market data, account state, and order
   execution.
-
-## License
-
-Copyright © 2026 Adam Marquette. Licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE) and
-[`NOTICE`](NOTICE).
 
 ### An AI-first engineering project
 
@@ -218,9 +213,8 @@ of what it demonstrates: the requirements traceability (`R-#`), the ADR trail, t
 cross-referenced knowledge base exist so that agents can reconstruct context and build against a specification
 rather than a vibe. Judge it on the architecture, the test suites, and whether the safety-critical paths hold.
 
-One practical consequence: copyright in AI-generated work is unsettled, so the strength of any claim here — and
-with it the enforceability of any licence — is uncertain. A permissive licence asks little, which makes the
-question largely academic. It would not be under a restrictive one.
+One practical consequence: copyright in AI-generated work is unsettled, so the strength of ownership claims can
+be uncertain.
 
 ---
 
