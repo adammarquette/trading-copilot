@@ -337,6 +337,89 @@ ways: a **mechanical** setup emits a **deterministic alert / suggestion** (no LL
 strategy agent** (the executor combines agents into a timely suggestion) — one LLM call per event, not per tick.
 Cheaper-model triage, debounce / rate-limit, and an optional AI-spend governor keep cost bounded. Rationale and the
 "LLM at the edges" model: [ADR-0008](adr/0008-ai-invocation-cost-model.md).
+
+Two views of that flow, since the prose below is dense and the ordering is the design. The first is the
+**rulebook → armed trigger** lifecycle (R-7), with the deferred pieces marked; the second is **one agent-review
+fire** end to end (R-4), including every point at which it can stop before an LLM call is made.
+
+```mermaid
+flowchart TB
+  OP(["Operator states a practice — R-6 chat"])
+  COMPILE["NL → condition compiler (R-7)<br/>deferred, gh#660 — today: structural POST /api/triggers"]
+  RULE[("Rule + instrument_dependency_snapshot<br/>deferred — SourceRuleId / SourceConversationId are the seams")]
+  TRIG[("TriggerRecord · Confirmation = Unconfirmed<br/>inert regardless of Enabled — gh#470")]
+  CONFIRM{"POST /api/triggers/{id}/confirm"}
+  INERT["stays inert — the scan never sees it"]
+  SCAN["TriggerScanHost → TriggerEvaluationService.ScanAsync<br/>reads R-22 indicators · pure TriggerDebounce · fail-closed on null"]
+  ROUTE{"Route"}
+  MECH["mechanical — INotificationChannel<br/>send-before-commit, no LLM (gh#385)"]
+  AGENT["agent-review — ITriggerReviewer<br/>throttle + governor, then triage → deep (gh#402/#449/#476)"]
+  SUG[("Suggestion staged — commit-then-notify")]
+  FIRING[("TriggerFiring — append-only, dedup per ArmCycle")]
+  TAKE["POST /suggestions/{id}/take → order gate (ADR-0007)"]
+
+  OP --> COMPILE --> RULE --> TRIG --> CONFIRM
+  CONFIRM -- "no" --> INERT
+  CONFIRM -- "yes" --> SCAN
+  SCAN -- "arming edge" --> ROUTE
+  ROUTE --> MECH
+  ROUTE --> AGENT
+  AGENT -- "Suggest" --> SUG
+  AGENT -- "Suppress" --> FIRING
+  MECH --> FIRING
+  SUG --> FIRING
+  SUG --> TAKE
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SCAN as TriggerEvaluationService
+    participant IND as IIndicatorSource (R-22)
+    participant GOV as Throttle + IAiSpendGovernor
+    participant REV as ITriggerReviewer
+    participant LLM as ILlmProvider (Anthropic)
+    participant DB as Suggestions + TriggerFiring
+    participant CH as INotificationChannel
+
+    Note over SCAN: per pass, per owner-scoped context — Confirmed AND Enabled only
+    SCAN->>IND: read (symbol, indicator, period, resolution), cached per pass
+    IND-->>SCAN: value or null
+
+    alt null — Unmeasurable
+        SCAN->>SCAN: TriggerDebounce holds (never fires, never re-arms)
+        SCAN->>SCAN: UnmeasurableSince / StalenessReportedAt — warn once past 30 min (gh#469/#515)
+    else arming edge
+        alt Route = mechanical (gh#385)
+            SCAN->>CH: alert — send-before-commit
+        else Route = agent-review (gh#402)
+            SCAN->>GOV: throttle (gh#551), then governor (gh#448)
+            alt suppressed or budget exhausted
+                GOV-->>SCAN: blocked — no LLM call, no AIUsage row
+                SCAN->>CH: advisory (honest-inert, one per arming edge)
+            else allowed
+                SCAN->>SCAN: BuildEnrichmentAsync — bounded numeric context, fail-open (gh#476)
+                SCAN->>REV: ReviewAsync(context, allowEscalate) — gh#478
+                REV->>LLM: triage tier — structured output: suggest / suppress / escalate
+                opt escalate and affordable (gh#449)
+                    REV->>LLM: deep tier — market-context fenced as data
+                end
+                REV-->>SCAN: AgentReview(Outcome, Costs)
+                SCAN->>DB: AIUsage — one row per call, two on escalation (gh#431)
+                alt Suggest
+                    SCAN->>SCAN: SuggestionGeometry.Validate + tradable account
+                    SCAN->>DB: stage Suggestion — size/validity are the system's (gh#542/#544)
+                    SCAN->>CH: advisory + realtime push (commit-then-notify)
+                else Suppress
+                    SCAN->>CH: advisory, or silent for NotWorthSurfacing
+                end
+            end
+        end
+        SCAN->>DB: JournalFiring + arm := Fired (every outcome)
+    end
+    Note over SCAN,CH: The reviewer reaches no order, venue or gate type.<br/>Taking a suggestion re-enters OrderExecutionService (ADR-0007).
+```
+
 **Implemented — and now the most-built subsystem here.** `TriggerScanHost` + `TriggerEvaluationService` run the scan;
 the **mechanical** route fires edge-debounced alerts with no LLM (gh#385) and the **agent-review** route wakes the
 reviewer behind `ILlmProvider` (gh#402), served by the real `AnthropicLlmProvider` once a key is present (gh#423).
