@@ -37,8 +37,8 @@ back to **Planning** saying what is missing, and it gets re-scored.
 **Pick order**, so two coordinator sessions do not thrash:
 
 1. Conflicted PR — re-dispatch the implementer on the **same** claim. Do not launch a reviewer
-2. `Review` whose current head has no reviewer verdict, or the named SHA is behind HEAD, **and** no author is
-   running the watch-verdict loop — launch a reviewer
+2. `Review` whose current head has no reviewer verdict, or the named SHA is behind HEAD, **and** the PR does
+   **not** carry `verdict:watching` — launch a reviewer
 3. Changes-requested or red CI with no live implementer — re-dispatch on the **same** claim
 4. `In Progress` whose branch tip is stale ≥ 4 hours — announce on the issue, then re-claim
 5. Ready `Current ToDo`, top of the column first
@@ -81,12 +81,23 @@ They do not review their own PR.
 blocks on `scripts/watch-verdict.sh` ([engineering §10](../trading-platform-engineering.md); gh#815). You do
 not take that loop over while it is running.
 
-When Review has no verdict on the current head **and** no author is watching, launch a reviewer wearing the
-[reviewer contract](code-reviewer.md). That is a different hat. The author never reviews their own PR. You
-never review either.
+**`verdict:watching` is how you tell.** `watch-verdict.sh verdict` applies that label while it blocks and
+clears it on every exit, signal included (gh#1028). Before it existed this clause read *"no author is running
+the loop"* — a condition with no observable form, which left you choosing between never launching a reviewer
+(a dead author's PR waits forever) and always launching one (you race the author's own reviewer on the same
+head). Read the label; do not infer.
+
+When Review has no verdict on the current head **and** the PR does not carry `verdict:watching`, launch a
+reviewer wearing the [reviewer contract](code-reviewer.md). That is a different hat. The author never reviews
+their own PR. You never review either.
 
 The reviewer posts a verdict and names the head SHA. Verdicts arrive as a first line of
 `**Verdict: Approve**` or `**Verdict: Request changes**` when GitHub blocks self-review.
+
+**A green `reviewer` job is not a review.** Since gh#994 that workflow degrades to a *clean skip* on any API
+failure it cannot fix — no credit, a bad key, a rate limit, a 5xx — so the job concludes green with nothing
+posted and only a warning annotation to show for it. Key on **a verdict existing**, never on the job's
+conclusion, or you will move cards on reviews that never happened.
 
 - **Approve** → stop. There is no `Ready to Merge` column. `Review` → `Done` is the merge, and merging stays
   the maintainer's ([board](../project-board-workflow.md)).
@@ -95,8 +106,18 @@ The reviewer posts a verdict and names the head SHA. Verdicts arrive as a first 
 - **Conflicts** → see *Merge conflicts*. Re-dispatch; do not resolve; do not launch a reviewer.
 - **Red CI** with no live implementer → re-dispatch on the same claim. You do not apply review findings in
   the product tree — that is implementing.
+- **Two reviewers, different verdicts on the same head** → the approval does not carry. See
+  [board: a split verdict](../project-board-workflow.md#a-split-verdict) — every reviewer on the current head
+  must approve, and any unresolved finding outranks any approval.
 
 Any unresolved finding wins.
+
+**`BLOCKED` at the end of the loop is not yours to fix.** `protect-develop` carries
+`require_extra_approval_for_unattributed_changes`, and it fires on the `Co-Authored-By: Claude` trailer this
+repo *mandates*. So a PR that is approved, green, unconflicted and up to date still reports
+`mergeStateStatus: BLOCKED` with `reviewDecision: ""`. That is the gate asking the **maintainer** for an
+approving review — not a defect, and not something a re-dispatched implementer can clear. Confirm the required
+checks are green with no unresolved threads, report it ready to merge, and stop.
 
 ## Merge conflicts
 
@@ -111,8 +132,8 @@ A conflicted PR is not red CI and is not a missing reviewer. GitHub reports `CON
 - **Re-dispatch the implementer on the same claim.** They rebase onto `origin/develop` — do not merge
   `develop` in; a merge commit makes rebase-merge impossible (engineering §10). You do not resolve the
   conflict.
-- **After they push.** The named verdict SHA is behind HEAD. If no author is running the loop, launch a
-  reviewer on the new head.
+- **After they push.** The named verdict SHA is behind HEAD. If the PR does not carry `verdict:watching`,
+  launch a reviewer on the new head.
 
 ## What you do not do
 
