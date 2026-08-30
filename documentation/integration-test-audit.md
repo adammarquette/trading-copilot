@@ -233,6 +233,14 @@ The `Trade` rows these suites guard are what the R-4 and R-5 governors read, so 
 | **`Signals/NewsSalienceIntegrationTests.cs`** | **Importance-starring salience — Part A** (gh#362, gh#27, ADR-0014) over `/api/news` + `/api/news/feedback`: a star raises the salience of **similar future** news, a mute is its down-weight inverse, un-starring reverts, and a **salience floor** keeps a muted item visible (no filter bubble); the `CK_SoftSignalFeedback_Kind_NotUnknown` / `UX_SoftSignalFeedback_Importance` DB guards proven by name (renamed by gh#762 from its pre-rename name; gh#979 caught this row still naming that one). QA for gh#362 | **Active** (Passing) |
 | **`Signals/SalienceIsNotARiskControlIntegrationTests.cs`** | **Salience is never a risk control — Part B** (gh#362, gh#27, ADR-0014) — the **behavioural** half of a two-tier guard (the unit test asserts it structurally). Drives the real order-submit → gate path with the adversarial venue stub and asserts that a maximally-starred or maximally-muted operator profile leaves the gate's decision **byte-identical** to the un-rated baseline — closing the leak a reflection check cannot see (a gate call-site scaling `RequestedQuantity` by a salience multiplier). QA for gh#362 | **Active** (Passing) |
 
+**gh#464's live-feed proof is still unwritten (checked 2026-08-30, no suite file, deliberately no row above).** Both
+preconditions the issue names remain unmet, verified directly rather than assumed stale: no `Finnhub__ApiKey` /
+`Tiingo__ApiKey` exist in any GitHub secret or environment (repo-level `gh secret list`, and every environment via
+the API), no workflow forwards them, and Railway's `soothing-illumination` project has only a `production`
+environment (one `Postgres` service, offline) — no `dev`/`staging` deploy for a news poller to run against.
+Shipping a suite that only skips by construction would repeat the gh#1012/#1014 precedent the QA contract's guard
+discipline warns against, so the evidence lives on the issue instead of as permanently-skipped test methods here.
+
 ### The news-embedding tree — semantic retrieval and its GC
 
 Every suite here is **relational-only by construction**: `TradingCopilotDbContext` `Ignore()`s `EmbeddingRecord` unless `Database.IsNpgsql()` (gh#109, ADR-0001), so the pgvector reads are *reachable but untestable* at the unit tier and exist only against real Postgres + pgvector. All four share `EmbeddingReadTestPostgresFactory`, which strips every always-on `IHostedService` so the real GC host's wall-clock loop cannot race an explicit call.
