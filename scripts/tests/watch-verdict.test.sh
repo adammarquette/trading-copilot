@@ -93,12 +93,12 @@ signal_case() { # <signal> <expected status>
 }
 signal_case TERM 143
 signal_case INT  130
-# HUP is asserted for the lifecycle, but do not read it as proof of the HUP TRAP specifically: mutation-tested
-# on Git Bash / MSYS, removing `trap 'exit 129' HUP` leaves this case passing, because there the shell still
-# exits 129 and still runs its EXIT trap on an untrapped HUP. TERM and INT are the two that were mutation-proved
-# to red (drop their exit-ing traps and both report "the wait SURVIVED the signal"), and they are the two that
-# actually end an agent session. Keep HUP anyway -- a lifecycle assertion that cannot fail here can still fail
-# elsewhere, and it costs one case.
+# What these three catch is a handler that CLEARS AND RETURNS -- restore `trap clear_watching EXIT INT TERM`,
+# the round-1 shape, and all three red with "the wait SURVIVED the signal". What they do NOT catch is a missing
+# trap: delete any one of `trap 'exit 130' INT` / `143 TERM` / `129 HUP` and its case still passes, on Git Bash
+# and on Linux alike, because bash runs the EXIT trap on a fatal signal anyway and the status is 128+signum
+# either way. That is not a hole -- a missing trap is harmless here, and the returning handler is the bug that
+# actually shipped -- but do not read a green run as proof the traps are load-bearing. They are not.
 signal_case HUP  129
 
 # --- green checks HAND OFF, they do not finish --------------------------------------------------------
@@ -130,6 +130,16 @@ check 'add-fail status'  "$rc"             0 'an unlabelled wait still works, it
 check 'add-fail cleared' "$(count REMOVE)" 0 'never applied, so never removed'
 if grep -q 'could not apply' "$TMP/err.addfail"; then printf 'ok    add-fail warns on stderr\n'
 else printf '::error::FAIL  add-fail must warn on stderr -- a silent invisible wait is undiagnosable\n'; fail=1; fi
+
+# The hand-off's loose end: `verdict` failing to re-apply must still try to take down whatever `checks` handed
+# on, or a label this process never applied sits for its whole shelf life with nothing left to clear it.
+export WV_LOG="$TMP/log.inherit"; : > "$WV_LOG"
+WV_ADD_RC=1 WV_VERDICT='CHANGES-REQUESTED|deadbeefdeadbeef|1|99|Changes were requested on deadbee' \
+  bash "$SCRIPT" verdict 1 --repo o/r --poll-seconds 1 >"$TMP/out.inherit" 2>"$TMP/err.inherit"; rc=$?
+check 'inherited status'  "$rc"             1 'the wait still rules normally without a label of its own'
+check 'inherited cleared' "$(count REMOVE)" 1 'and still tries to clear one an earlier phase may have left'
+if grep -q 'handed one on' "$TMP/err.inherit"; then printf 'ok    inherited case says which failure it is\n'
+else printf '::error::FAIL  the verdict-phase add failure must not claim the wait is merely invisible\n'; fail=1; fi
 
 export WV_LOG="$TMP/log.rmfail"; : > "$WV_LOG"
 WV_CHECKS=red WV_REMOVE_RC=1 bash "$SCRIPT" checks 1 --repo o/r --poll-seconds 1 \
