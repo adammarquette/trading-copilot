@@ -81,16 +81,35 @@ They do not review their own PR.
 blocks on `scripts/watch-verdict.sh` ([engineering §10](../trading-platform-engineering.md); gh#815). You do
 not take that loop over while it is running.
 
-**`verdict:watching` is how you tell.** `watch-verdict.sh` applies that label while it blocks — through the
-`checks` wait as well as `verdict`, so the label is never absent while an author is live — and clears it on
-every exit, signal included (gh#1028). Before it existed this clause read *"no author is running the
-loop"* — a condition with no observable form, which left you choosing between never launching a reviewer
-(a dead author's PR waits forever) and always launching one (you race the author's own reviewer on the same
-head). Read the label; do not infer.
+**`verdict:watching` is how you tell.** `watch-verdict.sh` raises that label while it blocks and drops it on
+every exit, signal included (gh#1028). Before it existed this clause read *"no author is running the loop"* — a
+condition with no observable form, which left you choosing between never launching a reviewer (a dead author's
+PR waits forever) and always launching one (you race the author's own reviewer on the same head). Read the
+label; do not infer.
+
+**It spans both waits, seam included.** `checks` and `verdict` are two separate processes and the author spawns
+the reviewer *between* them, so a green `checks` hands the label on instead of clearing it and `verdict`
+inherits it. The signal therefore covers the spawn itself — which is the only moment where launching a second
+reviewer actually produces a split verdict.
 
 When Review has no verdict on the current head **and** the PR does not carry `verdict:watching`, launch a
 reviewer wearing the [reviewer contract](code-reviewer.md). That is a different hat. The author never reviews
 their own PR. You never review either.
+
+**A label has a shelf life; check it before you honour it.** Traps cover every exit a process can observe, and
+none of the ones it cannot — `SIGKILL`, a killed container, a lost machine. So `verdict:watching` can outlive
+its author, and unlike a stale claim branch it suppresses reviewers *silently and forever*. Both waits are
+deadline-bounded (45 minutes each by default), so **two hours is the outside of a legitimate wait**. Read when
+it went up before you treat it as live:
+
+```bash
+gh api "repos/{owner}/{repo}/issues/<pr>/timeline" --paginate \
+  --jq '[.[] | select(.event == "labeled" and .label.name == "verdict:watching")] | last | .created_at'
+```
+
+Older than two hours is stale, and the stale-tip rule applies as it does to a claim: **say so on the issue or
+PR first**, then remove the label and proceed as though it were absent. Say it even when you are confident —
+the note is what lets the author, if it is somehow still alive, object before you race it.
 
 The reviewer posts a verdict and names the head SHA. Verdicts arrive as a first line of
 `**Verdict: Approve**` or `**Verdict: Request changes**` when GitHub blocks self-review.

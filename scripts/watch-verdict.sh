@@ -32,10 +32,14 @@
 #
 # WHAT IT DOES NOT DO
 # -------------------
-# It does not review, spawn the reviewer, push, or merge. It only observes: reading is the whole of its
-# GitHub access. Who renders the verdict, and the independence rules that keep a reviewer spawned by the
-# author honest, are the [reviewer contract](documentation/agents/code-reviewer.md)'s; the loop the exit
-# statuses above serve is engineering §10's.
+# It does not review, spawn the reviewer, push, or merge. Its ONE write is the `verdict:watching` label it
+# raises for the life of its wait and drops on the way out (gh#1028); everything else it touches is a read.
+# That write is not optional to provision: the identity this runs under needs `pull_requests: write`, and
+# without it every wait is invisible to a coordinator -- a label failure is a warning on stderr, never a hard
+# stop, so a read-only token degrades QUIETLY to the pre-gh#1028 behaviour. See *The watching signal* below.
+# Who renders the verdict, and the independence rules that keep a reviewer spawned by the author honest, are
+# the [reviewer contract](documentation/agents/code-reviewer.md)'s; the loop the exit statuses above serve is
+# engineering §10's.
 #
 # `review-verdict` in CI waits for the same ruling from the same script (.github/scripts/verdict-state.sh) --
 # deliberately, so the gate and the author can never disagree about whether a PR is approved.
@@ -116,11 +120,26 @@ attempt=0
 # and each of those EXITS rather than clearing the label itself: a handler that returns hands control back to
 # the poll loop, leaving an UNLABELLED wait still running -- the very "nobody is watching" state the label
 # exists to deny. Exiting runs the EXIT trap, so the label is cleared on exactly one path.
+#
+# The label spans BOTH waits as one, and the seam between them is the whole reason. `checks` and `verdict` are
+# separate processes, and the author spawns the reviewer BETWEEN them (engineering §10's ordering) -- so a
+# `checks` that cleared the label on its way out would go dark for exactly the step the signal exists to
+# serialize, and a coordinator polling there would launch the second reviewer. A green `checks` therefore hands
+# the label ON rather than clearing it, and the `verdict` process inherits it. Every other way out of `checks`
+# -- red, timeout, signal -- clears it, because those end the wait rather than continuing it.
+#
+# That hand-off is what makes a STUCK label reachable: nothing clears it if the author dies in the seam. It is
+# bounded rather than prevented, and the bound is the coordinator's, not this script's -- `verdict:watching`
+# older than the deadlines here is stale and may be taken over, which the coordinator contract states and
+# gives the command for (gh#1028). A signal this script cannot clear from inside its own grave is why.
 WATCH_LABEL="verdict:watching"
 watching_applied=""
+# Set only on the one exit that is a hand-off, never a finish: `checks` going green into the reviewer spawn.
+hand_off=""
 
 clear_watching() {
   [ -n "$watching_applied" ] || return 0
+  [ -z "$hand_off" ] || return 0
   watching_applied=""
   # Warned about rather than swallowed. The apply path degrades loudly for the same reason this one must: a
   # label that fails to come OFF is the worse of the two failures, because it suppresses reviewers for as long
@@ -196,6 +215,10 @@ if [ "$CMD" = "checks" ]; then
     if [ "$pending_checks" -eq 0 ] && [ "$passed_checks" -gt 0 ]; then
       printf '%d check(s) green on %s.\n' "$passed_checks" "$PR_URL"
       printf 'Spawn the reviewer now, then wait on it: scripts/watch-verdict.sh verdict %s\n' "$PR"
+      # Handed on, not finished: the label stays up across the reviewer spawn, and `verdict` inherits it.
+      # If you stop here instead of running `verdict`, take it down -- it is a claim that you are still
+      # waiting, and the coordinator reads it as one.
+      hand_off=1
       exit 0
     fi
 
