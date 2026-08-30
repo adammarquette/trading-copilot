@@ -122,7 +122,13 @@ watching_applied=""
 clear_watching() {
   [ -n "$watching_applied" ] || return 0
   watching_applied=""
-  gh pr edit "$PR" --repo "$REPO" --remove-label "$WATCH_LABEL" >/dev/null 2>&1 || true
+  # Warned about rather than swallowed. The apply path degrades loudly for the same reason this one must: a
+  # label that fails to come OFF is the worse of the two failures, because it suppresses reviewers for as long
+  # as it sits there, and nothing else will ever mention it. The warning cannot be a non-zero return -- this
+  # runs from the EXIT trap, where a failing command would overwrite the exit status the caller reads.
+  gh pr edit "$PR" --repo "$REPO" --remove-label "$WATCH_LABEL" >/dev/null 2>&1 || \
+    printf 'watch-verdict: could not remove %s from %s -- clear it by hand (gh#1028)\n' \
+      "$WATCH_LABEL" "$PR_URL" >&2
 }
 
 # Created on demand so a fresh clone needs no setup step; a no-op once it exists.
