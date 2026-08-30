@@ -71,7 +71,7 @@ public class ConfluenceAssemblyIntegrationTests : IClassFixture<AgentReviewTestP
     private const int TriggerSize = 2;
     private const string PrimaryVenue = "projectx";
 
-    private static readonly DateTimeOffset Now = AgentReviewFixture.Now;
+    private static readonly DateTimeOffset _now = AgentReviewFixture.Now;
 
     private readonly AgentReviewTestPostgresFactory _factory;
     private readonly AgentReviewFixture _fixture;
@@ -301,7 +301,7 @@ public class ConfluenceAssemblyIntegrationTests : IClassFixture<AgentReviewTestP
             level.Bottom = 4_990m;
             level.TouchCount = 3;
             level.Significance = 20m;
-            level.UpdatedAt = Now;
+            level.UpdatedAt = _now;
         });
         await AssertSnapshotUnchangedAsync("a merge of the source level must not move the frozen snapshot");
 
@@ -424,7 +424,7 @@ public class ConfluenceAssemblyIntegrationTests : IClassFixture<AgentReviewTestP
                 ArmCycle = 0,
                 AccountId = route == TriggerRoute.AgentReview ? accountId : null,
                 Size = route == TriggerRoute.AgentReview ? TriggerSize : null,
-                CreatedAt = Now.AddDays(-1),
+                CreatedAt = _now.AddDays(-1),
             });
             await database.SaveChangesAsync();
             return 0;
@@ -440,9 +440,9 @@ public class ConfluenceAssemblyIntegrationTests : IClassFixture<AgentReviewTestP
                 ResolutionMinutes = resolutionMinutes,
                 Indicator = Indicator,
                 Period = Period,
-                BucketStart = Now.AddMinutes(-resolutionMinutes),
+                BucketStart = _now.AddMinutes(-resolutionMinutes),
                 Value = value,
-                RecordedAt = Now.AddMinutes(-resolutionMinutes),
+                RecordedAt = _now.AddMinutes(-resolutionMinutes),
             });
             await database.SaveChangesAsync();
             return 0;
@@ -470,10 +470,10 @@ public class ConfluenceAssemblyIntegrationTests : IClassFixture<AgentReviewTestP
                 Bottom = bottom,
                 Kind = kind,
                 Significance = significance,
-                FormedAtBucket = Now.AddHours(-2),
+                FormedAtBucket = _now.AddHours(-2),
                 TouchCount = 2,
                 Active = active,
-                UpdatedAt = Now.AddHours(-1),
+                UpdatedAt = _now.AddHours(-1),
             });
             await database.SaveChangesAsync();
             return id;
