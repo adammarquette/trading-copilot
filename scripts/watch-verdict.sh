@@ -96,6 +96,44 @@ deadline=$(( $(date +%s) + DEADLINE_MINUTES * 60 ))
 attempt=0
 
 # ---------------------------------------------------------------------------------------------------------
+# The watching signal
+# ---------------------------------------------------------------------------------------------------------
+# This wait is a LOCAL blocking call: nothing outside the authoring session can see that it is running. That
+# invisibility used to leave the coordinator guessing, because its contract said to launch a reviewer only when
+# "no author is running the watch-verdict loop" -- a condition with no observable form. Both guesses are wrong:
+# assume an author is watching and a dead author's PR waits forever; assume none and you race the author's own
+# reviewer on the same head (gh#1028).
+#
+# So the `verdict` wait announces itself, and the coordinator reads the label instead of guessing.
+#
+# The trap covers EVERY exit, not only the clean one. A stuck `verdict:watching` is worse than no label at all,
+# because it suppresses reviewers indefinitely -- and a bare `trap ... EXIT` does not fire when the shell is
+# killed by a signal, which is exactly how an interrupted agent session ends. Hence INT and TERM as well.
+WATCH_LABEL="verdict:watching"
+watching_applied=""
+
+clear_watching() {
+  [ -n "$watching_applied" ] || return 0
+  watching_applied=""
+  gh pr edit "$PR" --repo "$REPO" --remove-label "$WATCH_LABEL" >/dev/null 2>&1 || true
+}
+
+if [ "$CMD" = "verdict" ]; then
+  # Created on demand so a fresh clone needs no setup step; a no-op once it exists.
+  gh label create "$WATCH_LABEL" --repo "$REPO" --color BFD4F2 \
+    --description "An author is blocked on watch-verdict.sh for this PR" >/dev/null 2>&1 || true
+  if gh pr edit "$PR" --repo "$REPO" --add-label "$WATCH_LABEL" >/dev/null 2>&1; then
+    watching_applied=1
+    trap clear_watching EXIT INT TERM
+  else
+    # Degrade loudly rather than failing: the wait still works, it is just invisible to a coordinator, which
+    # is the pre-gh#1028 behaviour and no worse than it.
+    printf 'watch-verdict: could not apply %s -- this wait is invisible to a coordinator (gh#1028)\n' \
+      "$WATCH_LABEL" >&2
+  fi
+fi
+
+# ---------------------------------------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------------------------------------
 # `review-verdict` is EXCLUDED from every check reading below, and that exclusion is load-bearing: it is the
