@@ -81,9 +81,10 @@ They do not review their own PR.
 blocks on `scripts/watch-verdict.sh` ([engineering §10](../trading-platform-engineering.md); gh#815). You do
 not take that loop over while it is running.
 
-**`verdict:watching` is how you tell.** `watch-verdict.sh verdict` applies that label while it blocks and
-clears it on every exit, signal included (gh#1028). Before it existed this clause read *"no author is running
-the loop"* — a condition with no observable form, which left you choosing between never launching a reviewer
+**`verdict:watching` is how you tell.** `watch-verdict.sh` applies that label while it blocks — through the
+`checks` wait as well as `verdict`, so the label is never absent while an author is live — and clears it on
+every exit, signal included (gh#1028). Before it existed this clause read *"no author is running the
+loop"* — a condition with no observable form, which left you choosing between never launching a reviewer
 (a dead author's PR waits forever) and always launching one (you race the author's own reviewer on the same
 head). Read the label; do not infer.
 
