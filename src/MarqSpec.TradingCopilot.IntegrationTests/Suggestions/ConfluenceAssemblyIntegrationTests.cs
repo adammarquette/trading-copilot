@@ -358,8 +358,11 @@ public class ConfluenceAssemblyIntegrationTests : IClassFixture<AgentReviewTestP
         // R-20: the suggestion (and its factor set) this shared, venue-spanning market data fed stays visible ONLY
         // to the firing owner -- the default-deny filter, not the shared-data exemption that let both venues' levels
         // in above. Built exactly as production scopes a per-owner context (TriggerEvaluationService.ProcessOwnerAsync).
+        // DbContextOptions<T> is registered SCOPED (not singleton), so it must be resolved from a scope -- the
+        // options object itself is plain configuration, so it stays usable after the resolving scope is disposed.
+        using IServiceScope resolvingScope = _factory.Services.CreateScope();
         DbContextOptions<TradingCopilotDbContext> options =
-            _factory.Services.GetRequiredService<DbContextOptions<TradingCopilotDbContext>>();
+            resolvingScope.ServiceProvider.GetRequiredService<DbContextOptions<TradingCopilotDbContext>>();
 
         await using (TradingCopilotDbContext strangerScope = new(options, new OwnerUser(Guid.NewGuid())))
         {
