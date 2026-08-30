@@ -104,8 +104,18 @@ it went up before you treat it as live:
 
 ```bash
 gh api "repos/{owner}/{repo}/issues/<pr>/timeline" --paginate \
-  --jq '[.[] | select(.event == "labeled" and .label.name == "verdict:watching")] | last | .created_at'
+  --jq '.[] | select(.event == "labeled" and .label.name == "verdict:watching") | .created_at' | tail -1
 ```
+
+**Stream the matches and take the last; do not collect them.** `gh api --paginate` applies `--jq` **per page**
+rather than to the concatenation, so a collecting form (`[…] | last`) returns the last match *on every page*
+plus a blank line for every page that has none — and since the timeline is ascending, the final page of a
+long-running PR usually has none, so the last line comes back **empty** exactly where it matters. `--slurp` is
+rejected alongside `--jq`, so this is not a flag away.
+
+**An empty result is not an old label; it is no reading at all** — a PR with no `verdict:watching` event, or a
+call that failed. Treat it as *undated*, never as stale: go and look at the PR rather than taking the branch
+that lets you proceed, because an undatable label read as stale is how you remove one from a live author.
 
 Older than two hours is stale, and the stale-tip rule applies as it does to a claim: **say so on the issue or
 PR first**, then remove the label and proceed as though it were absent. Say it even when you are confident —
@@ -143,7 +153,11 @@ checks are green with no unresolved threads, report it ready to merge, and stop.
 
 A conflicted PR is not red CI and is not a missing reviewer. GitHub reports `CONFLICTING` / `dirty` and
 **starts no checks**, which reads as "no checks reported" rather than as a conflict. Check mergeability
-**before** waiting on `watch-verdict.sh checks` or launching a reviewer.
+**before** waiting on `watch-verdict.sh checks` or launching a reviewer. Mind what that wait costs you now:
+**running `checks` yourself takes the claim.** It raises `verdict:watching` like any other wait, and a green
+exit deliberately *hands it on* rather than clearing it — so a coordinator that walks away there has asserted
+an author is waiting, and its own rule above then declines to launch a reviewer for the next two hours. Either
+finish the loop you started or take the label down as you leave; the command is in the green exit's own output.
 
 - **Detect.** `CONFLICTING` or `dirty` on an open PR against `develop`. `UNKNOWN` is GitHub still computing —
   wait, do not treat it as a conflict.
