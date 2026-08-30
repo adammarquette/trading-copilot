@@ -124,10 +124,10 @@ Work complete and a **PR is open**. Move here when the PR exists.
   PR number and nothing else — the independence rules that keep this honest are the
   [contract's](agents/code-reviewer.md), and the loop is
   [engineering §10](trading-platform-engineering.md)'s (`gh#815`).
-- **While the author is waiting, the PR carries `verdict:watching`.** `watch-verdict.sh verdict` applies that
-  label for the life of its wait and clears it on every exit, signals included. It exists so a
-  [coordinator](agents/coordinator.md) can tell a live author from a dead one without guessing — read the
-  label, never infer from silence (`gh#1028`).
+- **While the author is waiting, the PR carries `verdict:watching`.** `watch-verdict.sh` applies that label for
+  the life of its wait — the `checks` phase included, since the author spawns its reviewer the moment checks go
+  green — and clears it on every exit, signals included. It exists so a [coordinator](agents/coordinator.md) can
+  tell a live author from a dead one without guessing — read the label, never infer from silence (`gh#1028`).
 
 #### A split verdict
 Two reviewers can rule on the same head — the author spawns one, and a coordinator that could not see the

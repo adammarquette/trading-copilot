@@ -104,11 +104,18 @@ attempt=0
 # assume an author is watching and a dead author's PR waits forever; assume none and you race the author's own
 # reviewer on the same head (gh#1028).
 #
-# So the `verdict` wait announces itself, and the coordinator reads the label instead of guessing.
+# So the wait announces itself, and the coordinator reads the label instead of guessing. BOTH phases label,
+# not just `verdict`: the coordinator launches a reviewer whenever the label is absent, so labelling only the
+# `verdict` phase would leave the whole `checks` wait -- about 15 minutes -- reading as "nobody is watching".
+# The reviewer it launched there would then race the one the author spawns the moment `checks` returns 0, which
+# is the split verdict this signal exists to prevent. The label has to go up BEFORE the action it serializes.
 #
 # The trap covers EVERY exit, not only the clean one. A stuck `verdict:watching` is worse than no label at all,
 # because it suppresses reviewers indefinitely -- and a bare `trap ... EXIT` does not fire when the shell is
-# killed by a signal, which is exactly how an interrupted agent session ends. Hence INT and TERM as well.
+# killed by a signal, which is exactly how an interrupted agent session ends. Hence INT, TERM and HUP as well,
+# and each of those EXITS rather than clearing the label itself: a handler that returns hands control back to
+# the poll loop, leaving an UNLABELLED wait still running -- the very "nobody is watching" state the label
+# exists to deny. Exiting runs the EXIT trap, so the label is cleared on exactly one path.
 WATCH_LABEL="verdict:watching"
 watching_applied=""
 
@@ -118,19 +125,21 @@ clear_watching() {
   gh pr edit "$PR" --repo "$REPO" --remove-label "$WATCH_LABEL" >/dev/null 2>&1 || true
 }
 
-if [ "$CMD" = "verdict" ]; then
-  # Created on demand so a fresh clone needs no setup step; a no-op once it exists.
-  gh label create "$WATCH_LABEL" --repo "$REPO" --color BFD4F2 \
-    --description "An author is blocked on watch-verdict.sh for this PR" >/dev/null 2>&1 || true
-  if gh pr edit "$PR" --repo "$REPO" --add-label "$WATCH_LABEL" >/dev/null 2>&1; then
-    watching_applied=1
-    trap clear_watching EXIT INT TERM
-  else
-    # Degrade loudly rather than failing: the wait still works, it is just invisible to a coordinator, which
-    # is the pre-gh#1028 behaviour and no worse than it.
-    printf 'watch-verdict: could not apply %s -- this wait is invisible to a coordinator (gh#1028)\n' \
-      "$WATCH_LABEL" >&2
-  fi
+# Created on demand so a fresh clone needs no setup step; a no-op once it exists.
+gh label create "$WATCH_LABEL" --repo "$REPO" --color BFD4F2 \
+  --description "An author is blocked on watch-verdict.sh for this PR" >/dev/null 2>&1 || true
+if gh pr edit "$PR" --repo "$REPO" --add-label "$WATCH_LABEL" >/dev/null 2>&1; then
+  watching_applied=1
+  trap clear_watching EXIT
+  # 128 + the signal number, the status a shell killed by that signal reports.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+else
+  # Degrade loudly rather than failing: the wait still works, it is just invisible to a coordinator, which
+  # is the pre-gh#1028 behaviour and no worse than it.
+  printf 'watch-verdict: could not apply %s -- this wait is invisible to a coordinator (gh#1028)\n' \
+    "$WATCH_LABEL" >&2
 fi
 
 # ---------------------------------------------------------------------------------------------------------
