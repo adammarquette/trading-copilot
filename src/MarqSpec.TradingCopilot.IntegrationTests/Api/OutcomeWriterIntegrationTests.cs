@@ -6,22 +6,26 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.Api;
 
 /// <summary>
 /// Independent real-Postgres coverage for <see cref="OutcomeJournalService.ComposeClosedTradeOutcomesAsync"/>
 /// (gh#940, of gh#909; R-9) — written from gh#940's own text and the R-9 requirement, not from the writer. Real
-/// Postgres is what witnesses the mechanism this writer rests on: <c>IX_Outcomes_TradeId</c> is what makes a
-/// concurrent double-compose impossible, and only a genuine race against a real unique index can prove it —
-/// EF-InMemory has no unique indexes at all.
+/// Postgres is what witnesses the mechanism this writer rests on: <c>IX_Outcomes_TradeId</c> is what makes a second
+/// outcome for one trade impossible — EF-InMemory has no unique indexes at all.
 /// </summary>
 /// <remarks>
 /// Every case drives the writer's own public method, over <c>Trade</c> rows seeded straight through the
 /// <see cref="TradingCopilotDbContext"/> — the writer's real input contract, not a production-computed answer
 /// handed to it. Uses <see cref="OutcomeTestPostgresFactory"/>, which strips every hosted service (including the
 /// writer's own five-minute-interval <c>OutcomeJournalHost</c>), so the only thing ever composing outcomes in
-/// these tests is the call each case makes.
+/// these tests is the call each case makes. The idempotency case is deliberately <b>not</b> a <c>Task.WhenAll</c>
+/// race on the writer's own method — that was tried and this suite's own prove-red pass caught it stayed green
+/// with <c>IX_Outcomes_TradeId</c> dropped entirely, because a container-local round trip can resolve the pair
+/// sequentially through the anti-join alone, with or without the index behind it. It instead forces the exact
+/// time-of-check-time-of-use gap deterministically (see the case's own remarks).
 /// </remarks>
 public class OutcomeWriterIntegrationTests : IClassFixture<OutcomeTestPostgresFactory>
 {
@@ -37,25 +41,51 @@ public class OutcomeWriterIntegrationTests : IClassFixture<OutcomeTestPostgresFa
     // =============================================================================================================
 
     [Fact]
-    public async Task ComposeClosedTradeOutcomes_ShouldWriteExactlyOneOutcome_WhenTwoPassesRaceTheSameClosedTrade()
+    public async Task ComposeClosedTradeOutcomes_ShouldRejectASecondOutcomeForTheSameTrade_ViaTheUniqueIndex()
     {
-        // Two concurrent composes of the same closed trade must mint exactly one Outcome — the second insert is
-        // rejected by IX_Outcomes_TradeId. A double-write here double-counts the day's realized outcome into
-        // whatever R-9 report reads it. Genuinely concurrent: two DI scopes, two Postgres connections, raced with
-        // Task.WhenAll (the same technique SuggestionTakeIntegrationTests uses for its own advisory-lock race).
+        // Two composes of the same closed trade must never mint two Outcome rows. A Task.WhenAll race on the
+        // writer's own method is NOT a reliable way to witness this: the anti-join alone resolves the ordinary
+        // case, and a container-local round trip can complete a full compose-and-commit before a "concurrent"
+        // second call ever reaches its own anti-join query — so the pair can pass whether or not the unique index
+        // is even there. Proven directly: a WhenAll-raced version of this case stayed green with
+        // IX_Outcomes_TradeId dropped entirely (this suite's own prove-red pass). This case instead forces the
+        // exact time-of-check-time-of-use gap the index exists to close: the first compose runs and commits
+        // normally, then a second writer attempts the identical row shape a racing pass would have built —
+        // deterministically proving the unique filtered index, not scheduling luck, is what makes a second
+        // outcome for one trade impossible.
         Guid owner = Guid.NewGuid();
         Guid accountId = await SeedAccountAsync(owner);
-        await SeedClosedTradeAsync(owner, accountId, realizedPnL: 120m);
+        Guid tradeId = await SeedClosedTradeAsync(owner, accountId, realizedPnL: 120m);
 
-        (int firstWritten, int secondWritten) = await RaceComposePassesAsync();
+        int firstPass = await ComposeAsync();
+        firstPass.Should().Be(1, "the first pass composes the trade's outcome normally");
 
-        (firstWritten + secondWritten).Should().Be(
-            1, "exactly one of the two racing passes may compose the trade's outcome — the other's insert is "
-            + "rejected by the unique filtered index and caught as an idempotent skip, never a fault");
+        await ExecuteDbAsync(async db =>
+        {
+            db.Outcomes.Add(new Outcome
+            {
+                Id = Guid.NewGuid(),
+                UserId = owner,
+                TradeId = tradeId,
+                Resolution = OutcomeResolution.Win,
+                Simulated = false,
+            });
+
+            Func<Task> save = () => db.SaveChangesAsync();
+
+            await save.Should().ThrowAsync<DbUpdateException>(
+                "a second outcome for the same trade must be impossible — exactly the shape a racing pass's "
+                + "insert would take")
+                .WithInnerException<DbUpdateException, PostgresException>()
+                .Where(error => error.SqlState == PostgresErrorCodes.UniqueViolation
+                    && (error.ConstraintName == "IX_Outcomes_TradeId"
+                        || error.MessageText.Contains("IX_Outcomes_TradeId", StringComparison.Ordinal)));
+        });
 
         List<Outcome> outcomes = await OutcomesForAccountAsync(accountId);
         outcomes.Should().ContainSingle(
-            "a double-written outcome for one trade would double-count the day's realized result");
+            "exactly one outcome survives — the rejected second insert never lands, so a double-write can never "
+            + "double-count the day's realized result");
     }
 
     // =============================================================================================================
@@ -144,14 +174,6 @@ public class OutcomeWriterIntegrationTests : IClassFixture<OutcomeTestPostgresFa
     // Helpers.
     // =============================================================================================================
 
-    private async Task<(int First, int Second)> RaceComposePassesAsync()
-    {
-        Task<int> first = ComposeAsync();
-        Task<int> second = ComposeAsync();
-        int[] results = await Task.WhenAll(first, second);
-        return (results[0], results[1]);
-    }
-
     private async Task<int> ComposeAsync()
     {
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
@@ -209,24 +231,29 @@ public class OutcomeWriterIntegrationTests : IClassFixture<OutcomeTestPostgresFa
         return accountId;
     }
 
-    private Task SeedClosedTradeAsync(Guid owner, Guid accountId, decimal? realizedPnL) => ExecuteDbAsync(async db =>
+    private async Task<Guid> SeedClosedTradeAsync(Guid owner, Guid accountId, decimal? realizedPnL)
     {
-        db.Trades.Add(new Trade
+        Guid tradeId = Guid.NewGuid();
+        await ExecuteDbAsync(async db =>
         {
-            Id = Guid.NewGuid(),
-            UserId = owner,
-            AccountId = accountId,
-            Instrument = "ESM25",
-            Side = OrderSide.Buy,
-            Size = 1,
-            EntryPrice = 5_000m,
-            ExitPrice = 5_000m + (realizedPnL ?? 0m),
-            RealizedPnL = realizedPnL,
-            Mode = TradingMode.Practice,
-            ClosedAt = DateTimeOffset.UtcNow,
+            db.Trades.Add(new Trade
+            {
+                Id = tradeId,
+                UserId = owner,
+                AccountId = accountId,
+                Instrument = "ESM25",
+                Side = OrderSide.Buy,
+                Size = 1,
+                EntryPrice = 5_000m,
+                ExitPrice = 5_000m + (realizedPnL ?? 0m),
+                RealizedPnL = realizedPnL,
+                Mode = TradingMode.Practice,
+                ClosedAt = DateTimeOffset.UtcNow,
+            });
+            await db.SaveChangesAsync();
         });
-        await db.SaveChangesAsync();
-    });
+        return tradeId;
+    }
 
     private Task SeedOpenTradeAsync(Guid owner, Guid accountId) => ExecuteDbAsync(async db =>
     {
