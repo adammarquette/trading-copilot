@@ -18,11 +18,12 @@ public class TradovateVenueTests
     private static VenueId Tradovate { get; } = VenueId.Parse("tradovate");
     private readonly ITradovateApiClient _api = A.Fake<ITradovateApiClient>();
     private readonly ITradovateWebSocketClient _webSocket = A.Fake<ITradovateWebSocketClient>();
+    private readonly TradovateQuoteSubscriptions _subscriptions = new();
 
     private TradovateVenue CreateVenue(string host = "https://demo.tradovateapi.com/v1", FirmConventions? conventions = null)
     {
         A.CallTo(() => _api.ConfiguredHost).Returns(host);
-        return new TradovateVenue(_api, _webSocket, conventions ?? FirmConventions.ForBrokerage("Tradovate"));
+        return new TradovateVenue(_api, _webSocket, _subscriptions, conventions ?? FirmConventions.ForBrokerage("Tradovate"));
     }
 
     [Fact]
@@ -398,6 +399,110 @@ public class TradovateVenueTests
     }
 
     [Fact]
+    public async Task StreamQuotesAsync_ShouldRegisterTheSubscription_SoAHostDrivenReconnectReplaysIt()
+    {
+        // The connection host reconnects the shared socket through the client's NON-replaying path, so a live
+        // stream is only re-armed if it is on the register. An unregistered stream survives the drop as an open
+        // sequence that never ticks again — the silent failure that stalls stop promotion.
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+        TaskCompletionSource subscribed = new();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._)).Invokes(() => subscribed.TrySetResult());
+
+        IAsyncEnumerator<Quote> quotes = CreateVenue()
+            .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
+        ValueTask<bool> next = quotes.MoveNextAsync();
+        await subscribed.Task;
+        _webSocket.QuoteReceived += Raise.With(Book(5000m, 5001m));
+        (await next).Should().BeTrue(); // park the iterator at its yield, so disposal runs its finally
+
+        _subscriptions.LiveKeys.Should().ContainSingle().Which.Should().Be("7");
+
+        await quotes.DisposeAsync();
+
+        _subscriptions.LiveKeys.Should().BeEmpty("a torn-down stream must not be replayed onto a recovered socket");
+    }
+
+    [Fact]
+    public async Task StreamQuotesAsync_ShouldKeepTheWireSubscribed_UntilTheLastStreamOnTheContractIsDisposed()
+    {
+        // One socket, one subscription per contract: unsubscribing on the FIRST teardown would starve the second
+        // consumer, which still believes it is streaming.
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+
+        int subscribes = 0;
+        TaskCompletionSource first = new();
+        TaskCompletionSource second = new();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._)).Invokes(() =>
+        {
+            if (Interlocked.Increment(ref subscribes) == 1)
+            {
+                first.TrySetResult();
+            }
+            else
+            {
+                second.TrySetResult();
+            }
+        });
+
+        TradovateVenue venue = CreateVenue();
+        IAsyncEnumerator<Quote> one = venue
+            .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
+        ValueTask<bool> firstNext = one.MoveNextAsync();
+        await first.Task;
+
+        IAsyncEnumerator<Quote> two = venue
+            .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
+        ValueTask<bool> secondNext = two.MoveNextAsync();
+        await second.Task;
+
+        // One book feeds both streams -- each attached its own handler to the shared socket.
+        _webSocket.QuoteReceived += Raise.With(Book(5000m, 5001m));
+        (await firstNext).Should().BeTrue();
+        (await secondNext).Should().BeTrue();
+
+        await one.DisposeAsync();
+
+        A.CallTo(() => _webSocket.UnsubscribeQuoteAsync("7", A<CancellationToken>._)).MustNotHaveHappened();
+        _subscriptions.LiveKeys.Should().ContainSingle().Which.Should().Be("7");
+
+        await two.DisposeAsync();
+
+        A.CallTo(() => _webSocket.UnsubscribeQuoteAsync("7", A<CancellationToken>._)).MustHaveHappened();
+        _subscriptions.LiveKeys.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task StreamQuotesAsync_ShouldStillReleaseTheRegistration_WhenTheWireUnsubscribeFails()
+    {
+        // Teardown usually happens BECAUSE the socket dropped, and the client refuses to send on a dead transport.
+        // That must not surface to the consumer as a fault, and must not leave the key on the register — replaying
+        // a subscription nobody consumes would feed a channel with no reader for the rest of the session.
+        using CancellationTokenSource cts = new();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
+        TaskCompletionSource subscribed = new();
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._)).Invokes(() => subscribed.TrySetResult());
+        A.CallTo(() => _webSocket.UnsubscribeQuoteAsync("7", A<CancellationToken>._))
+            .Throws(new InvalidOperationException("The WebSocket is not connected."));
+
+        IAsyncEnumerator<Quote> quotes = CreateVenue()
+            .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
+        ValueTask<bool> next = quotes.MoveNextAsync();
+        await subscribed.Task;
+        _webSocket.QuoteReceived += Raise.With(Book(5000m, 5001m));
+        (await next).Should().BeTrue();
+
+        Func<Task> dispose = async () => await quotes.DisposeAsync();
+
+        await dispose.Should().NotThrowAsync();
+        _subscriptions.LiveKeys.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task ClosePositionAsync_ShouldRefuse_WhileClosePositionIsUngranted()
     {
         Func<Task> act = () => CreateVenue().ClosePositionAsync(
@@ -421,6 +526,9 @@ public class TradovateVenueTests
 
         await act.Should().ThrowAsync<NotSupportedException>();
     }
+
+    private static ClientModels.Quote Book(decimal bid, decimal ask) =>
+        new() { ContractId = 7, Timestamp = DateTimeOffset.UnixEpoch, BidPrice = bid, AskPrice = ask };
 
     private static ClientModels.Account Account(long? id, bool active = true, bool isReadonly = false) =>
         new()

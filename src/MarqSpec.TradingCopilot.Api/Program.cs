@@ -86,6 +86,15 @@ builder.Services.AddSingleton<IVenueSetupContract, ProjectXSetupContract>();
 // serve. A declaration only (no credential values, no runtime venue yet); the execution adapter joins in gh#977.
 builder.Services.AddSingleton<IVenueSetupContract, TradovateSetupContract>();
 
+// The Tradovate market-data socket's lifecycle (R-17, gh#977). The register is what makes a reconnect non-silent:
+// the client replays subscriptions only on ITS own reconnect, and the manual connect that is the only way back from
+// Disconnected does not -- so the adapter records what it subscribed and the host resubscribes after a connect it
+// drove. Both are process-wide singletons: one credential set per process (ADR-0015) -> one market-data socket. The
+// host stands down (logging, never throwing) while Tradovate's client is unregistered, which it still is -- the
+// venue's runtime wiring is the remaining gh#977 slice.
+builder.Services.AddSingleton<TradovateQuoteSubscriptions>();
+builder.Services.AddHostedService<TradovateMarketDataConnectionHost>();
+
 // Venue connection liveness (R-17, gh#209): a process-wide singleton over the venue's websocket client, so the
 // orphan guard can watch for a drop. One credential set per process (ADR-0015) -> one connection.
 builder.Services.AddSingleton<IVenueConnection, ProjectXConnection>();

@@ -24,6 +24,7 @@ public sealed class TradovateVenue : ITradingVenue
 
     private readonly ITradovateApiClient _api;
     private readonly ITradovateWebSocketClient _webSocket;
+    private readonly TradovateQuoteSubscriptions _subscriptions;
     private readonly FirmConventions _conventions;
 
     /// <summary>Creates the adapter over a configured Tradovate client and a firm's conventions.</summary>
@@ -32,20 +33,31 @@ public sealed class TradovateVenue : ITradingVenue
     /// The Tradovate dual-socket WebSocket client — bars (and, later, quotes) ride the market-data socket. A
     /// process-wide singleton (one credential set per process, ADR-0015).
     /// </param>
+    /// <param name="subscriptions">
+    /// The process-wide register of live quote subscriptions, shared with the connection host. Required, not
+    /// optional: a quote stream that does not register itself survives a host-driven reconnect as an open sequence
+    /// that never ticks again, and nothing raises.
+    /// </param>
     /// <param name="conventions">
     /// What the firm behind this login has declared (R-14, gh#60). Tradovate is a brokerage, so these are
     /// <see cref="FirmConventions.ForBrokerage"/> and mode follows the venue's own host.
     /// <see cref="FirmConventions.None"/> resolves every account to <see cref="TradingMode.Undeclared"/> — the
     /// intended failure direction (tradeable nowhere), not an accident.
     /// </param>
-    public TradovateVenue(ITradovateApiClient api, ITradovateWebSocketClient webSocket, FirmConventions conventions)
+    public TradovateVenue(
+        ITradovateApiClient api,
+        ITradovateWebSocketClient webSocket,
+        TradovateQuoteSubscriptions subscriptions,
+        FirmConventions conventions)
     {
         ArgumentNullException.ThrowIfNull(api);
         ArgumentNullException.ThrowIfNull(webSocket);
+        ArgumentNullException.ThrowIfNull(subscriptions);
         ArgumentNullException.ThrowIfNull(conventions);
 
         _api = api;
         _webSocket = webSocket;
+        _subscriptions = subscriptions;
         _conventions = conventions;
     }
 
@@ -215,6 +227,10 @@ public sealed class TradovateVenue : ITradingVenue
         // (cancellation included), so an abandoned stream cannot leave a handler and a filling channel behind.
         string subscribeKey = contractId.ToString(CultureInfo.InvariantCulture);
         _webSocket.QuoteReceived += OnQuote;
+
+        // Register BEFORE the wire subscribe, so a reconnect the connection host drives in between still replays
+        // this contract: the manual connect path does not replay what the client remembers, only what is here.
+        _subscriptions.Track(subscribeKey);
         try
         {
             await _webSocket.SubscribeQuoteAsync(subscribeKey, cancellationToken);
@@ -227,7 +243,30 @@ public sealed class TradovateVenue : ITradingVenue
         finally
         {
             _webSocket.QuoteReceived -= OnQuote;
+
+            // One socket carries one subscription per contract, so the wire unsubscribe belongs to the LAST holder
+            // only -- tearing it down while another stream is still reading would starve a consumer that believes
+            // it is streaming.
+            if (_subscriptions.Release(subscribeKey))
+            {
+                await UnsubscribeSafelyAsync(subscribeKey);
+            }
+        }
+    }
+
+    // Teardown very often happens BECAUSE the socket dropped, and the client refuses to send on a dead transport --
+    // so a failed unsubscribe here is the expected case, not an error to surface. The register has already released
+    // the key, so the connection host will not replay it; what a failure leaves behind is at worst a wire
+    // subscription the client replays into a channel with no reader, which costs bandwidth and nothing else.
+    private async Task UnsubscribeSafelyAsync(string subscribeKey)
+    {
+        try
+        {
             await _webSocket.UnsubscribeQuoteAsync(subscribeKey, CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // swallowed deliberately: a consumer disposing its stream must not be handed the venue's transport fault
         }
     }
 
