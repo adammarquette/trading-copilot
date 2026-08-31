@@ -127,6 +127,82 @@ public class TradovateMarketDataConnectionHostTests
         await host.StopAsync(CancellationToken.None);
     }
 
+    [Fact]
+    public async Task ExecuteAsync_ShouldReplayTheOtherKeys_WhenOneSubscriptionFailsMidReplay()
+    {
+        // A key that fails must not abort the pass. Aborting would let one persistently failing contract starve
+        // every key behind it -- the same connected-but-silent feed this host exists to prevent, just for the tail
+        // of the register.
+        _subscriptions.Track("7");
+        _subscriptions.Track("8");
+
+        TaskCompletionSource survived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
+        A.CallTo(() => _client.SubscribeQuoteAsync("7", A<CancellationToken>._))
+            .Throws(() => new InvalidOperationException("this contract keeps failing (test)"));
+        A.CallTo(() => _client.SubscribeQuoteAsync("8", A<CancellationToken>._)).Invokes(() => survived.TrySetResult());
+
+        TradovateMarketDataConnectionHost host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Signalled(survived)).Should().BeTrue("a failing key must not starve the keys behind it");
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldRetryOnlyTheFailedKey_NotTheOnesAlreadyResubscribed()
+    {
+        // Re-sending a key that already landed would rest on the gateway treating a duplicate subscribe as a
+        // harmless no-op -- something this side cannot know. Only what is still owed is retried.
+        _subscriptions.Track("7");
+        _subscriptions.Track("8");
+
+        int attempts = 0;
+        TaskCompletionSource retried = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
+        A.CallTo(() => _client.SubscribeQuoteAsync("7", A<CancellationToken>._)).ReturnsLazily(() =>
+        {
+            if (Interlocked.Increment(ref attempts) == 1)
+            {
+                throw new InvalidOperationException("a transient failure on this contract (test)");
+            }
+
+            retried.TrySetResult();
+            return Task.CompletedTask;
+        });
+
+        TradovateMarketDataConnectionHost host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Signalled(retried)).Should().BeTrue();
+        await host.StopAsync(CancellationToken.None);
+
+        // The key that already landed is not owed a second subscribe.
+        A.CallTo(() => _client.SubscribeQuoteAsync("8", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldStopOwingAKey_WhoseStreamEndedBeforeTheRetry()
+    {
+        // Replaying a contract nobody streams any more would feed a channel with no reader for the rest of the
+        // session. What is owed is intersected with what is still held every pass.
+        _subscriptions.Track("7");
+
+        SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
+        A.CallTo(() => _client.SubscribeQuoteAsync("7", A<CancellationToken>._)).ReturnsLazily(() =>
+        {
+            _subscriptions.Release("7"); // the consumer disposed its stream while the replay was failing
+            throw new InvalidOperationException("a transient failure on this contract (test)");
+        });
+
+        TradovateMarketDataConnectionHost host = Host();
+        await host.StartAsync(CancellationToken.None);
+        await Task.Delay(150); // many poll passes at the 1 ms test cadence
+        await host.StopAsync(CancellationToken.None);
+
+        A.CallTo(() => _client.SubscribeQuoteAsync("7", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
     [Theory]
     [InlineData(ClientModels.ConnectionState.Connecting)]
     [InlineData(ClientModels.ConnectionState.Reconnecting)]

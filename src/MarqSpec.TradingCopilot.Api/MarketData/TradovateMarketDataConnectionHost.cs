@@ -32,8 +32,11 @@ namespace MarqSpec.TradingCopilot.Api.MarketData;
 /// which is what stalls a hidden stop's promotion, and it raises nothing.
 /// </para>
 /// <para>
-/// <b>A failed replay is remembered.</b> "Connected" looks healthy, so a pass that half-resubscribed would never
-/// be revisited; the pending replay therefore survives into the next pass until it completes.
+/// <b>A failed replay is remembered, per key.</b> "Connected" looks healthy, so a pass that half-resubscribed would
+/// never be revisited; the keys still owed a subscription therefore survive into the next pass until each lands. One
+/// key's failure never aborts the pass — that would let a persistently failing key starve every key behind it, which
+/// is the same silent feed in miniature — and only the failures are retried, so recovery never depends on the
+/// gateway treating a duplicate subscribe as a harmless no-op.
 /// </para>
 /// <para>
 /// <b>Everything is caught.</b> Under the default <c>BackgroundServiceExceptionBehavior.StopHost</c> an exception
@@ -123,9 +126,12 @@ public sealed class TradovateMarketDataConnectionHost : BackgroundService
             return;
         }
 
-        // Carried across passes: a replay that could not finish must be retried while the socket looks healthy,
-        // because nothing else would ever revisit a Connected socket that is subscribed to nothing.
-        bool replayPending = false;
+        // Carried across passes: the keys still owed a wire subscription. A replay that could not finish must be
+        // retried while the socket looks healthy, because nothing else would ever revisit a Connected socket that is
+        // subscribed to nothing. Tracked PER KEY rather than as one flag, so a key that keeps failing is the only
+        // thing still retried -- re-sending the ones that already succeeded would rest on the gateway treating a
+        // duplicate subscribe as a harmless no-op, which is not something this side can know.
+        HashSet<string> owed = new(StringComparer.Ordinal);
         TimeSpan backoff = _pollInterval;
 
         while (!stoppingToken.IsCancellationRequested)
@@ -138,9 +144,9 @@ public sealed class TradovateMarketDataConnectionHost : BackgroundService
                 {
                     case ClientModels.ConnectionState.Connected:
                         backoff = _pollInterval;
-                        if (replayPending)
+                        if (owed.Count > 0)
                         {
-                            replayPending = !await ReplayAsync(client, subscriptions, stoppingToken);
+                            await ReplayAsync(client, subscriptions, owed, stoppingToken);
                         }
 
                         break;
@@ -155,8 +161,10 @@ public sealed class TradovateMarketDataConnectionHost : BackgroundService
                         if (await ConnectAsync(client, stoppingToken))
                         {
                             // A host-driven connect takes the client's non-replaying path, so the socket is now
-                            // subscribed to nothing until this replay runs.
-                            replayPending = !await ReplayAsync(client, subscriptions, stoppingToken);
+                            // subscribed to nothing: EVERY live key is owed again, whatever was owed before.
+                            owed.Clear();
+                            owed.UnionWith(subscriptions.LiveKeys);
+                            await ReplayAsync(client, subscriptions, owed, stoppingToken);
                             backoff = _pollInterval;
                         }
                         else
@@ -258,42 +266,53 @@ public sealed class TradovateMarketDataConnectionHost : BackgroundService
         }
     }
 
-    // Returns whether every live key is subscribed again. A partial replay returns false so the caller retries it
-    // on the next pass -- otherwise a Connected socket would sit permanently subscribed to nothing.
-    private async Task<bool> ReplayAsync(
+    // Resubscribes the keys still owed one, and leaves in <paramref name="owed"/> exactly those that still are.
+    // A key that fails does NOT abort the pass: aborting would let one persistently failing key starve every key
+    // behind it, reproducing -- for the tail of the register -- the very connected-but-silent feed this host exists
+    // to prevent.
+    private async Task ReplayAsync(
         ITradovateWebSocketClient client,
         TradovateQuoteSubscriptions subscriptions,
+        HashSet<string> owed,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<string> keys = subscriptions.LiveKeys;
-        if (keys.Count == 0)
-        {
-            return true;
-        }
+        // A stream that ended since the drop released its key, and nothing is listening for it any more: replaying
+        // it would feed a channel with no reader for the rest of the session.
+        owed.IntersectWith(subscriptions.LiveKeys);
 
-        try
+        List<string> failed = [];
+        int replayed = 0;
+
+        foreach (string key in owed.ToArray())
         {
-            foreach (string key in keys)
+            try
             {
                 await client.SubscribeQuoteAsync(key, cancellationToken);
+                replayed++;
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                failed.Add(key);
+                _logger.LogError(
+                    error,
+                    "Replaying the Tradovate quote subscription for contract {Contract} onto the reconnected "
+                    + "market-data socket failed; that contract is not streaming. Retrying on the next pass.",
+                    key);
+            }
+        }
 
+        owed.Clear();
+        owed.UnionWith(failed);
+
+        if (replayed > 0)
+        {
             _logger.LogInformation(
                 "Replayed {Count} Tradovate quote subscription(s) onto the reconnected market-data socket.",
-                keys.Count);
-            return true;
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception error)
-        {
-            _logger.LogError(
-                error,
-                "Replaying the Tradovate quote subscriptions onto the reconnected market-data socket failed; the "
-                + "socket is connected but not streaming every subscribed contract. Retrying on the next pass.");
-            return false;
+                replayed);
         }
     }
 }
