@@ -49,7 +49,6 @@ public class HiddenWorkingStopReadIntegrationTests : IClassFixture<WorkingOrderR
     }
 
     private const string VenueKeyA = "PRAC-50K-101";
-    private const string VenueKeyB = "50KTC-V2-202";
     private const string Contract = "MESU26";
 
     [Fact]
@@ -168,14 +167,18 @@ public class HiddenWorkingStopReadIntegrationTests : IClassFixture<WorkingOrderR
     }
 
     [Fact]
-    public async Task Read_ShouldScopeThePlatformFields_ToTheirOwner_AcrossTwoOperators()
+    public async Task Read_ShouldScopeThePlatformFields_ToTheirOwner_AcrossTwoOperatorsOnTheSameVenueAccountKey()
     {
-        // R-20 at the PLAN level, not merely the account level: two operators each hold a Working order with a
-        // Hidden plan, seeded with deliberately DIFFERENT geometry. Reading operator B's own account must return
-        // ONLY B's numbers — never A's, even mixed in. Both operators discover the shared fixed venue roster
-        // (AdversarialTestProjectXVenueFactory.GetAccountsAsync), but each gets a distinct owner-scoped app-level
-        // Account row and StopPlanRecord — a regression that ever widened the plan lookup off the caller's own
-        // owner-scoped order ids (e.g. by venue key alone) would leak here.
+        // R-20 at the PLAN level, not merely the account level — and the scenario where it actually matters: two
+        // operators whose app-level accounts BOTH resolve to the same underlying venue account key (the fixed
+        // test roster hands every discovery the same four keys, and a shared demo/practice login is a real
+        // Topstep case). The raw venue-truth book at that key is therefore genuinely SHARED — operator B's read
+        // legitimately shows operator A's resting leg too (an existing, pre-gh#934 fact about this endpoint's
+        // venue-truth half). What must NOT happen is A's PLATFORM-held plan riding along with it: operator B's
+        // own distinct app-level Account.Id (and User.Id) is what keeps A's Order.Id out of B's journaledIds
+        // join, and B's own StopPlanRecord is what's owned by B — a regression that widened either lookup off
+        // the caller's own owner-scoped ids (e.g. by venue key alone, or by dropping the per-user filter) leaks
+        // A's plan into B's response.
         VenueFactory.ResetPositions();
         await ExecuteDbAsync(async db =>
         {
@@ -185,32 +188,39 @@ public class HiddenWorkingStopReadIntegrationTests : IClassFixture<WorkingOrderR
         });
 
         HttpClient operatorA = await AuthenticatedClientAsync(PostgresApiFactory.OperatorEmail, PostgresApiFactory.OperatorPassword);
-        Guid accountIdA = await SetupAccountAsync(operatorA, VenueKeyA);
+        Guid accountIdA = await SetupAccountAsync(operatorA);
         Guid operatorIdA = await OperatorIdAsync(PostgresApiFactory.OperatorEmail);
         VenueFactory.SeedWorkingOrder(VenueKeyA, "STOP-A", Contract, stopPrice: 4_980m, size: 1);
         Guid orderIdA = await SeedJournaledOrderAsync(accountIdA, operatorIdA, "STOP-A");
         await SeedStopPlanAsync(orderIdA, operatorIdA, StopStaging.Hidden, actualStop: 4_990m, safety: 4_980m, entry: 5_000m);
 
         (HttpClient operatorB, string emailB) = await SecondOperatorClientAsync(operatorA);
-        Guid accountIdB = await SetupAccountAsync(operatorB, VenueKeyB);
+        Guid accountIdB = await SetupAccountAsync(operatorB); // same underlying venue account key as A, by construction
         Guid operatorIdB = await OperatorIdAsync(emailB);
-        VenueFactory.SeedWorkingOrder(VenueKeyB, "STOP-B", Contract, stopPrice: 1_980m, size: 1);
+        VenueFactory.SeedWorkingOrder(VenueKeyA, "STOP-B", Contract, stopPrice: 1_980m, size: 1);
         Guid orderIdB = await SeedJournaledOrderAsync(accountIdB, operatorIdB, "STOP-B");
         await SeedStopPlanAsync(orderIdB, operatorIdB, StopStaging.Hidden, actualStop: 1_990m, safety: 1_980m, entry: 2_000m);
 
         using HttpResponseMessage response = await operatorB.GetAsync($"/accounts/{accountIdB}/orders");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
-        string body = await response.Content.ReadAsStringAsync();
-        body.Should().NotContain("STOP-A", "operator B's read must never carry operator A's venue key");
-        body.Should().NotContain("4990", "operator B's read must never carry operator A's working-stop price");
-        body.Should().NotContain("4980", "operator B's read must never carry operator A's safety-stop price");
+        using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        JsonElement orders = body.RootElement.GetProperty("orders");
+        orders.GetArrayLength().Should().Be(2, "the shared venue account key's book genuinely holds both legs");
 
-        JsonElement leg = await LegAsync(response, "STOP-B");
-        leg.GetProperty("orderId").GetGuid().Should().Be(orderIdB);
-        leg.GetProperty("workingStopPrice").GetDecimal().Should().Be(1_990m, "operator B sees B's own working stop");
-        leg.GetProperty("safetyStopPrice").GetDecimal().Should().Be(1_980m, "operator B sees B's own safety stop");
-        leg.GetProperty("entryPrice").GetDecimal().Should().Be(2_000m, "operator B sees B's own entry");
+        JsonElement legA = orders.EnumerateArray().Single(o => o.GetProperty("venueOrderKey").GetString() == "STOP-A");
+        legA.GetProperty("orderId").ValueKind.Should().Be(JsonValueKind.Null,
+            "A's Order.Id is scoped to A's own AccountId/UserId — B's read must never match it");
+        legA.GetProperty("workingStopPrice").ValueKind.Should().Be(JsonValueKind.Null, "A's plan must never surface in B's read");
+        legA.GetProperty("stopStaging").ValueKind.Should().Be(JsonValueKind.Null);
+        legA.GetProperty("safetyStopPrice").ValueKind.Should().Be(JsonValueKind.Null);
+        legA.GetProperty("entryPrice").ValueKind.Should().Be(JsonValueKind.Null);
+
+        JsonElement legB = orders.EnumerateArray().Single(o => o.GetProperty("venueOrderKey").GetString() == "STOP-B");
+        legB.GetProperty("orderId").GetGuid().Should().Be(orderIdB);
+        legB.GetProperty("workingStopPrice").GetDecimal().Should().Be(1_990m, "operator B sees B's own working stop");
+        legB.GetProperty("safetyStopPrice").GetDecimal().Should().Be(1_980m, "operator B sees B's own safety stop");
+        legB.GetProperty("entryPrice").GetDecimal().Should().Be(2_000m, "operator B sees B's own entry");
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -239,7 +249,7 @@ public class HiddenWorkingStopReadIntegrationTests : IClassFixture<WorkingOrderR
         });
 
         HttpClient client = await AuthenticatedClientAsync(PostgresApiFactory.OperatorEmail, PostgresApiFactory.OperatorPassword);
-        Guid accountId = await SetupAccountAsync(client, VenueKeyA);
+        Guid accountId = await SetupAccountAsync(client);
         Guid operatorId = await OperatorIdAsync(PostgresApiFactory.OperatorEmail);
         return (client, accountId, operatorId);
     }
@@ -274,23 +284,22 @@ public class HiddenWorkingStopReadIntegrationTests : IClassFixture<WorkingOrderR
         return (client, email);
     }
 
-    private async Task<Guid> SetupAccountAsync(HttpClient client, string venueKey)
+    /// <summary>
+    /// Stands up one app-level account for <paramref name="client"/>, resolving to <see cref="VenueKeyA"/> — the
+    /// FIXED venue roster (<c>AdversarialTestProjectXVenueFactory.GetAccountsAsync</c>) hands every operator the
+    /// SAME four keys, so two different callers legitimately land on the same underlying venue account key here
+    /// (the R-20 scenario the cross-operator test relies on).
+    /// </summary>
+    private async Task<Guid> SetupAccountAsync(HttpClient client)
     {
         using HttpResponseMessage createFirm = await client.PostAsJsonAsync(
             "/firms", new CreateFirmRequest($"Topstep-HiddenStop-{Guid.NewGuid():N}", FirmType.PropFirm));
         FirmResponse? firm = await createFirm.Content.ReadFromJsonAsync<FirmResponse>(_jsonOptions);
         ArgumentNullException.ThrowIfNull(firm);
 
-        // Both stages the fixed venue roster can resolve to (VenueKeyA -> Practice, VenueKeyB "50KTC-V2-202" ->
-        // Evaluation per ProjectXAccountStage) are declared no-capital-at-risk, so every account this suite
-        // discovers resolves to TradingMode.Practice -- matching the Mode a directly-seeded Order carries (the
-        // R-14 mode guard rejects a mismatch at the DB).
         using HttpResponseMessage conventions = await client.PutAsJsonAsync(
             $"/firms/{firm.Id}/conventions",
-            new DeclareConventionsRequest([
-                new StageConventionDto(AccountStage.Practice, CapitalAtRisk: false),
-                new StageConventionDto(AccountStage.Evaluation, CapitalAtRisk: false),
-            ]));
+            new DeclareConventionsRequest([new StageConventionDto(AccountStage.Practice, CapitalAtRisk: false)]));
         conventions.EnsureSuccessStatusCode();
 
         using HttpResponseMessage createConn = await client.PostAsJsonAsync(
@@ -303,7 +312,7 @@ public class HiddenWorkingStopReadIntegrationTests : IClassFixture<WorkingOrderR
         List<AccountResponse>? accounts = await discover.Content.ReadFromJsonAsync<List<AccountResponse>>(_jsonOptions);
         ArgumentNullException.ThrowIfNull(accounts);
 
-        return accounts.First(account => account.VenueAccountKey == venueKey).Id;
+        return accounts.First(account => account.VenueAccountKey == VenueKeyA).Id;
     }
 
     private async Task<Guid> SeedJournaledOrderAsync(
