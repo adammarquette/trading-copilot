@@ -103,6 +103,16 @@ jobs:
       - name: Reviewer outcome classifier (degrade API errors, keep real failures red)
         run: ./scripts/tests/reviewer-outcome.test.sh
 
+      # gh#1028: `verdict:watching` is what tells a coordinator a live author from a dead one, so a coordinator
+      # launches a reviewer whenever it is absent. Both ways of getting the lifecycle wrong are silent and both
+      # cost real work -- a handler that clears the label but lets the wait run on invites a second reviewer onto
+      # the same head, and a label that never comes down suppresses reviewers forever. The first shipped in that
+      # PR's own first round, with a review table that checked the label came off and never checked the process
+      # had stopped. This runs the real script against a stub `gh` on every exit path -- signals included -- so
+      # neither can regress. No .NET, no network -- sits with the other no-build checks.
+      - name: Watch-verdict label lifecycle (signals, hand-off, degrade)
+        run: ./scripts/tests/watch-verdict.test.sh
+
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 

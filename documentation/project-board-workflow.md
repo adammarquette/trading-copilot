@@ -124,6 +124,30 @@ Work complete and a **PR is open**. Move here when the PR exists.
   PR number and nothing else — the independence rules that keep this honest are the
   [contract's](agents/code-reviewer.md), and the loop is
   [engineering §10](trading-platform-engineering.md)'s (`gh#815`).
+- **While the author is waiting, the PR carries `verdict:watching`.** `watch-verdict.sh` raises that label for
+  the life of its wait and drops it on every exit, signals included. It spans the `checks` wait, the reviewer
+  spawn and the `verdict` wait as one — a green `checks` hands the label on rather than clearing it, so the
+  spawn itself is covered. It exists so a [coordinator](agents/coordinator.md) can tell a live author from a
+  dead one without guessing — read the label, never infer from silence, and check its age before honouring it
+  (the shelf life and the takeover rule are the [coordinator's](agents/coordinator.md), `gh#1028`).
+
+#### A split verdict
+Two reviewers can rule on the same head — the author spawns one, and a coordinator that could not see the
+author's wait spawns another. When their verdicts disagree, **the approval does not carry**:
+
+- **Every reviewer who ruled on the current head must approve.** One `Request changes` outranks any number of
+  approvals, and an unresolved finding outranks an approval that ignored it.
+- The card goes back to **Current ToDo** and the implementer is re-dispatched on the **same** claim, exactly as
+  for a single `Request changes`. There is no tie to break and no casting vote.
+- A verdict on a *superseded* head is not a vote at all — `review-verdict` binds an approval to the PR's own
+  contribution by `git patch-id`, so a stale one has already stopped counting (`gh#796`).
+
+The remedy for repeat splits is upstream, not procedural: if a coordinator is spawning duplicate reviewers, the
+`verdict:watching` signal above is not going up — an identity without `pull_requests: write`, or an author not
+running the loop at all — and that is the thing to fix. Its opposite failure looks nothing like this one: a
+label left **stuck** by an author that died where no trap could fire produces *no* reviewer rather than two, and
+a PR that waits forever instead of splitting. That one is bounded by the label's shelf life, in the
+[coordinator contract](agents/coordinator.md).
 
 ### Done
 Merged, and satisfying the **Definition of Done** (engineering §10: test-first, build green, docs updated in the
