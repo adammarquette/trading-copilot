@@ -4,6 +4,7 @@ using MarqSpec.Client.Tradovate.WebSocket;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.Tradovate;
+using Microsoft.Extensions.Logging.Abstractions;
 using ClientModels = MarqSpec.Client.Tradovate.Api.Models;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Integration.Tradovate;
@@ -23,7 +24,12 @@ public class TradovateVenueTests
     private TradovateVenue CreateVenue(string host = "https://demo.tradovateapi.com/v1", FirmConventions? conventions = null)
     {
         A.CallTo(() => _api.ConfiguredHost).Returns(host);
-        return new TradovateVenue(_api, _webSocket, _subscriptions, conventions ?? FirmConventions.ForBrokerage("Tradovate"));
+        return new TradovateVenue(
+            _api,
+            _webSocket,
+            _subscriptions,
+            NullLogger<TradovateVenue>.Instance,
+            conventions ?? FirmConventions.ForBrokerage("Tradovate"));
     }
 
     [Fact]
@@ -422,6 +428,7 @@ public class TradovateVenueTests
         await quotes.DisposeAsync();
 
         _subscriptions.LiveKeys.Should().BeEmpty("a torn-down stream must not be replayed onto a recovered socket");
+        A.CallTo(() => _webSocket.UnsubscribeQuoteAsync("7", A<CancellationToken>._)).MustHaveHappened();
     }
 
     [Fact]
