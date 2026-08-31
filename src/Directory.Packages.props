@@ -60,8 +60,8 @@
 
   <ItemGroup>
     <!-- Observability (ADR-0002, gh#230): OpenTelemetry SDK + OTLP export, and the instrumentations §7 names.
-         All Apache-2.0, matching this repo's licence posture. The exporter is OTLP only: the LGTM stack it
-         points at is a deployment concern (gh#231), so nothing here binds us to a specific backend. -->
+         The exporter is OTLP only: the LGTM stack it points at is a deployment concern (gh#231), so nothing
+         here binds us to a specific backend. -->
     <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.17.0" />
     <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
     <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.17.0" />

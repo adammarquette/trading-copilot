@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # external/MarqSpec.Client.ProjectX is a submodule the ProjectX adapter builds against.
+          # external/ holds four public client submodules the adapters build against (gh#1023).
           submodules: true
 
       - name: Setup .NET
@@ -345,7 +345,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The Dockerfile COPYs external/ (the ProjectX submodule) into the build.
+          # The Dockerfile COPYs external/ (the four client submodules) into the build.
           submodules: true
 
       - name: Set up Buildx
@@ -377,7 +377,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The Dockerfile COPYs external/ (the ProjectX submodule) into the build.
+          # The Dockerfile COPYs external/ (the four client submodules) into the build.
           submodules: true
 
       # Required for `cache-to: type=gha` below: the default `docker` driver cannot export a build

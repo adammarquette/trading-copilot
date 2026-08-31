@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true  # the ProjectX adapter builds against the external/ submodule
+          submodules: true  # adapters build against the four public client submodules (gh#1023)
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
