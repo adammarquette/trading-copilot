@@ -32,10 +32,14 @@
 #
 # WHAT IT DOES NOT DO
 # -------------------
-# It does not review, spawn the reviewer, push, or merge. It only observes: reading is the whole of its
-# GitHub access. Who renders the verdict, and the independence rules that keep a reviewer spawned by the
-# author honest, are the [reviewer contract](documentation/agents/code-reviewer.md)'s; the loop the exit
-# statuses above serve is engineering §10's.
+# It does not review, spawn the reviewer, push, or merge. Its ONE write is the `verdict:watching` label it
+# raises for the life of its wait and drops on the way out (gh#1028); everything else it touches is a read.
+# That write is not optional to provision: the identity this runs under needs `pull_requests: write`, and
+# without it every wait is invisible to a coordinator -- a label failure is a warning on stderr, never a hard
+# stop, so a read-only token degrades QUIETLY to the pre-gh#1028 behaviour. See *The watching signal* below.
+# Who renders the verdict, and the independence rules that keep a reviewer spawned by the author honest, are
+# the [reviewer contract](documentation/agents/code-reviewer.md)'s; the loop the exit statuses above serve is
+# engineering §10's.
 #
 # `review-verdict` in CI waits for the same ruling from the same script (.github/scripts/verdict-state.sh) --
 # deliberately, so the gate and the author can never disagree about whether a PR is approved.
@@ -96,6 +100,103 @@ deadline=$(( $(date +%s) + DEADLINE_MINUTES * 60 ))
 attempt=0
 
 # ---------------------------------------------------------------------------------------------------------
+# The watching signal
+# ---------------------------------------------------------------------------------------------------------
+# This wait is a LOCAL blocking call: nothing outside the authoring session can see that it is running. That
+# invisibility used to leave the coordinator guessing, because its contract said to launch a reviewer only when
+# "no author is running the watch-verdict loop" -- a condition with no observable form. Both guesses are wrong:
+# assume an author is watching and a dead author's PR waits forever; assume none and you race the author's own
+# reviewer on the same head (gh#1028).
+#
+# So the wait announces itself, and the coordinator reads the label instead of guessing. BOTH phases label,
+# not just `verdict`: the coordinator launches a reviewer whenever the label is absent, so labelling only the
+# `verdict` phase would leave the whole `checks` wait -- about 15 minutes -- reading as "nobody is watching".
+# The reviewer it launched there would then race the one the author spawns the moment `checks` returns 0, which
+# is the split verdict this signal exists to prevent. The label has to go up BEFORE the action it serializes.
+#
+# The trap covers EVERY exit, not only the clean one, because a stuck `verdict:watching` is worse than no label
+# at all -- it suppresses reviewers indefinitely.
+#
+# The hazard here is NOT that an EXIT trap misses a signal. Bash runs it on a fatal signal (`termsig_handler`
+# calls the exit trap before re-raising), verified on 5.3 under both Cygwin and Linux: a script whose only trap
+# is EXIT, killed with TERM, still clears and still reports 143. The round-1 bug was the opposite shape -- INT
+# and TERM were trapped to a handler that CLEARED THE LABEL AND RETURNED, and a returning handler hands control
+# back to the poll loop. The label came off while the wait ran on, which is the "nobody is watching" state the
+# label exists to deny, arrived at from the direction the design never considered.
+#
+# So the signal traps exit rather than clean up: cleanup belongs to EXIT alone, and every path reaches it once.
+# They are defensive rather than load-bearing -- delete one and the label still clears, because EXIT still runs
+# -- and the gate that matters is `scripts/tests/watch-verdict.test.sh`, which reds on the clear-and-return
+# shape rather than on a missing trap. Keep them; do not mistake them for the thing being guarded.
+#
+# The label spans BOTH waits as one, and the seam between them is the whole reason. `checks` and `verdict` are
+# separate processes, and the author spawns the reviewer BETWEEN them (engineering §10's ordering) -- so a
+# `checks` that cleared the label on its way out would go dark for exactly the step the signal exists to
+# serialize, and a coordinator polling there would launch the second reviewer. A green `checks` therefore hands
+# the label ON rather than clearing it, and the `verdict` process inherits it. Every other way out of `checks`
+# -- red, timeout, signal -- clears it, because those end the wait rather than continuing it.
+#
+# That hand-off is what makes a STUCK label reachable: nothing clears it if the author dies in the seam. It is
+# bounded rather than prevented, and the bound is the coordinator's, not this script's -- `verdict:watching`
+# older than the deadlines here is stale and may be taken over, which the coordinator contract states and
+# gives the command for (gh#1028). A signal this script cannot clear from inside its own grave is why.
+WATCH_LABEL="verdict:watching"
+watching_applied=""
+# Set only on the one exit that is a hand-off, never a finish: `checks` going green into the reviewer spawn.
+hand_off=""
+# Set when this process could not apply the label but an earlier phase may have handed one on (see below).
+maybe_inherited=""
+
+clear_watching() {
+  # `maybe_inherited` is the hand-off's loose end: when `verdict`'s re-apply fails, this process never applied
+  # the label but `checks` may well have left one up, and no-oping would strand it for the whole shelf life.
+  # So it still tries -- quietly, since there may be nothing there and a warning would be the wrong story.
+  if [ -z "$watching_applied" ]; then
+    [ -n "$maybe_inherited" ] || return 0
+    maybe_inherited=""
+    gh pr edit "$PR" --repo "$REPO" --remove-label "$WATCH_LABEL" >/dev/null 2>&1 || true
+    return 0
+  fi
+  [ -z "$hand_off" ] || return 0
+  watching_applied=""
+  # Warned about rather than swallowed. The apply path degrades loudly for the same reason this one must: a
+  # label that fails to come OFF is the worse of the two failures, because it suppresses reviewers for as long
+  # as it sits there, and nothing else will ever mention it. The warning cannot be a non-zero return -- this
+  # runs from the EXIT trap, where a failing command would overwrite the exit status the caller reads.
+  gh pr edit "$PR" --repo "$REPO" --remove-label "$WATCH_LABEL" >/dev/null 2>&1 || \
+    printf 'watch-verdict: could not remove %s from %s -- clear it by hand (gh#1028)\n' \
+      "$WATCH_LABEL" "$PR_URL" >&2
+}
+
+# Created on demand so a fresh clone needs no setup step; a no-op once it exists.
+gh label create "$WATCH_LABEL" --repo "$REPO" --color BFD4F2 \
+  --description "An author is blocked on watch-verdict.sh for this PR" >/dev/null 2>&1 || true
+if gh pr edit "$PR" --repo "$REPO" --add-label "$WATCH_LABEL" >/dev/null 2>&1; then
+  watching_applied=1
+  trap clear_watching EXIT
+  # 128 + the signal number, the status a shell killed by that signal reports.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+else
+  # Degrade loudly rather than failing: the wait still works, it is just invisible to a coordinator, which
+  # is the pre-gh#1028 behaviour and no worse than it.
+  printf 'watch-verdict: could not apply %s -- this wait is invisible to a coordinator (gh#1028)\n' \
+    "$WATCH_LABEL" >&2
+  # ...except in `verdict`, where "invisible" may be the wrong story entirely: a green `checks` hands the label
+  # ON, so a failure here can leave a label this process did not apply and would otherwise never remove. Say
+  # which of the two it is, and take the traps anyway so the EXIT path gets its chance to clear it.
+  if [ "$CMD" = "verdict" ]; then
+    printf '  (if `checks` handed one on, it is still up and this process will try to clear it on exit)\n' >&2
+    maybe_inherited=1
+    trap clear_watching EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+  fi
+fi
+
+# ---------------------------------------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------------------------------------
 # `review-verdict` is EXCLUDED from every check reading below, and that exclusion is load-bearing: it is the
@@ -143,6 +244,12 @@ if [ "$CMD" = "checks" ]; then
     if [ "$pending_checks" -eq 0 ] && [ "$passed_checks" -gt 0 ]; then
       printf '%d check(s) green on %s.\n' "$passed_checks" "$PR_URL"
       printf 'Spawn the reviewer now, then wait on it: scripts/watch-verdict.sh verdict %s\n' "$PR"
+      # Handed on, not finished: the label stays up across the reviewer spawn, and `verdict` inherits it. The
+      # operator who stops here is the one who has to take it down, so say it on the terminal rather than only
+      # in this comment -- they will never read this line, and a claim nobody clears sits for its shelf life.
+      printf '%s stays on the PR across that spawn -- if you stop here instead, take it down:\n' "$WATCH_LABEL"
+      printf '  gh pr edit %s --remove-label %s\n' "$PR" "$WATCH_LABEL"
+      hand_off=1
       exit 0
     fi
 

@@ -19,11 +19,13 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Signals;
 
 /// <summary>
 /// Independent QA for gh#362 Part B — the safety invariant gh#27 / ADR-0014 exist to guard: importance feedback is
-/// a <b>soft salience weight, never a risk control</b>. Exercises the <b>real order-submit → gate path</b>
-/// (<c>POST /accounts/{id}/orders</c> → <c>OrderEndpoints.ComposeAsync</c>/<c>BuildRequestAsync</c> →
+/// a <b>soft salience weight, never a risk control</b>. Extended by gh#971 to the gh#762 <b>direction</b> axis
+/// (👍/👎): direction is structurally unreachable from enforcement too (ADR-0007), so it must hold the same
+/// byte-identical property. Exercises the <b>real order-submit → gate path</b> (<c>POST /accounts/{id}/orders</c> →
+/// <c>OrderEndpoints.ComposeAsync</c>/<c>BuildRequestAsync</c> →
 /// <see cref="MarqSpec.TradingCopilot.Domain.Execution.OrderExecutionService"/> → <see cref="RiskGate"/>), with the
-/// adversarial venue stub — and asserts that a maximally-starred or maximally-muted operator profile leaves the
-/// gate's decision <b>byte-identical</b> to the un-rated baseline.
+/// adversarial venue stub — and asserts that a maximally-starred, maximally-muted, maximally-thumbs-up, or
+/// maximally-thumbs-down operator profile leaves the gate's decision <b>byte-identical</b> to the un-rated baseline.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -36,7 +38,11 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Signals;
 /// proposal is built, which is untyped and so invisible to any reflection-based check. This suite is that closure:
 /// it seeds real <see cref="SoftSignalFeedback"/> rows for the authenticated operator directly (no matching
 /// <c>NewsRecord</c> is required — the entity carries no FK to it) and diffs the gate's real decision with and
-/// without them in play.
+/// without them in play. <see cref="AssertGateDecisionIsInvariantToFeedbackAsync"/> and
+/// <see cref="SeedMaximalFeedbackAsync"/> take the <see cref="SoftSignalKind"/> as a plain parameter — kind-agnostic
+/// by construction — so gh#971's <c>ThumbsUp</c>/<c>ThumbsDown</c> Theories below reuse the identical mechanism
+/// that already closes the leak for Star/Mute; a defect that fed ANY <see cref="SoftSignalFeedback"/> row into the
+/// gate regardless of kind would redden all four Theories together, not just two of them.
 /// </para>
 /// <para>
 /// Two request sizes are exercised per feedback direction: a small quantity (1) the baseline gate <b>Allows</b>
@@ -83,6 +89,24 @@ public sealed class SalienceIsNotARiskControlIntegrationTests : IClassFixture<St
     public async Task SendOrder_ShouldProduceAByteIdenticalGateDecision_WhenTheOperatorHasMaximallyMutedSignals(int quantity)
     {
         await AssertGateDecisionIsInvariantToFeedbackAsync(quantity, SoftSignalKind.Mute);
+    }
+
+    // --- gh#971: the gh#762 DIRECTION axis (👍/👎) must hold the identical invariant -- same mechanism, other kinds ---
+
+    [Theory]
+    [InlineData(1)] // the baseline gate ALLOWS this outright -- most sensitive to a MULTIPLICATIVE leak
+    [InlineData(100)] // the baseline gate must RESIZE this (oversized) -- proves the invariant on a resize too
+    public async Task SendOrder_ShouldProduceAByteIdenticalGateDecision_WhenTheOperatorHasMaximallyThumbsUpSignals(int quantity)
+    {
+        await AssertGateDecisionIsInvariantToFeedbackAsync(quantity, SoftSignalKind.ThumbsUp);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(100)]
+    public async Task SendOrder_ShouldProduceAByteIdenticalGateDecision_WhenTheOperatorHasMaximallyThumbsDownSignals(int quantity)
+    {
+        await AssertGateDecisionIsInvariantToFeedbackAsync(quantity, SoftSignalKind.ThumbsDown);
     }
 
     private async Task AssertGateDecisionIsInvariantToFeedbackAsync(int quantity, SoftSignalKind kind)
@@ -143,10 +167,13 @@ public sealed class SalienceIsNotARiskControlIntegrationTests : IClassFixture<St
 
     // --- Helpers ---
 
-    // Six distinct feedback rows all sharing ONE instrument -- stacks the operator's profile weight for
-    // (Instrument, instrument) well past the scorer's own clamp in either direction. No matching NewsRecord is
-    // seeded: SoftSignalFeedback carries no FK to it (by NewsDedupKey, decoupled by design), and this suite's
-    // subject -- the order path -- never joins through the news store at all.
+    // Six distinct feedback rows all sharing ONE instrument. For Star/Mute (Importance) this stacks the operator's
+    // profile weight for (Instrument, instrument) well past the scorer's own clamp in either direction; for
+    // ThumbsUp/ThumbsDown (Direction, gh#971) SalienceProfile.Build skips them entirely by construction, so the six
+    // rows contribute ZERO weight -- as extreme a signal as either axis's model can produce, "in play for the
+    // operator" exactly as the gh#27 acceptance criterion (and gh#762's extension of it) names it. No matching
+    // NewsRecord is seeded: SoftSignalFeedback carries no FK to it (by NewsDedupKey, decoupled by design), and this
+    // suite's subject -- the order path -- never joins through the news store at all.
     private Task SeedMaximalFeedbackAsync(SoftSignalKind kind, string instrument) =>
         ExecuteDbContextAsync(async database =>
         {

@@ -34,11 +34,24 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Signals;
 /// different seam (the order-submit → gate path, with the adversarial venue stub) than the news feed read here.
 /// </para>
 /// <para>
-/// Two guards (the <c>SoftSignalFeedbacks_*</c> tests) write straight through the context to prove the DB-level
-/// <c>CK_SoftSignalFeedback_Kind_NotUnknown</c> check constraint and the per-axis <c>UX_SoftSignalFeedback_Importance</c>
-/// filtered unique index from the applied <c>AddSoftSignalDirectionAxis</c> migration (gh#762) are live — invisible to any in-memory
-/// provider, and a second line of defense below the endpoint validation they also duplicate (mirrors the
-/// <c>NewsTopics_*</c> tests in <c>RelevanceRoutingIntegrationTests</c>).
+/// The <c>SoftSignalFeedbacks_*</c> tests write straight through the context to prove the DB-level
+/// <c>CK_SoftSignalFeedback_Kind_NotUnknown</c> check constraint and the <b>two independent</b> per-axis filtered
+/// unique indexes (<c>UX_SoftSignalFeedback_Importance</c>, <c>UX_SoftSignalFeedback_Direction</c>) from the applied
+/// <c>AddSoftSignalDirectionAxis</c> migration (gh#762) are live — invisible to any in-memory provider, and a second
+/// line of defense below the endpoint validation they also duplicate (mirrors the <c>NewsTopics_*</c> tests in
+/// <c>RelevanceRoutingIntegrationTests</c>).
+/// </para>
+/// <para>
+/// <b>gh#971 (independent QA for gh#762's direction axis)</b> extends this file rather than adding a new one — same
+/// seam (<c>/api/news</c> + <c>/api/news/feedback</c> + direct-context DB guards), just the second axis. It proves
+/// four things only real Postgres / the live endpoint can: the <c>UX_SoftSignalFeedback_Direction</c> index refuses
+/// a second direction rating exactly as the importance index does; the two filtered indexes are independent, so a
+/// <b>Star and a ThumbsUp on the same item are both allowed</b>; re-rating one axis through the write endpoint
+/// replaces only that axis's row, leaving the other untouched, and clearing one axis deletes only that axis's row;
+/// and — the property this epic exists to protect — <b>direction is salience-inert</b> on the live read path,
+/// proven by diffing the full ranked feed with and without direction ratings in play (a regression that let 👍/👎
+/// into <see cref="SalienceProfile"/> would reorder it, exactly as the Part A starring tests above prove starring
+/// does).
 /// </para>
 /// </remarks>
 public sealed class NewsSalienceIntegrationTests : IClassFixture<SalienceTestPostgresFactory>
@@ -298,8 +311,9 @@ public sealed class NewsSalienceIntegrationTests : IClassFixture<SalienceTestPos
         // when written straight through the context -- UX_SoftSignalFeedback_Importance (the ADR-0014 gh#762 filtered
         // unique index over the Star/Mute kinds), not merely the endpoint's own read-then-write, which could race two
         // concurrent writers without the index behind it (the DbUpdateException race SetFeedbackAsync recovers from).
-        // A DIRECTION rating (👍/👎) on the same item is a DIFFERENT axis and is NOT refused -- the two-axis
-        // independence and the direction index are QA #971's independent coverage.
+        // A DIRECTION rating (👍/👎) on the same item is a DIFFERENT axis and is NOT refused by THIS index -- gh#971's
+        // mirror-image guard is SoftSignalFeedbacks_ShouldRefuseADuplicateDirectionRating_ByTheAxisUniqueIndex below,
+        // and the positive "both allowed" claim is SoftSignalFeedbacks_ShouldAllowBothAnImportanceAndADirectionRating_OnTheSameItem.
         Guid userId = Guid.NewGuid();
         const string key = "https://example.com/salience-db-unique-index";
 
@@ -337,6 +351,220 @@ public sealed class NewsSalienceIntegrationTests : IClassFixture<SalienceTestPos
         });
     }
 
+    // --- gh#971: the DIRECTION axis's own filtered unique index -- the mirror image of the importance guard above ---
+
+    [Fact]
+    public async Task SoftSignalFeedbacks_ShouldRefuseADuplicateDirectionRating_ByTheAxisUniqueIndex()
+    {
+        // Mirrors SoftSignalFeedbacks_ShouldRefuseADuplicateImportanceRating_ByTheAxisUniqueIndex exactly, but on the
+        // OTHER axis: proves UX_SoftSignalFeedback_Direction -- not merely UX_SoftSignalFeedback_Importance -- is a
+        // live, independent filtered unique index over (UserId, NewsDedupKey) WHERE "Kind" IN (3, 4). Written
+        // straight through the context, bypassing NewsEndpoints' own read-then-write upsert entirely.
+        Guid userId = Guid.NewGuid();
+        const string key = "https://example.com/salience-db-unique-index-direction";
+
+        await ExecuteDbContextAsync(async database =>
+        {
+            database.SoftSignalFeedbacks.Add(new SoftSignalFeedback
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                NewsDedupKey = key,
+                Kind = SoftSignalKind.ThumbsUp,
+                CreatedAt = DateTimeOffset.UtcNow,
+            });
+            await database.SaveChangesAsync();
+        });
+
+        await ExecuteDbContextAsync(async database =>
+        {
+            database.SoftSignalFeedbacks.Add(new SoftSignalFeedback
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                NewsDedupKey = key,
+                Kind = SoftSignalKind.ThumbsDown,
+                CreatedAt = DateTimeOffset.UtcNow,
+            });
+
+            Func<Task> save = () => database.SaveChangesAsync();
+
+            await save.Should().ThrowAsync<DbUpdateException>("one operator must never carry two direction (👍/👎) rows for the same item")
+                .WithInnerException<DbUpdateException, PostgresException>()
+                .Where(error => error.SqlState == PostgresErrorCodes.UniqueViolation
+                    && (error.ConstraintName == "UX_SoftSignalFeedback_Direction"
+                        || error.MessageText.Contains("UX_SoftSignalFeedback_Direction", StringComparison.Ordinal)));
+        });
+    }
+
+    [Fact]
+    public async Task SoftSignalFeedbacks_ShouldAllowBothAnImportanceAndADirectionRating_OnTheSameItem()
+    {
+        // THE positive claim gh#971 exists to prove: the two filtered indexes are INDEPENDENT, so an operator may
+        // hold ONE importance row (Star/Mute) AND ONE direction row (👍/👎) on the SAME item at once -- an
+        // "important AND bearish" story is a real, storable state (gh#762's whole reason for splitting the old
+        // single gh#27 index into two). Neither insert may throw; if the two axes were not truly independent
+        // (e.g. a regression that widened one filter to overlap the other), the second insert below would collide.
+        Guid userId = Guid.NewGuid();
+        const string key = "https://example.com/salience-db-both-axes-same-item";
+
+        await ExecuteDbContextAsync(async database =>
+        {
+            database.SoftSignalFeedbacks.Add(new SoftSignalFeedback
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                NewsDedupKey = key,
+                Kind = SoftSignalKind.Star,
+                CreatedAt = DateTimeOffset.UtcNow,
+            });
+            await database.SaveChangesAsync();
+        });
+
+        Func<Task> insertDirection = () => ExecuteDbContextAsync(async database =>
+        {
+            database.SoftSignalFeedbacks.Add(new SoftSignalFeedback
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                NewsDedupKey = key,
+                Kind = SoftSignalKind.ThumbsUp,
+                CreatedAt = DateTimeOffset.UtcNow,
+            });
+            await database.SaveChangesAsync();
+        });
+
+        await insertDirection.Should().NotThrowAsync(
+            "importance and direction are independent axes -- a Star and a ThumbsUp on the same item must BOTH be storable");
+
+        await ExecuteDbContextAsync(async database =>
+        {
+            List<SoftSignalFeedback> rows = await database.SoftSignalFeedbacks.IgnoreQueryFilters()
+                .Where(row => row.UserId == userId && row.NewsDedupKey == key)
+                .ToListAsync();
+            rows.Should().HaveCount(2, "one row per axis, both present at once");
+            rows.Should().ContainSingle(row => row.Kind == SoftSignalKind.Star);
+            rows.Should().ContainSingle(row => row.Kind == SoftSignalKind.ThumbsUp);
+        });
+    }
+
+    // --- gh#971: re-rating / clearing one axis through the write endpoint leaves the OTHER axis untouched ---
+
+    [Fact]
+    public async Task SetFeedback_ShouldReplaceOnlyTheDirectionRow_AndLeaveTheImportanceRowUntouched_WhenReRatingDirection()
+    {
+        const string key = "https://example.com/salience-cross-axis-rerate";
+        HttpClient client = await AuthenticatedClientAsync();
+        await SeedNewsAsync(News(key, DateTimeOffset.UtcNow, ["MES"], [], ["finnhub"]));
+
+        // Two DISTINCT axes on the SAME item through the real write endpoint -- both allowed, independently.
+        (await StarAsync(client, key)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+        (await ThumbsUpAsync(client, key)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        NewsFeedItemResponse beforeReRating = (await GetFeedAsync(client, limit: 5)).Items.Should().ContainSingle().Subject;
+        beforeReRating.Feedback.Should().Be(SoftSignalKind.Star, "precondition: the importance axis holds the star");
+        beforeReRating.Direction.Should().Be(SoftSignalKind.ThumbsUp, "precondition: the direction axis holds the thumbs-up");
+
+        // Re-rate ONLY the direction axis (👍 -> 👎): must replace the direction row and leave importance alone.
+        (await ThumbsDownAsync(client, key)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        NewsFeedItemResponse afterReRating = (await GetFeedAsync(client, limit: 5)).Items.Should().ContainSingle().Subject;
+        afterReRating.Feedback.Should().Be(SoftSignalKind.Star, "re-rating the DIRECTION axis must leave the importance row untouched");
+        afterReRating.Direction.Should().Be(SoftSignalKind.ThumbsDown, "re-rating replaces the direction row's kind");
+
+        // The observable DB state, not merely the read projection: exactly two rows for this item, one per axis --
+        // the importance row's Kind unchanged, the direction row's Kind replaced, never a third stacked row.
+        await ExecuteDbContextAsync(async database =>
+        {
+            List<SoftSignalFeedback> rows = await database.SoftSignalFeedbacks.IgnoreQueryFilters()
+                .Where(row => row.NewsDedupKey == key)
+                .ToListAsync();
+            rows.Should().HaveCount(2, "one row per axis -- re-rating direction must never stack a second direction row nor touch importance");
+            rows.Should().ContainSingle(row => row.Kind == SoftSignalKind.Star);
+            rows.Should().ContainSingle(row => row.Kind == SoftSignalKind.ThumbsDown);
+        });
+    }
+
+    [Fact]
+    public async Task ClearFeedback_ShouldDeleteOnlyTheNamedAxis_AndLeaveTheOtherAxisIntact_WhenBothAxesAreSet()
+    {
+        const string key = "https://example.com/salience-cross-axis-clear";
+        HttpClient client = await AuthenticatedClientAsync();
+        await SeedNewsAsync(News(key, DateTimeOffset.UtcNow, ["MES"], [], ["finnhub"]));
+
+        (await StarAsync(client, key)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+        (await ThumbsUpAsync(client, key)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        // Clear ONLY the direction axis.
+        (await ClearAsync(client, key, SoftSignalAxis.Direction)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        await ExecuteDbContextAsync(async database =>
+        {
+            List<SoftSignalFeedback> rows = await database.SoftSignalFeedbacks.IgnoreQueryFilters()
+                .Where(row => row.NewsDedupKey == key)
+                .ToListAsync();
+            rows.Should().ContainSingle("clearing the DIRECTION axis must leave the importance row -- the star -- untouched")
+                .Which.Kind.Should().Be(SoftSignalKind.Star);
+        });
+
+        NewsFeedItemResponse afterClearDirection = (await GetFeedAsync(client, limit: 5)).Items.Should().ContainSingle().Subject;
+        afterClearDirection.Feedback.Should().Be(SoftSignalKind.Star);
+        afterClearDirection.Direction.Should().BeNull("the direction axis was cleared");
+
+        // Clearing the SAME axis again finds nothing left on it -- 404, mirroring the single-axis round-trip test.
+        (await ClearAsync(client, key, SoftSignalAxis.Direction)).StatusCode.Should().Be(HttpStatusCode.NotFound);
+
+        // Clear the remaining IMPORTANCE axis too -- the item ends with neither axis set, no row at all.
+        (await ClearAsync(client, key, SoftSignalAxis.Importance)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+        await ExecuteDbContextAsync(async database =>
+            (await database.SoftSignalFeedbacks.IgnoreQueryFilters().AnyAsync(row => row.NewsDedupKey == key))
+                .Should().BeFalse("both axes cleared -- no row of either kind should remain"));
+    }
+
+    // --- gh#971: direction is salience-INERT on the live read path -- the property this epic exists to protect ---
+
+    [Fact]
+    public async Task GetFeed_ShouldProduceIdenticalOrderingAndMultipliers_WhenItemsCarryOnlyDirectionRatings()
+    {
+        // Same shape as GetFeed_ShouldRaiseSalienceOfSimilarItems... above (a rated item's dimensions could, if
+        // direction leaked into salience, boost a similar item and reorder an unrelated one below it) -- but rating
+        // 👍/👎 instead of star/mute. The two tests are deliberately symmetric: that one proves starring DOES
+        // reorder the feed; this one proves rating direction must NOT, on the exact same fixture shape.
+        const string ratedKey = "https://example.com/salience-direction-inert-rated";
+        const string similarKey = "https://example.com/salience-direction-inert-similar";
+        const string unrelatedKey = "https://example.com/salience-direction-inert-unrelated";
+
+        HttpClient client = await AuthenticatedClientAsync();
+        await SeedNewsAsync(
+            News(ratedKey, DateTimeOffset.UtcNow.AddHours(-3), ["MES"], ["fomc"], ["finnhub"]),
+            News(similarKey, DateTimeOffset.UtcNow.AddHours(-2), ["MES"], [], ["finnhub"]),
+            News(unrelatedKey, DateTimeOffset.UtcNow.AddHours(-1), ["CL"], ["opec"], ["tiingo"]));
+
+        NewsFeedResponse baseline = await GetFeedAsync(client, limit: 10);
+
+        (await ThumbsUpAsync(client, ratedKey)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+        (await ThumbsDownAsync(client, unrelatedKey)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        NewsFeedResponse withDirectionRatings = await GetFeedAsync(client, limit: 10);
+
+        // THE assertion gh#971 exists to make: direction is salience-inert, so the ranked order and every
+        // multiplier/salience are byte-identical to the no-rating baseline -- a regression letting 👍/👎 into
+        // SalienceProfile would reorder THIS feed exactly as the Part A starring test proves starring does
+        // (ratedKey/similarKey share instrument+topic; a leak scoring ThumbsUp like Star would move similarKey).
+        withDirectionRatings.Items.Select(item => item.DedupKey).Should().Equal(
+            baseline.Items.Select(item => item.DedupKey),
+            "direction ratings must never reorder the feed -- only importance (star/mute) reweighs salience");
+        withDirectionRatings.Items.Select(item => item.Multiplier).Should().Equal(
+            baseline.Items.Select(item => item.Multiplier),
+            "every item's multiplier must be byte-identical to the un-rated baseline -- direction contributes nothing");
+        withDirectionRatings.Items.Select(item => item.Salience).Should().Equal(
+            baseline.Items.Select(item => item.Salience));
+
+        // The rating itself IS surfaced (a read-side stored fact, gh#762) -- it just never fed the score above.
+        withDirectionRatings.Items.Single(item => item.DedupKey == ratedKey).Direction.Should().Be(SoftSignalKind.ThumbsUp);
+        withDirectionRatings.Items.Single(item => item.DedupKey == unrelatedKey).Direction.Should().Be(SoftSignalKind.ThumbsDown);
+    }
+
     // --- Helpers ---
 
     private static NewsRecord News(
@@ -369,8 +597,19 @@ public sealed class NewsSalienceIntegrationTests : IClassFixture<SalienceTestPos
     private static Task<HttpResponseMessage> MuteAsync(HttpClient client, string dedupKey) =>
         client.PutAsJsonAsync("/api/news/feedback", new NewsFeedbackRequest(dedupKey, SoftSignalKind.Mute));
 
-    private static Task<HttpResponseMessage> ClearAsync(HttpClient client, string dedupKey) =>
-        client.DeleteAsync($"/api/news/feedback?dedupKey={Uri.EscapeDataString(dedupKey)}");
+    // gh#971 -- the DIRECTION axis's own rating verbs, mirroring StarAsync/MuteAsync above.
+    private static Task<HttpResponseMessage> ThumbsUpAsync(HttpClient client, string dedupKey) =>
+        client.PutAsJsonAsync("/api/news/feedback", new NewsFeedbackRequest(dedupKey, SoftSignalKind.ThumbsUp));
+
+    private static Task<HttpResponseMessage> ThumbsDownAsync(HttpClient client, string dedupKey) =>
+        client.PutAsJsonAsync("/api/news/feedback", new NewsFeedbackRequest(dedupKey, SoftSignalKind.ThumbsDown));
+
+    // gh#971 -- an optional axis clears just that axis (mirrors ClearFeedbackAsync's own query contract); omitted,
+    // the pre-gh#762 `?dedupKey=` contract is preserved unchanged (the production default is Importance).
+    private static Task<HttpResponseMessage> ClearAsync(HttpClient client, string dedupKey, SoftSignalAxis? axis = null) =>
+        client.DeleteAsync(axis is null
+            ? $"/api/news/feedback?dedupKey={Uri.EscapeDataString(dedupKey)}"
+            : $"/api/news/feedback?dedupKey={Uri.EscapeDataString(dedupKey)}&axis={axis}");
 
     private async Task<NewsFeedResponse> GetFeedAsync(HttpClient client, int limit)
     {
