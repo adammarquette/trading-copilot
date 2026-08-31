@@ -440,36 +440,27 @@ public class TradovateVenueTests
         cts.CancelAfter(TimeSpan.FromSeconds(10));
         A.CallTo(() => _webSocket.MarketDataState).Returns(ClientModels.ConnectionState.Connected);
 
-        int subscribes = 0;
-        TaskCompletionSource first = new();
-        TaskCompletionSource second = new();
-        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._)).Invokes(() =>
-        {
-            if (Interlocked.Increment(ref subscribes) == 1)
-            {
-                first.TrySetResult();
-            }
-            else
-            {
-                second.TrySetResult();
-            }
-        });
-
         TradovateVenue venue = CreateVenue();
         IAsyncEnumerator<Quote> one = venue
             .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
-        ValueTask<bool> firstNext = one.MoveNextAsync();
-        await first.Task;
+        Task<bool> firstNext = one.MoveNextAsync().AsTask();
 
         IAsyncEnumerator<Quote> two = venue
             .StreamQuotesAsync(VenueContractId.Create(Tradovate, "7"), cts.Token).GetAsyncEnumerator(cts.Token);
-        ValueTask<bool> secondNext = two.MoveNextAsync();
-        await second.Task;
+        Task<bool> secondNext = two.MoveNextAsync().AsTask();
 
-        // One book feeds both streams -- each attached its own handler to the shared socket.
-        _webSocket.QuoteReceived += Raise.With(Book(5000m, 5001m));
-        (await firstNext).Should().BeTrue();
-        (await secondNext).Should().BeTrue();
+        // Only the FIRST holder subscribes the wire, so there is no second subscribe to wait on: republish the book
+        // until both streams have taken one. A bounded DropOldest channel keeps only the newest, so repeating is safe.
+        Task both = Task.WhenAll(firstNext, secondNext);
+        while (!both.IsCompleted)
+        {
+            _webSocket.QuoteReceived += Raise.With(Book(5000m, 5001m));
+            await Task.WhenAny(both, Task.Delay(25, cts.Token));
+        }
+
+        await both; // both iterators are now parked at their yield, so disposal runs their finally
+        A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly(); // one socket, one subscription per contract
 
         await one.DisposeAsync();
 
