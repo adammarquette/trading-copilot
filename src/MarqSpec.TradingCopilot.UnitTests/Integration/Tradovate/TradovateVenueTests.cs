@@ -451,13 +451,17 @@ public class TradovateVenueTests
 
         // Only the FIRST holder subscribes the wire, so there is no second subscribe to wait on: republish the book
         // until both streams have taken one. A bounded DropOldest channel keeps only the newest, so repeating is safe.
+        // Bounded, and the delay deliberately does NOT ride cts: once the 10s CancelAfter fires, a cancelled delay
+        // returns instantly and an unbounded loop would spin hot until the iterators noticed. This way a stream that
+        // never yields fails as a plain assertion rather than as a busy wait.
         Task both = Task.WhenAll(firstNext, secondNext);
-        while (!both.IsCompleted)
+        for (int attempt = 0; attempt < 200 && !both.IsCompleted; attempt++)
         {
             _webSocket.QuoteReceived += Raise.With(Book(5000m, 5001m));
-            await Task.WhenAny(both, Task.Delay(25, cts.Token));
+            await Task.WhenAny(both, Task.Delay(25, CancellationToken.None));
         }
 
+        both.IsCompleted.Should().BeTrue("both streams must receive the book the one shared subscription carries");
         await both; // both iterators are now parked at their yield, so disposal runs their finally
         A.CallTo(() => _webSocket.SubscribeQuoteAsync("7", A<CancellationToken>._))
             .MustHaveHappenedOnceExactly(); // one socket, one subscription per contract

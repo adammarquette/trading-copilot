@@ -35,10 +35,19 @@ namespace MarqSpec.TradingCopilot.Api.MarketData;
 /// <b>A failed replay is remembered, per key, and backed off.</b> "Connected" looks healthy, so a pass that
 /// half-resubscribed would never be revisited; the keys still owed a subscription therefore survive into the next
 /// pass until each lands. One key's failure never aborts the pass — that would let a persistently failing key starve
-/// every key behind it, which is the same silent feed in miniature — and only the failures are retried, so recovery
-/// never depends on the gateway treating a duplicate subscribe as a harmless no-op. A pass that still owes something
-/// backs off exactly as a failed connect does, since the usual reason a replay fails — a rate limit — is one that
-/// retrying at full cadence would sustain.
+/// every key behind it, which is the same silent feed in miniature — and only the failures are retried, so the
+/// ordinary path no longer depends on the gateway treating a duplicate subscribe as a harmless no-op. A pass that
+/// still owes something backs off exactly as a failed connect does, since the usual reason a replay fails — a rate
+/// limit — is one that retrying at full cadence would sustain.
+/// </para>
+/// <para>
+/// <b>A duplicate subscribe is rare here, not impossible.</b> Two edge paths can still emit one, and neither is
+/// worth contorting the design to remove: the client records a key <i>before</i> its own subscribe throws, so a key
+/// this host failed to replay is still replayed by the client's next internal reconnect and then again from
+/// <c>owed</c>; and a contract whose last holder releases and whose newcomer acquires between the
+/// <see cref="TradovateQuoteSubscriptions.LiveKeys"/> snapshot and its resubscribe sends both. What the gateway does
+/// with a duplicate <c>md/subscribeQuote</c> is unverified from this side — nothing in the vendored client pins it —
+/// so it is a staging observation to make once credentials exist, not an assumption to build on.
 /// </para>
 /// <para>
 /// <b>Everything is caught.</b> Under the default <c>BackgroundServiceExceptionBehavior.StopHost</c> an exception
@@ -132,7 +141,8 @@ public sealed class TradovateMarketDataConnectionHost : BackgroundService
         // retried while the socket looks healthy, because nothing else would ever revisit a Connected socket that is
         // subscribed to nothing. Tracked PER KEY rather than as one flag, so a key that keeps failing is the only
         // thing still retried -- re-sending the ones that already succeeded would rest on the gateway treating a
-        // duplicate subscribe as a harmless no-op, which is not something this side can know.
+        // duplicate subscribe as a harmless no-op, which is not something this side can know. That keeps duplicates
+        // off the ordinary path; the two edge paths that can still produce one are in this type's remarks.
         HashSet<string> owed = new(StringComparer.Ordinal);
         TimeSpan backoff = _pollInterval;
 
