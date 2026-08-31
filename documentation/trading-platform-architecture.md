@@ -47,8 +47,14 @@ alternatives (Kafka / NATS / Redis Streams), and consequences: [ADR-0001](adr/00
 ### Venue abstraction — the broker seam (R-17)
 Everything below depends on venue-neutral interfaces, never on a broker SDK. They live in
 `MarqSpec.TradingCopilot.Domain/Venue/`; each venue ships an adapter behind them (v1: ProjectX/TopstepX; a
-Tradovate adapter — contract / account / position reads, historical bars, live quotes, and connection liveness, with
-mode host-derived for a brokerage (gh#780) — is landing behind the same seam, gh#977, with execution and wiring to follow).
+Tradovate adapter — contract / account / position reads, historical bars, live quotes, connection liveness, and the
+market-data socket's **connect / reconnect / resubscribe** host, with mode host-derived for a brokerage (gh#780) — is
+landing behind the same seam, gh#977, with execution and the venue's own runtime wiring to follow). That host
+(`TradovateMarketDataConnectionHost`, over a shared `TradovateQuoteSubscriptions` register the adapter writes to) is
+not ceremony: the Tradovate client replays its subscriptions only on *its own* internal reconnect, which gives up
+after a single failed attempt, and the manual connect that is then the only way back does not replay — so without it
+a recovered socket returns connected-but-silent, every open quote stream alive and never ticking, which is exactly
+what stalls a hidden stop's promotion, and it raises nothing.
 
 **Decomposed into three slices**, so a component depends on the narrowest one that does its job:
 
