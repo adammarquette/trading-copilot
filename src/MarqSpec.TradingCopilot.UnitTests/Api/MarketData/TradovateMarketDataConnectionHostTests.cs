@@ -155,25 +155,64 @@ public class TradovateMarketDataConnectionHostTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_ShouldReplayTheOtherKeys_WhenOneSubscriptionFailsMidReplay()
+    public async Task ExecuteAsync_ShouldReplayTheOtherKeys_InTheSamePass_WhenOneSubscriptionFailsMidReplay()
     {
         // A key that fails must not abort the pass. Aborting would let one persistently failing contract starve
         // every key behind it — the same connected-but-silent feed this host exists to prevent, just for the tail
         // of the register.
+        //
+        // Two properties make this discriminating, and the first version of it had neither.
+        //
+        // It is ORDER-INDEPENDENT. Which key the replay reaches first is the register's business, not this test's:
+        // `owed` is filled from a ConcurrentDictionary's bucket walk, so the sequence follows string hashes rather
+        // than the order these two lines run in — and it is stable, not random, because a small
+        // ConcurrentDictionary built with StringComparer.Ordinal uses the non-randomised comparer. Naming a fixed
+        // thrower therefore pins the test to that accident, and pinning it to the wrong key makes it VACUOUS: a
+        // thrower reached last is only attempted after the survivor already succeeded, which is exactly what the
+        // abort-the-whole-pass bug does too. So the fake throws on whichever contract it is handed FIRST.
+        //
+        // And it asserts SAME-PASS. "The survivor was eventually subscribed" is true of the bug as well — the buggy
+        // pass aborts, but `owed` still carries both keys into the next pass, which then subscribes the survivor.
+        // The entire content of the fix is that the survivor does not WAIT for that next pass, so the assertion is
+        // that both subscribes happened on one loop pass, counted by the host's own state reads.
         await HoldsQuotesOn("7");
         await HoldsQuotesOn("8");
 
+        string? thrower = null;
+        int throwingPass = 0;
+        int survivingPass = 0;
         TaskCompletionSource survived = new(TaskCreationOptions.RunContinuationsAsynchronously);
         SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
-        A.CallTo(() => _client.SubscribeQuoteAsync("7", A<CancellationToken>._))
-            .Throws(() => new InvalidOperationException("this contract keeps failing (test)"));
-        A.CallTo(() => _client.SubscribeQuoteAsync("8", A<CancellationToken>._)).Invokes(() => survived.TrySetResult());
+        A.CallTo(() => _client.SubscribeQuoteAsync(A<string>._, A<CancellationToken>._))
+            .ReturnsLazily((string key, CancellationToken _) =>
+            {
+                if (Interlocked.CompareExchange(ref thrower, key, null) is null)
+                {
+                    // The first contract of the first pass, and only ever that one: a later retry of the same key
+                    // succeeds, so the host cannot spin on it for the rest of the test.
+                    throwingPass = Volatile.Read(ref _stateReads);
+                    throw new InvalidOperationException($"contract {key} fails its replay (test)");
+                }
+
+                if (!string.Equals(key, thrower, StringComparison.Ordinal) && survivingPass == 0)
+                {
+                    survivingPass = Volatile.Read(ref _stateReads);
+                    survived.TrySetResult();
+                }
+
+                return Task.CompletedTask;
+            });
 
         TradovateMarketDataConnectionHost host = Host();
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(survived)).Should().BeTrue("a failing key must not starve the keys behind it");
         await host.StopAsync(CancellationToken.None);
+
+        thrower.Should().NotBeNull();
+        survivingPass.Should().Be(
+            throwingPass,
+            "the surviving key must be subscribed on the SAME pass the other one failed, not deferred to the next");
     }
 
     [Fact]
