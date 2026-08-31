@@ -40,14 +40,21 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// the two sweeps' deletions apart.
 /// </para>
 /// <para>
-/// <b>The "skipped with no provider" case holds partly by construction.</b> <c>DeleteStaleModelDuplicatesAsync</c>
-/// takes a non-nullable <c>string currentModel</c> (a compile-time guard on its own), and the self-<c>EXISTS</c>
-/// predicate compares against the <c>Embeddings.Model</c> column, which is itself <c>NOT NULL</c> — so even a
-/// query with no outer guard at all can never match a null <c>currentModel</c> against a real row. The genuine
-/// regression guard for "the call never happens" is therefore the existing unit suite
+/// <b>The "skipped with no provider" case holds by construction — verified, not just reasoned.</b>
+/// <c>DeleteStaleModelDuplicatesAsync</c> takes a non-nullable <c>string currentModel</c>, and the self-<c>EXISTS</c>
+/// predicate compares against the <c>Embeddings.Model</c> column, which is itself <c>NOT NULL</c>. Prove-red was
+/// attempted anyway, by removing the outer <c>EmbeddingOrphanGcHost.SweepAsync</c> guard (<c>if (currentModel is not
+/// null)</c>) entirely and calling <c>DeleteStaleModelDuplicatesAsync(currentModel!, ct)</c> unconditionally against
+/// the SAME seeded stale/current pair a real current model deletes down to one row in the cases above: it did
+/// <b>not</b> turn this test red. EF Core's SQL translator constant-folds the compound predicate to a literal
+/// <c>DELETE FROM "Embeddings" AS e WHERE FALSE</c> (confirmed from the query log) when <c>currentModel</c> is
+/// <see langword="null"/> — so removing the C# guard changes nothing at the query level; the invariant survives on
+/// the NOT NULL column alone. Per the QA contract's guard-discipline rule 1 ("prefer guards that hold by
+/// construction over guards that inspect"), this is the sanctioned resolution rather than a gap: the genuine
+/// regression guard for "the call never happens" is the existing unit suite
 /// (<c>EmbeddingOrphanGcHostTests.SweepAsync_ShouldSkipTheStaleModelBackstop_WhenNoCurrentModelIsConfigured</c>,
-/// a mocked-store <c>MustNotHaveHappened()</c> assertion) — this suite's
-/// <see cref="Sweep_ShouldTouchNothing_WhenNoCurrentModelIsConfigured"/> is the integration-tier corroboration
+/// a mocked-store <c>MustNotHaveHappened()</c> assertion, which CAN and does redden on that specific defect) — this
+/// suite's <see cref="Sweep_ShouldTouchNothing_WhenNoCurrentModelIsConfigured"/> is the integration-tier corroboration
 /// that passing <c>currentModel: null</c> is safe end to end against real data that a real current model WOULD
 /// otherwise sweep, not an independent proof that the call is skipped.
 /// </para>
