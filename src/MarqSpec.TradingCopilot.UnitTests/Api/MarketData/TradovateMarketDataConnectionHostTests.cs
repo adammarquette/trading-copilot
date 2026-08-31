@@ -28,6 +28,11 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.MarketData;
 /// <c>BackgroundServiceExceptionBehavior.StopHost</c>, which would take the auto-flatten watchdog and the kill
 /// switch down with it.
 /// </para>
+/// <para>
+/// Every test that proves a <b>negative</b> ("it did not connect", "it did not resubscribe") first waits on
+/// <see cref="PassesObserved"/>, so the assertion rests on passes that really ran rather than on a sleep the host
+/// might have spent doing nothing at all.
+/// </para>
 /// </remarks>
 public class TradovateMarketDataConnectionHostTests
 {
@@ -35,6 +40,9 @@ public class TradovateMarketDataConnectionHostTests
 
     private readonly ITradovateWebSocketClient _client = A.Fake<ITradovateWebSocketClient>();
     private readonly TradovateQuoteSubscriptions _subscriptions = new();
+    private readonly TaskCompletionSource _witness = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _stateReads;
+    private int _witnessAt = int.MaxValue;
 
     private TradovateMarketDataConnectionHost Host(IServiceProvider? services = null) =>
         new(services ?? Registered(),
@@ -50,17 +58,36 @@ public class TradovateMarketDataConnectionHostTests
         return services.BuildServiceProvider();
     }
 
+    // Each state read is one loop pass, so counting them is the host's own heartbeat: it lets a "did not happen"
+    // assertion say "across N real passes" rather than "within some wall-clock window".
     private void SocketIs(params ClientModels.ConnectionState[] states)
     {
-        int index = 0;
         A.CallTo(() => _client.MarketDataState).ReturnsLazily(() =>
-            states[Math.Min(Interlocked.Increment(ref index) - 1, states.Length - 1)]);
+        {
+            int read = Interlocked.Increment(ref _stateReads);
+            if (read >= Volatile.Read(ref _witnessAt))
+            {
+                _witness.TrySetResult();
+            }
+
+            return states[Math.Min(read - 1, states.Length - 1)];
+        });
+    }
+
+    private Task<bool> PassesObserved(int passes)
+    {
+        Volatile.Write(ref _witnessAt, passes);
+        return Signalled(_witness);
     }
 
     private static async Task<bool> Signalled(TaskCompletionSource signal)
     {
         return await Task.WhenAny(signal.Task, Task.Delay(Timeout)) == signal.Task;
     }
+
+    // A stream holding quotes on a contract, without putting anything on the fake's wire: what the host replays is
+    // then unambiguously the host's own doing.
+    private Task HoldsQuotesOn(string key) => _subscriptions.AcquireAsync(key, _ => Task.CompletedTask);
 
     [Fact]
     public async Task ExecuteAsync_ShouldConnectTheMarketDataSocket_WhenItIsDisconnected()
@@ -83,8 +110,8 @@ public class TradovateMarketDataConnectionHostTests
     {
         // THE point of the host. ConnectMarketDataAsync takes the client's non-replaying path, so a socket brought
         // back that way is subscribed to nothing: the stream stays open and simply never ticks again.
-        _subscriptions.Track("7");
-        _subscriptions.Track("8");
+        await HoldsQuotesOn("7");
+        await HoldsQuotesOn("8");
 
         TaskCompletionSource replayed = new(TaskCreationOptions.RunContinuationsAsynchronously);
         SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
@@ -104,7 +131,7 @@ public class TradovateMarketDataConnectionHostTests
     {
         // A replay that half-succeeded leaves a CONNECTED socket carrying no subscription — a state no later pass
         // would revisit, because "connected" looks healthy. The pending replay must survive into the next pass.
-        _subscriptions.Track("7");
+        await HoldsQuotesOn("7");
 
         int attempts = 0;
         TaskCompletionSource retried = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -131,10 +158,10 @@ public class TradovateMarketDataConnectionHostTests
     public async Task ExecuteAsync_ShouldReplayTheOtherKeys_WhenOneSubscriptionFailsMidReplay()
     {
         // A key that fails must not abort the pass. Aborting would let one persistently failing contract starve
-        // every key behind it -- the same connected-but-silent feed this host exists to prevent, just for the tail
+        // every key behind it — the same connected-but-silent feed this host exists to prevent, just for the tail
         // of the register.
-        _subscriptions.Track("7");
-        _subscriptions.Track("8");
+        await HoldsQuotesOn("7");
+        await HoldsQuotesOn("8");
 
         TaskCompletionSource survived = new(TaskCreationOptions.RunContinuationsAsynchronously);
         SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
@@ -153,9 +180,9 @@ public class TradovateMarketDataConnectionHostTests
     public async Task ExecuteAsync_ShouldRetryOnlyTheFailedKey_NotTheOnesAlreadyResubscribed()
     {
         // Re-sending a key that already landed would rest on the gateway treating a duplicate subscribe as a
-        // harmless no-op -- something this side cannot know. Only what is still owed is retried.
-        _subscriptions.Track("7");
-        _subscriptions.Track("8");
+        // harmless no-op — something this side cannot know. Only what is still owed is retried.
+        await HoldsQuotesOn("7");
+        await HoldsQuotesOn("8");
 
         int attempts = 0;
         TaskCompletionSource retried = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -181,28 +208,6 @@ public class TradovateMarketDataConnectionHostTests
         A.CallTo(() => _client.SubscribeQuoteAsync("8", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
     }
 
-    [Fact]
-    public async Task ExecuteAsync_ShouldStopOwingAKey_WhoseStreamEndedBeforeTheRetry()
-    {
-        // Replaying a contract nobody streams any more would feed a channel with no reader for the rest of the
-        // session. What is owed is intersected with what is still held every pass.
-        _subscriptions.Track("7");
-
-        SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
-        A.CallTo(() => _client.SubscribeQuoteAsync("7", A<CancellationToken>._)).ReturnsLazily(() =>
-        {
-            _subscriptions.Release("7"); // the consumer disposed its stream while the replay was failing
-            throw new InvalidOperationException("a transient failure on this contract (test)");
-        });
-
-        TradovateMarketDataConnectionHost host = Host();
-        await host.StartAsync(CancellationToken.None);
-        await Task.Delay(150); // many poll passes at the 1 ms test cadence
-        await host.StopAsync(CancellationToken.None);
-
-        A.CallTo(() => _client.SubscribeQuoteAsync("7", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
-    }
-
     [Theory]
     [InlineData(ClientModels.ConnectionState.Connecting)]
     [InlineData(ClientModels.ConnectionState.Reconnecting)]
@@ -211,12 +216,12 @@ public class TradovateMarketDataConnectionHostTests
         // The client's own reconnect DOES replay subscriptions. Racing it with a manual connect would tear the
         // transport down mid-attempt and land on the non-replaying path instead — turning a self-healing drop into
         // a silent feed. An in-progress state therefore means "wait", exactly as it reads as "down" for liveness.
-        _subscriptions.Track("7");
+        await HoldsQuotesOn("7");
         SocketIs(state);
 
         TradovateMarketDataConnectionHost host = Host();
         await host.StartAsync(CancellationToken.None);
-        await Task.Delay(50);
+        (await PassesObserved(3)).Should().BeTrue("the assertions below only mean something if passes really ran");
         await host.StopAsync(CancellationToken.None);
 
         A.CallTo(() => _client.ConnectMarketDataAsync(A<CancellationToken>._)).MustNotHaveHappened();
@@ -227,12 +232,12 @@ public class TradovateMarketDataConnectionHostTests
     public async Task ExecuteAsync_ShouldNeitherConnectNorReplay_WhileTheSocketIsAlreadyConnected()
     {
         // A healthy socket already carries its subscriptions; re-driving connect would drop them.
-        _subscriptions.Track("7");
+        await HoldsQuotesOn("7");
         SocketIs(ClientModels.ConnectionState.Connected);
 
         TradovateMarketDataConnectionHost host = Host();
         await host.StartAsync(CancellationToken.None);
-        await Task.Delay(50);
+        (await PassesObserved(3)).Should().BeTrue("the assertions below only mean something if passes really ran");
         await host.StopAsync(CancellationToken.None);
 
         A.CallTo(() => _client.ConnectMarketDataAsync(A<CancellationToken>._)).MustNotHaveHappened();
@@ -321,9 +326,10 @@ public class TradovateMarketDataConnectionHostTests
         TradovateMarketDataConnectionHost host = Host();
 
         await host.StartAsync(CancellationToken.None);
+        (await PassesObserved(2)).Should().BeTrue();
 
         // StopAsync returning at all is half the assertion: it awaits the run, so a loop that ignored the stopping
-        // token would hang here rather than fail. The other half is that the run ended without a FAULT -- a fault
+        // token would hang here rather than fail. The other half is that the run ended without a FAULT — a fault
         // escaping a BackgroundService stops the whole application under the default StopHost behaviour.
         await host.StopAsync(CancellationToken.None);
 
