@@ -95,6 +95,13 @@ builder.Services.AddSingleton<IVenueSetupContract, TradovateSetupContract>();
 builder.Services.AddSingleton<TradovateQuoteSubscriptions>();
 builder.Services.AddHostedService<TradovateMarketDataConnectionHost>();
 
+// The Tradovate TRADING socket's lifecycle (R-17, gh#977) — the other half of the pair above, and the one that
+// carries order, position and fill events. Its post-connect obligation is a single `user/syncrequest`, which the
+// client sends only on ITS own reconnect: a socket the manual connect brought back is authorized and permanently
+// silent, because Tradovate pushes entity frames only to a socket that has synced. Stands down (logging, never
+// throwing) while Tradovate's client is unregistered, which it still is.
+builder.Services.AddHostedService<TradovateTradingConnectionHost>();
+
 // Venue connection liveness (R-17, gh#209): a process-wide singleton over the venue's websocket client, so the
 // orphan guard can watch for a drop. One credential set per process (ADR-0015) -> one connection.
 builder.Services.AddSingleton<IVenueConnection, ProjectXConnection>();
