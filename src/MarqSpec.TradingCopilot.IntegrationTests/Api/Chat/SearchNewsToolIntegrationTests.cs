@@ -99,9 +99,15 @@ public sealed class SearchNewsToolIntegrationTests : IClassFixture<SearchNewsToo
 
         // A Suggestion-owned row IDENTICAL to the query vector -- the closest possible distance (zero). If the
         // OwnerKind filter (or the partial index's predicate) were ever dropped or widened, this would rank #1.
+        // Deliberately given a matching NewsRecord under its own DedupKey too (same shape a real hydrate would find)
+        // -- WITHOUT that row, a broken filter would still be invisible to the tool's output: the recalled owner id
+        // would have nothing to hydrate and would silently vanish at that later step regardless of the filter, and
+        // this whole case would pass whether or not the OwnerKind filter actually ran (the guard-discipline trap:
+        // "a test that passes both with and against the defect is documentation, not verification").
         await SeedEmbeddingAsync(
-            EmbeddingOwnerKind.Suggestion, "wrong-kind-but-identical-vector", queryVector,
-            url: null, title: null, summary: null);
+            EmbeddingOwnerKind.Suggestion, "https://news.test/gh988-wrong-kind", queryVector,
+            url: "https://news.test/gh988-wrong-kind", title: "Wrong-kind headline that must never surface",
+            summary: "This embedding is Suggestion-owned; search_news must never return it.");
 
         await SeedSoftSignalAsync(random, queryVector, weightOther: 0.2, "https://news.test/gh988-only-near", "Only near SoftSignal headline");
         await SeedSoftSignalAsync(random, queryVector, weightOther: 0.4, "https://news.test/gh988-only-far", "Only far SoftSignal headline");
@@ -226,14 +232,18 @@ public sealed class SearchNewsToolIntegrationTests : IClassFixture<SearchNewsToo
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
 
-        if (ownerKind == EmbeddingOwnerKind.SoftSignal)
+        // A NewsRecord is written whenever the caller supplies one -- for ANY owner kind, not only SoftSignal. A
+        // wrong-owner-kind guard needs its embedding to have a matching hydratable row too, or a broken OwnerKind
+        // filter would recall it but hydration would still find nothing to show, hiding the very regression the
+        // case exists to catch (see the wrong-kind case's own remarks).
+        if (title is not null)
         {
             database.News.Add(new NewsRecord
             {
                 DedupKey = ownerId,
                 Type = "news",
                 Url = url!,
-                Title = title!,
+                Title = title,
                 Summary = summary!,
                 PublishedAt = _publishedAt,
                 Tickers = [],
