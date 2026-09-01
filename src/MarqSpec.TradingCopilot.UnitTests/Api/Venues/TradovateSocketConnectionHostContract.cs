@@ -290,6 +290,51 @@ public abstract class TradovateSocketConnectionHostContract
             "six connect attempts must be spread by a growing backoff, not retried at the raw poll interval");
     }
 
+    [Fact]
+    public async Task ExecuteAsync_ShouldBackOff_WhileAConnectedSocketStillOwesItsPostConnectWork()
+    {
+        // The backoff is not the connect path's alone. A socket that is UP and still owes work — a quote key that
+        // has not resubscribed, a snapshot that has not landed — is retried on the connected branch, and the usual
+        // reason that work fails is the same rate limit a failed connect draws. Retrying it at the raw poll interval
+        // would sustain the limit rather than relieve it, and would log an error every interval for the life of the
+        // process while the socket goes on looking healthy.
+        //
+        // Coarse cadence for the same reason as the growth test: at 20 ms the doubling is real time rather than
+        // Windows' ~15.6 ms timer rounding.
+        TimeSpan poll = TimeSpan.FromMilliseconds(20);
+        int attempts = 0;
+        long connectedAt = 0;
+        TaskCompletionSource retried = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
+        ArrangeConnect(() =>
+        {
+            Interlocked.CompareExchange(ref connectedAt, Stopwatch.GetTimestamp(), 0);
+            return Task.CompletedTask;
+        });
+        await ArrangePostConnectWorkAsync(() =>
+        {
+            // 20 + 40 + 80 + 160 + 320 = 620 ms before the sixth attempt, against 5 x 20 = 100 ms unbacked-off.
+            if (Interlocked.Increment(ref attempts) >= 6)
+            {
+                retried.TrySetResult();
+            }
+
+            throw new InvalidOperationException("the venue rate-limited the post-connect work (test)");
+        });
+
+        BackgroundService host = CreateHost(Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400));
+        await host.StartAsync(CancellationToken.None);
+
+        (await Signalled(retried)).Should().BeTrue("a connected socket that owes work must keep being retried");
+        TimeSpan sinceConnect = Stopwatch.GetElapsedTime(Volatile.Read(ref connectedAt));
+        await StopAsync(host);
+
+        sinceConnect.Should().BeGreaterThan(
+            TimeSpan.FromMilliseconds(300),
+            "a connected socket that still owes work must back off, not retry at the raw poll interval");
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // 2 · The Connecting / Reconnecting wait.
     // ---------------------------------------------------------------------------------------------------------
@@ -477,19 +522,29 @@ public abstract class TradovateSocketConnectionHostContract
     // ---------------------------------------------------------------------------------------------------------
 
     [Fact]
-    public async Task ExecuteAsync_ShouldKeepRetrying_WhenAVenueTimeoutArrivesAsAnOperationCanceledException()
+    public async Task ExecuteAsync_ShouldRetryAndBackOff_WhenAConnectTimesOutAsAnOperationCanceledException()
     {
         // A send that times out inside HttpClient surfaces as a TaskCanceledException carrying HttpClient's OWN
-        // internal token, not this host's. A loop that treated any OCE as a clean stop would exit silently on the
-        // first venue timeout, leaving the socket unmanaged while the application runs on and nothing is logged.
-        // So an OCE is a stop ONLY when the stopping token has actually been signalled; otherwise it is a fault
-        // like any other and the pass is retried.
+        // internal token, already cancelled — not this host's stopping token. It has to be handled as the ordinary
+        // failed connect it is: logged, backed off, retried.
+        //
+        // The BACKOFF is what makes this discriminating, and the reason the assertion is a stopwatch rather than
+        // "it tried twice". A connect wrapper that rethrew the OCE unconditionally — dropping the
+        // `when (cancellationToken.IsCancellationRequested)` clause — still leaves the loop running, because the
+        // pass-level handler catches it. What it loses is the pass's own conclusion: the pass ABORTS before it can
+        // charge `delay = backoff`, so a refusing venue is retried at the raw poll interval forever. That is a rate
+        // limit sustained rather than relieved, and nothing about the host's behaviour would look wrong.
+        TimeSpan poll = TimeSpan.FromMilliseconds(20);
         int attempts = 0;
+        long startedAt = Stopwatch.GetTimestamp();
         TaskCompletionSource retried = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         SocketIs(ClientModels.ConnectionState.Disconnected);
         ArrangeConnect(() =>
         {
-            if (Interlocked.Increment(ref attempts) >= 2)
+            // 20 + 40 + 80 + 160 + 320 = 620 ms of backoff before the sixth attempt, against 5 x 20 = 100 ms if the
+            // timeout aborts the pass instead of concluding it.
+            if (Interlocked.Increment(ref attempts) >= 6)
             {
                 retried.TrySetResult();
             }
@@ -498,12 +553,38 @@ public abstract class TradovateSocketConnectionHostContract
                 "the venue did not answer in time (test)", null, new CancellationToken(canceled: true));
         });
 
-        BackgroundService host = Host();
+        BackgroundService host = CreateHost(Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400));
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(retried)).Should()
             .BeTrue("a venue timeout is a transient fault, not this host's stopping token");
+        TimeSpan elapsed = Stopwatch.GetElapsedTime(startedAt);
         host.ExecuteTask!.IsCompleted.Should().BeFalse("the host must still be running after a venue timeout");
+        await StopAsync(host);
+
+        elapsed.Should().BeGreaterThan(
+            TimeSpan.FromMilliseconds(300),
+            "a timed-out connect is a failed connect: it must back off, not abort the pass and retry at full cadence");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldKeepPolling_WhenAPassIsCancelledByAForeignToken()
+    {
+        // The pass-level backstop for the same trap, one layer out. Anything inside a pass can raise an
+        // OperationCanceledException that has nothing to do with this host's shutdown — a venue call surfacing
+        // HttpClient's own cancelled token, a collaborator that wraps one. A loop that treated ANY OCE as a clean
+        // stop would end silently on the first one: the socket goes unmanaged for the life of the process,
+        // ExecuteTask sits completed-and-not-faulted so no watchdog sees anything, and nothing is logged. The pass
+        // handler therefore tests THIS host's stopping token, not the exception's own.
+        SocketReadsAs(_ => throw new TaskCanceledException(
+            "a collaborator's own token was cancelled (test)", null, new CancellationToken(canceled: true)));
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await PassesObserved(4)).Should()
+            .BeTrue("an OperationCanceledException that is not this host's stop must be retried, not obeyed");
+        host.ExecuteTask!.IsCompleted.Should().BeFalse("the host is still running");
         await StopAsync(host);
     }
 
