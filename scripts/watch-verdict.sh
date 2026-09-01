@@ -20,7 +20,11 @@
 #   1  changes requested       -> the findings are printed above; fix them, push, and start again at `checks`
 #   2  timed out               -> alert the operator and pause. What timed out depends on the phase: in
 #                                `verdict` nobody ruled (was a reviewer spawned, and COULD it post one?); in
-#                                `checks` the checks never concluded. Each phase prints which it was.
+#                                `checks` the checks never concluded; in EITHER phase, check state itself may
+#                                have been unreadable for --max-unreadable attempts running (GraphQL AND the
+#                                REST fallback both failed, gh#1040) -- that is an API problem, not a stalled
+#                                PR, and is reported as such well before the deadline. Each phase prints which
+#                                of these it was.
 #   3  approval is stale       -> the contribution changed since it was approved; SPAWN THE REVIEWER AGAIN
 #   4  a check failed          -> fix CI first; nobody is asked to rule on a diff that does not build
 #   5  too many rounds         -> --max-rounds reached; stop looping and escalate to the operator
@@ -78,14 +82,20 @@ shift 2
 DEADLINE_MINUTES=45
 POLL_SECONDS=60
 MAX_ROUNDS=3
+# How many CONSECUTIVE times read_checks() may come back unable to read check state -- GraphQL failed AND the
+# REST fallback failed too -- before this gives up loudly instead of running out the full deadline blind
+# (gh#1040). GitHub's secondary/burst limit clears in seconds, so a handful of polls is plenty of room for a
+# transient blip to pass; past that it is worth alerting on rather than waiting out 45 minutes silently.
+MAX_UNREADABLE=3
 REPO="${REPO:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --deadline-min)  DEADLINE_MINUTES="${2:?--deadline-min needs a number}"; shift 2 ;;
-    --poll-seconds)  POLL_SECONDS="${2:?--poll-seconds needs a number}";     shift 2 ;;
-    --max-rounds)    MAX_ROUNDS="${2:?--max-rounds needs a number}";         shift 2 ;;
-    --repo)          REPO="${2:?--repo needs owner/name}";                   shift 2 ;;
-    *)               die "unknown option '$1'" ;;
+    --deadline-min)   DEADLINE_MINUTES="${2:?--deadline-min needs a number}"; shift 2 ;;
+    --poll-seconds)   POLL_SECONDS="${2:?--poll-seconds needs a number}";     shift 2 ;;
+    --max-rounds)     MAX_ROUNDS="${2:?--max-rounds needs a number}";        shift 2 ;;
+    --max-unreadable) MAX_UNREADABLE="${2:?--max-unreadable needs a number}"; shift 2 ;;
+    --repo)           REPO="${2:?--repo needs owner/name}";                  shift 2 ;;
+    *)                die "unknown option '$1'" ;;
   esac
 done
 
@@ -208,21 +218,118 @@ fi
 red_checks=""
 pending_checks=0
 passed_checks=0
+# Whether the count above is trustworthy. Cleared, not just left at zero, the moment neither source could
+# produce a readable answer -- an unreadable read must never be mistaken for a PR that genuinely has zero
+# checks (gh#1040). A caller checks THIS before treating pending_checks==0 && passed_checks==0 as meaningful.
+checks_readable=""
+# Consecutive times in a row read_checks() has come back unreadable. Reset the moment either source reads
+# cleanly; used to bound the wait so a standing API failure is reported within a handful of polls rather than
+# the full deadline (see MAX_UNREADABLE above).
+unreadable_attempts=0
 
 read_checks() {
-  red_checks=""; pending_checks=0; passed_checks=0
-  local name bucket link
-  # gh exits non-zero when anything is pending or failing, which is a normal state here, not an error.
-  while IFS=$'\t' read -r name bucket link; do
+  red_checks=""; pending_checks=0; passed_checks=0; checks_readable=1
+  local name bucket link out rc
+
+  # Primary source: `gh pr checks`, which is GraphQL. The exit status is now READ rather than swallowed --
+  # gh exits non-zero both when a check is genuinely pending/failing (normal, and it still prints the rows)
+  # and when the call itself failed, e.g. rate-limited (not normal, and it prints nothing). Those two only
+  # look alike when stdout is EMPTY, so that is the one case this falls through to the REST fallback below
+  # rather than guessing from the exit code or the error text -- a PR that genuinely has no checks yet will
+  # get the same empty answer back from REST, converging on the same "no checks reported yet" state either
+  # way, while a rate limit will not (gh#1040).
+  out=$(gh pr checks "$PR" --repo "$REPO" --json name,bucket,link \
+          --jq '.[] | [.name, .bucket, (.link // "")] | @tsv' 2>/dev/null)
+  rc=$?
+
+  if [ -n "$out" ] || [ "$rc" -eq 0 ]; then
+    while IFS=$'\t' read -r name bucket link; do
+      [ -n "$name" ] || continue
+      [ "$name" = "review-verdict" ] && continue
+      case "$bucket" in
+        fail|cancel) red_checks="${red_checks}    ${name}  (${bucket})  ${link}"$'\n' ;;
+        pending)     pending_checks=$(( pending_checks + 1 )) ;;
+        *)           passed_checks=$(( passed_checks + 1 )) ;;
+      esac
+    done <<<"$out"
+    unreadable_attempts=0
+    return
+  fi
+
+  if read_checks_rest; then
+    unreadable_attempts=0
+    return
+  fi
+
+  # Both sources failed to produce a readable answer. This is NOT "zero checks": callers must check
+  # checks_readable before treating pending_checks==0 && passed_checks==0 as a legitimate empty state.
+  checks_readable=""
+  unreadable_attempts=$(( unreadable_attempts + 1 ))
+}
+
+# The fallback that stayed healthy through a full day of parallel sessions sharing one GraphQL pool (gh#1040):
+# `gh api` hits REST directly, bypassing whatever pool `gh pr checks` draws from. Populates the same
+# red_checks / pending_checks / passed_checks globals `read_checks` does; returns 1 (leave them alone) only
+# when REST itself could not answer, so a caller can tell "REST says zero" from "REST could not say."
+#
+# Reads BOTH REST surfaces GraphQL's statusCheckRollup merges, not just the Checks API. The Checks API
+# (check-runs) and the classic commit-status API (still used by third-party integrations that predate it) are
+# two SEPARATE sets -- a fallback that read only check-runs would silently narrow to a partial one, and could
+# then call a PR "green" while a still-pending or still-failing legacy status sat unread (review finding 1 on
+# PR #1046, gh#1040). So either source failing to answer fails the WHOLE read: "I read a partial set" must
+# never render as "there is nothing pending."
+read_checks_rest() {
+  local sha out name status conclusion link="${PR_URL}/checks"
+
+  sha=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha' 2>/dev/null)
+  [ -n "$sha" ] || return 1
+
+  out=$(gh api "repos/$REPO/commits/$sha/check-runs" --paginate \
+          --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv' 2>/dev/null) || return 1
+
+  while IFS=$'\t' read -r name status conclusion; do
     [ -n "$name" ] || continue
     [ "$name" = "review-verdict" ] && continue
-    case "$bucket" in
-      fail|cancel) red_checks="${red_checks}    ${name}  (${bucket})  ${link}"$'\n' ;;
-      pending)     pending_checks=$(( pending_checks + 1 )) ;;
-      *)           passed_checks=$(( passed_checks + 1 )) ;;
+    if [ "$status" != "completed" ]; then
+      pending_checks=$(( pending_checks + 1 ))
+      continue
+    fi
+    case "$conclusion" in
+      success|neutral|skipped)                        passed_checks=$(( passed_checks + 1 )) ;;
+      failure|timed_out|action_required|cancelled)
+        red_checks="${red_checks}    ${name}  (${conclusion})  ${link}"$'\n' ;;
+      *)                                               pending_checks=$(( pending_checks + 1 )) ;;
     esac
-  done < <(gh pr checks "$PR" --repo "$REPO" --json name,bucket,link \
-             --jq '.[] | [.name, .bucket, (.link // "")] | @tsv' 2>/dev/null || true)
+  done <<<"$out"
+
+  out=$(gh api "repos/$REPO/commits/$sha/status" \
+          --jq '.statuses[] | [.context, .state] | @tsv' 2>/dev/null) || return 1
+
+  while IFS=$'\t' read -r name status; do
+    [ -n "$name" ] || continue
+    [ "$name" = "review-verdict" ] && continue
+    case "$status" in
+      success)          passed_checks=$(( passed_checks + 1 )) ;;
+      failure|error)
+        red_checks="${red_checks}    ${name}  (${status})  ${link}"$'\n' ;;
+      *)                pending_checks=$(( pending_checks + 1 )) ;;  # pending, or anything unrecognized
+    esac
+  done <<<"$out"
+  return 0
+}
+
+# Prints the standing bail-out message and returns 0 once --max-unreadable consecutive reads have failed,
+# so a caller can `if unreadable_bailout; then exit 2; fi` instead of running out its full deadline on an
+# API problem that a bounded number of retries could not clear (gh#1040).
+unreadable_bailout() {
+  [ "$unreadable_attempts" -ge "$MAX_UNREADABLE" ] || return 1
+  printf 'Could not read check state after %d attempt(s) -- GraphQL and the REST fallback both failed.\n' \
+    "$unreadable_attempts" >&2
+  printf 'This is an API problem, not a verdict on the PR -- look at %s/checks directly before waiting\n' \
+    "$PR_URL" >&2
+  printf 'any longer. `gh api rate_limit --jq .resources` does not itself consume quota and shows what,\n' >&2
+  printf 'if anything, is actually exhausted (a secondary/burst limit clears in seconds, not at reset).\n' >&2
+  return 0
 }
 
 # Prints the failures and returns 0 when there are any, so callers can `if report_red; then exit 4; fi`.
@@ -239,26 +346,33 @@ if [ "$CMD" = "checks" ]; then
     attempt=$(( attempt + 1 ))
     read_checks
 
-    if report_red; then exit 4; fi
-
-    if [ "$pending_checks" -eq 0 ] && [ "$passed_checks" -gt 0 ]; then
-      printf '%d check(s) green on %s.\n' "$passed_checks" "$PR_URL"
-      printf 'Spawn the reviewer now, then wait on it: scripts/watch-verdict.sh verdict %s\n' "$PR"
-      # Handed on, not finished: the label stays up across the reviewer spawn, and `verdict` inherits it. The
-      # operator who stops here is the one who has to take it down, so say it on the terminal rather than only
-      # in this comment -- they will never read this line, and a claim nobody clears sits for its shelf life.
-      printf '%s stays on the PR across that spawn -- if you stop here instead, take it down:\n' "$WATCH_LABEL"
-      printf '  gh pr edit %s --remove-label %s\n' "$PR" "$WATCH_LABEL"
-      hand_off=1
-      exit 0
-    fi
-
-    # No checks at all yet is the normal state for the first seconds after a push, so it waits rather than
-    # concluding "green" on an empty set -- which would send the reviewer at an untested diff.
-    if [ "$pending_checks" -eq 0 ]; then
-      state="no checks reported yet"
+    if [ -z "$checks_readable" ]; then
+      if unreadable_bailout; then exit 2; fi
+      state="could not read check state (attempt $unreadable_attempts of $MAX_UNREADABLE) -- retrying"
     else
-      state="$pending_checks pending, $passed_checks green"
+      if report_red; then exit 4; fi
+
+      if [ "$pending_checks" -eq 0 ] && [ "$passed_checks" -gt 0 ]; then
+        printf '%d check(s) green on %s.\n' "$passed_checks" "$PR_URL"
+        printf 'Spawn the reviewer now, then wait on it: scripts/watch-verdict.sh verdict %s\n' "$PR"
+        # Handed on, not finished: the label stays up across the reviewer spawn, and `verdict` inherits it.
+        # The operator who stops here is the one who has to take it down, so say it on the terminal rather
+        # than only in this comment -- they will never read this line, and a claim nobody clears sits for
+        # its shelf life.
+        printf '%s stays on the PR across that spawn -- if you stop here instead, take it down:\n' "$WATCH_LABEL"
+        printf '  gh pr edit %s --remove-label %s\n' "$PR" "$WATCH_LABEL"
+        hand_off=1
+        exit 0
+      fi
+
+      # No checks at all yet is the normal state for the first seconds after a push, so it waits rather than
+      # concluding "green" on an empty set -- which would send the reviewer at an untested diff. Reaching
+      # here means checks_readable is set, so this genuinely IS empty, not an unreadable state in disguise.
+      if [ "$pending_checks" -eq 0 ]; then
+        state="no checks reported yet"
+      else
+        state="$pending_checks pending, $passed_checks green"
+      fi
     fi
 
     now=$(date +%s)
@@ -341,13 +455,22 @@ while :; do
       # Approved is only half of done. The other half is green, and it is re-read here rather than trusted
       # from the earlier `checks` pass: the approval may have arrived minutes after a later push.
       read_checks
-      if report_red; then exit 4; fi
-      if [ "$pending_checks" -eq 0 ] && [ "$passed_checks" -gt 0 ]; then
-        printf '%s, and %d check(s) green.\n' "$detail" "$passed_checks"
-        printf 'Done: move the card to Done and take the next one from Current ToDo (engineering §10).\n'
-        exit 0
+      if [ -z "$checks_readable" ]; then
+        # This is the exact shape gh#1040 reported: an APPROVED PR whose checks could not be read must never
+        # fall through to "waiting on 0 check(s)" -- that renders a read failure as a self-contradicting
+        # description of an already-green PR. Say plainly that the read failed, and bail out well before the
+        # deadline rather than making the operator wait 45 minutes on an API problem.
+        if unreadable_bailout; then exit 2; fi
+        state="$detail -- could not read check state (attempt $unreadable_attempts of $MAX_UNREADABLE), retrying"
+      else
+        if report_red; then exit 4; fi
+        if [ "$pending_checks" -eq 0 ] && [ "$passed_checks" -gt 0 ]; then
+          printf '%s, and %d check(s) green.\n' "$detail" "$passed_checks"
+          printf 'Done: move the card to Done and take the next one from Current ToDo (engineering §10).\n'
+          exit 0
+        fi
+        state="$detail -- waiting on $pending_checks check(s)"
       fi
-      state="$detail -- waiting on $pending_checks check(s)"
       ;;
 
     *)
