@@ -31,6 +31,16 @@ namespace MarqSpec.TradingCopilot.Api.Accounts;
 /// account. So a connect this host drove is always followed by its own sync, on the same pass.
 /// </para>
 /// <para>
+/// <b>What is verified here and what is not.</b> Everything above about the <i>client</i> is read from its source:
+/// the manual connect's <c>replay: false</c>, the reconnect's single attempt, its <c>if (userId is { } id)</c> guard
+/// around the sync, and that the sync's only in-client caller is that reconnect. That Tradovate itself pushes
+/// <c>props</c> only to a <i>synced</i> socket is the one premise this side cannot pin — the client dispatches
+/// <c>props</c> unconditionally and neither it nor its docs state the server's rule. It is the protocol as
+/// documented and as the client's own reconnect assumes, and syncing an already-synced socket costs a duplicate
+/// snapshot rather than a fault, so the host is built on it — but like the duplicate-sync question it is a staging
+/// observation to make once credentials exist, not a fact this repo has established.
+/// </para>
+/// <para>
 /// <b>The gap the client's recovery leaves.</b> That internal reconnect <b>gives up after a single failed attempt</b>
 /// and parks the socket in <see cref="ClientModels.ConnectionState.Disconnected"/> for the rest of the session, so a
 /// blip longer than one attempt would end order events until the process restarts. This host retries from
@@ -49,11 +59,27 @@ namespace MarqSpec.TradingCopilot.Api.Accounts;
 /// unavailable, and reports <c>Connected</c> regardless.
 /// </para>
 /// <para>
+/// <b>One pass of grace, and the direction it errs in is deliberate.</b> "The statement after <c>Connected</c>" is
+/// <c>await GetUserIdAsync()</c>, which can run a full REST token renewal before the socket round trip that follows
+/// — so a single poll interval is not certainly longer than the client's own sync takes, and a slow or throttled
+/// venue can still draw a duplicate out of this host. Waiting longer would make that rarer at the cost of a longer
+/// silence, and the two costs are not symmetric: a duplicate snapshot is re-delivered work for consumers that have
+/// to be idempotent anyway, while a silent trading socket is a position the platform cannot see. So the grace stays
+/// at the shortest value that covers the ordinary case, and the residual duplicate is accepted rather than traded
+/// for latency on the repair path.
+/// </para>
+/// <para>
 /// <b>The need is cleared by a snapshot landing, never by an attempt.</b> A failed sync leaves a socket that looks
-/// healthy, so nothing would ever revisit it; the need therefore survives into the next pass and rides the connect
-/// path's backoff, since the usual reason a sync fails — a rate limit — is one that retrying at full cadence would
-/// sustain. A reconnect racing an in-flight sync cannot leave a false "synced" behind: the client fails every pending
-/// request as it rebuilds the transport, so a sync that a reconnect overtook throws rather than completing.
+/// healthy, so nothing would ever revisit it; the need therefore survives into the next pass, since the usual reason
+/// a sync fails — a rate limit — is one that retrying at full cadence would sustain. A reconnect that overtakes an
+/// in-flight sync <i>usually</i> faults it rather than letting it complete: the client fails every request still
+/// pending as it rebuilds the transport. That is not a guarantee, though, and the loop does not lean on it as one.
+/// A response the receive loop has already dispatched resolves regardless of what happens next, so a completion can
+/// in principle arrive after a fresh connect has re-armed the need and clear it — one thread-pool continuation
+/// racing a whole transport rebuild and authorize round trip. The pass-level clear is therefore conditional
+/// (<c>CompareExchange</c> from <c>Due</c> only), and it is the event handler, which cannot know which connection a
+/// completion belongs to, that carries the residual risk. Closing it needs connection identity the client's event
+/// does not carry; it is named in gh#1051 rather than papered over here.
 /// </para>
 /// <para>
 /// <b>Everything is caught.</b> Under the default <c>BackgroundServiceExceptionBehavior.StopHost</c> an exception
@@ -238,6 +264,14 @@ public sealed class TradovateTradingConnectionHost : BackgroundService
                     case ClientModels.ConnectionState.Disconnected:
                         if (await ConnectAsync(client, stoppingToken))
                         {
+                            // Reset BEFORE the sync, not after it. Whatever was refusing connections has
+                            // demonstrably just stopped, so the outage's accumulated backoff must not be charged to
+                            // the first sync attempt: a rate limit is likeliest right after a reconnect, and a sync
+                            // that failed while `backoff` still held a 60-second ceiling would leave a socket that
+                            // is connected -- and therefore looks healthy to everything else -- silent for a minute
+                            // per retry. The market-data sibling resets in the same place, for the same reason.
+                            backoff = _pollInterval;
+
                             // A host-driven connect authorizes the socket and sends nothing else, so the sync is
                             // owed with no grace: nothing in the process will ever send it otherwise, and until it
                             // lands the socket is connected and silent.
@@ -246,7 +280,6 @@ public sealed class TradovateTradingConnectionHost : BackgroundService
                             {
                                 Interlocked.CompareExchange(
                                     ref _syncNeed, (int)SyncNeed.None, (int)SyncNeed.Due);
-                                backoff = _pollInterval;
                             }
                             else
                             {
