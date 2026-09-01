@@ -12,6 +12,7 @@ Sizes below are approximate tokens, so you can see what a read costs before you 
 |---|---:|---|
 | [`trading-platform-prd.md`](trading-platform-prd.md) | 23.5K | You need **what** the system must do. Requirements `R-1…R-22`; every capability traces to one. §6 is 76% of the file — **open the `R-#` you need, not the file**. |
 | [`trading-platform-architecture.md`](trading-platform-architecture.md) | 7.6K | You need **how the pieces fit** — components, seams, data flow. The cheapest whole-file read here. |
+| [`trigger-workflow-guide.md`](trigger-workflow-guide.md) | 2.8K | **Operator-facing.** You need to explain — to yourself or the operator — how a trigger becomes an alert, what the two routes do, and why a fire can legitimately produce no notification. Companion to the architecture doc's *Trigger / condition engine* diagrams, in prose. |
 | [`trading-platform-engineering.md`](trading-platform-engineering.md) | 15.7K | You need stack, standards, testing, observability, deployment or the Definition of Done. Numbered §1–§12; cite and open by section. |
 | [`data-dictionary.md`](data-dictionary.md) | 4.0K | You need the **data model**. This is now an **index**: the ERD, *Conventions* and a routing table over 12 domain pages in [`data-dictionary/`](data-dictionary/) (~2.1K each). Open the index, then the one domain — not the catalog. `§N` numbers are stable and cited from C# XML docs. |
 | [`deployment-runbook.md`](deployment-runbook.md) | 14.1K | You are deploying, on call, or setting up locally. Alert runbooks live under *When a page arrives*. |
