@@ -37,10 +37,13 @@ chmod +x "$TMP/.github/scripts/verdict-state.sh"
 # Stub gh:
 #   - `pr checks`   simulates GraphQL. WV_CHECKS=ratelimited prints NOTHING and exits 1, the shape a rate
 #     limit actually takes (no output, non-zero exit) -- distinct from `pending`/`red`, which print output.
-#   - `api .../pulls/<n>`            simulates the REST head-sha lookup the fallback needs first.
-#   - `api .../commits/<sha>/check-runs` simulates the REST fallback itself.
-# Both REST calls can be told to fail via WV_REST_SHA_FAIL / WV_REST_CHECKS=unreadable, so a test can drive
-# "GraphQL down, REST also down" without either one ever touching the network.
+#   - `api .../pulls/<n>`                 simulates the REST head-sha lookup the fallback needs first.
+#   - `api .../commits/<sha>/check-runs`  simulates the Checks API half of the REST fallback.
+#   - `api .../commits/<sha>/status`      simulates the CLASSIC COMMIT STATUS half -- a separate set
+#     GraphQL's statusCheckRollup merges in that the Checks API alone never returns (review finding 1 on
+#     PR #1046: a fallback reading only check-runs can call a still-red/still-pending legacy status "green").
+# Any of the three REST calls can be told to fail via WV_REST_SHA_FAIL / WV_REST_CHECKS=unreadable /
+# WV_REST_STATUS=unreadable, so a test can drive "GraphQL down, REST also down" without touching a network.
 cat > "$TMP/bin/gh" <<'GH_STUB'
 #!/usr/bin/env bash
 case "$1 $2" in
@@ -72,6 +75,13 @@ case "$1" in
           red)        printf 'build\tcompleted\tfailure\n'; exit 0 ;;
           pending)    printf 'build\tin_progress\t\n';       exit 0 ;;
           none)       exit 0 ;;
+          unreadable) exit 1 ;;
+        esac ;;
+      repos/o/r/commits/*/status)
+        case "${WV_REST_STATUS:-none}" in
+          none)       exit 0 ;;
+          red)        printf 'legacy-ci\tfailure\n'; exit 0 ;;
+          pending)    printf 'legacy-ci\tpending\n';  exit 0 ;;
           unreadable) exit 1 ;;
         esac ;;
     esac ;;
@@ -125,7 +135,8 @@ WV_CHECKS=ratelimited WV_REST_SHA_FAIL=1 \
 rc=$?
 elapsed=$(( $(date +%s) - start ))
 check 'both-down status' "$rc" 2 'an unreadable check state is reported as a hard stop (exit 2), not a timeout at 10m'
-if [ "$elapsed" -lt 20 ]; then printf 'ok    both-down bails out in %ss, not the full 10m deadline\n' "$elapsed"
+# A generous margin, not a tight SLA -- see the matching comment on the verdict-phase case below.
+if [ "$elapsed" -lt 60 ]; then printf 'ok    both-down bails out in %ss, not the full 10m deadline\n' "$elapsed"
 else printf '::error::FAIL  both-down: took %ss -- did not bail out early on repeated read failures\n' "$elapsed"; fail=1; fi
 if grep -qi 'could not read check state' "$out"; then printf 'ok    both-down names the failure explicitly\n'
 else printf '::error::FAIL  both-down: must say it could not READ checks, not imply there are none:\n%s\n' "$(cat "$out")"; fail=1; fi
@@ -155,6 +166,58 @@ if grep -qi 'no checks reported yet' "$out"; then printf 'ok    none-yet reads a
 else printf '::error::FAIL  none-yet: expected "no checks reported yet" somewhere in:\n%s\n' "$(cat "$out")"; fail=1; fi
 if grep -qi 'could not read check state' "$out"; then
   printf '::error::FAIL  none-yet: a genuinely empty check set must not be reported as a read failure\n'
+  fail=1
+fi
+
+# --- 5. REST must read classic commit statuses too, not just the Checks API (review finding 1) -------------
+# The Checks API and the legacy `POST .../statuses` API are TWO SEPARATE sets GraphQL's statusCheckRollup
+# merges. A fallback that reads only check-runs silently narrows to a partial set, and "I read a partial set"
+# must never render as "everything passed" -- that would wave a still-red or still-pending PR through, worse
+# than the timeout this PR set out to fix.
+out="$TMP/out.legacy-status-red"
+WV_CHECKS=ratelimited WV_REST_CHECKS=green WV_REST_STATUS=red \
+  timeout 15 bash "$SCRIPT" checks 1 --repo o/r --poll-seconds 1 --deadline-min 5 >"$out" 2>&1
+rc=$?
+check 'legacy-status-red status' "$rc" 4 'a red legacy commit status must fail the read same as a red check-run'
+if grep -q 'legacy-ci' "$out"; then printf 'ok    legacy-status-red names the legacy status context\n'
+else printf '::error::FAIL  legacy-status-red: expected the legacy context named in the failure, got:\n%s\n' "$(cat "$out")"; fail=1; fi
+if grep -q 'check(s) green' "$out"; then
+  printf '::error::FAIL  legacy-status-red: reported green while a legacy commit status is still failing\n'
+  fail=1
+fi
+
+out="$TMP/out.legacy-status-pending"
+WV_CHECKS=ratelimited WV_REST_CHECKS=green WV_REST_STATUS=pending \
+  timeout 6 bash "$SCRIPT" checks 1 --repo o/r --poll-seconds 1 --deadline-min 5 >"$out" 2>&1
+rc=$?
+check 'legacy-status-pending status' "$rc" 124 'keeps waiting -- a still-pending legacy status must not resolve to green'
+if grep -q 'check(s) green' "$out"; then
+  printf '::error::FAIL  legacy-status-pending: reported green while a legacy status is still pending\n'
+  fail=1
+else printf 'ok    legacy-status-pending: never falsely reports green\n'
+fi
+
+# --- 6. `verdict`'s OWN unreadable-bailout: APPROVED, but GraphQL AND REST both fail (review finding 2) -----
+# Case 3 above exercises the `checks` command's bailout branch; `verdict` has a SEPARATE branch with its own
+# message construction and its own exit path for the identical shape -- an approved PR whose checks cannot be
+# read by either source. It must bail out loud and bounded too, never render as "waiting on 0 check(s)."
+out="$TMP/out.verdict-both-down"
+start=$(date +%s)
+WV_VERDICT='APPROVED|deadbeefcafef00dfeedfacecafebeef|1|0|Approved at head deadbee' \
+  WV_CHECKS=ratelimited WV_REST_SHA_FAIL=1 \
+  timeout 30 bash "$SCRIPT" verdict 1 --repo o/r --poll-seconds 1 --deadline-min 10 --max-unreadable 2 \
+  >"$out" 2>&1
+rc=$?
+elapsed=$(( $(date +%s) - start ))
+check 'verdict-both-down status' "$rc" 2 'verdict phase must also bail out (exit 2), not wait the full 10m deadline'
+# A generous margin, not a tight SLA -- the point is "well short of 10 real minutes," and CI/dev-box load can
+# stretch a couple of 1s polls plus stub-gh process spawns further than a quiet machine would.
+if [ "$elapsed" -lt 60 ]; then printf 'ok    verdict-both-down bails out in %ss, not the full 10m deadline\n' "$elapsed"
+else printf '::error::FAIL  verdict-both-down: took %ss -- did not bail out early on repeated read failures\n' "$elapsed"; fail=1; fi
+if grep -qi 'could not read check state' "$out"; then printf 'ok    verdict-both-down names the failure explicitly\n'
+else printf '::error::FAIL  verdict-both-down: must say it could not READ checks:\n%s\n' "$(cat "$out")"; fail=1; fi
+if grep -qi 'waiting on 0 check' "$out"; then
+  printf '::error::FAIL  verdict-both-down: must never print the self-contradicting "waiting on 0 check(s)"\n'
   fail=1
 fi
 
