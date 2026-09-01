@@ -278,16 +278,21 @@ read_checks() {
 # then call a PR "green" while a still-pending or still-failing legacy status sat unread (review finding 1 on
 # PR #1046, gh#1040). So either source failing to answer fails the WHOLE read: "I read a partial set" must
 # never render as "there is nothing pending."
+#
+# Each red row links to ITS OWN url -- a check-run's `html_url`, a status's `target_url` -- rather than the
+# generic `${PR_URL}/checks`, the same precision `gh pr checks` (GraphQL) already gives via its `link` field
+# (gh#1049). The generic link is only the fallback for the row whose own url came back empty/null, never the
+# default every row shares.
 read_checks_rest() {
-  local sha out name status conclusion link="${PR_URL}/checks"
+  local sha out name status conclusion own_link generic_link="${PR_URL}/checks"
 
   sha=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha' 2>/dev/null)
   [ -n "$sha" ] || return 1
 
   out=$(gh api "repos/$REPO/commits/$sha/check-runs" --paginate \
-          --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv' 2>/dev/null) || return 1
+          --jq '.check_runs[] | [.name, .status, (.conclusion // ""), (.html_url // "")] | @tsv' 2>/dev/null) || return 1
 
-  while IFS=$'\t' read -r name status conclusion; do
+  while IFS=$'\t' read -r name status conclusion own_link; do
     [ -n "$name" ] || continue
     [ "$name" = "review-verdict" ] && continue
     if [ "$status" != "completed" ]; then
@@ -297,21 +302,21 @@ read_checks_rest() {
     case "$conclusion" in
       success|neutral|skipped)                        passed_checks=$(( passed_checks + 1 )) ;;
       failure|timed_out|action_required|cancelled)
-        red_checks="${red_checks}    ${name}  (${conclusion})  ${link}"$'\n' ;;
+        red_checks="${red_checks}    ${name}  (${conclusion})  ${own_link:-$generic_link}"$'\n' ;;
       *)                                               pending_checks=$(( pending_checks + 1 )) ;;
     esac
   done <<<"$out"
 
   out=$(gh api "repos/$REPO/commits/$sha/status" \
-          --jq '.statuses[] | [.context, .state] | @tsv' 2>/dev/null) || return 1
+          --jq '.statuses[] | [.context, .state, (.target_url // "")] | @tsv' 2>/dev/null) || return 1
 
-  while IFS=$'\t' read -r name status; do
+  while IFS=$'\t' read -r name status own_link; do
     [ -n "$name" ] || continue
     [ "$name" = "review-verdict" ] && continue
     case "$status" in
       success)          passed_checks=$(( passed_checks + 1 )) ;;
       failure|error)
-        red_checks="${red_checks}    ${name}  (${status})  ${link}"$'\n' ;;
+        red_checks="${red_checks}    ${name}  (${status})  ${own_link:-$generic_link}"$'\n' ;;
       *)                pending_checks=$(( pending_checks + 1 )) ;;  # pending, or anything unrecognized
     esac
   done <<<"$out"
