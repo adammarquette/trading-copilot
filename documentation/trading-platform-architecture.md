@@ -270,7 +270,11 @@ consolidated in [ADR-0013](adr/0013-failure-recovery-model.md).
 **The pattern these share.** Every *polling* host opens a **fresh DI scope per pass** and exits cleanly on
 teardown — a scope held across passes cascades `ObjectDisposedException` through the parallel suites, and a host
 that ignores its stop token outlives the app. (`MarketDataIngestionHost` is the exception that proves it: its
-scope spans the *subscription*, because a websocket subscription is the unit of work, not a poll.) Each reads
+scope spans the *subscription*, because a websocket subscription is the unit of work, not a poll. The two Tradovate
+socket hosts are a second, narrower exception: they resolve the venue client and its collaborators **once, from the
+root provider**, and hold them for the process lifetime — the thing they own is a process-wide singleton socket, so
+there is no per-pass scope for them to open. They therefore resolve *lazily*, inside the run rather than through the
+constructor, so absent credentials degrade that venue's feed instead of failing startup.) Each reads
 across the R-20 filter with `IgnoreQueryFilters` to **discover** work — background plumbing has no request user —
 but does each owner's work in a context **scoped to that owner**, so the request-path guards stay correct
 unchanged rather than being re-implemented (the gh#148 duplication lesson). And every state transition is

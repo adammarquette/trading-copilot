@@ -56,8 +56,10 @@ namespace MarqSpec.TradingCopilot.Api.MarketData;
 /// direction here is always "this venue's feed degrades", never "the platform will not run" (engineering §9).
 /// </para>
 /// <para>
-/// The <b>trading</b> socket's lifecycle (order events, and the sync request its own reconnect issues) is not this
-/// host's concern; it lands with the execution slice of gh#977.
+/// The <b>trading</b> socket's lifecycle is not this host's concern — <c>TradovateTradingConnectionHost</c> owns it
+/// (gh#977). The two are deliberately separate loops rather than one template: what has to happen after a connect
+/// differs in kind, a per-key replay that must survive partial failure here versus a single <c>user/syncrequest</c>
+/// there. The cost of that choice is that a fix to one loop's shape has to be carried to the other by hand.
 /// </para>
 /// </remarks>
 public sealed class TradovateMarketDataConnectionHost : BackgroundService
