@@ -268,10 +268,12 @@ public class UnfilledSuggestionOutcomeIntegrationTests : IClassFixture<OutcomeTe
     [Fact]
     public async Task AccountRemoval_ShouldCascadeAwayATradeDerivedOutcome_WithNoOrphanOrConstraintBreach()
     {
+        // Deliberately no suggestion lineage: an outcome carrying BOTH a TradeId and a SuggestionId would also die
+        // via the (separately-proven) Suggestion cascade, masking a defect in the Trade cascade specifically — this
+        // suite's own prove-red pass caught exactly that vacuity when the fixture carried a linked suggestion too.
         Guid owner = Guid.NewGuid();
         Guid accountId = await SeedAccountAsync(owner);
-        Guid suggestionId = await SeedSuggestionAsync(owner, accountId, SuggestionState.ExpiredVoid);
-        Guid tradeId = await SeedClosedTradeAsync(owner, accountId, suggestionId, realizedPnL: 30m);
+        Guid tradeId = await SeedClosedTradeAsync(owner, accountId, suggestionId: null, realizedPnL: 30m);
         await ComposeClosedTradeOutcomesAsync();
         Guid outcomeId = (await OutcomesForTradeAsync(tradeId)).Should().ContainSingle().Subject.Id;
 
