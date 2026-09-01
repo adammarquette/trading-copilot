@@ -4,6 +4,7 @@ using MarqSpec.Client.Tradovate.Authentication;
 using MarqSpec.Client.Tradovate.Exceptions;
 using MarqSpec.Client.Tradovate.WebSocket;
 using MarqSpec.TradingCopilot.Api.Accounts;
+using MarqSpec.TradingCopilot.UnitTests.Api.Venues;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -27,90 +28,91 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.Accounts;
 /// has synced, so every order, fill and position update simply stops arriving with no exception anywhere.
 /// </para>
 /// <para>
-/// The grace pass is load-bearing in the other direction. When the <i>client</i> drove the reconnect it sends the
-/// sync itself, immediately after it reports <see cref="ClientModels.ConnectionState.Connected"/> — so a host that
-/// synced the moment it saw Connected would put a duplicate <c>user/syncrequest</c> on the ordinary path, and what
-/// Tradovate does with a second one is not pinned anywhere on this side.
-/// </para>
-/// <para>
-/// Everything is caught: an escape from <c>ExecuteAsync</c> stops the whole application under the default
-/// <c>BackgroundServiceExceptionBehavior.StopHost</c>, taking the auto-flatten watchdog and the kill switch with it.
+/// <b>The loop itself is tested by the base class</b>, <see cref="TradovateSocketConnectionHostContract"/>, and the
+/// market-data host inherits the same tests from the same source (gh#1054). What remains here is what genuinely
+/// differs: this socket's <c>user/syncrequest</c> obligation, the grace pass that keeps a duplicate snapshot off the
+/// ordinary path, and the <c>ConnectionStatusChanged</c> re-arm that only this socket needs — because only this one
+/// can reach <c>Connected</c> unsynced without anything failing.
 /// </para>
 /// <para>
 /// Every test that proves a <b>negative</b> ("it did not connect", "it did not sync") first waits on
-/// <see cref="PassesObserved"/>, so the assertion rests on passes that really ran rather than on a sleep the host
-/// might have spent doing nothing at all. Every wait is time-bound — a bare <see cref="TaskCompletionSource"/> await
-/// that never completes hangs the whole run and reads as slow CI rather than as a red test.
+/// <see cref="TradovateSocketConnectionHostContract.PassesObserved"/>, so the assertion rests on passes that really
+/// ran rather than on a sleep the host might have spent doing nothing at all. Every wait is time-bound — a bare
+/// <see cref="TaskCompletionSource"/> await that never completes hangs the whole run and reads as slow CI rather
+/// than as a red test.
 /// </para>
 /// </remarks>
-public class TradovateTradingConnectionHostTests
+public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHostContract
 {
-    private static TimeSpan Timeout { get; } = TimeSpan.FromSeconds(5);
-
     private const long UserId = 42;
 
-    private readonly ITradovateWebSocketClient _client = A.Fake<ITradovateWebSocketClient>();
     private readonly IAuthenticationService _authentication = A.Fake<IAuthenticationService>();
-    private readonly TaskCompletionSource _witness = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private int _stateReads;
-    private int _witnessAt = int.MaxValue;
 
     public TradovateTradingConnectionHostTests()
     {
         A.CallTo(() => _authentication.GetUserIdAsync(A<CancellationToken>._)).Returns<long?>(UserId);
     }
 
-    private TradovateTradingConnectionHost Host(IServiceProvider? services = null) =>
-        new(services ?? Registered(),
-            NullLogger<TradovateTradingConnectionHost>.Instance,
-            pollInterval: TimeSpan.FromMilliseconds(1),
-            maxBackoff: TimeSpan.FromMilliseconds(2));
+    /// <inheritdoc />
+    protected override BackgroundService CreateHost(
+        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff) =>
+        new TradovateTradingConnectionHost(
+            services, NullLogger<TradovateTradingConnectionHost>.Instance, pollInterval, maxBackoff);
 
-    private IServiceProvider Registered()
+    /// <inheritdoc />
+    protected override void Register(ServiceCollection services)
     {
-        ServiceCollection services = new();
-        services.AddSingleton(_client);
+        services.AddSingleton(Client);
         services.AddSingleton(_authentication);
-        return services.BuildServiceProvider();
     }
 
-    // Each state read is one loop pass, so counting them is the host's own heartbeat: it lets a "did not happen"
-    // assertion say "across N real passes" rather than "within some wall-clock window", and it lets a test act
-    // (below) at an exact point in the host's cycle instead of racing it with a sleep.
-    private void SocketIs(params ClientModels.ConnectionState[] states) => SocketIs(_ => { }, states);
+    /// <inheritdoc />
+    /// <remarks>
+    /// The authentication service is the collaborator: without the user id there is no sync request to build, and a
+    /// socket this host connected but could never sync is the silent one it exists to prevent.
+    /// </remarks>
+    protected override void RegisterWithoutARequiredCollaborator(ServiceCollection services) =>
+        services.AddSingleton(Client);
 
-    private void SocketIs(Action<int> onRead, params ClientModels.ConnectionState[] states)
+    /// <inheritdoc />
+    protected override void ArrangeSocketState(Func<ClientModels.ConnectionState> read) =>
+        A.CallTo(() => Client.TradingState).ReturnsLazily(read);
+
+    /// <inheritdoc />
+    protected override void ArrangeConnect(Func<Task> behaviour) =>
+        A.CallTo(() => Client.ConnectTradingAsync(A<CancellationToken>._)).ReturnsLazily(behaviour);
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// The real client raises <c>SyncCompleted</c> from inside <c>SyncRequestAsync</c>, before it returns — and only
+    /// when the request actually landed. Mirroring both halves on the fake is what makes "the host stops asking once
+    /// a snapshot has landed" a property of the host rather than of this test's setup.
+    /// </remarks>
+    protected override Task ArrangePostConnectWorkAsync(Func<Task> behaviour)
     {
-        A.CallTo(() => _client.TradingState).ReturnsLazily(() =>
-        {
-            int read = Interlocked.Increment(ref _stateReads);
-            onRead(read);
-            if (read >= Volatile.Read(ref _witnessAt))
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+            .ReturnsLazily(async () =>
             {
-                _witness.TrySetResult();
-            }
-
-            return states[Math.Min(read - 1, states.Length - 1)];
-        });
+                await behaviour();
+                RaiseSyncCompleted();
+                return new ClientModels.SyncResult();
+            });
+        return Task.CompletedTask;
     }
 
-    private Task<bool> PassesObserved(int passes)
-    {
-        Volatile.Write(ref _witnessAt, passes);
-        return Signalled(_witness);
-    }
+    /// <inheritdoc />
+    protected override void AssertNeverConnected() =>
+        A.CallTo(() => Client.ConnectTradingAsync(A<CancellationToken>._)).MustNotHaveHappened();
 
-    private static async Task<bool> Signalled(TaskCompletionSource signal)
-    {
-        return await Task.WhenAny(signal.Task, Task.Delay(Timeout)) == signal.Task;
-    }
+    /// <inheritdoc />
+    protected override void AssertNeverDidPostConnectWork() =>
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
 
-    // The real client raises SyncCompleted from inside SyncRequestAsync, before it returns. Mirroring that on the
-    // fake is what makes "the host stops asking once a snapshot has landed" a property of the host rather than of
-    // this test's setup.
+    // The real client raises SyncCompleted from inside SyncRequestAsync, before it returns.
     private void SyncRaisesCompletion(Action? onSync = null)
     {
-        A.CallTo(() => _client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
             .ReturnsLazily(() =>
             {
                 onSync?.Invoke();
@@ -120,43 +122,19 @@ public class TradovateTradingConnectionHostTests
     }
 
     private void RaiseSyncCompleted() =>
-        _client.SyncCompleted += Raise.With(_client, new ClientModels.SyncResult());
+        Client.SyncCompleted += Raise.With(Client, new ClientModels.SyncResult());
 
     // The client raises this from SetState, synchronously, on every transition -- including the ones NOTHING in this
     // host drives: its internal reconnect rebuilds the socket on a background task and reports Connected without the
     // host ever calling connect. That transition is the host's only cue that a live connection carries no entity
     // subscription, so it has to be exercised rather than assumed.
     private void RaiseConnected(bool tradingSocket) =>
-        _client.ConnectionStatusChanged += Raise.With(_client, new ClientModels.ConnectionStatusChange
+        Client.ConnectionStatusChanged += Raise.With(Client, new ClientModels.ConnectionStatusChange
         {
             IsTradingSocket = tradingSocket,
             Previous = ClientModels.ConnectionState.Reconnecting,
             Current = ClientModels.ConnectionState.Connected,
         });
-
-    // BackgroundService.StopAsync awaits ExecuteTask against Task.Delay(Timeout.Infinite, token), so stopping with
-    // CancellationToken.None makes every teardown here an UNBOUNDED wait: a loop that ignored its stopping token
-    // would hang the whole xunit run rather than fail this test, which reads as slow CI instead of as a defect.
-    // Every stop is therefore bounded, and a host that did not stop fails on the assertion instead of hanging.
-    private static async Task StopAsync(TradovateTradingConnectionHost host)
-    {
-        using CancellationTokenSource timeout = new(Timeout);
-        await host.StopAsync(timeout.Token);
-        host.ExecuteTask!.IsCompleted.Should().BeTrue("the host must stop when its stopping token is signalled");
-    }
-
-    // Same reason, for the stand-down tests: awaiting ExecuteTask bare would hang forever against the exact bug each
-    // of them names -- a host that failed to stand down and entered the poll loop instead.
-    private static async Task<bool> RanToCompletion(Task run)
-    {
-        if (await Task.WhenAny(run, Task.Delay(Timeout)) != run)
-        {
-            return false;
-        }
-
-        await run; // a fault surfaces as this test's failure rather than as a silent false
-        return true;
-    }
 
     [Fact]
     public async Task ExecuteAsync_ShouldConnectTheTradingSocket_WhenItIsDisconnected()
@@ -165,10 +143,10 @@ public class TradovateTradingConnectionHostTests
         // that was up went down — so at startup somebody has to open it, and that is this host and only this host.
         TaskCompletionSource connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
         SocketIs(ClientModels.ConnectionState.Disconnected);
-        A.CallTo(() => _client.ConnectTradingAsync(A<CancellationToken>._)).Invokes(() => connected.TrySetResult());
+        A.CallTo(() => Client.ConnectTradingAsync(A<CancellationToken>._)).Invokes(() => connected.TrySetResult());
         SyncRaisesCompletion();
 
-        TradovateTradingConnectionHost host = Host();
+        BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(connected)).Should().BeTrue();
@@ -182,30 +160,26 @@ public class TradovateTradingConnectionHostTests
         // user/syncrequest only from its OWN reconnect path — and Tradovate pushes props entity frames only to a
         // socket that has synced. So a host-driven connect that did not sync leaves the socket connected and
         // permanently silent: no order, fill or position event, and nothing raised.
-        //
-        // It is asserted SAME-PASS, not "eventually". A host that deferred the sync to a later pass would be
-        // indistinguishable here from one that syncs at once unless the pass is pinned — and deferring is exactly
-        // the shape of the bug, because the socket looks healthy in the meantime.
         int connectPass = 0;
         int syncPass = 0;
         TaskCompletionSource synced = new(TaskCreationOptions.RunContinuationsAsynchronously);
         SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
-        A.CallTo(() => _client.ConnectTradingAsync(A<CancellationToken>._))
-            .Invokes(() => connectPass = Volatile.Read(ref _stateReads));
+        A.CallTo(() => Client.ConnectTradingAsync(A<CancellationToken>._))
+            .Invokes(() => connectPass = PassesSoFar);
         SyncRaisesCompletion(() =>
         {
-            syncPass = Volatile.Read(ref _stateReads);
+            syncPass = PassesSoFar;
             synced.TrySetResult();
         });
 
-        TradovateTradingConnectionHost host = Host();
+        BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(synced)).Should().BeTrue("a connect the host drove is never synced by anything else");
         await StopAsync(host);
 
         syncPass.Should().Be(connectPass, "the socket is silent for every pass between the connect and the sync");
-        A.CallTo(() => _client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
     }
 
@@ -219,13 +193,13 @@ public class TradovateTradingConnectionHostTests
         SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
         SyncRaisesCompletion(() => synced.TrySetResult());
 
-        TradovateTradingConnectionHost host = Host();
+        BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(synced)).Should().BeTrue();
         await StopAsync(host);
 
-        A.CallTo(() => _client.SyncRequestAsync(
+        A.CallTo(() => Client.SyncRequestAsync(
                 A<ClientModels.SyncRequest>.That.Matches(request => request.Users.SequenceEqual(new[] { UserId })),
                 A<CancellationToken>._))
             .MustHaveHappened();
@@ -236,19 +210,20 @@ public class TradovateTradingConnectionHostTests
     {
         // The gap the client's own reconnect can still leave without failing: it skips the sync entirely when the
         // authenticated user id is unavailable, and it reports Connected either way. A socket that is up and has
-        // never synced is the silent one, so "connected" alone is not evidence the feed is alive.
+        // never synced is the silent one, so "connected" alone is not evidence the feed is alive. This is where the
+        // two sockets legitimately part company — the market-data host does nothing on a healthy socket.
         TaskCompletionSource synced = new(TaskCreationOptions.RunContinuationsAsynchronously);
         SocketIs(ClientModels.ConnectionState.Connected);
         SyncRaisesCompletion(() => synced.TrySetResult());
 
-        TradovateTradingConnectionHost host = Host();
+        BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(synced)).Should().BeTrue();
         await StopAsync(host);
 
         // A connected socket must never be torn down just to sync it: the manual connect rebuilds the transport.
-        A.CallTo(() => _client.ConnectTradingAsync(A<CancellationToken>._)).MustNotHaveHappened();
+        AssertNeverConnected();
     }
 
     [Fact]
@@ -261,16 +236,23 @@ public class TradovateTradingConnectionHostTests
         // The completion is raised on the SECOND state read, which is after the first pass has already decided the
         // sync is due. A host without the grace would have sent it on that first pass, so this fails against the
         // eager implementation rather than merely passing alongside it.
-        SocketIs(read => { if (read == 2) { RaiseSyncCompleted(); } }, ClientModels.ConnectionState.Connected);
+        SocketReadsAs(read =>
+        {
+            if (read == 2)
+            {
+                RaiseSyncCompleted();
+            }
+
+            return ClientModels.ConnectionState.Connected;
+        });
         SyncRaisesCompletion();
 
-        TradovateTradingConnectionHost host = Host();
+        BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
         (await PassesObserved(6)).Should().BeTrue("the assertion below only means something if passes really ran");
         await StopAsync(host);
 
-        A.CallTo(() => _client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
-            .MustNotHaveHappened();
+        AssertNeverDidPostConnectWork();
     }
 
     [Fact]
@@ -282,12 +264,12 @@ public class TradovateTradingConnectionHostTests
         SocketIs(ClientModels.ConnectionState.Connected);
         SyncRaisesCompletion();
 
-        TradovateTradingConnectionHost host = Host();
+        BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
         (await PassesObserved(8)).Should().BeTrue();
         await StopAsync(host);
 
-        A.CallTo(() => _client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
     }
 
@@ -307,16 +289,16 @@ public class TradovateTradingConnectionHostTests
         int syncs = 0;
         int reconnected = 0;
         TaskCompletionSource resynced = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        SocketIs(
-            _ =>
+        SocketReadsAs(_ =>
+        {
+            // Once, and only after a snapshot has already settled the need to None.
+            if (Volatile.Read(ref syncs) >= 1 && Interlocked.Exchange(ref reconnected, 1) == 0)
             {
-                // Once, and only after a snapshot has already settled the need to None.
-                if (Volatile.Read(ref syncs) >= 1 && Interlocked.Exchange(ref reconnected, 1) == 0)
-                {
-                    RaiseConnected(tradingSocket: true);
-                }
-            },
-            ClientModels.ConnectionState.Connected);
+                RaiseConnected(tradingSocket: true);
+            }
+
+            return ClientModels.ConnectionState.Connected;
+        });
         SyncRaisesCompletion(() =>
         {
             if (Interlocked.Increment(ref syncs) == 2)
@@ -325,7 +307,7 @@ public class TradovateTradingConnectionHostTests
             }
         });
 
-        TradovateTradingConnectionHost host = Host();
+        BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(resynced)).Should()
@@ -342,24 +324,24 @@ public class TradovateTradingConnectionHostTests
         // cost the grace pass exists to avoid. This is the test that makes the IsTradingSocket filter load-bearing.
         int syncs = 0;
         int reconnected = 0;
-        SocketIs(
-            _ =>
+        SocketReadsAs(_ =>
+        {
+            if (Volatile.Read(ref syncs) >= 1 && Interlocked.Exchange(ref reconnected, 1) == 0)
             {
-                if (Volatile.Read(ref syncs) >= 1 && Interlocked.Exchange(ref reconnected, 1) == 0)
-                {
-                    RaiseConnected(tradingSocket: false);
-                }
-            },
-            ClientModels.ConnectionState.Connected);
+                RaiseConnected(tradingSocket: false);
+            }
+
+            return ClientModels.ConnectionState.Connected;
+        });
         SyncRaisesCompletion(() => Interlocked.Increment(ref syncs));
 
-        TradovateTradingConnectionHost host = Host();
+        BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
         (await PassesObserved(10)).Should().BeTrue("the assertion below only means something if passes really ran");
         await StopAsync(host);
 
         Volatile.Read(ref reconnected).Should().Be(1, "the market-data reconnect must actually have been raised");
-        A.CallTo(() => _client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
     }
 
@@ -373,7 +355,7 @@ public class TradovateTradingConnectionHostTests
         int attempts = 0;
         TaskCompletionSource retried = new(TaskCreationOptions.RunContinuationsAsynchronously);
         SocketIs(ClientModels.ConnectionState.Connected);
-        A.CallTo(() => _client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
             .ReturnsLazily(() =>
             {
                 if (Interlocked.Increment(ref attempts) == 1)
@@ -386,72 +368,82 @@ public class TradovateTradingConnectionHostTests
                 return Task.FromResult(new ClientModels.SyncResult());
             });
 
-        TradovateTradingConnectionHost host = Host();
+        BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(retried)).Should().BeTrue();
         await StopAsync(host);
-
-        host.ExecuteTask!.IsFaulted.Should().BeFalse("a venue fault must never stop the application");
     }
 
     [Fact]
-    public async Task ExecuteAsync_ShouldResetTheBackoff_WhenAConnectSucceeds_SoTheFirstSyncIsNotChargedTheOutage()
+    public async Task ExecuteAsync_ShouldResetTheBackoff_WhenASnapshotLands_SoALaterReArmedSyncIsNotChargedTheFailures()
     {
-        // A venue outage grows the connect backoff toward its ceiling. When a connect finally succeeds, whatever was
-        // refusing connections has demonstrably just stopped — and the sync immediately after a reconnect is the
-        // likeliest moment of all to draw a rate limit. Charging that first sync attempt the outage's accumulated
-        // delay leaves the socket CONNECTED, and therefore healthy-looking to everything else in the process, while
-        // it delivers no order, fill or position event for a full ceiling per retry. The sibling market-data host
-        // resets in the same place for the same reason; two hand-maintained copies of this loop must not disagree
-        // about it.
+        // The second half of the shared reset rule — "a pass that owes nothing returns the cadence to the poll
+        // interval" — and the one that cannot live in the shared contract. It is only observable through a LATER
+        // pass that owes something, and only this socket can be pushed back into owing one without a reconnect:
+        // ConnectionStatusChanged re-arms it. Market data's obligation, once settled, is re-armed only by a
+        // host-driven connect, which resets the backoff on its own path anyway. The code being pinned is shared, so
+        // the mutation dies for both hosts even though only this suite can stage it.
         //
-        // Asserted as CADENCE rather than as a stopwatch reading of one delay: after the reset every pass costs a
-        // poll interval, so six retries land in a few milliseconds, where the unreset ceiling would spend six of
-        // them. The window below sits an order of magnitude below the ceiling and well above the reset cadence.
-        TimeSpan ceiling = TimeSpan.FromMilliseconds(100);
-        int connects = 0;
-        long recoveredAt = 0;
-        int syncsAfterRecovery = 0;
+        // Sequence: several failed syncs walk the backoff to its ceiling · one lands, which must reset it · the
+        // socket is re-armed by a client-driven reconnect · the syncs fail again. Those retries must cost poll
+        // intervals doubling from the reset, not the ceiling the earlier failures reached.
+        TimeSpan ceiling = TimeSpan.FromMilliseconds(250);
+        int attempts = 0;
+        long reArmedAt = 0;
+        int failuresAfterReArm = 0;
         TaskCompletionSource retried = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        SocketIs(ClientModels.ConnectionState.Disconnected);
-        A.CallTo(() => _client.ConnectTradingAsync(A<CancellationToken>._)).ReturnsLazily(() =>
+        SocketReadsAs(_ =>
         {
-            // Eight failures walk the backoff 1 → 2 → 4 … up to the ceiling; every attempt after that succeeds.
-            if (Interlocked.Increment(ref connects) <= 8)
+            // Re-arm once, immediately after the snapshot that settled the need — the client's own reconnect
+            // rebuilding the socket between two passes.
+            if (Volatile.Read(ref attempts) >= 9 && Interlocked.CompareExchange(ref reArmedAt, Stopwatch.GetTimestamp(), 0) == 0)
             {
-                throw new InvalidOperationException("the venue is unreachable (test)");
+                RaiseConnected(tradingSocket: true);
             }
 
-            Interlocked.CompareExchange(ref recoveredAt, Stopwatch.GetTimestamp(), 0);
-            return Task.CompletedTask;
+            return ClientModels.ConnectionState.Connected;
         });
-        A.CallTo(() => _client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
             .ReturnsLazily<Task<ClientModels.SyncResult>>(() =>
             {
-                if (Interlocked.Increment(ref syncsAfterRecovery) >= 6)
+                int attempt = Interlocked.Increment(ref attempts);
+                if (attempt < 9)
+                {
+                    // Eight failures walk the backoff 1 → 2 → 4 … to the ceiling.
+                    throw new TradovateRateLimitException("the venue rate-limited the sync (test)");
+                }
+
+                if (attempt == 9)
+                {
+                    // The snapshot that lands. THIS is the pass whose reset is under test.
+                    RaiseSyncCompleted();
+                    return Task.FromResult(new ClientModels.SyncResult());
+                }
+
+                if (Interlocked.Increment(ref failuresAfterReArm) >= 6)
                 {
                     retried.TrySetResult();
                 }
 
-                throw new TradovateRateLimitException("the venue rate-limited the sync (test)");
+                throw new TradovateRateLimitException("the venue rate-limited the sync again (test)");
             });
 
-        TradovateTradingConnectionHost host = new(
+        BackgroundService host = new TradovateTradingConnectionHost(
             Registered(),
             NullLogger<TradovateTradingConnectionHost>.Instance,
             pollInterval: TimeSpan.FromMilliseconds(1),
             maxBackoff: ceiling);
         await host.StartAsync(CancellationToken.None);
 
-        (await Signalled(retried)).Should().BeTrue("the sync must keep being retried after the connect recovered");
-        TimeSpan sinceRecovery = Stopwatch.GetElapsedTime(Volatile.Read(ref recoveredAt));
+        (await Signalled(retried)).Should().BeTrue("a re-armed sync must keep being retried");
+        TimeSpan sinceReArm = Stopwatch.GetElapsedTime(Volatile.Read(ref reArmedAt));
         await StopAsync(host);
 
-        sinceRecovery.Should().BeLessThan(
-            ceiling * 3,
-            "six sync retries after a recovered connect must cost poll intervals, not the outage's ceiling");
+        sinceReArm.Should().BeLessThan(
+            ceiling * 4,
+            "the pass whose snapshot landed must reset the backoff, so the re-armed retries cost poll intervals");
     }
 
     [Fact]
@@ -473,134 +465,12 @@ public class TradovateTradingConnectionHostTests
             return Task.FromResult<long?>(null);
         });
 
-        TradovateTradingConnectionHost host = Host();
+        BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(asked)).Should().BeTrue("an unavailable user id is retried, not settled into");
         await StopAsync(host);
 
-        A.CallTo(() => _client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
-            .MustNotHaveHappened();
-        host.ExecuteTask!.IsFaulted.Should().BeFalse();
-    }
-
-    [Theory]
-    [InlineData(ClientModels.ConnectionState.Connecting)]
-    [InlineData(ClientModels.ConnectionState.Reconnecting)]
-    public async Task ExecuteAsync_ShouldNeitherConnectNorSync_WhileTheClientIsAlreadyAttemptingIt(
-        ClientModels.ConnectionState state)
-    {
-        // The client's own reconnect DOES send the sync. Racing it with a manual connect would tear the transport
-        // down mid-attempt and land on the path that does not sync — turning a self-healing drop into a silent
-        // socket. And a sync sent over a transport that is not up yet just throws.
-        SocketIs(state);
-
-        TradovateTradingConnectionHost host = Host();
-        await host.StartAsync(CancellationToken.None);
-        (await PassesObserved(3)).Should().BeTrue("the assertions below only mean something if passes really ran");
-        await StopAsync(host);
-
-        A.CallTo(() => _client.ConnectTradingAsync(A<CancellationToken>._)).MustNotHaveHappened();
-        A.CallTo(() => _client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
-            .MustNotHaveHappened();
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_ShouldKeepRetrying_WhenTheConnectAttemptFails()
-    {
-        // The gap the client leaves: its internal reconnect gives up after one failure and parks the socket in
-        // Disconnected for the rest of the session. An outage lasting longer than a single attempt must still
-        // recover on its own.
-        int attempts = 0;
-        TaskCompletionSource retried = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        SocketIs(ClientModels.ConnectionState.Disconnected);
-        A.CallTo(() => _client.ConnectTradingAsync(A<CancellationToken>._)).ReturnsLazily(() =>
-        {
-            if (Interlocked.Increment(ref attempts) >= 2)
-            {
-                retried.TrySetResult();
-            }
-
-            throw new InvalidOperationException("the venue is unreachable (test)");
-        });
-
-        TradovateTradingConnectionHost host = Host();
-        await host.StartAsync(CancellationToken.None);
-
-        (await Signalled(retried)).Should().BeTrue();
-        await StopAsync(host);
-
-        // A sync sent over a socket that failed to connect can only throw.
-        A.CallTo(() => _client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
-            .MustNotHaveHappened();
-        host.ExecuteTask!.IsFaulted.Should().BeFalse("a venue outage must never stop the application");
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_ShouldStopQuietly_WhenTheTradovateClientIsNotRegistered()
-    {
-        // Tradovate is not wired in every deployment. An unconfigured venue is an idle host, not a startup failure.
-        TradovateTradingConnectionHost host = Host(new ServiceCollection().BuildServiceProvider());
-
-        await host.StartAsync(CancellationToken.None);
-
-        (await RanToCompletion(host.ExecuteTask!)).Should()
-            .BeTrue("standing down means the run ENDS -- a host that fell through to the poll loop hangs here");
-        await StopAsync(host);
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_ShouldStopQuietly_WhenBuildingTheClientThrows()
-    {
-        // Missing or malformed Tradovate credentials throw while the client is constructed. Under the default
-        // StopHost behaviour that would stop the platform — trading, auto-flatten and kill switch included.
-        ServiceCollection services = new();
-        services.AddSingleton<ITradovateWebSocketClient>(
-            _ => throw new InvalidOperationException("Tradovate credentials are not configured (test)."));
-        TradovateTradingConnectionHost host = Host(services.BuildServiceProvider());
-
-        await host.StartAsync(CancellationToken.None);
-
-        (await RanToCompletion(host.ExecuteTask!)).Should()
-            .BeTrue("standing down means the run ENDS -- a host that fell through to the poll loop hangs here");
-        await StopAsync(host);
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_ShouldNotDriveTheSocket_WhenTheAuthenticationServiceIsNotRegistered()
-    {
-        // A wiring defect: the client is present but the service that names the authenticated user is not. Connecting
-        // anyway would produce the exact failure this host exists to prevent — an authorized socket that can never be
-        // synced, and so never delivers an order event — so stand down loudly instead of half-driving it.
-        ServiceCollection services = new();
-        services.AddSingleton(_client);
-        SocketIs(ClientModels.ConnectionState.Disconnected);
-        TradovateTradingConnectionHost host = Host(services.BuildServiceProvider());
-
-        await host.StartAsync(CancellationToken.None);
-
-        (await RanToCompletion(host.ExecuteTask!)).Should()
-            .BeTrue("standing down means the run ENDS -- a host that fell through to the poll loop hangs here");
-        await StopAsync(host);
-        A.CallTo(() => _client.ConnectTradingAsync(A<CancellationToken>._)).MustNotHaveHappened();
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_ShouldExitCleanly_OnShutdown()
-    {
-        SocketIs(ClientModels.ConnectionState.Connected);
-        SyncRaisesCompletion();
-        TradovateTradingConnectionHost host = Host();
-
-        await host.StartAsync(CancellationToken.None);
-        (await PassesObserved(2)).Should().BeTrue();
-
-        // StopAsync awaits the run, so a loop that ignored the stopping token would never return — which is why the
-        // helper bounds the wait and asserts completion instead of letting the run hang. The other half is that the
-        // run ended without a FAULT: a fault escaping a BackgroundService stops the whole application under the
-        // default StopHost behaviour.
-        await StopAsync(host);
-
-        host.ExecuteTask!.IsFaulted.Should().BeFalse("a shutdown is a clean stop, not a fault");
+        AssertNeverDidPostConnectWork();
     }
 }
