@@ -2,6 +2,7 @@ using System.Diagnostics;
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Ai;
 using MarqSpec.TradingCopilot.Api.MarketData;
+using MarqSpec.TradingCopilot.Api.Notifications;
 using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
@@ -79,8 +80,9 @@ public class TriggerEvaluationServiceTests
     // so behaviour is byte-for-byte unchanged from before gh#448. The gh#448 cases pass a configured GovernorOptions.
     private TriggerEvaluationService Service(
         IAiUsageLedger? ledger = null, GovernorOptions? governor = null, IReviewEnrichmentSource? enrichment = null,
-        SuggestionOptions? suggestionOptions = null, ConfluenceOptions? confluence = null) => new(
-        Context(), Options, _indicators, _notifications, _reviewer, enrichment ?? _enrichment, ledger ?? _ledger,
+        SuggestionOptions? suggestionOptions = null, ConfluenceOptions? confluence = null,
+        INotificationChannel? notifications = null) => new(
+        Context(), Options, _indicators, notifications ?? _notifications, _reviewer, enrichment ?? _enrichment, ledger ?? _ledger,
         _llmMetrics, _deadlines, Microsoft.Extensions.Options.Options.Create(suggestionOptions ?? new SuggestionOptions()), new AiSpendGovernor(),
         Microsoft.Extensions.Options.Options.Create(governor ?? new GovernorOptions()),
         _suggestionNotifier, new SuggestionThrottle(), _levels, _specs,
@@ -326,6 +328,84 @@ public class TriggerEvaluationServiceTests
         await Service().ScanAsync(Now, CancellationToken.None);
 
         A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // (review fix) The staleness advisory's dedup key is STATIC per trigger, not per outage, and
+    // DedupingNotificationChannel only releases a key via ResolveAsync -- so a reported outage that clears MUST
+    // resolve its key, or a later, independent outage on the same trigger is silently swallowed forever.
+    [Fact]
+    public async Task ScanAsync_ShouldResolveTheStalenessIncident_WhenAReportedOutageRecovers()
+    {
+        Guid id = await AddTriggerAsync(
+            armState: TriggerArmState.Armed,
+            unmeasurableSince: Now - TriggerStaleness.ReportAfter - TimeSpan.FromMinutes(5),
+            stalenessReportedAt: Now - TimeSpan.FromMinutes(5)); // this outage was already reported
+        IndicatorReturns(40m); // measurable and NOT satisfied (Below 30) -> recovery, no fire
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _notifications.ResolveAsync($"trigger:{id}:staleness", A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldNotResolveTheStalenessIncident_WhenAnOutageThatWasNeverReportedRecovers()
+    {
+        // An outage that never crossed the 30-minute threshold never held the dedup key -- no resolve is needed,
+        // and calling it anyway would be a no-op at best but is worth pinning as intentional, not accidental.
+        await AddTriggerAsync(
+            armState: TriggerArmState.Armed,
+            unmeasurableSince: Now - TimeSpan.FromMinutes(5), // short-lived, never reported
+            stalenessReportedAt: null);
+        IndicatorReturns(40m); // recovers before the threshold
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _notifications.ResolveAsync(A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // (review fix, red-then-green against the REAL dedup layer) Without the resolve above, DedupingNotificationChannel
+    // -- a process-lifetime singleton -- delivers the FIRST reported outage and then silently drops every LATER,
+    // independent outage on the SAME trigger for the rest of the process's uptime: "once per process" instead of
+    // "once per outage". This is exercised against the real decorator (not the bare fake every other test in this
+    // file uses) because the bug lives entirely in the interaction between this service and that decorator.
+    [Fact]
+    public async Task ScanAsync_ShouldNotifyAgain_WhenTheTriggerRecoversThenGoesStaleASecondTime()
+    {
+        INotificationChannel inner = A.Fake<INotificationChannel>();
+        A.CallTo(() => inner.SendAsync(A<Notification>._, A<CancellationToken>._)).Returns(true);
+        DedupingNotificationChannel deduping = new(inner, NullLogger<DedupingNotificationChannel>.Instance);
+
+        Guid id = await AddTriggerAsync(
+            armState: TriggerArmState.Armed,
+            unmeasurableSince: Now - TriggerStaleness.ReportAfter, // first outage crosses the line immediately
+            stalenessReportedAt: null);
+
+        // Pass 1: crosses the threshold -> the FIRST outage is reported.
+        await Service(notifications: deduping).ScanAsync(Now, CancellationToken.None);
+
+        // Pass 2: the indicator recovers (measurable, not satisfied) -- the outage clears.
+        IndicatorReturns(40m);
+        await Service(notifications: deduping).ScanAsync(Now, CancellationToken.None);
+
+        // A SECOND, independent outage starts well after the first and crosses the threshold on its own.
+        DateTimeOffset later = Now.AddDays(1);
+        await using (TradingCopilotDbContext mid = Context())
+        {
+            TriggerRecord trigger = await mid.Triggers.SingleAsync(t => t.Id == id);
+            trigger.UnmeasurableSince = later - TriggerStaleness.ReportAfter;
+            trigger.StalenessReportedAt = null;
+            await mid.SaveChangesAsync();
+        }
+        IndicatorReturns(null); // unmeasurable again
+
+        // Pass 3: the second outage must notify too -- NOT be swallowed as a stale duplicate of the first.
+        await Service(notifications: deduping).ScanAsync(later, CancellationToken.None);
+
+        A.CallTo(() => inner.SendAsync(
+                A<Notification>.That.Matches(n => n.DedupKey == $"trigger:{id}:staleness"),
+                A<CancellationToken>._))
+            .MustHaveHappenedTwiceExactly();
     }
 
     // --- Seed silently ---

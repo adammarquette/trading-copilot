@@ -389,6 +389,10 @@ public class TriggerEvaluationService
             // never occurred. Duration is what separates a late bar from a broken trigger, so the outage start is
             // persisted and reported once it outlasts the threshold -- never every pass, which would be a log line
             // per trigger per poll.
+            //
+            // Captured BEFORE Track() overwrites it below, so the recovery branch can tell "this outage was
+            // reported and just cleared" from "this outage never crossed the threshold" (review fix, gh#1045).
+            DateTimeOffset? previouslyReportedStaleness = trigger.StalenessReportedAt;
             TriggerStaleness staleness = TriggerStaleness.Track(trigger.UnmeasurableSince, trigger.StalenessReportedAt, satisfaction, now);
             trigger.UnmeasurableSince = staleness.UnmeasurableSince;
             trigger.StalenessReportedAt = staleness.ReportedAt;
@@ -419,6 +423,22 @@ public class TriggerEvaluationService
                     + $"for {trigger.Symbol} since {staleness.UnmeasurableSince:u}. It cannot fire until that "
                     + "indicator is produced again. The trigger is NOT disabled.",
                     StalenessDedupKey(trigger)));
+            }
+            else if (previouslyReportedStaleness is not null && staleness.ReportedAt is null)
+            {
+                // REVIEW FIX (gh#1045): the advisory above uses a STATIC per-trigger dedup key (StalenessDedupKey),
+                // and DedupingNotificationChannel is a process-lifetime singleton that only releases a key via
+                // ResolveAsync. Without this branch, the FIRST reported outage on a trigger delivers and then
+                // every LATER, independent outage on that SAME trigger is silently dropped by the dedup layer for
+                // the rest of the process's uptime -- "one notification per process lifetime" instead of the
+                // intended "one per outage", which is precisely the "operator never finds out" failure this issue
+                // exists to fix, reproduced one layer down. Track() clears UnmeasurableSince/ReportedAt together
+                // on EVERY recovery, whether or not this particular outage was ever reported, so the resolve is
+                // gated on `previouslyReportedStaleness is not null`: an outage that never crossed the 30-minute
+                // threshold never held the key and needs no resolve (ResolveAsync is idempotent regardless, but
+                // there is no reason to call it). Mirrors the ReArmed branch below: an unguarded, before-commit
+                // resolve is the established idiom in this method.
+                await _notifications.ResolveAsync(StalenessDedupKey(trigger), cancellationToken);
             }
 
             if (decision.ShouldFire && trigger.Route == TriggerRoute.Mechanical)
