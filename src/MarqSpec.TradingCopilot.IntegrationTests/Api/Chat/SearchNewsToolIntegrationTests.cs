@@ -314,6 +314,10 @@ public sealed class SearchNewsToolIntegrationTests : IClassFixture<SearchNewsToo
         await database.SoftSignalFeedbacks.IgnoreQueryFilters().ExecuteDeleteAsync();
         await database.Embeddings.ExecuteDeleteAsync();
         await database.News.ExecuteDeleteAsync();
+        // Every case in this class shares one container (IClassFixture, gh#121); a prior case's Embed ledger row
+        // would otherwise still be there when the degrade case's own AiUsage assertion runs, failing it for a
+        // reason that has nothing to do with THAT case's own production behaviour.
+        await database.AiUsage.IgnoreQueryFilters().ExecuteDeleteAsync();
     }
 
     /// <summary>A uniformly-random unit vector -- Box-Muller normal samples, then normalized.</summary>
