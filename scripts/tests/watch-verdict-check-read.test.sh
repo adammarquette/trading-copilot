@@ -72,7 +72,9 @@ case "$1" in
       repos/o/r/commits/*/check-runs)
         case "${WV_REST_CHECKS:-unreadable}" in
           green)      printf 'build\tcompleted\tsuccess\n'; exit 0 ;;
-          red)        printf 'build\tcompleted\tfailure\n'; exit 0 ;;
+          # WV_REST_CHECKS_URL, when set, rides along as the check-run's OWN html_url (gh#1049) -- left unset
+          # it comes through as the empty field the fix must fall back to the generic link on.
+          red)        printf 'build\tcompleted\tfailure\t%s\n' "${WV_REST_CHECKS_URL:-}"; exit 0 ;;
           pending)    printf 'build\tin_progress\t\n';       exit 0 ;;
           none)       exit 0 ;;
           unreadable) exit 1 ;;
@@ -80,7 +82,9 @@ case "$1" in
       repos/o/r/commits/*/status)
         case "${WV_REST_STATUS:-none}" in
           none)       exit 0 ;;
-          red)        printf 'legacy-ci\tfailure\n'; exit 0 ;;
+          # WV_REST_STATUS_URL, when set, rides along as the status's OWN target_url (gh#1049) -- same
+          # empty-falls-back-to-generic shape as the check-run case above.
+          red)        printf 'legacy-ci\tfailure\t%s\n' "${WV_REST_STATUS_URL:-}"; exit 0 ;;
           pending)    printf 'legacy-ci\tpending\n';  exit 0 ;;
           unreadable) exit 1 ;;
         esac ;;
@@ -218,6 +222,99 @@ if grep -qi 'could not read check state' "$out"; then printf 'ok    verdict-both
 else printf '::error::FAIL  verdict-both-down: must say it could not READ checks:\n%s\n' "$(cat "$out")"; fail=1; fi
 if grep -qi 'waiting on 0 check' "$out"; then
   printf '::error::FAIL  verdict-both-down: must never print the self-contradicting "waiting on 0 check(s)"\n'
+  fail=1
+fi
+
+
+# --- 7. a red check-run's OWN html_url is reported, not the generic checks-tab link (gh#1049) ---------------
+# Before the fix, read_checks_rest() hardcoded every red row to "${PR_URL}/checks" regardless of what the
+# Checks API actually returned. The API gives a per-run html_url that points straight at the failing job --
+# use it.
+out="$TMP/out.checkrun-own-url"
+WV_CHECKS=ratelimited WV_REST_CHECKS=red WV_REST_CHECKS_URL='https://github.com/o/r/actions/runs/555/job/999' \
+  timeout 15 bash "$SCRIPT" checks 1 --repo o/r --poll-seconds 1 --deadline-min 5 >"$out" 2>&1
+rc=$?
+check 'checkrun-own-url status' "$rc" 4 'a red check-run must still fail the checks phase'
+if grep -q 'https://github.com/o/r/actions/runs/555/job/999' "$out"; then
+  printf 'ok    checkrun-own-url: reports the check-run''s own html_url\n'
+else
+  printf '::error::FAIL  checkrun-own-url: expected the check-run''s own html_url in the report, got:\n%s\n' "$(cat "$out")"
+  fail=1
+fi
+if grep -q 'o/r/pull/1/checks' "$out"; then
+  printf '::error::FAIL  checkrun-own-url: still printing the generic checks-tab link instead of the check-run''s own\n'
+  fail=1
+fi
+
+# --- 8. a red check-run with NO html_url falls back to the generic checks-tab link ---------------------------
+out="$TMP/out.checkrun-no-url"
+WV_CHECKS=ratelimited WV_REST_CHECKS=red \
+  timeout 15 bash "$SCRIPT" checks 1 --repo o/r --poll-seconds 1 --deadline-min 5 >"$out" 2>&1
+rc=$?
+check 'checkrun-no-url status' "$rc" 4 'a red check-run must still fail the checks phase'
+if grep -q 'o/r/pull/1/checks' "$out"; then
+  printf 'ok    checkrun-no-url: falls back to the generic checks-tab link when html_url is empty\n'
+else
+  printf '::error::FAIL  checkrun-no-url: expected the generic checks-tab link as fallback, got:\n%s\n' "$(cat "$out")"
+  fail=1
+fi
+
+# --- 9. a red legacy commit status's OWN target_url is reported, not the generic link ------------------------
+out="$TMP/out.status-own-url"
+WV_CHECKS=ratelimited WV_REST_CHECKS=green WV_REST_STATUS=red \
+  WV_REST_STATUS_URL='https://ci.example.com/legacy/build/42' \
+  timeout 15 bash "$SCRIPT" checks 1 --repo o/r --poll-seconds 1 --deadline-min 5 >"$out" 2>&1
+rc=$?
+check 'status-own-url status' "$rc" 4 'a red legacy status must still fail the checks phase'
+if grep -q 'https://ci.example.com/legacy/build/42' "$out"; then
+  printf 'ok    status-own-url: reports the legacy status''s own target_url\n'
+else
+  printf '::error::FAIL  status-own-url: expected the status''s own target_url in the report, got:\n%s\n' "$(cat "$out")"
+  fail=1
+fi
+if grep -q 'o/r/pull/1/checks' "$out"; then
+  printf '::error::FAIL  status-own-url: still printing the generic checks-tab link instead of the status''s own\n'
+  fail=1
+fi
+
+# --- 10. a red legacy commit status with NO target_url falls back to the generic checks-tab link -------------
+out="$TMP/out.status-no-url"
+WV_CHECKS=ratelimited WV_REST_CHECKS=green WV_REST_STATUS=red \
+  timeout 15 bash "$SCRIPT" checks 1 --repo o/r --poll-seconds 1 --deadline-min 5 >"$out" 2>&1
+rc=$?
+check 'status-no-url status' "$rc" 4 'a red legacy status must still fail the checks phase'
+if grep -q 'o/r/pull/1/checks' "$out"; then
+  printf 'ok    status-no-url: falls back to the generic checks-tab link when target_url is empty\n'
+else
+  printf '::error::FAIL  status-no-url: expected the generic checks-tab link as fallback, got:\n%s\n' "$(cat "$out")"
+  fail=1
+fi
+
+# --- 11. THE INTERSECTION: a red check-run AND a red legacy status in the SAME read, each with its own link --
+# #1046's own suite covered each surface's happy path separately and missed this combination -- a fix that
+# links from a single shared variable (or reuses one row's link for the other) would pass tests 7 and 9 in
+# isolation while silently cross-contaminating the two rows the moment both fire together. Assert BOTH rows
+# carry their OWN, DISTINCT link, and neither one shows the other's.
+out="$TMP/out.both-red-own-links"
+WV_CHECKS=ratelimited WV_REST_CHECKS=red WV_REST_CHECKS_URL='https://github.com/o/r/actions/runs/111/job/1' \
+  WV_REST_STATUS=red WV_REST_STATUS_URL='https://ci.example.com/legacy/build/2' \
+  timeout 15 bash "$SCRIPT" checks 1 --repo o/r --poll-seconds 1 --deadline-min 5 >"$out" 2>&1
+rc=$?
+check 'both-red-own-links status' "$rc" 4 'two red sources at once must still fail the checks phase'
+checkrun_line=$(grep 'build ' "$out" || true)
+status_line=$(grep 'legacy-ci' "$out" || true)
+if printf '%s' "$checkrun_line" | grep -q 'runs/111/job/1' && \
+   ! printf '%s' "$checkrun_line" | grep -q 'legacy/build/2'; then
+  printf 'ok    both-red-own-links: check-run row carries its own link, not the status'\''s\n'
+else
+  printf '::error::FAIL  both-red-own-links: check-run row does not carry its own distinct link:\n%s\n' "$checkrun_line"
+  fail=1
+fi
+if printf '%s' "$status_line" | grep -q 'legacy/build/2' && \
+   ! printf '%s' "$status_line" | grep -q 'runs/111/job/1'; then
+  printf 'ok    both-red-own-links: status row carries its own link, not the check-run'\''s\n'
+else
+  printf '::error::FAIL  both-red-own-links: status row does not carry its own distinct link:\n%s\n' "$status_line"
   fail=1
 fi
 
