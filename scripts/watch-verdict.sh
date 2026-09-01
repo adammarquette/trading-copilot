@@ -271,6 +271,13 @@ read_checks() {
 # `gh api` hits REST directly, bypassing whatever pool `gh pr checks` draws from. Populates the same
 # red_checks / pending_checks / passed_checks globals `read_checks` does; returns 1 (leave them alone) only
 # when REST itself could not answer, so a caller can tell "REST says zero" from "REST could not say."
+#
+# Reads BOTH REST surfaces GraphQL's statusCheckRollup merges, not just the Checks API. The Checks API
+# (check-runs) and the classic commit-status API (still used by third-party integrations that predate it) are
+# two SEPARATE sets -- a fallback that read only check-runs would silently narrow to a partial one, and could
+# then call a PR "green" while a still-pending or still-failing legacy status sat unread (review finding 1 on
+# PR #1046, gh#1040). So either source failing to answer fails the WHOLE read: "I read a partial set" must
+# never render as "there is nothing pending."
 read_checks_rest() {
   local sha out name status conclusion link="${PR_URL}/checks"
 
@@ -292,6 +299,20 @@ read_checks_rest() {
       failure|timed_out|action_required|cancelled)
         red_checks="${red_checks}    ${name}  (${conclusion})  ${link}"$'\n' ;;
       *)                                               pending_checks=$(( pending_checks + 1 )) ;;
+    esac
+  done <<<"$out"
+
+  out=$(gh api "repos/$REPO/commits/$sha/status" \
+          --jq '.statuses[] | [.context, .state] | @tsv' 2>/dev/null) || return 1
+
+  while IFS=$'\t' read -r name status; do
+    [ -n "$name" ] || continue
+    [ "$name" = "review-verdict" ] && continue
+    case "$status" in
+      success)          passed_checks=$(( passed_checks + 1 )) ;;
+      failure|error)
+        red_checks="${red_checks}    ${name}  (${status})  ${link}"$'\n' ;;
+      *)                pending_checks=$(( pending_checks + 1 )) ;;  # pending, or anything unrecognized
     esac
   done <<<"$out"
   return 0
