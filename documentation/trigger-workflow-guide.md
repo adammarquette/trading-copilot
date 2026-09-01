@@ -125,8 +125,8 @@ separate steps.
 
 A firing can legitimately stop at several different points before anything reaches you. The table below is meant
 to answer the question in the title precisely: which of these are normal, silent-by-design behavior, which of
-these do tell you something happened even though no suggestion resulted, and which one — the sole exception — is
-a real gap this page is not going to paper over.
+these do tell you something happened even though no suggestion resulted, and which two are real gaps this page
+is not going to paper over.
 
 | What happened | Is this normal? | Are you told? |
 | --- | --- | --- |
@@ -134,19 +134,21 @@ a real gap this page is not going to paper over.
 | The condition just hasn't crossed yet | Yes — nothing has happened | No — correctly nothing to say |
 | The condition was already true the moment the trigger (re)started watching, after being confirmed or edited | Yes, by design — it seeds silently so you're never alerted on stale truth | No |
 | The condition is sitting in a hysteresis dead-band, between the threshold and its buffer | Yes — treated like "no reading yet"; it never fires and never resets an existing fire | No |
-| The indicator behind the trigger has stopped producing values (a data-pipeline gap) | No — this is a fault. The trigger holds exactly like the hysteresis case above (never fires, never re-arms) and, unlike almost every other fault below, it never disables itself over it | **Yes, once you've been in that state past 30 minutes** — named, by trigger and by indicator |
+| The indicator behind the trigger has stopped producing values (a data-pipeline gap) | No — this is a fault. The trigger holds exactly like the hysteresis case above (never fires, never re-arms) and, unlike almost every other fault below, it never disables itself over it | **No, not currently — tracked as [gh#1045](https://github.com/adammarquette/trading-copilot/issues/1045).** Past 30 minutes in that state, the outage is named in a structured **log line** an engineer can find — but nothing reaches your phone or the app's notification stream. There is no Alertmanager rule covering it either. |
 | Your daily-drawdown governor or profit-target stand-down suppressed a new entry | Yes — a deliberate risk decision, made *before* any model call so it costs nothing | Yes — "Suggestions paused," quoting the reason |
 | The platform's daily AI-spend budget was already spent | Yes — the same fail-closed-but-not-silent posture | Yes — you're told review is paused for the day |
 | The cheap pass flagged the setup as hard enough to want the expensive pass, but the day's AI budget couldn't afford it | Yes — an intentional budget guard | Yes — told a setup fired and needs a manual look |
 | No reviewer is configured yet, or the configured one failed to respond | No, in the "something's not right" sense — but it fails closed, not silently | Yes — told a setup fired that couldn't be reviewed |
 | The model looked at it and judged it genuinely not worth surfacing | Yes — this is the one legitimate case where an actual review happened and produced nothing on purpose | No — this is intentional silence, not a fault |
-| The model's response couldn't be parsed into a valid suggestion, or proposed an incoherent trade (wrong-side stop, a non-positive price) | No — this is a real fault | **No, not currently — tracked as [gh#1042](https://github.com/adammarquette/trading-copilot/issues/1042).** It's logged server-side, but nothing reaches you. This is the one place where "nothing happened" and "something broke" currently look identical from the notification you *didn't* get. |
+| The model's response couldn't be parsed into a valid suggestion, or proposed an incoherent trade (wrong-side stop, a non-positive price) | No — this is a real fault | **No, not currently — tracked as [gh#1042](https://github.com/adammarquette/trading-copilot/issues/1042).** It's logged server-side, but nothing reaches you. This is one of two places on this page where "nothing happened" and "something broke" currently look identical from the notification you *didn't* get. |
 
-That last row is the honest exception to the "you're always told" pattern the rest of this table establishes. It
-is a narrow one in practice — a well-formed model response is the overwhelmingly common case — but it exists, and
-an operator relying on "silence means either nothing happened or the co-pilot told me why" should know it isn't
-quite universal yet. It's a tracked defect, not a permanent state of affairs — [gh#1042](https://github.com/adammarquette/trading-copilot/issues/1042)
-covers adding the missing advisory; this row should read "Yes" once that ships.
+The staleness row above and this last row are the two honest exceptions to the "you're always told" pattern the
+rest of this table establishes. Both are narrow in practice — a healthy indicator feed and a well-formed model
+response are the overwhelmingly common cases — but they exist, and an operator relying on "silence means either
+nothing happened or the co-pilot told me why" should know it isn't quite universal yet. Both are tracked defects,
+not a permanent state of affairs — [gh#1045](https://github.com/adammarquette/trading-copilot/issues/1045) covers
+the staleness report and [gh#1042](https://github.com/adammarquette/trading-copilot/issues/1042) covers the
+malformed-review case; each row above should read "Yes" once its issue ships.
 
 ## What this page deliberately doesn't cover
 
