@@ -47,14 +47,18 @@ alternatives (Kafka / NATS / Redis Streams), and consequences: [ADR-0001](adr/00
 ### Venue abstraction — the broker seam (R-17)
 Everything below depends on venue-neutral interfaces, never on a broker SDK. They live in
 `MarqSpec.TradingCopilot.Domain/Venue/`; each venue ships an adapter behind them (v1: ProjectX/TopstepX; a
-Tradovate adapter — contract / account / position reads, historical bars, live quotes, connection liveness, and the
-market-data socket's **connect / reconnect / resubscribe** host, with mode host-derived for a brokerage (gh#780) — is
-landing behind the same seam, gh#977, with execution and the venue's own runtime wiring to follow). That host
-(`TradovateMarketDataConnectionHost`, over a shared `TradovateQuoteSubscriptions` register the adapter writes to) is
-not ceremony: the Tradovate client replays its subscriptions only on *its own* internal reconnect, which gives up
-after a single failed attempt, and the manual connect that is then the only way back does not replay — so without it
-a recovered socket returns connected-but-silent, every open quote stream alive and never ticking, which is exactly
-what stalls a hidden stop's promotion, and it raises nothing.
+Tradovate adapter — contract / account / position reads, historical bars, live quotes, connection liveness, and a
+lifecycle host for **each of its two sockets**, with mode host-derived for a brokerage (gh#780) — is landing behind
+the same seam, gh#977, with execution and the venue's own runtime wiring to follow). Those hosts are not ceremony.
+The Tradovate client's internal reconnect **gives up after a single failed attempt**, and the manual connect that is
+then the only way back finishes *less* work than the reconnect does — so each socket comes back
+connected-but-silent, and each host's job is the piece the manual path skips.
+`TradovateMarketDataConnectionHost` **resubscribes** every live quote key (from a shared
+`TradovateQuoteSubscriptions` register the adapter writes to), because otherwise every open quote stream stays alive
+and never ticks again — which is exactly what stalls a hidden stop's promotion, and it raises nothing.
+`TradovateTradingConnectionHost` sends the **`user/syncrequest`** the client issues only on its own reconnect,
+because Tradovate pushes `props` entity frames only to a socket that has synced — so otherwise the socket is
+authorized and delivers no order, fill or position event at all.
 
 **Decomposed into three slices**, so a component depends on the narrowest one that does its job:
 
@@ -231,6 +235,7 @@ ingest → process flow, which they deliberately sit outside of.
 | `ConditionalOrderHost` | event log · `conditional-order` cursor | fires / cancels / expires pending conditional entries, each through the **authoritative fire-time re-gate** (gh#198) | "send when conditions met" must be re-judged at fire, not at arm (R-12) |
 | `VenueConnectionMonitorHost` | poll over `IVenueConnection` | orphans every hidden stop on a venue **drop**, re-arms on reconnect (gh#209) | a synthetic stop cannot promote without quotes; the native safety stop stays the floor |
 | `TradovateMarketDataConnectionHost` | poll over the venue client's socket state | owns the Tradovate **market-data socket**: connects it, drives it back up from `Disconnected` with backoff, and **resubscribes** every live quote key from `TradovateQuoteSubscriptions` after a connect it drove (gh#977) | the client replays subscriptions only on *its own* reconnect, which gives up after one attempt — so without this a recovered socket returns **connected but silent**, and a silent quote feed is what stalls the promotion above. Idle in a deployment where Tradovate is unconfigured |
+| `TradovateTradingConnectionHost` | poll over the venue client's socket state | owns the Tradovate **trading socket**: connects it, drives it back up from `Disconnected` with backoff, and sends the **`user/syncrequest`** after a connect it drove — plus, after one grace pass, after any connect it merely observed (gh#977) | the client sends that sync only on *its own* reconnect, and Tradovate pushes entity frames only to a socket that has synced — so without this the socket is **connected, authorized and delivering no order, fill or position event**. The grace pass keeps a duplicate snapshot off the ordinary path. Idle where Tradovate is unconfigured |
 | `AutoFlattenHost` | timer · DST-aware `MarketClock` | the **primary** R-13 trigger — closes positions at each instrument's per-market deadline, verifies flat, journals `flatten.*` (gh#185) | the one autonomous action, and it only reduces exposure |
 | `AutoFlattenWatchdogHost` | **separate** timer, own loop | the **redundant second tier** — backstops the primary past a grace window, persists on a rejected close, escalates to critical rather than firing blind (gh#187) | ADR-0013's independence requirement: a bug in the primary must not disable the flatten |
 | `DeadMansSwitchHost` | timer · per-instrument check-in | the **third** R-13 tier — reports each flat market to an **external** monitor and *withholds* the check-in while exposure remains past the deadline (gh#244) | the worst R-13 failure is the host dying and taking its own alerting with it, so here **silence is the alarm** (ADR-0019) |
@@ -265,7 +270,11 @@ consolidated in [ADR-0013](adr/0013-failure-recovery-model.md).
 **The pattern these share.** Every *polling* host opens a **fresh DI scope per pass** and exits cleanly on
 teardown — a scope held across passes cascades `ObjectDisposedException` through the parallel suites, and a host
 that ignores its stop token outlives the app. (`MarketDataIngestionHost` is the exception that proves it: its
-scope spans the *subscription*, because a websocket subscription is the unit of work, not a poll.) Each reads
+scope spans the *subscription*, because a websocket subscription is the unit of work, not a poll. The two Tradovate
+socket hosts are a second, narrower exception: they resolve the venue client and its collaborators **once, from the
+root provider**, and hold them for the process lifetime — the thing they own is a process-wide singleton socket, so
+there is no per-pass scope for them to open. They therefore resolve *lazily*, inside the run rather than through the
+constructor, so absent credentials degrade that venue's feed instead of failing startup.) Each reads
 across the R-20 filter with `IgnoreQueryFilters` to **discover** work — background plumbing has no request user —
 but does each owner's work in a context **scoped to that owner**, so the request-path guards stay correct
 unchanged rather than being re-implemented (the gh#148 duplication lesson). And every state transition is
