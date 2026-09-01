@@ -86,11 +86,19 @@ public class OutcomeSuppressionIntegrationTests : IClassFixture<OutcomeTestPostg
         // a LATER case's real sweep run can never pick either up and pollute an unrelated assertion's "written" count.
         await SeedOutcomeAsync(new Outcome
         {
-            Id = Guid.NewGuid(), UserId = owner, TradeId = tradeId, Resolution = OutcomeResolution.Win, Simulated = false,
+            Id = Guid.NewGuid(),
+            UserId = owner,
+            TradeId = tradeId,
+            Resolution = OutcomeResolution.Win,
+            Simulated = false,
         });
         await SeedOutcomeAsync(new Outcome
         {
-            Id = Guid.NewGuid(), UserId = owner, SuggestionId = suggestionId, Resolution = OutcomeResolution.Expired, Simulated = false,
+            Id = Guid.NewGuid(),
+            UserId = owner,
+            SuggestionId = suggestionId,
+            Resolution = OutcomeResolution.Expired,
+            Simulated = false,
         });
 
         await ExecuteDbAsync(async db =>
@@ -314,7 +322,11 @@ public class OutcomeSuppressionIntegrationTests : IClassFixture<OutcomeTestPostg
         Guid tradeB = await SeedClosedTradeAsync(userIdB, accountB, realizedPnL: -20m); // deliberately left un-outcomed
         Guid outcomeA = await SeedOutcomeAsync(new Outcome
         {
-            Id = Guid.NewGuid(), UserId = userIdA, TradeId = tradeA, Resolution = OutcomeResolution.Win, Simulated = false,
+            Id = Guid.NewGuid(),
+            UserId = userIdA,
+            TradeId = tradeA,
+            Resolution = OutcomeResolution.Win,
+            Simulated = false,
         });
 
         using HttpResponseMessage response = await operatorA.DeleteAsync($"/outcomes/{outcomeA}");
