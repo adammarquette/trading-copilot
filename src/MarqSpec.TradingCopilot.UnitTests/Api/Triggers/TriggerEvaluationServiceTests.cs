@@ -133,7 +133,9 @@ public class TriggerEvaluationServiceTests
         Guid? accountId = null,
         int? size = null,
         int resolution = Resolution,
-        TriggerConfirmation confirmation = TriggerConfirmation.Confirmed)
+        TriggerConfirmation confirmation = TriggerConfirmation.Confirmed,
+        DateTimeOffset? unmeasurableSince = null,
+        DateTimeOffset? stalenessReportedAt = null)
     {
         Guid ownerId = owner ?? _operator;
         Guid id = Guid.NewGuid();
@@ -158,6 +160,8 @@ public class TriggerEvaluationServiceTests
             Confirmation = confirmation,
             ArmState = armState,
             ArmCycle = armCycle,
+            UnmeasurableSince = unmeasurableSince,
+            StalenessReportedAt = stalenessReportedAt,
             CreatedAt = Now,
         });
         await context.SaveChangesAsync();
@@ -282,6 +286,46 @@ public class TriggerEvaluationServiceTests
         await using TradingCopilotDbContext reload = Context();
         (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Unseeded);
         (await reload.TriggerFirings.AnyAsync()).Should().BeFalse();
+    }
+
+    // --- gh#1045: an indicator staleness report reaches the operator, not just the log (gh#469 / gh#515) ---
+
+    [Fact]
+    public async Task ScanAsync_ShouldSendAnAdvisory_WhenAnIndicatorHasBeenUnmeasurablePastTheStalenessThreshold()
+    {
+        Guid id = await AddTriggerAsync(
+            armState: TriggerArmState.Armed,
+            unmeasurableSince: Now - TriggerStaleness.ReportAfter, // the outage just crossed the 30-minute line
+            stalenessReportedAt: null);
+        // No IndicatorReturns configured -> the read yields null (Unmeasurable), same shape as the fail-closed-null test.
+
+        int fires = await Service().ScanAsync(Now, CancellationToken.None);
+
+        fires.Should().Be(0, "an unevaluable trigger never fires");
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n =>
+                    n.Severity == NotificationSeverity.Notify && n.DedupKey == $"trigger:{id}:staleness"),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+
+        await using TradingCopilotDbContext reload = Context();
+        TriggerRecord trigger = await reload.Triggers.SingleAsync(t => t.Id == id);
+        trigger.StalenessReportedAt.Should().Be(Now, "the outage is marked reported so a later pass does not re-page");
+    }
+
+    [Fact]
+    public async Task ScanAsync_ShouldNotReSendTheAdvisory_WhenTheOutageWasAlreadyReported()
+    {
+        // Debounce check (gh#1045's acceptance criterion): TriggerStaleness.Track already reports at most once
+        // per OPEN outage; this proves that debounce also suppresses the NOTIFICATION, not only the log line.
+        await AddTriggerAsync(
+            armState: TriggerArmState.Armed,
+            unmeasurableSince: Now - TriggerStaleness.ReportAfter - TimeSpan.FromHours(1),
+            stalenessReportedAt: Now - TimeSpan.FromMinutes(5)); // already reported earlier in this same outage
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
     // --- Seed silently ---
