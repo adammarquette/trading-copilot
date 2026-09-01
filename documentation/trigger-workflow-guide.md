@@ -124,9 +124,9 @@ separate steps.
 ## "Why didn't I get an alert?"
 
 A firing can legitimately stop at several different points before anything reaches you. The table below is meant
-to answer the question in the title precisely: which of these are normal, silent-by-design behavior, which of
-these do tell you something happened even though no suggestion resulted, and which one is a real gap this page
-is not going to paper over.
+to answer the question in the title precisely: which of these are normal, silent-by-design behavior, and which of
+these do tell you something happened even though no suggestion resulted. Every row below is now one or the
+other — this page no longer carries a gap it has to paper over.
 
 | What happened | Is this normal? | Are you told? |
 | --- | --- | --- |
@@ -140,14 +140,14 @@ is not going to paper over.
 | The cheap pass flagged the setup as hard enough to want the expensive pass, but the day's AI budget couldn't afford it | Yes — an intentional budget guard | Yes — told a setup fired and needs a manual look |
 | No reviewer is configured yet, or the configured one failed to respond | No, in the "something's not right" sense — but it fails closed, not silently | Yes — told a setup fired that couldn't be reviewed |
 | The model looked at it and judged it genuinely not worth surfacing | Yes — this is the one legitimate case where an actual review happened and produced nothing on purpose | No — this is intentional silence, not a fault |
-| The model's response couldn't be parsed into a valid suggestion, or proposed an incoherent trade (wrong-side stop, a non-positive price) | No — this is a real fault | **No, not currently — tracked as [gh#1042](https://github.com/adammarquette/trading-copilot/issues/1042).** It's logged server-side, but nothing reaches you. This is the one place on this page where "nothing happened" and "something broke" currently look identical from the notification you *didn't* get. |
+| The model's response couldn't be parsed into a valid suggestion, or proposed an incoherent trade (wrong-side stop, a non-positive price) | No — this is a real fault | **Yes.** It's logged server-side for an engineer *and* a Notify-level advisory tells you a setup fired that needed review but couldn't be used — a generic message, deliberately: the model's own words are untrusted display data, so the advisory never re-surfaces its raw output or the parsed reason ([gh#1042](https://github.com/adammarquette/trading-copilot/issues/1042)). |
 
-This last row is the one honest exception to the "you're always told" pattern the rest of this table establishes
-— narrow in practice, since a well-formed model response is the overwhelmingly common case, but real, and an
-operator relying on "silence means either nothing happened or the co-pilot told me why" should know it isn't
-quite universal yet. It is a tracked defect, not a permanent state of affairs —
-[gh#1042](https://github.com/adammarquette/trading-copilot/issues/1042) covers the malformed-review case; the row
-above should read "Yes" once it ships.
+The staleness row above and this last row **were** the two honest exceptions to the "you're always told" pattern
+the rest of this table establishes — both now closed. [gh#1045](https://github.com/adammarquette/trading-copilot/issues/1045)
+routed the staleness report through the same advisory mechanism the table's other "Yes" rows already used, and
+[gh#1042](https://github.com/adammarquette/trading-copilot/issues/1042) did the same for a malformed or incoherent
+model response. Silence now means either nothing happened or the co-pilot told you why, without exception, on
+every row above.
 
 ## What this page deliberately doesn't cover
 
