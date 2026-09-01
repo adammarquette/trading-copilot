@@ -868,12 +868,19 @@ public class TriggerEvaluationService
                 break;
 
             case ReviewOutcome.Suppress suppress:
-                // MalformedOutput or InvalidGeometry: logged, no operator notify (fail-closed, not fail-loud).
+                // gh#1042: MalformedOutput -- the model answered, but the response could not be parsed into a
+                // usable proposal. This is a real fault, not the legitimate NotWorthSurfacing silence above, so it
+                // follows the SAME fail-closed-but-NOT-silent posture as every other named arm: the operator is
+                // told a setup fired that needs a manual look. `suppress.Detail` is logged server-side for an
+                // engineer only -- it can carry model-derived text (e.g. an unrecognised parsed field), which
+                // ReviewOutcome.Suggest.Rationale's own doc comment marks untrusted display data, so the advisory
+                // gets the same generic wording as the geometry-rejection arm below rather than echoing it.
                 _logger.LogWarning(
                     "Agent-review trigger {Id} produced no suggestion ({Reason}): {Detail}",
                     trigger.Id,
                     suppress.Reason,
                     suppress.Detail);
+                advisories.Add(ReviewCouldNotBeUsedAdvisory(trigger, dedupKey));
                 break;
         }
 
@@ -926,8 +933,13 @@ public class TriggerEvaluationService
             now, _suggestionValidity, _deadlines.DeadlineFor(InstrumentId.Parse(trigger.Symbol)));
 
         // Layer two below the reviewer: pure geometry sanity. A malformed / hostile proposal that got past the
-        // reviewer is rejected HERE before it can be persisted -- treated as Suppress(InvalidGeometry): log, no
-        // suggestion. (The risk gate is the true backstop below this, at take-time.)
+        // reviewer is rejected HERE before it can be persisted -- treated as Suppress(InvalidGeometry): log AND
+        // (gh#1042) tell the operator. This is the ACTUAL InvalidGeometry failure -- the reviewer itself never
+        // constructs that SuppressReason, so the review.Outcome switch's catch-all arm never sees it; this early
+        // return is the only place a real incoherent proposal is silently dropped today. Same generic wording as
+        // that switch arm: geometryError never contains raw model text (SuggestionGeometry only returns fixed
+        // strings), but staying generic keeps the two arms' operator-facing behaviour identical. (The risk gate is
+        // the true backstop below this, at take-time.)
         string? geometryError = SuggestionGeometry.Validate(
             suggest.Side, suggest.EntryPrice, suggest.StopPrice, suggest.TargetPrice);
         if (geometryError is not null)
@@ -936,6 +948,7 @@ public class TriggerEvaluationService
                 "Agent-review trigger {Id} proposed incoherent geometry ({Reason}); no suggestion staged.",
                 trigger.Id,
                 geometryError);
+            advisories.Add(ReviewCouldNotBeUsedAdvisory(trigger, dedupKey));
             return;
         }
 
@@ -1311,6 +1324,16 @@ public class TriggerEvaluationService
     // LATER outage is a fresh domain-level report even though the channel-level key is reused; per ADR-0019 a
     // key releases its dedup slot once delivered, so reuse across outages is exactly the intended behaviour.
     private static string StalenessDedupKey(TriggerRecord trigger) => $"trigger:{trigger.Id}:staleness";
+
+    // gh#1042: the one advisory both the MalformedOutput switch arm and the InvalidGeometry geometry-rejection
+    // early-return send -- kept generic and shared so the operator sees identical wording for "the model's
+    // response could not be used" regardless of which of the two failed, and so neither arm is tempted to
+    // re-surface the model's own (untrusted) words to explain why.
+    private static Notification ReviewCouldNotBeUsedAdvisory(TriggerRecord trigger, string dedupKey) => new(
+        NotificationSeverity.Notify,
+        $"Setup needs review — {TitleFor(trigger)}",
+        "A setup fired that needs agent review, but the reviewer's response could not be used. Review it manually.",
+        dedupKey);
 
     private static string TitleFor(TriggerRecord trigger) =>
         $"{trigger.Indicator.ToUpperInvariant()}({trigger.Period}) {trigger.ResolutionMinutes}m "

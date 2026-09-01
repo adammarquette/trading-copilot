@@ -652,9 +652,12 @@ public class TriggerEvaluationServiceTests
         A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
     }
 
-    // (e) An incoherent proposal (a Buy with the stop ABOVE entry) is rejected by SuggestionGeometry before persist.
+    // (e) gh#1042: an incoherent proposal (a Buy with the stop ABOVE entry) is rejected by SuggestionGeometry
+    // before persist -- this is the REAL InvalidGeometry failure (the reviewer itself never constructs that
+    // SuppressReason; SuggestionGeometry.Validate is the only place it happens), so the operator must be told,
+    // not just the engineer reading the log. Regression test: this assertion used to be MustNotHaveHappened.
     [Fact]
-    public async Task ScanAsync_ShouldStageNoSuggestion_WhenTheProposedGeometryIsIncoherent()
+    public async Task ScanAsync_ShouldSendAFallbackAdvisory_WhenTheProposedGeometryIsIncoherent()
     {
         Guid accountId = await SeedAccountAsync();
         Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
@@ -667,7 +670,39 @@ public class TriggerEvaluationServiceTests
         (await reload.Suggestions.AnyAsync()).Should().BeFalse();
         (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();
         (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
-        A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n =>
+                    n.Severity == NotificationSeverity.Notify
+                    && n.Body == "A setup fired that needs agent review, but the reviewer's response could not be used. Review it manually."
+                    && !n.Body.Contains("broken", StringComparison.Ordinal)), // never re-surfaces the model's rationale/output
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    // (e2) gh#1042: MalformedOutput -- the reviewer's own fail-closed mapping of an unusable model response --
+    // gets the SAME fallback advisory as NoReviewerConfigured / ReviewerUnavailable, not a silent log line.
+    [Fact]
+    public async Task ScanAsync_ShouldSendAFallbackAdvisory_WhenTheReviewIsMalformedOutput()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Guid id = await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suppress(SuppressReason.MalformedOutput, "unknown direction 'sideways'"));
+
+        await Service().ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.AnyAsync()).Should().BeFalse();
+        (await reload.TriggerFirings.AnyAsync(f => f.TriggerId == id)).Should().BeTrue();
+        (await reload.Triggers.SingleAsync(t => t.Id == id)).ArmState.Should().Be(TriggerArmState.Fired);
+        A.CallTo(() => _notifications.SendAsync(
+                A<Notification>.That.Matches(n =>
+                    n.Severity == NotificationSeverity.Notify
+                    && n.Body == "A setup fired that needs agent review, but the reviewer's response could not be used. Review it manually."
+                    // never re-surfaces the model-derived suppress detail (untrusted display data)
+                    && !n.Body.Contains("sideways", StringComparison.Ordinal)),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
     }
 
     // (f) An undeclared account mode cannot be traded -- nothing is suggested on it (mode is read live).
