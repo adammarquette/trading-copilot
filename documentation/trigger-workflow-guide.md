@@ -140,12 +140,13 @@ a real gap this page is not going to paper over.
 | The cheap pass flagged the setup as hard enough to want the expensive pass, but the day's AI budget couldn't afford it | Yes — an intentional budget guard | Yes — told a setup fired and needs a manual look |
 | No reviewer is configured yet, or the configured one failed to respond | No, in the "something's not right" sense — but it fails closed, not silently | Yes — told a setup fired that couldn't be reviewed |
 | The model looked at it and judged it genuinely not worth surfacing | Yes — this is the one legitimate case where an actual review happened and produced nothing on purpose | No — this is intentional silence, not a fault |
-| The model's response couldn't be parsed into a valid suggestion, or proposed an incoherent trade (wrong-side stop, a non-positive price) | No — this is a real fault | **No, not currently.** It's logged server-side, but nothing reaches you. This is the one place where "nothing happened" and "something broke" currently look identical from the notification you *didn't* get. |
+| The model's response couldn't be parsed into a valid suggestion, or proposed an incoherent trade (wrong-side stop, a non-positive price) | No — this is a real fault | **No, not currently — tracked as [gh#1042](https://github.com/adammarquette/trading-copilot/issues/1042).** It's logged server-side, but nothing reaches you. This is the one place where "nothing happened" and "something broke" currently look identical from the notification you *didn't* get. |
 
 That last row is the honest exception to the "you're always told" pattern the rest of this table establishes. It
 is a narrow one in practice — a well-formed model response is the overwhelmingly common case — but it exists, and
 an operator relying on "silence means either nothing happened or the co-pilot told me why" should know it isn't
-quite universal yet.
+quite universal yet. It's a tracked defect, not a permanent state of affairs — [gh#1042](https://github.com/adammarquette/trading-copilot/issues/1042)
+covers adding the missing advisory; this row should read "Yes" once that ships.
 
 ## What this page deliberately doesn't cover
 
