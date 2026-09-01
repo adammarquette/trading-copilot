@@ -402,6 +402,23 @@ public class TriggerEvaluationService
                     + "is NOT disabled.",
                     trigger.Id, staleness.UnmeasurableSince, trigger.Indicator, trigger.Period,
                     trigger.ResolutionMinutes, trigger.Symbol);
+
+                // gh#1045: gh#469 / gh#515 promised this outage is "visible rather than silent", but visible only
+                // ever meant the LogWarning above -- an engineer reading structured logs, never the operator. This
+                // check runs AHEAD of the mechanical / agent-review split, so it applies to a trigger on EITHER
+                // route; queuing into the SAME `advisories` list the agent-review suppress arms use routes it
+                // through the identical commit-then-notify flush below (ADR-0019: `TriggerEvaluationService`
+                // deliberately keeps `SendAsync` -- its advisories are not safety-critical, so no Enlist/hot-path
+                // concern here, matching gh#289's lesson). No separate debounce is added: TriggerStaleness.Track
+                // already reports at most once per OPEN outage (ShouldReport is false on every later pass until
+                // StalenessReportedAt is cleared by a recovery), so this fires exactly as often as the log line does.
+                advisories.Add(new Notification(
+                    NotificationSeverity.Notify,
+                    $"Trigger unevaluable — {TitleFor(trigger)}",
+                    $"No {trigger.Indicator.ToUpperInvariant()}({trigger.Period}) at {trigger.ResolutionMinutes}m "
+                    + $"for {trigger.Symbol} since {staleness.UnmeasurableSince:u}. It cannot fire until that "
+                    + "indicator is produced again. The trigger is NOT disabled.",
+                    StalenessDedupKey(trigger)));
             }
 
             if (decision.ShouldFire && trigger.Route == TriggerRoute.Mechanical)
@@ -1287,6 +1304,13 @@ public class TriggerEvaluationService
         FormattableString.Invariant($"ai-spend:threshold:{MarketClock.ToMarketTime(now):yyyy-MM-dd}");
 
     private static string DedupKeyFor(TriggerRecord trigger) => $"trigger:{trigger.Id}:{trigger.ArmCycle}";
+
+    // gh#1045: a staleness incident is orthogonal to the arm cycle -- a trigger can go stale while sitting in
+    // ARMED without any fire ever advancing ArmCycle -- so it gets its own key, stable per trigger rather than
+    // per cycle. TriggerStaleness.Track already clears UnmeasurableSince/ReportedAt together on recovery, so a
+    // LATER outage is a fresh domain-level report even though the channel-level key is reused; per ADR-0019 a
+    // key releases its dedup slot once delivered, so reuse across outages is exactly the intended behaviour.
+    private static string StalenessDedupKey(TriggerRecord trigger) => $"trigger:{trigger.Id}:staleness";
 
     private static string TitleFor(TriggerRecord trigger) =>
         $"{trigger.Indicator.ToUpperInvariant()}({trigger.Period}) {trigger.ResolutionMinutes}m "
