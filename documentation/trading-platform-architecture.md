@@ -60,6 +60,17 @@ and never ticks again — which is exactly what stalls a hidden stop's promotion
 because Tradovate pushes `props` entity frames only to a socket that has synced — so otherwise the socket is
 authorized and delivers no order, fill or position event at all.
 
+**Both hosts are one loop, not two.** They shipped a week apart as hand-maintained copies and diverged on a
+safety-relevant line within that week — a successful connect reset the backoff in one and not in the other, leaving a
+socket `Connected`, and so healthy-looking to every other reader, while silent for up to a minute per retry (gh#1054).
+`Api/Venues/TradovateSocketConnectionHost` now owns everything that is the same — connect with backoff and its reset,
+waiting out the client's own in-progress attempt, the fail-safe default on an unrecognised state, containment, and
+clean exit — with `ExecuteAsync` **sealed**, so a third venue's socket host (gh#41) inherits the loop rather than
+copying it. Each host supplies only its **post-connect obligation**, which differs in kind: a per-key replay that must
+survive a partial failure, versus one request that either lands or does not. The trading host alone also watches
+`ConnectionStatusChanged`, because only its socket can reach `Connected`-but-unsynced *without failing* — a
+market-data replay failure propagates and parks that socket in `Disconnected`, where the shared poll finds it.
+
 **Decomposed into three slices**, so a component depends on the narrowest one that does its job:
 
 | Slice | Interface | Who implements it |
@@ -234,8 +245,8 @@ ingest → process flow, which they deliberately sit outside of.
 | `StopPromotionHost` | event log · `stop-promotion` cursor | promotes a **hidden** working stop to a native order once price enters its band (gh#153) | a hidden stop is only safe if something is watching for it to matter |
 | `ConditionalOrderHost` | event log · `conditional-order` cursor | fires / cancels / expires pending conditional entries, each through the **authoritative fire-time re-gate** (gh#198) | "send when conditions met" must be re-judged at fire, not at arm (R-12) |
 | `VenueConnectionMonitorHost` | poll over `IVenueConnection` | orphans every hidden stop on a venue **drop**, re-arms on reconnect (gh#209) | a synthetic stop cannot promote without quotes; the native safety stop stays the floor |
-| `TradovateMarketDataConnectionHost` | poll over the venue client's socket state | owns the Tradovate **market-data socket**: connects it, drives it back up from `Disconnected` with backoff, and **resubscribes** every live quote key from `TradovateQuoteSubscriptions` after a connect it drove (gh#977) | the client replays subscriptions only on *its own* reconnect, which gives up after one attempt — so without this a recovered socket returns **connected but silent**, and a silent quote feed is what stalls the promotion above. Idle in a deployment where Tradovate is unconfigured |
-| `TradovateTradingConnectionHost` | poll over the venue client's socket state | owns the Tradovate **trading socket**: connects it, drives it back up from `Disconnected` with backoff, and sends the **`user/syncrequest`** after a connect it drove — plus, after one grace pass, after any connect it merely observed (gh#977) | the client sends that sync only on *its own* reconnect, and Tradovate pushes entity frames only to a socket that has synced — so without this the socket is **connected, authorized and delivering no order, fill or position event**. The grace pass keeps a duplicate snapshot off the ordinary path. Idle where Tradovate is unconfigured |
+| `TradovateMarketDataConnectionHost` | poll over the venue client's socket state (shared loop: `TradovateSocketConnectionHost`) | owns the Tradovate **market-data socket**: connects it, drives it back up from `Disconnected` with backoff, and **resubscribes** every live quote key from `TradovateQuoteSubscriptions` after a connect it drove (gh#977, gh#1054) | the client replays subscriptions only on *its own* reconnect, which gives up after one attempt — so without this a recovered socket returns **connected but silent**, and a silent quote feed is what stalls the promotion above. Idle in a deployment where Tradovate is unconfigured |
+| `TradovateTradingConnectionHost` | poll over the venue client's socket state (same shared loop) | owns the Tradovate **trading socket**: connects it, drives it back up from `Disconnected` with backoff, and sends the **`user/syncrequest`** after a connect it drove — plus, after one grace pass, after any connect it merely observed, re-arming on `ConnectionStatusChanged` because only this socket can reach `Connected`-but-unsynced without failing (gh#977, gh#1054) | the client sends that sync only on *its own* reconnect, and Tradovate pushes entity frames only to a socket that has synced — so without this the socket is **connected, authorized and delivering no order, fill or position event**. The grace pass keeps a duplicate snapshot off the ordinary path. Idle where Tradovate is unconfigured |
 | `AutoFlattenHost` | timer · DST-aware `MarketClock` | the **primary** R-13 trigger — closes positions at each instrument's per-market deadline, verifies flat, journals `flatten.*` (gh#185) | the one autonomous action, and it only reduces exposure |
 | `AutoFlattenWatchdogHost` | **separate** timer, own loop | the **redundant second tier** — backstops the primary past a grace window, persists on a rejected close, escalates to critical rather than firing blind (gh#187) | ADR-0013's independence requirement: a bug in the primary must not disable the flatten |
 | `DeadMansSwitchHost` | timer · per-instrument check-in | the **third** R-13 tier — reports each flat market to an **external** monitor and *withholds* the check-in while exposure remains past the deadline (gh#244) | the worst R-13 failure is the host dying and taking its own alerting with it, so here **silence is the alarm** (ADR-0019) |
@@ -274,7 +285,9 @@ scope spans the *subscription*, because a websocket subscription is the unit of 
 socket hosts are a second, narrower exception: they resolve the venue client and its collaborators **once, from the
 root provider**, and hold them for the process lifetime — the thing they own is a process-wide singleton socket, so
 there is no per-pass scope for them to open. They therefore resolve *lazily*, inside the run rather than through the
-constructor, so absent credentials degrade that venue's feed instead of failing startup.) Each reads
+constructor, so absent credentials degrade that venue's feed instead of failing startup. That resolve, and the whole
+poll loop around it, live once in `TradovateSocketConnectionHost` — the two hosts are subclasses, not copies, after
+the copies diverged on the backoff reset within a week of shipping, gh#1054.) Each reads
 across the R-20 filter with `IgnoreQueryFilters` to **discover** work — background plumbing has no request user —
 but does each owner's work in a context **scoped to that owner**, so the request-path guards stay correct
 unchanged rather than being re-implemented (the gh#148 duplication lesson). And every state transition is
