@@ -113,6 +113,17 @@ jobs:
       - name: Watch-verdict label lifecycle (signals, hand-off, degrade)
         run: ./scripts/tests/watch-verdict.test.sh
 
+      # gh#1040: `read_checks()` used to swallow a GraphQL failure under `2>/dev/null || true`. When GraphQL
+      # was rate-limited -- routine with several agent sessions sharing one 5,000/hr pool -- it read ZERO
+      # checks, which is indistinguishable from a PR that genuinely has none, so an APPROVED PR stalled
+      # printing the self-contradicting "waiting on 0 check(s)" for the full 45-minute deadline (#1036). This
+      # runs the real script against a stub `gh` that fails GraphQL and answers REST differently across
+      # cases, proving: a GraphQL failure now falls back to REST; an unreadable state is never rendered as
+      # "no checks reported yet"; a standing failure bails out loud within a handful of attempts instead of
+      # the full deadline; and a genuinely check-less PR is unaffected. No .NET, no network.
+      - name: Watch-verdict check-read fallback (GraphQL down, REST up, gh#1040)
+        run: ./scripts/tests/watch-verdict-check-read.test.sh
+
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 
