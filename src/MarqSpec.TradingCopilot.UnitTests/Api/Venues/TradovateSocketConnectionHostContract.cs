@@ -842,8 +842,12 @@ public abstract class TradovateSocketConnectionHostContract
         // push per flap, however good the dedup below is, which is ADR-0019 §4's budget spent by a producer rather
         // than by a real fault. Requiring sustained health makes a flapping socket the one continuing incident it
         // actually is.
-        long flappingSince = 0;
-        SocketReadsAs(_ =>
+        // Counted in PASSES, not measured against the wall clock, and that is what makes it deterministic. A
+        // delivering stretch of exactly one pass starts the recovery clock and reads it again in the same pass, so
+        // the elapsed time is ~0 whatever the machine is doing -- a stalled runner cannot manufacture a recovery
+        // here, which an earlier wall-clock version of this test could and did (gh#1070's hazard, in this file).
+        int healthyPasses = 0;
+        SocketReadsAs(pass =>
         {
             // Down until the outage is reported, so the incident genuinely exists before anything can close it.
             if (Notifications.Notifications.Count == 0)
@@ -851,15 +855,16 @@ public abstract class TradovateSocketConnectionHostContract
                 return ClientModels.ConnectionState.Disconnected;
             }
 
-            // Then alternate every QUARTER of the grace. Every healthy stretch is real -- the socket delivers, and a
-            // host that resolved on the first good pass would close the incident here -- but none of them lasts a
-            // whole grace, so none of them is a recovery.
-            Interlocked.CompareExchange(ref flappingSince, Stopwatch.GetTimestamp(), 0);
-            long quarters = Stopwatch.GetElapsedTime(Volatile.Read(ref flappingSince)).Ticks
-                            / (DegradedGrace.Ticks / 4);
-            return quarters % 2 == 0
-                ? ClientModels.ConnectionState.Connected
-                : ClientModels.ConnectionState.Disconnected;
+            // Then alternate every pass. Every healthy pass is real -- the socket delivers, and a host that
+            // resolved on the first good one would close the incident right here -- but no stretch of them ever
+            // lasts a whole grace, so none of them is a recovery.
+            if (pass % 2 != 0)
+            {
+                return ClientModels.ConnectionState.Disconnected;
+            }
+
+            Interlocked.Increment(ref healthyPasses);
+            return ClientModels.ConnectionState.Connected;
         });
         ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
         await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
@@ -867,9 +872,11 @@ public abstract class TradovateSocketConnectionHostContract
         BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
         (await Notifications.Sent(1)).Should().BeTrue("the outage must be reported before it can be wrongly closed");
-        await Task.Delay(DegradedGrace * 4);
+        (await PassesObserved(PassesSoFar + 20)).Should().BeTrue("the flapping has to actually run");
         await StopAsync(host);
 
+        Volatile.Read(ref healthyPasses).Should()
+            .BeGreaterThan(1, "the socket must really have delivered on some passes, or nothing was tested");
         Notifications.Resolutions.Should()
             .BeEmpty("a socket that never delivers for a whole grace has not recovered, whatever a single pass said");
         Notifications.Notifications.Should()
