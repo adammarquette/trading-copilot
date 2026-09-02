@@ -684,6 +684,7 @@ app.MapAiSpendEndpoints();
 app.MapAiAttributionEndpoints();
 app.MapChatEndpoints();
 app.MapOutcomeEndpoints();
+app.MapDailyJournalEndpoints();
 
 // The realtime hub (gh#645, R-10 / R-18). A literal path so it is a concrete authenticated route ahead of the SPA
 // fallback; RequireAuthorization so the R-18 auth-surface sweep treats its negotiate / connect endpoints as gated.
