@@ -27,9 +27,10 @@
 # through this path. That guard does not excuse pointing this at anything but a reserved PRACTICE account; it is
 # the backstop, not the plan.
 #
-# Never run this at the same time as a `staging-gates.yml` workflow_dispatch run (Actions tab) -- both place
-# orders on the SAME reserved account, and nothing serializes a local run against a concurrent CI run (only
-# StagingExecutionCollection serializes suites WITHIN one process). Check the Actions tab is idle first.
+# Never run this at the same time as a `staging-gates.yml` workflow_dispatch run -- both place orders on the SAME
+# reserved account, and nothing serializes a local run against a concurrent CI run (only StagingExecutionCollection
+# serializes suites WITHIN one process). Checked below via `gh run list` (by construction, not by care) as well as
+# disclosed here -- refuses to start rather than merely warn, the same bar as the missing-variable check.
 #
 # USAGE
 # -----
@@ -78,13 +79,36 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 2
 fi
 
+# Concurrency guard, by construction rather than by the operator remembering to check the Actions tab (review
+# finding on PR #1075): a `staging-gates.yml` workflow_dispatch run in progress trades the SAME reserved account
+# this script is about to trade, and nothing else serializes the two. Fails closed -- if `gh` cannot answer, this
+# refuses to start rather than assume it is safe.
+if ! command -v gh >/dev/null 2>&1; then
+  echo "::error::gh CLI not found -- cannot verify no staging-gates.yml run is currently in progress." >&2
+  echo "Install/authenticate gh, or confirm the Actions tab is idle yourself before rerunning." >&2
+  exit 2
+fi
+
+if ! in_progress_runs=$(gh run list --workflow=staging-gates.yml --status=in_progress --json databaseId --jq 'length' 2>&1); then
+  echo "::error::Could not query GitHub Actions for in-progress staging-gates.yml runs:" >&2
+  echo "$in_progress_runs" >&2
+  echo "Confirm the Actions tab is idle yourself before rerunning." >&2
+  exit 2
+fi
+
+if [ "$in_progress_runs" != "0" ]; then
+  echo "::error::A staging-gates.yml run is currently in progress on the same reserved account -- refusing to" >&2
+  echo "start (no cross-process lock between a local run and a CI run). Wait for it to finish, then rerun." >&2
+  exit 2
+fi
+
 echo "STAGING_PROJECTX_PRACTICE_ACCOUNT=${STAGING_PROJECTX_PRACTICE_ACCOUNT}"
 echo "STAGING_EXECUTION_INSTRUMENT=${STAGING_EXECUTION_INSTRUMENT}"
 echo
 echo "About to place REAL orders on the account above through a LOCAL instance at ${STAGING_API_BASE_URL}."
-echo "R-14 is enforced by construction (StagingProjectXGateway.ResolvePracticeAccountId refuses a non-simulated"
-echo "account), but that is the backstop -- confirm the account above really is the reserved practice account,"
-echo "and that no staging-gates.yml workflow_dispatch run is in flight, before continuing."
+echo "R-14 is enforced by construction (StagingProjectXGateway.ResolvePracticeAccountId requires BOTH the venue's"
+echo "Simulated flag AND its name-based stage classification to agree the account is Practice), but that is the"
+echo "backstop -- confirm the account above really is the reserved practice account before continuing."
 echo
 
 echo "Waiting for the local instance to be ready..."
