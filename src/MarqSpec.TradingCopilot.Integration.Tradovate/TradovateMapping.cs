@@ -355,10 +355,21 @@ public static class TradovateMapping
     /// <returns>The neutral order-state event.</returns>
     /// <exception cref="TradovateVenueException">The order has no id.</exception>
     /// <remarks>
+    /// <para>
     /// <b>Filled quantity and average fill price are reported absent, not zero.</b> Tradovate's order entity carries
     /// neither, and a 0 would be indistinguishable from "nothing has filled yet" — a fabricated figure on the path
     /// that feeds the journal. The neutral record models both as nullable for exactly this case; filled volume comes
     /// from <see cref="FillEvent"/>s, which are the authoritative record of executed size.
+    /// </para>
+    /// <para>
+    /// <b><c>At</c> carries Tradovate's <i>create</i> timestamp, which is not quite what the field promises.</b> The
+    /// neutral <see cref="AccountEvent.At"/> means "when the venue reported the change", and the ProjectX adapter can
+    /// honour that because its update carries <c>UpdateTimestamp ?? CreationTimestamp</c>. A Tradovate <c>order</c>
+    /// entity has only the one <c>timestamp</c> — the create time — so a state change reports the time the order was
+    /// placed rather than the time it changed. Named rather than papered over: it is the real field, not an invented
+    /// one, and its only consumer today is the realtime status push, where it shows an order's age rather than
+    /// driving anything. A consumer that needs true change time must not read it from here.
+    /// </para>
     /// </remarks>
     public static OrderStateEvent ToOrderStateEvent(ClientModels.Order order, VenueId venue)
     {

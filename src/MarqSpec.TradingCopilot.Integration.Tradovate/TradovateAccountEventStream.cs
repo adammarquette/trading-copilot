@@ -41,12 +41,23 @@ namespace MarqSpec.TradingCopilot.Integration.Tradovate;
 /// snapshot) supplies its account. Dropping it would lose a real execution the journal cannot reconstruct.
 /// </para>
 /// <para>
-/// <b>The sync snapshot seeds attribution and emits nothing.</b> <c>user/syncrequest</c> returns a full re-delivery of
-/// the session's orders, fills and positions, and the connection host sends one after every connect it drives.
-/// Emitting those as events would re-drive the OCO-exit retire and the round-trip journal on every reconnect — a
-/// double-counted realized P&amp;L on the path that feeds the R-5 governor. Position truth for reconciliation comes
-/// from the venue query path (gh#193), not from a replayed stream, so the snapshot is used only for the one thing
-/// nothing else can supply: the order → account map that makes the <i>live</i> fills attributable.
+/// <b>The sync snapshot: orders seed, fills are emitted, positions are dropped.</b> <c>user/syncrequest</c> returns a
+/// full re-delivery of the session's orders, fills and positions, and the connection host sends one after every
+/// connect it drives. The three are not interchangeable, so they are not treated alike.
+/// </para>
+/// <para>
+/// Its <b>fills are emitted</b>, because a fill that executed while the socket was down exists <i>nowhere else</i> —
+/// live <c>props</c> frames carry changes from the sync point forward, and the reconciliation path (gh#193) recovers
+/// positions, not fills. Losing one means no <c>Fill</c> row, no <c>Trade</c>, and a real realized loss that never
+/// reaches the R-5 governor, the R-9 window or the R-4 throttle. Re-delivery is safe because a fill is idempotent by
+/// construction downstream: the unique index on <c>{ OrderId, VenueFillKey }</c> makes a replay a skip.
+/// </para>
+/// <para>
+/// Its <b>positions are dropped</b>, and that asymmetry is the point. A position event is <i>not</i> idempotent
+/// downstream: a flat re-drives the OCO-exit retire and composes a round trip, so a re-delivered one double-counts
+/// realized P&amp;L into the very gate the fills above must reach accurately. Its <b>orders</b> only seed the
+/// order → account map, which is the one thing nothing else can supply — the account behind an order this process
+/// never saw a <c>props</c> frame for.
 /// </para>
 /// <para>
 /// <b>What this stream does not decide.</b> It holds no limit and makes no enforcement decision — it translates, and
@@ -136,6 +147,11 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         // one. TryWrite on an unbounded channel neither blocks nor runs the reader's continuation inline
         // (AllowSynchronousContinuations stays false), so holding the lock across the write cannot stall the socket.
         object gate = new();
+
+        // Bounded by the orders in one socket session, not by time: entries are two longs, a heavy trading day is
+        // hundreds of orders, and the stream ends (taking the map with it) on every socket drop. Deliberately NOT
+        // evicted -- an evicted entry would make a late fill unattributable, which is the one thing this map exists
+        // to prevent.
         Dictionary<long, long> accountByOrder = [];
         LinkedList<ClientModels.Fill> heldFills = [];
         bool socketDropped = false;
@@ -144,7 +160,16 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         {
             try
             {
-                events.Writer.TryWrite(map());
+                if (!events.Writer.TryWrite(map()))
+                {
+                    // The channel is unbounded, so this is never back-pressure -- it means the stream has already
+                    // ended (the drop path completed it) and this event will not be delivered. Rare, and the caller
+                    // re-subscribes, but a silent discard here would be exactly the failure this seam guards.
+                    _logger.LogWarning(
+                        "A Tradovate {What} arrived after the account-event stream had ended; it was not delivered. "
+                        + "The re-subscribed stream picks up from the venue's next snapshot.",
+                        what);
+                }
             }
             catch (Exception error)
             {
@@ -206,30 +231,41 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             }
         }
 
+        // Emit it if its order is known, hold it if not. Shared by the live props frames and the sync snapshot, so a
+        // fill is attributed by one rule whichever way it arrived. Callers hold the lock.
+        void AttributeOrHold(ClientModels.Fill fill)
+        {
+            if (accountByOrder.TryGetValue(fill.OrderId, out long accountId))
+            {
+                EmitFill(fill, accountId);
+                return;
+            }
+
+            // Held, never guessed. Attributing a fill to the wrong account would journal a real execution against
+            // somebody else's balance, which is worse than the delay -- and worse than losing it.
+            //
+            // The buffer is shared across every account under this login, so a foreign account's lagging order frames
+            // can push ours toward the cap. That is accepted: the alternative is a per-account buffer whose bound
+            // nothing could size, and the eviction below is loud precisely because it is the case that loses truth.
+            if (heldFills.Count >= MaxHeldFills)
+            {
+                ClientModels.Fill evicted = heldFills.First!.Value;
+                heldFills.RemoveFirst();
+                _logger.LogError(
+                    "Holding {Held} Tradovate fills whose order has never arrived; dropping the oldest (fill "
+                    + "{Fill} on order {Order}) to bound the buffer. That execution is lost to the journal, so "
+                    + "the day's realized P&L will under-report until it is reconciled from the venue.",
+                    heldFills.Count + 1, evicted.Id, evicted.OrderId);
+            }
+
+            heldFills.AddLast(fill);
+        }
+
         void OnFill(object? sender, ClientModels.Fill fill)
         {
             lock (gate)
             {
-                if (accountByOrder.TryGetValue(fill.OrderId, out long accountId))
-                {
-                    EmitFill(fill, accountId);
-                    return;
-                }
-
-                // Held, never guessed. Attributing a fill to the wrong account would journal a real execution against
-                // somebody else's balance, which is worse than the delay -- and worse than losing it.
-                if (heldFills.Count >= MaxHeldFills)
-                {
-                    ClientModels.Fill evicted = heldFills.First!.Value;
-                    heldFills.RemoveFirst();
-                    _logger.LogError(
-                        "Holding {Held} Tradovate fills whose order has never arrived; dropping the oldest (fill "
-                        + "{Fill} on order {Order}) to bound the buffer. That execution is lost to the journal, so "
-                        + "the day's realized P&L will under-report until it is reconciled from the venue.",
-                        heldFills.Count + 1, evicted.Id, evicted.OrderId);
-                }
-
-                heldFills.AddLast(fill);
+                AttributeOrHold(fill);
             }
         }
 
@@ -244,8 +280,9 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             }
         }
 
-        // The snapshot SEEDS attribution and emits nothing -- see the remarks. It is the only source of the account
-        // behind an order this process never saw a props frame for, which is every order that predates the connect.
+        // The snapshot seeds attribution, and emits its FILLS but not its orders or positions -- see the remarks for
+        // why those three are treated differently. Orders are the only source of the account behind an order this
+        // process never saw a props frame for, which is every order that predates the connect.
         void OnSync(object? sender, ClientModels.SyncResult snapshot)
         {
             lock (gate)
@@ -258,7 +295,15 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
                     }
                 }
 
+                // Anything held from before this snapshot first -- its orders may be what names them.
                 ReleaseHeldFills();
+
+                // Then the snapshot's own fills, by the same attribution rule: an execution that landed while the
+                // socket was down exists NOWHERE else, and one this snapshot cannot name is held rather than guessed.
+                foreach (ClientModels.Fill fill in snapshot.Fills)
+                {
+                    AttributeOrHold(fill);
+                }
             }
         }
 
@@ -302,6 +347,21 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
 
         try
         {
+            // Re-read the state now the drop handler is attached. The check at the top of this method and the attach
+            // above are not one step, and a drop landing between them is raised to NOBODY: the handler that would
+            // have seen it did not exist yet, so the channel would never be completed and the read below would park
+            // forever on a dead socket. The supervisor has no watchdog -- it reacts only to a session that ends or
+            // throws -- so nothing above would ever notice. That is the "open sequence over a dead socket" this class
+            // exists to prevent, arriving through the one window the event subscription cannot cover.
+            if (_webSocket.TradingState != ClientModels.ConnectionState.Connected)
+            {
+                lock (gate)
+                {
+                    socketDropped = true;
+                    events.Writer.TryComplete();
+                }
+            }
+
             await foreach (AccountEvent accountEvent in events.Reader.ReadAllAsync(cancellationToken))
             {
                 yield return accountEvent;
