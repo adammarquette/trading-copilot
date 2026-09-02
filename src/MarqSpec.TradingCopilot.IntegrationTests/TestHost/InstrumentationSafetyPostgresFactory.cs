@@ -152,6 +152,11 @@ public sealed class FaultInjectingExecutionMetrics : IExecutionMetrics
     {
     }
 
+    /// <inheritdoc />
+    public void RecordNotificationRefused(string kind)
+    {
+    }
+
     private static void FailIf(bool armed)
     {
         if (armed)

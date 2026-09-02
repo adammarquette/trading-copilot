@@ -26,7 +26,7 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// <i>once</i> and lets the channel repeat, because both repeating is double-nagging.
 /// </para>
 /// </remarks>
-public sealed class DedupingNotificationChannel : INotificationChannel
+public sealed class DedupingNotificationChannel : INotificationChannel, IIncidentKeyRegistry
 {
     private readonly INotificationChannel _inner;
     private readonly ILogger<DedupingNotificationChannel> _logger;
@@ -76,7 +76,7 @@ public sealed class DedupingNotificationChannel : INotificationChannel
         // RE-ARM unconditionally. This is local state and its failure mode is a duplicate page, which is the
         // safe direction; holding the key back because the transport could not confirm a cancel would suppress
         // the NEXT genuine incident as a stale duplicate -- silence, which is what this system exists to remove.
-        if (_reported.TryRemove(dedupKey, out _))
+        if (ReleaseIncident(dedupKey))
         {
             _logger.LogInformation("Incident {Incident} resolved.", dedupKey);
         }
@@ -87,4 +87,14 @@ public sealed class DedupingNotificationChannel : INotificationChannel
         // holds no receipt, so the redundant call costs nothing.
         return await _inner.ResolveAsync(dedupKey, cancellationToken);
     }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// The re-arm above, exposed on its own (gh#1077). It is the half of a resolve that <b>cannot be recovered by
+    /// anyone else</b>: the outbox has no row for a resolve and no producer reliably retries one, so a release
+    /// that is lost is permanent silence on this key. <see cref="QueuedNotificationChannel"/> calls this — and
+    /// only this, never the transport half — when a resolve could not be enqueued, so no outcome of that queue
+    /// can leave a key held for the life of the process.
+    /// </remarks>
+    public bool ReleaseIncident(string dedupKey) => _reported.TryRemove(dedupKey, out _);
 }

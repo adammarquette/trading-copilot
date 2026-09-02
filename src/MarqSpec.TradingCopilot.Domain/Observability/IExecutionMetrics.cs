@@ -123,6 +123,21 @@ public interface IExecutionMetrics
     /// </summary>
     /// <param name="kind">One of the sink's reconcile-strand kind constants (a closed set — never an id).</param>
     void RecordReconcileStrandDetected(string kind);
+
+    /// <summary>
+    /// Counts one operator notification the delivery queue <b>refused</b> (gh#1077), dimensioned by
+    /// <paramref name="kind"/> — a page it could not accept, or a resolve it could not accept.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the alerting path reporting its own failure, so it must not be reported only by alerting.</b>
+    /// A refused page means Layer 1 — the push the app sends itself — did not go out; a log line for it is
+    /// "visible" only to an engineer who goes looking, which is the exact criticism gh#1045 and gh#1051 levelled at
+    /// their own <c>LogWarning</c>-only signals. Metering it hands the fact to Layer 2 (the rule engine), whose
+    /// entire purpose under ADR-0019 is to cover what Layer 1 cannot self-report — and a queue that is refusing is
+    /// precisely a Layer-1 blind spot.
+    /// </remarks>
+    /// <param name="kind">One of the sink's notification-refusal kind constants (a closed set — never a dedup key).</param>
+    void RecordNotificationRefused(string kind);
 }
 
 /// <summary>
@@ -199,6 +214,11 @@ public sealed class NullExecutionMetrics : IExecutionMetrics
 
     /// <inheritdoc />
     public void RecordReconcileStrandDetected(string kind)
+    {
+    }
+
+    /// <inheritdoc />
+    public void RecordNotificationRefused(string kind)
     {
     }
 }

@@ -3,6 +3,7 @@ using MarqSpec.TradingCopilot.Api.Notifications;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Notifications;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -183,6 +184,29 @@ public class NotificationRegistrationTests
             + "into itself and silently discard every page, incl. the R-13 auto-flatten escalation (gh#459)");
     }
 
+    [Fact]
+    public void AddTradingCopilotNotifications_ShouldGiveTheQueueTheSameDedupInstanceAsItsKeyRegistry_SoAReleaseReleasesSomething()
+    {
+        // gh#1077, and the one way this fix can fail silently. When a resolve cannot be enqueued, the queue
+        // releases the dedup key directly through IIncidentKeyRegistry -- and the open-incident set is
+        // PER-INSTANCE. Bound to a second DedupingNotificationChannel the release would remove a key from a
+        // dictionary nobody reads: every unit test still green, and the key the operator's next outage runs into
+        // still held for the life of the process. Identity, not type, exactly as gh#455's enlister binding.
+        using WebApplication app = Compose();
+        QueuedNotificationChannel queue = app.Services.GetRequiredService<QueuedNotificationChannel>();
+
+        object inner = typeof(QueuedNotificationChannel)
+            .GetField("_inner", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(queue)!;
+        object incidents = typeof(QueuedNotificationChannel)
+            .GetField("_incidents", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(queue)!;
+
+        inner.Should().BeOfType<DedupingNotificationChannel>(
+            "the queue delivers into the dedup layer, which is what holds the incident set");
+        incidents.Should().BeSameAs(inner,
+            "an out-of-band release must reach the SAME incident set the suppression reads, or it releases "
+            + "nothing while every test passes (gh#1077)");
+    }
+
     /// <summary>Builds a host with the <b>real</b> notification registration, plus the one dependency it now has.</summary>
     /// <remarks>
     /// The database is registered because gh#437 made the seam durable: <see cref="OutboxNotificationChannel"/>
@@ -196,6 +220,10 @@ public class NotificationRegistrationTests
         builder.Services.AddScoped<ICurrentUser>(_ => new FixedUser(Guid.Empty));
         builder.Services.AddDbContext<TradingCopilotDbContext>(
             options => options.UseInMemoryDatabase($"notification-registration-{Guid.NewGuid()}"));
+        // The metrics seam, because gh#1077 made the queue meter a refusal. Production binds it in
+        // AddTradingCopilotTelemetry, which Program.cs calls first; the null sink stands in for it here because
+        // these cases assert the SHAPE of the notification composition, never what a measurement records.
+        builder.Services.AddSingleton<IExecutionMetrics>(NullExecutionMetrics.Instance);
         builder.AddTradingCopilotNotifications();
         return builder.Build();
     }

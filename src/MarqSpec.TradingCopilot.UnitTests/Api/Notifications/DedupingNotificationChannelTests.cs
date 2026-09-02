@@ -182,4 +182,57 @@ public class DedupingNotificationChannelTests
 
         A.CallTo(() => _inner.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
     }
+
+    // --- gh#1077: releasing a key WITHOUT the transport ---
+    //
+    // This class holds the open-incident set for the life of the process and releases a key only through
+    // ResolveAsync, which has to reach the transport. QueuedNotificationChannel sits above it, so a resolve it
+    // cannot enqueue never arrives and the key is held forever -- every later, independent incident on it then
+    // suppressed as a duplicate. ReleaseIncident is the half that needs no transport, split out so the queue can
+    // perform it when it has refused the rest.
+
+    [Fact]
+    public async Task ReleaseIncident_ShouldReportThatAKeyWasHeld_WhenAnIncidentIsOpen()
+    {
+        DedupingNotificationChannel channel = Channel();
+        await channel.SendAsync(Note(), CancellationToken.None);
+
+        channel.ReleaseIncident("flatten:9001:ES").Should().BeTrue(
+            "the caller needs to know whether a repeat was actually being suppressed, so a refusal can say so");
+    }
+
+    [Fact]
+    public void ReleaseIncident_ShouldReportThatNothingWasHeld_WhenNoIncidentIsOpen()
+    {
+        // The ordinary case, and it must not read as a release. A blanket `true` would make the refusal log claim
+        // it rescued a key it never held.
+        Channel().ReleaseIncident("flatten:9001:ES").Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ReleaseIncident_ShouldLetTheNextOccurrenceThrough_WhenTheKeyWasHeld()
+    {
+        // The property that matters downstream: one notification per OUTAGE, not one per process lifetime.
+        DedupingNotificationChannel channel = Channel();
+        await channel.SendAsync(Note(), CancellationToken.None);
+
+        channel.ReleaseIncident("flatten:9001:ES");
+        await channel.SendAsync(Note(), CancellationToken.None);
+
+        A.CallTo(() => _inner.SendAsync(A<Notification>._, A<CancellationToken>._)).MustHaveHappenedTwiceExactly();
+    }
+
+    [Fact]
+    public async Task ReleaseIncident_ShouldNotTouchTheTransport_SoItIsSafeOnTheCallersThread()
+    {
+        // It is called from QueuedNotificationChannel.ResolveAsync, whose caller is the auto-flatten on the R-13
+        // path. A release that reached the transport would put a wedged network back onto that thread -- gh#289
+        // reintroduced by the fix for gh#1077.
+        DedupingNotificationChannel channel = Channel();
+        await channel.SendAsync(Note(), CancellationToken.None);
+
+        channel.ReleaseIncident("flatten:9001:ES");
+
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
 }
