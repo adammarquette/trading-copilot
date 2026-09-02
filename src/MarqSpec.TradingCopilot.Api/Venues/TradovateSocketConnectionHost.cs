@@ -441,10 +441,19 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
 
             return await send(channel);
         }
+        catch (Exception error) when (error is OperationCanceledException or ObjectDisposedException)
+        {
+            // Shutdown, not a fault: the stopping token fired mid-send, or the root provider is already being torn
+            // down. The loop's own checks end the run on the next statement, and logging an alerting ERROR on every
+            // clean stop would train the reader to ignore the one that matters.
+            Logger.LogDebug(
+                error, "Did not {What} the Tradovate {Socket} socket; the host is stopping.", what, SocketName);
+            return false;
+        }
         catch (Exception error)
         {
-            // Includes cancellation at shutdown, and ObjectDisposedException from a root provider being torn down.
-            // The loop's own stopping-token checks end the run; losing an advisory on the way out is not a fault.
+            // INotificationChannel's contract is never-throws, so reaching here means a buggy channel -- which must
+            // cost the advisory, never the pass that is trying to bring the socket back.
             Logger.LogError(
                 error, "Failed to {What} the Tradovate {Socket} socket.", what, SocketName);
             return false;

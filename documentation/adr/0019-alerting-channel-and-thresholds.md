@@ -491,3 +491,40 @@ could not act on it, and a **page** where the tier would otherwise have made a c
 asymmetry is the point rather than an inconsistency: this tier's output is a promise to something outside the
 system, and the noise budget in §4 does not buy the right to make a false one. The operator's lever if a stale row
 pages nightly is to rediscover or remove it — the primary and watchdog journals name which account it is.
+
+## Update (2026-09-02) — a venue socket that is connected and silent is a **P2**, and it resolves itself (gh#1051)
+
+The Tradovate socket hosts had the shape this ADR exists to remove, one layer down. A connect that keeps failing,
+or a `user/syncrequest` that keeps failing, backed off to its ceiling and logged at that cadence **forever**, with
+no operator-facing signal at all — and the trading socket reports itself `Connected` throughout, because Tradovate
+pushes `props` entity frames only to a socket that has *synced*. So a feed that was dead and a feed that was quiet
+were indistinguishable to everything above, including the account-event stream that now carries real fills into the
+ledger (gh#1069). "Visible rather than silent" again meant a `LogWarning` an engineer would have to go and find —
+the same finding as gh#1045, on a different path.
+
+**The new class: `tradovate.socket.degraded:{market-data|trading}` — P2, notify.** Raised by
+`TradovateSocketConnectionHost` (shared, so both sockets and every future venue socket host inherit it) after
+**three consecutive passes** that end still owing, and **resolved on the first pass that owes nothing**.
+
+- **Why P2 and not P1.** It sits with *connection lost > 2 min with a position open* — protection degraded, not
+  lost. This host cannot read exposure, so it cannot claim risk, which is the same reason `flatten.unrostered` is
+  not paged (§*Update 2026-08-14*). And the "false promise" argument that makes the dead-man's switch the exception
+  (§*Update 2026-08-15*) does **not** apply here, because the promise is withdrawn structurally rather than by
+  alerting: `TradovateTradingSocketSync.IsSynced` is now a readable fact, and `TradovateAccountEventStream` refuses
+  on it instead of reporting a quiet account over a silent socket.
+- **Why three passes and not one.** A single failed pass is an ordinary blip the next pass clears; three have
+  spent the first two doublings of the backoff and are no longer plausibly transient. Counted in *passes* rather
+  than seconds because the gap between them grows with the backoff, so a wall-clock threshold would mean something
+  different at the start of an outage than at its ceiling. An attempt still **in progress** (`Connecting` /
+  `Reconnecting`) counts as neither — a socket wedged there is a distinct defect (gh#1052), and absorbing it here
+  would report the wrong cause.
+- **The resolve is the load-bearing half.** `DedupingNotificationChannel` is a process-lifetime singleton that
+  releases a key only through `ResolveAsync`, so a producer that never resolves turns *one notification per
+  outage* into *one per process lifetime* — the first outage delivers and every later, independent one is
+  suppressed as a duplicate. That is this ADR's own failure mode reproduced by a caller, and it is now pinned by
+  the shared host contract for both sockets rather than trusted.
+
+**Budget.** One push per outage per socket, zero on a clean session, and nothing at all in a deployment where
+Tradovate is unconfigured — the host stands down before it can escalate. It **reports and never acts**: no socket
+is torn down, re-authenticated or disabled on the host's own judgement (the propose-and-confirm posture ratified
+in gh#722).
