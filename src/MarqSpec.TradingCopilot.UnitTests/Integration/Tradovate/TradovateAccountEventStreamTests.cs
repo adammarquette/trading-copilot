@@ -32,6 +32,9 @@ public class TradovateAccountEventStreamTests
     /// <summary>Every await in this suite is bounded: an unbounded one reads as slow CI rather than a red test.</summary>
     private static TimeSpan Timeout { get; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>Mirrors <c>TradovateAccountEventStream.MaxHeldFills</c> — the hold buffer's cap.</summary>
+    private const int HoldCap = 512;
+
     private readonly RecordingWebSocketClient _webSocket = new();
 
     private readonly CapturingLogger _log = new();
@@ -237,26 +240,6 @@ public class TradovateAccountEventStreamTests
     }
 
     [Fact]
-    public async Task StreamAsync_ShouldEmitNothingForTheSyncSnapshotItself_BecauseItOnlySeedsAttribution()
-    {
-        // The snapshot is a FULL re-delivery of the session's entities. Emitting it would re-drive OcoExitService and
-        // the round-trip journal on every reconnect -- a double-counted realized P&L on the path that feeds the R-5
-        // gate. Position truth for reconciliation comes from the venue query path (gh#193), not from here.
-        await using Reader reader = Start(CreateStream(), [Account(9001)]);
-
-        _webSocket.RaiseSync(
-            orders: [Order(id: 5150, account: 9001, ClientModels.OrderStatus.Canceled)],
-            positions: [Position(account: 9001, net: 0, price: null)],
-            fills: [Fill(id: 77, order: 5150)]);
-
-        // Nothing from the snapshot; the next LIVE event is the first thing out.
-        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
-
-        PositionEvent position = (await reader.NextAsync()).Should().BeOfType<PositionEvent>().Subject;
-        position.NetQuantity.Should().Be(-3);
-    }
-
-    [Fact]
     public async Task StreamAsync_ShouldNotEmitAFill_WhenItsOrderResolvesToAnUnsubscribedAccount()
     {
         await using Reader reader = Start(CreateStream(), [Account(9001)]);
@@ -328,6 +311,136 @@ public class TradovateAccountEventStreamTests
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // The reconnect gap -- the snapshot's fills are the only record of what happened while the socket was down
+    // ---------------------------------------------------------------------------------------------------------
+    [Fact]
+    public async Task StreamAsync_ShouldEmitTheSyncSnapshotsFills_BecauseNothingElseCarriesAFillFromTheOutage()
+    {
+        // Round-2 review, finding 1. A fill that lands while the socket is down exists ONLY in the next
+        // user/syncrequest snapshot: live props frames carry changes from the sync point forward, and gh#193
+        // reconciles POSITIONS, not fills. Dropping it means no Fill row, no Trade, and a real realized loss that
+        // never reaches the R-5 governor, the R-9 window or the R-4 throttle -- the exact gap
+        // RecordUnmatchedFillAsync exists to refuse. Unlike a position, a fill is idempotent by construction
+        // downstream (the unique index on { OrderId, VenueFillKey }), so re-delivering one costs a skip.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseSync(
+            orders: [Order(id: 5150, account: 9001, ClientModels.OrderStatus.Working)],
+            fills: [Fill(id: 77, order: 5150)]);
+
+        FillEvent fill = (await reader.NextAsync()).Should().BeOfType<FillEvent>().Subject;
+        fill.VenueFillKey.Should().Be("77");
+        fill.Account.Should().Be(Account(9001));
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldStillEmitNoOrderOrPositionFromTheSnapshot_WhenItEmitsItsFills()
+    {
+        // The carve-out is fills ONLY, and the asymmetry is the whole point. A snapshot POSITION re-drives the
+        // OCO-exit retire and the round-trip journal -- ProcessFlatAsync composes a Trade, so a re-delivered flat
+        // double-counts realized P&L into the R-5 governor. Fills cannot: they dedupe on a unique index.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseSync(
+            orders: [Order(id: 5150, account: 9001, ClientModels.OrderStatus.Canceled)],
+            positions: [Position(account: 9001, net: 0, price: null)],
+            fills: [Fill(id: 77, order: 5150)]);
+
+        // The fill, and then nothing else from the snapshot -- the next LIVE event follows it directly.
+        (await reader.NextAsync()).Should().BeOfType<FillEvent>();
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+        (await reader.NextAsync()).Should().BeOfType<PositionEvent>().Subject.NetQuantity.Should().Be(-3);
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldHoldASnapshotFill_WhenTheSnapshotDoesNotNameItsOrder()
+    {
+        // A snapshot fill is attributed by the same rule as a live one, so a snapshot carrying the fill but not the
+        // order still must not guess an account.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseSync(fills: [Fill(id: 77, order: 5150)]);
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        (await reader.NextAsync()).Should().BeOfType<PositionEvent>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNotEmitASnapshotFill_ForAnUnsubscribedAccount()
+    {
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseSync(
+            orders: [Order(id: 5150, account: 8002, ClientModels.OrderStatus.Working)],
+            fills: [Fill(id: 77, order: 5150)]);
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        (await reader.NextAsync()).Should().BeOfType<PositionEvent>();
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // The hold buffer's cap -- the one branch that knowingly discards a real execution
+    // ---------------------------------------------------------------------------------------------------------
+    [Fact]
+    public async Task StreamAsync_ShouldEvictTheOldestHeldFill_WhenTheHoldBufferIsFull()
+    {
+        // Round-2 review, finding 3. This branch loses a real execution on purpose, to bound the buffer, and it was
+        // the one branch with no test at all. Fill 1000 is the oldest of 513, so it is the one evicted -- and the log
+        // line naming it is the only trace that an execution was dropped.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        for (int i = 0; i <= HoldCap; i++)
+        {
+            _webSocket.RaiseFill(Fill(id: 1000 + i, order: 5000 + i));
+        }
+
+        _log.Messages.Should().ContainMatch("*dropping the oldest*");
+        _log.Messages.Should().ContainMatch("*fill 1000 on order 5000*", "the OLDEST held fill is the one evicted");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNotEvictAnything_WhileTheHoldBufferIsWithinItsCap()
+    {
+        // The paired half: an eviction that fired early would silently discard executions that were never at risk.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        for (int i = 0; i < HoldCap; i++)
+        {
+            _webSocket.RaiseFill(Fill(id: 1000 + i, order: 5000 + i));
+        }
+
+        _log.Messages.Should().NotContainMatch("*dropping the oldest*");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldStillReleaseTheSurvivingHeldFills_AfterAnEviction()
+    {
+        // An eviction must cost exactly the evicted fill. A cap that cleared the buffer, or evicted the NEWEST, would
+        // lose executions that were still attributable.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        for (int i = 0; i <= HoldCap; i++)
+        {
+            _webSocket.RaiseFill(Fill(id: 1000 + i, order: 5000 + i));
+        }
+
+        // A fill from the MIDDLE of the buffer -- not the newest, which survives even a mutation that clears the
+        // whole buffer, because it is added after the eviction. Only a survivor from behind the evicted head proves
+        // that exactly one fill was dropped.
+        _webSocket.RaiseOrder(Order(id: 5001, account: 9001, ClientModels.OrderStatus.Working));
+
+        (await reader.NextAsync()).Should().BeOfType<OrderStateEvent>();
+        (await reader.NextAsync()).Should().BeOfType<FillEvent>().Subject.VenueFillKey.Should().Be("1001");
+
+        // ...and the newest, so both ends of the surviving range are covered.
+        _webSocket.RaiseOrder(Order(id: 5000 + HoldCap, account: 9001, ClientModels.OrderStatus.Working));
+
+        (await reader.NextAsync()).Should().BeOfType<OrderStateEvent>();
+        (await reader.NextAsync()).Should().BeOfType<FillEvent>()
+            .Subject.VenueFillKey.Should().Be((1000 + HoldCap).ToString(CultureInfo.InvariantCulture));
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Silence -- a socket that drops must end the stream, not sit open and quiet
     // ---------------------------------------------------------------------------------------------------------
     [Fact]
@@ -368,6 +481,27 @@ public class TradovateAccountEventStreamTests
 
         (await read.Should().ThrowAsync<TradovateVenueException>())
             .WithMessage("*1 fill(s) still awaiting*");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldEndTheStream_WhenTheSocketDropsBetweenTheConnectedCheckAndTheAttach()
+    {
+        // Round-2 review, finding 2. The connected check and the handler attach are not one step, and a drop landing
+        // between them is raised to nobody: the ConnectionStatusChanged handler is not attached yet, so the drop is
+        // never seen, the channel is never completed, and the read parks FOREVER on a dead socket. The supervisor has
+        // no watchdog -- it only reacts to a session that ends or throws -- so nothing above would ever notice. That
+        // is precisely the "open sequence over a dead socket" this class exists to prevent (R-13, ADR-0019).
+        _webSocket.WhenOrderHandlerAttached = () =>
+            _webSocket.TradingState = ClientModels.ConnectionState.Disconnected;
+        TradovateAccountEventStream stream = CreateStream();
+
+        Func<Task> read = async () =>
+        {
+            await using Reader reader = Start(stream, [Account(9001)]);
+            await reader.NextAsync();
+        };
+
+        await read.Should().ThrowAsync<TradovateVenueException>();
     }
 
     [Fact]
@@ -616,7 +750,7 @@ public class TradovateAccountEventStreamTests
 
         public int ConnectTradingCalls { get; private set; }
 
-        public int OrderSubscribers => OrderReceived?.GetInvocationList().Length ?? 0;
+        public int OrderSubscribers => _orderReceived?.GetInvocationList().Length ?? 0;
 
         public int FillSubscribers => FillReceived?.GetInvocationList().Length ?? 0;
 
@@ -634,7 +768,21 @@ public class TradovateAccountEventStreamTests
 
         public event EventHandler<ClientModels.EntityPropsEvent>? EntityReceived;
 
-        public event EventHandler<ClientModels.Order>? OrderReceived;
+        /// <summary>Runs when the stream attaches its order handler — the attach window the drop race lives in.</summary>
+        public Action? WhenOrderHandlerAttached { get; set; }
+
+        private EventHandler<ClientModels.Order>? _orderReceived;
+
+        public event EventHandler<ClientModels.Order>? OrderReceived
+        {
+            add
+            {
+                _orderReceived += value;
+                WhenOrderHandlerAttached?.Invoke();
+            }
+
+            remove => _orderReceived -= value;
+        }
 
         public event EventHandler<ClientModels.Position>? PositionReceived;
 
@@ -648,7 +796,7 @@ public class TradovateAccountEventStreamTests
 
         public event EventHandler<IReadOnlyList<ClientModels.ChartBar>>? ChartBarsReceived;
 
-        public void RaiseOrder(ClientModels.Order order) => OrderReceived?.Invoke(this, order);
+        public void RaiseOrder(ClientModels.Order order) => _orderReceived?.Invoke(this, order);
 
         public void RaiseFill(ClientModels.Fill fill) => FillReceived?.Invoke(this, fill);
 

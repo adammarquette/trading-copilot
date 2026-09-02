@@ -67,8 +67,11 @@ adapter keeps the order → account map that joins them, seeded from the `user/s
 from `order` frames. Nothing orders the frames, so a fill that arrives before the order naming it is **held, not
 dropped**, and released when an order supplies its account; one that resolves to an unsubscribed account is
 discarded rather than emitted under a guessed one, which matters because one Tradovate login syncs *every* account
-the user holds. The snapshot **seeds attribution and emits nothing** — it is a full re-delivery, and emitting it
-would re-drive the OCO-exit retire and the round-trip journal on every reconnect. A trading socket that leaves
+the user holds. The snapshot is split three ways: its **orders seed** the map, its **fills are emitted** — a fill
+that executed while the socket was down exists nowhere else, and gh#193 reconciles positions, not fills, so losing
+one keeps a real realized loss out of the R-5 governor — and its **positions are dropped**, because a re-delivered
+flat re-drives the OCO-exit retire and composes a second round trip. The asymmetry is idempotency: a fill dedupes
+on the unique `{ OrderId, VenueFillKey }` index downstream, a position does not. A trading socket that leaves
 `Connected` **ends the stream**, after delivering what was buffered: an open sequence over a dead socket is
 indistinguishable from a quiet account, and a quiet account is what auto-flatten must never be told. Two gaps are
 recorded rather than papered over: Tradovate reports no per-fill commission, so `Fees` is zero (gh#1068), and a
