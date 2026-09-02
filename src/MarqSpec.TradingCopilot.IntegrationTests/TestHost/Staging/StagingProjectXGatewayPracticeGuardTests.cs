@@ -1,4 +1,5 @@
 using MarqSpec.Client.ProjectX.Api.Models;
+using MarqSpec.TradingCopilot.Domain.Venue;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost.Staging;
 
@@ -16,12 +17,15 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost.Staging;
 /// gates it protects.
 /// </para>
 /// <para>
-/// The guard requires <b>two independent signals to agree</b> (PR #1075 review): the venue's own
-/// <c>Simulated</c> flag is not sufficient alone for a ProjectX prop-firm-style account — gh#780's
-/// <c>FirmConventions.ForBrokerage</c> remarks establish that a funded account can report <c>Simulated=true</c>
-/// while real payout is at stake — so the name-based classification the production adapter itself uses
-/// (<c>ProjectXAccountStage.Resolve</c>) must also land on Practice. Each test below isolates one signal so a
-/// regression that trusts either alone reddens on its own case.
+/// <b>The guard does not consult <see cref="TradingAccount.Simulated"/> at all (PR #1075 second review round).</b>
+/// An earlier version of this guard trusted that flag — alone, then as one of two AND-ed signals — but gh#780's
+/// <c>FirmConventions.ForBrokerage</c> remarks establish it is not authoritative for a ProjectX prop-firm-style
+/// account: a funded account can report <c>Simulated=true</c> while real payout is at stake. The guard now derives
+/// <see cref="TradingMode"/> the <b>same way production does</b> for a <c>FirmType.PropFirm</c> connection — via
+/// <see cref="FirmConventions.ModeFor(AccountStage)"/>, which never reads the venue flag either. Each test below
+/// isolates one way that derivation can (or must) resolve, so a regression that starts trusting <c>Simulated</c>
+/// again reddens on its own case — most pointedly
+/// <see cref="ResolvePracticeAccountId_ShouldThrow_WhenSimulatedIsTrueButTheDeclarationResolvesToLive"/>.
 /// </para>
 /// </remarks>
 public sealed class StagingProjectXGatewayPracticeGuardTests
@@ -29,12 +33,13 @@ public sealed class StagingProjectXGatewayPracticeGuardTests
     private const string PracticeAccountKey = "PRAC-50K-101";
 
     /// <summary>
-    /// The guard's job, stated positively: a matching account where <b>both</b> signals agree it is Practice
-    /// resolves — the venue reports it simulated, and its name classifies as Practice
-    /// (<c>ProjectXAccountStage.Resolve</c>'s <c>PRAC</c> family).
+    /// The guard's job, stated positively: a matching account whose name classifies as Practice, under
+    /// conventions that declare Practice risk-free, resolves — this is
+    /// <see cref="StagingProjectXGateway.ReservedAccountConventions"/> itself, the same declaration the app-side
+    /// connection registers.
     /// </summary>
     [Fact]
-    public void ResolvePracticeAccountId_ShouldResolveTheId_WhenBothSignalsAgreeTheAccountIsPractice()
+    public void ResolvePracticeAccountId_ShouldResolveTheId_WhenTheDeclaredConventionsClassifyTheAccountAsPractice()
     {
         TradingAccount[] accounts =
         [
@@ -42,44 +47,70 @@ public sealed class StagingProjectXGatewayPracticeGuardTests
             new() { Id = 202, Name = "LIVE-FUNDED-202", Simulated = false },
         ];
 
-        int resolved = StagingProjectXGateway.ResolvePracticeAccountId(accounts, PracticeAccountKey);
+        int resolved = StagingProjectXGateway.ResolvePracticeAccountId(
+            accounts, PracticeAccountKey, StagingProjectXGateway.ReservedAccountConventions);
 
         resolved.Should().Be(101);
     }
 
     /// <summary>
-    /// <b>Prove-the-red on the hazard this guard originally caught (R-14).</b> A name matching the reserved key
-    /// that the venue nonetheless reports <c>Simulated=false</c> — e.g. the operator's
-    /// <c>STAGING_PROJECTX_API_KEY/SECRET</c> pointed at a live account whose name happens to collide — must be
-    /// refused, never silently traded. Before the gh#1074 guard this returned <c>202</c> and every write above it
-    /// (the partial close, the direct <c>PlaceOrderAsync</c>) would have transmitted to a live account with
-    /// nothing in code standing in the way.
+    /// <b>Deliberate, not an oversight:</b> a genuinely Practice-classified account still resolves even when the
+    /// venue reports <c>Simulated=false</c> — because for a <c>FirmType.PropFirm</c> connection the flag is never
+    /// consulted at all (<see cref="FirmConventions.ModeFor(AccountStage)"/>'s <c>ModeFollowsVenue=false</c> path),
+    /// exactly matching how production resolves this same venue's accounts. A test asserting the opposite would be
+    /// asserting the exact trust gh#780 says this venue must not extend to that flag.
     /// </summary>
     [Fact]
-    public void ResolvePracticeAccountId_ShouldThrow_WhenTheMatchingAccountIsNotSimulated()
+    public void ResolvePracticeAccountId_ShouldResolveTheId_EvenWhenSimulatedIsFalse_BecauseTheFlagIsNotConsulted()
     {
         TradingAccount[] accounts =
         [
-            new() { Id = 202, Name = PracticeAccountKey, Simulated = false },
+            new() { Id = 101, Name = PracticeAccountKey, Simulated = false },
         ];
 
-        Action resolve = () => StagingProjectXGateway.ResolvePracticeAccountId(accounts, PracticeAccountKey);
+        int resolved = StagingProjectXGateway.ResolvePracticeAccountId(
+            accounts, PracticeAccountKey, StagingProjectXGateway.ReservedAccountConventions);
 
-        resolve.Should().Throw<InvalidOperationException>()
-            .WithMessage("*R-14*")
-            .WithMessage("*Simulated=False*");
+        resolved.Should().Be(101);
     }
 
     /// <summary>
-    /// <b>Prove-the-red on the hazard PR #1075's review found (gh#780).</b> A <b>funded</b> account (its name
-    /// classifies via the <c>EXPRESS</c> family, per <c>ProjectXAccountStage.Resolve</c>) that nonetheless reports
-    /// <c>Simulated=true</c> — the exact scenario <c>FirmConventions.ForBrokerage</c>'s remarks warn about for a
-    /// prop-firm-style venue: real payout at stake while the venue's own flag says "simulated". A guard that
-    /// trusted <see cref="TradingAccount.Simulated"/> alone would have resolved this id and let
-    /// <c>PlaceOrderAsync</c>/<c>PartialCloseAsync</c> transmit real orders against it.
+    /// <b>The mutation that kills a regression back to trusting the venue flag (gh#780, coordinator review).</b>
+    /// A firm's conventions <i>explicitly</i> declare the name-classified stage as capital-at-risk (Live) — not
+    /// merely undeclared — and the account nonetheless reports <c>Simulated=true</c>: the documented prop-firm
+    /// inversion. If this guard ever again consulted <c>Simulated</c> — even as one of two AND-ed conditions —
+    /// this case would wrongly resolve and <c>PlaceOrderAsync</c>/<c>PartialCloseAsync</c> would transmit real
+    /// orders against a funded account with a real payout at stake, through the exact path this PR frames as
+    /// safety-hardened. The only thing that can make this throw is the declaration being consulted <i>instead of</i>
+    /// the flag, which is the whole point of the redesign.
     /// </summary>
     [Fact]
-    public void ResolvePracticeAccountId_ShouldThrow_WhenTheMatchingAccountIsSimulatedButNameClassifiesAsFunded()
+    public void ResolvePracticeAccountId_ShouldThrow_WhenSimulatedIsTrueButTheDeclarationResolvesToLive()
+    {
+        const string fundedKey = "EXPRESS-50K-303";
+        TradingAccount[] accounts =
+        [
+            new() { Id = 303, Name = fundedKey, Simulated = true },
+        ];
+        FirmConventions fundedIsLive = FirmConventions.For(
+            "Live-Payout-Firm", (AccountStage.Funded, CapitalAtRisk: true));
+
+        Action resolve = () => StagingProjectXGateway.ResolvePracticeAccountId(accounts, fundedKey, fundedIsLive);
+
+        resolve.Should().Throw<InvalidOperationException>()
+            .WithMessage("*R-14*")
+            .WithMessage("*TradingMode.Live*")
+            .WithMessage("*name-classified stage=Funded*");
+    }
+
+    /// <summary>
+    /// The reserved-account conventions declare only Practice; a funded-classified account is therefore
+    /// <see cref="TradingMode.Undeclared"/> under them (never promoted to tradeable by default) — refused the
+    /// same as an explicit Live declaration, distinguishing "the declaration says no" from "the declaration says
+    /// nothing" without either one being treated as permission.
+    /// </summary>
+    [Fact]
+    public void ResolvePracticeAccountId_ShouldThrow_WhenTheNameClassifiesAsFundedAndItIsUndeclared()
     {
         const string fundedKey = "EXPRESS-50K-303";
         TradingAccount[] accounts =
@@ -87,10 +118,12 @@ public sealed class StagingProjectXGatewayPracticeGuardTests
             new() { Id = 303, Name = fundedKey, Simulated = true },
         ];
 
-        Action resolve = () => StagingProjectXGateway.ResolvePracticeAccountId(accounts, fundedKey);
+        Action resolve = () => StagingProjectXGateway.ResolvePracticeAccountId(
+            accounts, fundedKey, StagingProjectXGateway.ReservedAccountConventions);
 
         resolve.Should().Throw<InvalidOperationException>()
             .WithMessage("*R-14*")
+            .WithMessage("*TradingMode.Undeclared*")
             .WithMessage("*name-classified stage=Funded*");
     }
 
@@ -100,7 +133,7 @@ public sealed class StagingProjectXGatewayPracticeGuardTests
     /// "not proven funded, so allow it".
     /// </summary>
     [Fact]
-    public void ResolvePracticeAccountId_ShouldThrow_WhenTheMatchingAccountIsSimulatedButNameIsUnclassifiable()
+    public void ResolvePracticeAccountId_ShouldThrow_WhenTheNameIsUnclassifiable()
     {
         const string unknownKey = "UNKNOWN-NAME-999";
         TradingAccount[] accounts =
@@ -108,7 +141,8 @@ public sealed class StagingProjectXGatewayPracticeGuardTests
             new() { Id = 999, Name = unknownKey, Simulated = true },
         ];
 
-        Action resolve = () => StagingProjectXGateway.ResolvePracticeAccountId(accounts, unknownKey);
+        Action resolve = () => StagingProjectXGateway.ResolvePracticeAccountId(
+            accounts, unknownKey, StagingProjectXGateway.ReservedAccountConventions);
 
         resolve.Should().Throw<InvalidOperationException>()
             .WithMessage("*R-14*")
@@ -124,7 +158,8 @@ public sealed class StagingProjectXGatewayPracticeGuardTests
             new() { Id = 202, Name = "SOME-OTHER-ACCOUNT", Simulated = true },
         ];
 
-        Action resolve = () => StagingProjectXGateway.ResolvePracticeAccountId(accounts, PracticeAccountKey);
+        Action resolve = () => StagingProjectXGateway.ResolvePracticeAccountId(
+            accounts, PracticeAccountKey, StagingProjectXGateway.ReservedAccountConventions);
 
         resolve.Should().Throw<InvalidOperationException>()
             .WithMessage("*not visible to the gateway credentials*");

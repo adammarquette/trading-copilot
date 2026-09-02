@@ -311,13 +311,18 @@ configuration that lives only in a provider console is otherwise invisible to an
       does, and then runs the identical `dotnet test … --filter "Category=Staging"` the workflow runs.
 
    > ⚠️ **R-14 holds here by construction, not only by care.** `StagingProjectXGateway.ResolvePracticeAccountId`
-   > requires **two independent signals to agree** before handing back an account id anything here can trade on:
-   > the venue's own `Simulated` flag, **and** the same name-based `ProjectXAccountStage` classification the
-   > production adapter uses — the venue flag alone is not trusted, because a prop-firm-style funded account can
-   > report `Simulated=true` while real payout is at stake (gh#780). A `STAGING_PROJECTX_API_KEY`/`_SECRET` pair
-   > accidentally pointed at a live or funded account cannot be traded through either path, proven by
-   > `StagingProjectXGatewayPracticeGuardTests`. That guard is the backstop, not the plan: confirm the account really
-   > is the reserved practice account before running this, the same as step 5's warning above.
+   > derives the account's trading mode the **same way production does** for a ProjectX `FirmType.PropFirm`
+   > connection — classifies the account's **name** (`ProjectXAccountStage.Resolve`, the same classifier the
+   > production adapter uses) and resolves it through the **same declared `FirmConventions`** the harness's own
+   > app-side connection registers (`StagingFirmConvention`), never the venue's own `Simulated` flag. That flag is
+   > deliberately **not** consulted at all — not even as a secondary check — because gh#780 established it is not
+   > trustworthy for this venue: a prop-firm funded account can report `Simulated=true` while real payout is at
+   > stake, and production's own `FirmConventions.For` (`ModeFollowsVenue: false`) never reads it either. A
+   > `STAGING_PROJECTX_API_KEY`/`_SECRET` pair accidentally pointed at a live or funded account cannot be traded
+   > through either path, proven by `StagingProjectXGatewayPracticeGuardTests` — including a case where
+   > `Simulated=true` and the declaration says the account is not practice, which must still fail closed. That
+   > guard is the backstop, not the plan: confirm the account really is the reserved practice account before
+   > running this, the same as step 5's warning above.
 
    **Never run this at the same time as a `staging-gates.yml` workflow_dispatch run.** Both trade on the *same*
    reserved account and nothing serializes a local run against a concurrent CI run — check the Actions tab is

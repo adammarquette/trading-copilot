@@ -18,6 +18,7 @@ using IOrderExecutor = MarqSpec.TradingCopilot.Domain.Venue.IOrderExecutor;
 using OrderRequest = MarqSpec.TradingCopilot.Domain.Venue.OrderRequest;
 using PlacedOrder = MarqSpec.TradingCopilot.Domain.Venue.PlacedOrder;
 using TaggedFillEvidence = MarqSpec.TradingCopilot.Domain.Venue.TaggedFillEvidence;
+using TradingMode = MarqSpec.TradingCopilot.Domain.Venue.TradingMode;
 using VenueAccountId = MarqSpec.TradingCopilot.Domain.Venue.VenueAccountId;
 using VenueContractId = MarqSpec.TradingCopilot.Domain.Venue.VenueContractId;
 using VenueId = MarqSpec.TradingCopilot.Domain.Venue.VenueId;
@@ -102,62 +103,86 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
     }
 
     /// <summary>
+    /// The declaration this harness trades under, built from <see cref="StagingFirmConvention"/> — the same named
+    /// source <see cref="StagingVenueExecutionSuite.EnsureConnectionAsync"/> declares for the app's own connection
+    /// via <c>PUT /firms/{id}/conventions</c>, so the two cannot drift into declaring different things for the
+    /// same account. <c>ModeFollowsVenue: false</c> — this gateway's writes are governed by the exact rule
+    /// production uses for a <c>FirmType.PropFirm</c> connection (R-14, gh#1074, gh#780): the venue's own
+    /// <c>Simulated</c> flag plays <b>no</b> role in the result.
+    /// </summary>
+    internal static FirmConventions ReservedAccountConventions { get; } =
+        FirmConventions.For(
+            StagingFirmConvention.FirmName,
+            (StagingFirmConvention.ReservedStage, StagingFirmConvention.ReservedCapitalAtRisk));
+
+    /// <summary>
     /// The gateway's own account id for the reserved practice account, matched by its venue name and verified
     /// PRACTICE by construction (R-14, gh#1074) — see <see cref="ResolvePracticeAccountId"/>.
     /// </summary>
     public async Task<int> ResolveAccountIdAsync(CancellationToken cancellationToken = default)
     {
         IEnumerable<TradingAccount> accounts = await _api.GetAccountsAsync(onlyActiveAccounts: true, cancellationToken);
-        return ResolvePracticeAccountId(accounts, StagingConfig.PracticeAccountKey);
+        return ResolvePracticeAccountId(accounts, StagingConfig.PracticeAccountKey, ReservedAccountConventions);
     }
 
     /// <summary>
     /// The R-14 guard every staging gate's writes are gated behind, whichever base URL drove them there (a
     /// deployed instance or a locally composed one — gh#1074): matches <paramref name="practiceAccountKey"/> by
-    /// name, then requires <b>two independent signals to agree</b> the account is Practice before handing back an
-    /// id anything here can trade on.
+    /// name, then derives its <see cref="TradingMode"/> through the <b>same declaration mechanism production
+    /// already uses</b> for a ProjectX <c>FirmType.PropFirm</c> connection, before handing back an id anything
+    /// here can trade on.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>The venue's own <see cref="TradingAccount.Simulated"/> flag is necessary but not sufficient (gh#780).</b>
-    /// <see cref="FirmConventions.ForBrokerage"/>'s remarks establish, for this exact venue, that a prop-firm
-    /// <i>funded</i> account can execute on a simulated engine while a real payout is at stake — the flag is a lie
-    /// there, which is precisely why <see cref="FirmConventions.For"/> (not <c>ForBrokerage</c>) backs the
-    /// <c>FirmType.PropFirm</c> connection <see cref="StagingVenueExecutionSuite"/> itself creates, and never
-    /// consults the venue flag for it. Trusting <c>Simulated</c> alone here would reintroduce exactly the trust
-    /// the rest of the R-14 architecture withholds from this venue.
+    /// <b>The venue's own <see cref="TradingAccount.Simulated"/> flag is not trustworthy here at all (gh#780) —
+    /// not even as one of two signals.</b> <see cref="FirmConventions.ForBrokerage"/>'s remarks establish, for
+    /// this exact venue, that a prop-firm <i>funded</i> account can execute on a simulated engine while a real
+    /// payout is at stake: "a funded account reports <c>simulated</c> and is nonetheless Live, which is the
+    /// inversion this branch must never introduce." That is precisely why <see cref="FirmConventions.For"/> (not
+    /// <c>ForBrokerage</c>) backs the <c>FirmType.PropFirm</c> connection <see cref="StagingVenueExecutionSuite"/>
+    /// itself creates via <c>ModeFollowsVenue: false</c> — production <b>never</b> consults the venue flag for
+    /// this firm type. Blending <c>Simulated</c> back in here, even as an additional AND-ed condition, would
+    /// re-derive R-14 by a weaker rule than production applies to the identical venue one file over.
     /// </para>
     /// <para>
-    /// So this cross-checks the <b>same name-based classification the production adapter uses</b> for a ProjectX
-    /// account (<see cref="ProjectXAccountStage.Resolve"/>, grounded in a real account-name roster, gh#76) and
-    /// requires it to independently land on <see cref="AccountStage.Practice"/> too. A funded or evaluation
-    /// account that happens to report <c>Simulated=true</c> — the exact hazard <c>FirmConventions.ForBrokerage</c>
-    /// warns about — is still refused, because its <b>name</b> does not classify as Practice. Refuses (fails
-    /// closed) on any disagreement between the two signals, rather than trusting either alone.
+    /// So this routes through <see cref="ReservedAccountConventions"/> — the <b>same</b>
+    /// <see cref="FirmConventions"/> declaration <see cref="StagingVenueExecutionSuite"/> already registers with
+    /// the app for this harness's connection — via <see cref="FirmConventions.ModeFor(AccountStage)"/>, exactly
+    /// as production resolves a <c>PropFirm</c> account's trading mode: the account's name is classified by
+    /// <see cref="ProjectXAccountStage.Resolve"/> (the same classifier the production adapter uses, grounded in a
+    /// real account-name roster, gh#76), and only a name-classified <see cref="AccountStage.Practice"/> resolves
+    /// to <see cref="TradingMode.Practice"/>. A funded or evaluation account — regardless of what its
+    /// <c>Simulated</c> flag says — resolves to <see cref="TradingMode.Live"/> or <see cref="TradingMode.Undeclared"/>
+    /// and is refused, because <see cref="FirmConventions.For"/> declared no capital-safe stage for it.
     /// </para>
     /// <para>
     /// Extracted as a pure function precisely so this guard is provable without a live venue call — see the
-    /// practice-guard unit tests, which assert a genuine Practice match resolves and prove-the-red on each way the
-    /// two signals can disagree.
+    /// practice-guard unit tests, which assert a genuine Practice match resolves and prove-the-red on every way
+    /// the declaration can resolve to something other than Practice, <b>including when <c>Simulated=true</c></b>.
     /// </para>
     /// </remarks>
-    internal static int ResolvePracticeAccountId(IEnumerable<TradingAccount> accounts, string? practiceAccountKey)
+    internal static int ResolvePracticeAccountId(
+        IEnumerable<TradingAccount> accounts, string? practiceAccountKey, FirmConventions conventions)
     {
         ArgumentNullException.ThrowIfNull(accounts);
+        ArgumentNullException.ThrowIfNull(conventions);
         TradingAccount account = accounts.SingleOrDefault(candidate =>
             string.Equals(candidate.Name, practiceAccountKey, StringComparison.Ordinal))
             ?? throw new InvalidOperationException(
                 $"The reserved practice account '{practiceAccountKey}' is not visible to the gateway credentials.");
 
         AccountStage nameClassifiedStage = ProjectXAccountStage.Resolve(account.Name);
-        if (!account.Simulated || nameClassifiedStage != AccountStage.Practice)
+        TradingMode mode = conventions.ModeFor(nameClassifiedStage);
+        if (mode != TradingMode.Practice)
         {
             throw new InvalidOperationException(
-                $"R-14 violation: account '{account.Name}' (id {account.Id}) is not provably a practice account -- "
-                + $"venue Simulated={account.Simulated}, name-classified stage={nameClassifiedStage} (both must be "
-                + "Practice). Refusing to resolve it: these gates place real orders and must never reach a live or "
-                + "funded account, regardless of what STAGING_PROJECTX_PRACTICE_ACCOUNT names. Point the gateway "
-                + "credentials (STAGING_PROJECTX_API_KEY/SECRET) at a reserved PRACTICE account.");
+                $"R-14 violation: account '{account.Name}' (id {account.Id}) resolves to TradingMode.{mode} under "
+                + $"the declared firm conventions (name-classified stage={nameClassifiedStage}, venue "
+                + $"Simulated={account.Simulated} -- deliberately NOT consulted; ModeFollowsVenue=false for this "
+                + "firm type). Refusing to resolve it: these gates place real orders and must never reach a live "
+                + "or funded account, regardless of what STAGING_PROJECTX_PRACTICE_ACCOUNT names or what the venue "
+                + "flag reports. Point the gateway credentials (STAGING_PROJECTX_API_KEY/SECRET) at a reserved "
+                + "PRACTICE account.");
         }
 
         return account.Id;
