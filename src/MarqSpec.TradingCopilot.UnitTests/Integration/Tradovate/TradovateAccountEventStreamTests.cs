@@ -39,9 +39,10 @@ public class TradovateAccountEventStreamTests
 
     private readonly CapturingLogger _log = new();
 
-    // A socket the connection host has synced -- the only state in which this seam streams at all (gh#1051). Every
-    // test below that is about attribution or silence needs a socket that is genuinely delivering, so the default is
-    // synced and the two tests that care about the unsynced case arrange it themselves.
+    // A socket the connection host has already synced. Most tests below are about attribution or silence and need a
+    // socket that is genuinely delivering, so that is the default; the tests that care about the unsynced window
+    // drive the real transition themselves with OnSocketConnected, because setting TradingState alone would arrange
+    // an ordering production cannot produce (gh#1051 review).
     private readonly TradovateTradingSocketSync _sync = Synced();
 
     private static TradovateTradingSocketSync Synced()
@@ -80,43 +81,45 @@ public class TradovateAccountEventStreamTests
     }
 
     [Fact]
-    public async Task StreamAsync_ShouldThrow_WhenTheTradingSocketIsConnectedButHasNeverBeenSynced()
+    public async Task StreamAsync_ShouldStillReceiveTheSyncSnapshot_WhenItOpensOverAConnectedButUnsyncedSocket()
     {
-        // gh#1051. Tradovate pushes props entity frames only to a socket that has completed user/syncrequest, and an
-        // unsynced one reports Connected throughout while delivering nothing at all. Without this refusal the stream
-        // opens, parks, and looks exactly like a quiet account for as long as it lasts -- and a quiet account is the
-        // one thing auto-flatten must never be told (R-13, ADR-0019). The connected check above cannot catch it: the
-        // socket IS connected.
+        // THE regression this seam must never take, and the reason it does not refuse an unsynced socket (gh#1051
+        // review, finding 1). IsSynced can only become true AFTER SyncCompleted has already been raised -- the
+        // client raises it synchronously from inside SyncRequestAsync before that call returns, and every path that
+        // clears the obligation runs from inside that same invocation list. So a stream gated on IsSynced could only
+        // ever attach on the far side of the snapshot, which makes the OnSync handler UNREACHABLE.
         //
-        // The message is asserted, not just the type. The post-attach re-read below throws the same exception type,
-        // so a suite that checked only the type would stay green with this refusal deleted -- the other guard would
-        // catch it and report a socket that "reconnected without being synced", which is a different and untrue
-        // cause. That mutant survived the first pass of this file's suite; it does not now.
-        TradovateTradingSocketSync unsynced = new();
-        unsynced.IsSynced.Should().BeFalse("the arrangement is only meaningful over a socket nothing has synced");
-        TradovateAccountEventStream stream = new(_webSocket, unsynced, _log);
+        // OnSync is the sole source of the order -> account seed for orders predating the connect, and of the fills
+        // that executed while the socket was down, which exist nowhere else. Losing it means no Fill row, no composed
+        // Trade, and a realized loss that never reaches the R-5 governor -- the exact harm gh#1051 cites as its own
+        // motivation. Refusing here would reintroduce it through the card's own fix.
+        _sync.OnSocketConnected();
+        _sync.IsSynced.Should().BeFalse("the arrangement is only meaningful over a socket nothing has synced yet");
 
-        Func<Task> read = async () =>
-        {
-            await using Reader reader = Start(stream, [Account(9001)]);
-            await reader.NextAsync();
-        };
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
 
-        await read.Should().ThrowAsync<TradovateVenueException>().WithMessage("*has not been synced*");
+        // The connection host's sync lands while this stream is open, exactly as it does in production.
+        _webSocket.RaiseSync(
+            orders: [Order(id: 5150, account: 9001, ClientModels.OrderStatus.Filled)],
+            fills: [Fill(id: 77, order: 5150)]);
+
+        FillEvent fill = (await reader.NextAsync()).Should().BeOfType<FillEvent>().Subject;
+        fill.VenueFillKey.Should().Be("77");
+        fill.Account.Should().Be(Account(9001));
     }
 
     [Fact]
-    public async Task StreamAsync_ShouldEndTheStream_WhenTheSocketReconnectsUnsyncedBetweenTheCheckAndTheAttach()
+    public async Task StreamAsync_ShouldEndTheStream_WhenTheConnectionIsReplacedBetweenTheCheckAndTheAttach()
     {
-        // The window the connected re-read alone cannot cover (gh#1051). A drop AND a reconnect landing between the
-        // checks and the attach leaves TradingState back at Connected -- so the state re-read is satisfied -- while
-        // the NEW connection carries no entity subscription at all. The drop that would have ended the stream was
-        // raised before the handler existed, so nothing completes the channel and the read parks forever on a socket
-        // that will never deliver. Fails against a re-read that tests only the connection state.
+        // The window the connected re-read alone cannot cover (gh#1051). A drop AND a reconnect both landing between
+        // the check and the attach leave TradingState back at Connected -- so the state re-read is satisfied -- while
+        // the socket underneath is a different connection whose drop was raised before this stream's handler
+        // existed. Nothing completes the channel and the read parks forever over a connection it never subscribed
+        // to. Only the generation shows it.
         //
-        // The message is asserted so this cannot be satisfied by the DROP path: a socket that reconnected unsynced
-        // never left the connected state as far as this stream can see, and reporting it as one would send the
-        // supervisor after the wrong cause.
+        // The message is asserted so this cannot be satisfied by the DROP path: the socket never left the connected
+        // state as far as this stream could see, and reporting it as a drop would send the supervisor after the
+        // wrong cause.
         _webSocket.WhenOrderHandlerAttached = () => _sync.OnSocketConnected();
         _webSocket.TradingState.Should().Be(ClientModels.ConnectionState.Connected);
         TradovateAccountEventStream stream = CreateStream();
@@ -127,7 +130,63 @@ public class TradovateAccountEventStreamTests
             await reader.NextAsync();
         };
 
-        await read.Should().ThrowAsync<TradovateVenueException>().WithMessage("*reconnected without being synced*");
+        await read.Should().ThrowAsync<TradovateVenueException>().WithMessage("*replaced by a new connection*");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNotEndTheStream_WhenTheSocketIsMerelyUnsyncedAtTheAttach()
+    {
+        // The other side of the guard above, and what keeps it from becoming the refusal this card must not ship. A
+        // connection that is legitimately new -- and therefore legitimately unsynced -- is the ORDINARY case the
+        // stream has to survive, because it is the only moment at which the snapshot can still be caught. Only a
+        // generation that moved WHILE the stream was opening ends it.
+        _sync.OnSocketConnected();
+
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseOrder(Order(id: 5150, account: 9001, ClientModels.OrderStatus.Working));
+
+        (await reader.NextAsync()).Should().BeOfType<OrderStateEvent>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldReportOnTeardown_WhenItNeverRodeASyncedSocketAtAll()
+    {
+        // The fact gh#1051 exists to make readable, at the one moment it is unambiguous. This stream opened over a
+        // socket that had never been synced and no snapshot landed while it was open, so Tradovate pushed it no
+        // props frame at all -- its silence is NOT evidence about the account, and a caller that read it as a quiet
+        // one would be reading a position the platform cannot see.
+        //
+        // Reported rather than thrown: refusing at the top would make the snapshot unreachable (see above), and the
+        // socket that stays up and never syncs is escalated to the OPERATOR by the connection host, which is where
+        // something can act on it.
+        _sync.OnSocketConnected();
+
+        await using (Reader reader = Start(CreateStream(), [Account(9001)]))
+        {
+            await Task.Yield();
+        }
+
+        _log.Warnings.Should().Contain(message => message.Contains("never received a sync snapshot"));
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNotReportANeverSyncedSocket_WhenTheSnapshotArrivedWhileItWasOpen()
+    {
+        // The mirror, so the report above cannot be a constant. A stream that opened unsynced and then saw the
+        // snapshot land rode a socket that was genuinely delivering, and saying otherwise would train the reader to
+        // ignore the message that matters.
+        _sync.OnSocketConnected();
+
+        await using (Reader reader = Start(CreateStream(), [Account(9001)]))
+        {
+            _webSocket.RaiseSync(
+                orders: [Order(id: 5150, account: 9001, ClientModels.OrderStatus.Filled)],
+                fills: [Fill(id: 77, order: 5150)]);
+            (await reader.NextAsync()).Should().BeOfType<FillEvent>();
+        }
+
+        _log.Warnings.Should().NotContain(message => message.Contains("never received a sync snapshot"));
     }
 
     [Fact]
@@ -426,7 +485,16 @@ public class TradovateAccountEventStreamTests
 
         // The host brings the socket back and syncs it; the supervisor re-subscribes. The re-subscribed stream starts
         // with an EMPTY attribution map, so the snapshot has to supply both the order and the fill.
+        //
+        // The reconnect is driven through the SYNC REGISTER as well as the socket state (gh#1051 review), because
+        // production cannot produce any other order: a new connection re-arms the obligation, so the socket really
+        // is Connected-and-unsynced at the moment the supervisor re-subscribes, and the snapshot lands afterwards.
+        // Setting only TradingState left the register synced from construction and quietly arranged a world the
+        // code can no longer reach -- so this test, whose name asserts exactly the behaviour a refusal here would
+        // remove, would have stayed green while that behaviour was deleted.
         _webSocket.TradingState = ClientModels.ConnectionState.Connected;
+        _sync.OnSocketConnected();
+        _sync.IsSynced.Should().BeFalse("a fresh connection carries no entity subscription until something syncs it");
         await using Reader resubscribed = Start(stream, [Account(9001)]);
 
         _webSocket.RaiseSync(
@@ -884,9 +952,23 @@ public class TradovateAccountEventStreamTests
     };
 
     /// <summary>Captures log lines, so the cases whose only trace is a log line can still be asserted on.</summary>
+    /// <summary>
+    /// Records what was logged <b>and at what level</b>. The level is not decoration: a double that discarded it
+    /// would let a <c>LogError</c> silently downgraded to <c>LogDebug</c> keep every assertion here green, which is
+    /// a defect this repository has already shipped once and paid for.
+    /// </summary>
     private sealed class CapturingLogger : ILogger<TradovateAccountEventStream>
     {
-        public List<string> Messages { get; } = [];
+        private readonly List<(LogLevel Level, string Message)> _entries = [];
+
+        /// <summary>Everything logged, at any level.</summary>
+        public IEnumerable<string> Messages => _entries.Select(entry => entry.Message);
+
+        /// <summary>Only what was logged at <see cref="LogLevel.Warning"/>.</summary>
+        public IEnumerable<string> Warnings => At(LogLevel.Warning);
+
+        /// <summary>Only what was logged at <see cref="LogLevel.Error"/>.</summary>
+        public IEnumerable<string> Errors => At(LogLevel.Error);
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -896,7 +978,18 @@ public class TradovateAccountEventStreamTests
             LogLevel level, EventId id, TState state, Exception? error, Func<TState, Exception?, string> formatter)
         {
             ArgumentNullException.ThrowIfNull(formatter);
-            Messages.Add(formatter(state, error));
+            lock (_entries)
+            {
+                _entries.Add((level, formatter(state, error)));
+            }
+        }
+
+        private IEnumerable<string> At(LogLevel level)
+        {
+            lock (_entries)
+            {
+                return [.. _entries.Where(entry => entry.Level == level).Select(entry => entry.Message)];
+            }
         }
     }
 

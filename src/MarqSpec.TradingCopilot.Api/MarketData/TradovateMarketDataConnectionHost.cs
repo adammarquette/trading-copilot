@@ -89,12 +89,14 @@ public sealed class TradovateMarketDataConnectionHost : TradovateSocketConnectio
     /// <param name="logger">The logger.</param>
     /// <param name="pollInterval">How often the socket's state is sampled.</param>
     /// <param name="maxBackoff">The ceiling the backoff doubles up to.</param>
+    /// <param name="degradedGrace">How long the socket must not deliver before the operator is told.</param>
     internal TradovateMarketDataConnectionHost(
         IServiceProvider services,
         ILogger<TradovateMarketDataConnectionHost> logger,
         TimeSpan pollInterval,
-        TimeSpan maxBackoff)
-        : base(services, logger, pollInterval, maxBackoff)
+        TimeSpan maxBackoff,
+        TimeSpan degradedGrace)
+        : base(services, logger, pollInterval, maxBackoff, degradedGrace)
     {
     }
 
@@ -138,13 +140,13 @@ public sealed class TradovateMarketDataConnectionHost : TradovateSocketConnectio
     /// A host-driven connect takes the client's non-replaying path, so the socket is now subscribed to nothing:
     /// EVERY live key is owed again, whatever was owed before.
     /// </remarks>
-    protected override async Task<bool> SettleAfterHostDrivenConnectAsync(
+    protected override async Task<SocketPassOutcome> SettleAfterHostDrivenConnectAsync(
         ITradovateWebSocketClient client, CancellationToken cancellationToken)
     {
         _owed.Clear();
         _owed.UnionWith(Subscriptions.LiveKeys);
         await ReplayAsync(client, cancellationToken);
-        return _owed.Count == 0;
+        return Outcome();
     }
 
     /// <inheritdoc />
@@ -152,7 +154,7 @@ public sealed class TradovateMarketDataConnectionHost : TradovateSocketConnectio
     /// A socket that is up and fully subscribed owes nothing, which is the ordinary case. What survives here is the
     /// tail of a partial replay: those keys are retried while the socket looks healthy, because nothing else would.
     /// </remarks>
-    protected override async Task<bool> SettleConnectedSocketAsync(
+    protected override async Task<SocketPassOutcome> SettleConnectedSocketAsync(
         ITradovateWebSocketClient client, CancellationToken cancellationToken)
     {
         if (_owed.Count > 0)
@@ -160,8 +162,15 @@ public sealed class TradovateMarketDataConnectionHost : TradovateSocketConnectio
             await ReplayAsync(client, cancellationToken);
         }
 
-        return _owed.Count == 0;
+        return Outcome();
     }
+
+    // This socket has no third case. Unlike the trading socket's grace pass, every pass here either leaves the
+    // register fully replayed -- the feed is live -- or leaves keys that were attempted on the wire and failed,
+    // which is what the backoff exists for. `Waiting` is deliberately unreachable rather than defensively returned:
+    // a market-data pass that owes nothing genuinely is an all-clear.
+    private SocketPassOutcome Outcome() =>
+        _owed.Count == 0 ? SocketPassOutcome.Delivering : SocketPassOutcome.StillOwed;
 
     // Set by TryResolveCollaborators before the loop starts; the loop never runs when that returned false.
     private TradovateQuoteSubscriptions Subscriptions =>

@@ -56,6 +56,17 @@ public abstract class TradovateSocketConnectionHostContract
     /// <summary>The bound on every wait in this class — long enough never to fire on a healthy pass.</summary>
     protected static TimeSpan Timeout { get; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// The test cadence for how long a socket must go without delivering before the operator is told, and how long
+    /// it must deliver before the incident is closed (production: two minutes).
+    /// </summary>
+    /// <remarks>
+    /// Comfortably longer than a pass at the 1 ms test poll interval, so a blip that recovers on the very next pass
+    /// is genuinely inside the grace rather than merely racing it — and comfortably shorter than
+    /// <see cref="Timeout"/>, so a test that waits for the advisory fails on its assertion rather than on the clock.
+    /// </remarks>
+    protected static TimeSpan DegradedGrace { get; } = TimeSpan.FromMilliseconds(300);
+
     /// <summary>The venue client both hosts drive. The subclass points the seams below at its own socket.</summary>
     protected ITradovateWebSocketClient Client { get; } = A.Fake<ITradovateWebSocketClient>();
 
@@ -72,7 +83,7 @@ public abstract class TradovateSocketConnectionHostContract
 
     /// <summary>Builds the host under test with a test cadence, over the given provider.</summary>
     protected abstract BackgroundService CreateHost(
-        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff);
+        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff, TimeSpan degradedGrace);
 
     /// <summary>Registers <see cref="Client"/> and every collaborator the host requires.</summary>
     protected abstract void Register(ServiceCollection services);
@@ -135,7 +146,8 @@ public abstract class TradovateSocketConnectionHostContract
         CreateHost(
             services ?? Registered(),
             pollInterval: TimeSpan.FromMilliseconds(1),
-            maxBackoff: TimeSpan.FromMilliseconds(2));
+            maxBackoff: TimeSpan.FromMilliseconds(2),
+            degradedGrace: DegradedGrace);
 
     // Each state read is one loop pass, so counting them is the host's own heartbeat: it lets a "did not happen"
     // assertion say "across N real passes" rather than "within some wall-clock window", and it lets a test act at an
@@ -286,7 +298,8 @@ public abstract class TradovateSocketConnectionHostContract
             throw new InvalidOperationException("the venue rate-limited the post-connect work (test)");
         });
 
-        BackgroundService host = CreateHost(Registered(), pollInterval: TimeSpan.FromMilliseconds(1), ceiling);
+        BackgroundService host = CreateHost(
+            Registered(), pollInterval: TimeSpan.FromMilliseconds(1), ceiling, DegradedGrace);
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(retried)).Should()
@@ -326,7 +339,8 @@ public abstract class TradovateSocketConnectionHostContract
             throw new InvalidOperationException("the venue is unreachable (test)");
         });
 
-        BackgroundService host = CreateHost(Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400));
+        BackgroundService host = CreateHost(
+            Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400), DegradedGrace);
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(kept)).Should().BeTrue("an outage longer than one attempt must still be retried");
@@ -371,7 +385,8 @@ public abstract class TradovateSocketConnectionHostContract
             throw new InvalidOperationException("the venue rate-limited the post-connect work (test)");
         });
 
-        BackgroundService host = CreateHost(Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400));
+        BackgroundService host = CreateHost(
+            Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400), DegradedGrace);
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(retried)).Should().BeTrue("a connected socket that owes work must keep being retried");
@@ -601,7 +616,8 @@ public abstract class TradovateSocketConnectionHostContract
                 "the venue did not answer in time (test)", null, new CancellationToken(canceled: true));
         });
 
-        BackgroundService host = CreateHost(Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400));
+        BackgroundService host = CreateHost(
+            Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400), DegradedGrace);
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(retried)).Should()
@@ -712,12 +728,13 @@ public abstract class TradovateSocketConnectionHostContract
         await StopAsync(host);
     }
 
+
     // ---------------------------------------------------------------------------------------------------------
-    // 8 · The operator hears about a degradation that persists — and hears it once (gh#1051).
+    // 8 · The operator hears about a socket that stops delivering — and hears it once (gh#1051).
     // ---------------------------------------------------------------------------------------------------------
 
     [Fact]
-    public async Task ExecuteAsync_ShouldTellTheOperator_WhenTheSocketStaysDegraded()
+    public async Task ExecuteAsync_ShouldTellTheOperator_WhenTheSocketStopsDelivering()
     {
         // THE gap gh#1051 was filed for, and it is not trading-specific. Everything above leaves exactly one trace
         // when it fails forever: an ILogger line at the backoff cadence, which reaches an engineer reading
@@ -743,11 +760,16 @@ public abstract class TradovateSocketConnectionHostContract
     }
 
     [Fact]
-    public async Task ExecuteAsync_ShouldNotTellTheOperator_WhenAFailedPassRecoversOnTheNext()
+    public async Task ExecuteAsync_ShouldNotTellTheOperator_WhenAFailedPassRecoversInsideTheGrace()
     {
-        // The other half, and the one that keeps the advisory worth reading. A single failed pass is an ordinary
-        // blip; paging on it would spend ADR-0019 §4's noise budget on nothing, and a pager that cries wolf gets
-        // muted — at which point it is strictly worse than no pager, because it manufactures confidence.
+        // The other half, and the one that keeps the advisory worth reading. A blip that clears well inside the
+        // grace is not an incident; paging on it would spend ADR-0019 §4's noise budget on nothing, and a pager
+        // that cries wolf gets muted — at which point it is strictly worse than no pager, because it manufactures
+        // confidence.
+        //
+        // The wait is deliberately several times the grace: a host that started its outage clock and never reset it
+        // would have advised long before this returns, so the emptiness below is a real observation rather than a
+        // race the assertion happened to win.
         int attempts = 0;
         SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
         ArrangeConnect(() => Interlocked.Increment(ref attempts) == 1
@@ -757,26 +779,26 @@ public abstract class TradovateSocketConnectionHostContract
 
         BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
-        (await PassesObserved(TradovateSocketConnectionHost.DegradedPassesBeforeAdvisory + 4)).Should()
-            .BeTrue("the assertion below only means something if passes really ran");
+        await Task.Delay(DegradedGrace * 4);
         await StopAsync(host);
 
-        Notifications.Notifications.Should().BeEmpty("one failed pass that recovered is not an incident");
+        Volatile.Read(ref attempts).Should().BeGreaterThan(0, "the blip must actually have happened");
+        Notifications.Notifications.Should().BeEmpty("a blip that recovered inside the grace is not an incident");
     }
 
     [Fact]
     public async Task ExecuteAsync_ShouldTellTheOperatorOnlyOnce_WhileOneOutageContinues()
     {
-        // The advisory repeats at the poll cadence if the host re-sends every degraded pass. The dedup channel would
-        // collapse the pushes, but each one still costs a durable outbox row, and relying on a downstream layer to
-        // hide a producer's noise is how ADR-0019 §4's budget gets spent without anyone noticing.
+        // The advisory would repeat at the poll cadence if the host re-sent every degraded pass. The dedup channel
+        // would collapse the pushes, but each one still costs a durable outbox row, and relying on a downstream
+        // layer to hide a producer's noise is how ADR-0019 §4's budget gets spent without anyone noticing.
         SocketIs(ClientModels.ConnectionState.Disconnected);
         ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
 
         BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
         (await Notifications.Sent(1)).Should().BeTrue();
-        (await PassesObserved(TradovateSocketConnectionHost.DegradedPassesBeforeAdvisory + 6)).Should()
+        (await PassesObserved(PassesSoFar + 20)).Should()
             .BeTrue("the assertion below only means something if passes really ran after the advisory");
         await StopAsync(host);
 
@@ -784,17 +806,17 @@ public abstract class TradovateSocketConnectionHostContract
     }
 
     [Fact]
-    public async Task ExecuteAsync_ShouldResolveTheAdvisory_WhenTheSocketRecovers()
+    public async Task ExecuteAsync_ShouldResolveTheAdvisory_WhenTheSocketDeliversAgainForTheWholeGrace()
     {
         // Not tidiness. DedupingNotificationChannel is a process-lifetime singleton that releases a key ONLY through
         // ResolveAsync, so a producer that never resolves turns "one notification per outage" into "one per process
         // lifetime": the first outage delivers and every later, independent one is silently suppressed as a
         // duplicate — this very failure reproduced one layer down. That was the blocking finding on gh#1045, and it
         // is pinned here so it cannot be reintroduced on this path.
-        int attempts = 0;
-        SocketReadsAs(_ => Volatile.Read(ref attempts) > TradovateSocketConnectionHost.DegradedPassesBeforeAdvisory
-            ? ClientModels.ConnectionState.Connected
-            : ClientModels.ConnectionState.Disconnected);
+        int recovered = 0;
+        SocketReadsAs(_ => Volatile.Read(ref recovered) == 0
+            ? ClientModels.ConnectionState.Disconnected
+            : ClientModels.ConnectionState.Connected);
         ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
         await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
 
@@ -803,13 +825,55 @@ public abstract class TradovateSocketConnectionHostContract
         (await Notifications.Sent(1)).Should().BeTrue("the outage must be reported before it can be resolved");
 
         // Only now let the socket come back, so the resolve cannot be an artefact of a race with the advisory.
-        Interlocked.Add(ref attempts, TradovateSocketConnectionHost.DegradedPassesBeforeAdvisory + 1);
+        Interlocked.Exchange(ref recovered, 1);
 
         (await Notifications.Resolved(1)).Should().BeTrue("an incident that ended must be closed");
         await StopAsync(host);
 
         Notifications.Resolutions.Should().AllBeEquivalentTo(
             Notifications.Notifications[0].DedupKey, "the key resolved must be the key that was reported");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotResolveTheAdvisory_UntilTheSocketHasDeliveredForTheWholeGrace()
+    {
+        // The hysteresis, and the reason it is not decoration. Closing the incident on the first healthy pass lets a
+        // socket that recovers and fails faster than the grace produce advise → resolve → advise indefinitely: a
+        // push per flap, however good the dedup below is, which is ADR-0019 §4's budget spent by a producer rather
+        // than by a real fault. Requiring sustained health makes a flapping socket the one continuing incident it
+        // actually is.
+        long flappingSince = 0;
+        SocketReadsAs(_ =>
+        {
+            // Down until the outage is reported, so the incident genuinely exists before anything can close it.
+            if (Notifications.Notifications.Count == 0)
+            {
+                return ClientModels.ConnectionState.Disconnected;
+            }
+
+            // Then alternate every QUARTER of the grace. Every healthy stretch is real -- the socket delivers, and a
+            // host that resolved on the first good pass would close the incident here -- but none of them lasts a
+            // whole grace, so none of them is a recovery.
+            Interlocked.CompareExchange(ref flappingSince, Stopwatch.GetTimestamp(), 0);
+            long quarters = Stopwatch.GetElapsedTime(Volatile.Read(ref flappingSince)).Ticks
+                            / (DegradedGrace.Ticks / 4);
+            return quarters % 2 == 0
+                ? ClientModels.ConnectionState.Connected
+                : ClientModels.ConnectionState.Disconnected;
+        });
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Sent(1)).Should().BeTrue("the outage must be reported before it can be wrongly closed");
+        await Task.Delay(DegradedGrace * 4);
+        await StopAsync(host);
+
+        Notifications.Resolutions.Should()
+            .BeEmpty("a socket that never delivers for a whole grace has not recovered, whatever a single pass said");
+        Notifications.Notifications.Should()
+            .ContainSingle("and because it was never resolved, it was never re-raised either");
     }
 
     [Fact]
@@ -822,27 +886,34 @@ public abstract class TradovateSocketConnectionHostContract
 
         BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
-        (await PassesObserved(6)).Should().BeTrue("the assertion below only means something if passes really ran");
+        (await PassesObserved(20)).Should().BeTrue("the assertion below only means something if passes really ran");
+        await Task.Delay(DegradedGrace * 2);
         await StopAsync(host);
 
         Notifications.Resolutions.Should().BeEmpty();
     }
 
     [Fact]
-    public async Task ExecuteAsync_ShouldNotTellTheOperator_WhileTheClientIsStillAttemptingTheConnect()
+    public async Task ExecuteAsync_ShouldTellTheOperator_WhenTheClientSitsInAnAttemptItNeverFinishes()
     {
-        // An attempt in progress is not yet a failure — the loop deliberately waits it out rather than tearing it
-        // down. A socket WEDGED in Connecting is a distinct defect with its own card (gh#1052); absorbing it into
-        // this counter would report the wrong thing and quietly close that card without fixing it.
+        // CHANGED BY REVIEW, and the change is the point. This loop deliberately waits out an attempt in progress
+        // rather than tearing it down — but "wait" is about what the loop DRIVES, not about what the operator is
+        // told. Treating a mid-attempt pass as proving nothing meant a socket that reconnects faster than the grace
+        // — the venue closing shortly after `authorize`, or the client's silence-timeout loop — never accumulated an
+        // outage at all, which is exactly the reported-to-nobody state this advisory exists for.
+        //
+        // It does not close gh#1052: that card is about getting a wedged socket OUT of this state. Reporting "it has
+        // not delivered for N" is true meanwhile, and true is the bar.
         SocketIs(ClientModels.ConnectionState.Connecting);
 
         BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
-        (await PassesObserved(TradovateSocketConnectionHost.DegradedPassesBeforeAdvisory + 5)).Should()
-            .BeTrue("the assertion below only means something if passes really ran");
+
+        (await Notifications.Sent(1)).Should()
+            .BeTrue("a socket stuck mid-attempt delivers nothing, whatever the loop is right to do about it");
         await StopAsync(host);
 
-        Notifications.Notifications.Should().BeEmpty();
+        AssertNeverConnected();
     }
 
     [Fact]
