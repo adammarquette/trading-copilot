@@ -934,20 +934,58 @@ public abstract class TradovateSocketConnectionHostContract
         await StopAsync(host);
     }
 
+    [Fact]
+    public async Task ExecuteAsync_ShouldStillReportTheNextOutage_WhenAnEarlierResolveWasNeverConfirmed()
+    {
+        // Round-2 review, note c. Holding the incident open until the channel CONFIRMS the resolve looks careful and
+        // is the opposite: DedupingNotificationChannel re-arms its key unconditionally before it forwards (gh#300),
+        // so the hazard a retry would guard against cannot happen -- while the retry itself creates a real one. A
+        // resolve that keeps coming back unconfirmed leaves the host believing an advisory is still outstanding, and
+        // the next genuine outage is then never raised at all, because the advisory only fires while that belief is
+        // false. Silence, reached by way of a guard against silence.
+        //
+        // Sequence: outage -> advisory -> recovery -> a resolve the channel refuses to confirm -> outage again. The
+        // SECOND advisory is the assertion, and it is also why the recording channel hands out one witness per wait.
+        int healthy = 0;
+        SocketReadsAs(_ => Volatile.Read(ref healthy) == 1
+            ? ClientModels.ConnectionState.Connected
+            : ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+        Notifications.ConfirmResolve = false;
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Sent(1)).Should().BeTrue("the first outage must be reported");
+
+        Interlocked.Exchange(ref healthy, 1);
+        (await Notifications.Resolved(1)).Should().BeTrue("the recovery must at least attempt to close it");
+
+        Interlocked.Exchange(ref healthy, 0);
+
+        (await Notifications.Sent(2)).Should()
+            .BeTrue("an unconfirmed resolve must not cost the operator every later outage");
+        await StopAsync(host);
+    }
+
     /// <summary>Records what the host told the operator, so the advisory can be asserted rather than inferred.</summary>
     protected sealed class RecordingNotificationChannel : INotificationChannel
     {
         private readonly object _gate = new();
         private readonly List<Notification> _sent = [];
         private readonly List<string> _resolved = [];
-        private readonly TaskCompletionSource _sentWitness = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly TaskCompletionSource _resolvedWitness =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private int _sentWitnessAt = int.MaxValue;
-        private int _resolvedWitnessAt = int.MaxValue;
+
+        // One witness PER WAIT, not one per channel. A single reusable TaskCompletionSource stays completed once it
+        // has fired, so a second Sent(n) in the same test would return true off the FIRST wait's completion whatever
+        // n was -- a wait that cannot fail, in the harness rather than in an assertion (gh#1051 round-2 review).
+        private readonly List<(int At, TaskCompletionSource Signal)> _sentWaits = [];
+        private readonly List<(int At, TaskCompletionSource Signal)> _resolvedWaits = [];
 
         /// <summary>Whether a send is accepted for delivery — false is a channel that could not take it.</summary>
         public bool Accept { get; set; } = true;
+
+        /// <summary>Whether a resolve is confirmed — false is a cancel the channel could not vouch for.</summary>
+        public bool ConfirmResolve { get; set; } = true;
 
         /// <summary>Everything the host asked the operator to be told, oldest first.</summary>
         public IReadOnlyList<Notification> Notifications
@@ -974,34 +1012,10 @@ public abstract class TradovateSocketConnectionHostContract
         }
 
         /// <summary>Completes once <paramref name="count"/> sends have been attempted; false means it timed out.</summary>
-        public Task<bool> Sent(int count)
-        {
-            lock (_gate)
-            {
-                _sentWitnessAt = count;
-                if (_sent.Count >= count)
-                {
-                    _sentWitness.TrySetResult();
-                }
-            }
-
-            return Signalled(_sentWitness);
-        }
+        public Task<bool> Sent(int count) => Wait(_sentWaits, () => _sent.Count, count);
 
         /// <summary>Completes once <paramref name="count"/> resolves have landed; false means it timed out.</summary>
-        public Task<bool> Resolved(int count)
-        {
-            lock (_gate)
-            {
-                _resolvedWitnessAt = count;
-                if (_resolved.Count >= count)
-                {
-                    _resolvedWitness.TrySetResult();
-                }
-            }
-
-            return Signalled(_resolvedWitness);
-        }
+        public Task<bool> Resolved(int count) => Wait(_resolvedWaits, () => _resolved.Count, count);
 
         /// <inheritdoc />
         public Task<bool> SendAsync(Notification notification, CancellationToken cancellationToken)
@@ -1009,10 +1023,7 @@ public abstract class TradovateSocketConnectionHostContract
             lock (_gate)
             {
                 _sent.Add(notification);
-                if (_sent.Count >= _sentWitnessAt)
-                {
-                    _sentWitness.TrySetResult();
-                }
+                Release(_sentWaits, _sent.Count);
             }
 
             return Task.FromResult(Accept);
@@ -1024,13 +1035,42 @@ public abstract class TradovateSocketConnectionHostContract
             lock (_gate)
             {
                 _resolved.Add(dedupKey);
-                if (_resolved.Count >= _resolvedWitnessAt)
+                Release(_resolvedWaits, _resolved.Count);
+            }
+
+            return Task.FromResult(ConfirmResolve);
+        }
+
+        // `soFar` is a callback rather than a value so the count is read UNDER the gate: reading it at the call site
+        // would let a send land between the read and the registration, and the wait would then miss the very event
+        // it was registered for.
+        private Task<bool> Wait(List<(int At, TaskCompletionSource Signal)> waits, Func<int> soFar, int count)
+        {
+            TaskCompletionSource signal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_gate)
+            {
+                if (soFar() >= count)
                 {
-                    _resolvedWitness.TrySetResult();
+                    signal.TrySetResult();
+                }
+                else
+                {
+                    waits.Add((count, signal));
                 }
             }
 
-            return Task.FromResult(true);
+            return Signalled(signal);
+        }
+
+        private static void Release(List<(int At, TaskCompletionSource Signal)> waits, int reached)
+        {
+            foreach ((int at, TaskCompletionSource signal) in waits)
+            {
+                if (reached >= at)
+                {
+                    signal.TrySetResult();
+                }
+            }
         }
     }
 }

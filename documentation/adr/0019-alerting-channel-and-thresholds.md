@@ -515,8 +515,13 @@ socket has gone **two minutes without delivering**, and resolved once it has del
 - **Two minutes, wall-clock — deliberately not a pass count.** The gap between passes grows with the backoff, so
   "three consecutive failed passes" is about fifteen seconds at the start of an outage and about three minutes at
   the ceiling: one rule meaning two different things, and only one of them is the number that decides whether an
-  alert is noise. Two minutes is §3's own figure for the comparable P2, so a venue's nightly maintenance break or
-  an ordinary blip passes in silence.
+  alert is noise.
+- **The number is borrowed from §3, and borrowed short — mark it unverified.** §3's comparable entry is *connection
+  lost > 2 min **with a position open***, and this host cannot read exposure, so it takes the figure without the
+  qualifier that keeps that entry off a clean session. Whether two minutes clears Tradovate's own maintenance and
+  disconnect behaviour is **not a fact this repository has established** — there are no credentials to observe it —
+  and §4 is blunt that a rule firing on a clean session is a defect in the rule. It is a staging observation to make
+  once credentials exist. The hysteresis argument below justifies a grace of this order without depending on it.
 - **The all-clear has the same grace, and that is what keeps a flapping socket inside §4's budget.** Resolving on
   the first healthy pass lets a socket that recovers and fails every twenty seconds produce advise → resolve →
   advise indefinitely — a push per flap, however good the dedup is. Requiring sustained health makes a flapping

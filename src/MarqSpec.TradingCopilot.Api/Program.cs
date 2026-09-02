@@ -103,9 +103,16 @@ builder.Services.AddHostedService<TradovateMarketDataConnectionHost>();
 //
 // The sync register beside it (gh#1051) is the market-data register's counterpart, and a singleton for the same
 // reason: one credential set per process -> one trading socket, so "has this socket been synced?" is one answer.
-// It is the ONLY way anything above the client can tell a synced socket from one that was never subscribed --
-// TradingState reports Connected either way -- so TradovateAccountEventStream refuses on it rather than reading a
-// silent socket as a quiet account.
+// It is the ONLY way anything above the client can tell a socket that was never subscribed from a quiet account,
+// because TradingState reports Connected either way.
+//
+// What reads it, and -- just as load-bearing -- what does NOT. TradovateSocketConnectionHost escalates a socket
+// that has stopped delivering to the operator, and TradovateAccountEventStream REPORTS on teardown when it rode a
+// socket that never synced. That stream deliberately does not REFUSE an unsynced socket, and nothing else may
+// either: IsSynced only becomes true after SyncCompleted has already been raised, so a consumer gated on it can
+// only ever attach on the far side of the snapshot -- which makes the snapshot's handler unreachable and loses,
+// permanently, the fills that executed while the socket was down. That is a worse failure than the one this
+// register exists to expose, and it is the shape a reader of this line is most likely to build (gh#1051 review).
 builder.Services.AddSingleton<TradovateTradingSocketSync>();
 builder.Services.AddHostedService<TradovateTradingConnectionHost>();
 

@@ -167,7 +167,7 @@ public class TradovateAccountEventStreamTests
             await Task.Yield();
         }
 
-        _log.Warnings.Should().Contain(message => message.Contains("never received a sync snapshot"));
+        _log.Warnings.Should().Contain(message => message.Contains("delivered nothing at all"));
     }
 
     [Fact]
@@ -186,7 +186,53 @@ public class TradovateAccountEventStreamTests
             (await reader.NextAsync()).Should().BeOfType<FillEvent>();
         }
 
-        _log.Warnings.Should().NotContain(message => message.Contains("never received a sync snapshot"));
+        _log.Warnings.Should().NotContain(message => message.Contains("delivered nothing at all"));
+    }
+
+
+    [Fact]
+    public async Task StreamAsync_ShouldNotReportSilence_WhenItDeliveredLiveFramesWithoutASnapshot()
+    {
+        // Round-2 review, note b. The report was driven by the SNAPSHOT alone, so a stream that took live props
+        // frames and never saw a further SyncCompleted was told its silence proved nothing -- while it was busy
+        // emitting real orders and fills. That happens in production: the client's own reconnect syncs while one of
+        // the host's syncs is in flight, so the completion is left to the connection-bound clear and the obligation
+        // stays armed even though the socket really is synced.
+        //
+        // A message whose whole job is to say "this silence is not evidence" is worthless the moment it fires on a
+        // stream that was not silent, because that is what teaches a reader to skip it.
+        _sync.OnSocketConnected();
+
+        await using (Reader reader = Start(CreateStream(), [Account(9001)]))
+        {
+            _webSocket.RaiseOrder(Order(id: 5150, account: 9001, ClientModels.OrderStatus.Working));
+            (await reader.NextAsync()).Should().BeOfType<OrderStateEvent>();
+        }
+
+        _log.Warnings.Should().NotContain(message => message.Contains("delivered nothing at all"));
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNotReportSilence_WhenTheSocketWasSyncedWhileTheStreamWasAttaching()
+    {
+        // The other half of note b. `openedUnsynced` is sampled before the handlers go on, so a SyncCompleted
+        // landing in that gap clears the register while this stream's own OnSync does not yet exist -- and the
+        // stream then rides a fully synced socket for its whole life. Over a genuinely quiet account it delivers
+        // nothing, which is exactly when the report must NOT claim that its silence proves nothing: the socket was
+        // synced, so the silence is real evidence.
+        //
+        // The register is the third conjunct that distinguishes the two, and this is the test that makes it
+        // load-bearing rather than defensive.
+        _sync.OnSocketConnected();
+        _webSocket.WhenOrderHandlerAttached = () => _sync.CompleteObservedSync();
+
+        await using (Reader reader = Start(CreateStream(), [Account(9001)]))
+        {
+            await Task.Yield();
+        }
+
+        _sync.IsSynced.Should().BeTrue("the arrangement is only meaningful if the socket really did sync");
+        _log.Warnings.Should().NotContain(message => message.Contains("delivered nothing at all"));
     }
 
     [Fact]

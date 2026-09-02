@@ -122,8 +122,17 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
     /// <b>Wall-clock, not a pass count.</b> The delay between passes grows with the backoff, so "three consecutive
     /// failed passes" is about fifteen seconds at the start of an outage and about three minutes at the ceiling —
     /// the same rule meaning two different things, and only one of them is the number that decides whether an alert
-    /// is noise. Two minutes is ADR-0019 §3's own threshold for the comparable P2 (<i>connection lost &gt; 2 min
-    /// with a position open</i>), so a venue's nightly maintenance break or an ordinary blip passes in silence.
+    /// is noise.
+    /// </para>
+    /// <para>
+    /// <b>Two minutes is borrowed, and it is borrowed short.</b> It is ADR-0019 §3's figure for the comparable P2 —
+    /// <i>connection lost &gt; 2 min <b>with a position open</b></i> — and this host cannot read exposure, so it
+    /// takes the number without the qualifier that keeps that entry off a clean session. Whether the number
+    /// survives that is <b>unverified</b>: it rests on Tradovate's own maintenance and disconnect behaviour, which
+    /// this repository has no credentials to observe, and §4 is blunt that a rule which fires on a clean session is
+    /// a defect in the rule. It is a staging observation to make once credentials exist, alongside the
+    /// duplicate-sync question the trading host records. What does <i>not</i> depend on the venue is the flap
+    /// argument below, which justifies a grace of this order on its own.
     /// </para>
     /// <para>
     /// <b>The same period guards the all-clear, and that is what keeps a flapping socket inside §4's budget.</b>
@@ -441,12 +450,25 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
                 // Hysteresis. Closing the incident on the first healthy pass lets a socket that recovers and fails
                 // faster than the grace produce advise -> resolve -> advise forever, which is a push per flap
                 // however good the dedup below is; requiring sustained health makes a flapping socket the one
-                // continuing incident it actually is (ADR-0019 §4). Held until the resolve is CONFIRMED: an
-                // unconfirmed one would leave the dedup key held for the life of the process, silently suppressing
-                // the next genuine outage.
+                // continuing incident it actually is (ADR-0019 §4).
+                //
+                // The incident is closed HERE whatever the channel answers, and that is deliberate.
+                // DedupingNotificationChannel re-arms its key UNCONDITIONALLY before it forwards (gh#300), so an
+                // unconfirmed resolve cannot leave the key held -- the hazard a retry would guard against does not
+                // exist on this path. What a retry WOULD create is worse and real: `advised` stuck true means the
+                // next outage is never raised at all, because the advisory below only fires while it is false.
+                // Silence, reached by way of a guard against silence (gh#1051 round-2 review).
                 if (advised && Stopwatch.GetElapsedTime(deliveringSince) >= _degradedGrace)
                 {
-                    advised = !await ResolveDegradedAsync(stoppingToken);
+                    if (!await ResolveDegradedAsync(stoppingToken))
+                    {
+                        Logger.LogWarning(
+                            "The Tradovate {Socket} socket recovered, but closing its operator advisory could not "
+                            + "be confirmed; a stale incident may still show as open.",
+                            SocketName);
+                    }
+
+                    advised = false;
                 }
             }
             else
