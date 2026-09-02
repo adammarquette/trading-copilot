@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Flatten;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
@@ -79,11 +80,7 @@ public static class DailyRealizedReader
         // P&L" -- reporting full headroom on an account that really lost money. No caller should pass it (an
         // Undeclared account trades nowhere); the callers treat it as inert, and this enforces that contract so a
         // future one that forgets fails fast rather than silently misleading a risk surface.
-        if (mode == TradingMode.Undeclared)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(mode), "Undeclared is not a journalable trading mode; treat an Undeclared account as inert.");
-        }
+        GuardMode(mode);
 
         DateTime today = MarketClock.ToMarketTime(now).Date;
         DateTimeOffset floor = now.AddDays(-2); // coarse bound; the in-memory Central-date match below is authoritative
@@ -98,4 +95,116 @@ public static class DailyRealizedReader
             .Where(trade => MarketClock.ToMarketTime(trade.ClosedAt).Date == today)
             .Sum(trade => trade.RealizedPnL);
     }
+
+    /// <summary>
+    /// Sums the account's realized P&amp;L <b>per Central trading day</b> over <paramref name="from"/>..<paramref name="to"/>
+    /// (both inclusive) — the gh#1062 (R-8/R-9) generalization of <see cref="TodayRealizedPnLForAccountAsync"/> from
+    /// "today" to an arbitrary range, for the P&amp;L-by-day calendar read. Same rules as the day-scoped reader: the
+    /// Central calendar day (not UTC), realized-and-closed trades only, R-20 owner scoping, and R-14 mode scoping
+    /// (gh#746) — see that method's remarks for the full rationale, which apply unchanged here.
+    /// </summary>
+    /// <param name="database">The scoped, R-20-filtered context.</param>
+    /// <param name="accountId">The account whose days are summed.</param>
+    /// <param name="mode">The account's <b>current</b> declared mode (R-14) — never <see cref="TradingMode.Undeclared"/>.</param>
+    /// <param name="from">The first Central trading day to include.</param>
+    /// <param name="to">The last Central trading day to include.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>
+    /// One entry per Central day that closed at least one realized trade, ascending by date — <b>no entry</b> for a
+    /// quiet day (the empty list is the honest "nothing happened" for a range, mirroring the single-day reader's
+    /// <c>0</c>). The caller decides whether to fill gaps for a calendar display.
+    /// </returns>
+    public static async Task<IReadOnlyList<DailyRealized>> RealizedPnLByDayForAccountAsync(
+        this TradingCopilotDbContext database,
+        Guid accountId,
+        TradingMode mode,
+        DateOnly from,
+        DateOnly to,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+        GuardMode(mode);
+
+        DateTimeOffset windowStart = CentralDayStartUtc(from);
+        DateTimeOffset windowEndExclusive = CentralDayStartUtc(to.AddDays(1));
+
+        List<(DateTimeOffset ClosedAt, decimal RealizedPnL)> rows = await database.Trades
+            .Where(trade => trade.AccountId == accountId && trade.Mode == mode
+                && trade.ClosedAt != null && trade.ClosedAt >= windowStart && trade.ClosedAt < windowEndExclusive
+                && trade.RealizedPnL != null)
+            .Select(trade => new ValueTuple<DateTimeOffset, decimal>(trade.ClosedAt!.Value, trade.RealizedPnL!.Value))
+            .ToListAsync(cancellationToken);
+
+        return
+        [
+            .. rows
+                .GroupBy(row => DateOnly.FromDateTime(MarketClock.ToMarketTime(row.ClosedAt).Date))
+                .Select(group => new DailyRealized(group.Key, group.Sum(row => row.RealizedPnL), group.Count()))
+                .OrderBy(day => day.Date),
+        ];
+    }
+
+    /// <summary>
+    /// The account's realized, closed trades on one <b>Central trading day</b> (gh#1062, R-8) — the day-detail
+    /// drill-down behind the P&amp;L-by-day calendar. Same rules as <see cref="RealizedPnLByDayForAccountAsync"/>: the
+    /// Central calendar day (not UTC), realized-and-closed only, R-20 owner scoping, R-14 mode scoping (gh#746).
+    /// </summary>
+    /// <param name="database">The scoped, R-20-filtered context.</param>
+    /// <param name="accountId">The account whose day is read.</param>
+    /// <param name="mode">The account's <b>current</b> declared mode (R-14) — never <see cref="TradingMode.Undeclared"/>.</param>
+    /// <param name="day">The Central trading day to read.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The day's realized trades, oldest first; empty (not an error) on a quiet day.</returns>
+    public static async Task<IReadOnlyList<Trade>> TradesForDayForAccountAsync(
+        this TradingCopilotDbContext database,
+        Guid accountId,
+        TradingMode mode,
+        DateOnly day,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+        GuardMode(mode);
+
+        DateTimeOffset windowStart = CentralDayStartUtc(day);
+        DateTimeOffset windowEndExclusive = CentralDayStartUtc(day.AddDays(1));
+
+        return await database.Trades
+            .Where(trade => trade.AccountId == accountId && trade.Mode == mode
+                && trade.ClosedAt != null && trade.ClosedAt >= windowStart && trade.ClosedAt < windowEndExclusive
+                && trade.RealizedPnL != null)
+            .OrderBy(trade => trade.ClosedAt)
+            .ToListAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Refuses <see cref="TradingMode.Undeclared"/> loudly (gh#746 review), shared by every reader in this family.
+    /// See <see cref="TodayRealizedPnLForAccountAsync"/>'s remarks for the full rationale: filtering
+    /// <c>Trade.Mode</c> by <c>Undeclared</c> silently matches zero rows for any account (the column is
+    /// check-constrained never to hold it), which would misreport as "nothing realized" rather than fail loudly.
+    /// </summary>
+    private static void GuardMode(TradingMode mode)
+    {
+        if (mode == TradingMode.Undeclared)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(mode), "Undeclared is not a journalable trading mode; treat an Undeclared account as inert.");
+        }
+    }
+
+    /// <summary>
+    /// UTC instant at which the Central calendar day <paramref name="day"/> begins — <see cref="MarketClock.CentralDayStartUtc"/>
+    /// fed a midday-UTC instant on that date so the Central-time conversion cannot roll the date itself (a UTC
+    /// midnight or late-evening instant sits close enough to the Central boundary that the conversion could land on
+    /// the adjacent calendar date; UTC noon never does, for any US time zone).
+    /// </summary>
+    private static DateTimeOffset CentralDayStartUtc(DateOnly day) =>
+        MarketClock.CentralDayStartUtc(new DateTimeOffset(day.ToDateTime(new TimeOnly(12, 0)), TimeSpan.Zero));
 }
+
+/// <summary>
+/// One Central trading day's realized outcome (gh#1062, R-8/R-9) — a row of the P&amp;L-by-day calendar read.
+/// </summary>
+/// <param name="Date">The Central trading day.</param>
+/// <param name="RealizedPnL">The day's signed realized P&amp;L (positive net profit, negative net loss).</param>
+/// <param name="TradeCount">How many realized trades closed that day.</param>
+public sealed record DailyRealized(DateOnly Date, decimal RealizedPnL, int TradeCount);

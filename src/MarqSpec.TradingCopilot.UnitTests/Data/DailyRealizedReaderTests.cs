@@ -143,3 +143,272 @@ public class DailyRealizedReaderTests
         (await ReadAsync(mode: TradingMode.Practice)).Should().Be(-500m, "only the practice trade counts toward a practice read");
     }
 }
+
+/// <summary>
+/// The P&amp;L-by-day and day-detail read (gh#1062, R-8/R-9) — the same reader family as
+/// <see cref="DailyRealizedReaderTests"/>, generalized from "today" to an arbitrary Central-day range / single day.
+/// The behaviours that matter are the same ones the day-scoped reader already proved: Central-day grouping (not
+/// UTC), realized-and-closed only, zero/empty (not absence) on a quiet window, R-20 owner scoping, and R-14
+/// mode-scoping (gh#746) including the loud refusal of <see cref="TradingMode.Undeclared"/>.
+/// </summary>
+public class DailyRealizedByDayReaderTests
+{
+    private readonly Guid _operator = Guid.NewGuid();
+    private readonly Guid _other = Guid.NewGuid();
+    private readonly Guid _account = Guid.NewGuid();
+    private readonly string _database = Guid.NewGuid().ToString();
+
+    private sealed record FixedUser(Guid UserId) : ICurrentUser;
+
+    private TradingCopilotDbContext Context(Guid? asUser = null) =>
+        new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
+            new FixedUser(asUser ?? _operator));
+
+    private async Task SeedTradeAsync(
+        decimal? realizedPnL, DateTimeOffset? closedAt, Guid? account = null, Guid? owner = null,
+        TradingMode mode = TradingMode.Practice)
+    {
+        Guid ownerId = owner ?? _operator;
+        await using TradingCopilotDbContext context = Context(ownerId);
+        context.Trades.Add(new Trade
+        {
+            Id = Guid.NewGuid(),
+            UserId = ownerId,
+            AccountId = account ?? _account,
+            Instrument = "CON.F.US.ES.U26",
+            Side = OrderSide.Buy,
+            Size = 1,
+            EntryPrice = 5_300m,
+            ExitPrice = closedAt is null ? null : 5_305m,
+            RealizedPnL = realizedPnL,
+            Mode = mode,
+            ClosedAt = closedAt,
+        });
+        await context.SaveChangesAsync();
+    }
+
+    private async Task<IReadOnlyList<DailyRealized>> ReadDaysAsync(
+        DateOnly from, DateOnly to, Guid? asUser = null, TradingMode mode = TradingMode.Practice)
+    {
+        await using TradingCopilotDbContext context = Context(asUser);
+        return await context.RealizedPnLByDayForAccountAsync(_account, mode, from, to, CancellationToken.None);
+    }
+
+    private async Task<IReadOnlyList<Trade>> ReadDayAsync(
+        DateOnly day, Guid? asUser = null, TradingMode mode = TradingMode.Practice)
+    {
+        await using TradingCopilotDbContext context = Context(asUser);
+        return await context.TradesForDayForAccountAsync(_account, mode, day, CancellationToken.None);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // RealizedPnLByDayForAccountAsync
+    // -----------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldGroupByCentralTradingDay_WithinTheRange()
+    {
+        // 06:00Z 08-03 = 01:00 CDT 08-03 (day 1); 18:00Z 08-04 = 13:00 CDT 08-04 (day 2).
+        await SeedTradeAsync(realizedPnL: 100m, closedAt: new DateTimeOffset(2026, 8, 3, 6, 0, 0, TimeSpan.Zero));
+        await SeedTradeAsync(realizedPnL: -30m, closedAt: new DateTimeOffset(2026, 8, 3, 20, 0, 0, TimeSpan.Zero));
+        await SeedTradeAsync(realizedPnL: 50m, closedAt: new DateTimeOffset(2026, 8, 4, 18, 0, 0, TimeSpan.Zero));
+
+        IReadOnlyList<DailyRealized> days = await ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 4));
+
+        days.Should().BeEquivalentTo(
+            [
+                new DailyRealized(new DateOnly(2026, 8, 3), 70m, 2),
+                new DailyRealized(new DateOnly(2026, 8, 4), 50m, 1),
+            ],
+            options => options.WithStrictOrdering(), "grouped by Central trading day, earliest first");
+    }
+
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldExcludeATradeOutsideTheRange()
+    {
+        await SeedTradeAsync(realizedPnL: -999m, closedAt: new DateTimeOffset(2026, 8, 2, 18, 0, 0, TimeSpan.Zero)); // before `from`
+        await SeedTradeAsync(realizedPnL: 40m, closedAt: new DateTimeOffset(2026, 8, 3, 18, 0, 0, TimeSpan.Zero));   // in range
+        await SeedTradeAsync(realizedPnL: -999m, closedAt: new DateTimeOffset(2026, 8, 5, 18, 0, 0, TimeSpan.Zero)); // after `to`
+
+        IReadOnlyList<DailyRealized> days = await ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 3));
+
+        days.Should().ContainSingle().Which.RealizedPnL.Should().Be(40m, "trades outside the range must not be summed in");
+    }
+
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldRespectTheCentralMidnightBoundary_AtRangeEdges()
+    {
+        // Central midnight for 08-03 is 05:00Z. One minute before is still 08-02 (excluded, `from` is 08-03); one
+        // minute after is 08-03 (included). Central midnight for 08-05 (one past `to` = 08-04) is 05:00Z on the 5th;
+        // one minute before is still 08-04 (included); one minute after is 08-05 (excluded, past `to`).
+        await SeedTradeAsync(realizedPnL: -1m, closedAt: new DateTimeOffset(2026, 8, 3, 4, 59, 0, TimeSpan.Zero)); // 08-02, excluded
+        await SeedTradeAsync(realizedPnL: 10m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 1, 0, TimeSpan.Zero));  // 08-03, included
+        await SeedTradeAsync(realizedPnL: 20m, closedAt: new DateTimeOffset(2026, 8, 5, 4, 59, 0, TimeSpan.Zero)); // 08-04, included
+        await SeedTradeAsync(realizedPnL: -1m, closedAt: new DateTimeOffset(2026, 8, 5, 5, 1, 0, TimeSpan.Zero));  // 08-05, excluded
+
+        IReadOnlyList<DailyRealized> days = await ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 4));
+
+        days.Sum(day => day.RealizedPnL).Should().Be(30m, "only the two trades landing inside the Central-day range count");
+        days.Sum(day => day.TradeCount).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldReturnEmpty_WhenNothingClosedInRange()
+    {
+        // A quiet window is an empty list, not an error or a fabricated zero-day -- there is no day to report.
+        (await ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 9))).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldExcludeOpenAndUnrealizedTrades()
+    {
+        DateTimeOffset closedAt = new(2026, 8, 3, 18, 0, 0, TimeSpan.Zero);
+        await SeedTradeAsync(realizedPnL: null, closedAt: null);       // still open
+        await SeedTradeAsync(realizedPnL: null, closedAt: closedAt);   // closed but no realized figure yet
+        await SeedTradeAsync(realizedPnL: 25m, closedAt: closedAt);    // the only countable one
+
+        IReadOnlyList<DailyRealized> days = await ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 3));
+
+        days.Should().ContainSingle().Which.Should().BeEquivalentTo(new DailyRealized(new DateOnly(2026, 8, 3), 25m, 1));
+    }
+
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldOnlyCountTheGivenAccount()
+    {
+        DateTimeOffset closedAt = new(2026, 8, 3, 18, 0, 0, TimeSpan.Zero);
+        await SeedTradeAsync(realizedPnL: 100m, closedAt: closedAt, account: _account);
+        await SeedTradeAsync(realizedPnL: -999m, closedAt: closedAt, account: Guid.NewGuid());
+
+        IReadOnlyList<DailyRealized> days = await ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 3));
+
+        days.Should().ContainSingle().Which.RealizedPnL.Should().Be(100m, "another account's trade is not this account's day");
+    }
+
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldOnlyCountTheCallersTrades()
+    {
+        // R-20: another operator's trade on the same account id is invisible.
+        await SeedTradeAsync(realizedPnL: -777m, closedAt: new DateTimeOffset(2026, 8, 3, 18, 0, 0, TimeSpan.Zero), owner: _other);
+
+        (await ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 3), asUser: _operator)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldCountOnlyTheRequestedMode_WhenAnAccountChangedModes()
+    {
+        // R-14 (gh#746): a practice loss must never blend into a live read, or vice versa.
+        DateTimeOffset closedAt = new(2026, 8, 3, 18, 0, 0, TimeSpan.Zero);
+        await SeedTradeAsync(realizedPnL: -500m, closedAt: closedAt, mode: TradingMode.Practice);
+        await SeedTradeAsync(realizedPnL: 100m, closedAt: closedAt, mode: TradingMode.Live);
+
+        IReadOnlyList<DailyRealized> live = await ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 3), mode: TradingMode.Live);
+        IReadOnlyList<DailyRealized> practice = await ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 3), mode: TradingMode.Practice);
+
+        live.Should().ContainSingle().Which.RealizedPnL.Should().Be(100m, "only the live trade counts toward a live read");
+        practice.Should().ContainSingle().Which.RealizedPnL.Should().Be(-500m, "only the practice trade counts toward a practice read");
+    }
+
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldThrow_WhenTheModeIsUndeclared()
+    {
+        await SeedTradeAsync(realizedPnL: -400m, closedAt: new DateTimeOffset(2026, 8, 3, 18, 0, 0, TimeSpan.Zero), mode: TradingMode.Live);
+
+        Func<Task> act = () => ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 3), mode: TradingMode.Undeclared);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // TradesForDayForAccountAsync
+    // -----------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task TradesForDay_ShouldReturnTheDaysClosedRealizedTrades_OrderedByClosedAt()
+    {
+        DateTimeOffset later = new(2026, 8, 3, 20, 0, 0, TimeSpan.Zero);
+        DateTimeOffset earlier = new(2026, 8, 3, 18, 0, 0, TimeSpan.Zero);
+        await SeedTradeAsync(realizedPnL: -30m, closedAt: later);
+        await SeedTradeAsync(realizedPnL: 100m, closedAt: earlier);
+
+        IReadOnlyList<Trade> trades = await ReadDayAsync(new DateOnly(2026, 8, 3));
+
+        trades.Select(trade => trade.ClosedAt).Should().Equal([earlier, later], "the day's trades are returned in execution order");
+    }
+
+    [Fact]
+    public async Task TradesForDay_ShouldExcludeAnAdjacentDaysTrades_AtTheCentralBoundary()
+    {
+        // Central midnight for 08-03 is 05:00Z: one minute before is the PREVIOUS day, one minute after is this one.
+        await SeedTradeAsync(realizedPnL: -500m, closedAt: new DateTimeOffset(2026, 8, 3, 4, 59, 0, TimeSpan.Zero));
+        await SeedTradeAsync(realizedPnL: -40m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 1, 0, TimeSpan.Zero));
+
+        IReadOnlyList<Trade> trades = await ReadDayAsync(new DateOnly(2026, 8, 3));
+
+        trades.Should().ContainSingle().Which.RealizedPnL.Should().Be(-40m, "only the trade after Central midnight is today's");
+    }
+
+    [Fact]
+    public async Task TradesForDay_ShouldExcludeOpenAndUnrealizedTrades()
+    {
+        DateTimeOffset closedAt = new(2026, 8, 3, 18, 0, 0, TimeSpan.Zero);
+        await SeedTradeAsync(realizedPnL: null, closedAt: null);     // still open
+        await SeedTradeAsync(realizedPnL: null, closedAt: closedAt); // closed but no realized figure yet
+        await SeedTradeAsync(realizedPnL: 25m, closedAt: closedAt);  // the only countable one
+
+        IReadOnlyList<Trade> trades = await ReadDayAsync(new DateOnly(2026, 8, 3));
+
+        trades.Should().ContainSingle().Which.RealizedPnL.Should().Be(25m);
+    }
+
+    [Fact]
+    public async Task TradesForDay_ShouldReturnEmpty_WhenNothingClosedThatDay()
+    {
+        (await ReadDayAsync(new DateOnly(2026, 8, 3))).Should().BeEmpty("a quiet day is zero trades, not an error");
+    }
+
+    [Fact]
+    public async Task TradesForDay_ShouldOnlyCountTheGivenAccount()
+    {
+        DateTimeOffset closedAt = new(2026, 8, 3, 18, 0, 0, TimeSpan.Zero);
+        await SeedTradeAsync(realizedPnL: 100m, closedAt: closedAt, account: _account);
+        await SeedTradeAsync(realizedPnL: -999m, closedAt: closedAt, account: Guid.NewGuid());
+
+        IReadOnlyList<Trade> trades = await ReadDayAsync(new DateOnly(2026, 8, 3));
+
+        trades.Should().ContainSingle().Which.RealizedPnL.Should().Be(100m, "another account's trade is not this account's day");
+    }
+
+    [Fact]
+    public async Task TradesForDay_ShouldOnlyCountTheCallersTrades()
+    {
+        // R-20: another operator's trade on the same account id is invisible.
+        await SeedTradeAsync(realizedPnL: -777m, closedAt: new DateTimeOffset(2026, 8, 3, 18, 0, 0, TimeSpan.Zero), owner: _other);
+
+        (await ReadDayAsync(new DateOnly(2026, 8, 3), asUser: _operator)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task TradesForDay_ShouldCountOnlyTheRequestedMode_WhenAnAccountChangedModes()
+    {
+        // R-14 (gh#746): a practice loss must never blend into a live day-detail read, or vice versa.
+        DateTimeOffset closedAt = new(2026, 8, 3, 18, 0, 0, TimeSpan.Zero);
+        await SeedTradeAsync(realizedPnL: -500m, closedAt: closedAt, mode: TradingMode.Practice);
+        await SeedTradeAsync(realizedPnL: 100m, closedAt: closedAt, mode: TradingMode.Live);
+
+        IReadOnlyList<Trade> live = await ReadDayAsync(new DateOnly(2026, 8, 3), mode: TradingMode.Live);
+        IReadOnlyList<Trade> practice = await ReadDayAsync(new DateOnly(2026, 8, 3), mode: TradingMode.Practice);
+
+        live.Should().ContainSingle().Which.RealizedPnL.Should().Be(100m, "only the live trade counts toward a live read");
+        practice.Should().ContainSingle().Which.RealizedPnL.Should().Be(-500m, "only the practice trade counts toward a practice read");
+    }
+
+    [Fact]
+    public async Task TradesForDay_ShouldThrow_WhenTheModeIsUndeclared()
+    {
+        await SeedTradeAsync(realizedPnL: -400m, closedAt: new DateTimeOffset(2026, 8, 3, 18, 0, 0, TimeSpan.Zero), mode: TradingMode.Live);
+
+        Func<Task> act = () => ReadDayAsync(new DateOnly(2026, 8, 3), mode: TradingMode.Undeclared);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+}
