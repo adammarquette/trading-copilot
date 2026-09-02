@@ -39,12 +39,18 @@ public class TradovateVenueTests
     }
 
     [Fact]
-    public void Capabilities_ShouldGrantBarsAndQuotes_ButNotExecution()
+    public void Capabilities_ShouldGrantBarsQuotesAndAccountStreaming_ButNotExecution()
     {
         VenueCapabilities capabilities = CreateVenue().Capabilities;
 
         capabilities.Supports(VenueCapability.HistoricalBars).Should().BeTrue();
         capabilities.Supports(VenueCapability.Quotes).Should().BeTrue();
+
+        // Granted now that TradovateAccountEventStream exists (gh#977). The capability is what a caller Requires at
+        // the call to decide whether it can depend on order / fill / position events at all, so leaving it ungranted
+        // once the seam is real would make every such caller degrade for a gap that has closed.
+        capabilities.Supports(VenueCapability.AccountStreaming).Should().BeTrue();
+
         capabilities.Supports(VenueCapability.ClosePosition).Should().BeFalse();
     }
 

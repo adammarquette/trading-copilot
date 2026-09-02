@@ -290,6 +290,45 @@ configuration that lives only in a provider console is otherwise invisible to an
    > first symptom is a real order on real money. Verify the account for each non-prod environment **at the
    > broker** after setting it, not from the value you believe you pasted.
 
+6. **Running the gates against a local compose stack instead of a deployed one (gh#1074).** There is no staging
+   environment and none is planned right now — development runs on Docker locally — so step 5's *Run workflow*
+   button has nothing to point at yet. It does not have to: `StagingApiClient` only needs a running base URL, and
+   `StagingProjectXGateway` reads venue truth straight from ProjectX, so a `docker compose up -d` instance on
+   `http://localhost:8080` satisfies the same contract a deployed one would. This is a **second** way to run the
+   same `Category=Staging` suite, not a replacement for step 5 — keep both.
+
+   1. Bring up the local stack (*Local development (docker-compose)* above) and confirm it answers at
+      `http://localhost:8080/ready`.
+   2. Sign in once as the local operator (`Bootstrap__Email` / `Bootstrap__Password` in your `.env`) so you have a
+      login to hand the gates.
+   3. Set the same `STAGING_*` variables as the table above in your shell — **never committed**, and
+      `STAGING_API_BASE_URL=http://localhost:8080` instead of the deployed URL. `STAGING_PROJECTX_API_KEY` /
+      `_API_SECRET` / `STAGING_PROJECTX_PRACTICE_ACCOUNT` are still the **reserved practice account's** direct
+      credentials — the same ones step 5 uses, not new ones; this path changes only which app the gates place
+      their entry order *through*, never which broker account they trade on.
+   4. Run `scripts/run-staging-gates-local.sh` from the repo root. It refuses to start rather than run a partial
+      set (prints exactly which `STAGING_*` variables are missing), waits for `/ready` the same way the CI job
+      does, and then runs the identical `dotnet test … --filter "Category=Staging"` the workflow runs.
+
+   > ⚠️ **R-14 holds here by construction, not only by care.** `StagingProjectXGateway.ResolvePracticeAccountId`
+   > derives the account's trading mode the **same way production does** for a ProjectX `FirmType.PropFirm`
+   > connection — classifies the account's **name** (`ProjectXAccountStage.Resolve`, the same classifier the
+   > production adapter uses) and resolves it through the **same declared `FirmConventions`** the harness's own
+   > app-side connection registers (`StagingFirmConvention`), never the venue's own `Simulated` flag. That flag is
+   > deliberately **not** consulted at all — not even as a secondary check — because gh#780 established it is not
+   > trustworthy for this venue: a prop-firm funded account can report `Simulated=true` while real payout is at
+   > stake, and production's own `FirmConventions.For` (`ModeFollowsVenue: false`) never reads it either. A
+   > `STAGING_PROJECTX_API_KEY`/`_SECRET` pair accidentally pointed at a live or funded account cannot be traded
+   > through either path, proven by `StagingProjectXGatewayPracticeGuardTests` — including a case where
+   > `Simulated=true` and the declaration says the account is not practice, which must still fail closed. That
+   > guard is the backstop, not the plan: confirm the account really is the reserved practice account before
+   > running this, the same as step 5's warning above.
+
+   **Never run this at the same time as a `staging-gates.yml` workflow_dispatch run.** Both trade on the *same*
+   reserved account and nothing serializes a local run against a concurrent CI run — check the Actions tab is
+   idle first. Record whichever direction the run turns out on the gh#1012 issue and PR #1013, exactly as it ran;
+   a run that could not start (missing credentials) is reported as *not run*, never as a pass.
+
 ### Automated code review — one workflow, one dormant ruleset
 Two mechanisms have carried this name. Only the first is live.
 

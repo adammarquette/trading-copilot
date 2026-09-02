@@ -491,3 +491,72 @@ could not act on it, and a **page** where the tier would otherwise have made a c
 asymmetry is the point rather than an inconsistency: this tier's output is a promise to something outside the
 system, and the noise budget in §4 does not buy the right to make a false one. The operator's lever if a stale row
 pages nightly is to rediscover or remove it — the primary and watchdog journals name which account it is.
+
+## Update (2026-09-02) — a venue socket that stops delivering is a **P2**, and both edges have hysteresis (gh#1051)
+
+The Tradovate socket hosts had the shape this ADR exists to remove, one layer down. A connect that keeps failing,
+or a `user/syncrequest` that keeps failing, backed off to its ceiling and logged at that cadence **forever**, with
+no operator-facing signal at all — and the trading socket reports itself `Connected` throughout, because Tradovate
+pushes `props` entity frames only to a socket that has *synced*. So a feed that was dead and a feed that was quiet
+were indistinguishable to everything above, including the account-event stream that now carries real fills into the
+ledger (gh#1069). "Visible rather than silent" again meant a `LogWarning` an engineer would have to go and find —
+the same finding as gh#1045, on a different path.
+
+**The new class: `tradovate.socket.degraded:{market-data|trading}` — P2, notify.** Raised by
+`TradovateSocketConnectionHost` (shared, so both sockets and every future venue socket host inherit it) once the
+socket has gone **two minutes without delivering**, and resolved once it has delivered continuously for two minutes.
+
+- **Why P2 and not P1.** It sits with *connection lost > 2 min with a position open* — protection degraded, not
+  lost. This host cannot read exposure, so it cannot claim risk, which is the same reason `flatten.unrostered` is
+  not paged (§*Update 2026-08-14*). And the "false promise" argument that makes the dead-man's switch the exception
+  (§*Update 2026-08-15*) does **not** apply, because the promise is withdrawn structurally rather than by alerting:
+  `TradovateTradingSocketSync.IsSynced` is a readable fact, and `TradovateAccountEventStream` reports when it never
+  rode a synced socket instead of letting its silence pass as a quiet account.
+- **Two minutes, wall-clock — deliberately not a pass count.** The gap between passes grows with the backoff, so
+  "three consecutive failed passes" is about fifteen seconds at the start of an outage and about three minutes at
+  the ceiling: one rule meaning two different things, and only one of them is the number that decides whether an
+  alert is noise.
+- **The number is borrowed from §3, and borrowed short — mark it unverified.** §3's comparable entry is *connection
+  lost > 2 min **with a position open***, and this host cannot read exposure, so it takes the figure without the
+  qualifier that keeps that entry off a clean session. Whether two minutes clears Tradovate's own maintenance and
+  disconnect behaviour is **not a fact this repository has established** — there are no credentials to observe it —
+  and §4 is blunt that a rule firing on a clean session is a defect in the rule. It is a staging observation to make
+  once credentials exist. The hysteresis argument below justifies a grace of this order without depending on it.
+- **The all-clear has the same grace, and that is what keeps a flapping socket inside §4's budget.** Resolving on
+  the first healthy pass lets a socket that recovers and fails every twenty seconds produce advise → resolve →
+  advise indefinitely — a push per flap, however good the dedup is. Requiring sustained health makes a flapping
+  socket **one continuing incident**, reported once, which is what it is. The cost is an all-clear two minutes late;
+  for a P2 that is the cheap side.
+- **The resolve is the load-bearing half.** `DedupingNotificationChannel` is a process-lifetime singleton that
+  releases a key only through `ResolveAsync`, so a producer that never resolves turns *one notification per outage*
+  into *one per process lifetime* — the first outage delivers and every later, independent one is suppressed as a
+  duplicate. That is this ADR's own failure mode reproduced by a caller, and it is pinned by the shared host
+  contract for both sockets rather than trusted.
+- **And a resolve that returned `true` is not proof the key was released, so the close is provisional.** A producer
+  sits above the whole chain — outbox → queue → dedup → transport — and `QueuedNotificationChannel` is a bounded
+  channel with `BoundedChannelFullMode.DropWrite`. **Under any `Drop*` mode `TryWrite` discards the item and returns
+  `true`**, so that class's own *"queue is full — dropped the resolve"* branch is unreachable, nothing is logged,
+  and the producer is told the resolve was accepted. The key then stays armed for the process lifetime and the
+  failure above happens anyway, with every layer reporting success. The socket hosts therefore treat a close as
+  provisional and **re-arm the key once, before the first advisory of the next outage** — never on the retries
+  within one outage, which would cost a push per pass. A redundant resolve is free: the decorator forwards
+  unconditionally and a transport holding no receipt no-ops. *(The unreachable drop-logging in
+  `QueuedNotificationChannel` is a defect in its own right — the queue is fullest exactly when a transport is
+  wedged, which is when the flatten escalation is also enqueuing — and is gh#1077, not fixed here.)*
+- **What counts as "not delivering" is everything that is not delivering.** A failed connect, an unmet obligation, a
+  socket mid-attempt, an unrecognised state, a pass that threw. The first cut of this exempted the mid-attempt case,
+  which meant a socket reconnecting faster than the grace — the venue closing shortly after `authorize`, or the
+  client's silence-timeout loop — never accumulated an outage at all: precisely the reported-to-nobody state this
+  class exists for. It does not pre-empt gh#1052, which is about getting a wedged socket *out* of that state.
+- **What it deliberately does not report:** a socket that keeps delivering intermittently. Data is reaching the
+  platform, and paging on a stuttering-but-live feed spends §4's budget on something the operator cannot act on.
+
+**Quiet hours.** P2 is documented above as *suppressed outside 06:00–17:00 CT*, and this feed runs the overnight
+Globex session. No quiet-hour suppression is implemented on the Layer-1 push today, so nothing is lost yet; when it
+is built, **this class must be exempt** — a trading socket that stops delivering overnight is exactly when nobody
+is watching a dashboard.
+
+**Budget.** One push per outage per socket, zero on a clean session, and nothing at all in a deployment where
+Tradovate is unconfigured — the host stands down before it can escalate. It **reports and never acts**: no socket
+is torn down, re-authenticated or disabled on the host's own judgement (the propose-and-confirm posture ratified
+in gh#722).

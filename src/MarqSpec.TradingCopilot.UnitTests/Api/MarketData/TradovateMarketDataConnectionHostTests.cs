@@ -44,9 +44,13 @@ public class TradovateMarketDataConnectionHostTests : TradovateSocketConnectionH
 
     /// <inheritdoc />
     protected override BackgroundService CreateHost(
-        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff) =>
+        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff, TimeSpan degradedGrace) =>
         new TradovateMarketDataConnectionHost(
-            services, NullLogger<TradovateMarketDataConnectionHost>.Instance, pollInterval, maxBackoff);
+            services,
+            NullLogger<TradovateMarketDataConnectionHost>.Instance,
+            pollInterval,
+            maxBackoff,
+            degradedGrace);
 
     /// <inheritdoc />
     protected override void Register(ServiceCollection services)
@@ -59,6 +63,9 @@ public class TradovateMarketDataConnectionHostTests : TradovateSocketConnectionH
     /// <remarks>The register is the collaborator: without it a reconnect could restore no subscription at all.</remarks>
     protected override void RegisterWithoutARequiredCollaborator(ServiceCollection services) =>
         services.AddSingleton(Client);
+
+    /// <inheritdoc />
+    protected override string SocketNameUnderTest => "market-data";
 
     /// <inheritdoc />
     protected override void ArrangeSocketState(Func<ClientModels.ConnectionState> read) =>

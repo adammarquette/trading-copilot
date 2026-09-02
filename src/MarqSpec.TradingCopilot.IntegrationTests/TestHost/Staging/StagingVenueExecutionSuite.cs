@@ -55,14 +55,15 @@ public abstract class StagingVenueExecutionSuite
         }
 
         using HttpResponseMessage createFirm = await client.PostAsJsonAsync(
-            "/firms", new CreateFirmRequest("Staging-Execution-Gate", FirmType.PropFirm));
+            "/firms", new CreateFirmRequest(StagingFirmConvention.FirmName, FirmType.PropFirm));
         createFirm.EnsureSuccessStatusCode();
         FirmResponse? firm = await createFirm.Content.ReadFromJsonAsync<FirmResponse>(JsonSerializerOptions.Web);
         ArgumentNullException.ThrowIfNull(firm);
 
         using HttpResponseMessage conventions = await client.PutAsJsonAsync(
             $"/firms/{firm.Id}/conventions",
-            new DeclareConventionsRequest([new StageConventionDto(AccountStage.Practice, CapitalAtRisk: false)]));
+            new DeclareConventionsRequest(
+                [new StageConventionDto(StagingFirmConvention.ReservedStage, StagingFirmConvention.ReservedCapitalAtRisk)]));
         conventions.EnsureSuccessStatusCode();
 
         using HttpResponseMessage createConn = await client.PostAsJsonAsync(

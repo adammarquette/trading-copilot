@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using FakeItEasy;
 using MarqSpec.Client.Tradovate.WebSocket;
+using MarqSpec.TradingCopilot.Api.Venues;
+using MarqSpec.TradingCopilot.Domain.Notifications;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using ClientModels = MarqSpec.Client.Tradovate.Api.Models;
@@ -54,6 +56,17 @@ public abstract class TradovateSocketConnectionHostContract
     /// <summary>The bound on every wait in this class — long enough never to fire on a healthy pass.</summary>
     protected static TimeSpan Timeout { get; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// The test cadence for how long a socket must go without delivering before the operator is told, and how long
+    /// it must deliver before the incident is closed (production: two minutes).
+    /// </summary>
+    /// <remarks>
+    /// Comfortably longer than a pass at the 1 ms test poll interval, so a blip that recovers on the very next pass
+    /// is genuinely inside the grace rather than merely racing it — and comfortably shorter than
+    /// <see cref="Timeout"/>, so a test that waits for the advisory fails on its assertion rather than on the clock.
+    /// </remarks>
+    protected static TimeSpan DegradedGrace { get; } = TimeSpan.FromMilliseconds(300);
+
     /// <summary>The venue client both hosts drive. The subclass points the seams below at its own socket.</summary>
     protected ITradovateWebSocketClient Client { get; } = A.Fake<ITradovateWebSocketClient>();
 
@@ -70,7 +83,7 @@ public abstract class TradovateSocketConnectionHostContract
 
     /// <summary>Builds the host under test with a test cadence, over the given provider.</summary>
     protected abstract BackgroundService CreateHost(
-        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff);
+        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff, TimeSpan degradedGrace);
 
     /// <summary>Registers <see cref="Client"/> and every collaborator the host requires.</summary>
     protected abstract void Register(ServiceCollection services);
@@ -96,16 +109,36 @@ public abstract class TradovateSocketConnectionHostContract
     /// <summary>Asserts the host never attempted its post-connect obligation.</summary>
     protected abstract void AssertNeverDidPostConnectWork();
 
+    /// <summary>
+    /// The name this host gives its socket — the string its degraded-advisory dedup key is scoped by (gh#1051).
+    /// </summary>
+    /// <remarks>
+    /// Declared per suite on purpose. The two suites name different sockets, so a base that shared one key between
+    /// the hosts — which would let a degraded quote feed suppress a degraded trading feed — fails one of them.
+    /// </remarks>
+    protected abstract string SocketNameUnderTest { get; }
+
     // ---------------------------------------------------------------------------------------------------------
     // Shared harness.
     // ---------------------------------------------------------------------------------------------------------
 
+    /// <summary>The operator channel both hosts escalate through (gh#1051). Every send and resolve is recorded.</summary>
+    protected RecordingNotificationChannel Notifications { get; } = new();
+
     /// <summary>A provider with everything the host needs.</summary>
+    /// <remarks>
+    /// The notification channel is registered <b>scoped</b>, exactly as production binds it (the outbox seam writes
+    /// through a scoped <c>DbContext</c>, gh#437), and the provider validates scopes. A host that resolved the
+    /// channel once from the root provider and held it — the obvious shortcut — would therefore fail here rather
+    /// than in production, where the captive dependency surfaces as an <c>ObjectDisposedException</c> at the moment
+    /// it is asked to page.
+    /// </remarks>
     protected IServiceProvider Registered()
     {
         ServiceCollection services = new();
         Register(services);
-        return services.BuildServiceProvider();
+        services.AddScoped<INotificationChannel>(_ => Notifications);
+        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }
 
     /// <summary>Builds the host over <see cref="Registered"/> at the default test cadence.</summary>
@@ -113,7 +146,8 @@ public abstract class TradovateSocketConnectionHostContract
         CreateHost(
             services ?? Registered(),
             pollInterval: TimeSpan.FromMilliseconds(1),
-            maxBackoff: TimeSpan.FromMilliseconds(2));
+            maxBackoff: TimeSpan.FromMilliseconds(2),
+            degradedGrace: DegradedGrace);
 
     // Each state read is one loop pass, so counting them is the host's own heartbeat: it lets a "did not happen"
     // assertion say "across N real passes" rather than "within some wall-clock window", and it lets a test act at an
@@ -207,7 +241,33 @@ public abstract class TradovateSocketConnectionHostContract
         // doubling from the poll interval, so six of them land well inside one ceiling, where the unreset ceiling
         // would spend six of them. The window sits an order of magnitude below the broken path and far above the
         // reset cadence, so a break fails on the ASSERTION with a legible message rather than on a timeout.
-        TimeSpan ceiling = TimeSpan.FromMilliseconds(250);
+        //
+        // The ceiling is 1s rather than the 250ms it started at (gh#1070). The invariant is a RATIO -- six retries
+        // at the reset cadence versus six at the accumulated ceiling -- but the budget it was checked against was an
+        // absolute 750ms, and six Task.Delay round trips do not fit in 750ms on a loaded CI runner: Windows' default
+        // timer tick alone is ~15.6ms, and the suite runs thousands of tests in parallel collections. It reddened on
+        // two consecutive runs of #1069, which adds tests to this assembly, and passed every time in isolation.
+        // Raising the ceiling scales the budget with the thing it is measuring instead of against wall-clock luck.
+        // The pre-recovery walk is unaffected -- it doubles from the 1ms poll interval and never reaches the ceiling
+        // in eight failures (~255ms), leaving the backoff at 256ms when the connect recovers.
+        //
+        // THE MARGIN IS SMALLER THAN IT LOOKS, AND IT IS A CLIFF. Measured at this ceiling, the mutant that deletes
+        // the reset fails at 3s 838ms against the 3s threshold -- 838ms of margin, about 1.28x. NOT an order of
+        // magnitude; that is true only of the correct path (~63ms of backoff against a 3s budget). The broken path
+        // costs min(256,C) + min(512,C) + min(1024,C) + 2*min(2048,C) against a threshold of 3C, so for
+        // 512 < C <= 1024 the margin is a flat 768ms however high C goes, and above 1024ms it SHRINKS linearly as
+        // (1792 - C), reaching zero at C = 1792ms. So 1s sits at the top of the flat region with the full margin,
+        // and anyone raising this further is walking toward an edge at ~1.79s where the guard silently stops killing
+        // its mutant. Do not reach for this lever again without re-running that mutation.
+        //
+        // Why the cheap fix is nonetheless sound rather than a coin flip: a slow runner inflates the BROKEN path
+        // further past the threshold, so the measured kill is a floor, not an average. All of the flakiness risk
+        // sits on the correct-path side -- which is exactly the side this widens.
+        //
+        // This is the cheap fix, and it is the weak one: the test still measures the runner. Asserting on the retry
+        // COUNT inside one ceiling, or driving the loop from an injected TimeProvider, is what makes it
+        // deterministic -- gh#1070 carries that.
+        TimeSpan ceiling = TimeSpan.FromSeconds(1);
         int connects = 0;
         long recoveredAt = 0;
         int attemptsAfterRecovery = 0;
@@ -238,7 +298,8 @@ public abstract class TradovateSocketConnectionHostContract
             throw new InvalidOperationException("the venue rate-limited the post-connect work (test)");
         });
 
-        BackgroundService host = CreateHost(Registered(), pollInterval: TimeSpan.FromMilliseconds(1), ceiling);
+        BackgroundService host = CreateHost(
+            Registered(), pollInterval: TimeSpan.FromMilliseconds(1), ceiling, DegradedGrace);
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(retried)).Should()
@@ -278,7 +339,8 @@ public abstract class TradovateSocketConnectionHostContract
             throw new InvalidOperationException("the venue is unreachable (test)");
         });
 
-        BackgroundService host = CreateHost(Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400));
+        BackgroundService host = CreateHost(
+            Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400), DegradedGrace);
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(kept)).Should().BeTrue("an outage longer than one attempt must still be retried");
@@ -323,7 +385,8 @@ public abstract class TradovateSocketConnectionHostContract
             throw new InvalidOperationException("the venue rate-limited the post-connect work (test)");
         });
 
-        BackgroundService host = CreateHost(Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400));
+        BackgroundService host = CreateHost(
+            Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400), DegradedGrace);
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(retried)).Should().BeTrue("a connected socket that owes work must keep being retried");
@@ -553,7 +616,8 @@ public abstract class TradovateSocketConnectionHostContract
                 "the venue did not answer in time (test)", null, new CancellationToken(canceled: true));
         });
 
-        BackgroundService host = CreateHost(Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400));
+        BackgroundService host = CreateHost(
+            Registered(), poll, maxBackoff: TimeSpan.FromMilliseconds(400), DegradedGrace);
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(retried)).Should()
@@ -662,5 +726,486 @@ public abstract class TradovateSocketConnectionHostContract
         // helper bounds the wait and asserts completion instead of letting the run hang. The other half is that the
         // run ended without a FAULT.
         await StopAsync(host);
+    }
+
+
+    // ---------------------------------------------------------------------------------------------------------
+    // 8 · The operator hears about a socket that stops delivering — and hears it once (gh#1051).
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldTellTheOperator_WhenTheSocketStopsDelivering()
+    {
+        // THE gap gh#1051 was filed for, and it is not trading-specific. Everything above leaves exactly one trace
+        // when it fails forever: an ILogger line at the backoff cadence, which reaches an engineer reading
+        // structured logs and never the operator. The socket meanwhile reports Connected or climbs back to it, so
+        // nothing downstream can tell either — a feed that is dead and a feed that is quiet look identical.
+        //
+        // This asserts on the ABSENCE being reported, not on a happy path: pin the advisory that must fire, because
+        // a test that checked what a healthy socket does would pass while a broken one went unnoticed.
+        SocketIs(ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Notifications.Sent(1)).Should().BeTrue("a socket that never recovers must reach the operator");
+        await StopAsync(host);
+
+        Notification advisory = Notifications.Notifications.Should().ContainSingle().Subject;
+        advisory.Severity.Should().Be(
+            NotificationSeverity.Notify, "a degraded venue feed is ADR-0019's P2 tier, not a page");
+        advisory.DedupKey.Should().Contain(
+            SocketNameUnderTest, "one socket's outage must never suppress the other socket's");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotTellTheOperator_WhenAFailedPassRecoversInsideTheGrace()
+    {
+        // The other half, and the one that keeps the advisory worth reading. A blip that clears well inside the
+        // grace is not an incident; paging on it would spend ADR-0019 §4's noise budget on nothing, and a pager
+        // that cries wolf gets muted — at which point it is strictly worse than no pager, because it manufactures
+        // confidence.
+        //
+        // The wait is deliberately several times the grace: a host that started its outage clock and never reset it
+        // would have advised long before this returns, so the emptiness below is a real observation rather than a
+        // race the assertion happened to win.
+        int attempts = 0;
+        SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
+        ArrangeConnect(() => Interlocked.Increment(ref attempts) == 1
+            ? throw new InvalidOperationException("one bad attempt (test)")
+            : Task.CompletedTask);
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        await Task.Delay(DegradedGrace * 4);
+        await StopAsync(host);
+
+        Volatile.Read(ref attempts).Should().BeGreaterThan(0, "the blip must actually have happened");
+        Notifications.Notifications.Should().BeEmpty("a blip that recovered inside the grace is not an incident");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldTellTheOperatorOnlyOnce_WhileOneOutageContinues()
+    {
+        // The advisory would repeat at the poll cadence if the host re-sent every degraded pass. The dedup channel
+        // would collapse the pushes, but each one still costs a durable outbox row, and relying on a downstream
+        // layer to hide a producer's noise is how ADR-0019 §4's budget gets spent without anyone noticing.
+        SocketIs(ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Sent(1)).Should().BeTrue();
+        (await PassesObserved(PassesSoFar + 20)).Should()
+            .BeTrue("the assertion below only means something if passes really ran after the advisory");
+        await StopAsync(host);
+
+        Notifications.Notifications.Should().ContainSingle("one continuing outage is one incident");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldResolveTheAdvisory_WhenTheSocketDeliversAgainForTheWholeGrace()
+    {
+        // Not tidiness. DedupingNotificationChannel is a process-lifetime singleton that releases a key ONLY through
+        // ResolveAsync, so a producer that never resolves turns "one notification per outage" into "one per process
+        // lifetime": the first outage delivers and every later, independent one is silently suppressed as a
+        // duplicate — this very failure reproduced one layer down. That was the blocking finding on gh#1045, and it
+        // is pinned here so it cannot be reintroduced on this path.
+        int recovered = 0;
+        SocketReadsAs(_ => Volatile.Read(ref recovered) == 0
+            ? ClientModels.ConnectionState.Disconnected
+            : ClientModels.ConnectionState.Connected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Sent(1)).Should().BeTrue("the outage must be reported before it can be resolved");
+
+        // Only now let the socket come back, so the resolve cannot be an artefact of a race with the advisory.
+        Interlocked.Exchange(ref recovered, 1);
+
+        (await Notifications.Resolved(1)).Should().BeTrue("an incident that ended must be closed");
+        await StopAsync(host);
+
+        Notifications.Resolutions.Should().AllBeEquivalentTo(
+            Notifications.Notifications[0].DedupKey, "the key resolved must be the key that was reported");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotResolveTheAdvisory_UntilTheSocketHasDeliveredForTheWholeGrace()
+    {
+        // The hysteresis, and the reason it is not decoration. Closing the incident on the first healthy pass lets a
+        // socket that recovers and fails faster than the grace produce advise → resolve → advise indefinitely: a
+        // push per flap, however good the dedup below is, which is ADR-0019 §4's budget spent by a producer rather
+        // than by a real fault. Requiring sustained health makes a flapping socket the one continuing incident it
+        // actually is.
+        // Counted in PASSES, not measured against the wall clock, and that is what makes it deterministic. A
+        // delivering stretch of exactly one pass starts the recovery clock and reads it again in the same pass, so
+        // the elapsed time is ~0 whatever the machine is doing -- a stalled runner cannot manufacture a recovery
+        // here, which an earlier wall-clock version of this test could and did (gh#1070's hazard, in this file).
+        int healthyPasses = 0;
+        SocketReadsAs(pass =>
+        {
+            // Down until the outage is reported, so the incident genuinely exists before anything can close it.
+            if (Notifications.Notifications.Count == 0)
+            {
+                return ClientModels.ConnectionState.Disconnected;
+            }
+
+            // Then alternate every pass. Every healthy pass is real -- the socket delivers, and a host that
+            // resolved on the first good one would close the incident right here -- but no stretch of them ever
+            // lasts a whole grace, so none of them is a recovery.
+            if (pass % 2 != 0)
+            {
+                return ClientModels.ConnectionState.Disconnected;
+            }
+
+            Interlocked.Increment(ref healthyPasses);
+            return ClientModels.ConnectionState.Connected;
+        });
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Sent(1)).Should().BeTrue("the outage must be reported before it can be wrongly closed");
+        (await PassesObserved(PassesSoFar + 20)).Should().BeTrue("the flapping has to actually run");
+        await StopAsync(host);
+
+        Volatile.Read(ref healthyPasses).Should()
+            .BeGreaterThan(1, "the socket must really have delivered on some passes, or nothing was tested");
+        Notifications.Resolutions.Should()
+            .BeEmpty("a socket that never delivers for a whole grace has not recovered, whatever a single pass said");
+        Notifications.Notifications.Should()
+            .ContainSingle("and because it was never resolved, it was never re-raised either");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotResolveAnything_WhenNoAdvisoryWasEverRaised()
+    {
+        // The mirror of the branch above. A resolve fired on every healthy pass would re-arm a key some OTHER
+        // producer legitimately holds, and would clear an incident this host never reported.
+        SocketIs(ClientModels.ConnectionState.Connected);
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await PassesObserved(20)).Should().BeTrue("the assertion below only means something if passes really ran");
+        await Task.Delay(DegradedGrace * 2);
+        await StopAsync(host);
+
+        Notifications.Resolutions.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldTellTheOperator_WhenTheClientSitsInAnAttemptItNeverFinishes()
+    {
+        // CHANGED BY REVIEW, and the change is the point. This loop deliberately waits out an attempt in progress
+        // rather than tearing it down — but "wait" is about what the loop DRIVES, not about what the operator is
+        // told. Treating a mid-attempt pass as proving nothing meant a socket that reconnects faster than the grace
+        // — the venue closing shortly after `authorize`, or the client's silence-timeout loop — never accumulated an
+        // outage at all, which is exactly the reported-to-nobody state this advisory exists for.
+        //
+        // It does not close gh#1052: that card is about getting a wedged socket OUT of this state. Reporting "it has
+        // not delivered for N" is true meanwhile, and true is the bar.
+        SocketIs(ClientModels.ConnectionState.Connecting);
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Notifications.Sent(1)).Should()
+            .BeTrue("a socket stuck mid-attempt delivers nothing, whatever the loop is right to do about it");
+        await StopAsync(host);
+
+        AssertNeverConnected();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldTryAgain_WhenTheChannelDoesNotAcceptTheAdvisory()
+    {
+        // A send that was not accepted never reached anybody, so recording it as "told them" would cost the entire
+        // incident to one transient channel failure — the same mistake DedupingNotificationChannel avoids by
+        // recording only on success, one layer up.
+        Notifications.Accept = false;
+        SocketIs(ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Notifications.Sent(2)).Should()
+            .BeTrue("an advisory the channel refused must be attempted again, not counted as delivered");
+        await StopAsync(host);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldStillReportTheNextOutage_WhenAnEarlierResolveWasNeverConfirmed()
+    {
+        // Round-2 review, note c. Holding the incident open until the channel CONFIRMS the resolve looks careful and
+        // is the opposite: DedupingNotificationChannel re-arms its key unconditionally before it forwards (gh#300),
+        // so the hazard a retry would guard against cannot happen -- while the retry itself creates a real one. A
+        // resolve that keeps coming back unconfirmed leaves the host believing an advisory is still outstanding, and
+        // the next genuine outage is then never raised at all, because the advisory only fires while that belief is
+        // false. Silence, reached by way of a guard against silence.
+        //
+        // Sequence: outage -> advisory -> recovery -> a resolve the channel refuses to confirm -> outage again. The
+        // SECOND advisory is the assertion, and it is also why the recording channel hands out one witness per wait.
+        int healthy = 0;
+        SocketReadsAs(_ => Volatile.Read(ref healthy) == 1
+            ? ClientModels.ConnectionState.Connected
+            : ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+        Notifications.ConfirmResolve = false;
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Sent(1)).Should().BeTrue("the first outage must be reported");
+
+        Interlocked.Exchange(ref healthy, 1);
+        (await Notifications.Resolved(1)).Should().BeTrue("the recovery must at least attempt to close it");
+
+        Interlocked.Exchange(ref healthy, 0);
+
+        (await Notifications.Sent(2)).Should()
+            .BeTrue("an unconfirmed resolve must not cost the operator every later outage");
+        await StopAsync(host);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldStillReachTheOperator_WhenAnEarlierResolveWasAcceptedButLost()
+    {
+        // Round-3 review, and the failure the round-2 comment claimed could not happen. This host talks to the
+        // OUTBOX seam; three layers below it QueuedNotificationChannel is a bounded channel with
+        // BoundedChannelFullMode.DropWrite, and under any Drop mode TryWrite DISCARDS the item and returns true --
+        // so that class's own "queue is full" branch cannot run, nothing is logged, and this host is told the
+        // resolve was accepted. The key stays armed in DedupingNotificationChannel for the life of the process, and
+        // every later outage is suppressed as a duplicate while each layer reports success. That is gh#1045's
+        // blocking finding, reproduced by this producer.
+        //
+        // The assertion is on DELIVERIES, not attempts: the host attempted outage 2's advisory in the broken
+        // version too, and every layer told it that worked. What the operator got is the only thing that matters.
+        int healthy = 0;
+        SocketReadsAs(_ => Volatile.Read(ref healthy) == 1
+            ? ClientModels.ConnectionState.Connected
+            : ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+        Notifications.LoseNextResolve = true;
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Delivered(1)).Should().BeTrue("the first outage must reach the operator");
+
+        Interlocked.Exchange(ref healthy, 1);
+        (await Notifications.Resolved(1)).Should()
+            .BeTrue("the recovery closes the incident -- and this is the resolve that is silently lost");
+
+        Interlocked.Exchange(ref healthy, 0);
+
+        (await Notifications.Delivered(2)).Should()
+            .BeTrue("a resolve that was accepted and lost must not cost the operator every later outage");
+        await StopAsync(host);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotReArmTheIncidentKey_OnTheRetriesWithinOneOutage()
+    {
+        // The bound on the fix above. Re-arming before EVERY attempt would release the dedup key each pass and turn
+        // one continuing incident into a push per poll interval -- ADR-0019 §4's budget, destroyed by the very
+        // producer that is meant to respect it. The re-arm happens once, before the first advisory of a NEW outage,
+        // and never on the retries that follow it.
+        //
+        // The channel refuses every send, so the host retries for the whole run and each retry would resolve if the
+        // re-arm were unbounded. Nothing has ever been advised, so nothing is owed a re-arm at all: zero resolves.
+        Notifications.Accept = false;
+        SocketIs(ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Sent(3)).Should().BeTrue("the host must really have retried");
+        await StopAsync(host);
+
+        Notifications.Resolutions.Should()
+            .BeEmpty("an outage that was never closed has no key to re-arm, and retries never resolve");
+    }
+
+    /// <summary>Records what the host told the operator, so the advisory can be asserted rather than inferred.</summary>
+    protected sealed class RecordingNotificationChannel : INotificationChannel
+    {
+        private readonly object _gate = new();
+        private readonly List<Notification> _sent = [];
+        private readonly List<Notification> _delivered = [];
+        private readonly List<string> _resolved = [];
+
+        // The dedup decorator's memory, modelled here because the hazard this double exists to express lives in the
+        // interaction between it and the queue below it: a key that is armed and never released suppresses every
+        // later incident, and the producer above sees only "accepted".
+        private readonly HashSet<string> _reported = new(StringComparer.Ordinal);
+
+        // One witness PER WAIT, not one per channel. A single reusable TaskCompletionSource stays completed once it
+        // has fired, so a second Sent(n) in the same test would return true off the FIRST wait's completion whatever
+        // n was -- a wait that cannot fail, in the harness rather than in an assertion (gh#1051 round-2 review).
+        private readonly List<(int At, TaskCompletionSource Signal)> _sentWaits = [];
+        private readonly List<(int At, TaskCompletionSource Signal)> _resolvedWaits = [];
+        private readonly List<(int At, TaskCompletionSource Signal)> _deliveredWaits = [];
+
+        /// <summary>Whether a send is accepted for delivery — false is a channel that could not take it.</summary>
+        public bool Accept { get; set; } = true;
+
+        /// <summary>Whether a resolve is confirmed — false is a cancel the channel could not vouch for.</summary>
+        public bool ConfirmResolve { get; set; } = true;
+
+        /// <summary>
+        /// Loses the <b>next</b> resolve — recorded, reported successful, key never released — then clears itself.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This models the real chain rather than an invented failure. <c>QueuedNotificationChannel</c> is a bounded
+        /// channel with <c>BoundedChannelFullMode.DropWrite</c>, and under any Drop mode <c>TryWrite</c> discards
+        /// the item and returns <see langword="true"/> — so its own "queue is full" branch cannot run, nothing is
+        /// logged, and the caller three layers up is told the resolve was accepted while
+        /// <c>DedupingNotificationChannel</c> goes on holding the key. Without this knob a held key is not
+        /// representable here, and a test asserting the host "re-raises" proves only half the system (gh#1051
+        /// round-3 review).
+        /// </para>
+        /// <para>
+        /// One-shot, because a queue that overflows forever is a different (and louder) fault: the interesting case
+        /// is the transient drop, where everything is healthy again by the next outage and the ONLY lasting damage
+        /// is the key nobody released.
+        /// </para>
+        /// </remarks>
+        public bool LoseNextResolve { get; set; }
+
+        /// <summary>Everything the host asked the operator to be told, oldest first.</summary>
+        public IReadOnlyList<Notification> Notifications
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _sent];
+                }
+            }
+        }
+
+        /// <summary>What actually reached the operator — sends the dedup memory did not suppress.</summary>
+        public IReadOnlyList<Notification> Deliveries
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _delivered];
+                }
+            }
+        }
+
+        /// <summary>Every incident key the host closed, oldest first.</summary>
+        public IReadOnlyList<string> Resolutions
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _resolved];
+                }
+            }
+        }
+
+        /// <summary>Completes once <paramref name="count"/> sends have been attempted; false means it timed out.</summary>
+        public Task<bool> Sent(int count) => Wait(_sentWaits, () => _sent.Count, count);
+
+        /// <summary>Completes once <paramref name="count"/> resolves have landed; false means it timed out.</summary>
+        public Task<bool> Resolved(int count) => Wait(_resolvedWaits, () => _resolved.Count, count);
+
+        /// <summary>Completes once <paramref name="count"/> notifications have REACHED the operator.</summary>
+        public Task<bool> Delivered(int count) => Wait(_deliveredWaits, () => _delivered.Count, count);
+
+        /// <inheritdoc />
+        public Task<bool> SendAsync(Notification notification, CancellationToken cancellationToken)
+        {
+            lock (_gate)
+            {
+                _sent.Add(notification);
+                Release(_sentWaits, _sent.Count);
+
+                // Suppressed as a duplicate, exactly as the dedup decorator does while it still holds the key.
+                if (_reported.Contains(notification.DedupKey))
+                {
+                    return Task.FromResult(false);
+                }
+
+                if (!Accept)
+                {
+                    return Task.FromResult(false);
+                }
+
+                // Recorded ONLY on success, like the decorator: a push that never landed is not "already told them".
+                _reported.Add(notification.DedupKey);
+                _delivered.Add(notification);
+                Release(_deliveredWaits, _delivered.Count);
+            }
+
+            return Task.FromResult(true);
+        }
+
+        /// <inheritdoc />
+        public Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken)
+        {
+            lock (_gate)
+            {
+                _resolved.Add(dedupKey);
+                Release(_resolvedWaits, _resolved.Count);
+
+                // The accepted-then-lost case: recorded, reported successful, key NEVER released. One-shot.
+                if (LoseNextResolve)
+                {
+                    LoseNextResolve = false;
+                }
+                else
+                {
+                    _reported.Remove(dedupKey);
+                }
+            }
+
+            return Task.FromResult(ConfirmResolve);
+        }
+
+        // `soFar` is a callback rather than a value so the count is read UNDER the gate: reading it at the call site
+        // would let a send land between the read and the registration, and the wait would then miss the very event
+        // it was registered for.
+        private Task<bool> Wait(List<(int At, TaskCompletionSource Signal)> waits, Func<int> soFar, int count)
+        {
+            TaskCompletionSource signal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_gate)
+            {
+                if (soFar() >= count)
+                {
+                    signal.TrySetResult();
+                }
+                else
+                {
+                    waits.Add((count, signal));
+                }
+            }
+
+            return Signalled(signal);
+        }
+
+        private static void Release(List<(int At, TaskCompletionSource Signal)> waits, int reached)
+        {
+            foreach ((int at, TaskCompletionSource signal) in waits)
+            {
+                if (reached >= at)
+                {
+                    signal.TrySetResult();
+                }
+            }
+        }
     }
 }
