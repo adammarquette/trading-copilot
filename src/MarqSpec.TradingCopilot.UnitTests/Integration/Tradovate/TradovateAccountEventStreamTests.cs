@@ -271,6 +271,23 @@ public class TradovateAccountEventStreamTests
     }
 
     [Fact]
+    public async Task StreamAsync_ShouldNotEmitAFillForAnUnsubscribedAccount_WhenItsOrderWasAlreadyKnown()
+    {
+        // The SAME filter as the test above, reached down the other path. A fill is attributed either immediately
+        // (its order is already in the map) or after being held, and only one of those two routes is exercised by the
+        // held-path test -- so a mutant that filtered on release but not on the immediate hit survived the suite until
+        // this existed. What it guards is cross-account contamination: one Tradovate login syncs EVERY account the
+        // user holds, so an unfiltered fill lands another account's execution in this process's journal.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseOrder(Order(id: 5150, account: 8002, ClientModels.OrderStatus.Working));
+        _webSocket.RaiseFill(Fill(id: 77, order: 5150));
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        (await reader.NextAsync()).Should().BeOfType<PositionEvent>();
+    }
+
+    [Fact]
     public async Task StreamAsync_ShouldNeverEmitAFillItCannotAttribute()
     {
         await using Reader reader = Start(CreateStream(), [Account(9001)]);
