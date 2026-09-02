@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using FakeItEasy;
 using MarqSpec.Client.Tradovate.WebSocket;
+using MarqSpec.TradingCopilot.Api.Venues;
+using MarqSpec.TradingCopilot.Domain.Notifications;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using ClientModels = MarqSpec.Client.Tradovate.Api.Models;
@@ -96,16 +98,36 @@ public abstract class TradovateSocketConnectionHostContract
     /// <summary>Asserts the host never attempted its post-connect obligation.</summary>
     protected abstract void AssertNeverDidPostConnectWork();
 
+    /// <summary>
+    /// The name this host gives its socket — the string its degraded-advisory dedup key is scoped by (gh#1051).
+    /// </summary>
+    /// <remarks>
+    /// Declared per suite on purpose. The two suites name different sockets, so a base that shared one key between
+    /// the hosts — which would let a degraded quote feed suppress a degraded trading feed — fails one of them.
+    /// </remarks>
+    protected abstract string SocketNameUnderTest { get; }
+
     // ---------------------------------------------------------------------------------------------------------
     // Shared harness.
     // ---------------------------------------------------------------------------------------------------------
 
+    /// <summary>The operator channel both hosts escalate through (gh#1051). Every send and resolve is recorded.</summary>
+    protected RecordingNotificationChannel Notifications { get; } = new();
+
     /// <summary>A provider with everything the host needs.</summary>
+    /// <remarks>
+    /// The notification channel is registered <b>scoped</b>, exactly as production binds it (the outbox seam writes
+    /// through a scoped <c>DbContext</c>, gh#437), and the provider validates scopes. A host that resolved the
+    /// channel once from the root provider and held it — the obvious shortcut — would therefore fail here rather
+    /// than in production, where the captive dependency surfaces as an <c>ObjectDisposedException</c> at the moment
+    /// it is asked to page.
+    /// </remarks>
     protected IServiceProvider Registered()
     {
         ServiceCollection services = new();
         Register(services);
-        return services.BuildServiceProvider();
+        services.AddScoped<INotificationChannel>(_ => Notifications);
+        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }
 
     /// <summary>Builds the host over <see cref="Registered"/> at the default test cadence.</summary>
@@ -688,5 +710,256 @@ public abstract class TradovateSocketConnectionHostContract
         // helper bounds the wait and asserts completion instead of letting the run hang. The other half is that the
         // run ended without a FAULT.
         await StopAsync(host);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // 8 · The operator hears about a degradation that persists — and hears it once (gh#1051).
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldTellTheOperator_WhenTheSocketStaysDegraded()
+    {
+        // THE gap gh#1051 was filed for, and it is not trading-specific. Everything above leaves exactly one trace
+        // when it fails forever: an ILogger line at the backoff cadence, which reaches an engineer reading
+        // structured logs and never the operator. The socket meanwhile reports Connected or climbs back to it, so
+        // nothing downstream can tell either — a feed that is dead and a feed that is quiet look identical.
+        //
+        // This asserts on the ABSENCE being reported, not on a happy path: pin the advisory that must fire, because
+        // a test that checked what a healthy socket does would pass while a broken one went unnoticed.
+        SocketIs(ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Notifications.Sent(1)).Should().BeTrue("a socket that never recovers must reach the operator");
+        await StopAsync(host);
+
+        Notification advisory = Notifications.Notifications.Should().ContainSingle().Subject;
+        advisory.Severity.Should().Be(
+            NotificationSeverity.Notify, "a degraded venue feed is ADR-0019's P2 tier, not a page");
+        advisory.DedupKey.Should().Contain(
+            SocketNameUnderTest, "one socket's outage must never suppress the other socket's");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotTellTheOperator_WhenAFailedPassRecoversOnTheNext()
+    {
+        // The other half, and the one that keeps the advisory worth reading. A single failed pass is an ordinary
+        // blip; paging on it would spend ADR-0019 §4's noise budget on nothing, and a pager that cries wolf gets
+        // muted — at which point it is strictly worse than no pager, because it manufactures confidence.
+        int attempts = 0;
+        SocketIs(ClientModels.ConnectionState.Disconnected, ClientModels.ConnectionState.Connected);
+        ArrangeConnect(() => Interlocked.Increment(ref attempts) == 1
+            ? throw new InvalidOperationException("one bad attempt (test)")
+            : Task.CompletedTask);
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await PassesObserved(TradovateSocketConnectionHost.DegradedPassesBeforeAdvisory + 4)).Should()
+            .BeTrue("the assertion below only means something if passes really ran");
+        await StopAsync(host);
+
+        Notifications.Notifications.Should().BeEmpty("one failed pass that recovered is not an incident");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldTellTheOperatorOnlyOnce_WhileOneOutageContinues()
+    {
+        // The advisory repeats at the poll cadence if the host re-sends every degraded pass. The dedup channel would
+        // collapse the pushes, but each one still costs a durable outbox row, and relying on a downstream layer to
+        // hide a producer's noise is how ADR-0019 §4's budget gets spent without anyone noticing.
+        SocketIs(ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Sent(1)).Should().BeTrue();
+        (await PassesObserved(TradovateSocketConnectionHost.DegradedPassesBeforeAdvisory + 6)).Should()
+            .BeTrue("the assertion below only means something if passes really ran after the advisory");
+        await StopAsync(host);
+
+        Notifications.Notifications.Should().ContainSingle("one continuing outage is one incident");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldResolveTheAdvisory_WhenTheSocketRecovers()
+    {
+        // Not tidiness. DedupingNotificationChannel is a process-lifetime singleton that releases a key ONLY through
+        // ResolveAsync, so a producer that never resolves turns "one notification per outage" into "one per process
+        // lifetime": the first outage delivers and every later, independent one is silently suppressed as a
+        // duplicate — this very failure reproduced one layer down. That was the blocking finding on gh#1045, and it
+        // is pinned here so it cannot be reintroduced on this path.
+        int attempts = 0;
+        SocketReadsAs(_ => Volatile.Read(ref attempts) > TradovateSocketConnectionHost.DegradedPassesBeforeAdvisory
+            ? ClientModels.ConnectionState.Connected
+            : ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Sent(1)).Should().BeTrue("the outage must be reported before it can be resolved");
+
+        // Only now let the socket come back, so the resolve cannot be an artefact of a race with the advisory.
+        Interlocked.Add(ref attempts, TradovateSocketConnectionHost.DegradedPassesBeforeAdvisory + 1);
+
+        (await Notifications.Resolved(1)).Should().BeTrue("an incident that ended must be closed");
+        await StopAsync(host);
+
+        Notifications.Resolutions.Should().AllBeEquivalentTo(
+            Notifications.Notifications[0].DedupKey, "the key resolved must be the key that was reported");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotResolveAnything_WhenNoAdvisoryWasEverRaised()
+    {
+        // The mirror of the branch above. A resolve fired on every healthy pass would re-arm a key some OTHER
+        // producer legitimately holds, and would clear an incident this host never reported.
+        SocketIs(ClientModels.ConnectionState.Connected);
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await PassesObserved(6)).Should().BeTrue("the assertion below only means something if passes really ran");
+        await StopAsync(host);
+
+        Notifications.Resolutions.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotTellTheOperator_WhileTheClientIsStillAttemptingTheConnect()
+    {
+        // An attempt in progress is not yet a failure — the loop deliberately waits it out rather than tearing it
+        // down. A socket WEDGED in Connecting is a distinct defect with its own card (gh#1052); absorbing it into
+        // this counter would report the wrong thing and quietly close that card without fixing it.
+        SocketIs(ClientModels.ConnectionState.Connecting);
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await PassesObserved(TradovateSocketConnectionHost.DegradedPassesBeforeAdvisory + 5)).Should()
+            .BeTrue("the assertion below only means something if passes really ran");
+        await StopAsync(host);
+
+        Notifications.Notifications.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldTryAgain_WhenTheChannelDoesNotAcceptTheAdvisory()
+    {
+        // A send that was not accepted never reached anybody, so recording it as "told them" would cost the entire
+        // incident to one transient channel failure — the same mistake DedupingNotificationChannel avoids by
+        // recording only on success, one layer up.
+        Notifications.Accept = false;
+        SocketIs(ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Notifications.Sent(2)).Should()
+            .BeTrue("an advisory the channel refused must be attempted again, not counted as delivered");
+        await StopAsync(host);
+    }
+
+    /// <summary>Records what the host told the operator, so the advisory can be asserted rather than inferred.</summary>
+    protected sealed class RecordingNotificationChannel : INotificationChannel
+    {
+        private readonly object _gate = new();
+        private readonly List<Notification> _sent = [];
+        private readonly List<string> _resolved = [];
+        private readonly TaskCompletionSource _sentWitness = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _resolvedWitness =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _sentWitnessAt = int.MaxValue;
+        private int _resolvedWitnessAt = int.MaxValue;
+
+        /// <summary>Whether a send is accepted for delivery — false is a channel that could not take it.</summary>
+        public bool Accept { get; set; } = true;
+
+        /// <summary>Everything the host asked the operator to be told, oldest first.</summary>
+        public IReadOnlyList<Notification> Notifications
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _sent];
+                }
+            }
+        }
+
+        /// <summary>Every incident key the host closed, oldest first.</summary>
+        public IReadOnlyList<string> Resolutions
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _resolved];
+                }
+            }
+        }
+
+        /// <summary>Completes once <paramref name="count"/> sends have been attempted; false means it timed out.</summary>
+        public Task<bool> Sent(int count)
+        {
+            lock (_gate)
+            {
+                _sentWitnessAt = count;
+                if (_sent.Count >= count)
+                {
+                    _sentWitness.TrySetResult();
+                }
+            }
+
+            return Signalled(_sentWitness);
+        }
+
+        /// <summary>Completes once <paramref name="count"/> resolves have landed; false means it timed out.</summary>
+        public Task<bool> Resolved(int count)
+        {
+            lock (_gate)
+            {
+                _resolvedWitnessAt = count;
+                if (_resolved.Count >= count)
+                {
+                    _resolvedWitness.TrySetResult();
+                }
+            }
+
+            return Signalled(_resolvedWitness);
+        }
+
+        /// <inheritdoc />
+        public Task<bool> SendAsync(Notification notification, CancellationToken cancellationToken)
+        {
+            lock (_gate)
+            {
+                _sent.Add(notification);
+                if (_sent.Count >= _sentWitnessAt)
+                {
+                    _sentWitness.TrySetResult();
+                }
+            }
+
+            return Task.FromResult(Accept);
+        }
+
+        /// <inheritdoc />
+        public Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken)
+        {
+            lock (_gate)
+            {
+                _resolved.Add(dedupKey);
+                if (_resolved.Count >= _resolvedWitnessAt)
+                {
+                    _resolvedWitness.TrySetResult();
+                }
+            }
+
+            return Task.FromResult(true);
+        }
     }
 }

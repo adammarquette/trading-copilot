@@ -100,6 +100,13 @@ builder.Services.AddHostedService<TradovateMarketDataConnectionHost>();
 // client sends only on ITS own reconnect: a socket the manual connect brought back is authorized and permanently
 // silent, because Tradovate pushes entity frames only to a socket that has synced. Stands down (logging, never
 // throwing) while Tradovate's client is unregistered, which it still is.
+//
+// The sync register beside it (gh#1051) is the market-data register's counterpart, and a singleton for the same
+// reason: one credential set per process -> one trading socket, so "has this socket been synced?" is one answer.
+// It is the ONLY way anything above the client can tell a synced socket from one that was never subscribed --
+// TradingState reports Connected either way -- so TradovateAccountEventStream refuses on it rather than reading a
+// silent socket as a quiet account.
+builder.Services.AddSingleton<TradovateTradingSocketSync>();
 builder.Services.AddHostedService<TradovateTradingConnectionHost>();
 
 // Venue connection liveness (R-17, gh#209): a process-wide singleton over the venue's websocket client, so the

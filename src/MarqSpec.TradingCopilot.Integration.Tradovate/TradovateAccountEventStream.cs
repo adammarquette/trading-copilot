@@ -67,9 +67,22 @@ namespace MarqSpec.TradingCopilot.Integration.Tradovate;
 /// this process's journal.
 /// </para>
 /// <para>
-/// <b>Not covered here:</b> a trading socket that is connected but never synced still delivers nothing, and this seam
-/// cannot tell that apart from a quiet account either — that is gh#1051, where the missing operator-facing advisory
-/// and the readable "synced" fact belong.
+/// <b>Connected is not the same as delivering (gh#1051).</b> Tradovate pushes <c>props</c> frames only to a socket
+/// that has completed <c>user/syncrequest</c>, and a socket that is open, authorized and unsynced reports
+/// <c>Connected</c> throughout while delivering nothing at all. This seam therefore refuses on
+/// <see cref="TradovateTradingSocketSync.IsSynced"/> as well as on the connection state: without it, an unsynced
+/// socket is indistinguishable from a quiet account here, which is the one thing auto-flatten must never be told
+/// (R-13, ADR-0019). The register is <b>required</b>, never optional — a seam that silently accepted a null and
+/// defaulted to "assume synced" would be the guard that cannot fail on the thing it names.
+/// </para>
+/// <para>
+/// <b>What refusing costs, and why it is still the right direction.</b> A stream that starts <i>after</i> the
+/// snapshot landed does not see it, so it seeds its order → account map from live <c>order</c> frames alone. That
+/// window is not created here — the connection host connects and syncs back to back, so a supervisor re-subscribing
+/// over a recovered socket already lands on either side of it by luck — but refusing makes which side deterministic.
+/// The trade is a bounded loss of downtime-fill re-delivery (which gh#193's reconciliation covers, and which a
+/// duplicate snapshot on the next connect re-supplies) against an unbounded silence nothing above could detect. It is
+/// the ADR-0013 direction: fail loudly rather than report a quiet account that is not quiet.
 /// </para>
 /// </remarks>
 public sealed class TradovateAccountEventStream : IAccountEventStream
@@ -83,21 +96,31 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
     private const int MaxHeldFills = 512;
 
     private readonly ITradovateWebSocketClient _webSocket;
+    private readonly TradovateTradingSocketSync _sync;
     private readonly ILogger<TradovateAccountEventStream> _logger;
 
     /// <summary>Creates the seam over the process's realtime client.</summary>
     /// <param name="webSocket">The Tradovate dual-socket client (a singleton — the trading socket is process-wide).</param>
+    /// <param name="sync">
+    /// The process-wide record of whether the trading socket has actually been synced. Required, not optional: a
+    /// default of "assume synced" would make this seam report an unsynced socket as a quiet account, which is the
+    /// exact failure it is being given this dependency to prevent (gh#1051).
+    /// </param>
     /// <param name="logger">
     /// The logger. Required, not optional: every case this seam cannot resolve — an unattributable fill, a position
     /// it had to refuse — leaves no other trace, and a swallow nobody can see is the silence it exists to prevent.
     /// </param>
     public TradovateAccountEventStream(
-        ITradovateWebSocketClient webSocket, ILogger<TradovateAccountEventStream> logger)
+        ITradovateWebSocketClient webSocket,
+        TradovateTradingSocketSync sync,
+        ILogger<TradovateAccountEventStream> logger)
     {
         ArgumentNullException.ThrowIfNull(webSocket);
+        ArgumentNullException.ThrowIfNull(sync);
         ArgumentNullException.ThrowIfNull(logger);
 
         _webSocket = webSocket;
+        _sync = sync;
         _logger = logger;
     }
 
@@ -131,6 +154,17 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
                 "The Tradovate trading socket is not connected; account events require the connection host to have "
                 + "connected and synced it first (gh#977). An account-event stream never manages the shared socket's "
                 + "lifecycle.");
+        }
+
+        // Connected is not delivering. Tradovate pushes props frames only to a socket that has completed
+        // user/syncrequest, so an unsynced one is silent while reporting itself healthy -- and a stream opened over
+        // it would be indistinguishable from a quiet account for as long as it lasted (gh#1051).
+        if (!_sync.IsSynced)
+        {
+            throw new TradovateVenueException(
+                "The Tradovate trading socket is connected but has not been synced, so it delivers no order, fill "
+                + "or position event at all; an account-event stream over it would report a quiet account rather "
+                + "than a silent socket (gh#1051). The connection host is retrying the sync.");
         }
 
         Channel<AccountEvent> events = Channel.CreateUnbounded<AccountEvent>(new UnboundedChannelOptions
@@ -370,7 +404,12 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             // forever on a dead socket. The supervisor has no watchdog -- it reacts only to a session that ends or
             // throws -- so nothing above would ever notice. That is the "open sequence over a dead socket" this class
             // exists to prevent, arriving through the one window the event subscription cannot cover.
-            if (_webSocket.TradingState != ClientModels.ConnectionState.Connected)
+            //
+            // The sync state is re-read for the same reason and closes a window the connection check alone cannot:
+            // a drop AND a reconnect landing in that gap leaves TradingState back at Connected while the new
+            // connection carries no entity subscription at all, so the socket reads healthy and delivers nothing
+            // (gh#1051).
+            if (_webSocket.TradingState != ClientModels.ConnectionState.Connected || !_sync.IsSynced)
             {
                 lock (gate)
                 {

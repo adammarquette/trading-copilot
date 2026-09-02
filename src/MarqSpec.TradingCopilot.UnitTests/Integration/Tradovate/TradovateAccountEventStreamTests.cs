@@ -39,7 +39,19 @@ public class TradovateAccountEventStreamTests
 
     private readonly CapturingLogger _log = new();
 
-    private TradovateAccountEventStream CreateStream() => new(_webSocket, _log);
+    // A socket the connection host has synced -- the only state in which this seam streams at all (gh#1051). Every
+    // test below that is about attribution or silence needs a socket that is genuinely delivering, so the default is
+    // synced and the two tests that care about the unsynced case arrange it themselves.
+    private readonly TradovateTradingSocketSync _sync = Synced();
+
+    private static TradovateTradingSocketSync Synced()
+    {
+        TradovateTradingSocketSync sync = new();
+        sync.CompleteObservedSync();
+        return sync;
+    }
+
+    private TradovateAccountEventStream CreateStream() => new(_webSocket, _sync, _log);
 
     [Fact]
     public void Venue_ShouldBeTradovate()
@@ -56,6 +68,48 @@ public class TradovateAccountEventStreamTests
         // The connection host owns the socket (gh#977 / gh#1048). A stream that connected it here would land on the
         // manual path, which sends no user/syncrequest -- connected, authorized and permanently silent.
         _webSocket.TradingState = ClientModels.ConnectionState.Disconnected;
+        TradovateAccountEventStream stream = CreateStream();
+
+        Func<Task> read = async () =>
+        {
+            await using Reader reader = Start(stream, [Account(9001)]);
+            await reader.NextAsync();
+        };
+
+        await read.Should().ThrowAsync<TradovateVenueException>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldThrow_WhenTheTradingSocketIsConnectedButHasNeverBeenSynced()
+    {
+        // gh#1051. Tradovate pushes props entity frames only to a socket that has completed user/syncrequest, and an
+        // unsynced one reports Connected throughout while delivering nothing at all. Without this refusal the stream
+        // opens, parks, and looks exactly like a quiet account for as long as it lasts -- and a quiet account is the
+        // one thing auto-flatten must never be told (R-13, ADR-0019). The connected check above cannot catch it: the
+        // socket IS connected.
+        TradovateTradingSocketSync unsynced = new();
+        unsynced.IsSynced.Should().BeFalse("the arrangement is only meaningful over a socket nothing has synced");
+        TradovateAccountEventStream stream = new(_webSocket, unsynced, _log);
+
+        Func<Task> read = async () =>
+        {
+            await using Reader reader = Start(stream, [Account(9001)]);
+            await reader.NextAsync();
+        };
+
+        await read.Should().ThrowAsync<TradovateVenueException>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldEndTheStream_WhenTheSocketReconnectsUnsyncedBetweenTheCheckAndTheAttach()
+    {
+        // The window the connected re-read alone cannot cover (gh#1051). A drop AND a reconnect landing between the
+        // checks and the attach leaves TradingState back at Connected -- so the state re-read is satisfied -- while
+        // the NEW connection carries no entity subscription at all. The drop that would have ended the stream was
+        // raised before the handler existed, so nothing completes the channel and the read parks forever on a socket
+        // that will never deliver. Fails against a re-read that tests only the connection state.
+        _webSocket.WhenOrderHandlerAttached = () => _sync.OnSocketConnected();
+        _webSocket.TradingState.Should().Be(ClientModels.ConnectionState.Connected);
         TradovateAccountEventStream stream = CreateStream();
 
         Func<Task> read = async () =>

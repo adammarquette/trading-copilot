@@ -1,4 +1,5 @@
 using MarqSpec.Client.Tradovate.WebSocket;
+using MarqSpec.TradingCopilot.Domain.Notifications;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -51,6 +52,41 @@ namespace MarqSpec.TradingCopilot.Api.Venues;
 /// removes.
 /// </para>
 /// <para>
+/// <b>A degradation nobody is told about is the same defect one layer up (gh#1051).</b> Every failure above — a
+/// connect that keeps failing, a post-connect obligation that keeps failing — used to leave exactly one trace: an
+/// <c>ILogger</c> line at the backoff cadence, which reaches an engineer reading structured logs and never the
+/// operator. The socket meanwhile reports <c>Connected</c> or climbs back to it, so nothing downstream can tell
+/// either. After <see cref="DegradedPassesBeforeAdvisory"/> consecutive passes that end still owing, this loop
+/// therefore raises an operator-facing advisory through <see cref="INotificationChannel"/> (ADR-0019, P2 — notify),
+/// and <b>resolves it the moment a pass owes nothing</b>. The resolve is not optional bookkeeping:
+/// <c>DedupingNotificationChannel</c> is a process-lifetime singleton that releases a key only through
+/// <c>ResolveAsync</c>, so without it the first outage of the process would deliver and every later, independent one
+/// would be silently suppressed as a duplicate — "one notification per process lifetime" instead of one per outage,
+/// which is this very failure reproduced one layer down (the blocking review finding on gh#1045).
+/// </para>
+/// <para>
+/// <b>Why the escalation lives here and not in the trading host.</b> gh#1051 was filed against the trading socket,
+/// but "connected, degraded, and the only trace is a repeating log line" is not trading-specific — the market-data
+/// host has the identical shape, and a stalled quote feed is what stops a hidden stop being promoted (gh#209). Both
+/// hosts already share this loop (gh#1054), so the policy is written once and inherited rather than copied, and a
+/// third venue's socket host (gh#41) gets it for free. The threshold is deliberately small but not one: a single
+/// failed pass is an ordinary blip that the next pass usually clears, while three consecutive ones have spent the
+/// first two doublings of the backoff and are no longer plausibly transient.
+/// </para>
+/// <para>
+/// <b>The advisory is a report, never an action.</b> This loop does not tear a socket down, re-authenticate, or
+/// disable a venue on its own judgement — it surfaces the state and lets the operator act, the propose-and-confirm
+/// posture ratified for detection on this project (gh#722). What it drives is only the recovery it already drove
+/// before: connect, and finish the post-connect obligation.
+/// </para>
+/// <para>
+/// <b>The channel is resolved per send, from its own scope.</b> <see cref="INotificationChannel"/> binds to the
+/// scoped outbox seam (gh#437), so holding one for the process lifetime would be a captive dependency over a
+/// disposed <c>DbContext</c>. Its <i>absence</i> is logged as an error rather than standing the host down: alerting
+/// being unregistered must not turn "the operator is not told" into "the venue has no feed at all", which would be
+/// the strictly worse failure.
+/// </para>
+/// <para>
 /// <b>Everything is caught, and the loop never ends on a fault.</b> Under the default
 /// <c>BackgroundServiceExceptionBehavior.StopHost</c> an exception escaping <see cref="ExecuteAsync"/> stops the
 /// whole application — the auto-flatten watchdog and the kill switch with it. Missing Tradovate credentials are
@@ -68,6 +104,18 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
 
     /// <summary>The ceiling the backoff doubles up to, so a long outage is retried without hammering it.</summary>
     private static TimeSpan DefaultMaxBackoff { get; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// How many consecutive passes may end still owing before the operator is told (gh#1051, ADR-0019 §4).
+    /// </summary>
+    /// <remarks>
+    /// Small, but deliberately not one. A single failed pass is an ordinary blip the next pass usually clears, and
+    /// paging on it would spend the noise budget on nothing; three consecutive ones have already spent the first two
+    /// doublings of the backoff and are no longer plausibly transient. Counted in <i>passes</i> rather than seconds
+    /// because the delay between them grows with the backoff, so a fixed wall-clock threshold would mean something
+    /// different at the start of an outage than at its ceiling.
+    /// </remarks>
+    internal const int DegradedPassesBeforeAdvisory = 3;
 
     private readonly IServiceProvider _services;
     private readonly TimeSpan _pollInterval;
@@ -195,9 +243,20 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
     {
         TimeSpan backoff = _pollInterval;
 
+        // gh#1051. Local to the loop rather than fields: this loop is single-threaded, so nothing needs
+        // synchronising, and a host that is restarted cannot inherit a stale incident from an earlier run.
+        int degradedPasses = 0;
+        bool advised = false;
+
         while (!stoppingToken.IsCancellationRequested)
         {
             TimeSpan delay = _pollInterval;
+
+            // Did this pass leave the socket owing something? `null` means it proved nothing either way -- the
+            // client is mid-attempt, or the state is unrecognised -- so it must neither escalate an outage nor
+            // declare one over. Only "the socket owes nothing" clears; only "it still owes" counts against the
+            // threshold.
+            bool? owing = null;
 
             try
             {
@@ -208,11 +267,13 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
                         {
                             // A pass that owes nothing returns the cadence to the poll interval.
                             backoff = _pollInterval;
+                            owing = false;
                         }
                         else
                         {
                             delay = backoff;
                             backoff = NextBackoff(backoff);
+                            owing = true;
                         }
 
                         break;
@@ -222,6 +283,10 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
                         // The client is mid-attempt, and its own reconnect finishes MORE than the manual path does.
                         // Driving a manual connect now would tear that attempt down and land on the lesser path.
                         // No wire traffic is sent on this pass, so there is no rate limit to back off from either.
+                        //
+                        // `owing` deliberately stays null. An attempt in progress is not yet a failure, and one
+                        // that never finishes is a distinct defect with its own card (gh#1052) rather than
+                        // something this counter should quietly absorb.
                         break;
 
                     case ClientModels.ConnectionState.Disconnected:
@@ -236,16 +301,22 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
                             // hand-maintained copies disagreed about (gh#1054); it now exists once.
                             backoff = _pollInterval;
 
-                            if (!await SettleAfterHostDrivenConnectAsync(client, stoppingToken))
+                            if (await SettleAfterHostDrivenConnectAsync(client, stoppingToken))
+                            {
+                                owing = false;
+                            }
+                            else
                             {
                                 delay = backoff;
                                 backoff = NextBackoff(backoff);
+                                owing = true;
                             }
                         }
                         else
                         {
                             delay = backoff;
                             backoff = NextBackoff(backoff);
+                            owing = true;
                         }
 
                         break;
@@ -273,7 +344,40 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
                 // A transient fault must not stop the application, and must not end the loop either: log, wait a
                 // pass, try again. A venue timeout arrives here as an OperationCanceledException carrying
                 // HttpClient's own internal token, which is why the clause above tests the STOPPING token.
+                //
+                // It counts as owing (gh#1051): a pass that threw did not leave a socket delivering anything, and a
+                // fault that repeats -- a state read that keeps throwing, say -- is exactly the shape that used to
+                // produce a log line at the backoff cadence and nothing else.
+                owing = true;
                 Logger.LogWarning(error, "The Tradovate {Socket} connection pass failed; retrying.", SocketName);
+            }
+
+            // gh#1051: outside the pass's own try, because these must not be mistaken for a connection fault and
+            // must not be skipped by one. Neither call throws.
+            switch (owing)
+            {
+                case true:
+                    degradedPasses++;
+                    if (!advised && degradedPasses >= DegradedPassesBeforeAdvisory)
+                    {
+                        advised = await AdviseDegradedAsync(degradedPasses, stoppingToken);
+                    }
+
+                    break;
+
+                case false:
+                    degradedPasses = 0;
+                    if (advised)
+                    {
+                        // Held until the resolve is CONFIRMED. An unconfirmed one would leave the dedup key held
+                        // for the life of the process, silently suppressing the next genuine outage.
+                        advised = !await ResolveDegradedAsync(stoppingToken);
+                    }
+
+                    break;
+
+                default:
+                    break;
             }
 
             try
@@ -286,6 +390,71 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
             }
         }
     }
+
+    // Tells the OPERATOR that this socket has been degraded for several consecutive passes -- the loud failure that
+    // was missing while the only trace was a log line at the backoff cadence (gh#1051, ADR-0019 P2). Reports; never
+    // acts. Returns whether the advisory was accepted for delivery, so one that was not is attempted again on the
+    // next degraded pass rather than being recorded as told.
+    private async Task<bool> AdviseDegradedAsync(int degradedPasses, CancellationToken cancellationToken)
+    {
+        Notification advisory = new(
+            NotificationSeverity.Notify,
+            $"Tradovate {SocketName} socket degraded",
+            $"{SilenceConsequence}, and the socket has not recovered across {degradedPasses} consecutive attempts. "
+            + "It may be reporting itself connected throughout, so nothing downstream can tell — check the API logs "
+            + $"for the Tradovate {SocketName} connection host.",
+            DegradedDedupKey);
+
+        return await TryNotifyAsync(
+            channel => channel.SendAsync(advisory, cancellationToken), "raise the degraded advisory for");
+    }
+
+    // Closes the incident the moment a pass owes nothing. Not optional bookkeeping: DedupingNotificationChannel is a
+    // process-lifetime singleton that releases a key only through ResolveAsync, so skipping this would deliver the
+    // FIRST outage of the process and silently suppress every later one as a duplicate (gh#1045).
+    private Task<bool> ResolveDegradedAsync(CancellationToken cancellationToken) =>
+        TryNotifyAsync(
+            channel => channel.ResolveAsync(DegradedDedupKey, cancellationToken), "resolve the degraded advisory for");
+
+    // One scope per call. INotificationChannel binds to the scoped outbox seam (gh#437), so a channel held for the
+    // process lifetime would be a captive dependency over a disposed DbContext. Never throws: the poll loop's job is
+    // to keep the socket up, and an alerting fault must not cost a pass of that.
+    private async Task<bool> TryNotifyAsync(Func<INotificationChannel, Task<bool>> send, string what)
+    {
+        try
+        {
+            using IServiceScope scope = _services.CreateScope();
+            if (scope.ServiceProvider.GetService<INotificationChannel>() is not { } channel)
+            {
+                // Loud, not silent. Standing the host down instead would turn "the operator is not told" into "this
+                // venue has no feed at all", which is the strictly worse failure -- but a missing alerting channel
+                // must never be discovered only by an outage nobody heard about.
+                Logger.LogError(
+                    "No {Channel} is registered, so nothing can {What} the Tradovate {Socket} socket and the "
+                    + "operator will not be told that {Consequence}.",
+                    nameof(INotificationChannel),
+                    what,
+                    SocketName,
+                    SilenceConsequence);
+                return false;
+            }
+
+            return await send(channel);
+        }
+        catch (Exception error)
+        {
+            // Includes cancellation at shutdown, and ObjectDisposedException from a root provider being torn down.
+            // The loop's own stopping-token checks end the run; losing an advisory on the way out is not a fault.
+            Logger.LogError(
+                error, "Failed to {What} the Tradovate {Socket} socket.", what, SocketName);
+            return false;
+        }
+    }
+
+    // Scoped to the SOCKET, so a degraded market-data feed never suppresses a degraded trading feed. Static for the
+    // life of the process and released by ResolveAsync, which is what makes the invariant "one notification per
+    // outage" rather than "one per process lifetime".
+    private string DegradedDedupKey => $"tradovate.socket.degraded:{SocketName}";
 
     // Returns null whenever the host must stand down: Tradovate unconfigured (the common, benign case), a client
     // that throws while it is built (bad or absent credentials), or a required collaborator missing while the client
