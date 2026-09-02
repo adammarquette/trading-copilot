@@ -334,6 +334,78 @@ public class TradovateAccountEventStreamTests
     }
 
     [Fact]
+    public async Task StreamAsync_ShouldDeliverAFillThatExecutedWhileTheSocketWasDown_OnTheReSubscribedStream()
+    {
+        // The failure in the shape it actually happens, end to end across the reconnect boundary -- not a snapshot
+        // raised at a convenient moment on a live stream.
+        //
+        // A working order rests; the socket drops; the venue fills the order while this process is blind; the
+        // connection host reconnects and re-syncs. That fill arrives ONLY in SyncResult.Fills -- a props frame will
+        // never carry it, because props carries changes from the sync point forward, which is the entire reason the
+        // snapshot exists. Dropping it means no Fill row, no composed Trade, and a realized loss that never reaches
+        // the R-5 governor, the R-9 window or the R-4 throttle: they then read headroom that is not there and permit
+        // risk against a position the operator actually took. Nothing looks wrong -- there is simply less in the
+        // ledger than in the world.
+        TradovateAccountEventStream stream = CreateStream();
+
+        Func<Task> whileConnected = async () =>
+        {
+            await using Reader first = Start(stream, [Account(9001)]);
+            _webSocket.RaiseOrder(Order(id: 5150, account: 9001, ClientModels.OrderStatus.Working));
+            (await first.NextAsync()).Should().BeOfType<OrderStateEvent>();
+
+            _webSocket.TradingState = ClientModels.ConnectionState.Disconnected;
+            _webSocket.RaiseStatus(isTrading: true, ClientModels.ConnectionState.Disconnected);
+            await first.NextAsync();
+        };
+
+        await whileConnected.Should().ThrowAsync<TradovateVenueException>();
+
+        // The host brings the socket back and syncs it; the supervisor re-subscribes. The re-subscribed stream starts
+        // with an EMPTY attribution map, so the snapshot has to supply both the order and the fill.
+        _webSocket.TradingState = ClientModels.ConnectionState.Connected;
+        await using Reader resubscribed = Start(stream, [Account(9001)]);
+
+        _webSocket.RaiseSync(
+            orders: [Order(id: 5150, account: 9001, ClientModels.OrderStatus.Filled)],
+            fills: [Fill(id: 77, order: 5150)]);
+
+        FillEvent fill = (await resubscribed.NextAsync()).Should().BeOfType<FillEvent>().Subject;
+        fill.VenueFillKey.Should().Be("77");
+        fill.VenueOrderKey.Should().Be("5150");
+        fill.Account.Should().Be(Account(9001));
+        fill.Quantity.Should().Be(2);
+        fill.ExecutionPrice.Should().Be(new Price(5312.25m));
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldKeyAReplayedSnapshotFillIdentically_SoTheDedupeDownstreamHolds()
+    {
+        // Emitting the snapshot's fills is only safe because a replay dedupes downstream, and that dedupe is the
+        // unique { OrderId, VenueFillKey } index -- so both halves of the key have to be the venue's OWN immutable
+        // ids, never a composite derived from mutable fields. This repo has been bitten by exactly that: a FIFO
+        // pairing key re-derived on a late fill made exact-key dedup double-count. Two syncs re-deliver one fill;
+        // the keys must be byte-identical, or the "replay is a skip" argument is false and the R-5 inputs
+        // double-count instead.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseSync(
+            orders: [Order(id: 5150, account: 9001, ClientModels.OrderStatus.Working)],
+            fills: [Fill(id: 77, order: 5150)]);
+        FillEvent first = (await reader.NextAsync()).Should().BeOfType<FillEvent>().Subject;
+
+        // A second sync -- the host sends one after every connect it drives -- re-delivers the same fill.
+        _webSocket.RaiseSync(
+            orders: [Order(id: 5150, account: 9001, ClientModels.OrderStatus.Filled)],
+            fills: [Fill(id: 77, order: 5150)]);
+        FillEvent replay = (await reader.NextAsync()).Should().BeOfType<FillEvent>().Subject;
+
+        replay.VenueFillKey.Should().Be(first.VenueFillKey);
+        replay.VenueOrderKey.Should().Be(first.VenueOrderKey);
+        replay.Account.Should().Be(first.Account);
+    }
+
+    [Fact]
     public async Task StreamAsync_ShouldStillEmitNoOrderOrPositionFromTheSnapshot_WhenItEmitsItsFills()
     {
         // The carve-out is fills ONLY, and the asymmetry is the whole point. A snapshot POSITION re-drives the
