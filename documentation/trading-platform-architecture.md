@@ -60,6 +60,20 @@ and never ticks again — which is exactly what stalls a hidden stop's promotion
 because Tradovate pushes `props` entity frames only to a socket that has synced — so otherwise the socket is
 authorized and delivers no order, fill or position event at all.
 
+`TradovateAccountEventStream` translates the events those hosts make flow onto the neutral `IAccountEventStream`
+seam (gh#977). It is **stateful where ProjectX's is not**, for one reason the venues genuinely differ on: a ProjectX
+trade notification carries its own account, while a Tradovate `fill` entity carries only an `orderId` — so this
+adapter keeps the order → account map that joins them, seeded from the `user/syncrequest` snapshot and kept current
+from `order` frames. Nothing orders the frames, so a fill that arrives before the order naming it is **held, not
+dropped**, and released when an order supplies its account; one that resolves to an unsubscribed account is
+discarded rather than emitted under a guessed one, which matters because one Tradovate login syncs *every* account
+the user holds. The snapshot **seeds attribution and emits nothing** — it is a full re-delivery, and emitting it
+would re-drive the OCO-exit retire and the round-trip journal on every reconnect. A trading socket that leaves
+`Connected` **ends the stream**, after delivering what was buffered: an open sequence over a dead socket is
+indistinguishable from a quiet account, and a quiet account is what auto-flatten must never be told. Two gaps are
+recorded rather than papered over: Tradovate reports no per-fill commission, so `Fees` is zero (gh#1068), and a
+socket that is connected but never synced is still silent (gh#1051).
+
 **Both hosts are one loop, not two.** They shipped a week apart as hand-maintained copies and diverged on a
 safety-relevant line within that week — a successful connect reset the backoff in one and not in the other, leaving a
 socket `Connected`, and so healthy-looking to every other reader, while silent for up to a minute per retry (gh#1054).
@@ -91,7 +105,8 @@ Finnhub, order types vary — so a gap fails loudly at the seam instead of surfa
 **ProjectX adapter** reaches `HistoricalBars`, `Quotes`, `ClosePosition`, `BracketOrders`, `AccountStreaming`
 (order / position / fill events over the user hub, behind the singleton `IAccountEventStream` seam, parallel to
 the `IVenueConnection` liveness seam — since **gh#219**), and — since **gh#259** — `ModifyOrder` (an in-place
-reprice of a working order, behind `IOrderExecutor.ModifyOrderAsync`); `MarketDepth` and `TrailingStops` remain
+reprice of a working order, behind `IOrderExecutor.ModifyOrderAsync`); the **Tradovate adapter** reaches
+`HistoricalBars`, `Quotes` and — since **gh#977** — `AccountStreaming`, with execution still ungranted; `MarketDepth` and `TrailingStops` remain
 **declared-but-unreached** by the neutral contract and stay unadvertised, so a caller never commits to a path that
 cannot work.
 
