@@ -96,10 +96,7 @@ describe('ConversationThread — loading and rendering the thread', () => {
     await renderThread();
 
     const rows = screen.getAllByTestId('chat-message');
-    expect(rows.map((row) => row.textContent)).toEqual([
-      'What is my risk?',
-      '-$412 to the stop.',
-    ]);
+    expect(rows.map((row) => row.textContent)).toEqual(['What is my risk?', '-$412 to the stop.']);
     expect(rows[0].getAttribute('data-role')).toBe('user');
     expect(rows[1].getAttribute('data-role')).toBe('assistant');
   });
@@ -174,7 +171,11 @@ describe('ConversationThread — loading and rendering the thread', () => {
   });
 
   it('a refused/failed load renders an error with retry', async () => {
-    getMock.mockResolvedValue({ ok: false, kind: 'failed', error: 'The request could not be sent.' });
+    getMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      error: 'The request could not be sent.',
+    });
 
     await renderThread();
 
@@ -267,7 +268,12 @@ describe('ConversationThread — sending a turn', () => {
       turn.settle({
         ok: true,
         data: {
-          userMessage: message({ id: 'u1', sequence: 1, role: ChatRole.User, content: 'headroom?' }),
+          userMessage: message({
+            id: 'u1',
+            sequence: 1,
+            role: ChatRole.User,
+            content: 'headroom?',
+          }),
           assistantMessage: message({
             id: 'a1',
             sequence: 2,
@@ -341,7 +347,9 @@ describe('ConversationThread — cross-connection reconciliation', () => {
         title: null,
         createdAt: '',
         updatedAt: '',
-        messages: [message({ id: 'm1', sequence: 1, role: ChatRole.User, content: 'from elsewhere' })],
+        messages: [
+          message({ id: 'm1', sequence: 1, role: ChatRole.User, content: 'from elsewhere' }),
+        ],
       },
     });
 

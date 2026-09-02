@@ -1,7 +1,12 @@
 import { act, cleanup, fireEvent, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { type Conversation, createConversation, getConversation, listConversations } from '../api/chat';
+import {
+  type Conversation,
+  createConversation,
+  getConversation,
+  listConversations,
+} from '../api/chat';
 import { renderWithProviders } from '../testing/render';
 import { ChatSurface } from './ChatSurface';
 
@@ -79,7 +84,10 @@ describe('ChatSurface', () => {
   it('loads the conversation list and auto-selects the most recent one', async () => {
     listMock.mockResolvedValue({
       ok: true,
-      data: [conversation({ id: 'c1', title: 'ES setups' }), conversation({ id: 'c2', title: 'Journal review' })],
+      data: [
+        conversation({ id: 'c1', title: 'ES setups' }),
+        conversation({ id: 'c2', title: 'Journal review' }),
+      ],
     });
 
     await renderSurface();
@@ -102,12 +110,21 @@ describe('ChatSurface', () => {
   it('selecting a different conversation swaps the thread', async () => {
     listMock.mockResolvedValue({
       ok: true,
-      data: [conversation({ id: 'c1', title: 'ES setups' }), conversation({ id: 'c2', title: 'Journal review' })],
+      data: [
+        conversation({ id: 'c1', title: 'ES setups' }),
+        conversation({ id: 'c2', title: 'Journal review' }),
+      ],
     });
     getMock.mockImplementation((id) =>
       Promise.resolve({
         ok: true,
-        data: { id, title: id === 'c1' ? 'ES setups' : 'Journal review', createdAt: '', updatedAt: '', messages: [] },
+        data: {
+          id,
+          title: id === 'c1' ? 'ES setups' : 'Journal review',
+          createdAt: '',
+          updatedAt: '',
+          messages: [],
+        },
       }),
     );
 
@@ -121,7 +138,10 @@ describe('ChatSurface', () => {
   });
 
   it('creating a conversation selects it immediately and prepends it to the list', async () => {
-    listMock.mockResolvedValue({ ok: true, data: [conversation({ id: 'c1', title: 'ES setups' })] });
+    listMock.mockResolvedValue({
+      ok: true,
+      data: [conversation({ id: 'c1', title: 'ES setups' })],
+    });
     createMock.mockResolvedValue({ ok: true, data: conversation({ id: 'c2', title: null }) });
 
     await renderSurface();
@@ -135,8 +155,15 @@ describe('ChatSurface', () => {
   });
 
   it('a failed create surfaces an error without disturbing the current selection', async () => {
-    listMock.mockResolvedValue({ ok: true, data: [conversation({ id: 'c1', title: 'ES setups' })] });
-    createMock.mockResolvedValue({ ok: false, kind: 'failed', error: 'The request could not be sent.' });
+    listMock.mockResolvedValue({
+      ok: true,
+      data: [conversation({ id: 'c1', title: 'ES setups' })],
+    });
+    createMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      error: 'The request could not be sent.',
+    });
 
     await renderSurface();
     fireEvent.click(screen.getByRole('button', { name: /New conversation/i }));
@@ -151,7 +178,11 @@ describe('ChatSurface', () => {
   });
 
   it('a failed list load renders an error with retry', async () => {
-    listMock.mockResolvedValue({ ok: false, kind: 'failed', error: 'The request could not be sent.' });
+    listMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      error: 'The request could not be sent.',
+    });
 
     await renderSurface();
 

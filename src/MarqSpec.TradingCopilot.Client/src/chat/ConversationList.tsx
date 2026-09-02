@@ -32,7 +32,10 @@ export function ConversationList({
   creating,
 }: ConversationListProps) {
   return (
-    <Box data-testid="conversation-list" sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <Box
+      data-testid="conversation-list"
+      sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+    >
       <Box sx={{ p: 1.5 }}>
         <Button
           fullWidth

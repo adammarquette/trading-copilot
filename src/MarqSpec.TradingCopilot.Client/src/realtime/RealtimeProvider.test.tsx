@@ -176,9 +176,10 @@ describe('RealtimeProvider', () => {
     const received: string[] = [];
     function Consumer() {
       const { onChatMessage } = useRealtime();
-      useEffect(() => onChatMessage((message) => received.push(message.messageId)), [
-        onChatMessage,
-      ]);
+      useEffect(
+        () => onChatMessage((message) => received.push(message.messageId)),
+        [onChatMessage],
+      );
       return null;
     }
 

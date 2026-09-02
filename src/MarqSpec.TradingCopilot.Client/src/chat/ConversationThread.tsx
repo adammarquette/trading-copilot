@@ -46,10 +46,7 @@ function roleLabel(role: ChatMessage['role']): string {
 }
 
 /** Appends a message unless its id is already present -- the fold used for both cross-connection pushes and reconcile. */
-function foldIn(
-  messages: readonly ChatMessage[],
-  incoming: ChatMessage,
-): readonly ChatMessage[] {
+function foldIn(messages: readonly ChatMessage[], incoming: ChatMessage): readonly ChatMessage[] {
   if (messages.some((existing) => existing.id === incoming.id)) {
     return messages;
   }
@@ -291,7 +288,11 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   }
 
   const composer = (
-    <Box component="form" onSubmit={handleSubmit} sx={{ p: 1.5, borderTop: 1, borderColor: 'divider' }}>
+    <Box
+      component="form"
+      onSubmit={handleSubmit}
+      sx={{ p: 1.5, borderTop: 1, borderColor: 'divider' }}
+    >
       {sendError ? (
         <Alert severity="error" role="alert" sx={{ mb: 1 }} onClose={() => setSendError(null)}>
           {sendError}

@@ -84,7 +84,9 @@ export function createConversation(title?: string): Promise<ApiResult<Conversati
  * server-side (R-20); this client adds no filter of its own. `limit` is optional -- the server defaults and clamps
  * its own page size.
  */
-export async function listConversations(limit?: number): Promise<ApiResult<readonly Conversation[]>> {
+export async function listConversations(
+  limit?: number,
+): Promise<ApiResult<readonly Conversation[]>> {
   const path = limit === undefined ? '/conversations' : `/conversations?limit=${limit}`;
   const result = await requestJson<ConversationListResponse>('GET', path);
   if (!result.ok) {
