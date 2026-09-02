@@ -190,6 +190,12 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         LinkedList<ClientModels.Fill> heldFills = [];
         bool socketDropped = false;
 
+        // Distinct from socketDropped, and not folded into it, because the two end the stream for different reasons
+        // and the caller is told which. Reporting "the socket left the connected state" for a socket that is up but
+        // unsynced would name the wrong cause, and on a path whose whole justification is that the message IS the
+        // trace, a message that names the wrong cause is a correctness defect rather than a wording one.
+        bool syncLost = false;
+
         void Emit(Func<AccountEvent> map, string what)
         {
             try
@@ -409,11 +415,19 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             // a drop AND a reconnect landing in that gap leaves TradingState back at Connected while the new
             // connection carries no entity subscription at all, so the socket reads healthy and delivers nothing
             // (gh#1051).
-            if (_webSocket.TradingState != ClientModels.ConnectionState.Connected || !_sync.IsSynced)
+            if (_webSocket.TradingState != ClientModels.ConnectionState.Connected)
             {
                 lock (gate)
                 {
                     socketDropped = true;
+                    events.Writer.TryComplete();
+                }
+            }
+            else if (!_sync.IsSynced)
+            {
+                lock (gate)
+                {
+                    syncLost = true;
                     events.Writer.TryComplete();
                 }
             }
@@ -424,10 +438,12 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             }
 
             bool dropped;
+            bool unsynced;
             int stillHeld;
             lock (gate)
             {
                 dropped = socketDropped;
+                unsynced = syncLost;
                 stillHeld = heldFills.Count;
             }
 
@@ -437,6 +453,15 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
                     $"The Tradovate trading socket left the connected state with {stillHeld} fill(s) still awaiting "
                     + "the order that names their account; the account-event stream ended so it is re-subscribed "
                     + "rather than left open over a dead socket delivering nothing.");
+            }
+
+            if (unsynced)
+            {
+                throw new TradovateVenueException(
+                    $"The Tradovate trading socket reconnected without being synced, with {stillHeld} fill(s) still "
+                    + "awaiting the order that names their account; it delivers no entity frame at all until the "
+                    + "connection host syncs it, so the account-event stream ended rather than reporting a quiet "
+                    + "account over a silent socket (gh#1051).");
             }
         }
         finally

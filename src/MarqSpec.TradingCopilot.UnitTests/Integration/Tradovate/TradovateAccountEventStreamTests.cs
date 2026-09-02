@@ -87,6 +87,11 @@ public class TradovateAccountEventStreamTests
         // opens, parks, and looks exactly like a quiet account for as long as it lasts -- and a quiet account is the
         // one thing auto-flatten must never be told (R-13, ADR-0019). The connected check above cannot catch it: the
         // socket IS connected.
+        //
+        // The message is asserted, not just the type. The post-attach re-read below throws the same exception type,
+        // so a suite that checked only the type would stay green with this refusal deleted -- the other guard would
+        // catch it and report a socket that "reconnected without being synced", which is a different and untrue
+        // cause. That mutant survived the first pass of this file's suite; it does not now.
         TradovateTradingSocketSync unsynced = new();
         unsynced.IsSynced.Should().BeFalse("the arrangement is only meaningful over a socket nothing has synced");
         TradovateAccountEventStream stream = new(_webSocket, unsynced, _log);
@@ -97,7 +102,7 @@ public class TradovateAccountEventStreamTests
             await reader.NextAsync();
         };
 
-        await read.Should().ThrowAsync<TradovateVenueException>();
+        await read.Should().ThrowAsync<TradovateVenueException>().WithMessage("*has not been synced*");
     }
 
     [Fact]
@@ -108,6 +113,10 @@ public class TradovateAccountEventStreamTests
         // the NEW connection carries no entity subscription at all. The drop that would have ended the stream was
         // raised before the handler existed, so nothing completes the channel and the read parks forever on a socket
         // that will never deliver. Fails against a re-read that tests only the connection state.
+        //
+        // The message is asserted so this cannot be satisfied by the DROP path: a socket that reconnected unsynced
+        // never left the connected state as far as this stream can see, and reporting it as one would send the
+        // supervisor after the wrong cause.
         _webSocket.WhenOrderHandlerAttached = () => _sync.OnSocketConnected();
         _webSocket.TradingState.Should().Be(ClientModels.ConnectionState.Connected);
         TradovateAccountEventStream stream = CreateStream();
@@ -118,7 +127,7 @@ public class TradovateAccountEventStreamTests
             await reader.NextAsync();
         };
 
-        await read.Should().ThrowAsync<TradovateVenueException>();
+        await read.Should().ThrowAsync<TradovateVenueException>().WithMessage("*reconnected without being synced*");
     }
 
     [Fact]

@@ -118,6 +118,29 @@ public class TradovateTradingSocketSyncTests
     }
 
     [Fact]
+    public void CompleteHostSync_ShouldNotClearTheObligation_WhenTheNewConnectionOwesASyncOfItsOwn()
+    {
+        // The case that makes the generation load-bearing rather than decorative, and the one the test above cannot
+        // reach. There, the reconnect left the obligation at Pending, so the clear's "from Due only" rule refused on
+        // its own — the generation was never consulted. Here the host has already spent the grace pass on the NEW
+        // connection, so the obligation is Due again and "from Due only" would happily clear it. Only the generation
+        // can tell that this snapshot answers a question about a connection that no longer exists.
+        //
+        // Written after the mutation that removes the generation check survived this file's first pass.
+        TradovateTradingSocketSync sync = new();
+        sync.RequireSync();
+        long generation = sync.BeginHostSync();
+
+        sync.OnSocketConnected();          // the transport was rebuilt underneath the in-flight sync
+        sync.PromoteGraceToDue();          // ...and the new connection has since been found unsynced
+        sync.EndHostSync();
+
+        sync.CompleteHostSync(generation).Should().BeFalse();
+        sync.IsSynced.Should().BeFalse("the new connection has never been synced");
+        sync.Obligation.Should().Be(TradovateSyncObligation.Due);
+    }
+
+    [Fact]
     public void CompleteHostSync_ShouldNotClearTheObligation_WhenNothingWasOwed()
     {
         // Clearing from None is harmless but clearing from Pending is not: a grace pass that a stale completion
