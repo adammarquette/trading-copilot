@@ -100,14 +100,46 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
         return new StagingProjectXGateway(provider, api, orderExecutor);
     }
 
-    /// <summary>The gateway's own account id for the reserved practice account, matched by its venue name (R-14).</summary>
+    /// <summary>
+    /// The gateway's own account id for the reserved practice account, matched by its venue name and verified
+    /// PRACTICE by construction (R-14, gh#1074) — see <see cref="ResolvePracticeAccountId"/>.
+    /// </summary>
     public async Task<int> ResolveAccountIdAsync(CancellationToken cancellationToken = default)
     {
         IEnumerable<TradingAccount> accounts = await _api.GetAccountsAsync(onlyActiveAccounts: true, cancellationToken);
+        return ResolvePracticeAccountId(accounts, StagingConfig.PracticeAccountKey);
+    }
+
+    /// <summary>
+    /// The R-14 guard every staging gate's writes are gated behind, whichever base URL drove them there (a
+    /// deployed instance or a locally composed one — gh#1074): matches <paramref name="practiceAccountKey"/> by
+    /// name, then <b>independently verifies the venue's own <see cref="TradingAccount.Simulated"/> flag</b> before
+    /// handing back an id anything here can trade on. Refuses (fails closed) rather than trusting the operator's
+    /// naming convention alone — an operator error that points <c>STAGING_PROJECTX_API_KEY/SECRET</c> at a live
+    /// account must not silently place a real order on it just because its name matched the reserved key.
+    /// </summary>
+    /// <remarks>
+    /// Extracted as a pure function precisely so this guard is provable without a live venue call — see the
+    /// practice-guard unit tests, which assert both that a simulated match resolves and that a non-simulated
+    /// match is refused (prove-the-red on the exact defect this exists to catch).
+    /// </remarks>
+    internal static int ResolvePracticeAccountId(IEnumerable<TradingAccount> accounts, string? practiceAccountKey)
+    {
+        ArgumentNullException.ThrowIfNull(accounts);
         TradingAccount account = accounts.SingleOrDefault(candidate =>
-            string.Equals(candidate.Name, StagingConfig.PracticeAccountKey, StringComparison.Ordinal))
+            string.Equals(candidate.Name, practiceAccountKey, StringComparison.Ordinal))
             ?? throw new InvalidOperationException(
-                $"The reserved practice account '{StagingConfig.PracticeAccountKey}' is not visible to the gateway credentials.");
+                $"The reserved practice account '{practiceAccountKey}' is not visible to the gateway credentials.");
+
+        if (!account.Simulated)
+        {
+            throw new InvalidOperationException(
+                $"R-14 violation: account '{account.Name}' (id {account.Id}) reports Simulated=false at the venue "
+                + "-- it is not a practice account. Refusing to resolve it: these gates place real orders and must "
+                + "never reach a live account, regardless of what STAGING_PROJECTX_PRACTICE_ACCOUNT names. Point "
+                + "the gateway credentials (STAGING_PROJECTX_API_KEY/SECRET) at a reserved PRACTICE account.");
+        }
+
         return account.Id;
     }
 
