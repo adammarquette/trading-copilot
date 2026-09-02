@@ -13,7 +13,8 @@ namespace MarqSpec.TradingCopilot.Integration.Tradovate;
 
 /// <summary>
 /// The Tradovate venue adapter behind <see cref="ITradingVenue"/> (R-17, gh#41 / gh#977). It serves contract
-/// resolution, account / position reads, <b>historical bars</b>, and <b>live quotes</b>; execution is ungranted
+/// resolution, account / position reads, <b>historical bars</b>, <b>live quotes</b>, and — through the singleton
+/// <see cref="TradovateAccountEventStream"/> seam — <b>account streaming</b>; execution is ungranted
 /// and refuses loudly through the capability seam (or as <see cref="NotSupportedException"/>) until its slice lands
 /// (gh#977). Every Tradovate-specific detail — integer ids, an already-signed net position, demo-vs-live as the mode
 /// source (a brokerage, gh#780), bars and quotes over the market-data socket — stops here so the core sees only the neutral model.
@@ -72,12 +73,20 @@ public sealed class TradovateVenue : ITradingVenue
     public VenueId Id { get; } = VenueId.Parse("tradovate");
 
     /// <summary>
-    /// What this adapter delivers through <see cref="ITradingVenue"/>: <see cref="VenueCapability.HistoricalBars"/>
-    /// and <see cref="VenueCapability.Quotes"/>. Contract resolution and account / position reads are not
-    /// capability-gated and work regardless; execution and position-close are ungranted, so those paths refuse at the
-    /// seam rather than doing something partial (their slice lands in gh#977).
+    /// What this adapter delivers through <see cref="ITradingVenue"/>: <see cref="VenueCapability.HistoricalBars"/>,
+    /// <see cref="VenueCapability.Quotes"/> and <see cref="VenueCapability.AccountStreaming"/>. Contract resolution
+    /// and account / position reads are not capability-gated and work regardless; execution and position-close are
+    /// ungranted, so those paths refuse at the seam rather than doing something partial (their slice lands in gh#977).
     /// </summary>
-    public VenueCapabilities Capabilities { get; } = VenueCapabilities.Of(VenueCapability.HistoricalBars | VenueCapability.Quotes);
+    /// <remarks>
+    /// <see cref="VenueCapability.AccountStreaming"/> is granted now that <see cref="TradovateAccountEventStream"/>
+    /// exists (gh#977). The capability is what a caller <c>Require</c>s at the call to decide whether it can depend on
+    /// order / fill / position events at all, so leaving it ungranted once the seam is real would make every such
+    /// caller degrade for a gap that has closed. The <i>transport</i> still belongs to the singleton
+    /// <see cref="IAccountEventStream"/> seam, kept off this scoped adapter (ADR-0015).
+    /// </remarks>
+    public VenueCapabilities Capabilities { get; } = VenueCapabilities.Of(
+        VenueCapability.HistoricalBars | VenueCapability.Quotes | VenueCapability.AccountStreaming);
 
     /// <summary>
     /// The Tradovate derivation-logic version (ADR-0009). <b>1</b> — the initial read slice: mode from the configured

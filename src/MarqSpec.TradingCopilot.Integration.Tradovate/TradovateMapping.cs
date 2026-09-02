@@ -398,8 +398,9 @@ public static class TradovateMapping
     /// <b>Fees are reported as zero, and that is a known gap.</b> Tradovate's fill entity carries no commission and
     /// the client exposes no per-fill fee anywhere, while the neutral <see cref="FillEvent"/> has no way to say
     /// "unknown". A zero UNDER-states cost, so realized P&amp;L reads slightly generous downstream — the direction
-    /// that makes headroom look larger than it is. It is recorded here rather than papered over with an invented
-    /// number; closing it needs a commission source the client does not yet surface.
+    /// that makes headroom look larger than it is on the R-5, R-9 and R-4 inputs. It is recorded rather than papered
+    /// over with an invented number, and tracked as <b>gh#1068</b>; closing it needs a commission source the client
+    /// does not yet surface, and possibly a nullable <c>Fees</c> so the absence is representable at all.
     /// </para>
     /// <para>
     /// <c>Active</c> is read as the bust flag: an inactive fill is a trade Tradovate has voided, and the consumer
