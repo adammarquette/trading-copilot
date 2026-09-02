@@ -532,6 +532,17 @@ socket has gone **two minutes without delivering**, and resolved once it has del
   into *one per process lifetime* — the first outage delivers and every later, independent one is suppressed as a
   duplicate. That is this ADR's own failure mode reproduced by a caller, and it is pinned by the shared host
   contract for both sockets rather than trusted.
+- **And a resolve that returned `true` is not proof the key was released, so the close is provisional.** A producer
+  sits above the whole chain — outbox → queue → dedup → transport — and `QueuedNotificationChannel` is a bounded
+  channel with `BoundedChannelFullMode.DropWrite`. **Under any `Drop*` mode `TryWrite` discards the item and returns
+  `true`**, so that class's own *"queue is full — dropped the resolve"* branch is unreachable, nothing is logged,
+  and the producer is told the resolve was accepted. The key then stays armed for the process lifetime and the
+  failure above happens anyway, with every layer reporting success. The socket hosts therefore treat a close as
+  provisional and **re-arm the key once, before the first advisory of the next outage** — never on the retries
+  within one outage, which would cost a push per pass. A redundant resolve is free: the decorator forwards
+  unconditionally and a transport holding no receipt no-ops. *(The unreachable drop-logging in
+  `QueuedNotificationChannel` is a defect in its own right — the queue is fullest exactly when a transport is
+  wedged, which is when the flatten escalation is also enqueuing — and is not fixed here.)*
 - **What counts as "not delivering" is everything that is not delivering.** A failed connect, an unmet obligation, a
   socket mid-attempt, an unrecognised state, a pass that threw. The first cut of this exempted the mid-attempt case,
   which meant a socket reconnecting faster than the grace — the venue closing shortly after `authorize`, or the

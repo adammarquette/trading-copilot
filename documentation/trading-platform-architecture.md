@@ -100,7 +100,10 @@ raises one P2 through `INotificationChannel`, and two minutes of delivering reso
 pass count, because the gap between passes grows with the backoff; and with the same grace on both edges, because
 resolving on the first healthy pass would make a flapping socket a push per flap instead of one incident. Without
 the resolve at all, the process-lifetime dedup would deliver the first outage and suppress every later one
-(gh#1045, gh#1051). It reports and never acts: no socket is torn down or disabled on the host's own judgement.
+(gh#1045, gh#1051). The close is **provisional**: a resolve that returned `true` is not proof the key was released
+— the queue below the dedup decorator drops on overflow and still reports success — so the first advisory of the
+next outage re-arms the key once before it sends. It reports and never acts: no socket is torn down or disabled
+on the host's own judgement.
 Each host supplies only its **post-connect obligation**, which differs in kind: a per-key replay that must
 survive a partial failure, versus one request that either lands or does not. A pass reports one of three things —
 delivering, still owed, or waiting — because "nothing failed on the wire" and "the feed is alive" are different
