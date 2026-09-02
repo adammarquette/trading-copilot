@@ -294,6 +294,183 @@ public static class TradovateMapping
         return new Quote(timestamp, new Price(bid), new Price(ask), bidSize, askSize);
     }
 
+    /// <summary>Maps Tradovate's <c>ordStatus</c> onto the venue-neutral order state (R-17, gh#977).</summary>
+    /// <param name="status">Tradovate's order status.</param>
+    /// <returns>The neutral state; anything that cannot be mapped safely becomes <see cref="VenueOrderState.Unknown"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Two statuses deliberately fail closed</b> rather than take the nearest-looking neutral state (gh#60).
+    /// <c>Completed</c> is <b>not</b> read as <see cref="VenueOrderState.Filled"/>: whether Tradovate means "fully
+    /// executed" or merely "finished" is not pinned from this side, and reading a finished-but-unfilled order as a
+    /// fill would tell the journal an execution happened. <c>Suspended</c> is live-but-not-executable, which is no
+    /// neutral state at all. Both are harmless as <see cref="VenueOrderState.Unknown"/>, because the consumer acts
+    /// only on the terminal <i>non-fill</i> transitions and takes filled volume from the fill events.
+    /// </para>
+    /// <para>
+    /// <c>PendingCancel</c> / <c>PendingReplace</c> map to <see cref="VenueOrderState.Working"/>, not
+    /// <see cref="VenueOrderState.Pending"/>: the neutral <c>Pending</c> means "submitted, not yet working", whereas
+    /// an order awaiting an amendment is <b>still resting and still fillable</b>. Calling it not-yet-working would
+    /// understate a live order.
+    /// </para>
+    /// </remarks>
+    public static VenueOrderState ToVenueOrderState(ClientModels.OrderStatus status)
+    {
+        return status switch
+        {
+            ClientModels.OrderStatus.Working => VenueOrderState.Working,
+            ClientModels.OrderStatus.PendingCancel => VenueOrderState.Working,
+            ClientModels.OrderStatus.PendingReplace => VenueOrderState.Working,
+            ClientModels.OrderStatus.PendingNew => VenueOrderState.Pending,
+            ClientModels.OrderStatus.Filled => VenueOrderState.Filled,
+            ClientModels.OrderStatus.Canceled => VenueOrderState.Cancelled,
+            ClientModels.OrderStatus.Expired => VenueOrderState.Expired,
+            ClientModels.OrderStatus.Rejected => VenueOrderState.Rejected,
+
+            // Unknown, Completed, Suspended, or a status a newer client adds -- fail closed (gh#60).
+            _ => VenueOrderState.Unknown,
+        };
+    }
+
+    /// <summary>Maps Tradovate's buy/sell action onto the venue-neutral side.</summary>
+    /// <param name="action">Tradovate's order action.</param>
+    /// <returns>Buy or sell.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">The action is not recognized.</exception>
+    /// <remarks>
+    /// Throws rather than defaulting: side is the sign of an execution, so guessing it would invert a position's
+    /// direction in the journal — the one place a silent default is worse than a loud failure.
+    /// </remarks>
+    public static OrderSide ToVenueSide(ClientModels.OrderAction action)
+    {
+        return action switch
+        {
+            ClientModels.OrderAction.Buy => OrderSide.Buy,
+            ClientModels.OrderAction.Sell => OrderSide.Sell,
+            _ => throw new ArgumentOutOfRangeException(nameof(action), action, "Unrecognized Tradovate order action."),
+        };
+    }
+
+    /// <summary>Maps a Tradovate order entity onto the neutral <see cref="OrderStateEvent"/> (R-17, gh#977).</summary>
+    /// <param name="order">The Tradovate order entity, from a <c>props</c> frame or a sync snapshot.</param>
+    /// <param name="venue">The venue to tag the event with.</param>
+    /// <returns>The neutral order-state event.</returns>
+    /// <exception cref="TradovateVenueException">The order has no id.</exception>
+    /// <remarks>
+    /// <b>Filled quantity and average fill price are reported absent, not zero.</b> Tradovate's order entity carries
+    /// neither, and a 0 would be indistinguishable from "nothing has filled yet" — a fabricated figure on the path
+    /// that feeds the journal. The neutral record models both as nullable for exactly this case; filled volume comes
+    /// from <see cref="FillEvent"/>s, which are the authoritative record of executed size.
+    /// </remarks>
+    public static OrderStateEvent ToOrderStateEvent(ClientModels.Order order, VenueId venue)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+
+        // The id is the handle the journal resolves the order by; without it the event names nothing it could be
+        // applied to, so refuse it here rather than emit an event keyed on an empty string.
+        if (order.Id is not { } id)
+        {
+            throw new TradovateVenueException(
+                $"Tradovate reported an order on account {order.AccountId} with no id, so it cannot be matched to a "
+                + "journaled order.");
+        }
+
+        return new OrderStateEvent(
+            VenueAccountId.Create(venue, order.AccountId.ToString(CultureInfo.InvariantCulture)),
+            order.Timestamp,
+            id.ToString(CultureInfo.InvariantCulture),
+            ToVenueOrderState(order.OrdStatus),
+            FilledQuantity: null,
+            AverageFillPrice: null);
+    }
+
+    /// <summary>Maps a Tradovate fill entity onto the neutral <see cref="FillEvent"/> (R-17, gh#977).</summary>
+    /// <param name="fill">The Tradovate fill entity.</param>
+    /// <param name="account">
+    /// The account the fill belongs to, <b>resolved by the caller</b>. Tradovate's fill entity carries only an order
+    /// id — no account — so attribution is the streaming adapter's job (it holds the order → account map) and this
+    /// mapping refuses to invent one. The handle is checked against <paramref name="venue"/> below.
+    /// </param>
+    /// <param name="venue">This adapter's venue — the account must belong to it.</param>
+    /// <returns>The neutral fill event; the Tradovate fill id is its idempotency key.</returns>
+    /// <exception cref="TradovateVenueException">The fill has no id.</exception>
+    /// <exception cref="ArgumentException">The account belongs to another venue.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>Fees are reported as zero, and that is a known gap.</b> Tradovate's fill entity carries no commission and
+    /// the client exposes no per-fill fee anywhere, while the neutral <see cref="FillEvent"/> has no way to say
+    /// "unknown". A zero UNDER-states cost, so realized P&amp;L reads slightly generous downstream — the direction
+    /// that makes headroom look larger than it is. It is recorded here rather than papered over with an invented
+    /// number; closing it needs a commission source the client does not yet surface.
+    /// </para>
+    /// <para>
+    /// <c>Active</c> is read as the bust flag: an inactive fill is a trade Tradovate has voided, and the consumer
+    /// skips a voided fill rather than counting it.
+    /// </para>
+    /// </remarks>
+    public static FillEvent ToFillEvent(ClientModels.Fill fill, VenueAccountId account, VenueId venue)
+    {
+        ArgumentNullException.ThrowIfNull(fill);
+
+        // Checked, not assumed: Tradovate account handles are bare integers that collide freely with other venues',
+        // so a foreign handle stamped onto a Tradovate execution would journal the fill against somebody else's
+        // account. The attribution map this account came from is keyed by a bare Tradovate order id, which makes a
+        // cross-venue mix-up a live possibility rather than a theoretical one.
+        EnsureBelongsTo(account.Venue, venue, account.ToString());
+
+        // The fill id is the { order, fill } idempotency key the persistence layer dedupes a replay on. Without it a
+        // re-delivered fill would insert a second row and double-count a real execution.
+        if (fill.Id is not { } id)
+        {
+            throw new TradovateVenueException(
+                $"Tradovate reported a fill on order {fill.OrderId} with no id, so it carries no idempotency key.");
+        }
+
+        return new FillEvent(
+            account,
+            fill.Timestamp,
+            fill.OrderId.ToString(CultureInfo.InvariantCulture),
+            id.ToString(CultureInfo.InvariantCulture),
+            ToVenueSide(fill.Action),
+            fill.Qty,
+            new Price(fill.Price),
+
+            // Tradovate reports no per-fill commission -- see the remarks above. Not an omission; a named gap.
+            Fees: 0m,
+
+            // An inactive fill is a busted trade.
+            Voided: !fill.Active);
+    }
+
+    /// <summary>Maps a Tradovate position entity onto the neutral <see cref="PositionEvent"/> (R-17, gh#977).</summary>
+    /// <param name="position">The Tradovate position entity.</param>
+    /// <param name="venue">The venue to tag the event with.</param>
+    /// <returns>The neutral position event, with a signed net exposure.</returns>
+    /// <exception cref="TradovateVenueException">An open position carries no net price.</exception>
+    /// <remarks>
+    /// Same discipline as <see cref="ToPositionSnapshot"/>, and the flat carve-out is the point: a <b>flat</b>
+    /// position (<c>netPos</c> 0) is the OCO-cancel-on-exit trigger (gh#183) — the one position event that retires
+    /// live protection — and its price is immaterial, so refusing it for a missing <c>netPrice</c> would leave a
+    /// resting safety stop behind a position that no longer exists. An <b>open</b> position with no price is refused,
+    /// because a fabricated 0 basis feeds a wildly wrong unrealised P&amp;L to the R-5 gate.
+    /// </remarks>
+    public static PositionEvent ToPositionEvent(ClientModels.Position position, VenueId venue)
+    {
+        ArgumentNullException.ThrowIfNull(position);
+
+        if (position.NetPos != 0 && position.NetPrice is null)
+        {
+            throw new TradovateVenueException(
+                $"Tradovate reported an open position ({position.NetPos} on contract {position.ContractId}) with no "
+                + "net price, which cannot be mapped to an average entry price.");
+        }
+
+        return new PositionEvent(
+            VenueAccountId.Create(venue, position.AccountId.ToString(CultureInfo.InvariantCulture)),
+            position.Timestamp,
+            VenueContractId.Create(venue, position.ContractId.ToString(CultureInfo.InvariantCulture)),
+            position.NetPos,
+            new Price(position.NetPrice ?? 0m));
+    }
+
     private static void EnsureBelongsTo(VenueId actual, VenueId expected, string qualified)
     {
         if (actual != expected)

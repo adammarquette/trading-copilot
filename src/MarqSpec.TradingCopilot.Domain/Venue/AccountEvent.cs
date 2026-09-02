@@ -18,14 +18,20 @@ public abstract record AccountEvent(VenueAccountId Account, DateTimeOffset At);
 /// <param name="At">When the venue reported the change (UTC).</param>
 /// <param name="VenueOrderKey">The venue's own order handle — resolves back to the journaled order.</param>
 /// <param name="State">The neutral lifecycle state.</param>
-/// <param name="FilledQuantity">The cumulative filled quantity the venue reports on the order.</param>
+/// <param name="FilledQuantity">
+/// The cumulative filled quantity the venue reports on the order, or <see langword="null"/> when the venue's order
+/// entity carries no such figure. <b>Nullable on purpose</b>: not every venue reports one — Tradovate's order entity
+/// has neither a filled quantity nor an average price (gh#977) — and a 0 substituted for the absence would be
+/// indistinguishable from "nothing has filled yet" on a field a consumer may read as venue truth. Filled volume is
+/// driven by <see cref="FillEvent"/>s regardless, so the absence costs nothing and the fabrication would not.
+/// </param>
 /// <param name="AverageFillPrice">The average fill price, when the venue reports one.</param>
 public sealed record OrderStateEvent(
     VenueAccountId Account,
     DateTimeOffset At,
     string VenueOrderKey,
     VenueOrderState State,
-    int FilledQuantity,
+    int? FilledQuantity,
     Price? AverageFillPrice) : AccountEvent(Account, At);
 
 /// <summary>
