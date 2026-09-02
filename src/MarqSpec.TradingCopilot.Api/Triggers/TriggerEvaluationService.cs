@@ -389,6 +389,10 @@ public class TriggerEvaluationService
             // never occurred. Duration is what separates a late bar from a broken trigger, so the outage start is
             // persisted and reported once it outlasts the threshold -- never every pass, which would be a log line
             // per trigger per poll.
+            //
+            // Captured BEFORE Track() overwrites it below, so the recovery branch can tell "this outage was
+            // reported and just cleared" from "this outage never crossed the threshold" (review fix, gh#1045).
+            DateTimeOffset? previouslyReportedStaleness = trigger.StalenessReportedAt;
             TriggerStaleness staleness = TriggerStaleness.Track(trigger.UnmeasurableSince, trigger.StalenessReportedAt, satisfaction, now);
             trigger.UnmeasurableSince = staleness.UnmeasurableSince;
             trigger.StalenessReportedAt = staleness.ReportedAt;
@@ -402,6 +406,39 @@ public class TriggerEvaluationService
                     + "is NOT disabled.",
                     trigger.Id, staleness.UnmeasurableSince, trigger.Indicator, trigger.Period,
                     trigger.ResolutionMinutes, trigger.Symbol);
+
+                // gh#1045: gh#469 / gh#515 promised this outage is "visible rather than silent", but visible only
+                // ever meant the LogWarning above -- an engineer reading structured logs, never the operator. This
+                // check runs AHEAD of the mechanical / agent-review split, so it applies to a trigger on EITHER
+                // route; queuing into the SAME `advisories` list the agent-review suppress arms use routes it
+                // through the identical commit-then-notify flush below (ADR-0019: `TriggerEvaluationService`
+                // deliberately keeps `SendAsync` -- its advisories are not safety-critical, so no Enlist/hot-path
+                // concern here, matching gh#289's lesson). No separate debounce is added: TriggerStaleness.Track
+                // already reports at most once per OPEN outage (ShouldReport is false on every later pass until
+                // StalenessReportedAt is cleared by a recovery), so this fires exactly as often as the log line does.
+                advisories.Add(new Notification(
+                    NotificationSeverity.Notify,
+                    $"Trigger unevaluable — {TitleFor(trigger)}",
+                    $"No {trigger.Indicator.ToUpperInvariant()}({trigger.Period}) at {trigger.ResolutionMinutes}m "
+                    + $"for {trigger.Symbol} since {staleness.UnmeasurableSince:u}. It cannot fire until that "
+                    + "indicator is produced again. The trigger is NOT disabled.",
+                    StalenessDedupKey(trigger)));
+            }
+            else if (previouslyReportedStaleness is not null && staleness.ReportedAt is null)
+            {
+                // REVIEW FIX (gh#1045): the advisory above uses a STATIC per-trigger dedup key (StalenessDedupKey),
+                // and DedupingNotificationChannel is a process-lifetime singleton that only releases a key via
+                // ResolveAsync. Without this branch, the FIRST reported outage on a trigger delivers and then
+                // every LATER, independent outage on that SAME trigger is silently dropped by the dedup layer for
+                // the rest of the process's uptime -- "one notification per process lifetime" instead of the
+                // intended "one per outage", which is precisely the "operator never finds out" failure this issue
+                // exists to fix, reproduced one layer down. Track() clears UnmeasurableSince/ReportedAt together
+                // on EVERY recovery, whether or not this particular outage was ever reported, so the resolve is
+                // gated on `previouslyReportedStaleness is not null`: an outage that never crossed the 30-minute
+                // threshold never held the key and needs no resolve (ResolveAsync is idempotent regardless, but
+                // there is no reason to call it). Mirrors the ReArmed branch below: an unguarded, before-commit
+                // resolve is the established idiom in this method.
+                await _notifications.ResolveAsync(StalenessDedupKey(trigger), cancellationToken);
             }
 
             if (decision.ShouldFire && trigger.Route == TriggerRoute.Mechanical)
@@ -851,12 +888,19 @@ public class TriggerEvaluationService
                 break;
 
             case ReviewOutcome.Suppress suppress:
-                // MalformedOutput or InvalidGeometry: logged, no operator notify (fail-closed, not fail-loud).
+                // gh#1042: MalformedOutput -- the model answered, but the response could not be parsed into a
+                // usable proposal. This is a real fault, not the legitimate NotWorthSurfacing silence above, so it
+                // follows the SAME fail-closed-but-NOT-silent posture as every other named arm: the operator is
+                // told a setup fired that needs a manual look. `suppress.Detail` is logged server-side for an
+                // engineer only -- it can carry model-derived text (e.g. an unrecognised parsed field), which
+                // ReviewOutcome.Suggest.Rationale's own doc comment marks untrusted display data, so the advisory
+                // gets the same generic wording as the geometry-rejection arm below rather than echoing it.
                 _logger.LogWarning(
                     "Agent-review trigger {Id} produced no suggestion ({Reason}): {Detail}",
                     trigger.Id,
                     suppress.Reason,
                     suppress.Detail);
+                advisories.Add(ReviewCouldNotBeUsedAdvisory(trigger, dedupKey));
                 break;
         }
 
@@ -909,8 +953,13 @@ public class TriggerEvaluationService
             now, _suggestionValidity, _deadlines.DeadlineFor(InstrumentId.Parse(trigger.Symbol)));
 
         // Layer two below the reviewer: pure geometry sanity. A malformed / hostile proposal that got past the
-        // reviewer is rejected HERE before it can be persisted -- treated as Suppress(InvalidGeometry): log, no
-        // suggestion. (The risk gate is the true backstop below this, at take-time.)
+        // reviewer is rejected HERE before it can be persisted -- treated as Suppress(InvalidGeometry): log AND
+        // (gh#1042) tell the operator. This is the ACTUAL InvalidGeometry failure -- the reviewer itself never
+        // constructs that SuppressReason, so the review.Outcome switch's catch-all arm never sees it; this early
+        // return is the only place a real incoherent proposal is silently dropped today. Same generic wording as
+        // that switch arm: geometryError never contains raw model text (SuggestionGeometry only returns fixed
+        // strings), but staying generic keeps the two arms' operator-facing behaviour identical. (The risk gate is
+        // the true backstop below this, at take-time.)
         string? geometryError = SuggestionGeometry.Validate(
             suggest.Side, suggest.EntryPrice, suggest.StopPrice, suggest.TargetPrice);
         if (geometryError is not null)
@@ -919,6 +968,7 @@ public class TriggerEvaluationService
                 "Agent-review trigger {Id} proposed incoherent geometry ({Reason}); no suggestion staged.",
                 trigger.Id,
                 geometryError);
+            advisories.Add(ReviewCouldNotBeUsedAdvisory(trigger, dedupKey));
             return;
         }
 
@@ -1287,6 +1337,23 @@ public class TriggerEvaluationService
         FormattableString.Invariant($"ai-spend:threshold:{MarketClock.ToMarketTime(now):yyyy-MM-dd}");
 
     private static string DedupKeyFor(TriggerRecord trigger) => $"trigger:{trigger.Id}:{trigger.ArmCycle}";
+
+    // gh#1045: a staleness incident is orthogonal to the arm cycle -- a trigger can go stale while sitting in
+    // ARMED without any fire ever advancing ArmCycle -- so it gets its own key, stable per trigger rather than
+    // per cycle. TriggerStaleness.Track already clears UnmeasurableSince/ReportedAt together on recovery, so a
+    // LATER outage is a fresh domain-level report even though the channel-level key is reused; per ADR-0019 a
+    // key releases its dedup slot once delivered, so reuse across outages is exactly the intended behaviour.
+    private static string StalenessDedupKey(TriggerRecord trigger) => $"trigger:{trigger.Id}:staleness";
+
+    // gh#1042: the one advisory both the MalformedOutput switch arm and the InvalidGeometry geometry-rejection
+    // early-return send -- kept generic and shared so the operator sees identical wording for "the model's
+    // response could not be used" regardless of which of the two failed, and so neither arm is tempted to
+    // re-surface the model's own (untrusted) words to explain why.
+    private static Notification ReviewCouldNotBeUsedAdvisory(TriggerRecord trigger, string dedupKey) => new(
+        NotificationSeverity.Notify,
+        $"Setup needs review — {TitleFor(trigger)}",
+        "A setup fired that needs agent review, but the reviewer's response could not be used. Review it manually.",
+        dedupKey);
 
     private static string TitleFor(TriggerRecord trigger) =>
         $"{trigger.Indicator.ToUpperInvariant()}({trigger.Period}) {trigger.ResolutionMinutes}m "

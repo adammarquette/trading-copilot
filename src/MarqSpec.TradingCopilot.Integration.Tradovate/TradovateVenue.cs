@@ -6,6 +6,7 @@ using MarqSpec.Client.Tradovate;
 using MarqSpec.Client.Tradovate.WebSocket;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Venue;
+using Microsoft.Extensions.Logging;
 using ClientModels = MarqSpec.Client.Tradovate.Api.Models;
 
 namespace MarqSpec.TradingCopilot.Integration.Tradovate;
@@ -24,6 +25,8 @@ public sealed class TradovateVenue : ITradingVenue
 
     private readonly ITradovateApiClient _api;
     private readonly ITradovateWebSocketClient _webSocket;
+    private readonly TradovateQuoteSubscriptions _subscriptions;
+    private readonly ILogger<TradovateVenue> _logger;
     private readonly FirmConventions _conventions;
 
     /// <summary>Creates the adapter over a configured Tradovate client and a firm's conventions.</summary>
@@ -32,20 +35,36 @@ public sealed class TradovateVenue : ITradingVenue
     /// The Tradovate dual-socket WebSocket client — bars (and, later, quotes) ride the market-data socket. A
     /// process-wide singleton (one credential set per process, ADR-0015).
     /// </param>
+    /// <param name="subscriptions">
+    /// The process-wide register of live quote subscriptions, shared with the connection host. Required, not
+    /// optional: a quote stream that does not register itself survives a host-driven reconnect as an open sequence
+    /// that never ticks again, and nothing raises.
+    /// </param>
     /// <param name="conventions">
     /// What the firm behind this login has declared (R-14, gh#60). Tradovate is a brokerage, so these are
     /// <see cref="FirmConventions.ForBrokerage"/> and mode follows the venue's own host.
     /// <see cref="FirmConventions.None"/> resolves every account to <see cref="TradingMode.Undeclared"/> — the
     /// intended failure direction (tradeable nowhere), not an accident.
     /// </param>
-    public TradovateVenue(ITradovateApiClient api, ITradovateWebSocketClient webSocket, FirmConventions conventions)
+    /// <param name="logger">The logger. A dropped socket makes a failed wire unsubscribe the ordinary teardown
+    /// case rather than an error to raise, and a swallow nobody can see is how that stops being observable.</param>
+    public TradovateVenue(
+        ITradovateApiClient api,
+        ITradovateWebSocketClient webSocket,
+        TradovateQuoteSubscriptions subscriptions,
+        ILogger<TradovateVenue> logger,
+        FirmConventions conventions)
     {
         ArgumentNullException.ThrowIfNull(api);
         ArgumentNullException.ThrowIfNull(webSocket);
+        ArgumentNullException.ThrowIfNull(subscriptions);
+        ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(conventions);
 
         _api = api;
         _webSocket = webSocket;
+        _subscriptions = subscriptions;
+        _logger = logger;
         _conventions = conventions;
     }
 
@@ -213,11 +232,23 @@ public sealed class TradovateVenue : ITradingVenue
         // Attach the handler BEFORE subscribing, so a tick published between the subscribe and the first read is not
         // lost. Registration and cleanup share this iterator's lifecycle: detach + unsubscribe on every exit
         // (cancellation included), so an abandoned stream cannot leave a handler and a filling channel behind.
+        // The register -- not this method -- owns the wire subscribe and unsubscribe, because a claim and the wire
+        // call it implies have to be one indivisible step: two consumers of the same contract otherwise race, and
+        // the loser's late unsubscribe silently kills the winner's feed with nothing left to notice it (the client
+        // forgets the key before sending, and the socket stays Connected, so neither replay path covers it).
         string subscribeKey = contractId.ToString(CultureInfo.InvariantCulture);
+        bool holding = false;
+
         _webSocket.QuoteReceived += OnQuote;
         try
         {
-            await _webSocket.SubscribeQuoteAsync(subscribeKey, cancellationToken);
+            // Acquiring registers the claim BEFORE the wire subscribe, so a reconnect the connection host drives in
+            // between still replays this contract; the manual connect path replays what is here, not what the client
+            // remembers. A subscribe that throws rolls the claim back, so `holding` stays false and the teardown
+            // below cannot decrement another consumer's count.
+            await _subscriptions.AcquireAsync(
+                subscribeKey, token => _webSocket.SubscribeQuoteAsync(subscribeKey, token), cancellationToken);
+            holding = true;
 
             await foreach (Quote quote in quotes.Reader.ReadAllAsync(cancellationToken))
             {
@@ -227,7 +258,34 @@ public sealed class TradovateVenue : ITradingVenue
         finally
         {
             _webSocket.QuoteReceived -= OnQuote;
-            await _webSocket.UnsubscribeQuoteAsync(subscribeKey, CancellationToken.None);
+
+            if (holding)
+            {
+                await ReleaseSafelyAsync(subscribeKey);
+            }
+        }
+    }
+
+    // Teardown very often happens BECAUSE the socket dropped, and the client refuses to send on a dead transport --
+    // so a failed unsubscribe here is the ordinary case, not an error to surface: a consumer disposing its stream
+    // must not be handed the venue's transport fault. It is not silent, though. The client removes its own record
+    // of the key before it sends, so a failure leaves the contract subscribed at the venue with nothing consuming
+    // it and nothing that will ever take it down -- wasted bandwidth rather than a safety problem, but the only
+    // trace it leaves is this log line.
+    private async Task ReleaseSafelyAsync(string subscribeKey)
+    {
+        try
+        {
+            await _subscriptions.ReleaseAsync(
+                subscribeKey, () => _webSocket.UnsubscribeQuoteAsync(subscribeKey, CancellationToken.None));
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning(
+                error,
+                "Unsubscribing the Tradovate quote feed for contract {Contract} failed while a stream was torn "
+                + "down; the contract may stay subscribed at the venue with nothing consuming it.",
+                subscribeKey);
         }
     }
 
