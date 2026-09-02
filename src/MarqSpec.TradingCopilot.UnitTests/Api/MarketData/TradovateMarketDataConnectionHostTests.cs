@@ -61,6 +61,9 @@ public class TradovateMarketDataConnectionHostTests : TradovateSocketConnectionH
         services.AddSingleton(Client);
 
     /// <inheritdoc />
+    protected override string SocketNameUnderTest => "market-data";
+
+    /// <inheritdoc />
     protected override void ArrangeSocketState(Func<ClientModels.ConnectionState> read) =>
         A.CallTo(() => Client.MarketDataState).ReturnsLazily(read);
 

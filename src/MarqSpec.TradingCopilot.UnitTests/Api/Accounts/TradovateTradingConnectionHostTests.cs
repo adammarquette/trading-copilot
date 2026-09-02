@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using FakeItEasy;
+using MarqSpec.Client.Tradovate;
 using MarqSpec.Client.Tradovate.Authentication;
 using MarqSpec.Client.Tradovate.Exceptions;
 using MarqSpec.Client.Tradovate.WebSocket;
 using MarqSpec.TradingCopilot.Api.Accounts;
+using MarqSpec.TradingCopilot.Integration.Tradovate;
 using MarqSpec.TradingCopilot.UnitTests.Api.Venues;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -46,11 +48,19 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
 {
     private const long UserId = 42;
 
+    private const long AuthMeUserId = 4242;
+
     private readonly IAuthenticationService _authentication = A.Fake<IAuthenticationService>();
+
+    private readonly ITradovateApiClient _apiClient = A.Fake<ITradovateApiClient>();
+
+    private readonly TradovateTradingSocketSync _sync = new();
 
     public TradovateTradingConnectionHostTests()
     {
         A.CallTo(() => _authentication.GetUserIdAsync(A<CancellationToken>._)).Returns<long?>(UserId);
+        A.CallTo(() => _apiClient.GetAuthMeAsync(A<CancellationToken>._))
+            .Returns(new ClientModels.AuthMe { UserId = AuthMeUserId });
     }
 
     /// <inheritdoc />
@@ -64,6 +74,8 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
     {
         services.AddSingleton(Client);
         services.AddSingleton(_authentication);
+        services.AddSingleton(_apiClient);
+        services.AddSingleton(_sync);
     }
 
     /// <inheritdoc />
@@ -73,6 +85,9 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
     /// </remarks>
     protected override void RegisterWithoutARequiredCollaborator(ServiceCollection services) =>
         services.AddSingleton(Client);
+
+    /// <inheritdoc />
+    protected override string SocketNameUnderTest => "trading";
 
     /// <inheritdoc />
     protected override void ArrangeSocketState(Func<ClientModels.ConnectionState> read) =>
@@ -447,7 +462,7 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
     }
 
     [Fact]
-    public async Task ExecuteAsync_ShouldKeepRetrying_AndNotSync_WhenTheAuthenticatedUserIdIsUnavailable()
+    public async Task ExecuteAsync_ShouldKeepRetrying_AndNotSync_WhenNeitherSourceReportsAnAuthenticatedUserId()
     {
         // Without the user id there is no sync request to build. The failure direction is "keep trying and stay
         // loud" rather than "give up quietly": the id comes from the token response, so a later renewal can supply
@@ -464,6 +479,8 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
 
             return Task.FromResult<long?>(null);
         });
+        A.CallTo(() => _apiClient.GetAuthMeAsync(A<CancellationToken>._))
+            .Returns(new ClientModels.AuthMe { UserId = null });
 
         BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
@@ -472,5 +489,200 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
         await StopAsync(host);
 
         AssertNeverDidPostConnectWork();
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // The user id has two sources, because the primary one can simply be missing (gh#1051).
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldSyncWithTheUserIdFromAuthMe_WhenTheTokenResponseOmittedIt()
+    {
+        // The path that used to be terminal. GetUserIdAsync returns null when the server omitted the id from the
+        // token response — no failure, no exception — which is exactly the case the client's own reconnect answers
+        // by skipping its sync and reporting Connected anyway. A host with only that source loops on it forever
+        // over a connected, silent socket. /auth/me returns the same id from a different endpoint, so the omission
+        // stops being terminal.
+        TaskCompletionSource synced = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        SocketIs(ClientModels.ConnectionState.Connected);
+        A.CallTo(() => _authentication.GetUserIdAsync(A<CancellationToken>._)).Returns<long?>(null);
+        SyncRaisesCompletion(() => synced.TrySetResult());
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Signalled(synced)).Should().BeTrue("a token response without a user id is not the end of the road");
+        await StopAsync(host);
+
+        A.CallTo(() => Client.SyncRequestAsync(
+                A<ClientModels.SyncRequest>.That.Matches(
+                    request => request.Users.SequenceEqual(new[] { AuthMeUserId })),
+                A<CancellationToken>._))
+            .MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotAskAuthMe_WhenTheTokenResponseAlreadyCarriesTheUserId()
+    {
+        // The fallback is a fallback. Asking /auth/me on every sync would put a REST round trip on the ordinary
+        // path — and on a venue whose usual failure mode is a rate limit, spending a request to learn something
+        // already in hand is how the sync that matters gets refused.
+        TaskCompletionSource synced = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        SocketIs(ClientModels.ConnectionState.Connected);
+        SyncRaisesCompletion(() => synced.TrySetResult());
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Signalled(synced)).Should().BeTrue();
+        await StopAsync(host);
+
+        A.CallTo(() => _apiClient.GetAuthMeAsync(A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotSync_WhenAuthMeReportedAnErrorAlongsideAUserId()
+    {
+        // Tradovate reports REST failures in the BODY rather than the status, so a 200 carrying ErrorText is a
+        // failure and the id beside it is not to be trusted. Syncing on it would subscribe the socket to the wrong
+        // user, which returns an empty snapshot and subscribes nothing — the same silent socket, with a successful
+        // call behind it.
+        int reads = 0;
+        TaskCompletionSource asked = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        SocketIs(ClientModels.ConnectionState.Connected);
+        A.CallTo(() => _authentication.GetUserIdAsync(A<CancellationToken>._)).Returns<long?>(null);
+        A.CallTo(() => _apiClient.GetAuthMeAsync(A<CancellationToken>._)).ReturnsLazily(() =>
+        {
+            if (Interlocked.Increment(ref reads) >= 2)
+            {
+                asked.TrySetResult();
+            }
+
+            return Task.FromResult(new ClientModels.AuthMe { ErrorText = "not authorized", UserId = AuthMeUserId });
+        });
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Signalled(asked)).Should().BeTrue("a rejected /auth/me is retried, not settled into");
+        await StopAsync(host);
+
+        AssertNeverDidPostConnectWork();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldStillSync_WhenReadingTheTokenResponsesUserIdThrows()
+    {
+        // A failing token service must not mean an unsyncable socket: the id is available from a second endpoint,
+        // so the fallback covers a throw for the same reason it covers a null.
+        TaskCompletionSource synced = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        SocketIs(ClientModels.ConnectionState.Connected);
+        A.CallTo(() => _authentication.GetUserIdAsync(A<CancellationToken>._))
+            .Throws(new InvalidOperationException("the token service is unreachable (test)"));
+        SyncRaisesCompletion(() => synced.TrySetResult());
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Signalled(synced)).Should().BeTrue();
+        await StopAsync(host);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // A completion that lands after a fresh connect (gh#1051).
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldSyncAgain_WhenTheSocketReconnectedWhileTheHostsOwnSyncWasStillInFlight()
+    {
+        // The third path gh#1051 records. The client fails every request still PENDING as it rebuilds the transport,
+        // but a response its receive loop has already dispatched resolves regardless — so a sync started on one
+        // connection can complete after a fresh one has re-armed the need. A host that cleared on that completion
+        // would leave the NEW connection connected, authorized and silent for the life of the process, and nothing
+        // would ever revisit it because the socket reports Connected throughout.
+        //
+        // Written to fail against the unconditional clear: the reconnect and the completion are raised in that order
+        // from inside the sync call, which is exactly where the real client raises both.
+        int syncs = 0;
+        int raced = 0;
+        TaskCompletionSource resynced = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        SocketIs(ClientModels.ConnectionState.Connected);
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+            .ReturnsLazily(() =>
+            {
+                if (Interlocked.Exchange(ref raced, 1) == 0)
+                {
+                    // The transport was rebuilt underneath this request, and the new connection carries no entity
+                    // subscription — while this request's own answer is already on its way back.
+                    RaiseConnected(tradingSocket: true);
+                }
+
+                RaiseSyncCompleted();
+                if (Interlocked.Increment(ref syncs) == 2)
+                {
+                    resynced.TrySetResult();
+                }
+
+                return Task.FromResult(new ClientModels.SyncResult());
+            });
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Signalled(resynced)).Should()
+            .BeTrue("a snapshot for a connection that no longer exists does not sync the one that replaced it");
+        await StopAsync(host);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // The synced state is a fact something else can read (gh#1051).
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldPublishThatTheSocketIsSynced_OnceASnapshotHasLanded()
+    {
+        // TradingState reports Connected whether or not the socket was ever subscribed, so this is the ONLY thing
+        // that lets TradovateAccountEventStream tell a silent socket from a quiet account. The host holding the
+        // answer privately — which is what it did before — is the same information loss one layer in.
+        TaskCompletionSource synced = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        SocketIs(ClientModels.ConnectionState.Connected);
+        SyncRaisesCompletion(() => synced.TrySetResult());
+        _sync.IsSynced.Should().BeFalse("nothing has synced this socket yet");
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Signalled(synced)).Should().BeTrue();
+        await StopAsync(host);
+
+        _sync.IsSynced.Should().BeTrue("the snapshot landed, so entity frames are flowing");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldPublishThatTheSocketIsNotSynced_WhileTheSyncKeepsFailing()
+    {
+        // The half that matters. A consumer that read "synced" off a socket whose sync has never landed would open a
+        // stream over it and report a quiet account — which is the one thing auto-flatten must never be told.
+        TaskCompletionSource attempted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int attempts = 0;
+        SocketIs(ClientModels.ConnectionState.Connected);
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+            .ReturnsLazily<Task<ClientModels.SyncResult>>(() =>
+            {
+                if (Interlocked.Increment(ref attempts) >= 2)
+                {
+                    attempted.TrySetResult();
+                }
+
+                throw new TradovateRateLimitException("the venue rate-limited the sync (test)");
+            });
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Signalled(attempted)).Should().BeTrue();
+        await StopAsync(host);
+
+        _sync.IsSynced.Should().BeFalse("a sync that never landed leaves the socket connected and silent");
     }
 }
