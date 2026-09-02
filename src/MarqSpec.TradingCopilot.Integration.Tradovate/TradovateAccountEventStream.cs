@@ -69,20 +69,33 @@ namespace MarqSpec.TradingCopilot.Integration.Tradovate;
 /// <para>
 /// <b>Connected is not the same as delivering (gh#1051).</b> Tradovate pushes <c>props</c> frames only to a socket
 /// that has completed <c>user/syncrequest</c>, and a socket that is open, authorized and unsynced reports
-/// <c>Connected</c> throughout while delivering nothing at all. This seam therefore refuses on
-/// <see cref="TradovateTradingSocketSync.IsSynced"/> as well as on the connection state: without it, an unsynced
-/// socket is indistinguishable from a quiet account here, which is the one thing auto-flatten must never be told
-/// (R-13, ADR-0019). The register is <b>required</b>, never optional — a seam that silently accepted a null and
-/// defaulted to "assume synced" would be the guard that cannot fail on the thing it names.
+/// <c>Connected</c> throughout while delivering nothing at all. So this stream's silence is only evidence about the
+/// account when the socket underneath it was actually synced, and
+/// <see cref="TradovateTradingSocketSync"/> is what makes that knowable at all. The register is <b>required</b>,
+/// never optional — a seam that accepted a null and defaulted to "assume synced" would be the guard that cannot
+/// fail on the thing it names.
 /// </para>
 /// <para>
-/// <b>What refusing costs, and why it is still the right direction.</b> A stream that starts <i>after</i> the
-/// snapshot landed does not see it, so it seeds its order → account map from live <c>order</c> frames alone. That
-/// window is not created here — the connection host connects and syncs back to back, so a supervisor re-subscribing
-/// over a recovered socket already lands on either side of it by luck — but refusing makes which side deterministic.
-/// The trade is a bounded loss of downtime-fill re-delivery (which gh#193's reconciliation covers, and which a
-/// duplicate snapshot on the next connect re-supplies) against an unbounded silence nothing above could detect. It is
-/// the ADR-0013 direction: fail loudly rather than report a quiet account that is not quiet.
+/// <b>And yet this stream does NOT refuse an unsynced socket — that would be the worse bug.</b>
+/// <see cref="TradovateTradingSocketSync.IsSynced"/> can only become true <i>after</i> <c>SyncCompleted</c> has
+/// already been raised: the client raises it synchronously from inside <c>SyncRequestAsync</c> before that call
+/// returns, and every path that clears the obligation runs from inside that same invocation list. A stream gated on
+/// <c>IsSynced</c> could therefore only ever attach on the far side of the snapshot, which makes <c>OnSync</c>
+/// <b>unreachable</b> — and <c>OnSync</c> is the sole source of the order → account seed for every order predating
+/// the connect, and of the fills that executed while the socket was down, which exist nowhere else. Every
+/// transition off <c>Connected</c> ends the stream, so a re-subscribed one would meet the same wall: the loss would
+/// be permanent rather than occasional. Refusing here would reintroduce, through this card's own fix, the exact
+/// harm it cites as its motivation.
+/// </para>
+/// <para>
+/// <b>What is guarded instead.</b> Two things, neither of which costs the snapshot. The stream ends when the
+/// <i>connection</i> under it is replaced while it is opening — the generation, not the sync state, because a new
+/// connection is legitimately unsynced for a moment and only the generation distinguishes that from a drop nobody
+/// saw. And when the stream ends having opened unsynced and never seen a snapshot, it says so: its silence was not
+/// evidence about the account. A socket that stays up and never syncs is reported by
+/// <c>TradovateSocketConnectionHost</c>'s operator advisory, which is the other half of gh#1051 — the alarm belongs
+/// where something can act on it, not in an exception thrown at a supervisor whose only move is to re-subscribe
+/// into the same state.
 /// </para>
 /// </remarks>
 public sealed class TradovateAccountEventStream : IAccountEventStream
@@ -156,16 +169,16 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
                 + "lifecycle.");
         }
 
-        // Connected is not delivering. Tradovate pushes props frames only to a socket that has completed
-        // user/syncrequest, so an unsynced one is silent while reporting itself healthy -- and a stream opened over
-        // it would be indistinguishable from a quiet account for as long as it lasted (gh#1051).
-        if (!_sync.IsSynced)
-        {
-            throw new TradovateVenueException(
-                "The Tradovate trading socket is connected but has not been synced, so it delivers no order, fill "
-                + "or position event at all; an account-event stream over it would report a quiet account rather "
-                + "than a silent socket (gh#1051). The connection host is retrying the sync.");
-        }
+        // WHICH connection this stream is riding, captured before anything else. Only the generation can show that
+        // the socket under this stream is no longer the one it checked: a drop AND a reconnect both landing in the
+        // window below leave TradingState back at Connected, so the state re-read alone sees nothing (gh#1051).
+        long connection = _sync.Generation;
+
+        // Whether the socket had been synced when this stream opened. NOT a refusal -- see the remarks: refusing
+        // here would put every stream on the far side of the snapshot and make OnSync unreachable. It is recorded so
+        // the stream can say, when it ends, whether it ever rode a socket that was delivering at all.
+        bool openedUnsynced = !_sync.IsSynced;
+        bool sawSnapshot = false;
 
         Channel<AccountEvent> events = Channel.CreateUnbounded<AccountEvent>(new UnboundedChannelOptions
         {
@@ -191,10 +204,11 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         bool socketDropped = false;
 
         // Distinct from socketDropped, and not folded into it, because the two end the stream for different reasons
-        // and the caller is told which. Reporting "the socket left the connected state" for a socket that is up but
-        // unsynced would name the wrong cause, and on a path whose whole justification is that the message IS the
-        // trace, a message that names the wrong cause is a correctness defect rather than a wording one.
-        bool syncLost = false;
+        // and the caller is told which. A socket that was rebuilt underneath this stream never left the connected
+        // state as far as this stream could see, so reporting it as a drop would name the wrong cause -- and on a
+        // path whose whole justification is that the message IS the trace, that is a correctness defect rather than
+        // a wording one.
+        bool connectionReplaced = false;
 
         void Emit(Func<AccountEvent> map, string what)
         {
@@ -334,6 +348,10 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         {
             lock (gate)
             {
+                // This stream has now seen the socket deliver, which is what separates "the account was quiet" from
+                // "this socket was never subscribed to anything" when the stream ends (gh#1051).
+                sawSnapshot = true;
+
                 foreach (ClientModels.Order order in snapshot.Orders)
                 {
                     if (order.Id is { } id)
@@ -411,10 +429,11 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             // throws -- so nothing above would ever notice. That is the "open sequence over a dead socket" this class
             // exists to prevent, arriving through the one window the event subscription cannot cover.
             //
-            // The sync state is re-read for the same reason and closes a window the connection check alone cannot:
-            // a drop AND a reconnect landing in that gap leaves TradingState back at Connected while the new
-            // connection carries no entity subscription at all, so the socket reads healthy and delivers nothing
-            // (gh#1051).
+            // The CONNECTION is re-read for the same reason, and it closes a window the state check alone cannot:
+            // a drop AND a reconnect both landing in that gap leave TradingState back at Connected, so the state
+            // says "healthy" while the socket underneath is a different connection whose drop was raised to nobody.
+            // Only the generation shows it. Deliberately NOT `!IsSynced`: the new connection is legitimately
+            // unsynced for a moment, and refusing on that would refuse the ordinary case too (gh#1051).
             if (_webSocket.TradingState != ClientModels.ConnectionState.Connected)
             {
                 lock (gate)
@@ -423,11 +442,11 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
                     events.Writer.TryComplete();
                 }
             }
-            else if (!_sync.IsSynced)
+            else if (_sync.Generation != connection)
             {
                 lock (gate)
                 {
-                    syncLost = true;
+                    connectionReplaced = true;
                     events.Writer.TryComplete();
                 }
             }
@@ -438,12 +457,12 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             }
 
             bool dropped;
-            bool unsynced;
+            bool replaced;
             int stillHeld;
             lock (gate)
             {
                 dropped = socketDropped;
-                unsynced = syncLost;
+                replaced = connectionReplaced;
                 stillHeld = heldFills.Count;
             }
 
@@ -455,13 +474,13 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
                     + "rather than left open over a dead socket delivering nothing.");
             }
 
-            if (unsynced)
+            if (replaced)
             {
                 throw new TradovateVenueException(
-                    $"The Tradovate trading socket reconnected without being synced, with {stillHeld} fill(s) still "
-                    + "awaiting the order that names their account; it delivers no entity frame at all until the "
-                    + "connection host syncs it, so the account-event stream ended rather than reporting a quiet "
-                    + "account over a silent socket (gh#1051).");
+                    $"The Tradovate trading socket was replaced by a new connection while this stream was opening, "
+                    + $"with {stillHeld} fill(s) still awaiting the order that names their account; the drop was "
+                    + "raised before this stream's handler existed, so it ended rather than sitting open over a "
+                    + "connection it never subscribed to (gh#1051).");
             }
         }
         finally
@@ -473,9 +492,26 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             _webSocket.ConnectionStatusChanged -= OnConnectionStatusChanged;
 
             int abandoned;
+            bool neverDelivered;
             lock (gate)
             {
                 abandoned = heldFills.Count;
+                neverDelivered = openedUnsynced && !sawSnapshot;
+            }
+
+            if (neverDelivered)
+            {
+                // The fact gh#1051 exists to make readable, reported at the one moment it is unambiguous. This
+                // stream opened over a socket that had never been synced and no snapshot landed while it was open,
+                // so Tradovate pushed it no props frame at all: its silence is NOT evidence of a quiet account, and
+                // a caller that treated it as one would be reading a position the platform cannot see. The stream
+                // is NOT refused for this -- refusing at the top would put every stream on the far side of the
+                // snapshot and make the OnSync handler above unreachable, losing the outage fills it exists to
+                // recover. The connection host escalates the same condition to the operator.
+                _logger.LogWarning(
+                    "The Tradovate account-event stream ended having never received a sync snapshot over a socket "
+                    + "that was unsynced when it opened. Tradovate delivers entity frames only to a synced socket, "
+                    + "so nothing this stream did or did not report is evidence about the account.");
             }
 
             if (abandoned > 0)

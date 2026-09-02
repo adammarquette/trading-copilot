@@ -135,12 +135,14 @@ public sealed class TradovateTradingConnectionHost : TradovateSocketConnectionHo
     /// <param name="logger">The logger.</param>
     /// <param name="pollInterval">How often the socket's state is sampled.</param>
     /// <param name="maxBackoff">The ceiling the backoff doubles up to.</param>
+    /// <param name="degradedGrace">How long the socket must not deliver before the operator is told.</param>
     internal TradovateTradingConnectionHost(
         IServiceProvider services,
         ILogger<TradovateTradingConnectionHost> logger,
         TimeSpan pollInterval,
-        TimeSpan maxBackoff)
-        : base(services, logger, pollInterval, maxBackoff)
+        TimeSpan maxBackoff,
+        TimeSpan degradedGrace)
+        : base(services, logger, pollInterval, maxBackoff, degradedGrace)
     {
     }
 
@@ -234,15 +236,17 @@ public sealed class TradovateTradingConnectionHost : TradovateSocketConnectionHo
     /// A host-driven connect authorizes the socket and sends nothing else, so the sync is owed with <b>no grace</b>:
     /// nothing in the process will ever send it otherwise, and until it lands the socket is connected and silent.
     /// </remarks>
-    protected override Task<bool> SettleAfterHostDrivenConnectAsync(
+    protected override async Task<SocketPassOutcome> SettleAfterHostDrivenConnectAsync(
         ITradovateWebSocketClient client, CancellationToken cancellationToken)
     {
         Sync.RequireSync();
-        return SyncAsync(client, cancellationToken);
+        return await SyncAsync(client, cancellationToken)
+            ? SocketPassOutcome.Delivering
+            : SocketPassOutcome.StillOwed;
     }
 
     /// <inheritdoc />
-    protected override async Task<bool> SettleConnectedSocketAsync(
+    protected override async Task<SocketPassOutcome> SettleConnectedSocketAsync(
         ITradovateWebSocketClient client, CancellationToken cancellationToken)
     {
         switch (Sync.Obligation)
@@ -250,16 +254,25 @@ public sealed class TradovateTradingConnectionHost : TradovateSocketConnectionHo
             case TradovateSyncObligation.Pending:
                 // Somebody else connected it. The client's own reconnect syncs in the statement after it reports
                 // Connected, so give that one pass rather than duplicating a full snapshot; if it never lands, the
-                // next pass sends ours. Nothing is owed on the WIRE this pass, so the cadence stays at the poll
-                // interval rather than backing off.
+                // next pass sends ours.
+                //
+                // WAITING, not Delivering, and the distinction is the whole reason the outcome is not a bool
+                // (gh#1051 review). Nothing is owed on the WIRE this pass, so the cadence must stay at the poll
+                // interval rather than backing off -- but this pass has PROVED the socket is unsynced, so it is the
+                // last pass that may be read as an all-clear. Reporting it as one let a socket reconnecting faster
+                // than the advisory's grace close its own incident and reset the clock forever: connected,
+                // degraded, and nobody told.
                 Sync.PromoteGraceToDue();
-                return true;
+                return SocketPassOutcome.Waiting;
 
             case TradovateSyncObligation.Due:
-                return await SyncAsync(client, cancellationToken);
+                return await SyncAsync(client, cancellationToken)
+                    ? SocketPassOutcome.Delivering
+                    : SocketPassOutcome.StillOwed;
 
             default:
-                return true;
+                // A snapshot has landed for this connection, so entity frames are flowing.
+                return SocketPassOutcome.Delivering;
         }
     }
 
@@ -289,6 +302,12 @@ public sealed class TradovateTradingConnectionHost : TradovateSocketConnectionHo
     // never "give up": a socket that is up and unsynced is the silent one.
     private async Task<bool> SyncAsync(ITradovateWebSocketClient client, CancellationToken cancellationToken)
     {
+        // Captured BEFORE the user id is resolved, not just before the send. Resolving it can run a REST round trip
+        // to /auth/me, and a reconnect landing in THAT gap is just as much "this answer is about a connection that
+        // no longer exists" as one landing during the send -- so binding only the send would leave the clear below
+        // refusing on the "from Due only" rule and logging a cause that was not the cause (gh#1051 review).
+        long generation = Sync.Generation;
+
         if (await ResolveUserIdAsync(cancellationToken) is not { } userId)
         {
             // Both sources came back empty. The id comes from the token response, so a later renewal can still
@@ -301,10 +320,10 @@ public sealed class TradovateTradingConnectionHost : TradovateSocketConnectionHo
             return false;
         }
 
-        // Taken BEFORE the request goes out, so the snapshot is bound to the connection it was asked for. A
-        // reconnect that lands while this is in flight moves the generation on, and the clear below then refuses --
-        // leaving the need armed for the new connection rather than cleared by the old one's answer.
-        long generation = Sync.BeginHostSync();
+        // Marks a HOST sync in flight, so a completion raised while it runs is left to the connection-bound clear
+        // below rather than taken at face value by the event handler. The generation it returns is the same one
+        // captured above; the earlier capture is the binding, this is the discriminator.
+        Sync.BeginHostSync();
         try
         {
             await client.SyncRequestAsync(

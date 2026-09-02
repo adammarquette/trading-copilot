@@ -65,9 +65,13 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
 
     /// <inheritdoc />
     protected override BackgroundService CreateHost(
-        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff) =>
+        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff, TimeSpan degradedGrace) =>
         new TradovateTradingConnectionHost(
-            services, NullLogger<TradovateTradingConnectionHost>.Instance, pollInterval, maxBackoff);
+            services,
+            NullLogger<TradovateTradingConnectionHost>.Instance,
+            pollInterval,
+            maxBackoff,
+            degradedGrace);
 
     /// <inheritdoc />
     protected override void Register(ServiceCollection services)
@@ -80,8 +84,11 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
 
     /// <inheritdoc />
     /// <remarks>
-    /// The authentication service is the collaborator: without the user id there is no sync request to build, and a
-    /// socket this host connected but could never sync is the silent one it exists to prevent.
+    /// This host has <b>three</b> required collaborators — the authentication service, the REST client behind the
+    /// <c>/auth/me</c> fallback, and the sync register nothing above could read without. Dropping all three at once
+    /// satisfies the shared contract's stand-down test through whichever guard happens to run first, so it proves
+    /// only that <i>some</i> guard exists; each one is pinned separately by
+    /// <c>ExecuteAsync_ShouldNotDriveTheSocket_WhenExactlyOneCollaboratorIsMissing</c>.
     /// </remarks>
     protected override void RegisterWithoutARequiredCollaborator(ServiceCollection services) =>
         services.AddSingleton(Client);
@@ -449,7 +456,8 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
             Registered(),
             NullLogger<TradovateTradingConnectionHost>.Instance,
             pollInterval: TimeSpan.FromMilliseconds(1),
-            maxBackoff: ceiling);
+            maxBackoff: ceiling,
+            degradedGrace: DegradedGrace);
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(retried)).Should().BeTrue("a re-armed sync must keep being retried");
@@ -685,4 +693,91 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
 
         _sync.IsSynced.Should().BeFalse("a sync that never landed leaves the socket connected and silent");
     }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // The grace pass is not an all-clear (gh#1051 review, finding 2).
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotResolveTheAdvisory_WhenASocketThatKeepsReconnectingIsStillUnsynced()
+    {
+        // The false all-clear. The grace pass sends nothing on the wire, so it must not charge the backoff -- and
+        // the first version of this change reported that as "the socket owes nothing", which the shared loop reads
+        // as an all-clear. A socket that reconnects at least once per grace therefore closed its own incident and
+        // reset the outage clock forever: connected, degraded, and nobody told, which is the exact state this card
+        // was filed for, reintroduced by the card's own fix.
+        //
+        // Here the socket reconnects continuously and the sync never lands, so EVERY pass is either the grace pass
+        // or a failed sync. Nothing is ever delivering, so nothing may ever be resolved.
+        SocketReadsAs(_ =>
+        {
+            // A fresh connection on every pass -- the venue closing shortly after `authorize`, or the client's own
+            // silence-timeout reconnect loop.
+            RaiseConnected(tradingSocket: true);
+            return ClientModels.ConnectionState.Connected;
+        });
+        A.CallTo(() => Client.SyncRequestAsync(A<ClientModels.SyncRequest>._, A<CancellationToken>._))
+            .ReturnsLazily<Task<ClientModels.SyncResult>>(
+                () => throw new TradovateRateLimitException("the venue rate-limited the sync (test)"));
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+
+        (await Notifications.Sent(1)).Should()
+            .BeTrue("a socket that reconnects forever and never syncs must still reach the operator");
+        await Task.Delay(DegradedGrace * 3);
+        await StopAsync(host);
+
+        Notifications.Resolutions.Should()
+            .BeEmpty("a grace pass has PROVED the socket is unsynced; it is the last pass that may read as healthy");
+        _sync.IsSynced.Should().BeFalse("nothing ever synced this socket");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Each fail-safe collaborator guard stands the host down on its own (gh#1051 review, finding 3).
+    // ---------------------------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData("authentication")]
+    [InlineData("api-client")]
+    [InlineData("sync-register")]
+    public async Task ExecuteAsync_ShouldNotDriveTheSocket_WhenExactlyOneCollaboratorIsMissing(string missing)
+    {
+        // Per-collaborator, because the shared contract's stand-down test drops all three at once -- so the
+        // pre-existing authentication guard satisfied it alone and either new guard could be deleted with the suite
+        // still green. The sync-register one in particular is what keeps the Sync property from throwing on every
+        // pass; the api-client one is what keeps a token response without a user id from being terminal.
+        //
+        // Each case registers the client and the OTHER two, so the only thing that can stand the host down is the
+        // guard under test.
+        ServiceCollection services = new();
+        services.AddSingleton(Client);
+        if (missing != "authentication")
+        {
+            services.AddSingleton(_authentication);
+        }
+
+        if (missing != "api-client")
+        {
+            services.AddSingleton(_apiClient);
+        }
+
+        if (missing != "sync-register")
+        {
+            services.AddSingleton(_sync);
+        }
+
+        SocketIs(ClientModels.ConnectionState.Disconnected);
+        BackgroundService host = Host(services.BuildServiceProvider(
+            new ServiceProviderOptions { ValidateScopes = true }));
+
+        await host.StartAsync(CancellationToken.None);
+
+        (await RanToCompletion(host.ExecuteTask!)).Should()
+            .BeTrue("standing down means the run ENDS — a host that fell through to the poll loop hangs here");
+        await StopAsync(host);
+
+        AssertNeverConnected();
+    }
+
 }

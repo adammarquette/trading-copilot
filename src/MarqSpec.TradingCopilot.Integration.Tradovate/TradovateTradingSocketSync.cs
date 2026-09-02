@@ -90,6 +90,17 @@ public sealed class TradovateTradingSocketSync
     public TradovateSyncObligation Obligation => (TradovateSyncObligation)Volatile.Read(ref _obligation);
 
     /// <summary>
+    /// Gets which connection the socket currently holds — a counter bumped on every transition into
+    /// <c>Connected</c>, so two reads that differ mean the transport was rebuilt in between.
+    /// </summary>
+    /// <remarks>
+    /// Only ever compared for equality. A reader uses it to notice that the socket underneath it is no longer the
+    /// one it checked, which the connection <i>state</i> cannot show: a drop and a reconnect landing in the same
+    /// window leave that state back at <c>Connected</c> with nothing to distinguish it.
+    /// </remarks>
+    public long Generation => Volatile.Read(ref _generation);
+
+    /// <summary>
     /// Records a transition <b>into</b> <c>Connected</c>: a new connection carries no entity subscription, so the
     /// obligation is re-armed with one pass of grace whoever drove the connect.
     /// </summary>

@@ -44,9 +44,13 @@ public class TradovateMarketDataConnectionHostTests : TradovateSocketConnectionH
 
     /// <inheritdoc />
     protected override BackgroundService CreateHost(
-        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff) =>
+        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff, TimeSpan degradedGrace) =>
         new TradovateMarketDataConnectionHost(
-            services, NullLogger<TradovateMarketDataConnectionHost>.Instance, pollInterval, maxBackoff);
+            services,
+            NullLogger<TradovateMarketDataConnectionHost>.Instance,
+            pollInterval,
+            maxBackoff,
+            degradedGrace);
 
     /// <inheritdoc />
     protected override void Register(ServiceCollection services)
