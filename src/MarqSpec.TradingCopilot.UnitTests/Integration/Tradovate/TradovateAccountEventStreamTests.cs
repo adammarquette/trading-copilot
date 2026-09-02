@@ -471,6 +471,31 @@ public class TradovateAccountEventStreamTests
     }
 
     [Fact]
+    public async Task StreamAsync_ShouldNeverEmitTheEvictedFill_WhenItsOrderFinallyArrives()
+    {
+        // Round-2 review, and the pattern behind it: every eviction assertion in this file had been written against
+        // what SURVIVES, and a survivor assertion is satisfiable by discarding something else. `RemoveLast()` passed
+        // all 38 tests -- it drops fill 1511, which no survivor assertion happened to name.
+        //
+        // A discard is only pinned by asserting on what is GONE. Order 5000 names the evicted fill 1000; nothing
+        // must come out for it. The position after it is the marker that proves the absence rather than a race:
+        // if fill 1000 were still held, it would be released ahead of the position.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        for (int i = 0; i <= HoldCap; i++)
+        {
+            _webSocket.RaiseFill(Fill(id: 1000 + i, order: 5000 + i));
+        }
+
+        _webSocket.RaiseOrder(Order(id: 5000, account: 9001, ClientModels.OrderStatus.Working));
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        (await reader.NextAsync()).Should().BeOfType<OrderStateEvent>();
+        (await reader.NextAsync()).Should().BeOfType<PositionEvent>(
+            "fill 1000 was evicted, so its order arriving must release nothing");
+    }
+
+    [Fact]
     public async Task StreamAsync_ShouldNotEvictAnything_WhileTheHoldBufferIsWithinItsCap()
     {
         // The paired half: an eviction that fired early would silently discard executions that were never at risk.
@@ -487,8 +512,11 @@ public class TradovateAccountEventStreamTests
     [Fact]
     public async Task StreamAsync_ShouldStillReleaseTheSurvivingHeldFills_AfterAnEviction()
     {
-        // An eviction must cost exactly the evicted fill. A cap that cleared the buffer, or evicted the NEWEST, would
-        // lose executions that were still attributable.
+        // The other half of the pair: the test above pins what is GONE, this one pins that nothing ELSE went with it.
+        // Neither alone is enough -- a survivor assertion is satisfiable by discarding something it does not name
+        // (which is how `RemoveLast()` survived), and a gone-assertion alone is satisfiable by discarding the whole
+        // buffer. Both ends of the surviving range are checked, because a middle survivor is what a `Clear()` mutant
+        // takes and the newest is what it cannot (it is added after the eviction).
         await using Reader reader = Start(CreateStream(), [Account(9001)]);
 
         for (int i = 0; i <= HoldCap; i++)

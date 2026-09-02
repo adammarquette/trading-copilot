@@ -249,13 +249,20 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             // nothing could size, and the eviction below is loud precisely because it is the case that loses truth.
             if (heldFills.Count >= MaxHeldFills)
             {
-                ClientModels.Fill evicted = heldFills.First!.Value;
-                heldFills.RemoveFirst();
+                // Take the NODE, remove THAT node, and log from ITS value. Reading `First` and calling
+                // `RemoveFirst()` as two separate statements leaves nothing binding them: change which end goes
+                // and the log still names the old end, so the one trace that an execution was discarded would
+                // name a fill still sitting in the buffer while the fill actually lost went unnamed. On a branch
+                // whose entire justification is that the log IS the trace, that is a correctness hazard, not a
+                // coverage gap. Bound this way, any change to which node is removed also changes what is logged,
+                // so the whole class of mutation stops being expressible rather than merely being tested for.
+                LinkedListNode<ClientModels.Fill> oldest = heldFills.First!;
+                heldFills.Remove(oldest);
                 _logger.LogError(
                     "Holding {Held} Tradovate fills whose order has never arrived; dropping the oldest (fill "
                     + "{Fill} on order {Order}) to bound the buffer. That execution is lost to the journal, so "
                     + "the day's realized P&L will under-report until it is reconciled from the venue.",
-                    heldFills.Count + 1, evicted.Id, evicted.OrderId);
+                    heldFills.Count + 1, oldest.Value.Id, oldest.Value.OrderId);
             }
 
             heldFills.AddLast(fill);
@@ -300,6 +307,16 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
 
                 // Then the snapshot's own fills, by the same attribution rule: an execution that landed while the
                 // socket was down exists NOWHERE else, and one this snapshot cannot name is held rather than guessed.
+                //
+                // These two sources are NOT disjoint, and the release above does not make them so. Tradovate can
+                // push a `props` fill frame from the moment it processes `user/syncrequest` -- before the client
+                // raises SyncCompleted, while the map is still empty -- so that fill is held, released here, and
+                // then delivered a second time from the snapshot. Emitting it twice is the deliberate cost of the
+                // idempotency this whole carve-out rests on: `ProcessFillAsync` dedupes on the unique
+                // { OrderId, VenueFillKey } index and `ProcessFlatAsync` on the unique ClosingFillId, so the
+                // duplicate costs one redundant round trip, never a double-counted execution. Suppressing it would
+                // need this stream to remember every fill it has emitted -- unbounded state to avoid a cost the
+                // layer below already absorbs.
                 foreach (ClientModels.Fill fill in snapshot.Fills)
                 {
                     AttributeOrHold(fill);

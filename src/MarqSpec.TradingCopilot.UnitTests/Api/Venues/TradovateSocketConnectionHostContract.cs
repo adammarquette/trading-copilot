@@ -213,10 +213,22 @@ public abstract class TradovateSocketConnectionHostContract
         // absolute 750ms, and six Task.Delay round trips do not fit in 750ms on a loaded CI runner: Windows' default
         // timer tick alone is ~15.6ms, and the suite runs thousands of tests in parallel collections. It reddened on
         // two consecutive runs of #1069, which adds tests to this assembly, and passed every time in isolation.
-        // Raising the ceiling scales the budget with the thing it is measuring instead of against wall-clock luck:
-        // the correct path still costs ~63ms of backoff (1+2+4+8+16+32), the broken path still costs ~6s, and the 3s
-        // window sits an order of magnitude from both. The pre-recovery walk is unaffected -- it doubles from the
-        // 1ms poll interval and never reaches the ceiling in eight failures (~255ms).
+        // Raising the ceiling scales the budget with the thing it is measuring instead of against wall-clock luck.
+        // The pre-recovery walk is unaffected -- it doubles from the 1ms poll interval and never reaches the ceiling
+        // in eight failures (~255ms), leaving the backoff at 256ms when the connect recovers.
+        //
+        // THE MARGIN IS SMALLER THAN IT LOOKS, AND IT IS A CLIFF. Measured at this ceiling, the mutant that deletes
+        // the reset fails at 3s 838ms against the 3s threshold -- 838ms of margin, about 1.28x. NOT an order of
+        // magnitude; that is true only of the correct path (~63ms of backoff against a 3s budget). The broken path
+        // costs min(256,C) + min(512,C) + min(1024,C) + 2*min(2048,C) against a threshold of 3C, so for
+        // 512 < C <= 1024 the margin is a flat 768ms however high C goes, and above 1024ms it SHRINKS linearly as
+        // (1792 - C), reaching zero at C = 1792ms. So 1s sits at the top of the flat region with the full margin,
+        // and anyone raising this further is walking toward an edge at ~1.79s where the guard silently stops killing
+        // its mutant. Do not reach for this lever again without re-running that mutation.
+        //
+        // Why the cheap fix is nonetheless sound rather than a coin flip: a slow runner inflates the BROKEN path
+        // further past the threshold, so the measured kill is a floor, not an average. All of the flakiness risk
+        // sits on the correct-path side -- which is exactly the side this widens.
         //
         // This is the cheap fix, and it is the weak one: the test still measures the runner. Asserting on the retry
         // COUNT inside one ceiling, or driving the loop from an injected TimeProvider, is what makes it
