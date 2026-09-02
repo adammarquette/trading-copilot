@@ -84,8 +84,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
       onFill: (fill) => fillSubs.current.forEach((handler) => handler(fill)),
       onSuggestion: (suggestion) =>
         suggestionSubs.current.forEach((handler) => handler(suggestion)),
-      onChatMessage: (message) =>
-        chatMessageSubs.current.forEach((handler) => handler(message)),
+      onChatMessage: (message) => chatMessageSubs.current.forEach((handler) => handler(message)),
       onChatChunk: (chunk) => chatChunkSubs.current.forEach((handler) => handler(chunk)),
       onGap: () => resyncSubs.current.forEach((handler) => handler()),
       onResynced: () => resyncSubs.current.forEach((handler) => handler()),

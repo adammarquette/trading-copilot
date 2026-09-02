@@ -57,7 +57,9 @@ describe('createConversation', () => {
   });
 
   it('surfaces an over-length title as a refusal, not a fabricated conversation', async () => {
-    stubFetch(() => Promise.resolve(response(400, { error: 'Title must be at most 256 characters.' })));
+    stubFetch(() =>
+      Promise.resolve(response(400, { error: 'Title must be at most 256 characters.' })),
+    );
 
     const result = await createConversation('x'.repeat(300));
 
@@ -68,9 +70,7 @@ describe('createConversation', () => {
 
 describe('listConversations', () => {
   it('reads /conversations and unwraps the envelope to the conversation array', async () => {
-    const mock = stubFetch(() =>
-      Promise.resolve(response(200, { conversations: [CONVERSATION] })),
-    );
+    const mock = stubFetch(() => Promise.resolve(response(200, { conversations: [CONVERSATION] })));
 
     const result = await listConversations();
 

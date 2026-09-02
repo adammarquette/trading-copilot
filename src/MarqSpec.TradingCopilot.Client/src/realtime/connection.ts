@@ -110,9 +110,7 @@ export function createRealtimeConnection(
     hub.on(RealtimeMethod.ChatMessage, (message: RealtimeChatMessage) =>
       callbacks.onChatMessage?.(message),
     );
-    hub.on(RealtimeMethod.ChatChunk, (chunk: RealtimeChatChunk) =>
-      callbacks.onChatChunk?.(chunk),
-    );
+    hub.on(RealtimeMethod.ChatChunk, (chunk: RealtimeChatChunk) => callbacks.onChatChunk?.(chunk));
     hub.onclose(() => onClosed());
   }
 

@@ -64,7 +64,7 @@ export function ChatSurface({ destination }: ChatSurfaceProps) {
       // Auto-select the most recent conversation (the server's own most-recent-first order) on first load only --
       // an explicit selection already in place (from a prior load, or a just-created conversation) is never
       // overridden by a background refresh.
-      setSelectedId((current) => current ?? (result.data[0]?.id ?? null));
+      setSelectedId((current) => current ?? result.data[0]?.id ?? null);
     });
   }, []);
 
@@ -105,7 +105,11 @@ export function ChatSurface({ destination }: ChatSurfaceProps) {
   }, []);
 
   return (
-    <Box data-testid="surface" data-surface={destination.id} sx={{ height: '100%', display: 'flex' }}>
+    <Box
+      data-testid="surface"
+      data-surface={destination.id}
+      sx={{ height: '100%', display: 'flex' }}
+    >
       <Box
         sx={{
           width: 280,
