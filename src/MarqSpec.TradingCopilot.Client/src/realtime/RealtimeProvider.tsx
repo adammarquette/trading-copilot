@@ -13,6 +13,8 @@ import { useAuth } from '../auth/AuthProvider';
 import { createRealtimeConnection } from './connection';
 import type { RealtimeConnection, RealtimeConnectionState } from './connection';
 import type {
+  RealtimeChatChunk,
+  RealtimeChatMessage,
   RealtimeEvent,
   RealtimeFill,
   RealtimeOrderState,
@@ -23,6 +25,8 @@ type EventHandler = (event: RealtimeEvent, historical: boolean) => void;
 type OrderStateHandler = (state: RealtimeOrderState) => void;
 type FillHandler = (fill: RealtimeFill) => void;
 type SuggestionHandler = (suggestion: RealtimeSuggestion) => void;
+type ChatMessageHandler = (message: RealtimeChatMessage) => void;
+type ChatChunkHandler = (chunk: RealtimeChatChunk) => void;
 type ResyncHandler = () => void;
 
 export interface RealtimeContextValue {
@@ -34,6 +38,10 @@ export interface RealtimeContextValue {
   onFill(handler: FillHandler): () => void;
   /** Subscribe to owner-scoped suggestion lifecycle pushes (gh#684) — a new / superseded suggestion. */
   onSuggestion(handler: SuggestionHandler): () => void;
+  /** Subscribe to owner-scoped chat message pushes (gh#906, gh#1063) — a newly appended turn on any connection. */
+  onChatMessage(handler: ChatMessageHandler): () => void;
+  /** Subscribe to streamed chat token deltas (gh#906 inc 3b, gh#1063) — presentation-only, best-effort. */
+  onChatChunk(handler: ChatChunkHandler): () => void;
   /**
    * Fired when the client must re-fetch its state over REST — a retention gap, or a reconnect (owner-scoped
    * order/fill/suggestion pushes are live-only and are not replayed). A surface subscribes to reload its REST reads.
@@ -58,6 +66,8 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
   const orderStateSubs = useRef(new Set<OrderStateHandler>());
   const fillSubs = useRef(new Set<FillHandler>());
   const suggestionSubs = useRef(new Set<SuggestionHandler>());
+  const chatMessageSubs = useRef(new Set<ChatMessageHandler>());
+  const chatChunkSubs = useRef(new Set<ChatChunkHandler>());
   const resyncSubs = useRef(new Set<ResyncHandler>());
 
   const authenticated = session.status === 'authenticated';
@@ -74,6 +84,9 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
       onFill: (fill) => fillSubs.current.forEach((handler) => handler(fill)),
       onSuggestion: (suggestion) =>
         suggestionSubs.current.forEach((handler) => handler(suggestion)),
+      onChatMessage: (message) =>
+        chatMessageSubs.current.forEach((handler) => handler(message)),
+      onChatChunk: (chunk) => chatChunkSubs.current.forEach((handler) => handler(chunk)),
       onGap: () => resyncSubs.current.forEach((handler) => handler()),
       onResynced: () => resyncSubs.current.forEach((handler) => handler()),
       onStateChange: setConnectionState,
@@ -95,14 +108,40 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
     (handler: SuggestionHandler) => subscribe(suggestionSubs.current, handler),
     [],
   );
+  const onChatMessage = useCallback(
+    (handler: ChatMessageHandler) => subscribe(chatMessageSubs.current, handler),
+    [],
+  );
+  const onChatChunk = useCallback(
+    (handler: ChatChunkHandler) => subscribe(chatChunkSubs.current, handler),
+    [],
+  );
   const onResync = useCallback(
     (handler: ResyncHandler) => subscribe(resyncSubs.current, handler),
     [],
   );
 
   const value = useMemo<RealtimeContextValue>(
-    () => ({ connectionState, onEvent, onOrderState, onFill, onSuggestion, onResync }),
-    [connectionState, onEvent, onOrderState, onFill, onSuggestion, onResync],
+    () => ({
+      connectionState,
+      onEvent,
+      onOrderState,
+      onFill,
+      onSuggestion,
+      onChatMessage,
+      onChatChunk,
+      onResync,
+    }),
+    [
+      connectionState,
+      onEvent,
+      onOrderState,
+      onFill,
+      onSuggestion,
+      onChatMessage,
+      onChatChunk,
+      onResync,
+    ],
   );
 
   return <RealtimeContext.Provider value={value}>{children}</RealtimeContext.Provider>;

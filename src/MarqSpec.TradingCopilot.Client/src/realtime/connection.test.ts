@@ -132,6 +132,35 @@ describe('createRealtimeConnection', () => {
     expect(onSuggestion).toHaveBeenCalledWith(suggestion);
   });
 
+  it('forwards an owner-scoped chat message push to onChatMessage (gh#1063)', async () => {
+    const onChatMessage = vi.fn();
+    const connection = createRealtimeConnection({ onChatMessage });
+    await connection.start();
+
+    const message = {
+      conversationId: 'c1',
+      messageId: 'm1',
+      sequence: 2,
+      role: 2,
+      content: 'headroom is $1,800',
+      at: '2026-01-01T00:00:00Z',
+    };
+    builds[0].hub.handlers.get(RealtimeMethod.ChatMessage)!(message);
+
+    expect(onChatMessage).toHaveBeenCalledWith(message);
+  });
+
+  it('forwards a streamed chat chunk to onChatChunk (gh#1063 inc 3b)', async () => {
+    const onChatChunk = vi.fn();
+    const connection = createRealtimeConnection({ onChatChunk });
+    await connection.start();
+
+    const chunk = { conversationId: 'c1', delta: 'Headroom is ' };
+    builds[0].hub.handlers.get(RealtimeMethod.ChatChunk)!(chunk);
+
+    expect(onChatChunk).toHaveBeenCalledWith(chunk);
+  });
+
   it('tags events inside a catch-up bracket as historical, and live outside it', async () => {
     const onEvent = vi.fn();
     const connection = createRealtimeConnection({ onEvent });
