@@ -311,9 +311,11 @@ configuration that lives only in a provider console is otherwise invisible to an
       does, and then runs the identical `dotnet test … --filter "Category=Staging"` the workflow runs.
 
    > ⚠️ **R-14 holds here by construction, not only by care.** `StagingProjectXGateway.ResolvePracticeAccountId`
-   > independently checks the venue's own `Simulated` flag on the resolved account and **refuses** to hand back an
-   > id for any account it reports as non-simulated — so a `STAGING_PROJECTX_API_KEY`/`_SECRET` pair accidentally
-   > pointed at a live account cannot be traded through either path, proven by
+   > requires **two independent signals to agree** before handing back an account id anything here can trade on:
+   > the venue's own `Simulated` flag, **and** the same name-based `ProjectXAccountStage` classification the
+   > production adapter uses — the venue flag alone is not trusted, because a prop-firm-style funded account can
+   > report `Simulated=true` while real payout is at stake (gh#780). A `STAGING_PROJECTX_API_KEY`/`_SECRET` pair
+   > accidentally pointed at a live or funded account cannot be traded through either path, proven by
    > `StagingProjectXGatewayPracticeGuardTests`. That guard is the backstop, not the plan: confirm the account really
    > is the reserved practice account before running this, the same as step 5's warning above.
 

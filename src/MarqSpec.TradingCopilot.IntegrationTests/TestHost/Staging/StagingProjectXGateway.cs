@@ -12,6 +12,7 @@ using Microsoft.Extensions.DependencyInjection;
 // Aliased rather than a blanket `using MarqSpec.TradingCopilot.Domain.Venue;` — that namespace's own `OrderType`
 // collides with the ProjectX client's `OrderType` (Api.Models), which every venue-truth read in this file already
 // uses unqualified.
+using AccountStage = MarqSpec.TradingCopilot.Domain.Venue.AccountStage;
 using FirmConventions = MarqSpec.TradingCopilot.Domain.Venue.FirmConventions;
 using IOrderExecutor = MarqSpec.TradingCopilot.Domain.Venue.IOrderExecutor;
 using OrderRequest = MarqSpec.TradingCopilot.Domain.Venue.OrderRequest;
@@ -113,15 +114,32 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
     /// <summary>
     /// The R-14 guard every staging gate's writes are gated behind, whichever base URL drove them there (a
     /// deployed instance or a locally composed one — gh#1074): matches <paramref name="practiceAccountKey"/> by
-    /// name, then <b>independently verifies the venue's own <see cref="TradingAccount.Simulated"/> flag</b> before
-    /// handing back an id anything here can trade on. Refuses (fails closed) rather than trusting the operator's
-    /// naming convention alone — an operator error that points <c>STAGING_PROJECTX_API_KEY/SECRET</c> at a live
-    /// account must not silently place a real order on it just because its name matched the reserved key.
+    /// name, then requires <b>two independent signals to agree</b> the account is Practice before handing back an
+    /// id anything here can trade on.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>The venue's own <see cref="TradingAccount.Simulated"/> flag is necessary but not sufficient (gh#780).</b>
+    /// <see cref="FirmConventions.ForBrokerage"/>'s remarks establish, for this exact venue, that a prop-firm
+    /// <i>funded</i> account can execute on a simulated engine while a real payout is at stake — the flag is a lie
+    /// there, which is precisely why <see cref="FirmConventions.For"/> (not <c>ForBrokerage</c>) backs the
+    /// <c>FirmType.PropFirm</c> connection <see cref="StagingVenueExecutionSuite"/> itself creates, and never
+    /// consults the venue flag for it. Trusting <c>Simulated</c> alone here would reintroduce exactly the trust
+    /// the rest of the R-14 architecture withholds from this venue.
+    /// </para>
+    /// <para>
+    /// So this cross-checks the <b>same name-based classification the production adapter uses</b> for a ProjectX
+    /// account (<see cref="ProjectXAccountStage.Resolve"/>, grounded in a real account-name roster, gh#76) and
+    /// requires it to independently land on <see cref="AccountStage.Practice"/> too. A funded or evaluation
+    /// account that happens to report <c>Simulated=true</c> — the exact hazard <c>FirmConventions.ForBrokerage</c>
+    /// warns about — is still refused, because its <b>name</b> does not classify as Practice. Refuses (fails
+    /// closed) on any disagreement between the two signals, rather than trusting either alone.
+    /// </para>
+    /// <para>
     /// Extracted as a pure function precisely so this guard is provable without a live venue call — see the
-    /// practice-guard unit tests, which assert both that a simulated match resolves and that a non-simulated
-    /// match is refused (prove-the-red on the exact defect this exists to catch).
+    /// practice-guard unit tests, which assert a genuine Practice match resolves and prove-the-red on each way the
+    /// two signals can disagree.
+    /// </para>
     /// </remarks>
     internal static int ResolvePracticeAccountId(IEnumerable<TradingAccount> accounts, string? practiceAccountKey)
     {
@@ -131,13 +149,15 @@ internal sealed class StagingProjectXGateway : IAsyncDisposable
             ?? throw new InvalidOperationException(
                 $"The reserved practice account '{practiceAccountKey}' is not visible to the gateway credentials.");
 
-        if (!account.Simulated)
+        AccountStage nameClassifiedStage = ProjectXAccountStage.Resolve(account.Name);
+        if (!account.Simulated || nameClassifiedStage != AccountStage.Practice)
         {
             throw new InvalidOperationException(
-                $"R-14 violation: account '{account.Name}' (id {account.Id}) reports Simulated=false at the venue "
-                + "-- it is not a practice account. Refusing to resolve it: these gates place real orders and must "
-                + "never reach a live account, regardless of what STAGING_PROJECTX_PRACTICE_ACCOUNT names. Point "
-                + "the gateway credentials (STAGING_PROJECTX_API_KEY/SECRET) at a reserved PRACTICE account.");
+                $"R-14 violation: account '{account.Name}' (id {account.Id}) is not provably a practice account -- "
+                + $"venue Simulated={account.Simulated}, name-classified stage={nameClassifiedStage} (both must be "
+                + "Practice). Refusing to resolve it: these gates place real orders and must never reach a live or "
+                + "funded account, regardless of what STAGING_PROJECTX_PRACTICE_ACCOUNT names. Point the gateway "
+                + "credentials (STAGING_PROJECTX_API_KEY/SECRET) at a reserved PRACTICE account.");
         }
 
         return account.Id;
