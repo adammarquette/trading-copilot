@@ -4,6 +4,8 @@ import type { HubConnection } from '@microsoft/signalr';
 import { readToken } from '../api/token';
 import type {
   RealtimeCatchUp,
+  RealtimeChatChunk,
+  RealtimeChatMessage,
   RealtimeEvent,
   RealtimeFill,
   RealtimeGap,
@@ -25,6 +27,10 @@ export interface RealtimeConnectionCallbacks {
   onFill?: (fill: RealtimeFill) => void;
   /** A suggestion's new lifecycle state (gh#684). Owner-scoped + live-only like order / fill — a reconnect fires onResynced. */
   onSuggestion?: (suggestion: RealtimeSuggestion) => void;
+  /** A newly appended chat message (gh#906, gh#1063). Owner-scoped + live-only, same as order / fill / suggestion. */
+  onChatMessage?: (message: RealtimeChatMessage) => void;
+  /** One streamed token delta of an in-flight chat turn (gh#906 inc 3b, gh#1063). Presentation-only, best-effort. */
+  onChatChunk?: (chunk: RealtimeChatChunk) => void;
   /** The cursor fell off retention (or the resume was too large): re-fetch state over REST, then keep consuming. */
   onGap?: (gap: RealtimeGap) => void;
   /** Fired after a RE-connect: owner-scoped order/fill pushes are live-only (never replayed), so surfaces re-fetch. */
@@ -100,6 +106,12 @@ export function createRealtimeConnection(
     hub.on(RealtimeMethod.Fill, (fill: RealtimeFill) => callbacks.onFill?.(fill));
     hub.on(RealtimeMethod.Suggestion, (suggestion: RealtimeSuggestion) =>
       callbacks.onSuggestion?.(suggestion),
+    );
+    hub.on(RealtimeMethod.ChatMessage, (message: RealtimeChatMessage) =>
+      callbacks.onChatMessage?.(message),
+    );
+    hub.on(RealtimeMethod.ChatChunk, (chunk: RealtimeChatChunk) =>
+      callbacks.onChatChunk?.(chunk),
     );
     hub.onclose(() => onClosed());
   }
