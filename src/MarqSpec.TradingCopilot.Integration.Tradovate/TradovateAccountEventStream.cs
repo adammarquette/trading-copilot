@@ -1,0 +1,352 @@
+using System.Globalization;
+using System.Runtime.CompilerServices;
+using System.Threading.Channels;
+using MarqSpec.Client.Tradovate.WebSocket;
+using MarqSpec.TradingCopilot.Domain.Venue;
+using Microsoft.Extensions.Logging;
+using ClientModels = MarqSpec.Client.Tradovate.Api.Models;
+
+namespace MarqSpec.TradingCopilot.Integration.Tradovate;
+
+/// <summary>
+/// The Tradovate account-event seam (R-17, gh#977): the trading socket's <c>props</c> entity frames behind
+/// <see cref="IAccountEventStream"/>, translated onto the neutral <see cref="AccountEvent"/>s at this boundary so no
+/// vendor type crosses into the core. A <b>singleton</b> over the process's one websocket client, exactly as
+/// <see cref="TradovateConnection"/> is (one credential set per process, ADR-0015).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>It does not own the socket, and must not.</b> <c>ConnectTradingAsync</c> is the <i>manual</i> connect path: it
+/// opens the transport, authorizes it, and sends no <c>user/syncrequest</c> — and Tradovate pushes <c>props</c> frames
+/// only to a socket that has synced. Connecting from here would therefore produce a socket that is connected,
+/// authorized and permanently silent. <c>TradovateTradingConnectionHost</c> owns that lifecycle (gh#1048); this seam
+/// refuses loudly when the socket is down and lets the caller's supervisor re-subscribe, the same shape the bars and
+/// quote reads already take.
+/// </para>
+/// <para>
+/// <b>Why a socket drop ends the stream.</b> A dropped socket delivers nothing further, and the client replays
+/// subscriptions only on its <i>own</i> reconnect — which gives up after one attempt. An open sequence over a dead
+/// socket is not distinguishable from a quiet account by anything above it, and a quiet account is exactly what
+/// auto-flatten must never be told (R-13, ADR-0019). So a transition off <c>Connected</c> on the <b>trading</b>
+/// socket completes the channel and the enumeration then throws, after delivering whatever was already buffered —
+/// those events are still truth. The caller re-subscribes over the socket the connection host brings back and
+/// re-syncs. The market-data socket's transitions are ignored: a quote-feed blip is not this stream's business.
+/// </para>
+/// <para>
+/// <b>Attribution, and why this seam is stateful where ProjectX's is not.</b> A ProjectX trade notification carries
+/// its own account, so that adapter maps one payload to one event and holds nothing. A Tradovate <c>fill</c> entity
+/// carries only an <c>orderId</c> — no account at all — so the account has to come from the <c>order</c> entity, and
+/// this stream keeps the order → account map that joins them. Nothing orders the frames, so a fill can arrive before
+/// the order that names it: such a fill is <b>held</b>, not dropped, and released the moment an order (or a sync
+/// snapshot) supplies its account. Dropping it would lose a real execution the journal cannot reconstruct.
+/// </para>
+/// <para>
+/// <b>The sync snapshot seeds attribution and emits nothing.</b> <c>user/syncrequest</c> returns a full re-delivery of
+/// the session's orders, fills and positions, and the connection host sends one after every connect it drives.
+/// Emitting those as events would re-drive the OCO-exit retire and the round-trip journal on every reconnect — a
+/// double-counted realized P&amp;L on the path that feeds the R-5 governor. Position truth for reconciliation comes
+/// from the venue query path (gh#193), not from a replayed stream, so the snapshot is used only for the one thing
+/// nothing else can supply: the order → account map that makes the <i>live</i> fills attributable.
+/// </para>
+/// <para>
+/// <b>What this stream does not decide.</b> It holds no limit and makes no enforcement decision — it translates, and
+/// the risk / execution gate below the model enforces (ADR-0007). It also grants no account: an event for an account
+/// this process did not subscribe is discarded here, because one Tradovate login syncs <i>every</i> account the user
+/// holds (unlike ProjectX, which subscribes per account), so without that filter another account's orders would reach
+/// this process's journal.
+/// </para>
+/// <para>
+/// <b>Not covered here:</b> a trading socket that is connected but never synced still delivers nothing, and this seam
+/// cannot tell that apart from a quiet account either — that is gh#1051, where the missing operator-facing advisory
+/// and the readable "synced" fact belong.
+/// </para>
+/// </remarks>
+public sealed class TradovateAccountEventStream : IAccountEventStream
+{
+    /// <summary>
+    /// How many fills may wait for the order that names their account before the oldest is dropped. Generous by
+    /// design: the wait is a frame-ordering race measured in milliseconds, not a backlog, so reaching this bound
+    /// means something is wrong rather than busy — and it is logged as an error, because the fill being dropped is a
+    /// real execution nothing downstream can reconstruct.
+    /// </summary>
+    private const int MaxHeldFills = 512;
+
+    private readonly ITradovateWebSocketClient _webSocket;
+    private readonly ILogger<TradovateAccountEventStream> _logger;
+
+    /// <summary>Creates the seam over the process's realtime client.</summary>
+    /// <param name="webSocket">The Tradovate dual-socket client (a singleton — the trading socket is process-wide).</param>
+    /// <param name="logger">
+    /// The logger. Required, not optional: every case this seam cannot resolve — an unattributable fill, a position
+    /// it had to refuse — leaves no other trace, and a swallow nobody can see is the silence it exists to prevent.
+    /// </param>
+    public TradovateAccountEventStream(
+        ITradovateWebSocketClient webSocket, ILogger<TradovateAccountEventStream> logger)
+    {
+        ArgumentNullException.ThrowIfNull(webSocket);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        _webSocket = webSocket;
+        _logger = logger;
+    }
+
+    /// <inheritdoc />
+    public VenueId Venue { get; } = VenueId.Parse("tradovate");
+
+    /// <inheritdoc />
+    /// <exception cref="ArgumentException">An account belongs to another venue.</exception>
+    /// <exception cref="TradovateVenueException">The trading socket is not connected, or it dropped mid-stream.</exception>
+    public IAsyncEnumerable<AccountEvent> StreamAsync(
+        IReadOnlyCollection<VenueAccountId> accounts, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(accounts);
+
+        // Eager, at the call rather than on the first read (the ProjectX and quote-stream shape): account handles are
+        // bare integers that collide freely across venues, so a projectx:9001 arriving here must never be subscribed
+        // as TRADOVATE account 9001 -- and discovering that mid-stream would mean events already went the wrong way.
+        HashSet<long> subscribed = [.. accounts.Select(account => TradovateMapping.ToAccountId(account, Venue))];
+
+        return ReadAsync(subscribed, cancellationToken);
+    }
+
+    private async IAsyncEnumerable<AccountEvent> ReadAsync(
+        HashSet<long> subscribed, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // The connection host owns the socket. Failing here rather than connecting is what keeps this seam off the
+        // manual connect path, which would leave the socket authorized and silent (gh#1048).
+        if (_webSocket.TradingState != ClientModels.ConnectionState.Connected)
+        {
+            throw new TradovateVenueException(
+                "The Tradovate trading socket is not connected; account events require the connection host to have "
+                + "connected and synced it first (gh#977). An account-event stream never manages the shared socket's "
+                + "lifecycle.");
+        }
+
+        Channel<AccountEvent> events = Channel.CreateUnbounded<AccountEvent>(new UnboundedChannelOptions
+        {
+            // Never drops. Unlike a quote -- a replaceable snapshot the quote stream sheds under back-pressure -- an
+            // account event is truth we cannot lose: a dropped fill or rejection strands an order's status. Account
+            // event volume is low, so an unbounded buffer is safe.
+            SingleReader = true,
+        });
+
+        // One lock over the map, the held fills and the channel writes together. The client dispatches from its
+        // receive loop and the connection host raises SyncCompleted from its own, so two threads can genuinely race
+        // here -- and an interleaved "resolve the account" and "emit the fill" is how a fill lands under the wrong
+        // one. TryWrite on an unbounded channel neither blocks nor runs the reader's continuation inline
+        // (AllowSynchronousContinuations stays false), so holding the lock across the write cannot stall the socket.
+        object gate = new();
+        Dictionary<long, long> accountByOrder = [];
+        LinkedList<ClientModels.Fill> heldFills = [];
+        bool socketDropped = false;
+
+        void Emit(Func<AccountEvent> map, string what)
+        {
+            try
+            {
+                events.Writer.TryWrite(map());
+            }
+            catch (Exception error)
+            {
+                // A payload this adapter refuses -- an open position with no net price, an entity with no id -- costs
+                // ONE event, never the feed. A stream that died on a malformed frame would be the silence this seam
+                // exists to prevent, and the refusal itself is deliberate (a fabricated price would reach the R-5
+                // gate). Loud, because nothing else records it.
+                _logger.LogError(error, "A Tradovate {What} could not be mapped onto an account event; skipped.", what);
+            }
+        }
+
+        // Releases every held fill whose order is now known. A fill that resolves to an account this process did not
+        // subscribe is DISCARDED rather than emitted -- it belongs to another account under the same login.
+        void ReleaseHeldFills()
+        {
+            LinkedListNode<ClientModels.Fill>? node = heldFills.First;
+            while (node is not null)
+            {
+                LinkedListNode<ClientModels.Fill>? next = node.Next;
+                if (accountByOrder.TryGetValue(node.Value.OrderId, out long accountId))
+                {
+                    heldFills.Remove(node);
+                    EmitFill(node.Value, accountId);
+                }
+
+                node = next;
+            }
+        }
+
+        void EmitFill(ClientModels.Fill fill, long accountId)
+        {
+            if (!subscribed.Contains(accountId))
+            {
+                return;
+            }
+
+            VenueAccountId account =
+                VenueAccountId.Create(Venue, accountId.ToString(CultureInfo.InvariantCulture));
+            Emit(() => TradovateMapping.ToFillEvent(fill, account, Venue), "fill");
+        }
+
+        void OnOrder(object? sender, ClientModels.Order order)
+        {
+            lock (gate)
+            {
+                if (order.Id is { } id)
+                {
+                    // Recorded for EVERY account, subscribed or not: an order for a foreign account is what lets a
+                    // fill held against it be resolved and discarded instead of waiting forever.
+                    accountByOrder[id] = order.AccountId;
+                }
+
+                if (subscribed.Contains(order.AccountId))
+                {
+                    Emit(() => TradovateMapping.ToOrderStateEvent(order, Venue), "order");
+                }
+
+                ReleaseHeldFills();
+            }
+        }
+
+        void OnFill(object? sender, ClientModels.Fill fill)
+        {
+            lock (gate)
+            {
+                if (accountByOrder.TryGetValue(fill.OrderId, out long accountId))
+                {
+                    EmitFill(fill, accountId);
+                    return;
+                }
+
+                // Held, never guessed. Attributing a fill to the wrong account would journal a real execution against
+                // somebody else's balance, which is worse than the delay -- and worse than losing it.
+                if (heldFills.Count >= MaxHeldFills)
+                {
+                    ClientModels.Fill evicted = heldFills.First!.Value;
+                    heldFills.RemoveFirst();
+                    _logger.LogError(
+                        "Holding {Held} Tradovate fills whose order has never arrived; dropping the oldest (fill "
+                        + "{Fill} on order {Order}) to bound the buffer. That execution is lost to the journal, so "
+                        + "the day's realized P&L will under-report until it is reconciled from the venue.",
+                        heldFills.Count + 1, evicted.Id, evicted.OrderId);
+                }
+
+                heldFills.AddLast(fill);
+            }
+        }
+
+        void OnPosition(object? sender, ClientModels.Position position)
+        {
+            lock (gate)
+            {
+                if (subscribed.Contains(position.AccountId))
+                {
+                    Emit(() => TradovateMapping.ToPositionEvent(position, Venue), "position");
+                }
+            }
+        }
+
+        // The snapshot SEEDS attribution and emits nothing -- see the remarks. It is the only source of the account
+        // behind an order this process never saw a props frame for, which is every order that predates the connect.
+        void OnSync(object? sender, ClientModels.SyncResult snapshot)
+        {
+            lock (gate)
+            {
+                foreach (ClientModels.Order order in snapshot.Orders)
+                {
+                    if (order.Id is { } id)
+                    {
+                        accountByOrder[id] = order.AccountId;
+                    }
+                }
+
+                ReleaseHeldFills();
+            }
+        }
+
+        void OnConnectionStatusChanged(object? sender, ClientModels.ConnectionStatusChange change)
+        {
+            // The TRADING socket only, and only a transition OFF Connected. A transition INTO Connected is the
+            // connection host re-arming its sync, and the market-data socket carries no entity frames at all.
+            if (!change.IsTradingSocket || change.Current == ClientModels.ConnectionState.Connected)
+            {
+                return;
+            }
+
+            lock (gate)
+            {
+                socketDropped = true;
+
+                // Completed WITHOUT an error, and the drop is reported by throwing after the drain instead.
+                //
+                // NOT because completing with the error would lose the buffered events or change the exception type:
+                // it would do neither. `WaitToReadAsync` checks the queue BEFORE it checks the completion, so buffered
+                // items are still delivered either way, and the error a writer completes with is rethrown as itself,
+                // not wrapped. Both shapes end the stream with this same exception -- verified, because a mutant that
+                // swapped them survived the first pass of this file's suite.
+                //
+                // The reason is what the message can say. How many fills this stream was still holding -- executions
+                // it will now never attribute to an account -- is only known once the drain is over, and it is the one
+                // number that tells the operator how much truth ended with the socket. An exception built here, in a
+                // handler that runs before the drain, could not carry it.
+                events.Writer.TryComplete();
+            }
+        }
+
+        // Attached before the first read, so an event arriving between here and the drain loop is not lost. Attach and
+        // detach share this iterator's lifecycle: an abandoned stream cannot leave a handler and a filling channel
+        // behind, and every exit -- cancellation, the drop, an unconsumed sequence -- runs the finally.
+        _webSocket.OrderReceived += OnOrder;
+        _webSocket.FillReceived += OnFill;
+        _webSocket.PositionReceived += OnPosition;
+        _webSocket.SyncCompleted += OnSync;
+        _webSocket.ConnectionStatusChanged += OnConnectionStatusChanged;
+
+        try
+        {
+            await foreach (AccountEvent accountEvent in events.Reader.ReadAllAsync(cancellationToken))
+            {
+                yield return accountEvent;
+            }
+
+            bool dropped;
+            int stillHeld;
+            lock (gate)
+            {
+                dropped = socketDropped;
+                stillHeld = heldFills.Count;
+            }
+
+            if (dropped)
+            {
+                throw new TradovateVenueException(
+                    $"The Tradovate trading socket left the connected state with {stillHeld} fill(s) still awaiting "
+                    + "the order that names their account; the account-event stream ended so it is re-subscribed "
+                    + "rather than left open over a dead socket delivering nothing.");
+            }
+        }
+        finally
+        {
+            _webSocket.OrderReceived -= OnOrder;
+            _webSocket.FillReceived -= OnFill;
+            _webSocket.PositionReceived -= OnPosition;
+            _webSocket.SyncCompleted -= OnSync;
+            _webSocket.ConnectionStatusChanged -= OnConnectionStatusChanged;
+
+            int abandoned;
+            lock (gate)
+            {
+                abandoned = heldFills.Count;
+            }
+
+            if (abandoned > 0)
+            {
+                // Real executions this stream could never name. They are not lost quietly: the journal will
+                // under-report until they are reconciled from the venue, and this is the only trace of that.
+                _logger.LogWarning(
+                    "The Tradovate account-event stream ended holding {Held} fill(s) whose order never arrived, so "
+                    + "they were never attributed to an account. The day's realized P&L under-reports by that much "
+                    + "until it is reconciled from the venue.",
+                    abandoned);
+            }
+        }
+    }
+}

@@ -1,0 +1,699 @@
+using System.Globalization;
+using MarqSpec.Client.Tradovate.WebSocket;
+using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Venue;
+using MarqSpec.TradingCopilot.Integration.Tradovate;
+using Microsoft.Extensions.Logging;
+using ClientModels = MarqSpec.Client.Tradovate.Api.Models;
+
+namespace MarqSpec.TradingCopilot.UnitTests.Integration.Tradovate;
+
+/// <summary>
+/// The Tradovate account-event seam (R-17, gh#977). Two things carry this suite, and neither is a happy path.
+/// <b>Attribution</b>: a Tradovate fill entity names only an order, never an account, so the stream holds the
+/// order → account map and must never guess when it misses. <b>Silence</b>: a trading socket that drops leaves an
+/// open sequence that never ticks again, which looks exactly like a quiet account to everything above — so a drop
+/// has to end the stream loudly and let the supervisor re-subscribe.
+/// </summary>
+/// <remarks>
+/// The socket double is hand-rolled rather than a fake, for one reason: it counts event subscribers, which is what
+/// makes the teardown guard able to fail. A leaked handler is otherwise invisible — it writes into a channel nobody
+/// reads, throws nothing, and changes no observable output — so a "handlers are detached" test written against a
+/// fake would pass whether or not the code detaches anything.
+/// </remarks>
+public class TradovateAccountEventStreamTests
+{
+    private static VenueId Tradovate { get; } = VenueId.Parse("tradovate");
+
+    private static VenueId ProjectX { get; } = VenueId.Parse("projectx");
+
+    private static DateTimeOffset At { get; } = new(2026, 3, 4, 14, 30, 0, TimeSpan.Zero);
+
+    /// <summary>Every await in this suite is bounded: an unbounded one reads as slow CI rather than a red test.</summary>
+    private static TimeSpan Timeout { get; } = TimeSpan.FromSeconds(5);
+
+    private readonly RecordingWebSocketClient _webSocket = new();
+
+    private readonly CapturingLogger _log = new();
+
+    private TradovateAccountEventStream CreateStream() => new(_webSocket, _log);
+
+    [Fact]
+    public void Venue_ShouldBeTradovate()
+    {
+        CreateStream().Venue.Should().Be(Tradovate);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // The socket's lifecycle is not this seam's to drive
+    // ---------------------------------------------------------------------------------------------------------
+    [Fact]
+    public async Task StreamAsync_ShouldThrow_WhenTheTradingSocketIsNotConnected()
+    {
+        // The connection host owns the socket (gh#977 / gh#1048). A stream that connected it here would land on the
+        // manual path, which sends no user/syncrequest -- connected, authorized and permanently silent.
+        _webSocket.TradingState = ClientModels.ConnectionState.Disconnected;
+        TradovateAccountEventStream stream = CreateStream();
+
+        Func<Task> read = async () =>
+        {
+            await using Reader reader = Start(stream, [Account(9001)]);
+            await reader.NextAsync();
+        };
+
+        await read.Should().ThrowAsync<TradovateVenueException>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNeverConnectTheTradingSocketItself()
+    {
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.ConnectTradingCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public void StreamAsync_ShouldThrow_WhenAnAccountBelongsToAnotherVenue()
+    {
+        // Account handles are bare integers that collide across venues, so a projectx:9001 reaching this adapter must
+        // never be subscribed as TRADOVATE account 9001. Eager, at the call -- not on the first read.
+        TradovateAccountEventStream stream = CreateStream();
+
+        Action subscribe = () => stream.StreamAsync([VenueAccountId.Create(ProjectX, "9001")], CancellationToken.None);
+
+        subscribe.Should().Throw<ArgumentException>();
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Order and position events
+    // ---------------------------------------------------------------------------------------------------------
+    [Fact]
+    public async Task StreamAsync_ShouldEmitAnOrderStateEvent_WhenAnOrderArrivesForASubscribedAccount()
+    {
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseOrder(Order(id: 5150, account: 9001, ClientModels.OrderStatus.Canceled));
+
+        OrderStateEvent state = (await reader.NextAsync()).Should().BeOfType<OrderStateEvent>().Subject;
+        state.Account.Should().Be(Account(9001));
+        state.VenueOrderKey.Should().Be("5150");
+        state.State.Should().Be(VenueOrderState.Cancelled);
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldIgnoreAnOrder_WhenItsAccountIsNotSubscribed()
+    {
+        // One Tradovate login syncs EVERY account the user holds -- unlike ProjectX, which subscribes per account --
+        // so the filter is this adapter's, and without it another account's orders reach this process's journal.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseOrder(Order(id: 5150, account: 8002, ClientModels.OrderStatus.Canceled));
+        _webSocket.RaiseOrder(Order(id: 5151, account: 9001, ClientModels.OrderStatus.Canceled));
+
+        // The 9001 order is the FIRST thing out: the 8002 one was dropped, not queued ahead of it.
+        OrderStateEvent state = (await reader.NextAsync()).Should().BeOfType<OrderStateEvent>().Subject;
+        state.VenueOrderKey.Should().Be("5151");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldEmitAPositionEvent_KeepingTheSign()
+    {
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        PositionEvent position = (await reader.NextAsync()).Should().BeOfType<PositionEvent>().Subject;
+        position.NetQuantity.Should().Be(-3);
+        position.Account.Should().Be(Account(9001));
+        position.Contract.Should().Be(VenueContractId.Create(Tradovate, "222"));
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldIgnoreAPosition_WhenItsAccountIsNotSubscribed()
+    {
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaisePosition(Position(account: 8002, net: -3, price: 5310m));
+        _webSocket.RaisePosition(Position(account: 9001, net: 4, price: 5311m));
+
+        PositionEvent position = (await reader.NextAsync()).Should().BeOfType<PositionEvent>().Subject;
+        position.NetQuantity.Should().Be(4);
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldKeepStreaming_WhenOneEventCannotBeMapped()
+    {
+        // An open position with no netPrice is refused by the mapping (a fabricated 0 basis would feed a wrong
+        // unrealised P&L to the R-5 gate). That refusal must cost ONE event, not the whole feed -- a stream that died
+        // on a malformed payload would be the silence this seam exists to make impossible.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaisePosition(Position(account: 9001, net: 2, price: null));
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        PositionEvent position = (await reader.NextAsync()).Should().BeOfType<PositionEvent>().Subject;
+        position.NetQuantity.Should().Be(-3);
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldEmitAFlatPosition_EvenWhenItCarriesNoNetPrice()
+    {
+        // The flat retires live protection (OCO-cancel-on-exit, gh#183). Losing it leaves a resting safety stop
+        // behind a position that no longer exists.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaisePosition(Position(account: 9001, net: 0, price: null));
+
+        PositionEvent position = (await reader.NextAsync()).Should().BeOfType<PositionEvent>().Subject;
+        position.NetQuantity.Should().Be(0);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Fill attribution -- Tradovate's fill entity carries no account
+    // ---------------------------------------------------------------------------------------------------------
+    [Fact]
+    public async Task StreamAsync_ShouldAttributeAFill_WhenItsOrderIsAlreadyKnown()
+    {
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseOrder(Order(id: 5150, account: 9001, ClientModels.OrderStatus.Working));
+        await reader.NextAsync(); // the order-state event
+
+        _webSocket.RaiseFill(Fill(id: 77, order: 5150));
+
+        FillEvent fill = (await reader.NextAsync()).Should().BeOfType<FillEvent>().Subject;
+        fill.Account.Should().Be(Account(9001));
+        fill.VenueOrderKey.Should().Be("5150");
+        fill.VenueFillKey.Should().Be("77");
+        fill.Quantity.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldHoldAFillAndEmitIt_WhenItsOrderArrivesAfterIt()
+    {
+        // Nothing orders the props frames, so a fill can land before the order that names its account. Dropping it
+        // would lose a real execution -- truth the journal cannot reconstruct -- so it is held until it can be named.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseFill(Fill(id: 77, order: 5150));
+        _webSocket.RaiseOrder(Order(id: 5150, account: 9001, ClientModels.OrderStatus.Working));
+
+        // The order-state event first (it is what unblocked the fill), then the fill that was held for it.
+        (await reader.NextAsync()).Should().BeOfType<OrderStateEvent>();
+        FillEvent fill = (await reader.NextAsync()).Should().BeOfType<FillEvent>().Subject;
+        fill.Account.Should().Be(Account(9001));
+        fill.VenueFillKey.Should().Be("77");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldHoldEveryFillForAnOrder_WhenSeveralLandBeforeIt()
+    {
+        // A partial-fill sequence arrives as several fills against one order. Releasing only the first would lose the
+        // rest of a real execution, and the journal has no way to reconstruct them.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseFill(Fill(id: 77, order: 5150));
+        _webSocket.RaiseFill(Fill(id: 78, order: 5150));
+        _webSocket.RaiseOrder(Order(id: 5150, account: 9001, ClientModels.OrderStatus.Working));
+
+        (await reader.NextAsync()).Should().BeOfType<OrderStateEvent>();
+        (await reader.NextAsync()).Should().BeOfType<FillEvent>().Subject.VenueFillKey.Should().Be("77");
+        (await reader.NextAsync()).Should().BeOfType<FillEvent>().Subject.VenueFillKey.Should().Be("78");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldAttributeAHeldFillFromTheSyncSnapshot_WhenNoOrderFrameEverArrives()
+    {
+        // The snapshot is the other source of the order → account map: on a reconnect the host re-syncs, and the
+        // orders in that snapshot never arrive as props frames.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseFill(Fill(id: 77, order: 5150));
+        _webSocket.RaiseSync(orders: [Order(id: 5150, account: 9001, ClientModels.OrderStatus.Working)]);
+
+        FillEvent fill = (await reader.NextAsync()).Should().BeOfType<FillEvent>().Subject;
+        fill.VenueFillKey.Should().Be("77");
+        fill.Account.Should().Be(Account(9001));
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldEmitNothingForTheSyncSnapshotItself_BecauseItOnlySeedsAttribution()
+    {
+        // The snapshot is a FULL re-delivery of the session's entities. Emitting it would re-drive OcoExitService and
+        // the round-trip journal on every reconnect -- a double-counted realized P&L on the path that feeds the R-5
+        // gate. Position truth for reconciliation comes from the venue query path (gh#193), not from here.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseSync(
+            orders: [Order(id: 5150, account: 9001, ClientModels.OrderStatus.Canceled)],
+            positions: [Position(account: 9001, net: 0, price: null)],
+            fills: [Fill(id: 77, order: 5150)]);
+
+        // Nothing from the snapshot; the next LIVE event is the first thing out.
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        PositionEvent position = (await reader.NextAsync()).Should().BeOfType<PositionEvent>().Subject;
+        position.NetQuantity.Should().Be(-3);
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNotEmitAFill_WhenItsOrderResolvesToAnUnsubscribedAccount()
+    {
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseFill(Fill(id: 77, order: 5150));
+        _webSocket.RaiseOrder(Order(id: 5150, account: 8002, ClientModels.OrderStatus.Working));
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        // The held fill was resolved to a foreign account and discarded, not emitted under a fabricated one -- and
+        // the foreign ORDER was filtered too, so the position is the first thing out.
+        (await reader.NextAsync()).Should().BeOfType<PositionEvent>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNeverEmitAFillItCannotAttribute()
+    {
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseFill(Fill(id: 77, order: 5150));
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        // The position overtakes the unattributed fill rather than the fill being emitted under a guessed account.
+        (await reader.NextAsync()).Should().BeOfType<PositionEvent>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldReportOnTeardown_WhenItStillHoldsAFillItCouldNeverAttribute()
+    {
+        // A held fill that is never named is a real execution the journal never receives. Nothing else records that,
+        // so the teardown line is the whole trace -- and a trace nobody asserts on is not a trace.
+        await using (Reader reader = Start(CreateStream(), [Account(9001)]))
+        {
+            _webSocket.RaiseFill(Fill(id: 77, order: 5150));
+        }
+
+        _log.Messages.Should().ContainMatch("*never attributed to an account*");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldStopHoldingAFill_WhenItsOrderNamesAnUnsubscribedAccount()
+    {
+        // Reaches the reason the order → account map records EVERY account rather than only the subscribed ones: a
+        // foreign order is what lets a fill held against it be resolved and discarded. Recording only subscribed
+        // accounts would leave it held forever — reported at teardown as a lost execution that was never ours.
+        await using (Reader reader = Start(CreateStream(), [Account(9001)]))
+        {
+            _webSocket.RaiseFill(Fill(id: 77, order: 5150));
+            _webSocket.RaiseOrder(Order(id: 5150, account: 8002, ClientModels.OrderStatus.Working));
+        }
+
+        _log.Messages.Should().NotContainMatch("*never attributed to an account*");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Silence -- a socket that drops must end the stream, not sit open and quiet
+    // ---------------------------------------------------------------------------------------------------------
+    [Fact]
+    public async Task StreamAsync_ShouldEndTheStream_WhenTheTradingSocketDrops()
+    {
+        // A dropped socket delivers nothing further, and the client's replay covers only its OWN reconnect. An open
+        // sequence over a dead socket is indistinguishable from a quiet account, so end it and let the supervisor
+        // re-subscribe over the socket the connection host brings back and re-syncs.
+        TradovateAccountEventStream stream = CreateStream();
+
+        Func<Task> read = async () =>
+        {
+            await using Reader reader = Start(stream, [Account(9001)]);
+            _webSocket.RaiseStatus(isTrading: true, ClientModels.ConnectionState.Disconnected);
+            await reader.NextAsync();
+        };
+
+        await read.Should().ThrowAsync<TradovateVenueException>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNameTheFillsItWasStillHolding_WhenTheDropEndsTheStream()
+    {
+        // This is what the drain-then-throw shape buys, and the only thing it buys: the count of fills the stream was
+        // still holding -- executions it will now never attribute -- is knowable only once the drain is over. An
+        // exception built in the drop handler, before the drain, could not carry it. Completing the channel WITH the
+        // error is otherwise indistinguishable (buffered events survive it and the exception is rethrown unwrapped),
+        // so without this assertion the two shapes are the same test.
+        TradovateAccountEventStream stream = CreateStream();
+
+        Func<Task> read = async () =>
+        {
+            await using Reader reader = Start(stream, [Account(9001)]);
+            _webSocket.RaiseFill(Fill(id: 77, order: 5150));
+            _webSocket.RaiseStatus(isTrading: true, ClientModels.ConnectionState.Disconnected);
+            await reader.NextAsync();
+        };
+
+        (await read.Should().ThrowAsync<TradovateVenueException>())
+            .WithMessage("*1 fill(s) still awaiting*");
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldDeliverAlreadyBufferedEvents_BeforeItReportsTheDrop()
+    {
+        // Events the socket delivered before it dropped are still truth. Losing them to the teardown would be the
+        // same silence, one layer down.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+        _webSocket.RaiseStatus(isTrading: true, ClientModels.ConnectionState.Disconnected);
+
+        (await reader.NextAsync()).Should().BeOfType<PositionEvent>();
+        Func<Task> next = () => reader.NextAsync();
+        await next.Should().ThrowAsync<TradovateVenueException>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNotEndTheStream_WhenTheMarketDataSocketDrops()
+    {
+        // Reaches the IsTradingSocket half of the guard specifically: one socket carries quotes and the other carries
+        // entities, and a quote-feed blip must not tear down the account stream.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseStatus(isTrading: false, ClientModels.ConnectionState.Disconnected);
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        (await reader.NextAsync()).Should().BeOfType<PositionEvent>();
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldNotEndTheStream_WhenTheTradingSocketReportsConnected()
+    {
+        // Reaches the "left Connected" half of the same guard, separately from the IsTradingSocket half above. A
+        // transition INTO Connected is the connection host re-arming its sync, never a reason to drop the stream.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.RaiseStatus(isTrading: true, ClientModels.ConnectionState.Connected);
+        _webSocket.RaisePosition(Position(account: 9001, net: -3, price: 5310m));
+
+        (await reader.NextAsync()).Should().BeOfType<PositionEvent>();
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Teardown
+    // ---------------------------------------------------------------------------------------------------------
+    [Fact]
+    public async Task StreamAsync_ShouldAttachEveryHandlerItNeeds_WhileTheStreamIsLive()
+    {
+        // The paired half of the detach guard below: a detach test alone passes trivially if nothing ever attached.
+        await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+        _webSocket.OrderSubscribers.Should().Be(1);
+        _webSocket.FillSubscribers.Should().Be(1);
+        _webSocket.PositionSubscribers.Should().Be(1);
+        _webSocket.SyncSubscribers.Should().Be(1);
+        _webSocket.StatusSubscribers.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldDetachEveryHandler_WhenTheStreamIsTornDown()
+    {
+        // A leaked handler keeps mapping payloads into a channel nobody reads, for the life of the process -- and it
+        // holds the whole attribution map alive with it.
+        Reader reader = Start(CreateStream(), [Account(9001)]);
+        await reader.DisposeAsync();
+
+        _webSocket.OrderSubscribers.Should().Be(0);
+        _webSocket.FillSubscribers.Should().Be(0);
+        _webSocket.PositionSubscribers.Should().Be(0);
+        _webSocket.SyncSubscribers.Should().Be(0);
+        _webSocket.StatusSubscribers.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldDetachEveryHandler_WhenTheSocketDropEndsTheStream()
+    {
+        // The drop path exits through a THROW rather than a dispose, and that is the exit a live process actually
+        // takes -- so it needs its own guard, not the ordinary teardown's.
+        TradovateAccountEventStream stream = CreateStream();
+
+        Func<Task> read = async () =>
+        {
+            await using Reader reader = Start(stream, [Account(9001)]);
+            _webSocket.RaiseStatus(isTrading: true, ClientModels.ConnectionState.Disconnected);
+            await reader.NextAsync();
+        };
+
+        await read.Should().ThrowAsync<TradovateVenueException>();
+        _webSocket.OrderSubscribers.Should().Be(0);
+        _webSocket.FillSubscribers.Should().Be(0);
+        _webSocket.PositionSubscribers.Should().Be(0);
+        _webSocket.SyncSubscribers.Should().Be(0);
+        _webSocket.StatusSubscribers.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task StreamAsync_ShouldStopCleanly_WhenTheCallerCancels()
+    {
+        using CancellationTokenSource cancellation = new();
+        TradovateAccountEventStream stream = CreateStream();
+
+        Func<Task> read = async () =>
+        {
+            await using IAsyncEnumerator<AccountEvent> enumerator =
+                stream.StreamAsync([Account(9001)], cancellation.Token).GetAsyncEnumerator(cancellation.Token);
+            Task<bool> move = enumerator.MoveNextAsync().AsTask();
+            await cancellation.CancelAsync();
+            await move.WaitAsync(Timeout);
+        };
+
+        await read.Should().ThrowAsync<OperationCanceledException>();
+        _webSocket.OrderSubscribers.Should().Be(0);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Harness
+    // ---------------------------------------------------------------------------------------------------------
+
+    // The iterator body -- the connected-state guard, the channel, and the handler attach -- runs synchronously on
+    // the first MoveNext, up to the point where it parks on the empty channel. So the enumerator has to be primed
+    // before any event is raised, and that first move is the one the first NextAsync awaits.
+    private static Reader Start(TradovateAccountEventStream stream, IReadOnlyCollection<VenueAccountId> accounts)
+    {
+        CancellationTokenSource stop = new();
+        IAsyncEnumerator<AccountEvent> enumerator =
+            stream.StreamAsync(accounts, stop.Token).GetAsyncEnumerator(stop.Token);
+
+        return new Reader(enumerator, enumerator.MoveNextAsync().AsTask(), stop);
+    }
+
+    private sealed class Reader(
+        IAsyncEnumerator<AccountEvent> enumerator, Task<bool> primed, CancellationTokenSource stop) : IAsyncDisposable
+    {
+        private Task<bool>? _pending = primed;
+
+        public async Task<AccountEvent> NextAsync()
+        {
+            Task<bool> move = _pending ?? enumerator.MoveNextAsync().AsTask();
+            _pending = null;
+
+            // Bounded: an unbounded await here would hang the whole xunit run and read as slow CI, not a red test.
+            (await move.WaitAsync(Timeout)).Should().BeTrue("the stream should have produced an event");
+            return enumerator.Current;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            // The parked MoveNext has to END before the enumerator is disposed -- disposing one with a move in flight
+            // throws NotSupportedException -- so cancel the stream and let the iterator run its own teardown, which
+            // is the path a shutdown takes anyway.
+            if (_pending is { } pending)
+            {
+                _pending = null;
+                await stop.CancelAsync();
+                try
+                {
+                    await pending.WaitAsync(Timeout);
+                }
+                catch (OperationCanceledException)
+                {
+                    // a clean stop
+                }
+                catch (TradovateVenueException)
+                {
+                    // the drop the test under way is asserting on
+                }
+            }
+
+            await enumerator.DisposeAsync();
+            stop.Dispose();
+        }
+    }
+
+    private static VenueAccountId Account(long id) =>
+        VenueAccountId.Create(Tradovate, id.ToString(CultureInfo.InvariantCulture));
+
+    private static ClientModels.Order Order(long? id, long account, ClientModels.OrderStatus status) => new()
+    {
+        Id = id,
+        AccountId = account,
+        ContractId = 222,
+        Timestamp = At,
+        Action = ClientModels.OrderAction.Buy,
+        OrdStatus = status,
+        Admin = false,
+    };
+
+    private static ClientModels.Fill Fill(long? id, long order) => new()
+    {
+        Id = id,
+        OrderId = order,
+        ContractId = 222,
+        Timestamp = At,
+        TradeDate = new ClientModels.TradeDate { Year = 2026, Month = 3, Day = 4 },
+        Action = ClientModels.OrderAction.Buy,
+        Qty = 2,
+        Price = 5312.25m,
+        Active = true,
+        FinallyPaired = 0,
+    };
+
+    private static ClientModels.Position Position(long account, int net, decimal? price) => new()
+    {
+        Id = 11,
+        AccountId = account,
+        ContractId = 222,
+        Timestamp = At,
+        TradeDate = new ClientModels.TradeDate { Year = 2026, Month = 3, Day = 4 },
+        NetPos = net,
+        NetPrice = price,
+        Bought = 2,
+        BoughtValue = 10624.50m,
+        Sold = 0,
+        SoldValue = 0m,
+        PrevPos = 0,
+    };
+
+    /// <summary>Captures log lines, so the cases whose only trace is a log line can still be asserted on.</summary>
+    private sealed class CapturingLogger : ILogger<TradovateAccountEventStream>
+    {
+        public List<string> Messages { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel level) => true;
+
+        public void Log<TState>(
+            LogLevel level, EventId id, TState state, Exception? error, Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+            Messages.Add(formatter(state, error));
+        }
+    }
+
+    /// <summary>
+    /// A hand-rolled socket double that <b>counts its event subscribers</b>. That count is the whole reason it exists:
+    /// a leaked handler is invisible through a fake — it writes into an abandoned channel, throws nothing, and changes
+    /// no output — so the teardown guards could not fail without it.
+    /// </summary>
+    private sealed class RecordingWebSocketClient : ITradovateWebSocketClient
+    {
+        public ClientModels.ConnectionState TradingState { get; set; } = ClientModels.ConnectionState.Connected;
+
+        public ClientModels.ConnectionState MarketDataState { get; set; } = ClientModels.ConnectionState.Connected;
+
+        public int ConnectTradingCalls { get; private set; }
+
+        public int OrderSubscribers => OrderReceived?.GetInvocationList().Length ?? 0;
+
+        public int FillSubscribers => FillReceived?.GetInvocationList().Length ?? 0;
+
+        public int PositionSubscribers => PositionReceived?.GetInvocationList().Length ?? 0;
+
+        public int SyncSubscribers => SyncCompleted?.GetInvocationList().Length ?? 0;
+
+        public int StatusSubscribers => ConnectionStatusChanged?.GetInvocationList().Length ?? 0;
+
+        public event EventHandler<ClientModels.ConnectionStatusChange>? ConnectionStatusChanged;
+
+        public event EventHandler<ClientModels.WebSocketMessageFailedEventArgs>? MessageSendFailed;
+
+        public event EventHandler<ClientModels.SyncResult>? SyncCompleted;
+
+        public event EventHandler<ClientModels.EntityPropsEvent>? EntityReceived;
+
+        public event EventHandler<ClientModels.Order>? OrderReceived;
+
+        public event EventHandler<ClientModels.Position>? PositionReceived;
+
+        public event EventHandler<ClientModels.Fill>? FillReceived;
+
+        public event EventHandler<ClientModels.CashBalance>? CashBalanceReceived;
+
+        public event EventHandler<ClientModels.Quote>? QuoteReceived;
+
+        public event EventHandler<ClientModels.DomBook>? DomReceived;
+
+        public event EventHandler<IReadOnlyList<ClientModels.ChartBar>>? ChartBarsReceived;
+
+        public void RaiseOrder(ClientModels.Order order) => OrderReceived?.Invoke(this, order);
+
+        public void RaiseFill(ClientModels.Fill fill) => FillReceived?.Invoke(this, fill);
+
+        public void RaisePosition(ClientModels.Position position) => PositionReceived?.Invoke(this, position);
+
+        public void RaiseSync(
+            IReadOnlyList<ClientModels.Order>? orders = null,
+            IReadOnlyList<ClientModels.Position>? positions = null,
+            IReadOnlyList<ClientModels.Fill>? fills = null) =>
+            SyncCompleted?.Invoke(this, new ClientModels.SyncResult
+            {
+                Orders = orders ?? [],
+                Positions = positions ?? [],
+                Fills = fills ?? [],
+            });
+
+        public void RaiseStatus(bool isTrading, ClientModels.ConnectionState current) =>
+            ConnectionStatusChanged?.Invoke(this, new ClientModels.ConnectionStatusChange
+            {
+                IsTradingSocket = isTrading,
+                Previous = ClientModels.ConnectionState.Connected,
+                Current = current,
+            });
+
+        public Task ConnectTradingAsync(CancellationToken cancellationToken = default)
+        {
+            ConnectTradingCalls++;
+            return Task.CompletedTask;
+        }
+
+        public Task ConnectMarketDataAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task DisconnectTradingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task DisconnectMarketDataAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<ClientModels.SyncResult> SyncRequestAsync(
+            ClientModels.SyncRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ClientModels.SyncResult());
+
+        public Task SubscribeQuoteAsync(string symbolOrContractId, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task UnsubscribeQuoteAsync(string symbolOrContractId, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task SubscribeDomAsync(string symbolOrContractId, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task UnsubscribeDomAsync(string symbolOrContractId, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task SubscribeChartAsync(
+            ClientModels.ChartRequest request, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<IReadOnlyList<ClientModels.ChartBar>> GetHistoricalBarsAsync(
+            ClientModels.ChartRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<ClientModels.ChartBar>>([]);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        // Declared by the interface and unused by this seam; referenced here so the compiler does not warn them away.
+        internal void Unused() => _ = (MessageSendFailed, EntityReceived, CashBalanceReceived, QuoteReceived, DomReceived, ChartBarsReceived);
+    }
+}
