@@ -1,5 +1,6 @@
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain.Notifications;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.Api.Notifications;
@@ -56,7 +57,17 @@ public static class NotificationRegistration
             DedupingNotificationChannel deduping = new(
                 transport, provider.GetRequiredService<ILogger<DedupingNotificationChannel>>());
 
-            return new QueuedNotificationChannel(deduping, provider.GetRequiredService<ILogger<QueuedNotificationChannel>>());
+            // `deduping` is passed TWICE, and that is the binding, not a redundancy (gh#1077). The queue needs the
+            // dedup layer for two different things: as the channel it delivers into, and as the IIncidentKeyRegistry
+            // it releases a key through when a resolve cannot be enqueued at all. They must be the SAME INSTANCE --
+            // the incident set is per-instance, so releasing a key on a second DedupingNotificationChannel would
+            // release nothing while every test still passed, and the key the operator's next outage runs into would
+            // still be held. Same failure shape as gh#455's two-instance enlister.
+            return new QueuedNotificationChannel(
+                deduping,
+                deduping,
+                provider.GetRequiredService<IExecutionMetrics>(),
+                provider.GetRequiredService<ILogger<QueuedNotificationChannel>>());
         });
         // THE SEAM IS THE OUTBOX (gh#437). The chain is now: outbox -> queue -> dedup -> transport.
         //

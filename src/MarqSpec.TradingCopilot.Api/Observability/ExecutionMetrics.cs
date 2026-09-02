@@ -90,6 +90,19 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <summary>Reconcile-strand kind tag: a conditional stranded mid-fire (<c>Firing</c>, gh#577).</summary>
     public const string ReconcileStrandConditionalFiring = "conditional-firing";
 
+    /// <summary>
+    /// Operator notifications the in-process delivery queue <b>refused</b>, by kind (gh#1077) — the alerting path
+    /// reporting its own failure to Layer 2, because a Layer-1 push that never went out is invisible to Layer 1.
+    /// </summary>
+    public const string NotificationsRefused = "trading.notifications.refused";
+
+    /// <summary>Notification-refusal kind tag: a page the queue could not accept.</summary>
+    public const string NotificationRefusedPage = "page";
+
+    /// <summary>Notification-refusal kind tag: a resolve the queue could not accept — the worse of the two,
+    /// because nothing above the queue records that a resolve is owed.</summary>
+    public const string NotificationRefusedResolve = "resolve";
+
     /// <summary>Outcome tag: the round trip was journalled.</summary>
     public const string JournalWritten = "journalled";
 
@@ -179,6 +192,7 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     private readonly Histogram<double> _backfillShortfall;
     private readonly Counter<long> _journalOutcomes;
     private readonly Counter<long> _reconcileStrands;
+    private readonly Counter<long> _notificationsRefused;
 
     private int _killSwitchEngaged;
     private int _orphanedStops;
@@ -226,6 +240,10 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
         _reconcileStrands = _meter.CreateCounter<long>(
             ReconcileStrandsDetected, unit: "{strand}",
             description: "Stranded pre-transmit intents the runtime reconcile sweep newly detected, by kind.");
+
+        _notificationsRefused = _meter.CreateCounter<long>(
+            NotificationsRefused, unit: "{notification}",
+            description: "Operator notifications the delivery queue refused, by kind.");
 
         // Observable: state, not events. A gauge read on scrape reports what is true NOW, which is what a
         // dashboard needs for "are we currently killed / currently degraded".
@@ -321,6 +339,10 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <inheritdoc />
     public void RecordReconcileStrandDetected(string kind) =>
         _reconcileStrands.Add(1, new KeyValuePair<string, object?>("kind", kind));
+
+    /// <inheritdoc />
+    public void RecordNotificationRefused(string kind) =>
+        _notificationsRefused.Add(1, new KeyValuePair<string, object?>("kind", kind));
 
     /// <inheritdoc />
     public void Dispose() => _meter.Dispose();

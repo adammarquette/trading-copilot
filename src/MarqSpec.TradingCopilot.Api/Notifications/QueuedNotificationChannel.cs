@@ -1,5 +1,7 @@
 using System.Threading.Channels;
+using MarqSpec.TradingCopilot.Api.Observability;
 using MarqSpec.TradingCopilot.Domain.Notifications;
+using MarqSpec.TradingCopilot.Domain.Observability;
 using Microsoft.Extensions.Logging;
 
 namespace MarqSpec.TradingCopilot.Api.Notifications;
@@ -33,6 +35,41 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// delivery without reintroducing the defect, so the honest thing is to say so rather than to imply a guarantee
 /// the design gives up on purpose.
 /// </para>
+/// <para>
+/// <b>A full queue REFUSES; it never drops (gh#1077).</b> This class was written with
+/// <c>BoundedChannelFullMode.DropWrite</c> and a comment promising that "a drop is logged". Under <i>any</i>
+/// <c>Drop*</c> mode <c>TryWrite</c> discards the item and returns <see langword="true"/>, so both drop branches
+/// were unreachable: nothing was logged and every caller was told the notification landed. The mode is
+/// <see cref="BoundedChannelFullMode.Wait"/> now — used with <c>TryWrite</c> and never
+/// <c>WaitToWriteAsync</c>, so nothing ever blocks — because it is the only mode under which <c>TryWrite</c>
+/// reports a full queue at all.
+/// </para>
+/// <para>
+/// <b>Refusing is the right policy for this payload, and the alternatives are not equivalent.</b>
+/// </para>
+/// <list type="bullet">
+/// <item><b>Blocking with a bounded wait</b> puts the transport's backpressure onto the caller, and the caller is
+/// the auto-flatten on the R-13 path. That is gh#289 re-introduced as a smaller number.</item>
+/// <item><b><c>DropOldest</c></b> leaves <c>TryWrite</c>'s answer just as dishonest, and discards the wrong end:
+/// the <i>first</i> page of an incident is the one that matters, and the later ones are repeats the dedup layer
+/// below would collapse anyway.</item>
+/// <item><b>Refusing</b> is the only outcome that is <i>recoverable</i>. The layer above is the durable outbox,
+/// and <c>NotificationOutboxRelay</c> already reads <see langword="false"/> as "the row stays owed and is retried
+/// next pass" — as <c>TriggerEvaluationService</c> already leaves a trigger armed. Refusing hands the page back
+/// to the ledger that remembers it instead of destroying it.</item>
+/// </list>
+/// <para>
+/// <b>Pages and resolves are budgeted separately, because their losses are not comparable.</b> A refused page is
+/// recoverable, as above. A refused <i>resolve</i> is not: nothing above this queue records that a resolve is
+/// owed, and a producer that resolves once per outage — <c>TriggerEvaluationService</c>'s staleness recovery —
+/// never comes back for it. So a send is refused at <see cref="PageCapacity"/> while the channel keeps
+/// <see cref="ResolveHeadroom"/> slots beyond it that only a resolve, or the pump's own cancel-retry, can reach.
+/// What fills this queue is <i>pages</i> — the escalation re-emitting every 15 s against a transport that is not
+/// draining — so without the reserve the resolve is precisely the item crowded out. And if even the reserve is
+/// exhausted, the dedup key is released out of band through <see cref="IIncidentKeyRegistry"/> (see
+/// <see cref="ResolveAsync"/>), so <b>no outcome of this queue can leave a key held for the life of the
+/// process</b>.
+/// </para>
 /// </remarks>
 public sealed class QueuedNotificationChannel : INotificationChannel
 {
@@ -47,39 +84,85 @@ public sealed class QueuedNotificationChannel : INotificationChannel
     /// </remarks>
     public const int MaxResolveAttempts = 3;
 
+    /// <summary>How deep the queue may get before a <b>page</b> is refused (gh#1077).</summary>
+    /// <remarks>
+    /// The original bound, unchanged: a wedged transport must not grow this queue without limit beside a trading
+    /// process. It is a soft cap on total depth now rather than the channel's capacity, so the slots above it stay
+    /// available to a resolve — see <see cref="ResolveHeadroom"/>.
+    /// </remarks>
+    public const int PageCapacity = 256;
+
+    /// <summary>Slots beyond <see cref="PageCapacity"/> only a resolve or a cancel-retry can reach (gh#1077).</summary>
+    /// <remarks>
+    /// Sized against what can be <i>owed</i> rather than against throughput: a resolve exists per <b>open
+    /// incident</b>, and the set of things that can concurrently be wrong is a handful of account/instrument pairs
+    /// plus a trigger or two — the same bound that lets <c>DedupingNotificationChannel</c> hold its incident set
+    /// with no eviction policy. Sixty-four is generous against that and small beside the page budget it protects.
+    /// </remarks>
+    public const int ResolveHeadroom = 64;
+
     private readonly INotificationChannel _inner;
+    private readonly IIncidentKeyRegistry _incidents;
+    private readonly IExecutionMetrics _metrics;
     private readonly ILogger<QueuedNotificationChannel> _logger;
     private readonly Channel<Delivery> _queue;
 
     /// <summary>Creates the queueing decorator.</summary>
     /// <param name="inner">The channel that actually delivers — deduping, then the transport.</param>
+    /// <param name="incidents">
+    /// Releases a dedup key without the queue, for the one case the queue cannot carry a resolve. <b>Required, not
+    /// optional</b>: a dependency that defaulted to a no-op would make the gh#1077 failure silent again, and
+    /// silently is exactly how it got here.
+    /// </param>
+    /// <param name="metrics">Meters a refusal, so Layer 2 can see an alerting path that is failing to alert.</param>
     /// <param name="logger">The logger.</param>
-    public QueuedNotificationChannel(INotificationChannel inner, ILogger<QueuedNotificationChannel> logger)
+    public QueuedNotificationChannel(
+        INotificationChannel inner,
+        IIncidentKeyRegistry incidents,
+        IExecutionMetrics metrics,
+        ILogger<QueuedNotificationChannel> logger)
     {
         _inner = inner;
+        _incidents = incidents;
+        _metrics = metrics;
         _logger = logger;
 
-        // Bounded, so a wedged transport cannot grow the queue without limit beside a trading process. DropWrite
-        // keeps the OLDEST: during an incident the first page is the one that matters, and the rest are repeats
-        // of it that dedup would collapse anyway. A drop is logged -- silence is what this whole area is about.
-        _queue = Channel.CreateBounded<Delivery>(new BoundedChannelOptions(256)
+        // Bounded, so a wedged transport cannot grow the queue without limit beside a trading process. WAIT rather
+        // than any Drop* mode, because Drop* is what made this class lie: TryWrite discards the item and returns
+        // true under every Drop mode, so the "queue is full" branches below could never run (gh#1077). Nothing here
+        // ever calls WaitToWriteAsync, so Wait never blocks a caller -- it only makes TryWrite tell the truth.
+        _queue = Channel.CreateBounded<Delivery>(new BoundedChannelOptions(PageCapacity + ResolveHeadroom)
         {
-            FullMode = BoundedChannelFullMode.DropWrite,
+            FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
         });
     }
 
     /// <inheritdoc />
-    /// <remarks>Enqueues and returns; it never waits for the transport. See the type remarks.</remarks>
+    /// <remarks>
+    /// Enqueues and returns; it never waits for the transport. See the type remarks. Returns
+    /// <see langword="false"/> — loudly — once the queue is at <see cref="PageCapacity"/>: the page is
+    /// <b>refused, not dropped</b>, so the durable outbox above keeps owing it and the next relay pass re-offers
+    /// it.
+    /// </remarks>
     public Task<bool> SendAsync(Notification notification, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(notification);
 
-        if (!_queue.Writer.TryWrite(Delivery.Send(notification)))
+        // The soft cap is read BEFORE the write, so pages stop at PageCapacity and the slots above it stay for a
+        // resolve. Two concurrent sends can both read a depth just under the cap and both write; the reserve
+        // absorbs that, which is the other reason it is generous rather than exact.
+        if (_queue.Reader.Count >= PageCapacity || !_queue.Writer.TryWrite(Delivery.Send(notification)))
         {
+            // ERROR, deliberately, and never Debug: appsettings.json sets Logging:LogLevel:Default to Information,
+            // so anything below that is never written in production -- a "logged" drop nobody can read is the
+            // defect being fixed, not the fix. Metered as well (gh#1077), because a log line is visible to an
+            // engineer who goes looking and the operator is exactly who is not being told.
             _logger.LogError(
-                "Notification queue is full — dropped a {Severity} for {Incident}. The transport is not draining.",
+                "Notification queue is full — REFUSED a {Severity} for {Incident}; the transport is not draining. "
+                + "The page is not lost: it stays owed in the outbox and is re-offered on the next relay pass.",
                 notification.Severity, notification.DedupKey);
+            _metrics.RecordNotificationRefused(ExecutionMetrics.NotificationRefusedPage);
             return Task.FromResult(false);
         }
 
@@ -87,12 +170,39 @@ public sealed class QueuedNotificationChannel : INotificationChannel
     }
 
     /// <inheritdoc />
-    /// <remarks>Enqueued like a send, so ordering with the send it clears is preserved.</remarks>
+    /// <remarks>
+    /// Enqueued like a send, so ordering with the send it clears is preserved — and enqueued into the reserve
+    /// <see cref="ResolveHeadroom"/> keeps for it, so a queue full of pages cannot crowd it out. In the residual
+    /// case where even that is exhausted the dedup key is released <b>out of band</b> before returning
+    /// <see langword="false"/>: the cancel is recoverable by a retrying caller, the release is recoverable by
+    /// nobody.
+    /// </remarks>
     public Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken)
     {
         if (!_queue.Writer.TryWrite(Delivery.Resolve(dedupKey)))
         {
-            _logger.LogWarning("Notification queue is full — dropped the resolve for {Incident}.", dedupKey);
+            // THE BRACE (gh#1077). A resolve carries two halves that fail differently. Cancelling the outstanding
+            // page needs the transport, so it is lost here and `false` asks the caller to try again -- which is
+            // INotificationChannel's documented meaning for `false`. Releasing the dedup key needs nothing but a
+            // dictionary removal, and NOTHING anywhere remembers that it is owed: there is no outbox row for a
+            // resolve, and a producer that resolves once per outage never comes back. Left held, the key
+            // suppresses every later incident on it for the life of the process -- ADR-0019's "one notification
+            // per process lifetime instead of one per outage", reached without any producer doing anything wrong
+            // (gh#1045, gh#1051).
+            //
+            // So the release happens here, on the caller's thread, and ONLY here: doing it on the ordinary path
+            // would let a concurrent escalation on the same key slip past the suppression it is meant to meet.
+            // The cost of releasing is a duplicate page, which is the direction DedupingNotificationChannel
+            // already chose for its own unconditional re-arm.
+            bool released = _incidents.ReleaseIncident(dedupKey);
+
+            _logger.LogCritical(
+                "Notification queue is full — REFUSED the resolve for {Incident}; the transport is not draining. "
+                + "Its dedup key was released out of band ({Released}), so a later occurrence of this incident is "
+                + "still reported — but any page already raised for it keeps nagging until it expires or is "
+                + "acknowledged.",
+                dedupKey, released ? "a repeat was being suppressed" : "nothing was being suppressed");
+            _metrics.RecordNotificationRefused(ExecutionMetrics.NotificationRefusedResolve);
             return Task.FromResult(false);
         }
 
@@ -183,9 +293,17 @@ public sealed class QueuedNotificationChannel : INotificationChannel
                 return;
             }
 
+            // Straight into the reserve, with no soft cap: this is a resolve. The key it belongs to has already been
+            // released by the decorator below -- it re-arms unconditionally, before forwarding -- so what is at
+            // stake here is only the outstanding page's cancel. Worth a reserved slot; not worth crowding out a
+            // live page for.
             if (!_queue.Writer.TryWrite(item.NextAttempt()))
             {
-                _logger.LogWarning("Notification queue is full — dropped the cancel retry for {Incident}.", item.DedupKey);
+                _logger.LogError(
+                    "Notification queue is full — REFUSED the cancel retry for {Incident}; its page will nag until "
+                    + "it expires or is acknowledged.",
+                    item.DedupKey);
+                _metrics.RecordNotificationRefused(ExecutionMetrics.NotificationRefusedResolve);
             }
         }
         catch (Exception error)
