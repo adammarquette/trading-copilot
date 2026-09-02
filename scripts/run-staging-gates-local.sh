@@ -19,11 +19,13 @@
 # SAFETY -- READ THIS BEFORE RUNNING
 # -----------------------------------
 # THIS PLACES REAL ORDERS on a real ProjectX account. R-14 (practice accounts only outside production) must hold
-# by construction: StagingProjectXGateway.ResolvePracticeAccountId (gh#1074) independently verifies the venue's
-# own `Simulated` flag on the resolved account and REFUSES to hand back an id for any account it reports as
-# non-simulated -- so even a misconfigured STAGING_PROJECTX_API_KEY/SECRET pointed at a live account cannot be
-# traded through this path. That guard does not excuse pointing this at anything but a reserved PRACTICE account;
-# it is the backstop, not the plan.
+# by construction: StagingProjectXGateway.ResolvePracticeAccountId (gh#1074) requires TWO independent signals to
+# agree before handing back an id anything here can trade on -- the venue's own `Simulated` flag, AND the same
+# name-based ProjectXAccountStage classification the production adapter uses. The venue flag alone is not
+# trusted: a prop-firm-style funded account can report Simulated=true while real payout is at stake (gh#780), so
+# even a misconfigured STAGING_PROJECTX_API_KEY/SECRET pointed at a live or funded account cannot be traded
+# through this path. That guard does not excuse pointing this at anything but a reserved PRACTICE account; it is
+# the backstop, not the plan.
 #
 # Never run this at the same time as a `staging-gates.yml` workflow_dispatch run (Actions tab) -- both place
 # orders on the SAME reserved account, and nothing serializes a local run against a concurrent CI run (only
