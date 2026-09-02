@@ -997,9 +997,9 @@ public class TradovateAccountEventStreamTests
         PrevPos = 0,
     };
 
-    /// <summary>Captures log lines, so the cases whose only trace is a log line can still be asserted on.</summary>
     /// <summary>
-    /// Records what was logged <b>and at what level</b>. The level is not decoration: a double that discarded it
+    /// Captures log lines <b>and their level</b>, so the cases whose only trace is a log line can be asserted on.
+    /// The level is not decoration: a double that discarded it
     /// would let a <c>LogError</c> silently downgraded to <c>LogDebug</c> keep every assertion here green, which is
     /// a defect this repository has already shipped once and paid for.
     /// </summary>
@@ -1008,7 +1008,7 @@ public class TradovateAccountEventStreamTests
         private readonly List<(LogLevel Level, string Message)> _entries = [];
 
         /// <summary>Everything logged, at any level.</summary>
-        public IEnumerable<string> Messages => _entries.Select(entry => entry.Message);
+        public IEnumerable<string> Messages => At(null);
 
         /// <summary>Only what was logged at <see cref="LogLevel.Warning"/>.</summary>
         public IEnumerable<string> Warnings => At(LogLevel.Warning);
@@ -1030,11 +1030,18 @@ public class TradovateAccountEventStreamTests
             }
         }
 
-        private IEnumerable<string> At(LogLevel level)
+        // A null level means "every level" -- the reads are snapshots taken under the lock either way, because the
+        // stream logs from the socket's threads as well as the consumer's.
+        private IEnumerable<string> At(LogLevel? level)
         {
             lock (_entries)
             {
-                return [.. _entries.Where(entry => entry.Level == level).Select(entry => entry.Message)];
+                return
+                [
+                    .. _entries
+                        .Where(entry => level is null || entry.Level == level)
+                        .Select(entry => entry.Message)
+                ];
             }
         }
     }

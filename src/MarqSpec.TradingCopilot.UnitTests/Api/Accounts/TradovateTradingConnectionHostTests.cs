@@ -707,8 +707,10 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
         // reset the outage clock forever: connected, degraded, and nobody told, which is the exact state this card
         // was filed for, reintroduced by the card's own fix.
         //
-        // Here the socket reconnects continuously and the sync never lands, so EVERY pass is either the grace pass
-        // or a failed sync. Nothing is ever delivering, so nothing may ever be resolved.
+        // Here the socket reconnects on every pass, so the obligation is back to Pending before each settle and
+        // every pass is the GRACE pass -- the sync arrangement below is the state the host would reach if a single
+        // reconnect were ever missed, and is deliberately kept as the belt to that brace rather than removed.
+        // Nothing is ever delivering, so nothing may ever be resolved.
         SocketReadsAs(_ =>
         {
             // A fresh connection on every pass -- the venue closing shortly after `authorize`, or the client's own

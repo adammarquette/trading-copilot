@@ -195,22 +195,29 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
     protected enum SocketPassOutcome
     {
         /// <summary>
+        /// Nothing was owed on the <b>wire</b> this pass, and the socket is not delivering either. No backoff to
+        /// charge, and no all-clear to give.
+        /// </summary>
+        /// <remarks>
+        /// <b>Deliberately the zero value.</b> This type is <c>protected</c> so that hosts this class does not own
+        /// return it — a third venue's socket host (gh#41) inherits the loop and supplies these. The one value a
+        /// future override can produce by omission (a <c>default</c>, an unassigned field, a cast) must therefore
+        /// be the one that claims nothing, because the permissive member here <i>closes an operator advisory</i>.
+        /// An enum whose zero value is the permissive one is a defect this codebase keeps paying for.
+        /// </remarks>
+        Waiting = 0,
+
+        /// <summary>
         /// The socket owes nothing and is delivering. The only value that resets the backoff, and the only one that
         /// counts toward closing an operator advisory.
         /// </summary>
-        Delivering,
+        Delivering = 1,
 
         /// <summary>
         /// The socket still owes work that this pass attempted on the wire and did not complete. Charges the
         /// backoff — the usual reason is a rate limit, which retrying at full cadence would sustain.
         /// </summary>
-        StillOwed,
-
-        /// <summary>
-        /// Nothing was owed on the <b>wire</b> this pass, and the socket is not delivering either. No backoff to
-        /// charge, and no all-clear to give.
-        /// </summary>
-        Waiting,
+        StillOwed = 2,
     }
 
     /// <summary>The logger, categorised to the derived host.</summary>
@@ -324,6 +331,10 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
         long notDeliveringSince = 0;
         long deliveringSince = 0;
         bool advised = false;
+
+        // Whether the dedup key may still be held by an incident this host already closed, so the NEXT outage's
+        // first advisory has to re-arm it before it can get through. See the resolve below for why "may".
+        bool reArmBeforeNextAdvisory = false;
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -452,12 +463,24 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
                 // however good the dedup below is; requiring sustained health makes a flapping socket the one
                 // continuing incident it actually is (ADR-0019 §4).
                 //
-                // The incident is closed HERE whatever the channel answers, and that is deliberate.
-                // DedupingNotificationChannel re-arms its key UNCONDITIONALLY before it forwards (gh#300), so an
-                // unconfirmed resolve cannot leave the key held -- the hazard a retry would guard against does not
-                // exist on this path. What a retry WOULD create is worse and real: `advised` stuck true means the
-                // next outage is never raised at all, because the advisory below only fires while it is false.
-                // Silence, reached by way of a guard against silence (gh#1051 round-2 review).
+                // The incident is closed HERE whatever the channel answers -- `advised` stuck true would mean the
+                // next outage is never raised at all, because the advisory below only fires while it is false:
+                // silence, reached by way of a guard against silence (gh#1051 round-2 review).
+                //
+                // But a resolve that returned true is NOT proof the key was released, and the round-2 comment that
+                // said otherwise was wrong about everything above the dedup decorator (gh#1051 round-3 review).
+                // This host talks to the OUTBOX seam; three layers below it QueuedNotificationChannel is a bounded
+                // channel with BoundedChannelFullMode.DropWrite, and under any Drop mode TryWrite DISCARDS the item
+                // and returns true -- so that class's own "queue is full, dropped the resolve" branch cannot run,
+                // nothing is logged, and this host is told the resolve was accepted. A resolve lost that way leaves
+                // DedupingNotificationChannel holding the key for the life of the process, and every later outage
+                // is then suppressed as a duplicate while each layer reports success: gh#1045's finding, reproduced
+                // by this producer.
+                //
+                // So the close is remembered as PROVISIONAL. A redundant resolve is free -- the decorator forwards
+                // unconditionally and a transport holding no receipt no-ops -- which is what makes re-arming before
+                // the next outage's first advisory safe, and it is the only moment a held key actually costs
+                // anything.
                 if (advised && Stopwatch.GetElapsedTime(deliveringSince) >= _degradedGrace)
                 {
                     if (!await ResolveDegradedAsync(stoppingToken))
@@ -469,6 +492,7 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
                     }
 
                     advised = false;
+                    reArmBeforeNextAdvisory = true;
                 }
             }
             else
@@ -482,6 +506,17 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
                 TimeSpan degradedFor = Stopwatch.GetElapsedTime(notDeliveringSince);
                 if (!advised && degradedFor >= _degradedGrace)
                 {
+                    if (reArmBeforeNextAdvisory)
+                    {
+                        // ONCE per outage, before the first advisory of it, and never on the retries that follow --
+                        // a resolve before each retry would re-arm the key every pass and turn one incident into a
+                        // push per pass, which is the noise ADR-0019 §4 forbids. Its result is deliberately
+                        // ignored: this is a belt on top of a brace, and if it fails the send below is no worse off
+                        // than it already was.
+                        await ResolveDegradedAsync(stoppingToken);
+                        reArmBeforeNextAdvisory = false;
+                    }
+
                     advised = await AdviseDegradedAsync(degradedFor, stoppingToken);
                 }
             }

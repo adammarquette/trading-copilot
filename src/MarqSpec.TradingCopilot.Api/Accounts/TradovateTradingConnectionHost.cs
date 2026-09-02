@@ -270,9 +270,23 @@ public sealed class TradovateTradingConnectionHost : TradovateSocketConnectionHo
                     ? SocketPassOutcome.Delivering
                     : SocketPassOutcome.StillOwed;
 
-            default:
-                // A snapshot has landed for this connection, so entity frames are flowing.
+            case TradovateSyncObligation.None:
+                // A snapshot has landed for this connection, so entity frames are flowing. This is the ONLY
+                // obligation that may report an all-clear, and it is named rather than defaulted to.
                 return SocketPassOutcome.Delivering;
+
+            default:
+                // A WHITELIST, not a blacklist, and the difference is safety-relevant here. `Delivering` is the
+                // sole input that zeroes the outage clock and CLOSES the operator advisory, so an obligation this
+                // switch does not recognise must never reach it: the next member added to this enum is most likely
+                // the mid-sync / wedged state gh#1052 needs, and defaulting that to "delivering" would silently
+                // resolve `tradovate.socket.degraded:trading` on a socket that has never synced -- the exact state
+                // this card exists to report. `Waiting` costs nothing for a value that never occurs: it neither
+                // charges the backoff nor clears an outage.
+                Logger.LogWarning(
+                    "The Tradovate trading socket reported an unrecognised sync obligation; treating it as not "
+                    + "delivering rather than assuming the feed is live.");
+                return SocketPassOutcome.Waiting;
         }
     }
 
@@ -321,8 +335,10 @@ public sealed class TradovateTradingConnectionHost : TradovateSocketConnectionHo
         }
 
         // Marks a HOST sync in flight, so a completion raised while it runs is left to the connection-bound clear
-        // below rather than taken at face value by the event handler. The generation it returns is the same one
-        // captured above; the earlier capture is the binding, this is the discriminator.
+        // below rather than taken at face value by the event handler. Its return is DISCARDED on purpose: it is the
+        // generation as of now, and the capture above -- taken before the user-id read, which can run a REST round
+        // trip -- is deliberately the older of the two. Binding to the earlier one is what makes a reconnect during
+        // that read refuse the clear; binding to this one would silently accept it.
         Sync.BeginHostSync();
         try
         {
