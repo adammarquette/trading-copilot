@@ -80,11 +80,13 @@ on the unique `{ OrderId, VenueFillKey }` index downstream, a position does not.
 `Connected` **ends the stream**, after delivering what was buffered: an open sequence over a dead socket is
 indistinguishable from a quiet account, and a quiet account is what auto-flatten must never be told. Two gaps are
 recorded rather than papered over: Tradovate reports no per-fill commission, so `Fees` is zero (gh#1068). A socket
-that is connected but never synced **no longer reads as a quiet account**: the stream refuses on
-`TradovateTradingSocketSync.IsSynced` as well as on the connection state, and ends the stream when a reconnect
-lands unsynced in the window between its checks and its handler attach — reporting that cause rather than the
-drop's, because a message that names the wrong cause is a defect on a path whose justification is that the message
-*is* the trace (gh#1051).
+that is connected but never synced **no longer reads as a quiet account** — though deliberately *not* by refusing
+one. `IsSynced` can only become true after `SyncCompleted` has been raised, so a stream gated on it could only ever
+attach on the far side of the snapshot, making the `OnSync` handler above unreachable and losing the outage fills
+permanently. The stream therefore attaches first, ends when the connection *generation* moves in the window between
+its checks and its handler attach — reporting that cause rather than the drop's — and reports on teardown when it
+never rode a synced socket at all. The socket that stays up and never syncs is escalated to the operator by the
+connection host, where something can act on it (gh#1051).
 
 **Both hosts are one loop, not two.** They shipped a week apart as hand-maintained copies and diverged on a
 safety-relevant line within that week — a successful connect reset the backoff in one and not in the other, leaving a
@@ -93,11 +95,18 @@ socket `Connected`, and so healthy-looking to every other reader, while silent f
 waiting out the client's own in-progress attempt, the fail-safe default on an unrecognised state, containment,
 clean exit, and the **operator advisory** — with `ExecuteAsync` **sealed**, so a third venue's socket host (gh#41)
 inherits the loop rather than copying it. The advisory is shared for the same reason the loop is: "connected,
-degraded, and the only trace is a repeating log line" is not trading-specific. Three consecutive passes that end
-still owing raise one P2 through `INotificationChannel`, and the first pass that owes nothing **resolves** it —
-without the resolve, the process-lifetime dedup would deliver the first outage and suppress every later one
-(gh#1045, gh#1051). It reports and never acts: no socket is torn down or disabled on the host's own judgement. Each host supplies only its **post-connect obligation**, which differs in kind: a per-key replay that must
-survive a partial failure, versus one request that either lands or does not. The trading host alone also watches
+degraded, and the only trace is a repeating log line" is not trading-specific. Two minutes without **delivering**
+raises one P2 through `INotificationChannel`, and two minutes of delivering resolves it — wall-clock rather than a
+pass count, because the gap between passes grows with the backoff; and with the same grace on both edges, because
+resolving on the first healthy pass would make a flapping socket a push per flap instead of one incident. Without
+the resolve at all, the process-lifetime dedup would deliver the first outage and suppress every later one
+(gh#1045, gh#1051). It reports and never acts: no socket is torn down or disabled on the host's own judgement.
+Each host supplies only its **post-connect obligation**, which differs in kind: a per-key replay that must
+survive a partial failure, versus one request that either lands or does not. A pass reports one of three things —
+delivering, still owed, or waiting — because "nothing failed on the wire" and "the feed is alive" are different
+claims, and conflating them let the trading socket's grace pass close its own incident.
+
+The trading host alone also watches
 `ConnectionStatusChanged`, because only its socket can reach `Connected`-but-unsynced *without failing* — a
 market-data replay failure propagates and parks that socket in `Disconnected`, where the shared poll finds it.
 
@@ -277,7 +286,7 @@ ingest → process flow, which they deliberately sit outside of.
 | `ConditionalOrderHost` | event log · `conditional-order` cursor | fires / cancels / expires pending conditional entries, each through the **authoritative fire-time re-gate** (gh#198) | "send when conditions met" must be re-judged at fire, not at arm (R-12) |
 | `VenueConnectionMonitorHost` | poll over `IVenueConnection` | orphans every hidden stop on a venue **drop**, re-arms on reconnect (gh#209) | a synthetic stop cannot promote without quotes; the native safety stop stays the floor |
 | `TradovateMarketDataConnectionHost` | poll over the venue client's socket state (shared loop: `TradovateSocketConnectionHost`) | owns the Tradovate **market-data socket**: connects it, drives it back up from `Disconnected` with backoff, and **resubscribes** every live quote key from `TradovateQuoteSubscriptions` after a connect it drove (gh#977, gh#1054) | the client replays subscriptions only on *its own* reconnect, which gives up after one attempt — so without this a recovered socket returns **connected but silent**, and a silent quote feed is what stalls the promotion above. Idle in a deployment where Tradovate is unconfigured |
-| `TradovateTradingConnectionHost` | poll over the venue client's socket state (same shared loop) | owns the Tradovate **trading socket**: connects it, drives it back up from `Disconnected` with backoff, and sends the **`user/syncrequest`** after a connect it drove — plus, after one grace pass, after any connect it merely observed, re-arming on `ConnectionStatusChanged` because only this socket can reach `Connected`-but-unsynced without failing. Falls back to `GET /auth/me` when the token response omits the user id, and publishes the synced state into `TradovateTradingSocketSync` (gh#977, gh#1054, gh#1051) | the client sends that sync only on *its own* reconnect, and Tradovate pushes entity frames only to a socket that has synced — so without this the socket is **connected, authorized and delivering no order, fill or position event**. The grace pass keeps a duplicate snapshot off the ordinary path. Idle where Tradovate is unconfigured |
+| `TradovateTradingConnectionHost` | poll over the venue client's socket state (same shared loop) | owns the Tradovate **trading socket**: connects it, drives it back up from `Disconnected` with backoff, and sends the **`user/syncrequest`** after a connect it drove — plus, after one grace pass, after any connect it merely observed, re-arming on `ConnectionStatusChanged` because only this socket can reach `Connected`-but-unsynced without failing. Falls back to `GET /auth/me` when the token response omits the user id, and publishes the synced state into `TradovateTradingSocketSync`, which is how `TradovateAccountEventStream` can tell a socket that was never subscribed from a quiet account (gh#977, gh#1054, gh#1051) | the client sends that sync only on *its own* reconnect, and Tradovate pushes entity frames only to a socket that has synced — so without this the socket is **connected, authorized and delivering no order, fill or position event**. The grace pass keeps a duplicate snapshot off the ordinary path. Idle where Tradovate is unconfigured |
 | `AutoFlattenHost` | timer · DST-aware `MarketClock` | the **primary** R-13 trigger — closes positions at each instrument's per-market deadline, verifies flat, journals `flatten.*` (gh#185) | the one autonomous action, and it only reduces exposure |
 | `AutoFlattenWatchdogHost` | **separate** timer, own loop | the **redundant second tier** — backstops the primary past a grace window, persists on a rejected close, escalates to critical rather than firing blind (gh#187) | ADR-0013's independence requirement: a bug in the primary must not disable the flatten |
 | `DeadMansSwitchHost` | timer · per-instrument check-in | the **third** R-13 tier — reports each flat market to an **external** monitor and *withholds* the check-in while exposure remains past the deadline (gh#244) | the worst R-13 failure is the host dying and taking its own alerting with it, so here **silence is the alarm** (ADR-0019) |
