@@ -633,7 +633,11 @@
 
   /* ---------- co-pilot chat surface ---------- */
   .copilot{margin-top:44px}
-  .cop-wrap{display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start}
+  .cop-wrap{display:grid;grid-template-columns:200px 1fr 300px;gap:20px;align-items:start}
+  .cop-list{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-l);display:flex;flex-direction:column;overflow:hidden}
+  .cop-list-new{margin:10px;padding:7px 10px;border:1px solid var(--outline-soft);border-radius:8px;background:var(--surface-2);color:var(--on-med);font-size:11px;text-align:center}
+  .cop-list-row{padding:9px 12px;font-size:11.5px;color:var(--on-med);border-top:1px solid var(--outline-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cop-list-row.on{background:var(--primary-ctr);color:var(--primary);font-weight:600}
   .cop-thread{background:var(--surface-1);border:1px solid var(--outline-soft);border-radius:var(--r-l);padding:16px;display:flex;flex-direction:column;gap:12px}
   .cmsg{font-size:12.5px;line-height:1.5;border-radius:12px}
   .cmsg.me{align-self:flex-end;max-width:80%;background:var(--primary-ctr);color:#dfe9ff;padding:9px 12px;border-bottom-right-radius:4px}
@@ -654,7 +658,7 @@
   .cop-input{display:flex;align-items:center;gap:8px;margin-top:4px;padding:10px 14px;background:var(--bg);border:1px solid var(--outline-soft);border-radius:22px;color:var(--on-dim);font-size:12px}
   .cop-input .cop-send{margin-left:auto;color:var(--primary);font-size:14px}
   .cop-ann{align-self:start}
-  @media(max-width:900px){.cop-wrap{grid-template-columns:1fr}}
+  @media(max-width:900px){.cop-wrap{grid-template-columns:1fr}.cop-list{display:none}}
 
   /* ---------- news & signals feed ---------- */
   .feed{margin-top:44px}
@@ -1324,22 +1328,28 @@
   </section>
 
   <section class="copilot">
-    <div class="cap"><h2>Co-pilot chat — grounded, tool-calling, propose-only</h2><span class="bp">R-6 · [A4]</span>
-      <span class="muted">the dock's Chat tab, expanded · the conversational engine + retrieval are [A4] (Phase 2, not built yet); the tools it calls and the gate it routes through are the shipped reality</span></div>
+    <div class="cap"><h2>Co-pilot chat — grounded, tool-calling, propose-only</h2><span class="bp">R-6 · gh#1063 built · tool-calling [A4]</span>
+      <span class="muted">the dedicated <code>/chat</code> surface (gh#1063, of gh#18): conversation list, thread and composer against the real endpoints, streamed incrementally · the richer tool-call cards, citations and drafted-ticket actions below stay [A4] (Phase 2) — the turn API returns plain text today, nothing structured for them yet</span></div>
 
     <div class="cop-wrap">
+      <div class="cop-list">
+        <div class="cop-list-new">+ New conversation</div>
+        <div class="cop-list-row on">ES risk &amp; resize</div>
+        <div class="cop-list-row">Journal — opening drive fades</div>
+        <div class="cop-list-row">Rulebook — no adds into news</div>
+      </div>
       <div class="cop-thread">
         <div class="cmsg me">Is my ES buy-limit still safe if I add a contract? And what's my headroom on the 50K?</div>
 
         <div class="cmsg ai">
           <div class="cop-turn">
-            <div class="cop-line">Reading your live risk state and dry-running the resize at size 3 — neither of these sends anything.</div>
+            <div class="cop-line">Reading your live risk state and dry-running the resize at size 3 — neither of these sends anything. <span class="plannedtag">tool-calling [A4]</span></div>
             <div class="toolcall"><span class="tc-ic">🔧</span><span class="tc-name">risk.headroom</span><span class="tc-arg">account 50KTC…02</span><span class="tc-ok">✓ read</span></div>
             <div class="toolcall"><span class="tc-ic">🔧</span><span class="tc-name">orders.evaluate_resize</span><span class="tc-arg">ES · 2 → 3 (dry-run)</span><span class="tc-ok">✓ gate</span></div>
             <div class="cop-line">Headroom is <b>$1,800</b> to the drawdown floor (governor $380 away). Resizing ES to <b>3</b> <b>passes the gate</b>: worst-case at the safety stop is <b>$2,100</b>, inside every layer; per-trade risk becomes <b>$610 / $700</b>. It doesn't move the safety stop, so your max-loss floor holds.</div>
             <div class="grounded"><span class="g-lab">grounded in</span>
               <span class="cite">Risk profile · 50K</span><span class="cite">Rulebook · "no adds into news"</span><span class="cite">ADR-0007 · safety stop</span>
-              <span class="plannedtag">retrieval [A4]</span>
+              <span class="plannedtag">structured citations [A4]</span>
             </div>
           </div>
         </div>
@@ -1348,7 +1358,7 @@
 
         <div class="cmsg ai">
           <div class="cop-turn">
-            <div class="cop-line"><b>I don't send it.</b> I've drafted the change onto the order ticket. This one's a <b>material size increase</b>, so it needs your <b>acknowledgement</b> — and the gate re-checks again at send.</div>
+            <div class="cop-line"><b>I don't send it.</b> I've drafted the change onto the order ticket. This one's a <b>material size increase</b>, so it needs your <b>acknowledgement</b> — and the gate re-checks again at send. <span class="plannedtag">drafted-ticket action [A4]</span></div>
             <div class="ticket cop-draft">
               <div class="th"><span>Modify · ES buy limit</span><span class="chip info" style="padding:1px 7px">drafted by co-pilot</span></div>
               <div class="trow edited"><span class="k">Size <span class="chip warn" style="padding:0 6px;font-size:9px">resize</span></span><span><span class="was">2</span><span class="v">3</span></span></div>
@@ -1364,24 +1374,24 @@
 
         <div class="cmsg ai proactive">
           <div class="cop-turn">
-            <span class="chip info" style="align-self:flex-start">proactive · from your journal</span>
+            <span class="chip info" style="align-self:flex-start">proactive · from your journal <span class="plannedtag" style="margin-left:6px">[A4]</span></span>
             <div class="cop-line">Separately — you've <b>passed 6 of 7</b> opening-drive counter-trend fades in the first 5 minutes this month. Want me to draft a rule to suppress those suggestions?</div>
             <div class="btns"><button class="btn fill">Draft the rule</button><button class="btn out">Not now</button></div>
           </div>
         </div>
 
-        <div class="cop-input"><span>Ask the co-pilot, or tell it to draft an action…</span><span class="cop-send">➤</span></div>
+        <div class="cop-input"><span>Ask the co-pilot — quotes, journal, edit a rule…</span><span class="cop-send">➤</span></div>
       </div>
 
       <div class="ann cop-ann">
-        <div class="annitem"><b>A co-pilot, not a chatbot.</b> Each turn can <b>call platform tools</b> — read positions / risk, explain a suggestion, dry-run or draft an order change — and <b>ground its answers</b> in your rulebook, journal and the wiki via retrieval, with <b>citations</b> you can open.</div>
-        <div class="annitem"><b>Propose-only — enforcement stays below the model.</b> The co-pilot <b>never sends an order and never holds a risk limit</b>. A trade action becomes a <b>drafted ticket</b> you review; the <b>risk gate + sanity caps re-check it at send</b> (R-5 / R-12), and a material risk increase needs <b>acknowledge-before-send</b>. A cancel / flatten is a <b>hold-to-confirm</b>. Reads and dry-runs are free; <b>writes are always human-confirmed</b> (ADR-0007, engineering §1).</div>
-        <div class="annitem"><b>The tools are real; the conversation isn't built yet.</b> The endpoints a tool-call hits — modify / cancel / kill switch / risk / positions — are <b>shipped</b>. The <b>conversational engine + Cohere retrieval</b> are <b>[A4]</b> (Phase 2), drawn here as the intended design, not a live feature.</div>
-        <div class="annitem"><b>It asks, too.</b> Journal patterns and backtests surface as <b>proactive follow-ups</b> (R-6 / R-9); a confirmed one becomes a rule — see <i>Rulebook &amp; triggers</i> and the <i>AI refinement loop</i>. Nothing changes without your confirm.</div>
+        <div class="annitem"><b>Built (gh#1063): the conversation list, thread and composer.</b> The panel on the left, the thread, and the input at its foot are <b>live</b> — real conversations, real turns against <code>POST /conversations/{id}/turns</code>, rendered as the model streams (gh#906 inc 3b). Every message's text — either role — renders as plain display text, never interpreted markup: the presentation-layer half of the untrusted-grounding contract gh#995 holds server-side.</div>
+        <div class="annitem"><b>A co-pilot, not a chatbot — but the calling and citing are still [A4].</b> The design is for each turn to <b>call platform tools</b> — read positions / risk, explain a suggestion, dry-run or draft an order change — and <b>ground its answers</b> with open-able <b>citations</b>. The tools themselves and the retrieval pipeline are shipped server-side (read-only tools gh#925/#930, always-on news grounding gh#995); what is <b>not yet returned to this surface</b> is a structured shape for either — today a turn answers as plain text, so the tool-call cards and citation chips marked <span class="plannedtag">[A4]</span> above are the intended next increment, not live.</div>
+        <div class="annitem"><b>Propose-only — enforcement stays below the model.</b> The co-pilot <b>never sends an order and never holds a risk limit</b>. A trade action becomes a <b>drafted ticket</b> you review; the <b>risk gate + sanity caps re-check it at send</b> (R-5 / R-12), and a material risk increase needs <b>acknowledge-before-send</b>. A cancel / flatten is a <b>hold-to-confirm</b>. Reads and dry-runs are free; <b>writes are always human-confirmed</b> (ADR-0007, engineering §1). The drafted-ticket action itself is <b>[A4]</b> — the write tools it would call are gh#1059.</div>
+        <div class="annitem"><b>It asks, too — still [A4].</b> Journal patterns and backtests are meant to surface as <b>proactive follow-ups</b> (R-6 / R-9); a confirmed one becomes a rule — see <i>Rulebook &amp; triggers</i> and the <i>AI refinement loop</i>. Nothing changes without your confirm. Not part of gh#1063's turn API today.</div>
       </div>
     </div>
 
-    <div class="rej-why" style="margin-top:12px">The differentiator is a co-pilot that <b>reasons over your own data with tools and citations</b> and can <b>act on the platform</b> — but only by <b>proposing</b>: a write is a drafted ticket or a hold-to-confirm, re-checked by the same gate every other path runs (R-5 / R-12), and the LLM is never in a position to hold a limit or send unattended (ADR-0007, engineering §1 — the whole reason enforcement lives below the model). Today the <b>tools and the gate are shipped</b>; the <b>conversational engine and retrieval are [A4]</b> (Phase 2), drawn here to validate the UX and, above all, the <b>propose-only safety contract</b> before it is built.</div>
+    <div class="rej-why" style="margin-top:12px">The differentiator is a co-pilot that <b>reasons over your own data with tools and citations</b> and can <b>act on the platform</b> — but only by <b>proposing</b>: a write is a drafted ticket or a hold-to-confirm, re-checked by the same gate every other path runs (R-5 / R-12), and the LLM is never in a position to hold a limit or send unattended (ADR-0007, engineering §1 — the whole reason enforcement lives below the model). Today the <b>conversation itself is shipped</b> (gh#1063: list, thread, composer, streamed) <b>and so are the tools and the gate</b> underneath it; what is still <b>[A4]</b> is surfacing a tool call, a citation or a drafted ticket <i>as its own turn-native card</i> rather than as the plain text a turn answers with now — drawn here to validate that UX, and above all the <b>propose-only safety contract</b>, before it is built.</div>
   </section>
 
   <section class="perf">
@@ -2355,8 +2365,8 @@
       <div><span class="tag">R-5 · R-16</span> Risk gate &amp; sanity caps — shown before arming</div>
       <div><span class="tag">R-13</span> Time-to-flat countdown — auto-flatten at the pre-MOC deadline (default ~2:30 PM CT)</div>
       <div><span class="tag">R-14</span> Practice / live mode chip — safety surface</div>
-      <div><span class="tag">R-6</span> Co-pilot chat — invokes platform tools ([A4] — the conversational engine is unbuilt; see the Co-pilot chat surface)</div>
-      <div><span class="tag">R-6 · [A4]</span> Co-pilot chat surface — grounded (retrieval + citations), tool-calling, and strictly propose-only: writes become a drafted ticket or hold-to-confirm and re-pass the gate; the conversational engine + retrieval are [A4] (unbuilt), the tools + gate it routes through are shipped</div>
+      <div><span class="tag">R-6</span> Co-pilot chat dock stub — the workspace's embedded Chat tab (planned; the dedicated surface below is what ships, gh#1063)</div>
+      <div><span class="tag">R-6 · gh#1063</span> Co-pilot chat surface — the dedicated <code>/chat</code> surface (conversation list, thread, composer) is <b>built</b> and streams turns incrementally; tool-call cards, structured citations and a drafted-ticket action are the intended <b>[A4]</b> next increment — the tools, retrieval and gate underneath are shipped, a turn just answers as plain text today</div>
       <div><span class="tag">R-2 · [D2]</span> News &amp; signals feed — Finnhub + Tiingo, deduped, attached to your instruments with a salience weight + importance star; a soft signal (never a risk control) that feeds suggestions / chat, not orders; surfaced both as a dedicated feed and, compact + salience-ranked, in the workspace dock; ingestion + weighting are [D2] (unbuilt)</div>
       <div><span class="tag">R-8 · R-9</span> Positions, fills, journal</div>
       <div><span class="tag">Kill</span> Kill switch — always visible, all breakpoints</div>
