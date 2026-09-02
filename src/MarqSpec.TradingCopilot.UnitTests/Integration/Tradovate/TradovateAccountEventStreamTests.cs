@@ -191,6 +191,42 @@ public class TradovateAccountEventStreamTests
 
 
     [Fact]
+    public async Task StreamAsync_ShouldStillReportSilence_WhenALaterConnectionSyncedBeforeTheConsumerLetGo()
+    {
+        // Round-3 review. The teardown report runs in the `finally`, and an iterator's `finally` does not run when
+        // the stream ENDS -- it runs when the CONSUMER disposes, which for the journalling consumer is seconds
+        // later, after it has drained. The register is process-wide and a drop never re-arms the obligation, so in
+        // that gap the connection host can reconnect and sync a WHOLE NEW connection and flip IsSynced true.
+        //
+        // Read unscoped, that suppresses a report about the connection this stream actually rode -- and it is the
+        // wrong direction to fail in: a real "its silence proved nothing" is silently dropped. The generation is
+        // what scopes the read to the connection captured when the stream opened.
+        _sync.OnSocketConnected();
+
+        Func<Task> read = async () =>
+        {
+            await using Reader reader = Start(CreateStream(), [Account(9001)]);
+
+            // The socket this stream rode drops, having delivered nothing at all.
+            _webSocket.TradingState = ClientModels.ConnectionState.Disconnected;
+            _webSocket.RaiseStatus(isTrading: true, ClientModels.ConnectionState.Disconnected);
+
+            // ...and while the consumer is still draining, the host brings a NEW connection up and syncs it.
+            _sync.OnSocketConnected();
+            _sync.CompleteObservedSync();
+            _sync.IsSynced.Should().BeTrue("the arrangement is only meaningful once a LATER connection is synced");
+
+            await reader.NextAsync();
+        };
+
+        await read.Should().ThrowAsync<TradovateVenueException>();
+
+        _log.Warnings.Should().Contain(
+            message => message.Contains("delivered nothing at all"),
+            "the connection this stream rode was never synced, whatever the one after it did");
+    }
+
+    [Fact]
     public async Task StreamAsync_ShouldNotReportSilence_WhenItDeliveredLiveFramesWithoutASnapshot()
     {
         // Round-2 review, note b. The report was driven by the SNAPSHOT alone, so a stream that took live props
