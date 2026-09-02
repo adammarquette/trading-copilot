@@ -7,6 +7,7 @@ import RuleIcon from '@mui/icons-material/Rule';
 import SettingsIcon from '@mui/icons-material/Settings';
 import type { ComponentType } from 'react';
 
+import { ChatSurface } from '../chat/ChatSurface';
 import { NewsSurface } from '../news/NewsSurface';
 import { RulebookSurface } from '../triggers/RulebookSurface';
 import { SettingsSurface } from '../settings/SettingsSurface';
@@ -72,6 +73,12 @@ export const destinations: readonly Destination[] = [
     requirement: 'R-6',
     Icon: ForumIcon,
     tier: 'primary',
+    // The conversation list, thread and composer (gh#1063, increment 8 of gh#18): consumes the merged
+    // persistence / CRUD / grounded-turn / retrieval / rerank stack (gh#898/#901/#906/#925/#930/#975/#995), which
+    // was fully built but unreachable until this surface existed. Tool-call cards, citations and drafted-ticket
+    // actions from the wireframe's [A4] design stay unbuilt -- the API returns plain turn text, nothing structured
+    // for them yet.
+    Surface: ChatSurface,
   },
   {
     id: 'journal',
