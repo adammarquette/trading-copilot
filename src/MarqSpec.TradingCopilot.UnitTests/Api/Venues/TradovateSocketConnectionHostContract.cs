@@ -975,24 +975,111 @@ public abstract class TradovateSocketConnectionHostContract
         await StopAsync(host);
     }
 
+    [Fact]
+    public async Task ExecuteAsync_ShouldStillReachTheOperator_WhenAnEarlierResolveWasAcceptedButLost()
+    {
+        // Round-3 review, and the failure the round-2 comment claimed could not happen. This host talks to the
+        // OUTBOX seam; three layers below it QueuedNotificationChannel is a bounded channel with
+        // BoundedChannelFullMode.DropWrite, and under any Drop mode TryWrite DISCARDS the item and returns true --
+        // so that class's own "queue is full" branch cannot run, nothing is logged, and this host is told the
+        // resolve was accepted. The key stays armed in DedupingNotificationChannel for the life of the process, and
+        // every later outage is suppressed as a duplicate while each layer reports success. That is gh#1045's
+        // blocking finding, reproduced by this producer.
+        //
+        // The assertion is on DELIVERIES, not attempts: the host attempted outage 2's advisory in the broken
+        // version too, and every layer told it that worked. What the operator got is the only thing that matters.
+        int healthy = 0;
+        SocketReadsAs(_ => Volatile.Read(ref healthy) == 1
+            ? ClientModels.ConnectionState.Connected
+            : ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+        Notifications.LoseNextResolve = true;
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Delivered(1)).Should().BeTrue("the first outage must reach the operator");
+
+        Interlocked.Exchange(ref healthy, 1);
+        (await Notifications.Resolved(1)).Should()
+            .BeTrue("the recovery closes the incident -- and this is the resolve that is silently lost");
+
+        Interlocked.Exchange(ref healthy, 0);
+
+        (await Notifications.Delivered(2)).Should()
+            .BeTrue("a resolve that was accepted and lost must not cost the operator every later outage");
+        await StopAsync(host);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldNotReArmTheIncidentKey_OnTheRetriesWithinOneOutage()
+    {
+        // The bound on the fix above. Re-arming before EVERY attempt would release the dedup key each pass and turn
+        // one continuing incident into a push per poll interval -- ADR-0019 §4's budget, destroyed by the very
+        // producer that is meant to respect it. The re-arm happens once, before the first advisory of a NEW outage,
+        // and never on the retries that follow it.
+        //
+        // The channel refuses every send, so the host retries for the whole run and each retry would resolve if the
+        // re-arm were unbounded. Nothing has ever been advised, so nothing is owed a re-arm at all: zero resolves.
+        Notifications.Accept = false;
+        SocketIs(ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Sent(3)).Should().BeTrue("the host must really have retried");
+        await StopAsync(host);
+
+        Notifications.Resolutions.Should()
+            .BeEmpty("an outage that was never closed has no key to re-arm, and retries never resolve");
+    }
+
     /// <summary>Records what the host told the operator, so the advisory can be asserted rather than inferred.</summary>
     protected sealed class RecordingNotificationChannel : INotificationChannel
     {
         private readonly object _gate = new();
         private readonly List<Notification> _sent = [];
+        private readonly List<Notification> _delivered = [];
         private readonly List<string> _resolved = [];
+
+        // The dedup decorator's memory, modelled here because the hazard this double exists to express lives in the
+        // interaction between it and the queue below it: a key that is armed and never released suppresses every
+        // later incident, and the producer above sees only "accepted".
+        private readonly HashSet<string> _reported = new(StringComparer.Ordinal);
 
         // One witness PER WAIT, not one per channel. A single reusable TaskCompletionSource stays completed once it
         // has fired, so a second Sent(n) in the same test would return true off the FIRST wait's completion whatever
         // n was -- a wait that cannot fail, in the harness rather than in an assertion (gh#1051 round-2 review).
         private readonly List<(int At, TaskCompletionSource Signal)> _sentWaits = [];
         private readonly List<(int At, TaskCompletionSource Signal)> _resolvedWaits = [];
+        private readonly List<(int At, TaskCompletionSource Signal)> _deliveredWaits = [];
 
         /// <summary>Whether a send is accepted for delivery — false is a channel that could not take it.</summary>
         public bool Accept { get; set; } = true;
 
         /// <summary>Whether a resolve is confirmed — false is a cancel the channel could not vouch for.</summary>
         public bool ConfirmResolve { get; set; } = true;
+
+        /// <summary>
+        /// Loses the <b>next</b> resolve — recorded, reported successful, key never released — then clears itself.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This models the real chain rather than an invented failure. <c>QueuedNotificationChannel</c> is a bounded
+        /// channel with <c>BoundedChannelFullMode.DropWrite</c>, and under any Drop mode <c>TryWrite</c> discards
+        /// the item and returns <see langword="true"/> — so its own "queue is full" branch cannot run, nothing is
+        /// logged, and the caller three layers up is told the resolve was accepted while
+        /// <c>DedupingNotificationChannel</c> goes on holding the key. Without this knob a held key is not
+        /// representable here, and a test asserting the host "re-raises" proves only half the system (gh#1051
+        /// round-3 review).
+        /// </para>
+        /// <para>
+        /// One-shot, because a queue that overflows forever is a different (and louder) fault: the interesting case
+        /// is the transient drop, where everything is healthy again by the next outage and the ONLY lasting damage
+        /// is the key nobody released.
+        /// </para>
+        /// </remarks>
+        public bool LoseNextResolve { get; set; }
 
         /// <summary>Everything the host asked the operator to be told, oldest first.</summary>
         public IReadOnlyList<Notification> Notifications
@@ -1002,6 +1089,18 @@ public abstract class TradovateSocketConnectionHostContract
                 lock (_gate)
                 {
                     return [.. _sent];
+                }
+            }
+        }
+
+        /// <summary>What actually reached the operator — sends the dedup memory did not suppress.</summary>
+        public IReadOnlyList<Notification> Deliveries
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _delivered];
                 }
             }
         }
@@ -1024,6 +1123,9 @@ public abstract class TradovateSocketConnectionHostContract
         /// <summary>Completes once <paramref name="count"/> resolves have landed; false means it timed out.</summary>
         public Task<bool> Resolved(int count) => Wait(_resolvedWaits, () => _resolved.Count, count);
 
+        /// <summary>Completes once <paramref name="count"/> notifications have REACHED the operator.</summary>
+        public Task<bool> Delivered(int count) => Wait(_deliveredWaits, () => _delivered.Count, count);
+
         /// <inheritdoc />
         public Task<bool> SendAsync(Notification notification, CancellationToken cancellationToken)
         {
@@ -1031,9 +1133,25 @@ public abstract class TradovateSocketConnectionHostContract
             {
                 _sent.Add(notification);
                 Release(_sentWaits, _sent.Count);
+
+                // Suppressed as a duplicate, exactly as the dedup decorator does while it still holds the key.
+                if (_reported.Contains(notification.DedupKey))
+                {
+                    return Task.FromResult(false);
+                }
+
+                if (!Accept)
+                {
+                    return Task.FromResult(false);
+                }
+
+                // Recorded ONLY on success, like the decorator: a push that never landed is not "already told them".
+                _reported.Add(notification.DedupKey);
+                _delivered.Add(notification);
+                Release(_deliveredWaits, _delivered.Count);
             }
 
-            return Task.FromResult(Accept);
+            return Task.FromResult(true);
         }
 
         /// <inheritdoc />
@@ -1043,6 +1161,16 @@ public abstract class TradovateSocketConnectionHostContract
             {
                 _resolved.Add(dedupKey);
                 Release(_resolvedWaits, _resolved.Count);
+
+                // The accepted-then-lost case: recorded, reported successful, key NEVER released. One-shot.
+                if (LoseNextResolve)
+                {
+                    LoseNextResolve = false;
+                }
+                else
+                {
+                    _reported.Remove(dedupKey);
+                }
             }
 
             return Task.FromResult(ConfirmResolve);

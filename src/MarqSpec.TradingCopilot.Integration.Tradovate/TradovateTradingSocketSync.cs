@@ -2,22 +2,25 @@ namespace MarqSpec.TradingCopilot.Integration.Tradovate;
 
 /// <summary>What the Tradovate trading socket still owes before it delivers entity events at all (gh#1051).</summary>
 /// <remarks>
-/// Ordered by how certain the connection host is that it must act, because the two "connected" cases are not the
-/// same obligation.
+/// <b>The zero value is the one that keeps the socket owing</b>, not the one that says the feed is live. Uninitialised
+/// state has to fail closed here: every reader of this enum treats <see cref="None"/> as "entity frames are flowing",
+/// and that answer arriving by default — an unassigned field, a cast, a value this type gains later — is how a
+/// silent socket comes to read as a healthy one. The register instance defends itself the same way, starting at
+/// <see cref="Pending"/> rather than relying on the numbering.
 /// </remarks>
 public enum TradovateSyncObligation
 {
-    /// <summary>A snapshot has landed since the socket last connected — the feed is live.</summary>
-    None = 0,
-
     /// <summary>
     /// The socket reported <c>Connected</c> and the host did not drive it, so the client's own reconnect may be about
     /// to sync it. One pass of patience, then <see cref="Due"/>.
     /// </summary>
-    Pending = 1,
+    Pending = 0,
 
     /// <summary>Nothing else will sync this connection. Send it.</summary>
-    Due = 2,
+    Due = 1,
+
+    /// <summary>A snapshot has landed since the socket last connected — the feed is live.</summary>
+    None = 2,
 }
 
 /// <summary>
@@ -69,8 +72,9 @@ public enum TradovateSyncObligation
 public sealed class TradovateTradingSocketSync
 {
     // Written from the client's event handlers (arbitrary threads) as well as the connection host's poll loop, so
-    // every read and write goes through Interlocked/Volatile. Starts at Pending rather than None: a socket already
-    // Connected when this process starts was synced by nothing it can see.
+    // every read and write goes through Interlocked/Volatile. Starts at Pending -- which is also this enum's zero
+    // value, deliberately, so the field and the type fail closed together: a socket already Connected when this
+    // process starts was synced by nothing it can see.
     private int _obligation = (int)TradovateSyncObligation.Pending;
 
     // Bumped on every transition into Connected. Only ever compared for equality, so wrap-around is irrelevant.

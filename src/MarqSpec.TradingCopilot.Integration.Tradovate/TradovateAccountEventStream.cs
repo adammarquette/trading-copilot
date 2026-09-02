@@ -179,8 +179,11 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         // the stream can say, when it ends, whether it ever rode a socket that was delivering at all.
         bool openedUnsynced = !_sync.IsSynced;
 
-        // Did this stream ever see the socket DELIVER? Set by the snapshot and by every live props frame alike,
-        // because either one proves the same thing. Watching only the snapshot reported silence about streams that
+        // Did this stream ever see the socket DELIVER? Set when a frame ARRIVES, not when one is emitted, and the
+        // difference is the whole point: an order or position for an account this stream did not subscribe, and a
+        // fill still waiting for the order that names it, never reach Emit -- and one Tradovate login syncs EVERY
+        // account the user holds, so a stream scoped to one account meets that case constantly. Keyed on emission,
+        // this flag reported "nothing arrived" about a socket that was demonstrably delivering (gh#1051 round-3). Watching only the snapshot reported silence about streams that
         // were not silent at all: a SyncCompleted landing between the sample above and the attach below clears the
         // register while this stream's own handler does not yet exist, and a stream can take live frames with no
         // further SyncCompleted at all -- the client's own reconnect syncs while one of the host's syncs is in
@@ -220,10 +223,6 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
 
         void Emit(Func<AccountEvent> map, string what)
         {
-            // Before the write, not after it: an event this stream could not deliver is still proof the socket was
-            // delivering, which is the only thing this flag claims. Callers hold the lock.
-            sawDelivery = true;
-
             try
             {
                 if (!events.Writer.TryWrite(map()))
@@ -281,6 +280,7 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         {
             lock (gate)
             {
+                sawDelivery = true;
                 if (order.Id is { } id)
                 {
                     // Recorded for EVERY account, subscribed or not: an order for a foreign account is what lets a
@@ -338,6 +338,7 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         {
             lock (gate)
             {
+                sawDelivery = true;
                 AttributeOrHold(fill);
             }
         }
@@ -346,6 +347,7 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         {
             lock (gate)
             {
+                sawDelivery = true;
                 if (subscribed.Contains(position.AccountId))
                 {
                     Emit(() => TradovateMapping.ToPositionEvent(position, Venue), "position");
@@ -520,9 +522,17 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             {
                 abandoned = heldFills.Count;
                 // All three conjuncts earn their place. It opened over a socket nothing had synced; it never saw
-                // that socket deliver anything; and the register STILL says unsynced, which rules out a snapshot
-                // that landed in the gap between the sample and the attach over a genuinely quiet account.
-                neverDelivered = openedUnsynced && !sawDelivery && !_sync.IsSynced;
+                // that socket deliver anything; and the register -- read for the connection this stream actually
+                // rode -- still says unsynced, which rules out a snapshot that landed in the gap between the sample
+                // and the attach over a genuinely quiet account.
+                //
+                // The generation is part of that third read, not decoration. This runs in the `finally`, which does
+                // not execute until the CONSUMER has drained and disposed -- seconds, for the journalling
+                // consumer -- so by then a LATER connection may have synced and flipped IsSynced true, silently
+                // suppressing a report about the connection this stream was actually on (gh#1051 round-3).
+                neverDelivered = openedUnsynced
+                                 && !sawDelivery
+                                 && (_sync.Generation != connection || !_sync.IsSynced);
             }
 
             if (neverDelivered)
