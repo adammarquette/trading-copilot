@@ -178,7 +178,15 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         // here would put every stream on the far side of the snapshot and make OnSync unreachable. It is recorded so
         // the stream can say, when it ends, whether it ever rode a socket that was delivering at all.
         bool openedUnsynced = !_sync.IsSynced;
-        bool sawSnapshot = false;
+
+        // Did this stream ever see the socket DELIVER? Set by the snapshot and by every live props frame alike,
+        // because either one proves the same thing. Watching only the snapshot reported silence about streams that
+        // were not silent at all: a SyncCompleted landing between the sample above and the attach below clears the
+        // register while this stream's own handler does not yet exist, and a stream can take live frames with no
+        // further SyncCompleted at all -- the client's own reconnect syncs while one of the host's syncs is in
+        // flight, so the completion is left to the connection-bound clear and the obligation stays armed even
+        // though the socket really is synced (gh#1051 round-2 review).
+        bool sawDelivery = false;
 
         Channel<AccountEvent> events = Channel.CreateUnbounded<AccountEvent>(new UnboundedChannelOptions
         {
@@ -212,6 +220,10 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
 
         void Emit(Func<AccountEvent> map, string what)
         {
+            // Before the write, not after it: an event this stream could not deliver is still proof the socket was
+            // delivering, which is the only thing this flag claims. Callers hold the lock.
+            sawDelivery = true;
+
             try
             {
                 if (!events.Writer.TryWrite(map()))
@@ -350,7 +362,7 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             {
                 // This stream has now seen the socket deliver, which is what separates "the account was quiet" from
                 // "this socket was never subscribed to anything" when the stream ends (gh#1051).
-                sawSnapshot = true;
+                sawDelivery = true;
 
                 foreach (ClientModels.Order order in snapshot.Orders)
                 {
@@ -434,6 +446,17 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             // says "healthy" while the socket underneath is a different connection whose drop was raised to nobody.
             // Only the generation shows it. Deliberately NOT `!IsSynced`: the new connection is legitimately
             // unsynced for a moment, and refusing on that would refuse the ordinary case too (gh#1051).
+            //
+            // ONE INTERLEAVING FIRES THIS ON A CONNECTION'S FIRST APPEARANCE, and it is accepted rather than
+            // hidden. The client writes `_state = Connected` and only then raises the transition that reaches the
+            // connection host and bumps the generation, so a stream reading the state inside that gap sees
+            // `Connected` against the OLD generation and reports this connection as replaced when it is merely new.
+            // Nothing above can distinguish the two from here: both end with the socket Connected on a generation
+            // this stream did not capture. The failure direction is the safe one -- the sequence ENDS and the
+            // supervisor re-subscribes, rather than continuing silently -- and the residual cost is that the
+            // re-subscribed stream may attach after that connection's snapshot. Narrowing it needs the generation
+            // to move with the client's own state write rather than after it, which is an upstream change; it is
+            // recorded on gh#1051 rather than papered over here.
             if (_webSocket.TradingState != ClientModels.ConnectionState.Connected)
             {
                 lock (gate)
@@ -496,7 +519,10 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
             lock (gate)
             {
                 abandoned = heldFills.Count;
-                neverDelivered = openedUnsynced && !sawSnapshot;
+                // All three conjuncts earn their place. It opened over a socket nothing had synced; it never saw
+                // that socket deliver anything; and the register STILL says unsynced, which rules out a snapshot
+                // that landed in the gap between the sample and the attach over a genuinely quiet account.
+                neverDelivered = openedUnsynced && !sawDelivery && !_sync.IsSynced;
             }
 
             if (neverDelivered)
@@ -509,9 +535,9 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
                 // snapshot and make the OnSync handler above unreachable, losing the outage fills it exists to
                 // recover. The connection host escalates the same condition to the operator.
                 _logger.LogWarning(
-                    "The Tradovate account-event stream ended having never received a sync snapshot over a socket "
-                    + "that was unsynced when it opened. Tradovate delivers entity frames only to a synced socket, "
-                    + "so nothing this stream did or did not report is evidence about the account.");
+                    "The Tradovate account-event stream ended having delivered nothing at all over a socket that "
+                    + "was unsynced when it opened and is unsynced still. Tradovate delivers entity frames only to "
+                    + "a synced socket, so this stream's silence is not evidence about the account.");
             }
 
             if (abandoned > 0)
