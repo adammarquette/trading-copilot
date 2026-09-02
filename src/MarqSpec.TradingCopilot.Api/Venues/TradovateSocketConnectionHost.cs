@@ -471,7 +471,7 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
                 // said otherwise was wrong about everything above the dedup decorator (gh#1051 round-3 review).
                 // This host talks to the OUTBOX seam; three layers below it QueuedNotificationChannel is a bounded
                 // channel with BoundedChannelFullMode.DropWrite, and under any Drop mode TryWrite DISCARDS the item
-                // and returns true -- so that class's own "queue is full, dropped the resolve" branch cannot run,
+                // and returns true (gh#1077) -- so its own "queue is full, dropped the resolve" branch cannot run,
                 // nothing is logged, and this host is told the resolve was accepted. A resolve lost that way leaves
                 // DedupingNotificationChannel holding the key for the life of the process, and every later outage
                 // is then suppressed as a duplicate while each layer reports success: gh#1045's finding, reproduced

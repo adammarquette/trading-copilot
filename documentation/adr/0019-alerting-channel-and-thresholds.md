@@ -542,7 +542,7 @@ socket has gone **two minutes without delivering**, and resolved once it has del
   within one outage, which would cost a push per pass. A redundant resolve is free: the decorator forwards
   unconditionally and a transport holding no receipt no-ops. *(The unreachable drop-logging in
   `QueuedNotificationChannel` is a defect in its own right — the queue is fullest exactly when a transport is
-  wedged, which is when the flatten escalation is also enqueuing — and is not fixed here.)*
+  wedged, which is when the flatten escalation is also enqueuing — and is gh#1077, not fixed here.)*
 - **What counts as "not delivering" is everything that is not delivering.** A failed connect, an unmet obligation, a
   socket mid-attempt, an unrecognised state, a pass that threw. The first cut of this exempted the mid-attempt case,
   which meant a socket reconnecting faster than the grace — the venue closing shortly after `authorize`, or the
