@@ -19,13 +19,15 @@
 # SAFETY -- READ THIS BEFORE RUNNING
 # -----------------------------------
 # THIS PLACES REAL ORDERS on a real ProjectX account. R-14 (practice accounts only outside production) must hold
-# by construction: StagingProjectXGateway.ResolvePracticeAccountId (gh#1074) requires TWO independent signals to
-# agree before handing back an id anything here can trade on -- the venue's own `Simulated` flag, AND the same
-# name-based ProjectXAccountStage classification the production adapter uses. The venue flag alone is not
-# trusted: a prop-firm-style funded account can report Simulated=true while real payout is at stake (gh#780), so
-# even a misconfigured STAGING_PROJECTX_API_KEY/SECRET pointed at a live or funded account cannot be traded
-# through this path. That guard does not excuse pointing this at anything but a reserved PRACTICE account; it is
-# the backstop, not the plan.
+# by construction: StagingProjectXGateway.ResolvePracticeAccountId (gh#1074) derives the account's trading mode
+# the SAME WAY production does for a ProjectX FirmType.PropFirm connection -- classify the account's name
+# (ProjectXAccountStage.Resolve) and resolve it through the SAME declared FirmConventions the harness's app-side
+# connection registers (StagingFirmConvention). The venue's own `Simulated` flag plays NO role in the result --
+# not even as a secondary check -- because gh#780 established it is not trustworthy for this venue: a prop-firm
+# funded account can report Simulated=true while real payout is at stake. So even a misconfigured
+# STAGING_PROJECTX_API_KEY/SECRET pointed at a live or funded account cannot be traded through this path. That
+# guard does not excuse pointing this at anything but a reserved PRACTICE account; it is the backstop, not the
+# plan.
 #
 # Never run this at the same time as a `staging-gates.yml` workflow_dispatch run -- both place orders on the SAME
 # reserved account, and nothing serializes a local run against a concurrent CI run (only StagingExecutionCollection
@@ -106,9 +108,10 @@ echo "STAGING_PROJECTX_PRACTICE_ACCOUNT=${STAGING_PROJECTX_PRACTICE_ACCOUNT}"
 echo "STAGING_EXECUTION_INSTRUMENT=${STAGING_EXECUTION_INSTRUMENT}"
 echo
 echo "About to place REAL orders on the account above through a LOCAL instance at ${STAGING_API_BASE_URL}."
-echo "R-14 is enforced by construction (StagingProjectXGateway.ResolvePracticeAccountId requires BOTH the venue's"
-echo "Simulated flag AND its name-based stage classification to agree the account is Practice), but that is the"
-echo "backstop -- confirm the account above really is the reserved practice account before continuing."
+echo "R-14 is enforced by construction (StagingProjectXGateway.ResolvePracticeAccountId classifies the account by"
+echo "name and resolves it through the declared FirmConventions -- the venue's Simulated flag is not consulted"
+echo "at all), but that is the backstop -- confirm the account above really is the reserved practice account"
+echo "before continuing."
 echo
 
 echo "Waiting for the local instance to be ready..."
