@@ -583,9 +583,12 @@ belongs here.
   the ledger, and it already treats `false` as *"the row stays owed and is retried next pass"*. The producer was
   told `true` meaning *durably recorded*, which was and remains true, so there is nothing for it to do. What the
   **operator** needs is carried by the metric and the P1 below, not by a return value.
-- A **resolve** does reach the producer. `OutboxNotificationChannel.ResolveAsync` withdraws any undelivered row and
-  then returns this queue's answer verbatim, so the `false` and the out-of-band key release both land at the caller
-  that can act on them.
+- A **resolve** does reach the producer — `OutboxNotificationChannel.ResolveAsync` withdraws any undelivered row
+  and then returns this queue's answer verbatim. **But every live producer discards it**
+  (`AutoFlattenService`, `AutoFlattenWatchdogService`, `TriggerEvaluationService`); only the frozen Tradovate host
+  reads it. That is not an argument for changing them — the flatten resolves the same key again on its next pass
+  anyway — it is the argument for the fix below carrying the invariant *by construction* rather than by a return
+  value nobody is currently reading.
 
 **Three different `true`s already live in this chain, and this change adds no fourth.** The outbox seam's `true`
 means *durably recorded*; this queue's `true` means *accepted for delivery*; only the transport's means
@@ -611,10 +614,18 @@ simply the only mode under which `TryWrite` reports a full queue at all.
 the original bound, unchanged — while 64 further slots stay reachable only by a resolve or the pump's own
 cancel-retry. What *fills* this queue is pages: the escalation re-emitting every 15 s and the watchdog every 20 s
 against a transport that is not draining. Without a reserve the resolve is precisely the item crowded out, and a
-lost resolve is the unbounded failure of the two — §*the resolve is the load-bearing half*, above. Sixty-four is
-sized against what can be **owed** rather than against throughput: a resolve exists per *open incident*, and the
-set of things that can concurrently be wrong is the same handful that lets `DedupingNotificationChannel` hold its
-incident set with no eviction policy.
+lost resolve is the unbounded failure of the two — §*the resolve is the load-bearing half*, above.
+
+Sixty-four is sized against the number of **distinct open incidents**, the same handful that lets
+`DedupingNotificationChannel` hold its incident set with no eviction policy. **That bound only holds because
+repeats are collapsed, and the first cut of this did not collapse them.** Resolves are not rare:
+`AutoFlattenService` resolves *every configured instrument on every 15 s pass*, paged or not, and the watchdog
+does the same every 20 s — roughly sixteen writes a minute, which exhausts a 64-slot reserve in about four
+minutes and makes the "residual case" the steady state of exactly the outage the reserve exists for. So a resolve
+is not enqueued while one for the same key is already queued with no page in between: the operation is keyed and
+idempotent, so the caller's `true` still means *accepted for delivery* — delivered by the item already carrying
+it. The collapse is cleared when that resolve leaves the queue and by any page enqueued for the key, so a second
+incident is never left unclosed by it.
 
 **And a refused resolve still releases the dedup key**, through a new `IIncidentKeyRegistry` that
 `DedupingNotificationChannel` implements over that same incident set. The two halves of a resolve fail
@@ -624,9 +635,20 @@ dictionary removal, and **nothing anywhere records that it is owed**: there is n
 `TriggerEvaluationService`'s staleness recovery resolves exactly once per outage and never returns. So the
 release is done directly, on the caller's thread, at the one moment the queue has refused it — and *only* then,
 because doing it on the ordinary path would move the re-arm off the single-threaded pump and let a concurrent
-escalation slip past the suppression it is meant to meet. **No outcome of this queue can now leave a key held for
-the life of the process**, which is this ADR's own named failure — *one notification per process lifetime instead
-of one per outage* — reached in `gh#1045` and again in `gh#1051` without any producer doing anything wrong.
+escalation slip past the suppression it is meant to meet.
+
+**Releasing is not sufficient on its own, and the first cut of this got it wrong.** The dedup decorator *arms* a
+key on a successful send, so a page still sitting in the queue when the resolve was refused re-arms the key the
+refusal just released — and the resolve that would have cleared it is gone. The refusal therefore also records
+the enqueue **ordinal** it was refused at, and the pump releases the key again after delivering any page enqueued
+at or before that point: FIFO makes *"this page is one the lost resolve would have closed"* decidable. A page
+enqueued **after** it is a new incident and keeps its suppression — releasing that one would page on every 15 s
+escalation pass, which is the noise §4 forbids, reached by way of a guard against silence.
+
+**What that does not cover, stated rather than claimed away:** a page that *fails* delivery inside that window is
+re-offered by the outbox later under a fresh ordinal, so the marker is inert against it and the key stays armed
+until the producer resolves again. That residue is exactly what the socket hosts' producer-side re-arm (§*Update
+2026-09-02*, `gh#1051`) covers, which is why it **stays** — see the follow-up note below.
 
 **Observable, not merely counted — a log, a metric, and a failed result, deliberately all three.** The result is
 what makes it recoverable (the outbox keeps the row owed). The log is at **Error** for a page and **Critical**
@@ -643,6 +665,9 @@ a clean session emits nothing here; the promtool clean-session fixture asserts i
 `increase(...[5m]) > 0` shape means at most one push per five minutes per `kind`, and it is a condition that
 warrants a page by construction: it says the pager itself is not working.
 
-**Follow-up, not done here.** `TradovateSocketConnectionHost`'s provisional-close workaround (§*Update
-2026-09-02*, `gh#1051`) is now redundant — the key it re-arms is released by the queue itself. It is left in
-place because Tradovate is frozen (`gh#41`); removing it is a separate change on that code, noted on `gh#41`.
+**The socket hosts' provisional close stays, and is not made redundant by this.** It was tempting to call it so,
+and the first cut of this update did. It is the belt over the residue named above — a page that fails delivery
+inside the refusal window is re-offered under a fresh ordinal and re-arms the key with nothing left to release —
+and `TriggerEvaluationService`'s one-shot staleness resolve has no equivalent belt at all. Tradovate is frozen
+(`gh#41`) in any case, so nothing there is touched; the point is that a later reader must not remove it *citing
+this update*.
