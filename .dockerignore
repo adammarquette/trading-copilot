@@ -12,3 +12,11 @@ documentation/
 # anyway -- leaving them in the context makes every image build crawl for no benefit.
 **/node_modules/
 **/dist/
+
+# The image builds its own client stage and COPYs the result to /app/wwwroot (Dockerfile), so a local
+# `wwwroot/` -- left behind by the `npm run build` + copy-into-wwwroot dev workflow (AGENTS.md) -- is never an
+# input. Left in the build context it is COPYed into the build stage and partly survives dotnet publish's
+# default web-SDK wwwroot handling: the client stage's COPY overwrites same-named files but does not delete
+# orphaned content-hashed assets from an earlier local build (gh#1090). Scoped to this project rather than a
+# bare `wwwroot/`, matching the `.gitignore` entry gh#1088 added.
+src/MarqSpec.TradingCopilot.Api/wwwroot/
