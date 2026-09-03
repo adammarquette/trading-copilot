@@ -329,3 +329,44 @@ never touched (the read filter degrades over it gracefully rather than losing it
 **owner-kind-agnostic** (the sibling proves legitimacy without a producer lookup, so unlike the orphaned-owner sweep it
 needs no allow-list) and **best-effort** (a fault leaves the harmless rows). With no provider configured it is skipped —
 no current model, so no duplicate to resolve. The deferred "full GC" clause is now **closed**.
+
+## Update (2026-09-03) — the vector store serves cross-kind retrieval, not just news (gh#1065)
+
+The third storage shape has had exactly **one** retrieval consumer since gh#377: news. gh#18's increment 5 was meant
+to be general cross-kind retrieval, and #995 delivered only the news slice, so the co-pilot could ground a
+conversation on the market and on nothing the operator had actually done. This generalises the existing pipeline
+rather than adding a second one beside it.
+
+**Two more owner kinds are now written**: `Suggestion` (its trade line plus the model's rationale) and a new
+`JournalEntry` (a **closed** `Trade`, rendered as its trade line plus its realized result). Adding them needed **no
+schema change to the store itself** — the same "new owner kind, no migration" property gh#854 relied on for `Topic`,
+because the `OwnerKind` column's only constraint is `<> 0` and the key `(OwnerKind, OwnerId, Model)` admits any kind.
+What it *did* need is **one partial HNSW cosine index per kind**, which is gh#864's own rule arriving at its first
+real test: a vector-ordered read whose owner-kind predicate is applied as a post-scan filter can return **zero**
+neighbours though thousands exist. That rule has a corollary this increment had to obey in code as well as in SQL —
+a partial index is matched against the query's predicate, which needs a **constant**, so `PgVectorEmbeddingRecall`
+dispatches to one query per kind with a literal owner kind instead of parameterising it. Parameterising would have
+re-opened gh#861's starvation silently, with no failing query to notice.
+
+**The ranked read is now kind-parameterised.** `NearestNewsAsync` moved off `INewsEmbeddingSimilarity` onto a new
+`IEmbeddingRecall.NearestAsync(kind, ...)`; the two remaining reads on the old seam really are news/topic-specific,
+so its name is now accurate rather than inherited. Because every kind reports the same cosine metric, distances are
+**comparable across kinds**, which is what makes the pipeline's merge a ranking rather than an interleave — and it
+is also the keyless **degrade**: with no Cohere key the reranker returns identity order, so a deployment with no key
+still gets a genuine nearest-first cross-kind list.
+
+**R-20 is enforced at the hydrate, and that is a deliberate placement.** The `Embeddings` table is not `IUserOwned`
+— it follows its owners, and news, topics and market snapshots are global — so the vector recall is
+deployment-wide and can legitimately return another operator's suggestion. Rather than bolt an owner column onto a
+polymorphic store whose other kinds have no owner, the pipeline reads each recalled row back **through the tenant
+query filter**: a foreign row is simply absent, dropped by the same code path that drops a deleted owner. The
+symmetric consequence sits on the **write** side, where a background host has no request user and therefore
+`IgnoreQueryFilters` (or every row would look unembedded forever) — so each embed is ledgered to **that row's own
+owner** instead of the `SystemOwner` sentinel, keeping the operator's spend meter honest.
+
+**The two sweeps extend rather than change.** `Suggestion` and `JournalEntry` join `SweepableKinds` with producer
+checks against `Suggestions.Id` / `Trades.Id`; `Rule` and `MarketSnapshot` stay off it, still waiting on producers.
+The allow-list's failure mode is now two-sided and both sides are pinned by test: a kind swept **without** a producer
+is deleted to zero, and a kind **retrieved** but never swept accumulates orphans that keep filling the recall window
+until the hydrate discards them — a silent recall degradation rather than a visible failure. The stale-model
+backstop (gh#915) needed nothing: it is owner-kind-agnostic by construction.
