@@ -42,10 +42,13 @@ public class QueuedNotificationChannelTests
     private static Notification Note(string key = "flatten:9001:ES") =>
         new(NotificationSeverity.Page, "Auto-flatten escalated", "body", key);
 
-    /// <summary>Enqueues exactly the page budget, asserting each one was accepted — nothing drains it.</summary>
-    private static async Task FillPageBudgetAsync(QueuedNotificationChannel channel)
+    /// <summary>
+    /// Fills the page budget, asserting each one was accepted — nothing drains it. <paramref name="alreadyQueued"/>
+    /// discounts items a test put in before calling, because the cap is on total queue depth.
+    /// </summary>
+    private static async Task FillPageBudgetAsync(QueuedNotificationChannel channel, int alreadyQueued = 0)
     {
-        for (int i = 0; i < QueuedNotificationChannel.PageCapacity; i++)
+        for (int i = 0; i < QueuedNotificationChannel.PageCapacity - alreadyQueued; i++)
         {
             (await channel.SendAsync(Note($"fill:{i}"), CancellationToken.None))
                 .Should().BeTrue($"page {i} is inside the budget of {QueuedNotificationChannel.PageCapacity}");
@@ -455,6 +458,138 @@ public class QueuedNotificationChannelTests
 
         A.CallTo(() => _metrics.RecordNotificationRefused(ExecutionMetrics.NotificationRefusedResolve))
             .MustHaveHappenedOnceExactly();
+    }
+
+    // --- gh#1077 round-2 review: the release alone did not hold, and the reserve was sized on a false rate ---
+
+    [Fact]
+    public async Task DrainPendingAsync_ShouldReleaseTheKeyAgain_WhenAPageWasQueuedBehindARefusedResolve()
+    {
+        // THE ROUND-2 BLOCKING FINDING. Releasing the key at the moment of refusal is not enough: dedup ARMS a key
+        // on a successful send, so a page still sitting in the queue re-arms the key the refusal just released --
+        // and the resolve that would have cleared it is gone. This is production's shape, not a contrived one: the
+        // relay enqueues the page, the transport wedges, and the producer's resolve arrives while it is stuck.
+        QueuedNotificationChannel channel = Channel();
+
+        // The page for our incident goes in FIRST, and stays queued.
+        (await channel.SendAsync(Note("outage"), CancellationToken.None)).Should().BeTrue();
+
+        // Then the queue fills and the resolve for that same incident is refused.
+        await FillPageBudgetAsync(channel, alreadyQueued: 1);
+        await FillResolveHeadroomAsync(channel);
+        (await channel.ResolveAsync("outage", CancellationToken.None)).Should().BeFalse();
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        // Twice: once at the refusal (nothing was armed yet), and again after the page that armed it went out.
+        A.CallTo(() => _incidents.ReleaseIncident("outage")).MustHaveHappenedTwiceExactly();
+    }
+
+    [Fact]
+    public async Task DrainPendingAsync_ShouldNotReleaseTheKey_WhenThePageWasQueuedAfterTheRefusedResolve()
+    {
+        // The other side of the same rule, and the reason the marker is ordinal-guarded rather than a bare flag. A
+        // page enqueued AFTER the refusal is a NEW incident: it must keep its suppression, or the escalation
+        // re-emitting every 15 s pages every pass -- the noise ADR-0019 §4 forbids, reached by way of a guard
+        // against silence.
+        QueuedNotificationChannel channel = Channel();
+        await FillPageBudgetAsync(channel);
+        await FillResolveHeadroomAsync(channel);
+        (await channel.ResolveAsync("outage", CancellationToken.None)).Should().BeFalse();
+
+        await channel.DrainPendingAsync(CancellationToken.None);   // make room again
+        await channel.SendAsync(Note("outage"), CancellationToken.None);
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        // Only the release at the refusal itself; the later page is a new incident and keeps its key.
+        A.CallTo(() => _incidents.ReleaseIncident("outage")).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldNotEnqueueARepeat_WhileAResolveForTheSameKeyIsAlreadyQueued()
+    {
+        // Round-2 finding: the reserve was documented as sized against OPEN INCIDENTS, but AutoFlattenService
+        // resolves every configured instrument on every 15 s pass whether or not anything was ever paged -- so
+        // sized against the real rate a 64-slot reserve is four minutes of a wedged transport, not a residual
+        // case. Collapsing repeats is what makes the documented bound true.
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(true);
+        QueuedNotificationChannel channel = Channel();
+
+        for (int pass = 0; pass < 50; pass++)
+        {
+            (await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None)).Should().BeTrue(
+                "a repeat is covered by the resolve already queued -- still accepted for delivery");
+        }
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldEnqueueAgain_AfterTheQueuedResolveHasBeenDelivered()
+    {
+        // The collapse must not outlive the queued resolve, or the SECOND incident on that key is never closed --
+        // silence, reached by way of an optimisation.
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(true);
+        QueuedNotificationChannel channel = Channel();
+
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+        await channel.DrainPendingAsync(CancellationToken.None);
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedTwiceExactly();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldEnqueueAgain_WhenAPageWasEnqueuedAfterTheQueuedResolve()
+    {
+        // Ordering, which is what makes the collapse safe. A page enqueued after a queued resolve is a NEW
+        // incident that the queued resolve -- which sits ahead of it -- cannot close, so the next resolve has to
+        // be a fresh item behind that page rather than folded into one in front of it.
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(true);
+        QueuedNotificationChannel channel = Channel();
+
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+        await channel.SendAsync(Note(), CancellationToken.None);
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedTwiceExactly();
+    }
+
+    [Fact]
+    public async Task DrainPendingAsync_ShouldAbandonTheCancelRetry_WhenTheQueueRefillsWhileItIsDelivering()
+    {
+        // The THIRD refusal site, which had no test. It is only reachable when producers refill the slot the pump
+        // just freed, between its read and its retry write -- so the fake does exactly that, from inside the
+        // transport call, which is precisely the production interleaving (the pump is the only reader; producers
+        // write concurrently). Without the guard the retry would spin on a queue it cannot re-enter.
+        QueuedNotificationChannel channel = Channel();
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._))
+            .Invokes(() =>
+            {
+                // Refill to the HARD bound with resolves only, each on its own key. Resolves carry no soft cap, so
+                // exactly capacity of them fit and NONE is itself refused -- which keeps the Error assertion below
+                // about the cancel-retry rather than about refusals the fixture manufactured.
+                for (int i = 0; i < QueuedNotificationChannel.PageCapacity + QueuedNotificationChannel.ResolveHeadroom; i++)
+                {
+                    channel.ResolveAsync($"refill-resolve:{i}", CancellationToken.None).GetAwaiter().GetResult()
+                        .Should().BeTrue("the refill must fit exactly, so nothing but the cancel-retry is refused");
+                }
+            })
+            .Returns(false);
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        // ONCE, not MaxResolveAttempts: the retry could not be re-queued, so it is given up loudly rather than
+        // spun on.
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        MustHaveLogged(LogLevel.Error);
     }
 
     // --- gh#1077: the invariant the whole card is about, over the REAL dedup decorator ---
