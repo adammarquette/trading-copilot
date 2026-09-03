@@ -43,17 +43,21 @@ public sealed class EmbeddingOrphanStore : IEmbeddingOrphanStore
         // OutcomeJournalService and the flatten hosts). Owner scoping for these kinds is enforced on the READ side,
         // where the retrieval pipeline hydrates through the filter.
         //
-        // OwnerId is text (so any owner key shape fits), and these owners are Guid-keyed, so the comparison leans on
-        // the provider translating Guid.ToString() to a uuid->text cast. Postgres renders a uuid exactly as .NET's
-        // "D" format does (lowercase, hyphenated), so the values match; a provider that could NOT translate it would
-        // throw here, which the GC host catches per kind and logs -- stale rows remain, nothing is wrongly deleted.
+        // IgnoreQueryFilters is applied at the ROOT (where it is query-wide, covering the sub-query) AND repeated on
+        // the sub-query itself, so the intent stays visible on the line whose correctness depends on it.
+        //
+        // OwnerId is text (so any owner key shape fits) and these owners are Guid-keyed, so the comparison relies on
+        // Npgsql's object-to-string translation (a uuid->text cast). Postgres renders a uuid exactly as .NET's "D"
+        // format does -- lowercase, hyphenated -- so the values match the strings the embed pass wrote.
         EmbeddingOwnerKind.Suggestion => _database.Embeddings
+            .IgnoreQueryFilters()
             .Where(embedding => embedding.OwnerKind == EmbeddingOwnerKind.Suggestion
                 && !_database.Suggestions.IgnoreQueryFilters()
                     .Any(suggestion => suggestion.Id.ToString() == embedding.OwnerId))
             .ExecuteDeleteAsync(cancellationToken),
 
         EmbeddingOwnerKind.JournalEntry => _database.Embeddings
+            .IgnoreQueryFilters()
             .Where(embedding => embedding.OwnerKind == EmbeddingOwnerKind.JournalEntry
                 && !_database.Trades.IgnoreQueryFilters()
                     .Any(trade => trade.Id.ToString() == embedding.OwnerId))
