@@ -69,6 +69,19 @@ public class QueuedNotificationChannelTests
         A.CallTo(_logger).Where(call => call.Method.Name == "Log" && call.GetArgument<LogLevel>(0) == level)
             .MustHaveHappened();
 
+    /// <summary>What the operator would actually read — the rendered message, not the template.</summary>
+    private void MustHaveLoggedText(string fragment) =>
+        A.CallTo(_logger)
+            .Where(call => call.Method.Name == "Log"
+                && call.GetArgument<object>(2)!.ToString()!.Contains(fragment, StringComparison.Ordinal))
+            .MustHaveHappened();
+
+    private void MustNotHaveLoggedText(string fragment) =>
+        A.CallTo(_logger)
+            .Where(call => call.Method.Name == "Log"
+                && call.GetArgument<object>(2)!.ToString()!.Contains(fragment, StringComparison.Ordinal))
+            .MustNotHaveHappened();
+
     private void MustNotHaveLogged(LogLevel level) =>
         A.CallTo(_logger).Where(call => call.Method.Name == "Log" && call.GetArgument<LogLevel>(0) == level)
             .MustNotHaveHappened();
@@ -463,7 +476,7 @@ public class QueuedNotificationChannelTests
     // --- gh#1077 round-2 review: the release alone did not hold, and the reserve was sized on a false rate ---
 
     [Fact]
-    public async Task DrainPendingAsync_ShouldReleaseTheKeyAgain_WhenAPageWasQueuedBehindARefusedResolve()
+    public async Task DrainPendingAsync_ShouldReleaseTheKeyOnTheCoveringPage_WhenAPageWasQueuedBehindARefusedResolve()
     {
         // THE ROUND-2 BLOCKING FINDING. Releasing the key at the moment of refusal is not enough: dedup ARMS a key
         // on a successful send, so a page still sitting in the queue re-arms the key the refusal just released --
@@ -636,6 +649,45 @@ public class QueuedNotificationChannelTests
         A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedTwiceExactly();
     }
 
+    // --- gh#1077 round-5 review: the line the operator is sent to must match what the code did ---
+
+    [Fact]
+    public async Task ResolveAsync_ShouldNotClaimTheKeyWasReleased_WhenACoveringPageStillOwesIt()
+    {
+        // Round-5 finding, and the fifth time on this card that the code became right while one artifact kept
+        // telling the old story. In the COMMON wedge case -- pages queued for the key -- the refusal defers the
+        // release, but the log still said "its dedup key was released out of band (nothing was being
+        // suppressed)". Both halves false: nothing was released, and a queued page may be suppressing right now.
+        // Runbook step 4 sends the operator to exactly these lines, so the text is the artifact under test.
+        QueuedNotificationChannel channel = Channel();
+        await channel.SendAsync(Note("outage"), CancellationToken.None);
+        await FillPageBudgetAsync(channel, alreadyQueued: 1);
+        await FillResolveHeadroomAsync(channel);
+
+        await channel.ResolveAsync("outage", CancellationToken.None);
+
+        MustHaveLoggedText("deliberately still held");
+        MustNotHaveLoggedText("was released here");
+        A.CallTo(() => _incidents.ReleaseIncident("outage")).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldSayTheKeyWasReleased_WhenThisPathOwnedTheRelease()
+    {
+        // The other state, so the pair distinguishes them rather than asserting one and hoping. No page is queued
+        // for this key, so the refusal path owns the release and the operator is told the incident will be
+        // reported again.
+        A.CallTo(() => _incidents.ReleaseIncident("outage")).Returns(true);
+        QueuedNotificationChannel channel = Channel();
+        await FillPageBudgetAsync(channel);
+        await FillResolveHeadroomAsync(channel);
+
+        await channel.ResolveAsync("outage", CancellationToken.None);
+
+        MustHaveLoggedText("was released here");
+        MustNotHaveLoggedText("deliberately still held");
+    }
+
     // --- gh#1077 round-3 review: the collapse race, and one incident staying one push ---
 
     [Theory]
@@ -778,19 +830,14 @@ public class QueuedNotificationChannelTests
         // the release finds nothing held and the scenario evaporates -- the first cut of this fixture did exactly
         // that and stayed green under the very defect it was written for.
         QueuedNotificationChannel channel = null!;
-        bool injected = false;
+        int wedgeKey = 0;
         AfterSendHook hook = new(deduping, () =>
         {
-            if (injected)
-            {
-                return;
-            }
-
-            injected = true;
-
-            // Still wedged: refill the slots the pump has freed, then take the next flatten pass's resolve.
-            int i = 0;
-            while (channel.ResolveAsync($"wedge:{i++}", CancellationToken.None).GetAwaiter().GetResult() && i < 1000)
+            // EVERY delivery, not just the first -- the name says "repeated refusals" and the fixture should mean
+            // it. A wedge refuses this key on every 15 s pass while the backlog drains, so a refusal lands
+            // between each pair of deliveries.
+            while (channel.ResolveAsync($"wedge:{wedgeKey++}", CancellationToken.None).GetAwaiter().GetResult()
+                   && wedgeKey < 5000)
             {
             }
 

@@ -86,16 +86,27 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// <see cref="ResolveAsync"/>.
 /// </para>
 /// <para>
-/// <b>Releasing the key is not enough on its own, and the first cut of gh#1077 got this wrong</b> (round-2
-/// review). <see cref="DedupingNotificationChannel"/> <i>arms</i> a key on a successful send, so a page still
-/// sitting in this queue when a resolve is refused re-arms the key the refusal just released — and the resolve
-/// that would have cleared it is gone. The refusal therefore also records the ordinal it was refused at, and the
-/// pump releases the key again after delivering any page enqueued at or before that point: FIFO makes "this page
-/// is one the lost resolve would have closed" decidable. What is <b>not</b> covered is a page that <i>fails</i>
-/// delivery in that window and is re-offered by the outbox later under a fresh ordinal; that is a genuinely new
-/// send, so the marker is inert against it and the key stays armed until the producer resolves again. Stated
-/// precisely rather than as an absolute, because the Tradovate producer-side re-arm (gh#1051) is the belt that
-/// covers exactly that residue and must not be removed on the strength of this class.
+/// <b>Releasing the key is not enough on its own, and two cuts of gh#1077 got this wrong in the same
+/// direction.</b> <see cref="DedupingNotificationChannel"/> <i>arms</i> a key on a successful send, so a page
+/// still sitting in this queue when a resolve is refused re-arms the key the refusal just released (round 2) —
+/// and releasing on <i>every</i> refusal, while a wedge refuses on every pass, un-armed the key between backlog
+/// pages and paged once per refusal (round 4).
+/// </para>
+/// <para>
+/// So <b>the release has exactly one owner.</b> While a page for the key is queued, the refusal records the
+/// ordinal of the <i>newest</i> such page and defers; that page's delivery releases the key when it goes out, so
+/// the backlog beneath it stays suppressed and one incident stays one push. With nothing queued that could re-arm
+/// the key, the refusal path owns the release and performs it immediately. The bookkeeping runs in a
+/// <c>finally</c>, so a send that throws still hands the key back — and, because the entry is cleared there
+/// rather than before the send, a page merely <i>in flight</i> when the refusal lands is covered too: the refusal
+/// still sees it queued and defers to it.
+/// </para>
+/// <para>
+/// What is <b>not</b> covered is a page that <i>fails</i> delivery in that window and is re-offered by the outbox
+/// later under a fresh ordinal; that is a genuinely new send, so the marker is inert against it and the key stays
+/// armed until the producer resolves again. Stated precisely rather than as an absolute, because the Tradovate
+/// producer-side re-arm (gh#1051) is the belt that covers exactly that residue and must not be removed on the
+/// strength of this class.
 /// </para>
 /// </remarks>
 public sealed class QueuedNotificationChannel : INotificationChannel
@@ -286,6 +297,8 @@ public sealed class QueuedNotificationChannel : INotificationChannel
 
         bool accepted;
         bool released = false;
+        bool deferred = false;
+        long coveringPage = 0;
         lock (_enqueue)
         {
             // COLLAPSE a repeat (gh#1077 round-2 review). AutoFlattenService resolves EVERY configured instrument
@@ -336,28 +349,54 @@ public sealed class QueuedNotificationChannel : INotificationChannel
                 // together by that page's delivery, both under this lock, so "a marker is owed" and "a page is
                 // queued for this key" are the same question. Asking both would be a second gate no test can
                 // distinguish -- a mutation deleting one survived, which is how this was found.
-                bool pageQueued = _queuedPages.TryGetValue(dedupKey, out long coverUpTo);
+                deferred = _queuedPages.TryGetValue(dedupKey, out coveringPage);
 
-                if (pageQueued)
+                if (deferred)
                 {
-                    // Extend to the newest page queued for the key. It can only widen -- _queuedPages never goes
-                    // backwards -- so a later refusal hands the covering delivery more to answer for, never less.
-                    _lostResolves.AddOrUpdate(
-                        dedupKey, coverUpTo, (_, existing) => Math.Max(existing, coverUpTo));
+                    // Point the marker at the newest page queued for this key. A plain assignment, not a Max: the
+                    // ordinals recorded for one key only ever INCREASE, because each is _writes + 1 under this
+                    // lock and an entry is removed only by the exact page that set it. So there is no lower-value
+                    // case to guard, and guarding one would be a branch no fixture could reach. A later refusal
+                    // therefore hands the covering delivery more to answer for, never less -- which is what makes
+                    // a flapping transport (drain below the page cap, a fresh page accepted, then re-wedge) safe.
+                    _lostResolves[dedupKey] = coveringPage;
                 }
 
-                released = !pageQueued && _incidents.ReleaseIncident(dedupKey);
+                released = !deferred && _incidents.ReleaseIncident(dedupKey);
             }
         }
 
         if (!accepted)
         {
-            _logger.LogCritical(
-                "Notification queue is full — REFUSED the resolve for {Incident}; the transport is not draining. "
-                + "Its dedup key was released out of band ({Released}), so a later occurrence of this incident is "
-                + "still reported — but any page already raised for it keeps nagging until it expires or is "
-                + "acknowledged.",
-                dedupKey, released ? "a repeat was being suppressed" : "nothing was being suppressed");
+            // THREE STATES, because the release has one owner and the operator is sent to these lines by the
+            // runbook. Saying "released out of band" in the common wedge case would be false twice over: nothing
+            // was released, and a queued page may be suppressing right now. Separate templates rather than one
+            // interpolated string, so each state stays greppable and structured.
+            if (deferred)
+            {
+                _logger.LogCritical(
+                    "Notification queue is full — REFUSED the resolve for {Incident}; the transport is not "
+                    + "draining. Its dedup key is deliberately still held: the page already queued for it "
+                    + "(enqueue {CoveringPage}) releases the key when it goes out, which is what keeps the backlog "
+                    + "to a single push. Any page already raised keeps nagging until it expires or is acknowledged.",
+                    dedupKey, coveringPage);
+            }
+            else if (released)
+            {
+                _logger.LogCritical(
+                    "Notification queue is full — REFUSED the resolve for {Incident}; the transport is not "
+                    + "draining. Its dedup key was released here, so a later occurrence of this incident is still "
+                    + "reported — but any page already raised keeps nagging until it expires or is acknowledged.",
+                    dedupKey);
+            }
+            else
+            {
+                _logger.LogCritical(
+                    "Notification queue is full — REFUSED the resolve for {Incident}; the transport is not "
+                    + "draining. No dedup key was held, so nothing was being suppressed and nothing needed "
+                    + "releasing.",
+                    dedupKey);
+            }
             _metrics.RecordNotificationRefused(ExecutionMetrics.NotificationRefusedResolve);
             return Task.FromResult(false);
         }

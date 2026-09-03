@@ -848,9 +848,9 @@ go. It reaches you through Layer 2 (Prometheus → Alertmanager) or not at all.
    incident has drained. So later incidents are still reported, and the backlog reaches you as **one** push —
    not one per queued page, and not one per refusal, even though a wedge refuses again on every pass. **Any
    Emergency page already raised keeps nagging** until it expires or you acknowledge it in Pushover. One gap
-   remains: a page whose delivery *straddled* the refusal — in flight when it landed, or failed and re-offered
-   later — re-arms the key, so once this alert clears, **confirm you are still being paged** for anything that
-   recurs on the same incident.
+   remains: a page that *failed* to deliver inside the refusal window is re-offered later under a fresh ordinal
+   and re-arms the key, so once this alert clears, **confirm you are still being paged** for anything that recurs
+   on the same incident.
 4. Find the cause in the API logs: `Notification queue is full`, then whatever is upstream of it — Pushover
    returning slowly or not at all (`PushoverNotificationChannel` carries a 10-second timeout), or the notification
    pump having stopped (`The notification pump stopped` is logged at Critical).
