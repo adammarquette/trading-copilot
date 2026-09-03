@@ -55,9 +55,24 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// below would collapse anyway.</item>
 /// <item><b>Refusing</b> is the only outcome that is <i>recoverable</i>. The layer above is the durable outbox,
 /// and <c>NotificationOutboxRelay</c> already reads <see langword="false"/> as "the row stays owed and is retried
-/// next pass" — as <c>TriggerEvaluationService</c> already leaves a trigger armed. Refusing hands the page back
-/// to the ledger that remembers it instead of destroying it.</item>
+/// next pass". Refusing hands the page back to the ledger that remembers it instead of destroying it.</item>
 /// </list>
+/// <para>
+/// <b>Who actually receives a refusal — traced, because the producers are three layers up.</b> Every producer
+/// holds <c>OutboxNotificationChannel</c>, not this class, and the two verbs arrive here by different routes. A
+/// <b>send</b> never travels from a producer to this queue: the outbox seam writes a row and returns (returning
+/// <see langword="true"/> for an already-owed row as well), so the send reaching <see cref="SendAsync"/> comes
+/// from the relay — which is the right recipient, since it owns the ledger the refusal hands the page back to.
+/// The <b>operator</b> learns of it from the metric and its P1 rule, not from a return value nobody upstream can
+/// act on. A <b>resolve</b> is the opposite: <c>OutboxNotificationChannel.ResolveAsync</c> returns this queue's
+/// answer verbatim, so both the <see langword="false"/> and the out-of-band key release land at the caller.
+/// </para>
+/// <para>
+/// <b>Three different <see langword="true"/>s already live in this chain, and nothing here adds a fourth.</b> The
+/// outbox seam's means <i>durably recorded</i>; this class's means <i>accepted for delivery</i>; only the
+/// transport's means <i>delivered</i>. The defect was returning the middle one when nothing had been accepted.
+/// Do not read any of the three as the one below it.
+/// </para>
 /// <para>
 /// <b>Pages and resolves are budgeted separately, because their losses are not comparable.</b> A refused page is
 /// recoverable, as above. A refused <i>resolve</i> is not: nothing above this queue records that a resolve is

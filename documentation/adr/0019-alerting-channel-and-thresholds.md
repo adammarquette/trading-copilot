@@ -542,7 +542,8 @@ socket has gone **two minutes without delivering**, and resolved once it has del
   within one outage, which would cost a push per pass. A redundant resolve is free: the decorator forwards
   unconditionally and a transport holding no receipt no-ops. *(The unreachable drop-logging in
   `QueuedNotificationChannel` is a defect in its own right — the queue is fullest exactly when a transport is
-  wedged, which is when the flatten escalation is also enqueuing — and is gh#1077, not fixed here.)*
+  wedged, which is when the flatten escalation is also enqueuing — and is gh#1077, not fixed here. It is fixed in the
+  update below, which makes this producer-side belt redundant rather than wrong.)*
 - **What counts as "not delivering" is everything that is not delivering.** A failed connect, an unmet obligation, a
   socket mid-attempt, an unrecognised state, a pass that threw. The first cut of this exempted the mid-attempt case,
   which meant a socket reconnecting faster than the grace — the venue closing shortly after `authorize`, or the
@@ -560,3 +561,88 @@ is watching a dashboard.
 Tradovate is unconfigured — the host stands down before it can escalate. It **reports and never acts**: no socket
 is torn down, re-authenticated or disabled on the host's own judgement (the propose-and-confirm posture ratified
 in gh#722).
+
+## Update (2026-09-02) — the delivery queue **refuses**; it never drops, and a refused resolve still frees the key (gh#1077)
+
+`QueuedNotificationChannel` — the queue between every producer and this channel — was
+`Channel.CreateBounded(256)` with `BoundedChannelFullMode.DropWrite` and a comment promising that *"a drop is
+logged — silence is what this whole area is about"*. **Under any `Drop*` mode `TryWrite` discards the item and
+returns `true`**, so both of its *"queue is full — dropped"* branches were unreachable: nothing was logged and
+the caller was told the notification landed. Every path to the operator runs through this queue —
+`AutoFlattenService` and its watchdog (via the outbox), `TriggerEvaluationService`, the venue socket hosts — and
+a send reporting success while dropping the page is the worst shape a notification defect can take, because every
+layer above then reports healthy. The update above worked around it producer-side for the socket hosts; the brace
+belongs here.
+
+**Where each half of the remedy lands, traced through the real chain rather than assumed.** The producers hold
+`OutboxNotificationChannel`, three layers above this queue, and the two verbs reach it very differently:
+
+- A **send** never travels from a producer to the queue at all. `OutboxNotificationChannel.SendAsync` writes a row
+  and returns — and returns `true` for an already-owed row too — so the queue's send comes from
+  `NotificationOutboxRelay`, and the relay is who receives the refusal. That is the right recipient: the relay owns
+  the ledger, and it already treats `false` as *"the row stays owed and is retried next pass"*. The producer was
+  told `true` meaning *durably recorded*, which was and remains true, so there is nothing for it to do. What the
+  **operator** needs is carried by the metric and the P1 below, not by a return value.
+- A **resolve** does reach the producer. `OutboxNotificationChannel.ResolveAsync` withdraws any undelivered row and
+  then returns this queue's answer verbatim, so the `false` and the out-of-band key release both land at the caller
+  that can act on them.
+
+**Three different `true`s already live in this chain, and this change adds no fourth.** The outbox seam's `true`
+means *durably recorded*; this queue's `true` means *accepted for delivery*; only the transport's means
+*delivered*. The defect was that the middle one was being returned when nothing had been accepted. Making `false`
+reachable restores the existing vocabulary rather than overloading it — a reader must still not mistake any of the
+three for the one below it.
+
+**Refuse, rather than drop or block.** The three candidate policies are not equivalent for *this* payload:
+
+- **A bounded wait** puts the transport's backpressure onto the caller, and the caller is the auto-flatten on the
+  R-13 path. That is `gh#289` re-introduced as a smaller number, and this ADR's own rule is that alerting must
+  never delay a trading action.
+- **`DropOldest`** leaves `TryWrite` just as dishonest, and discards the wrong end: during an incident the
+  *first* page is the one that matters and the later ones are repeats the dedup decorator would collapse anyway.
+- **Refusing** is the only outcome that is *recoverable*, because the layer above the queue is the durable
+  outbox: `NotificationOutboxRelay` already reads `false` as "the row stays owed and is retried next pass".
+  Refusing hands the page back to the ledger that remembers it instead of destroying it.
+
+The mode is `Wait` now, used **only** with `TryWrite` and never `WaitToWriteAsync` — so nothing blocks; `Wait` is
+simply the only mode under which `TryWrite` reports a full queue at all.
+
+**Pages and resolves get separate budgets, because their losses are not comparable.** A page is refused at 256 —
+the original bound, unchanged — while 64 further slots stay reachable only by a resolve or the pump's own
+cancel-retry. What *fills* this queue is pages: the escalation re-emitting every 15 s and the watchdog every 20 s
+against a transport that is not draining. Without a reserve the resolve is precisely the item crowded out, and a
+lost resolve is the unbounded failure of the two — §*the resolve is the load-bearing half*, above. Sixty-four is
+sized against what can be **owed** rather than against throughput: a resolve exists per *open incident*, and the
+set of things that can concurrently be wrong is the same handful that lets `DedupingNotificationChannel` hold its
+incident set with no eviction policy.
+
+**And a refused resolve still releases the dedup key**, through a new `IIncidentKeyRegistry` that
+`DedupingNotificationChannel` implements over that same incident set. The two halves of a resolve fail
+differently: cancelling the outstanding page needs the transport, so it is queued and `false` asks the caller to
+retry — which is `INotificationChannel`'s documented meaning for `false`. Releasing the key needs nothing but a
+dictionary removal, and **nothing anywhere records that it is owed**: there is no outbox row for a resolve, and
+`TriggerEvaluationService`'s staleness recovery resolves exactly once per outage and never returns. So the
+release is done directly, on the caller's thread, at the one moment the queue has refused it — and *only* then,
+because doing it on the ordinary path would move the re-arm off the single-threaded pump and let a concurrent
+escalation slip past the suppression it is meant to meet. **No outcome of this queue can now leave a key held for
+the life of the process**, which is this ADR's own named failure — *one notification per process lifetime instead
+of one per outage* — reached in `gh#1045` and again in `gh#1051` without any producer doing anything wrong.
+
+**Observable, not merely counted — a log, a metric, and a failed result, deliberately all three.** The result is
+what makes it recoverable (the outbox keeps the row owed). The log is at **Error** for a page and **Critical**
+for a resolve, because `appsettings.json` sets `Logging:LogLevel:Default` to `Information` and a `LogDebug` is
+never written in production — a "logged" drop nobody can read is the same silence one level down. And a log line
+alone is what `gh#1045` and `gh#1051` were both filed against: *visible* meant an engineer reading structured
+logs, never the operator. So it is metered as `trading.notifications.refused{kind}` and ruled as a **P1**,
+`NotificationDeliveryRefused`. **This is the one condition Layer 1 structurally cannot self-report** — the push it
+would use is the push that did not go — so it is exactly what Layer 2 exists for, and it reaches the operator
+through the rule engine or not at all.
+
+**Budget (§4) is unaffected on a healthy session.** The queue only refuses while a transport is not draining, so
+a clean session emits nothing here; the promtool clean-session fixture asserts it. When it does fire, the
+`increase(...[5m]) > 0` shape means at most one push per five minutes per `kind`, and it is a condition that
+warrants a page by construction: it says the pager itself is not working.
+
+**Follow-up, not done here.** `TradovateSocketConnectionHost`'s provisional-close workaround (§*Update
+2026-09-02*, `gh#1051`) is now redundant — the key it re-arms is released by the queue itself. It is left in
+place because Tradovate is frozen (`gh#41`); removing it is a separate change on that code, noted on `gh#41`.

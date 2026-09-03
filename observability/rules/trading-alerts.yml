@@ -103,6 +103,25 @@ groups:
             this file is blind until it clears — assume unmonitored, not healthy.
           runbook: "documentation/deployment-runbook.md#telemetry-pipeline"
 
+      - alert: NotificationDeliveryRefused
+        # gh#1077. QueuedNotificationChannel refuses rather than accepts when its bounded queue is full, and the
+        # queue is fullest exactly when a transport is not draining -- which is when the flatten escalation is
+        # also enqueuing. LAYER 1 CANNOT REPORT THIS ONE ITSELF: the push it would use is the push that did not
+        # go. So it is metered and carried here, which is what Layer 2 is for. `kind` is page or resolve; a
+        # refused resolve is the worse of the two, because nothing above the queue records that one is owed.
+        expr: increase(trading_notifications_refused_total[5m]) > 0
+        labels:
+          priority: P1
+          component: alerting
+        annotations:
+          summary: "Operator notifications REFUSED ({{ $labels.kind }}) — the app cannot page"
+          description: >-
+            The in-process notification queue refused at least one notification, so a page the app raised did not
+            reach the transport. Assume the operator has NOT been told about whatever raised it — check the API
+            logs for "Notification queue is full" and treat every flatten condition as unreported until this
+            clears.
+          runbook: "documentation/deployment-runbook.md#notifications-refused"
+
   # ---------------------------------------------------------------------------------------------------------
   # P2 — notify. Single normal-priority push, suppressed outside 06:00–17:00 CT.
   # ---------------------------------------------------------------------------------------------------------
