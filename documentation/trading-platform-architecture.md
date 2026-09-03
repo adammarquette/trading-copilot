@@ -103,9 +103,10 @@ the resolve at all, the process-lifetime dedup would deliver the first outage an
 (gh#1045, gh#1051). The close is **provisional**: when that landed, a resolve that returned `true` was not proof
 the key had been released — the queue below the dedup decorator dropped on overflow and still reported success —
 so the first advisory of the next outage re-arms the key once before it sends. That queue now **refuses** rather
-than drops, and releases the key itself when it has to (gh#1077), which makes the re-arm a redundant belt rather
-than the brace; it stays in place only because Tradovate is frozen (gh#41). It reports and never acts: no socket
-is torn down or disabled on the host's own judgement.
+than drops, and releases the key itself when it has to (gh#1077) — but not in every case: a page that fails
+delivery inside the refusal window is re-offered later and re-arms the key with nothing left to release, so this
+re-arm is the belt over that residue and **stays**. It reports and never acts: no socket is torn down or disabled
+on the host's own judgement.
 Each host supplies only its **post-connect obligation**, which differs in kind: a per-key replay that must
 survive a partial failure, versus one request that either lands or does not. A pass reports one of three things —
 delivering, still owed, or waiting — because "nothing failed on the wire" and "the feed is alive" are different

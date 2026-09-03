@@ -592,6 +592,48 @@ public class QueuedNotificationChannelTests
         MustHaveLogged(LogLevel.Error);
     }
 
+    [Fact]
+    public async Task ResolveAsync_ShouldEnqueueAgain_AfterItsCancelRetryCouldNotBeReQueued()
+    {
+        // Found by mutation: removing the give-up `return` left the collapse marker set for a retry that was
+        // REFUSED, so the next resolve for that key collapsed into an item that is not in the queue at all. The
+        // incident would then never be closed and the key never released -- silence, reached by way of the
+        // optimisation that exists to keep the reserve free. Every other case here stayed green through that
+        // mutation, which is why this one exists.
+        bool refilled = false;
+        A.CallTo(() => _inner.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(true);
+        QueuedNotificationChannel channel = Channel();
+
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._))
+            .ReturnsLazily(() =>
+            {
+                if (refilled)
+                {
+                    return true;
+                }
+
+                // First delivery only: the cancel does not land AND producers refill the slot the pump just
+                // freed, so its retry cannot be re-queued.
+                refilled = true;
+                for (int i = 0; i < QueuedNotificationChannel.PageCapacity + QueuedNotificationChannel.ResolveHeadroom; i++)
+                {
+                    channel.ResolveAsync($"refill-resolve:{i}", CancellationToken.None).GetAwaiter().GetResult()
+                        .Should().BeTrue("the refill must fit exactly");
+                }
+
+                return false;
+            });
+
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        // A later pass resolves the same incident again. It MUST be enqueued.
+        await channel.ResolveAsync("flatten:9001:ES", CancellationToken.None);
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedTwiceExactly();
+    }
+
     // --- gh#1077: the invariant the whole card is about, over the REAL dedup decorator ---
 
     [Fact]
