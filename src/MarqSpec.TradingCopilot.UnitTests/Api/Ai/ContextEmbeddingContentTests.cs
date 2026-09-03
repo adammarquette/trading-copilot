@@ -143,6 +143,34 @@ public class ContextEmbeddingContentTests
     }
 
     [Fact]
+    public void Renderings_ShouldBeCultureInvariant_SoTheHostsCultureCannotReBillEveryStoredRow()
+    {
+        // The reason for string.Create(CultureInfo.InvariantCulture, ...): a culture whose decimal separator is a comma
+        // would render 5000,25 and change EVERY stored row's content hash the moment the host's culture did -- one
+        // deployment-wide, paid re-embed of the entire corpus, for no change in meaning. Stability across two calls in
+        // ONE culture cannot see that; this crosses the culture the rendering is supposedly independent of.
+        Suggestion suggestion = Suggestion();
+        Trade trade = Trade();
+
+        string invariantSuggestion = ContextEmbeddingContent.ForSuggestion(suggestion);
+        string invariantJournal = ContextEmbeddingContent.ForJournalEntry(trade);
+
+        CultureInfo original = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("de-DE"); // comma decimal separator, dot group separator
+            ContextEmbeddingContent.ForSuggestion(suggestion).Should().Be(invariantSuggestion);
+            ContextEmbeddingContent.ForJournalEntry(trade).Should().Be(invariantJournal);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+        }
+
+        invariantSuggestion.Should().Contain("5000.25", "prices render with a dot whatever the host's culture is");
+    }
+
+    [Fact]
     public void ForJournalEntry_ShouldBeStable_AcrossCalls_SoTheContentHashDoesNotReBillEveryPass()
     {
         Trade trade = Trade();

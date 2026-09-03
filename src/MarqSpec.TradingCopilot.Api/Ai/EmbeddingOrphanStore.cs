@@ -48,7 +48,10 @@ public sealed class EmbeddingOrphanStore : IEmbeddingOrphanStore
         //
         // OwnerId is text (so any owner key shape fits) and these owners are Guid-keyed, so the comparison relies on
         // Npgsql's object-to-string translation (a uuid->text cast). Postgres renders a uuid exactly as .NET's "D"
-        // format does -- lowercase, hyphenated -- so the values match the strings the embed pass wrote.
+        // format does -- lowercase, hyphenated -- so the values match the strings the embed pass wrote. That is a
+        // translation with no other precedent here and a SILENT failure mode (a mismatch makes every row look
+        // orphaned, and a delete that removes everything raises no fault for the host's per-kind catch to see), so
+        // it is proven on real Postgres in BOTH directions -- orphan reclaimed, live owner untouched -- by gh#1096.
         EmbeddingOwnerKind.Suggestion => _database.Embeddings
             .IgnoreQueryFilters()
             .Where(embedding => embedding.OwnerKind == EmbeddingOwnerKind.Suggestion

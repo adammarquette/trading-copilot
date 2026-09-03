@@ -65,7 +65,10 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// allow-list alongside the new <c>JournalEntry</c> kind, so it is no longer an example of a producer-less kind and
 /// its row here would now be correctly swept. Only that one case's subject changed; the claim — an allow-list keeps
 /// a kind with no producer out of the sweep entirely, rather than GC'ing it to zero because its owner "cannot be
-/// found" — is unchanged, and <c>Rule</c> / <c>MarketSnapshot</c> still carry it.
+/// found" — is unchanged, and <c>Rule</c> / <c>MarketSnapshot</c> still carry it. Coverage of the two <i>new</i>
+/// producer-backed branches (an orphan of each kind reclaimed, and the dangerous converse: a <b>live</b> owner's row
+/// surviving) is <b>gh#1096</b>'s, not a gap this alignment closes — both producers are FK'd to <c>Account</c>, so a
+/// live-owner case needs an account chain this fixture does not build.
 /// </para>
 /// </remarks>
 public sealed class EmbeddingOrphanSweepIntegrationTests : IClassFixture<EmbeddingReadTestPostgresFactory>
