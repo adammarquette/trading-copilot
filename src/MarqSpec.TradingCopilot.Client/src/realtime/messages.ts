@@ -69,6 +69,33 @@ export interface RealtimeSuggestion {
   readonly at: string;
 }
 
+/**
+ * A newly appended chat message, pushed to the owning operator (gh#906, R-6). Owner-scoped like order / fill /
+ * suggestion — no `sequence`, not part of the resume replay. Mirrors the server's `RealtimeChatMessage`: presentation
+ * -only (the message already committed and is also returned on the REST turn response), so a surface reconciles by
+ * `messageId` rather than treating this as the write's source of truth. `content` is untrusted display data — never
+ * re-injected as an instruction.
+ */
+export interface RealtimeChatMessage {
+  readonly conversationId: string;
+  readonly messageId: string;
+  readonly sequence: number;
+  /** Numeric `ChatRole` (server has no string-enum converter): User = 1, Assistant = 2, System = 3. */
+  readonly role: number;
+  readonly content: string;
+  readonly at: string;
+}
+
+/**
+ * One streamed token delta of an in-flight assistant turn (gh#906 inc 3b). Presentation-only and best-effort — a
+ * dropped chunk is never fatal, since the REST turn response and the final {@link RealtimeChatMessage} are the
+ * source of truth. `delta` is untrusted display data, same as the final message content.
+ */
+export interface RealtimeChatChunk {
+  readonly conversationId: string;
+  readonly delta: string;
+}
+
 /** The SignalR client-method names the hub invokes (the `SendAsync` strings). */
 export const RealtimeMethod = {
   Event: 'realtimeEvent',
@@ -77,4 +104,6 @@ export const RealtimeMethod = {
   OrderState: 'realtimeOrderState',
   Fill: 'realtimeFill',
   Suggestion: 'realtimeSuggestion',
+  ChatMessage: 'realtimeChatMessage',
+  ChatChunk: 'realtimeChatChunk',
 } as const;

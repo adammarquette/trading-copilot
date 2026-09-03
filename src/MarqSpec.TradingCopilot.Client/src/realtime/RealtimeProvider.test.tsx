@@ -170,6 +170,75 @@ describe('RealtimeProvider', () => {
     expect(received).toEqual(['s1']); // the unmounted subscriber did not fire
   });
 
+  it('fans owner-scoped chat message pushes out to a subscriber, and unsubscribes on unmount (gh#1063)', () => {
+    authenticate();
+    const { callbacks } = fakeConnection();
+    const received: string[] = [];
+    function Consumer() {
+      const { onChatMessage } = useRealtime();
+      useEffect(
+        () => onChatMessage((message) => received.push(message.messageId)),
+        [onChatMessage],
+      );
+      return null;
+    }
+
+    const { unmount } = render(
+      <RealtimeProvider>
+        <Consumer />
+      </RealtimeProvider>,
+    );
+
+    act(() =>
+      callbacks().onChatMessage?.({
+        conversationId: 'c1',
+        messageId: 'm1',
+        sequence: 1,
+        role: 2,
+        content: 'hi',
+        at: '',
+      }),
+    );
+    expect(received).toEqual(['m1']);
+
+    unmount();
+    act(() =>
+      callbacks().onChatMessage?.({
+        conversationId: 'c1',
+        messageId: 'm2',
+        sequence: 2,
+        role: 2,
+        content: 'hi again',
+        at: '',
+      }),
+    );
+    expect(received).toEqual(['m1']); // the unmounted subscriber did not fire
+  });
+
+  it('fans streamed chat chunks out to a subscriber, and unsubscribes on unmount (gh#1063)', () => {
+    authenticate();
+    const { callbacks } = fakeConnection();
+    const received: string[] = [];
+    function Consumer() {
+      const { onChatChunk } = useRealtime();
+      useEffect(() => onChatChunk((chunk) => received.push(chunk.delta)), [onChatChunk]);
+      return null;
+    }
+
+    const { unmount } = render(
+      <RealtimeProvider>
+        <Consumer />
+      </RealtimeProvider>,
+    );
+
+    act(() => callbacks().onChatChunk?.({ conversationId: 'c1', delta: 'Head' }));
+    expect(received).toEqual(['Head']);
+
+    unmount();
+    act(() => callbacks().onChatChunk?.({ conversationId: 'c1', delta: 'room' }));
+    expect(received).toEqual(['Head']); // the unmounted subscriber did not fire
+  });
+
   it('routes a resync (gap or reconnect) to resync subscribers', () => {
     authenticate();
     const { callbacks } = fakeConnection();
