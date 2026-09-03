@@ -318,6 +318,16 @@ public class DailyRealizedByDayReaderTests
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }
 
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldThrow_WhenToIsDateOnlyMaxValue()
+    {
+        // gh#1087: `to.AddDays(1)` has no representable day after 9999-12-31. Guarded here -- alongside GuardMode --
+        // so every caller of this reader inherits the refusal rather than hitting the AddDays throw bare.
+        Func<Task> act = () => ReadDaysAsync(new DateOnly(2026, 8, 3), DateOnly.MaxValue);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
     // -----------------------------------------------------------------------------------------------------------
     // TradesForDayForAccountAsync
     // -----------------------------------------------------------------------------------------------------------
@@ -408,6 +418,16 @@ public class DailyRealizedByDayReaderTests
         await SeedTradeAsync(realizedPnL: -400m, closedAt: new DateTimeOffset(2026, 8, 3, 18, 0, 0, TimeSpan.Zero), mode: TradingMode.Live);
 
         Func<Task> act = () => ReadDayAsync(new DateOnly(2026, 8, 3), mode: TradingMode.Undeclared);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public async Task TradesForDay_ShouldThrow_WhenDayIsDateOnlyMaxValue()
+    {
+        // gh#1087: `day.AddDays(1)` has no representable day after 9999-12-31. Guarded here -- alongside GuardMode --
+        // so every caller of this reader inherits the refusal rather than hitting the AddDays throw bare.
+        Func<Task> act = () => ReadDayAsync(DateOnly.MaxValue);
 
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }

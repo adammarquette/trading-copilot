@@ -75,7 +75,8 @@ public static class DailyJournalEndpoints
     /// <param name="now">The current time, supplied by the caller — the default window derives from it.</param>
     /// <param name="database">The scoped, R-20-filtered database.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>The calendar (200), a 400 for an inverted range, or a 404 for an absent / Undeclared / foreign account.</returns>
+    /// <returns>The calendar (200); a 400 for an inverted range or a <paramref name="to"/> at
+    /// <see cref="DateOnly.MaxValue"/> (gh#1087); or a 404 for an absent / Undeclared / foreign account.</returns>
     internal static async Task<IResult> GetDailyRealizedAsync(
         Guid id,
         DateOnly? from,
@@ -99,6 +100,16 @@ public static class DailyJournalEndpoints
             return Results.BadRequest(new { error = "from must not be after to." });
         }
 
+        // gh#1087: RealizedPnLByDayForAccountAsync computes an exclusive window end via `to.AddDays(1)`, which
+        // throws for DateOnly.MaxValue (9999-12-31 has no next day). Checked here, before the reader, so the
+        // caller gets a 400 rather than that throw reaching them unhandled as a 500 -- there is no exception
+        // middleware in this API. DailyRealizedReader.GuardUpperBound backs this up for any other caller of the
+        // reader; windowFrom is left unguarded at DateOnly.MinValue, which is already safe.
+        if (windowTo == DateOnly.MaxValue)
+        {
+            return Results.BadRequest(new { error = "to must be before DateOnly.MaxValue." });
+        }
+
         IReadOnlyList<DailyRealized> days = await database.RealizedPnLByDayForAccountAsync(
             id, mode.Value, windowFrom, windowTo, cancellationToken);
 
@@ -114,8 +125,9 @@ public static class DailyJournalEndpoints
     /// <param name="date">The Central trading day to read.</param>
     /// <param name="database">The scoped, R-20-filtered database.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>The day's trades and their realized sum (200; zero trades on a quiet day, never absence), or a 404
-    /// for an absent / Undeclared / foreign account.</returns>
+    /// <returns>The day's trades and their realized sum (200; zero trades on a quiet day, never absence); a 400
+    /// for <paramref name="date"/> at <see cref="DateOnly.MaxValue"/> (gh#1087); or a 404 for an absent /
+    /// Undeclared / foreign account.</returns>
     internal static async Task<IResult> GetDayDetailAsync(
         Guid id,
         DateOnly date,
@@ -128,6 +140,16 @@ public static class DailyJournalEndpoints
         if (mode is null or TradingMode.Undeclared)
         {
             return Results.NotFound();
+        }
+
+        // gh#1087: TradesForDayForAccountAsync computes an exclusive window end via `day.AddDays(1)`, which throws
+        // for DateOnly.MaxValue (9999-12-31 has no next day). Checked here, before the reader, so the caller gets a
+        // 400 rather than that throw reaching them unhandled as a 500 -- there is no exception middleware in this
+        // API. DailyRealizedReader.GuardUpperBound backs this up for any other caller of the reader;
+        // DateOnly.MinValue is left unguarded, which is already safe.
+        if (date == DateOnly.MaxValue)
+        {
+            return Results.BadRequest(new { error = "date must be before DateOnly.MaxValue." });
         }
 
         IReadOnlyList<Trade> trades = await database.TradesForDayForAccountAsync(id, mode.Value, date, cancellationToken);
