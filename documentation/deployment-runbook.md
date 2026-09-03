@@ -828,6 +828,28 @@ why the flatten alerts are inhibited by it — the actionable page is this one.
 3. Until it clears, **check positions manually at the broker** — the automation may be fine and merely unobserved,
    or it may be down. You cannot tell from here, which is the point of the alert.
 
+### Notifications refused
+
+**Alert:** `NotificationDeliveryRefused` (P1, `gh#1077`)
+
+The app's in-process notification queue refused a notification, so a page it raised never reached Pushover. Read
+this exactly like `TelemetryPipelineSilent`: **assume unreported, not healthy.** Whatever raised the refused
+notification — an auto-flatten escalation, the watchdog, the kill switch — the operator was not told about it, and
+this rule is the only reason you know.
+
+**This is the one condition Layer 1 cannot report itself**, because the push it would use is the push that did not
+go. It reaches you through Layer 2 (Prometheus → Alertmanager) or not at all.
+
+1. **Check positions manually at the broker**, first and before anything else.
+2. `kind="page"` — the queue was at its budget. The page is **not lost**: it stays owed in the outbox and is
+   re-offered on the next relay pass, so it delivers by itself once the transport drains.
+3. `kind="resolve"` — an incident could not be closed. The dedup key was released out of band, so later incidents
+   are still reported, but **any Emergency page already raised keeps nagging** until it expires or you acknowledge
+   it in Pushover.
+4. Find the cause in the API logs: `Notification queue is full`, then whatever is upstream of it — Pushover
+   returning slowly or not at all (`PushoverNotificationChannel` carries a 10-second timeout), or the notification
+   pump having stopped (`The notification pump stopped` is logged at Critical).
+
 ## The dead-man's switch (operator setup — required before live)
 
 The **only** alerting tier that survives this process dying (R-13, `gh#244`,

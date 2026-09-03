@@ -50,6 +50,9 @@ tests:
       - eval_time: 10m
         alertname: TelemetryPipelineSilent
         exp_alerts: []
+      - eval_time: 10m
+        alertname: NotificationDeliveryRefused
+        exp_alerts: []
       - eval_time: 12m
         alertname: WatchdogSaved
         exp_alerts: []
@@ -459,3 +462,53 @@ tests:
       - eval_time: 20m
         alertname: TimeToFlatSlow
         exp_alerts: []
+
+  # ---------------------------------------------------------------------------------------------------------
+  # gh#1077 — the alerting path reporting its own failure. This is the ONE condition Layer 1 structurally cannot
+  # self-report: the push it would send is the push that did not go, so if this rule does not carry it, nothing
+  # does. It fires per `kind`, because a refused resolve and a refused page are different problems.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "a refused notification pages, per kind"
+    input_series:
+      # A wedged transport: the queue fills with pages, refuses further ones, and then refuses the resolve that
+      # would have closed the incident.
+      - series: 'trading_notifications_refused_total{kind="page"}'
+        values: "0+0x20 1+1x40"
+      - series: 'trading_notifications_refused_total{kind="resolve"}'
+        values: "0+0x20 1+0x40"
+      # The app is otherwise alive and reporting, so TelemetryPipelineSilent stays quiet and this alert is the
+      # only thing saying anything is wrong.
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="nothing-to-do"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NotificationDeliveryRefused
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: NotificationDeliveryRefused
+        exp_alerts:
+          - exp_labels:
+              priority: P1
+              component: alerting
+              kind: page
+            exp_annotations:
+              summary: "Operator notifications REFUSED (page) — the app cannot page"
+              description: >-
+                The in-process notification queue refused at least one notification, so a page the app raised did
+                not reach the transport. Assume the operator has NOT been told about whatever raised it — check
+                the API logs for "Notification queue is full" and treat every flatten condition as unreported
+                until this clears.
+              runbook: "documentation/deployment-runbook.md#notifications-refused"
+          - exp_labels:
+              priority: P1
+              component: alerting
+              kind: resolve
+            exp_annotations:
+              summary: "Operator notifications REFUSED (resolve) — the app cannot page"
+              description: >-
+                The in-process notification queue refused at least one notification, so a page the app raised did
+                not reach the transport. Assume the operator has NOT been told about whatever raised it — check
+                the API logs for "Notification queue is full" and treat every flatten condition as unreported
+                until this clears.
+              runbook: "documentation/deployment-runbook.md#notifications-refused"
