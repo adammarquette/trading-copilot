@@ -55,10 +55,17 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// <see cref="Sweep_ShouldDeleteADeletedNewsSoftSignalOrphan"/> and
 /// <see cref="Sweep_ShouldBeIdempotent_ASecondPassDeletesNothing"/> red; an unconditional delete (the anti-join
 /// dropped) flips <see cref="Sweep_ShouldNeverTouchALiveOwner_UnderAnyModel"/> and
-/// <see cref="Sweep_ShouldNeverRaceAConcurrentEmbedOfAStillLiveOwner"/> red; adding <c>Suggestion</c> to the
+/// <see cref="Sweep_ShouldNeverRaceAConcurrentEmbedOfAStillLiveOwner"/> red; adding a producer-less kind to the
 /// allow-list AND wiring it to delete unconditionally flips
 /// <see cref="Sweep_ShouldNeverTouchProducerlessOwnerKinds"/> red — each for exactly the reason named. The broken
 /// copies never touched the branch; only this file is committed.
+/// </para>
+/// <para>
+/// <b>Aligned by gh#1065.</b> <c>Suggestion</c> gained a producer (<c>Suggestions.Id</c>) and moved onto the
+/// allow-list alongside the new <c>JournalEntry</c> kind, so it is no longer an example of a producer-less kind and
+/// its row here would now be correctly swept. Only that one case's subject changed; the claim — an allow-list keeps
+/// a kind with no producer out of the sweep entirely, rather than GC'ing it to zero because its owner "cannot be
+/// found" — is unchanged, and <c>Rule</c> / <c>MarketSnapshot</c> still carry it.
 /// </para>
 /// </remarks>
 public sealed class EmbeddingOrphanSweepIntegrationTests : IClassFixture<EmbeddingReadTestPostgresFactory>
@@ -157,18 +164,15 @@ public sealed class EmbeddingOrphanSweepIntegrationTests : IClassFixture<Embeddi
     [Fact]
     public async Task Sweep_ShouldNeverTouchProducerlessOwnerKinds()
     {
-        await SeedEmbeddingAsync(EmbeddingOwnerKind.Suggestion, "gh914-orphan-suggestion", ModelA);
         await SeedEmbeddingAsync(EmbeddingOwnerKind.Rule, "gh914-orphan-rule", ModelA);
         await SeedEmbeddingAsync(EmbeddingOwnerKind.MarketSnapshot, "gh914-orphan-snapshot", ModelA);
 
         int deleted = await RunSweepAsync();
 
         deleted.Should().Be(0, "no sweepable-kind row was seeded, so the sweep must report nothing deleted");
-        (await ReadEmbeddingsAsync(EmbeddingOwnerKind.Suggestion, "gh914-orphan-suggestion")).Should().ContainSingle(
-            "Suggestion has no producer table yet -- the allow-list must keep it out of the sweep entirely, "
-            + "never GC'd to zero just because its owner 'cannot be found'");
         (await ReadEmbeddingsAsync(EmbeddingOwnerKind.Rule, "gh914-orphan-rule")).Should().ContainSingle(
-            "Rule has no producer table yet -- same allow-list guarantee");
+            "Rule has no producer table yet (the rulebook is epic gh#15) -- the allow-list must keep it out of the "
+            + "sweep entirely, never GC'd to zero just because its owner 'cannot be found'");
         (await ReadEmbeddingsAsync(EmbeddingOwnerKind.MarketSnapshot, "gh914-orphan-snapshot")).Should().ContainSingle(
             "MarketSnapshot has no producer table yet -- same allow-list guarantee");
     }
