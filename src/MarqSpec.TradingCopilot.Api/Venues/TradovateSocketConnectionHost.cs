@@ -157,6 +157,7 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
     private readonly TimeSpan _pollInterval;
     private readonly TimeSpan _maxBackoff;
     private readonly TimeSpan _degradedGrace;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
 
     /// <summary>Creates the host.</summary>
     /// <param name="services">
@@ -170,18 +171,28 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
     /// How long the socket must go without delivering before the operator is told, and how long it must deliver
     /// before the incident is closed; production cadence when null.
     /// </param>
+    /// <param name="delayAsync">
+    /// The between-pass wait; <see cref="Task.Delay(TimeSpan,CancellationToken)"/> when null. A test-only seam
+    /// (gh#1070): the backoff <b>value</b> the loop chooses for a pass is deterministic from the pass history alone
+    /// — it is only the real time a genuine wait costs that a loaded runner can inflate. A test that wants to pin
+    /// which value the loop chose, rather than how long waiting it out actually took, substitutes a delegate that
+    /// records <paramref name="delayAsync"/>'s argument and returns immediately, so the assertion reads a value the
+    /// loop computed instead of a stopwatch racing the thread pool.
+    /// </param>
     protected TradovateSocketConnectionHost(
         IServiceProvider services,
         ILogger logger,
         TimeSpan? pollInterval = null,
         TimeSpan? maxBackoff = null,
-        TimeSpan? degradedGrace = null)
+        TimeSpan? degradedGrace = null,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         _services = services;
         Logger = logger;
         _pollInterval = pollInterval ?? DefaultPollInterval;
         _maxBackoff = maxBackoff ?? DefaultMaxBackoff;
         _degradedGrace = degradedGrace ?? DefaultDegradedGrace;
+        _delayAsync = delayAsync ?? Task.Delay;
     }
 
     /// <summary>What a pass concluded about the socket (gh#1051).</summary>
@@ -523,7 +534,7 @@ public abstract class TradovateSocketConnectionHost : BackgroundService
 
             try
             {
-                await Task.Delay(delay, stoppingToken);
+                await _delayAsync(delay, stoppingToken);
             }
             catch (OperationCanceledException)
             {

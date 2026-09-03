@@ -82,8 +82,16 @@ public abstract class TradovateSocketConnectionHostContract
     // ---------------------------------------------------------------------------------------------------------
 
     /// <summary>Builds the host under test with a test cadence, over the given provider.</summary>
+    /// <param name="delayAsync">
+    /// The between-pass wait; the real wait when null. A seam for the one test (gh#1070) that needs to read which
+    /// delay the loop <b>chose</b> for a pass rather than how long a real wait for it actually took.
+    /// </param>
     protected abstract BackgroundService CreateHost(
-        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff, TimeSpan degradedGrace);
+        IServiceProvider services,
+        TimeSpan pollInterval,
+        TimeSpan maxBackoff,
+        TimeSpan degradedGrace,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null);
 
     /// <summary>Registers <see cref="Client"/> and every collaborator the host requires.</summary>
     protected abstract void Register(ServiceCollection services);
@@ -237,55 +245,49 @@ public abstract class TradovateSocketConnectionHostContract
         // every pass would re-reset the backoff each time — proving "the reset happens on every connect" rather than
         // "the outage's backoff is not charged to what follows it".
         //
-        // Asserted as CADENCE rather than as a stopwatch reading of one delay: after the reset every retry costs a
-        // doubling from the poll interval, so six of them land well inside one ceiling, where the unreset ceiling
-        // would spend six of them. The window sits an order of magnitude below the broken path and far above the
-        // reset cadence, so a break fails on the ASSERTION with a legible message rather than on a timeout.
+        // READ FROM THE DELAY THE LOOP CHOSE, NOT FROM A STOPWATCH (gh#1070). This test twice measured a stopwatch
+        // reading of six REAL Task.Delay round trips against a budget derived from the ceiling -- first an absolute
+        // 750ms, then (after that reddened CI, with nothing it exercises having changed) a ratio-scaled 3x the
+        // ceiling. Both reddened or came close to it under load, because six real waits are six trips through the
+        // thread pool and the OS timer, and Windows' default timer resolution alone is ~15.6ms -- no threshold
+        // derived from `ceiling` can be both tight enough to mean something and loose enough to absorb a busy
+        // runner, because the thing being budgeted for (scheduling noise) does not scale with `ceiling` at all.
         //
-        // The ceiling is 1s rather than the 250ms it started at (gh#1070). The invariant is a RATIO -- six retries
-        // at the reset cadence versus six at the accumulated ceiling -- but the budget it was checked against was an
-        // absolute 750ms, and six Task.Delay round trips do not fit in 750ms on a loaded CI runner: Windows' default
-        // timer tick alone is ~15.6ms, and the suite runs thousands of tests in parallel collections. It reddened on
-        // two consecutive runs of #1069, which adds tests to this assembly, and passed every time in isolation.
-        // Raising the ceiling scales the budget with the thing it is measuring instead of against wall-clock luck.
-        // The pre-recovery walk is unaffected -- it doubles from the 1ms poll interval and never reaches the ceiling
-        // in eight failures (~255ms), leaving the backoff at 256ms when the connect recovers.
+        // `delay` at every pass is deterministic given the pass history alone -- the backoff bookkeeping in
+        // TradovateSocketConnectionHost.PollAsync has no randomness in it -- so this drives the loop through the
+        // `delayAsync` seam (gh#1070) instead of a real wait: the fake records what it was asked to wait and
+        // resumes on a plain Task.Yield(), a thread-pool hand-off with no timer and no wall-clock floor. Six retries
+        // now cost microseconds of real time rather than up to several ceilings of it, and the five gaps BETWEEN
+        // them are read back as the exact values the loop chose -- no scheduling noise is in the numbers at all, so
+        // the assertion below cannot flake regardless of what else the runner is doing.
         //
-        // THE MARGIN IS SMALLER THAN IT LOOKS, AND IT IS A CLIFF. Measured at this ceiling, the mutant that deletes
-        // the reset fails at 3s 838ms against the 3s threshold -- 838ms of margin, about 1.28x. NOT an order of
-        // magnitude; that is true only of the correct path (~63ms of backoff against a 3s budget). The broken path
-        // costs min(256,C) + min(512,C) + min(1024,C) + 2*min(2048,C) against a threshold of 3C, so for
-        // 512 < C <= 1024 the margin is a flat 768ms however high C goes, and above 1024ms it SHRINKS linearly as
-        // (1792 - C), reaching zero at C = 1792ms. So 1s sits at the top of the flat region with the full margin,
-        // and anyone raising this further is walking toward an edge at ~1.79s where the guard silently stops killing
-        // its mutant. Do not reach for this lever again without re-running that mutation.
-        //
-        // Why the cheap fix is nonetheless sound rather than a coin flip: a slow runner inflates the BROKEN path
-        // further past the threshold, so the measured kill is a floor, not an average. All of the flakiness risk
-        // sits on the correct-path side -- which is exactly the side this widens.
-        //
-        // This is the cheap fix, and it is the weak one: the test still measures the runner. Asserting on the retry
-        // COUNT inside one ceiling, or driving the loop from an injected TimeProvider, is what makes it
-        // deterministic -- gh#1070 carries that.
-        TimeSpan ceiling = TimeSpan.FromSeconds(1);
+        // The mutant this must still kill is gh#1054's: a loop that does not reset the backoff after a successful
+        // connect. Eight failed connects walk `backoff` 1 -> 2 -> ... -> 256ms (doubling from the 1ms poll interval,
+        // never reaching maxBackoff); deleting the reset leaves it there when the connect succeeds, so the five
+        // post-recovery gaps are 256, 512, 1000, 1000, 1000ms (capped at maxBackoff) -- summing to ~3.77s. The
+        // correct path's five gaps are 1, 2, 4, 8, 16ms -- summing to 31ms. Comparing that sum to half of maxBackoff
+        // leaves the correct path at ~6% of the bound and the broken path at ~7.5x over it: a margin no amount of
+        // runner contention can close, because contention no longer has anything to inflate.
+        TimeSpan maxBackoff = TimeSpan.FromSeconds(1);
         int connects = 0;
-        long recoveredAt = 0;
+        bool recovered = false;
         int attemptsAfterRecovery = 0;
+        List<TimeSpan> delaysSinceRecovery = new();
         TaskCompletionSource retried = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Disconnected until the connect recovers, then Connected — the branch the retries actually ride.
-        SocketReadsAs(_ => Volatile.Read(ref recoveredAt) == 0
-            ? ClientModels.ConnectionState.Disconnected
-            : ClientModels.ConnectionState.Connected);
+        SocketReadsAs(_ => Volatile.Read(ref recovered)
+            ? ClientModels.ConnectionState.Connected
+            : ClientModels.ConnectionState.Disconnected);
         ArrangeConnect(() =>
         {
-            // Eight failures walk the backoff 1 → 2 → 4 … up to the ceiling; every attempt after that succeeds.
+            // Eight failures walk the backoff 1 → 2 → 4 … up to maxBackoff; every attempt after that succeeds.
             if (Interlocked.Increment(ref connects) <= 8)
             {
                 throw new InvalidOperationException("the venue is unreachable (test)");
             }
 
-            Interlocked.CompareExchange(ref recoveredAt, Stopwatch.GetTimestamp(), 0);
+            Volatile.Write(ref recovered, true);
             return Task.CompletedTask;
         });
         await ArrangePostConnectWorkAsync(() =>
@@ -299,17 +301,45 @@ public abstract class TradovateSocketConnectionHostContract
         });
 
         BackgroundService host = CreateHost(
-            Registered(), pollInterval: TimeSpan.FromMilliseconds(1), ceiling, DegradedGrace);
+            Registered(),
+            pollInterval: TimeSpan.FromMilliseconds(1),
+            maxBackoff,
+            DegradedGrace,
+            delayAsync: async (requested, _) =>
+            {
+                // Recorded from the recovery pass on only — the pre-recovery connect-failure walk rides this same
+                // seam too, and mixing the two would blur exactly the boundary this test exists to pin.
+                if (Volatile.Read(ref recovered))
+                {
+                    lock (delaysSinceRecovery)
+                    {
+                        delaysSinceRecovery.Add(requested);
+                    }
+                }
+
+                await Task.Yield();
+            });
         await host.StartAsync(CancellationToken.None);
 
         (await Signalled(retried)).Should()
             .BeTrue("the post-connect obligation must keep being retried after the connect recovered");
-        TimeSpan sinceRecovery = Stopwatch.GetElapsedTime(Volatile.Read(ref recoveredAt));
         await StopAsync(host);
 
-        sinceRecovery.Should().BeLessThan(
-            ceiling * 3,
-            "six retries after a recovered connect must cost poll intervals, not the outage's accumulated ceiling");
+        // The five gaps BETWEEN the six post-recovery retries. A sixth recorded entry, if the loop got that far
+        // before StopAsync took effect, is what it chose to wait AFTER the sixth — irrelevant to how long reaching
+        // it cost, so it is deliberately left out rather than making the sum's meaning depend on exactly how far a
+        // no-longer-bounded loop happened to run.
+        TimeSpan[] gaps;
+        lock (delaysSinceRecovery)
+        {
+            gaps = delaysSinceRecovery.Take(5).ToArray();
+        }
+
+        gaps.Should().HaveCount(5, "five waits separate six retries, and the host must have chosen one for each");
+        TimeSpan costOfSixRetries = gaps.Aggregate(TimeSpan.Zero, (total, gap) => total + gap);
+        costOfSixRetries.Should().BeLessThan(
+            maxBackoff / 2,
+            "six retries after a recovered connect must cost poll intervals, not the outage's accumulated backoff");
     }
 
     [Fact]
