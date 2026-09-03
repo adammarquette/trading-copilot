@@ -420,13 +420,15 @@ builder.Services.Configure<EmbeddingOrphanGcOptions>(builder.Configuration.GetSe
 builder.Services.AddScoped<IEmbeddingOrphanStore, EmbeddingOrphanStore>();
 builder.Services.AddHostedService<EmbeddingOrphanGcHost>();
 
-// The news-embedding similarity READ seam (gh#852, R-2): the query-side counterpart to the write pass above.
-// PgVectorNewsSimilarity ranks stored soft-signal embeddings by pgvector CosineDistance for the seam's consumers
-// (NewsRelevanceService, SemanticSalienceAxis, and the NewsRetrievalService retrieval pipeline). SCOPED: it holds
-// the scoped TradingCopilotDbContext, so a singleton would be a captive dependency failing ValidateScopes at
-// startup (the AiUsageLedger lesson). The CosineDistance read is relational-only (gh#109), so it is exercised by
-// QA #855, not a unit test.
+// The embedding READ seams (gh#852, R-2; generalised gh#1065): the query side of the write pass above.
+// PgVectorNewsSimilarity serves the two BY-OWNER vector reads (NewsRelevanceService's semantic topic match and
+// SemanticSalienceAxis), while PgVectorEmbeddingRecall serves the KIND-PARAMETERISED ranked nearest-neighbour recall
+// the cross-kind retrieval pipeline runs on. Both SCOPED: each holds the scoped TradingCopilotDbContext, so a
+// singleton would be a captive dependency failing ValidateScopes at startup (the AiUsageLedger lesson). Both are
+// relational-only (gh#109) -- the Vector column has no in-memory mapping -- so they are exercised by QA (#855 and the
+// gh#1065 paired card), not by unit tests; their consumers depend on the seams so their own logic stays unit-testable.
 builder.Services.AddScoped<INewsEmbeddingSimilarity, PgVectorNewsSimilarity>();
+builder.Services.AddScoped<IEmbeddingRecall, PgVectorEmbeddingRecall>();
 
 // The semantic-embedding salience axis (gh#853, R-2, R-9): the news-feed consumer of the read seam above. It ranks
 // each candidate's embedding nearness to the operator's STARRED items (max cosine similarity) into the operator-

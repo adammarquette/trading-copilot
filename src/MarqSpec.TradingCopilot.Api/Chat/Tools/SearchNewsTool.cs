@@ -8,14 +8,16 @@ namespace MarqSpec.TradingCopilot.Api.Chat.Tools;
 /// <summary>
 /// The <c>search_news</c> chat tool (gh#987, R-6) — a read-only <b>semantic</b> search over the operator's ingested
 /// news / soft-signal feed. Since gh#995 it is a <b>thin adapter</b> over the shared
-/// <see cref="INewsRetrievalService"/> pipeline (embed the query → nearest-news recall → hydrate → rerank): the tool
-/// parses the model's JSON input, calls the pipeline, and serialises its items into the compact result shape the
-/// model reads. The retrieval logic — and its degrade / fail-open-ledger behaviour — lives in the service, shared
-/// with always-on chat grounding (gh#995), so there is one pipeline rather than two copies.
+/// <see cref="IContextRetrievalService"/> pipeline (embed the query → recall → hydrate → rerank): the tool parses the
+/// model's JSON input, calls the pipeline asking for <see cref="RetrievalKind.News"/> only, and serialises its items
+/// into the compact result shape the model reads. The retrieval logic — and its degrade / fail-open-ledger behaviour
+/// — lives in the service, shared with always-on chat grounding, so there is one pipeline rather than two copies.
+/// The pipeline went cross-kind in gh#1065; this tool deliberately did <b>not</b>, because its name and its
+/// description are a contract with the model about what it returns.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Read-only by construction (ADR-0025).</b> It injects only the read-only <see cref="INewsRetrievalService"/>
+/// <b>Read-only by construction (ADR-0025).</b> It injects only the read-only <see cref="IContextRetrievalService"/>
 /// (itself wired from read / compute seams only), reaching <b>no</b> order / execution / gate / write type, so the
 /// model can search and read the news but can never place, size, or modify an order (enforcement lives below the
 /// model). The retrieved news text is <b>untrusted display data</b> the model reads — never instruction — exactly the
@@ -34,13 +36,13 @@ public sealed class SearchNewsTool : IChatTool
     private const int DefaultLimit = 5;
     private const int MaxLimit = 20;
 
-    private readonly INewsRetrievalService _retrieval;
+    private readonly IContextRetrievalService _retrieval;
     private readonly ILogger<SearchNewsTool> _logger;
 
-    /// <summary>Creates the tool over the shared read-only news retrieval pipeline.</summary>
+    /// <summary>Creates the tool over the shared read-only cross-kind retrieval pipeline.</summary>
     /// <param name="retrieval">The shared retrieval pipeline (embed → recall → hydrate → rerank), read-only by construction.</param>
     /// <param name="logger">The logger (an unexpected fault is logged, then failed closed to an error string).</param>
-    public SearchNewsTool(INewsRetrievalService retrieval, ILogger<SearchNewsTool> logger)
+    public SearchNewsTool(IContextRetrievalService retrieval, ILogger<SearchNewsTool> logger)
     {
         ArgumentNullException.ThrowIfNull(retrieval);
         ArgumentNullException.ThrowIfNull(logger);
@@ -83,16 +85,21 @@ public sealed class SearchNewsTool : IChatTool
 
         try
         {
-            IReadOnlyList<RetrievedNewsItem> items = await _retrieval.RetrieveAsync(query, limit, cancellationToken);
+            // NEWS ONLY, deliberately (gh#1065): the pipeline is now cross-kind, but this tool is the model's
+            // *news* search and its contract with the model says so. The trader's own suggestions and journal
+            // entries reach a turn through always-on grounding and query_journal, not by quietly widening what a
+            // tool named search_news returns.
+            IReadOnlyList<RetrievedContextItem> items =
+                await _retrieval.RetrieveAsync(query, limit, [RetrievalKind.News], cancellationToken);
 
             // Serialise the pipeline's items into the compact model-facing shape (unchanged from gh#987): headline,
             // the source feeds joined, the publish time, and the snippet. An empty result is {"results":[]}.
             var results = items
                 .Select(item => new
                 {
-                    headline = item.Headline,
-                    source = string.Join(", ", item.SourceFeeds),
-                    publishedAt = item.PublishedAt,
+                    headline = item.Title,
+                    source = string.Join(", ", item.Attribution),
+                    publishedAt = item.OccurredAt,
                     snippet = item.Snippet,
                 })
                 .ToList();

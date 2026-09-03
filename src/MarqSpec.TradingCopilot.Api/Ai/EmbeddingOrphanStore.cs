@@ -6,7 +6,8 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 
 /// <summary>
 /// The concrete <see cref="IEmbeddingOrphanStore"/> — set-based anti-join DELETEs over the polymorphic embedding
-/// table: orphaned-owner rows one owner kind at a time (gh#902), and crash-leaked stale-model duplicates (gh#915).
+/// table: orphaned-owner rows one owner kind at a time (gh#902, extended to the owner-scoped kinds in gh#1065), and
+/// crash-leaked stale-model duplicates (gh#915).
 /// Relational-only like the embed pass (gh#109): the <c>Vector</c> column has no in-memory-provider mapping, so these
 /// are exercised only at the QA integration tier (#902 / #915's paired cards).
 /// </summary>
@@ -34,9 +35,33 @@ public sealed class EmbeddingOrphanStore : IEmbeddingOrphanStore
                 && !_database.NewsTopics.Any(topic => topic.Name == embedding.OwnerId))
             .ExecuteDeleteAsync(cancellationToken),
 
-        // Producer-less kinds (Suggestion / Rule / MarketSnapshot) and Unknown have no producer to check an owner
-        // against, so they are never swept -- EmbeddingOrphanSweep.SweepableKinds keeps them out of the caller's loop.
-        // This guard is belt-and-braces should the allow-list and this switch ever drift apart.
+        // The two OWNER-SCOPED kinds (gh#1065). IgnoreQueryFilters is LOAD-BEARING, not tidy-up: this runs in a
+        // background host with no request user, so the R-20 tenant filter would resolve to Guid.Empty and match
+        // NOTHING -- every suggestion would look orphaned and the sweep would delete the entire kind on its first
+        // pass. The sweep asks "does this row still exist ANYWHERE", which is a deployment-wide question; it reads no
+        // owner data and returns none, so crossing the filter here leaks nothing (the same posture as
+        // OutcomeJournalService and the flatten hosts). Owner scoping for these kinds is enforced on the READ side,
+        // where the retrieval pipeline hydrates through the filter.
+        //
+        // OwnerId is text (so any owner key shape fits), and these owners are Guid-keyed, so the comparison leans on
+        // the provider translating Guid.ToString() to a uuid->text cast. Postgres renders a uuid exactly as .NET's
+        // "D" format does (lowercase, hyphenated), so the values match; a provider that could NOT translate it would
+        // throw here, which the GC host catches per kind and logs -- stale rows remain, nothing is wrongly deleted.
+        EmbeddingOwnerKind.Suggestion => _database.Embeddings
+            .Where(embedding => embedding.OwnerKind == EmbeddingOwnerKind.Suggestion
+                && !_database.Suggestions.IgnoreQueryFilters()
+                    .Any(suggestion => suggestion.Id.ToString() == embedding.OwnerId))
+            .ExecuteDeleteAsync(cancellationToken),
+
+        EmbeddingOwnerKind.JournalEntry => _database.Embeddings
+            .Where(embedding => embedding.OwnerKind == EmbeddingOwnerKind.JournalEntry
+                && !_database.Trades.IgnoreQueryFilters()
+                    .Any(trade => trade.Id.ToString() == embedding.OwnerId))
+            .ExecuteDeleteAsync(cancellationToken),
+
+        // Producer-less kinds (Rule / MarketSnapshot) and Unknown have no producer to check an owner against, so they
+        // are never swept -- EmbeddingOrphanSweep.SweepableKinds keeps them out of the caller's loop. This guard is
+        // belt-and-braces should the allow-list and this switch ever drift apart.
         _ => throw new ArgumentOutOfRangeException(
             nameof(ownerKind), ownerKind, "Only producer-backed embedding owner kinds can be swept for orphans."),
     };

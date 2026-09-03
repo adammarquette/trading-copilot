@@ -41,8 +41,10 @@ public class EmbeddingOrphanGcHostTests
     {
         await SweepAsync();
 
+        // Suggestion / JournalEntry gained producers in gh#1065 and moved onto the allow-list; Rule is still waiting on
+        // the rulebook epic (gh#15), MarketSnapshot on its own producer, and Unknown is the refusable sentinel.
         EmbeddingOwnerKind[] producerless =
-            [EmbeddingOwnerKind.Unknown, EmbeddingOwnerKind.Suggestion, EmbeddingOwnerKind.Rule, EmbeddingOwnerKind.MarketSnapshot];
+            [EmbeddingOwnerKind.Unknown, EmbeddingOwnerKind.Rule, EmbeddingOwnerKind.MarketSnapshot];
         foreach (EmbeddingOwnerKind kind in producerless)
         {
             A.CallTo(() => _store.DeleteOrphansAsync(kind, A<CancellationToken>._)).MustNotHaveHappened();
