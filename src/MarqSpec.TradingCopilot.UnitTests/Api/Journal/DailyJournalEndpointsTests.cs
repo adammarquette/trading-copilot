@@ -162,6 +162,34 @@ public class DailyJournalEndpointsTests
     }
 
     [Fact]
+    public async Task GetDailyRealized_ShouldReturnBadRequest_WhenToIsAtDateOnlyMaxValue()
+    {
+        // gh#1087: `to.AddDays(1)` inside RealizedPnLByDayForAccountAsync throws for DateOnly.MaxValue (there is no
+        // day after 9999-12-31), and the API registers no exception middleware -- an unguarded caller-supplied
+        // MaxValue must 400 here rather than let that throw reach the caller as an unhandled 500. `from` is left
+        // unset, exactly gh#1087's repro: the default `from` (the 1st of that month) keeps windowFrom <= windowTo,
+        // so the existing inverted-range 400 above does NOT fire and this guard is the only thing standing between
+        // the caller and the throw.
+        await SeedAccountAsync();
+
+        IResult result = await ReadDaysAsync(to: DateOnly.MaxValue);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+    }
+
+    [Fact]
+    public async Task GetDailyRealized_ShouldReturnOk_WhenFromIsDateOnlyMinValue()
+    {
+        // DateOnly.MinValue is already safe at the `from` end (no AddDays applied to it) -- pinned so a later
+        // upper-bound clamp does not get generalized into over-rejecting the lower bound too (gh#1087).
+        await SeedAccountAsync();
+
+        IResult result = await ReadDaysAsync(from: DateOnly.MinValue);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+    }
+
+    [Fact]
     public async Task GetDailyRealized_ShouldCountOnlyTheAccountsCurrentMode_WhenItChangedModes()
     {
         // R-14 (gh#746): a leftover practice loss must never blend into a now-live account's P&L-by-day read.
@@ -210,6 +238,27 @@ public class DailyJournalEndpointsTests
         await SeedTradeAsync(realizedPnL: -400m, closedAt: _now, mode: TradingMode.Live);
 
         StatusOf(await ReadDayAsync(new DateOnly(2026, 8, 3))).Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
+    public async Task GetDayDetail_ShouldReturnBadRequest_WhenDateIsAtDateOnlyMaxValue()
+    {
+        // gh#1087: `day.AddDays(1)` inside TradesForDayForAccountAsync throws for DateOnly.MaxValue (there is no day
+        // after 9999-12-31), and the API registers no exception middleware -- GET .../journal/daily/9999-12-31 must
+        // 400 here rather than let that throw reach the caller as an unhandled 500.
+        await SeedAccountAsync();
+
+        StatusOf(await ReadDayAsync(DateOnly.MaxValue)).Should().Be(StatusCodes.Status400BadRequest);
+    }
+
+    [Fact]
+    public async Task GetDayDetail_ShouldReturnOk_WhenDateIsDateOnlyMinValue()
+    {
+        // DateOnly.MinValue is already safe here (no AddDays applied to it directly) -- pinned so a later
+        // upper-bound clamp does not get generalized into over-rejecting the lower bound too (gh#1087).
+        await SeedAccountAsync();
+
+        StatusOf(await ReadDayAsync(DateOnly.MinValue)).Should().Be(StatusCodes.Status200OK);
     }
 
     [Fact]
