@@ -685,11 +685,14 @@ dedups to a single push **and** the key still ends released, which are both requ
 leaving the key armed would trade the flood back for the silence this card exists to remove. The covering page's
 bookkeeping runs in a `finally`, so a send that throws still hands the key back rather than stranding it.
 
-**What that does not cover, stated rather than claimed away:** a page whose own delivery *straddles* the refusal —
-one already in flight when the refusal lands, or one that fails and is re-offered by the outbox later under a
-fresh ordinal — is not matched by the marker, so the key can stay armed until the producer resolves again. That
-residue is exactly what the socket hosts' producer-side re-arm (§*Update 2026-09-02*, `gh#1051`) covers, which is
-why it **stays** — see the follow-up note below.
+**What that does not cover, stated rather than claimed away:** a page that *fails* delivery inside the refusal
+window and is re-offered by the outbox later under a **fresh ordinal**. That is a genuinely new send, so the
+marker is inert against it and the key stays armed until the producer resolves again. (A page merely *in flight*
+when the refusal lands **is** covered — the bookkeeping is cleared in the delivery's `finally`, so the refusal
+still sees it queued and defers to it. An earlier version of this update listed that case as a gap; it is not
+one, and an unnecessary caveat teaches the next reader to distrust the accurate ones.) The remaining residue is
+exactly what the socket hosts' producer-side re-arm (§*Update 2026-09-02*, `gh#1051`) covers, which is why it
+**stays** — see the follow-up note below.
 
 **A note on how these were found, because it is the reusable part.** Every defect in this change was one the test
 suite was *structurally incapable* of expressing, not one it happened to miss: single-page fixtures hid the
