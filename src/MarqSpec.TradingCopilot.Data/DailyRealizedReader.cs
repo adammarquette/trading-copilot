@@ -124,6 +124,7 @@ public static class DailyRealizedReader
     {
         ArgumentNullException.ThrowIfNull(database);
         GuardMode(mode);
+        GuardUpperBound(to);
 
         DateTimeOffset windowStart = CentralDayStartUtc(from);
         DateTimeOffset windowEndExclusive = CentralDayStartUtc(to.AddDays(1));
@@ -164,6 +165,7 @@ public static class DailyRealizedReader
     {
         ArgumentNullException.ThrowIfNull(database);
         GuardMode(mode);
+        GuardUpperBound(day);
 
         DateTimeOffset windowStart = CentralDayStartUtc(day);
         DateTimeOffset windowEndExclusive = CentralDayStartUtc(day.AddDays(1));
@@ -188,6 +190,25 @@ public static class DailyRealizedReader
         {
             throw new ArgumentOutOfRangeException(
                 nameof(mode), "Undeclared is not a journalable trading mode; treat an Undeclared account as inert.");
+        }
+    }
+
+    /// <summary>
+    /// Refuses <see cref="DateOnly.MaxValue"/> loudly (gh#1087), shared by every reader in this family that derives
+    /// an exclusive window end via <c>AddDays(1)</c> on a caller-supplied day. <see cref="DateOnly.MaxValue"/> is
+    /// 9999-12-31 — the last representable <see cref="DateOnly"/> — so <c>AddDays(1)</c> on it throws
+    /// <see cref="ArgumentOutOfRangeException"/> itself (there is no 10000-01-01 to roll into); left unguarded, that
+    /// throw reaches the caller unhandled, since the API registers no exception middleware, producing a 500 where a
+    /// 400 belongs. There is no legitimate journal query at <see cref="DateOnly.MaxValue"/>, so rejecting exactly
+    /// that value is sufficient — every other day has a valid "day after," including <see cref="DateOnly.MinValue"/>
+    /// at the opposite end, which this guard does not touch.
+    /// </summary>
+    private static void GuardUpperBound(DateOnly day)
+    {
+        if (day == DateOnly.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(day), "DateOnly.MaxValue has no next day; the journal window cannot end there.");
         }
     }
 
