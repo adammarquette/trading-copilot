@@ -61,6 +61,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Recomposition-suppression tombstones — a hard-deleted outcome's source, so no sweep re-derives it (gh#955). Operator-owned.</summary>
     public DbSet<OutcomeSuppression> OutcomeSuppressions => Set<OutcomeSuppression>();
 
+    /// <summary>Post-close operator (or future AI) feedback on a trade (R-8, gh#1064). Operator-owned.</summary>
+    public DbSet<TradeFeedback> TradeFeedbacks => Set<TradeFeedback>();
+
     /// <summary>Declared per-account risk rules (R-5, gh#10). Operator-owned; one per account.</summary>
     public DbSet<RiskProfileRecord> RiskProfiles => Set<RiskProfileRecord>();
 
@@ -584,6 +587,34 @@ public class TradingCopilotDbContext : TenantDbContext
             // Filtered to the non-null key: every row of the opposite kind leaves this column null.
             suppression.HasIndex(s => s.TradeId).IsUnique().HasFilter("\"TradeId\" IS NOT NULL");
             suppression.HasIndex(s => s.SuggestionId).IsUnique().HasFilter("\"SuggestionId\" IS NOT NULL");
+        });
+
+        modelBuilder.Entity<TradeFeedback>(feedback =>
+        {
+            feedback.Property(f => f.Comment).HasMaxLength(TradeFeedback.CommentMaxLength);
+            feedback.Property(f => f.EmotionalState).HasMaxLength(TradeFeedback.EmotionalStateMaxLength);
+
+            // Dies WITH its trade (mirrors Outcome.TradeId) -- removing the operator's account cascades the trade
+            // away and its feedback with it, so an annotation never strands against a gone parent.
+            feedback.HasOne<Trade>()
+                .WithMany()
+                .HasForeignKey(f => f.TradeId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // The read pattern (TradeFeedbackReader): a trade's feedback, oldest first.
+            feedback.HasIndex(f => new { f.TradeId, f.CreatedAt });
+
+            feedback.ToTable(table =>
+            {
+                table.HasCheckConstraint("CK_TradeFeedback_Author_NotUnknown", "\"Author\" <> 0");
+
+                // Refuse a no-op row -- a feedback entry with no comment, no tags and no emotional state records
+                // nothing (the CK_SoftSignalFeedback_Kind_NotUnknown posture: never a placeholder sitting in the
+                // store). cardinality() returns 0 (never NULL) for the NOT NULL, default-'{}' Tags column.
+                table.HasCheckConstraint(
+                    "CK_TradeFeedback_HasContent",
+                    "\"Comment\" IS NOT NULL OR \"EmotionalState\" IS NOT NULL OR cardinality(\"Tags\") > 0");
+            });
         });
 
         modelBuilder.Entity<RiskProfileRecord>(profile =>
