@@ -668,20 +668,35 @@ exactly that page. A page enqueued **after** the refusal never matches, so a new
 releasing that one would page on every 15 s escalation pass, which is the noise §4 forbids, reached by way of a
 guard against silence.
 
-**Releasing after the *last* covered page, rather than after each of them, is what keeps one incident to one
-push.** Releasing eagerly let every page beneath the refusal through the dedup it had just cleared, so a backlog
-of pages for one key — routine during a wedge, since the outbox writes a fresh row per key once the previous is
-stamped — became one **Emergency** push per queued page. That is §4's *"strictly worse than no pager, because it
-manufactures confidence"*, and it is the same harm the ordinal guard already prevents on the other side of the
-line; documenting a flood is not bounding one. Bound this way the backlog still dedups to a single push **and**
-the key still ends released, which are both required: bounding the pushes by leaving the key armed would trade
-the flood back for the silence this card exists to remove.
+**The release has exactly one owner, and that is what keeps one incident to one push.** Two separate versions of
+this got it wrong in the same direction, so the rule is worth stating as a rule: *while a page for the key is
+queued, the covering page's delivery owns the release; with nothing queued that could re-arm the key, the refusal
+path owns it.*
+
+- Releasing after **each** covered page let every page beneath the refusal through the dedup it had just cleared,
+  so a backlog for one key became one **Emergency** push per queued page.
+- Releasing on **every refusal** was the same bug wearing a different hat, and is the one that survives a casual
+  reading: the wedge refuses a resolve for that key on *every* 15 s flatten pass while the backlog drains at
+  ~6/min, so each refusal released the key the previous page had just armed and the next page delivered
+  unsuppressed. One push per refusal instead of per incident — the flood again, at a lower rate.
+
+Both are §4's *"strictly worse than no pager, because it manufactures confidence"*. Bound this way the backlog
+dedups to a single push **and** the key still ends released, which are both required: bounding the pushes by
+leaving the key armed would trade the flood back for the silence this card exists to remove. The covering page's
+bookkeeping runs in a `finally`, so a send that throws still hands the key back rather than stranding it.
 
 **What that does not cover, stated rather than claimed away:** a page whose own delivery *straddles* the refusal —
-one already in flight, or one that fails and is re-offered by the outbox later under a fresh ordinal — is not
-matched by the marker, so the key can stay armed until the producer resolves again. That residue is exactly what
-the socket hosts' producer-side re-arm (§*Update 2026-09-02*, `gh#1051`) covers, which is why it **stays** — see
-the follow-up note below.
+one already in flight when the refusal lands, or one that fails and is re-offered by the outbox later under a
+fresh ordinal — is not matched by the marker, so the key can stay armed until the producer resolves again. That
+residue is exactly what the socket hosts' producer-side re-arm (§*Update 2026-09-02*, `gh#1051`) covers, which is
+why it **stays** — see the follow-up note below.
+
+**A note on how these were found, because it is the reusable part.** Every defect in this change was one the test
+suite was *structurally incapable* of expressing, not one it happened to miss: single-page fixtures hid the
+re-arm, single-threaded fixtures hid the collapse race, and a fixture that refused **once** and then drained
+uninterrupted hid the per-refusal flood — while a fixture that injected its second refusal from inside the
+transport call hid it a second time, because that runs *before* the dedup layer arms and the scenario evaporates.
+The question that found each of them is not "does this test pass?" but **"what can this fixture not produce?"**
 
 **Observable, not merely counted — a log, a metric, and a failed result, deliberately all three.** The result is
 what makes it recoverable (the outbox keeps the row owed). The log is at **Error** for a page and **Critical**
