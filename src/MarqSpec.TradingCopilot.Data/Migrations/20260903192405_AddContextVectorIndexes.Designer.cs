@@ -14,7 +14,7 @@ using Pgvector;
 namespace MarqSpec.TradingCopilot.Data.Migrations
 {
     [DbContext(typeof(TradingCopilotDbContext))]
-    [Migration("20260903175756_AddContextVectorIndexes")]
+    [Migration("20260903192405_AddContextVectorIndexes")]
     partial class AddContextVectorIndexes
     {
         /// <inheritdoc />
@@ -1673,6 +1673,48 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         });
                 });
 
+            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.TradeFeedback", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Author")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Comment")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("EmotionalState")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.PrimitiveCollection<List<string>>("Tags")
+                        .IsRequired()
+                        .HasColumnType("text[]");
+
+                    b.Property<Guid>("TradeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TradeId", "CreatedAt");
+
+                    b.ToTable("TradeFeedbacks", t =>
+                        {
+                            t.HasCheckConstraint("CK_TradeFeedback_Author_NotUnknown", "\"Author\" <> 0");
+
+                            t.HasCheckConstraint("CK_TradeFeedback_HasContent", "\"Comment\" IS NOT NULL OR \"EmotionalState\" IS NOT NULL OR cardinality(\"Tags\") > 0");
+                        });
+                });
+
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.TriggerFiringRecord", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2053,6 +2095,15 @@ namespace MarqSpec.TradingCopilot.Data.Migrations
                         .WithMany()
                         .HasForeignKey("SuggestionId")
                         .OnDelete(DeleteBehavior.SetNull);
+                });
+
+            modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.TradeFeedback", b =>
+                {
+                    b.HasOne("MarqSpec.TradingCopilot.Data.Entities.Trade", null)
+                        .WithMany()
+                        .HasForeignKey("TradeId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("MarqSpec.TradingCopilot.Data.Entities.TriggerRecord", b =>

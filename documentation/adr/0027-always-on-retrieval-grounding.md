@@ -83,3 +83,28 @@ adjacent constraints are fixed and non-negotiable:
   source is another read-only pipeline feeding the same user-role envelope, never the system prompt.
 - Streaming a *tool-using* turn's final answer (ADR-0025's inc 4b) and a conversation context-window cap (gh#906) are
   unaffected by and orthogonal to this change.
+
+## Update (2026-09-03) — the pipeline is cross-kind, and the follow-up above is delivered (gh#1065)
+
+The Follow-ups line "cross-kind always-on grounding is a later increment" is now **done for two of its three sources**,
+and its own framing was wrong in a way worth recording: it read *"each new source is another read-only pipeline feeding
+the same user-role envelope"*. It is **not** another pipeline. `INewsRetrievalService` became
+**`IContextRetrievalService`**, kind-parameterised: one query-embed, a recall **per asked kind**, a hydrate each, a
+merge **nearest-first across kinds**, and **one** rerank over the merged set. A second pipeline per source would have
+paid for a second embed and a second rerank per turn and produced two lists nothing could interleave meaningfully;
+this way a turn's cost does not grow with the number of kinds, and the merge is a real ranking because every kind's
+recall reports the same cosine metric.
+
+Every clause of the decision survives unchanged. Grounding is still **user-role content** on the operator's final turn
+behind the same envelope, **never** the system prompt — which matters more now, not less: a suggestion's
+`Rationale` is **model-authored prose**, so re-injecting it as instruction would close a loop where one turn's output
+becomes the next turn's orders. Empty grounding is still byte-identical to an un-grounded turn, it still rides the
+turn's single governor gate, is still threshold-skipped and fail-open, and is still ephemeral per turn.
+
+What is genuinely new is a **scoping** obligation the news-only slice did not have. News is the R-20 global exception;
+a suggestion and a journal entry are not, and the embedding store is deployment-global (it follows its owners), so the
+recall can legitimately return another operator's row. That is resolved at the **hydrate**, which reads each recalled
+owner back through the tenant query filter — a foreign row is simply absent, dropped by the same path that drops a
+deleted owner. The remaining source, the **rulebook**, stays deferred: epic gh#15 has not started, so there is no rule
+entity to embed. **Live positions** are deliberately *not* becoming a retrieval kind — they are current state, served
+by the `read_positions` tool, not recalled history.

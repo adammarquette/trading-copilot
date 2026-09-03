@@ -253,7 +253,7 @@ public sealed class NewsEmbeddingService
 
         if (total > 0)
         {
-            _logger.LogDebug("Embedded {Count} item(s) this pass (news + topics).", total);
+            _logger.LogDebug("Embedded {Count} item(s) this pass (news, topics, suggestions and journal entries).", total);
         }
 
         return total;
@@ -455,6 +455,7 @@ public sealed class NewsEmbeddingService
 
             skip += page.Count;
             bool capReachedMidPage = false;
+            bool progressed = false; // "handled" = embedded, or recognised unchanged -- NOT a provider failure
             List<string> embeddedOwnerIds = []; // owners re-embedded THIS page -> sweep their stale-model rows (gh#889)
 
             foreach (EmbeddableRow row in page)
@@ -480,7 +481,9 @@ public sealed class NewsEmbeddingService
                 {
                     // Unchanged: skip the paid re-embed. Like topics (and unlike news) the candidate set is the
                     // producer scan itself, so there is nothing to "touch out" of a future candidate query -- leave the
-                    // stored row untouched rather than re-UPDATE every unchanged row on every pass.
+                    // stored row untouched rather than re-UPDATE every unchanged row on every pass. This still counts
+                    // as PROGRESS: a page of already-embedded rows is the steady state, not a stalled provider.
+                    progressed = true;
                     continue;
                 }
 
@@ -499,6 +502,7 @@ public sealed class NewsEmbeddingService
 
                 Upsert(existing, ownerKind, ownerId, model, hash, result.Vector, now);
                 embeddedOwnerIds.Add(ownerId);
+                progressed = true;
                 embedded++;
             }
 
@@ -510,6 +514,17 @@ public sealed class NewsEmbeddingService
             {
                 _logger.LogInformation(
                     "The daily AI-spend budget is reached; {OwnerKind} embedding stops for this run.", ownerKind);
+                break;
+            }
+
+            // No row in this page could be handled at all -- the provider is down or rate-limited for the whole pass,
+            // and a rate-limited call costs 0 so the spend cap will never stop it. Mirrors the news loop's own guard:
+            // stop this run rather than paying an attempt for every remaining row, and retry next pass exactly as a
+            // per-item failure does.
+            if (!progressed)
+            {
+                _logger.LogDebug(
+                    "No {OwnerKind} row could be embedded this page; the pass stops for this run.", ownerKind);
                 break;
             }
 
