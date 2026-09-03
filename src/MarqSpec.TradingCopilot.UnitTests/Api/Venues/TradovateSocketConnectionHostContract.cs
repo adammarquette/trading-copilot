@@ -1012,26 +1012,104 @@ public abstract class TradovateSocketConnectionHostContract
     }
 
     [Fact]
-    public async Task ExecuteAsync_ShouldNotReArmTheIncidentKey_OnTheRetriesWithinOneOutage()
+    public async Task ExecuteAsync_ShouldReArmTheIncidentKeyOnlyOnce_NotOnEveryRetryWithinTheNextOutage()
     {
-        // The bound on the fix above. Re-arming before EVERY attempt would release the dedup key each pass and turn
-        // one continuing incident into a push per poll interval -- ADR-0019 §4's budget, destroyed by the very
-        // producer that is meant to respect it. The re-arm happens once, before the first advisory of a NEW outage,
-        // and never on the retries that follow it.
+        // RENAMED and RE-FIXTURED (gh#1079 finding 1). The old fixture set Accept = false from the very start, so
+        // NOTHING was ever advised: `advised` is only ever set from AdviseDegradedAsync's return, and
+        // reArmBeforeNextAdvisory is only ever set inside the `if (advised && ...)` branch that closes an
+        // incident -- with nothing ever advised, that branch never ran, so the flag was false on every pass
+        // regardless of the guard this test's old name claimed to pin. Deleting `if (reArmBeforeNextAdvisory)`
+        // entirely left the test green: `reArmBeforeNextAdvisory` was false either way, so `Resolutions` was
+        // empty either way. The mutation was not expressible against that fixture.
         //
-        // The channel refuses every send, so the host retries for the whole run and each retry would resolve if the
-        // re-arm were unbounded. Nothing has ever been advised, so nothing is owed a re-arm at all: zero resolves.
-        Notifications.Accept = false;
-        SocketIs(ClientModels.ConnectionState.Disconnected);
+        // This fixture drives a genuine outage -> advised -> recovered -> closed sequence first, so
+        // reArmBeforeNextAdvisory is actually TRUE going into the second outage. THEN the channel starts refusing,
+        // so that second outage is retried several times. The bound: exactly one resolve closes the first
+        // incident, exactly one more re-arms before the second outage's first advisory, and NONE of the retries
+        // that follow it may produce a third -- deleting the guard makes every retry re-resolve, which is the
+        // regression this name now actually pins.
+        int healthy = 0;
+        SocketReadsAs(_ => Volatile.Read(ref healthy) == 1
+            ? ClientModels.ConnectionState.Connected
+            : ClientModels.ConnectionState.Disconnected);
         ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
 
         BackgroundService host = Host();
         await host.StartAsync(CancellationToken.None);
-        (await Notifications.Sent(3)).Should().BeTrue("the host must really have retried");
+
+        // Outage 1: genuinely advised...
+        (await Notifications.Delivered(1)).Should().BeTrue("the first outage must actually reach the operator");
+
+        // ...then closed, which is what arms reArmBeforeNextAdvisory for the outage that follows it.
+        Interlocked.Exchange(ref healthy, 1);
+        (await Notifications.Resolved(1)).Should().BeTrue("recovery must close the first incident");
+
+        // Outage 2: the channel now refuses every send, so the host retries for the rest of the run -- one
+        // initial attempt (which re-arms first) plus several retries that must NOT.
+        Notifications.Accept = false;
+        Interlocked.Exchange(ref healthy, 0);
+
+        (await Notifications.Sent(4)).Should().BeTrue(
+            "the second outage must really have retried several times beyond its first attempt");
         await StopAsync(host);
 
-        Notifications.Resolutions.Should()
-            .BeEmpty("an outage that was never closed has no key to re-arm, and retries never resolve");
+        Notifications.Resolutions.Should().HaveCount(2,
+            "one resolve closes the first outage and one re-arms before the second outage's first advisory -- " +
+            "none of that outage's later retries may produce a third");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldStopRetryingTheAdvisory_WhenAHeldDedupKeySurvivesTheReArm()
+    {
+        // gh#1079 finding 2. RecordingNotificationChannel.SendAsync now answers as the OUTBOX seam the host
+        // actually holds -- true for an already-owed key, not the false DedupingNotificationChannel would answer
+        // three layers below. This test is why that distinction is not academic.
+        //
+        // The round-3 re-arm (the test above) defends against ONE transient queue drop (gh#1077) -- it is not
+        // proof against two. When the re-arm's OWN resolve is ALSO dropped, the key it was meant to release is
+        // still held when the next outage's first advisory is sent. The outbox tells the host "recorded" --
+        // seam-accurate, and exactly what production does -- so `advised` latches true and the loop stops
+        // retrying, while the dedup layer three levels down has silently swallowed the only attempt this outage
+        // ever made. This is gh#1045's failure shape, reproduced by a double that now tells the truth about which
+        // seam it stands in for.
+        int healthy = 0;
+        SocketReadsAs(_ => Volatile.Read(ref healthy) == 1
+            ? ClientModels.ConnectionState.Connected
+            : ClientModels.ConnectionState.Disconnected);
+        ArrangeConnect(() => throw new InvalidOperationException("the venue is unreachable (test)"));
+        await ArrangePostConnectWorkAsync(() => Task.CompletedTask);
+        Notifications.LoseNextResolve = true;
+
+        BackgroundService host = Host();
+        await host.StartAsync(CancellationToken.None);
+        (await Notifications.Delivered(1)).Should().BeTrue("the first outage must reach the operator");
+
+        Interlocked.Exchange(ref healthy, 1);
+        (await Notifications.Resolved(1)).Should()
+            .BeTrue("the recovery closes the incident -- and this is the resolve that is silently lost");
+
+        // The re-arm ahead of the SECOND outage is also lost: two consecutive transient drops, not the single
+        // one the round-3 defence covers.
+        Notifications.LoseNextResolve = true;
+        Interlocked.Exchange(ref healthy, 0);
+
+        (await Notifications.Resolved(2)).Should()
+            .BeTrue("the re-arm must still be attempted before the next advisory");
+        (await Notifications.Sent(2)).Should().BeTrue("the second outage's advisory must still be attempted once");
+
+        // The host believes the second advisory succeeded, so it must NOT retry it -- observe several more real
+        // passes to prove that is a STUCK belief rather than merely a retry that has not happened yet.
+        (await PassesObserved(PassesSoFar + 20)).Should()
+            .BeTrue("the assertion below only means something if passes really ran after the second advisory");
+        await StopAsync(host);
+
+        Notifications.Notifications.Should().HaveCount(2,
+            "the outbox told the host the second advisory was recorded, so it believes the incident is handled " +
+            "and must not retry it, however many passes follow");
+        Notifications.Deliveries.Should().ContainSingle(
+            "the dedup layer held the key from the lost resolve, so the second advisory never actually reached " +
+            "the operator -- advised stuck true over an operator who was told nothing");
     }
 
     /// <summary>Records what the host told the operator, so the advisory can be asserted rather than inferred.</summary>
@@ -1042,9 +1120,11 @@ public abstract class TradovateSocketConnectionHostContract
         private readonly List<Notification> _delivered = [];
         private readonly List<string> _resolved = [];
 
-        // The dedup decorator's memory, modelled here because the hazard this double exists to express lives in the
-        // interaction between it and the queue below it: a key that is armed and never released suppresses every
-        // later incident, and the producer above sees only "accepted".
+        // The dedup decorator's memory, modelled here -- THREE layers below the seam the host actually holds --
+        // because the hazard this double exists to express lives in the interaction between it and the queue
+        // above it: a key that is armed and never released suppresses every later incident, while every layer the
+        // host can see reports success (gh#1079 finding 2). SendAsync below answers from the OUTBOX's point of
+        // view, not this set's -- see the comment there.
         private readonly HashSet<string> _reported = new(StringComparer.Ordinal);
 
         // One witness PER WAIT, not one per channel. A single reusable TaskCompletionSource stays completed once it
@@ -1127,6 +1207,18 @@ public abstract class TradovateSocketConnectionHostContract
         public Task<bool> Delivered(int count) => Wait(_deliveredWaits, () => _delivered.Count, count);
 
         /// <inheritdoc />
+        /// <remarks>
+        /// <b>Answers as the OUTBOX, not the dedup layer (gh#1079 finding 2).</b> The host's <c>INotificationChannel</c>
+        /// resolves to <c>OutboxNotificationChannel</c>, three layers above <c>DedupingNotificationChannel</c> in the
+        /// outbox → queue → dedup → transport chain (<c>NotificationRegistration.cs</c>) -- and
+        /// <c>OutboxNotificationChannel.SendAsync</c> returns <see langword="true"/> for an already-owed row exactly
+        /// as it does for a new one (<c>OutboxNotificationChannel.cs</c>, "Already owed? … success, not a
+        /// collision"): dedup suppression happens later, below the queue, and its result never reaches this seam.
+        /// Returning <see langword="false"/> here for a held key -- what the DECORATOR would answer -- would be
+        /// faithful to a layer the host does not talk to, and would hide the failure shape this double exists to
+        /// reproduce: a held key that leaves the host believing an advisory succeeded while the operator hears
+        /// nothing (see <c>ExecuteAsync_ShouldStopRetryingTheAdvisory_WhenAHeldDedupKeySurvivesTheReArm</c>).
+        /// </remarks>
         public Task<bool> SendAsync(Notification notification, CancellationToken cancellationToken)
         {
             lock (_gate)
@@ -1134,10 +1226,13 @@ public abstract class TradovateSocketConnectionHostContract
                 _sent.Add(notification);
                 Release(_sentWaits, _sent.Count);
 
-                // Suppressed as a duplicate, exactly as the dedup decorator does while it still holds the key.
+                // Already held below -- the OUTBOX still says "recorded" (seam-accurate: true), but the dedup memory
+                // modelled by _reported swallows it before it reaches the operator, so it is deliberately NOT added
+                // to _delivered. The host is told success and stops retrying; the operator hears nothing. That gap
+                // between "sent" and "delivered" IS the production symptom, not a benign retry loop.
                 if (_reported.Contains(notification.DedupKey))
                 {
-                    return Task.FromResult(false);
+                    return Task.FromResult(true);
                 }
 
                 if (!Accept)

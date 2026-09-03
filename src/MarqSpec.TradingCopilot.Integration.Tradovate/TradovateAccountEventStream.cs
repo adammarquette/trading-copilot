@@ -183,12 +183,14 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
         // difference is the whole point: an order or position for an account this stream did not subscribe, and a
         // fill still waiting for the order that names it, never reach Emit -- and one Tradovate login syncs EVERY
         // account the user holds, so a stream scoped to one account meets that case constantly. Keyed on emission,
-        // this flag reported "nothing arrived" about a socket that was demonstrably delivering (gh#1051 round-3). Watching only the snapshot reported silence about streams that
-        // were not silent at all: a SyncCompleted landing between the sample above and the attach below clears the
-        // register while this stream's own handler does not yet exist, and a stream can take live frames with no
-        // further SyncCompleted at all -- the client's own reconnect syncs while one of the host's syncs is in
-        // flight, so the completion is left to the connection-bound clear and the obligation stays armed even
-        // though the socket really is synced (gh#1051 round-2 review).
+        // this flag reported "nothing arrived" about a socket that was demonstrably delivering (gh#1051 round-3).
+        //
+        // Watching only the snapshot reported silence about streams that were not silent at all: a SyncCompleted
+        // landing between the sample above and the attach below clears the register while this stream's own
+        // handler does not yet exist, and a stream can take live frames with no further SyncCompleted at all --
+        // the client's own reconnect syncs while one of the host's syncs is in flight, so the completion is left
+        // to the connection-bound clear and the obligation stays armed even though the socket really is synced
+        // (gh#1051 round-2 review).
         bool sawDelivery = false;
 
         Channel<AccountEvent> events = Channel.CreateUnbounded<AccountEvent>(new UnboundedChannelOptions
@@ -546,8 +548,8 @@ public sealed class TradovateAccountEventStream : IAccountEventStream
                 // recover. The connection host escalates the same condition to the operator.
                 _logger.LogWarning(
                     "The Tradovate account-event stream ended having delivered nothing at all over a socket that "
-                    + "was unsynced when it opened and is unsynced still. Tradovate delivers entity frames only to "
-                    + "a synced socket, so this stream's silence is not evidence about the account.");
+                    + "was unsynced when it opened. Tradovate delivers entity frames only to a synced socket, so "
+                    + "this stream's silence is not evidence about the account.");
             }
 
             if (abandoned > 0)
