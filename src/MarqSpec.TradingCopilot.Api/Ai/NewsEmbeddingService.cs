@@ -363,7 +363,9 @@ public sealed class NewsEmbeddingService
         GovernorPass? governorPass, string model, DateTimeOffset now, CancellationToken cancellationToken) =>
         EmbedOwnedPagesAsync(
             governorPass,
-            EmbeddingOwnerKind.Suggestion,
+            // Through the one mapping, never a second literal -- writing under a kind the read does not look under
+            // would leave the vectors stranded and the retrieval silently empty.
+            EmbeddingOwnerKinds.For(RetrievalKind.Suggestion),
             model,
             now,
             async (skip, token) =>
@@ -392,7 +394,7 @@ public sealed class NewsEmbeddingService
         GovernorPass? governorPass, string model, DateTimeOffset now, CancellationToken cancellationToken) =>
         EmbedOwnedPagesAsync(
             governorPass,
-            EmbeddingOwnerKind.JournalEntry,
+            EmbeddingOwnerKinds.For(RetrievalKind.JournalEntry),
             model,
             now,
             async (skip, token) =>

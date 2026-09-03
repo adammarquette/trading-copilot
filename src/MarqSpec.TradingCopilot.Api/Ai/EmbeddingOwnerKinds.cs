@@ -14,7 +14,15 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// <b>One place, deliberately.</b> The store's owner kinds are part of a persisted composite primary key, so their
 /// numeric values can never move; the retrieval kinds are a selector a consumer passes. A second copy of this mapping
 /// is a silent data corruption waiting to happen — one that would write vectors under one kind and read them under
-/// another — so every reader and writer of an owner-scoped embedding routes through here.
+/// another.
+/// </para>
+/// <para>
+/// <b>How the two halves are bound to it.</b> The <b>write</b> path calls this directly:
+/// <c>NewsEmbeddingService</c>'s owner-scoped passes take their owner kind from here, so there is no second literal to
+/// drift. The <b>read</b> path cannot — <c>PgVectorEmbeddingRecall</c>'s predicate needs a compile-time literal or the
+/// partial HNSW index stops being plannable (gh#864) — so it is bound the other way: its shipping predicate is
+/// exposed as an expression and <b>asserted against this mapping by a unit test</b>, kind by kind. Either half
+/// diverging is a red test rather than a silently empty read.
 /// </para>
 /// <para>
 /// <b>An unmappable kind throws.</b> <see cref="RetrievalKind.Unknown"/> is the refusable zero and is never persisted;
