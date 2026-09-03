@@ -11,7 +11,12 @@ public enum EmbeddingOwnerKind
     /// <summary>A <see cref="NewsRecord"/> — the first real consumer (gh#377, R-2).</summary>
     SoftSignal = 1,
 
-    /// <summary>A suggestion's rationale (R-4). Arrives with the suggestion pipeline.</summary>
+    /// <summary>
+    /// A <see cref="Suggestion"/> — its proposed trade line plus the model's rationale (R-4), embedded by the same
+    /// pass as news since gh#1065 so chat retrieval can ground on what the co-pilot actually proposed.
+    /// <b>Owner-scoped</b> (R-20): the vector row is global like every other, so the operator filter is applied
+    /// where the suggestion itself is read back.
+    /// </summary>
     Suggestion = 2,
 
     /// <summary>A rulebook rule (R-7). Arrives with epic gh#15, which has not started.</summary>
@@ -22,6 +27,13 @@ public enum EmbeddingOwnerKind
 
     /// <summary>A <see cref="NewsTopic"/> — its name + keywords, embedded for semantic topic match (gh#854, R-2).</summary>
     Topic = 5,
+
+    /// <summary>
+    /// A journal entry — a closed <see cref="Trade"/> the operator took (R-9), rendered as its trade line plus its
+    /// realized result and embedded from gh#1065, so the co-pilot can ground a conversation on what the operator
+    /// actually did rather than only on the news. <b>Owner-scoped</b> (R-20), like <see cref="Suggestion"/>.
+    /// </summary>
+    JournalEntry = 6,
 }
 
 /// <summary>

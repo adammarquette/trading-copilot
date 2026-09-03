@@ -41,7 +41,12 @@ public static class ChatEndpoints
     /// <summary>The most conversations one list read may return.</summary>
     private const int MaxPageSize = 200;
 
-    /// <summary>How many news items to ground a chat turn on (gh#995) — a small top-k the reranker sharpens.</summary>
+    /// <summary>
+    /// How many retrieved items to ground a chat turn on (gh#995) — a small top-k the reranker sharpens.
+    /// It is a budget for the WHOLE turn rather than a per-kind quota (gh#1065): the pipeline recalls every kind
+    /// and reranks them together, so the most relevant few win whichever kind they came from, and adding a kind
+    /// never grows the prompt.
+    /// </summary>
     private const int GroundingTopK = 4;
 
     /// <summary>Maps the chat CRUD endpoints. All require authentication.</summary>
@@ -65,7 +70,7 @@ public static class ChatEndpoints
             AppendAsync(id, request, DateTimeOffset.UtcNow, database, cancellationToken))
             .WithSummary("Append a message to a conversation.");
         group.MapPost("/{id:guid}/turns", (Guid id, ChatTurnRequest? request, TradingCopilotDbContext database,
-            IChatTurnService turnService, INewsRetrievalService retrieval, IAiSpendGovernor governor,
+            IChatTurnService turnService, IContextRetrievalService retrieval, IAiSpendGovernor governor,
             IOptions<GovernorOptions> governorOptions, IAiUsageLedger ledger, ILlmMetrics metrics,
             IChatRealtimeNotifier notifier, ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
             TurnAsync(id, request, DateTimeOffset.UtcNow, database, turnService, retrieval, governor, governorOptions,
@@ -249,12 +254,15 @@ public static class ChatEndpoints
     /// and <b>no assistant turn is invented</b>. Enforcement lives below the model: nothing here proposes an order.
     /// </para>
     /// <para>
-    /// <b>Always-on news grounding (gh#995, ADR-0027).</b> After the gate passes and the turn is persisted, the
-    /// read-only retrieval pipeline fetches a little news context for the operator's message, handed to the model as
-    /// <b>untrusted data</b> (user-role content, never the system prompt). It is fully <b>fail-open</b> — any fault
-    /// degrades to an un-grounded (history-only) turn — and is <b>skipped</b> once spend crosses the pre-alert
-    /// threshold, shedding its extra embed + rerank before the hard cap would 429 the chat call. No second governor
-    /// gate runs; a 429-blocked turn never reaches retrieval.
+    /// <b>Always-on grounding (gh#995, ADR-0027; cross-kind since gh#1065).</b> After the gate passes and the turn
+    /// is persisted, the read-only retrieval pipeline fetches a little context for the operator's message across
+    /// <b>every</b> retrievable kind — news, the trader's own suggestions, and their journal entries — handed to
+    /// the model as <b>untrusted data</b> (user-role content, never the system prompt). The owner-scoped kinds are
+    /// scoped inside the pipeline by the tenant filter (R-20), so a wider grounding set never widens whose data is
+    /// read. It is fully <b>fail-open</b> — any fault degrades to an un-grounded (history-only) turn — and is
+    /// <b>skipped</b> once spend crosses the pre-alert threshold, shedding its extra embed + rerank before the hard
+    /// cap would 429 the chat call. It still costs ONE embed and ONE rerank however many kinds are searched. No
+    /// second governor gate runs; a 429-blocked turn never reaches retrieval.
     /// </para>
     /// <para>
     /// <b>Presentation-only push.</b> On success the reply is pushed per-owner over the hub (ADR-0021) <b>after</b> the
@@ -267,7 +275,7 @@ public static class ChatEndpoints
     /// <param name="now">The clock, injected so timestamps and the spend window are testable.</param>
     /// <param name="database">The scoped, R-20-filtered database.</param>
     /// <param name="turnService">Runs the model over the thread and prices the call.</param>
-    /// <param name="retrieval">The read-only news retrieval pipeline for always-on grounding (gh#995).</param>
+    /// <param name="retrieval">The read-only cross-kind retrieval pipeline for always-on grounding (gh#1065).</param>
     /// <param name="governor">The pure AI-spend gate.</param>
     /// <param name="governorOptions">The daily-budget config (inert when unset).</param>
     /// <param name="ledger">The durable, fail-open AI-usage ledger.</param>
@@ -282,7 +290,7 @@ public static class ChatEndpoints
         DateTimeOffset now,
         TradingCopilotDbContext database,
         IChatTurnService turnService,
-        INewsRetrievalService retrieval,
+        IContextRetrievalService retrieval,
         IAiSpendGovernor governor,
         IOptions<GovernorOptions> governorOptions,
         IAiUsageLedger ledger,
@@ -395,19 +403,21 @@ public static class ChatEndpoints
             }
         }
 
-        // ALWAYS-ON NEWS GROUNDING (gh#995, R-6, ADR-0027): now the gate has passed and the operator's turn is
-        // persisted, retrieve a little news context for their message and hand it to the model as UNTRUSTED DATA
-        // (placed as user-role content, never the system prompt — the service is read-only by construction). It is
-        // fully FAIL-OPEN: any throw degrades to an un-grounded (history-only) turn, belt-and-suspenders over the
-        // pipeline's own degrade-to-empty. It is skipped once spend crossed the pre-alert threshold (grounding bills an
-        // embed + rerank); no second governor gate runs — the spend it bills is ledgered fail-open and seen by the next
-        // turn's floor — and a 429-blocked turn returned above, so it never reaches here.
-        IReadOnlyList<RetrievedNewsItem> grounding = [];
+        // ALWAYS-ON CROSS-KIND GROUNDING (gh#1065, of gh#995; R-6, ADR-0027): now the gate has passed and the
+        // operator's turn is persisted, retrieve a little context for their message across EVERY retrievable kind and
+        // hand it to the model as UNTRUSTED DATA (placed as user-role content, never the system prompt — the service
+        // is read-only by construction, and the owner-scoped kinds are R-20-filtered inside it). It is fully
+        // FAIL-OPEN: any throw degrades to an un-grounded (history-only) turn, belt-and-suspenders over the pipeline's
+        // own degrade-to-empty. It is skipped once spend crossed the pre-alert threshold (grounding bills one embed +
+        // one rerank, whatever the number of kinds); no second governor gate runs — the spend it bills is ledgered
+        // fail-open and seen by the next turn's floor — and a 429-blocked turn returned above, so it never reaches here.
+        IReadOnlyList<RetrievedContextItem> grounding = [];
         if (!groundingSuppressed)
         {
             try
             {
-                grounding = await retrieval.RetrieveAsync(request.Content, GroundingTopK, cancellationToken);
+                grounding = await retrieval.RetrieveAsync(
+                    request.Content, GroundingTopK, RetrievalKinds.All, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -416,7 +426,7 @@ public static class ChatEndpoints
             catch (Exception error)
             {
                 logger.LogWarning(
-                    error, "Chat turn news grounding faulted for owner {Owner}; running the turn history-only.", conversation.UserId);
+                    error, "Chat turn grounding faulted for owner {Owner}; running the turn history-only.", conversation.UserId);
             }
         }
 

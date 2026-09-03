@@ -153,9 +153,11 @@ public sealed class NewsEmbeddingRecallIntegrationTests : IClassFixture<Embeddin
         await AnalyzeAsync();
 
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
-        INewsEmbeddingSimilarity similarity = scope.ServiceProvider.GetRequiredService<INewsEmbeddingSimilarity>();
+        // gh#1065 moved the RANKED read onto the kind-parameterised IEmbeddingRecall seam; same production read.
+        IEmbeddingRecall recall = scope.ServiceProvider.GetRequiredService<IEmbeddingRecall>();
 
-        IReadOnlyList<SemanticNeighbor> hits = await similarity.NearestNewsAsync(query, RequestedN, CancellationToken.None);
+        IReadOnlyList<SemanticNeighbor> hits =
+            await recall.NearestAsync(RetrievalKind.News, query, RequestedN, CancellationToken.None);
 
         noiseIndex.Should().Be(NoiseCountPerKind * _noiseKinds.Length, "sanity: every noise row was seeded");
 

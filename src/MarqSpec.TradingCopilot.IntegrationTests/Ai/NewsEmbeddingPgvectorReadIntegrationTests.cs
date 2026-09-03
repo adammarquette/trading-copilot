@@ -191,8 +191,10 @@ public sealed class NewsEmbeddingPgvectorReadIntegrationTests : IClassFixture<Em
         // from DI -- NOT this suite's own NearestAsync helper below, which filters by Model itself and so could
         // never have caught a missing production filter (see this class's remarks).
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
-        INewsEmbeddingSimilarity similarity = scope.ServiceProvider.GetRequiredService<INewsEmbeddingSimilarity>();
-        IReadOnlyList<SemanticNeighbor> hits = await similarity.NearestNewsAsync(
+        // gh#1065 moved the RANKED read onto the kind-parameterised IEmbeddingRecall seam; same production read.
+        IEmbeddingRecall recall = scope.ServiceProvider.GetRequiredService<IEmbeddingRecall>();
+        IReadOnlyList<SemanticNeighbor> hits = await recall.NearestAsync(
+            RetrievalKind.News,
             Direction((0, 1f)).ToArray(), n: 5, CancellationToken.None);
 
         // gh#889's regression guard (restoring this test's original, pre-gh#888 intent): PgVectorNewsSimilarity

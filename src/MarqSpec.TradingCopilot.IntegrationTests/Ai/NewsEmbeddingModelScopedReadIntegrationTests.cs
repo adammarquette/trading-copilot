@@ -313,8 +313,10 @@ public sealed class NewsEmbeddingModelScopedReadIntegrationTests : IClassFixture
     private async Task<IReadOnlyList<SemanticNeighbor>> NearestNewsAsync(IReadOnlyList<float> queryVector, int n)
     {
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
-        INewsEmbeddingSimilarity similarity = scope.ServiceProvider.GetRequiredService<INewsEmbeddingSimilarity>();
-        return await similarity.NearestNewsAsync(queryVector, n, CancellationToken.None);
+        // gh#1065 moved the RANKED read off INewsEmbeddingSimilarity onto the kind-parameterised IEmbeddingRecall
+        // (the by-owner reads above stayed put). Still the real DI-registered production seam; only its name moved.
+        IEmbeddingRecall recall = scope.ServiceProvider.GetRequiredService<IEmbeddingRecall>();
+        return await recall.NearestAsync(RetrievalKind.News, queryVector, n, CancellationToken.None);
     }
 
     private async Task<int> RunEmbedPendingPassAsync(DateTimeOffset now)

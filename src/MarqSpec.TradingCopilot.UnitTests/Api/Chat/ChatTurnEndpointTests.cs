@@ -24,7 +24,7 @@ public class ChatTurnEndpointTests
     private readonly Guid _operator = Guid.NewGuid();
     private readonly string _database = Guid.NewGuid().ToString();
     private readonly IChatTurnService _turn = A.Fake<IChatTurnService>();
-    private readonly INewsRetrievalService _retrieval = A.Fake<INewsRetrievalService>();
+    private readonly IContextRetrievalService _retrieval = A.Fake<IContextRetrievalService>();
     private readonly IAiUsageLedger _ledger = A.Fake<IAiUsageLedger>();
     private readonly ILlmMetrics _metrics = A.Fake<ILlmMetrics>();
     private readonly IChatRealtimeNotifier _notifier = A.Fake<IChatRealtimeNotifier>();
@@ -47,13 +47,13 @@ public class ChatTurnEndpointTests
         new(AiUsageFeature.Chat, "claude-sonnet-5", LlmModelTier.Deep, outcome, 100, 20, usd, TimeSpan.FromMilliseconds(50));
 
     private void TurnReturns(ChatTurnResult result) =>
-        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedNewsItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).Returns(result);
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).Returns(result);
 
     // Makes the fake turn service stream the given deltas to the endpoint's onDelta (which pushes to the hub), then
     // return the result -- so a test can assert the endpoint forwarded each delta.
     private void TurnStreams(ChatTurnResult result, params string[] deltas) =>
-        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedNewsItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
-            .ReturnsLazily((IReadOnlyList<ChatMessage> _, IReadOnlyList<RetrievedNewsItem> _, Func<string, CancellationToken, Task> onDelta, CancellationToken ct) =>
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
+            .ReturnsLazily((IReadOnlyList<ChatMessage> _, IReadOnlyList<RetrievedContextItem> _, Func<string, CancellationToken, Task> onDelta, CancellationToken ct) =>
                 EmitAsync(onDelta, ct, result, deltas));
 
     private static async Task<ChatTurnResult> EmitAsync(
@@ -68,19 +68,20 @@ public class ChatTurnEndpointTests
     }
 
     // Captures the grounding the endpoint hands to StreamAsync, so a test can assert what (if anything) it grounded on.
-    private IReadOnlyList<RetrievedNewsItem>? _capturedGrounding;
+    private IReadOnlyList<RetrievedContextItem>? _capturedGrounding;
 
     private void TurnReturnsCapturingGrounding(ChatTurnResult result) =>
-        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedNewsItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
-            .Invokes((IReadOnlyList<ChatMessage> _, IReadOnlyList<RetrievedNewsItem> grounding, Func<string, CancellationToken, Task> _, CancellationToken _) => _capturedGrounding = grounding)
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
+            .Invokes((IReadOnlyList<ChatMessage> _, IReadOnlyList<RetrievedContextItem> grounding, Func<string, CancellationToken, Task> _, CancellationToken _) => _capturedGrounding = grounding)
             .Returns(result);
 
-    private void RetrieverReturns(params RetrievedNewsItem[] items) =>
-        A.CallTo(() => _retrieval.RetrieveAsync(A<string>._, A<int>._, A<CancellationToken>._))
-            .Returns((IReadOnlyList<RetrievedNewsItem>)[.. items]);
+    private void RetrieverReturns(params RetrievedContextItem[] items) =>
+        A.CallTo(() => _retrieval.RetrieveAsync(
+                A<string>._, A<int>._, A<IReadOnlyCollection<RetrievalKind>>._, A<CancellationToken>._))
+            .Returns((IReadOnlyList<RetrievedContextItem>)[.. items]);
 
-    private static RetrievedNewsItem Item(string headline = "NVDA beats") =>
-        new(headline, ["finnhub"], At(0), "revenue up 40%");
+    private static RetrievedContextItem Item(string headline = "NVDA beats") =>
+        new(RetrievalKind.News, headline, ["finnhub"], At(0), "revenue up 40%");
 
     private async Task<Guid> SeedConversationAsync(Guid? owner = null)
     {
@@ -185,7 +186,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(foreign, "sneak in", At(3));
 
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
-        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedNewsItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
         A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
@@ -197,7 +198,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(id, "   ", At(3));
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
-        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedNewsItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
     [Fact]
@@ -209,7 +210,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(id, tooLong, At(3));
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
-        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedNewsItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
     [Fact]
@@ -221,7 +222,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(id, "hi", At(3), governor: new GovernorOptions { DailyBudgetUsd = 10m });
 
         StatusOf(result).Should().Be(StatusCodes.Status429TooManyRequests);
-        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedNewsItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
         await using TradingCopilotDbContext verify = Context();
         (await verify.ChatMessages.AnyAsync()).Should().BeFalse(); // a governor block persists nothing
     }
@@ -236,7 +237,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(id, "hi", At(3), governor: new GovernorOptions { DailyBudgetUsd = 10m });
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
-        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedNewsItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
     }
 
     [Fact]
@@ -330,15 +331,18 @@ public class ChatTurnEndpointTests
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         // The retriever is asked about the operator's message, and its items reach StreamAsync as the turn's grounding.
-        A.CallTo(() => _retrieval.RetrieveAsync("what's moving ES?", A<int>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
-        _capturedGrounding.Should().ContainSingle().Which.Headline.Should().Be("NVDA beats");
+        A.CallTo(() => _retrieval.RetrieveAsync(
+                "what's moving ES?", A<int>._, A<IReadOnlyCollection<RetrievalKind>>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        _capturedGrounding.Should().ContainSingle().Which.Title.Should().Be("NVDA beats");
     }
 
     [Fact]
     public async Task TurnAsync_ShouldStillSucceedHistoryOnly_WhenTheRetrieverThrows()
     {
         Guid id = await SeedConversationAsync();
-        A.CallTo(() => _retrieval.RetrieveAsync(A<string>._, A<int>._, A<CancellationToken>._))
+        A.CallTo(() => _retrieval.RetrieveAsync(
+                A<string>._, A<int>._, A<IReadOnlyCollection<RetrievalKind>>._, A<CancellationToken>._))
             .Throws(new InvalidOperationException("retrieval down"));
         TurnReturnsCapturingGrounding(new ChatTurnResult(true, "ok", [Cost()]));
 
@@ -347,7 +351,7 @@ public class ChatTurnEndpointTests
         // Belt-and-suspenders fail-open: a retrieval throw degrades to an un-grounded (history-only) turn, never a fault.
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         _capturedGrounding.Should().BeEmpty();
-        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedNewsItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
     }
 
@@ -364,7 +368,8 @@ public class ChatTurnEndpointTests
             id, "hi", At(3), governor: new GovernorOptions { DailyBudgetUsd = 10m, AlertThresholdFraction = 0.5m });
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK); // not blocked -- the chat call itself proceeds
-        A.CallTo(() => _retrieval.RetrieveAsync(A<string>._, A<int>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _retrieval.RetrieveAsync(
+                A<string>._, A<int>._, A<IReadOnlyCollection<RetrievalKind>>._, A<CancellationToken>._)).MustNotHaveHappened();
         _capturedGrounding.Should().BeEmpty();
     }
 
@@ -378,7 +383,8 @@ public class ChatTurnEndpointTests
 
         StatusOf(result).Should().Be(StatusCodes.Status429TooManyRequests);
         // A 429-blocked turn returns before persist -- it never reaches retrieval (no second gate, no wasted spend).
-        A.CallTo(() => _retrieval.RetrieveAsync(A<string>._, A<int>._, A<CancellationToken>._)).MustNotHaveHappened();
+        A.CallTo(() => _retrieval.RetrieveAsync(
+                A<string>._, A<int>._, A<IReadOnlyCollection<RetrievalKind>>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
     [Fact]
@@ -392,6 +398,7 @@ public class ChatTurnEndpointTests
         IResult result = await Invoke(id, "hi", At(3), governor: new GovernorOptions { DailyBudgetUsd = 10m });
 
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
-        A.CallTo(() => _retrieval.RetrieveAsync(A<string>._, A<int>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _retrieval.RetrieveAsync(
+                A<string>._, A<int>._, A<IReadOnlyCollection<RetrievalKind>>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
     }
 }

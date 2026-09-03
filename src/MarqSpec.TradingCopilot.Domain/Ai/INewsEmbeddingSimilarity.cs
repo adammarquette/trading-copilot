@@ -1,47 +1,34 @@
 namespace MarqSpec.TradingCopilot.Domain.Ai;
 
 /// <summary>
-/// The nearest-news similarity read seam (gh#852, R-2) over the stored soft-signal embeddings — the boundary that
-/// keeps the surrounding retrieval logic unit-testable while the real <c>pgvector</c> <c>CosineDistance</c> read
-/// stays integration-tier (data dictionary §10; proven by QA #855).
+/// The stored-embedding read seam (gh#852, R-2) over the polymorphic embedding store — the boundary that keeps the
+/// surrounding retrieval logic unit-testable while the real <c>pgvector</c> reads stay integration-tier (data
+/// dictionary §10; proven by QA #855). It carries the two <b>by-owner</b> reads the news feed and the relevance pass
+/// use; the <b>ranked</b> nearest-neighbour recall generalised out to <see cref="IEmbeddingRecall"/> in gh#1065, since
+/// that one is no longer news-specific.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>Cosine distance, not similarity.</b> Each <see cref="SemanticNeighbor.Distance"/> is a cosine distance in
-/// <c>[0, 2]</c> — the metric the <c>EmbeddingRecord</c> store's HNSW cosine index is built on — so smaller is
-/// nearer and similarity is <c>1 - Distance</c>. Ascending by distance is the nearest-first ranking a caller wants.
-/// </para>
-/// <para>
-/// <b>Unavailable or faulting is an empty result, never a throw.</b> This read is off the trading path: pgvector
-/// may be absent (the gh#109 degrade), no provider may be configured, or the query may fault — and every one of
-/// those yields no neighbours, so the caller falls back to its non-semantic axis exactly as the embedding provider
-/// returns a null vector rather than throwing. Only a genuine caller cancellation propagates. Pure Domain — the
-/// query is a plain <see cref="float"/> list, so the seam carries no <c>Pgvector</c> or <c>Data</c> dependency.
-/// </para>
+/// <b>Unavailable or faulting is an empty result, never a throw.</b> These reads are off the trading path: pgvector
+/// may be absent (the gh#109 degrade), no provider may be configured, or the query may fault — and every one of those
+/// yields no vectors, so the caller falls back to its non-semantic axis exactly as the embedding provider returns a
+/// null vector rather than throwing. Only a genuine caller cancellation propagates. Pure Domain — a vector is a plain
+/// <see cref="float"/> list, so the seam carries no <c>Pgvector</c> or <c>Data</c> dependency.
 /// </remarks>
 public interface INewsEmbeddingSimilarity
 {
-    /// <summary>Finds the <paramref name="n"/> stored news embeddings nearest to <paramref name="queryVector"/>.</summary>
-    /// <param name="queryVector">The query embedding, as a plain float list so the seam stays <c>Pgvector</c>-free.</param>
-    /// <param name="n">How many nearest neighbours to return.</param>
-    /// <param name="cancellationToken">The caller's cancellation token.</param>
-    /// <returns>The nearest news owners and their cosine distance, nearest first; empty when retrieval cannot run.</returns>
-    Task<IReadOnlyList<SemanticNeighbor>> NearestNewsAsync(
-        IReadOnlyList<float> queryVector, int n, CancellationToken cancellationToken);
-
     /// <summary>
     /// Reads back the stored soft-signal embeddings for the given owners (gh#853) — the salience read that lets the
     /// feed score its window candidates against the operator's starred items in-process.
     /// </summary>
     /// <remarks>
-    /// A plain by-owner read over the same <c>SoftSignal</c> embeddings <see cref="NearestNewsAsync"/> ranks — no
-    /// ordering, no distance operator — returning each requested owner's vector as a plain <see cref="float"/> list so
-    /// the seam stays <c>Pgvector</c>- and <c>Data</c>-free. The <b>ranking</b> is a pure, unit-tested function over
-    /// these vectors (<c>EmbeddingSimilarity.MaxCosineSimilarity</c>, with <c>Domain.Signals</c> unaware of it), so
-    /// only the read itself is integration-tier. This replaces a nearest-N search: the feed already knows its
-    /// candidate window, so it <i>scores those candidates</i> rather than searching for a global nearest set that
-    /// might miss them. Owners with no stored embedding are simply absent from the result; an unavailable or faulting
-    /// store yields an empty list (the gh#109 degrade), never a throw — only a genuine caller cancellation propagates.
+    /// A plain by-owner read over the <c>SoftSignal</c> embeddings — no ordering, no distance operator — returning each
+    /// requested owner's vector as a plain <see cref="float"/> list so the seam stays <c>Pgvector</c>- and
+    /// <c>Data</c>-free. The <b>ranking</b> is a pure, unit-tested function over these vectors
+    /// (<c>EmbeddingSimilarity.MaxCosineSimilarity</c>, with <c>Domain.Signals</c> unaware of it), so only the read
+    /// itself is integration-tier. This replaces a nearest-N search: the feed already knows its candidate window, so it
+    /// <i>scores those candidates</i> rather than searching for a global nearest set that might miss them. Owners with
+    /// no stored embedding are simply absent from the result; an unavailable or faulting store yields an empty list
+    /// (the gh#109 degrade), never a throw — only a genuine caller cancellation propagates.
     /// </remarks>
     /// <param name="ownerIds">The owners whose stored vectors to read (a starred set or a candidate window).</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
@@ -69,8 +56,44 @@ public interface INewsEmbeddingSimilarity
 }
 
 /// <summary>
-/// One nearest-neighbour hit (gh#852): an embedded owner and its cosine distance from the query. For a news
-/// embedding the <see cref="OwnerId"/> is the <c>NewsRecord</c> dedup key (data dictionary §10).
+/// The <b>ranked</b> nearest-neighbour recall seam (gh#1065, R-6) — "the nearest stored embeddings of <i>this</i> kind
+/// to this query vector". The kind-parameterised generalisation of gh#852's news-only <c>NearestNewsAsync</c>, so a
+/// retrieval consumer can recall suggestions and journal entries through the same store and the same contract.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Cosine distance, not similarity.</b> Each <see cref="SemanticNeighbor.Distance"/> is a cosine distance in
+/// <c>[0, 2]</c> — the metric the embedding store's HNSW cosine indexes are built on — so smaller is nearer and
+/// similarity is <c>1 - Distance</c>. Ascending by distance is the nearest-first ranking a caller wants, and because
+/// every kind reports the same metric, distances are <b>comparable across kinds</b>: merging two kinds' neighbours and
+/// sorting by distance is a meaningful cross-kind ranking.
+/// </para>
+/// <para>
+/// <b>Unavailable or faulting is an empty result, never a throw</b> — the same degrade posture as
+/// <see cref="INewsEmbeddingSimilarity"/>. Asking for <see cref="RetrievalKind.Unknown"/>, or any kind the store
+/// cannot map, is a <b>caller error</b> and throws: that is a programming mistake rather than a degraded deployment,
+/// and returning nothing would hide it behind the degrade.
+/// </para>
+/// </remarks>
+public interface IEmbeddingRecall
+{
+    /// <summary>
+    /// Finds the <paramref name="n"/> stored embeddings of <paramref name="kind"/> nearest to
+    /// <paramref name="queryVector"/>, nearest first.
+    /// </summary>
+    /// <param name="kind">Which kind of stored context to recall.</param>
+    /// <param name="queryVector">The query embedding, as a plain float list so the seam stays <c>Pgvector</c>-free.</param>
+    /// <param name="n">How many nearest neighbours to return.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The nearest owners of that kind and their cosine distance, nearest first; empty when retrieval cannot run.</returns>
+    Task<IReadOnlyList<SemanticNeighbor>> NearestAsync(
+        RetrievalKind kind, IReadOnlyList<float> queryVector, int n, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// One nearest-neighbour hit (gh#852): an embedded owner and its cosine distance from the query. The
+/// <see cref="OwnerId"/> is the owner's key as text — a <c>NewsRecord.DedupKey</c> for a soft-signal embedding, and a
+/// <c>Suggestion.Id</c> / <c>Trade.Id</c> rendered as a string for the owner-scoped kinds (data dictionary §10).
 /// </summary>
 /// <param name="OwnerId">The embedded owner's id — a <c>NewsRecord.DedupKey</c> for a soft-signal embedding.</param>
 /// <param name="Distance">The cosine distance in <c>[0, 2]</c>; smaller is nearer, and similarity is <c>1 - Distance</c>.</param>

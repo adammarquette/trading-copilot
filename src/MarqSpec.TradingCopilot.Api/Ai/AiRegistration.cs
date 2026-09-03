@@ -111,16 +111,19 @@ public static class AiRegistration
         services.AddScoped<IChatTool, GetQuoteTool>();
         services.AddScoped<IChatTool, ReadPositionsTool>();
 
-        // The shared news retrieval pipeline (gh#995, ADR-0027 / ADR-0025 / ADR-0008): embed the query -> nearest-news
-        // recall -> hydrate -> rerank, ledgering its own embed (Embed) + rerank (Chat) spend stamped to the operator.
-        // The FIRST IReranker consumer's core (gh#987), now shared by the search_news tool AND always-on chat grounding
-        // (gh#995) rather than two copies. SCOPED -- it injects the scoped DbContext (R-20 owner-filtered) + the scoped
-        // ledger, so a singleton would be a captive dependency failing ValidateScopes at startup. Read-only by
-        // construction: it injects only read / compute seams (embed provider, nearest-news read, reranker), the
-        // read-only DbContext, and the fail-open spend ledger, reaching no order / write path. The clock is the shared
-        // TimeProvider (TryAdd so this registration stands alone even without the notification host that also adds it).
+        // The shared CROSS-KIND retrieval pipeline (gh#1065, generalising gh#995; ADR-0027 / ADR-0025 / ADR-0008):
+        // embed the query once -> recall each asked kind -> hydrate -> merge nearest-first -> rerank, ledgering its own
+        // embed (Embed) + rerank (Chat) spend stamped to the operator. The FIRST IReranker consumer's core (gh#987),
+        // shared by the search_news tool AND always-on chat grounding rather than two copies. SCOPED -- it injects the
+        // scoped DbContext (R-20 owner-filtered) + the scoped ledger, so a singleton would be a captive dependency
+        // failing ValidateScopes at startup. That scoped, tenant-filtered DbContext is not incidental: the embedding
+        // store is deployment-global, so the owner-scoped kinds (suggestions, journal entries) are scoped by the
+        // HYDRATE, and a context registered any other way would defeat R-20. Read-only by construction: it injects only
+        // read / compute seams (embed provider, ranked recall, reranker), the read-only DbContext, and the fail-open
+        // spend ledger, reaching no order / write path. The clock is the shared TimeProvider (TryAdd so this
+        // registration stands alone even without the notification host that also adds it).
         services.TryAddSingleton(TimeProvider.System);
-        services.AddScoped<INewsRetrievalService, NewsRetrievalService>();
+        services.AddScoped<IContextRetrievalService, ContextRetrievalService>();
 
         // search_news (gh#987, ADR-0025): a thin read-only IChatTool adapter over the pipeline above. SCOPED like its
         // siblings -- it holds the scoped pipeline, so a singleton would be a captive dependency. ChatTurnService

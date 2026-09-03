@@ -19,6 +19,10 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// embeds the deployment's <see cref="NewsTopic"/>s (gh#854) — the anticipated second embeddable owner kind
 /// (<see cref="EmbeddingOwnerKind.Topic"/>), a bounded, near-static config set — against the <b>same</b> provider,
 /// per-pass spend tally and ledger, so semantic topic match can compare a news vector to a topic vector.
+/// Since gh#1065 the same pass also embeds the operator's <b>suggestions</b> and <b>journal entries</b> (closed
+/// trades), so chat retrieval can ground on what the co-pilot proposed and what the trader actually did rather than
+/// on news alone. It is deliberately ONE pass rather than a sibling: the provider, the per-pass spend tally, the
+/// content-hash idempotence, the upsert and the stale-model sweep are shared, and a second copy of them would drift.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -49,6 +53,15 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// <see cref="AiUsageOutcome"/> exactly as ADR-0008 pins it (Embedded → Succeeded, RateLimited → RateLimited,
 /// Failed → Failed). The ledger write is guarded at this boundary too (mirroring the trigger scan), so a
 /// contract-violating ledger implementation can never abort the pass.
+/// </para>
+/// <para>
+/// <b>The owner-scoped kinds cross R-20 deliberately, and pay their own way (gh#1065).</b> A background host has no
+/// request user, so the tenant query filter would match nothing and every suggestion would look unembedded forever;
+/// the suggestion / journal scans therefore <c>IgnoreQueryFilters</c>, exactly as <c>OutcomeJournalService</c> and
+/// the flatten hosts do when acting for the deployment. The consequence is handled where it matters: each embed is
+/// ledgered to <b>that row's own owner</b> rather than to <see cref="SystemOwner"/> (embedding an operator's own
+/// suggestion is their cost, not deployment infrastructure), and the read side re-applies the filter when it
+/// hydrates, so a global vector store never becomes a cross-owner read.
 /// </para>
 /// <para>
 /// <b>Relational-only, by design (gh#109).</b> <see cref="EmbeddingRecord"/>'s <c>Vector</c> column has no
@@ -125,6 +138,13 @@ public sealed class NewsEmbeddingService
         // per-pass spend tally, so the cap still governs the total.
         total += await EmbedPendingTopicsAsync(governorPass, model, now, cancellationToken);
 
+        // Then the operator's OWN rows (gh#1065). Like topics these are bounded sets rather than an unbounded news
+        // backlog, and they are the context a conversation about the trader's own trading needs, so they come ahead
+        // of the news drain for the same reason topics do: a large news backlog must not keep them offline. They
+        // share the one per-pass spend tally, so the cap still governs the total.
+        total += await EmbedPendingSuggestionsAsync(governorPass, model, now, cancellationToken);
+        total += await EmbedPendingJournalEntriesAsync(governorPass, model, now, cancellationToken);
+
         // Page the work exactly as NewsRelevanceService does: an unbounded backlog (first run, or a long outage)
         // must not be loaded into one SaveChanges, and a row that was actually handled this page (embedded, or
         // touched as unchanged) drops out of the next page's query, guaranteeing progress.
@@ -163,7 +183,7 @@ public sealed class NewsEmbeddingService
                     break;
                 }
 
-                string content = ContentFor(news);
+                string content = ContextEmbeddingContent.ForNews(news);
                 string hash = EmbeddingContentHash.For(content);
 
                 EmbeddingRecord? existing = await _database.Embeddings.FirstOrDefaultAsync(
@@ -186,7 +206,7 @@ public sealed class NewsEmbeddingService
                 EmbeddingResult result = await _provider.EmbedAsync(content, cancellationToken);
                 TimeSpan latency = Stopwatch.GetElapsedTime(startedTicks);
 
-                await LedgerAsync(result, latency, now, cancellationToken);
+                await LedgerAsync(result, SystemOwner.Id, latency, now, cancellationToken);
                 governorPass?.Accrue(result.EstimatedCostUsd);
 
                 if (result.Vector is null)
@@ -312,7 +332,7 @@ public sealed class NewsEmbeddingService
             EmbeddingResult result = await _provider.EmbedAsync(content, cancellationToken);
             TimeSpan latency = Stopwatch.GetElapsedTime(startedTicks);
 
-            await LedgerAsync(result, latency, now, cancellationToken);
+            await LedgerAsync(result, SystemOwner.Id, latency, now, cancellationToken);
             governorPass?.Accrue(result.EstimatedCostUsd);
 
             if (result.Vector is null)
@@ -333,6 +353,179 @@ public sealed class NewsEmbeddingService
 
     /// <summary>The exact text handed to the provider for a topic — its name + keywords, the string the hash is over.</summary>
     private static string ContentForTopic(NewsTopic topic) => $"{topic.Name}\n\n{string.Join(' ', topic.Keywords)}";
+
+    /// <summary>
+    /// Embeds the operator's <b>suggestions</b> (gh#1065, R-4) so a conversation can be grounded on what the co-pilot
+    /// actually proposed. Owner-scoped rows read <c>IgnoreQueryFilters</c> (no request user in a background host) and
+    /// each embed is ledgered to that suggestion's own owner.
+    /// </summary>
+    private Task<int> EmbedPendingSuggestionsAsync(
+        GovernorPass? governorPass, string model, DateTimeOffset now, CancellationToken cancellationToken) =>
+        EmbedOwnedPagesAsync(
+            governorPass,
+            EmbeddingOwnerKind.Suggestion,
+            model,
+            now,
+            async (skip, token) =>
+            [
+                // Materialised BEFORE the projection: ContextEmbeddingContent is a client-side renderer, so composing
+                // it inside the EF query would be an untranslatable expression rather than a shared rendering.
+                .. (await _database.Suggestions
+                        .IgnoreQueryFilters()
+                        .AsNoTracking()
+                        .OrderBy(suggestion => suggestion.CreatedAt)
+                        .ThenBy(suggestion => suggestion.Id)
+                        .Skip(skip)
+                        .Take(BatchSize)
+                        .ToListAsync(token))
+                    .Select(suggestion => new EmbeddableRow(
+                        suggestion.Id, suggestion.UserId, ContextEmbeddingContent.ForSuggestion(suggestion)))
+            ],
+            cancellationToken);
+
+    /// <summary>
+    /// Embeds the operator's <b>journal entries</b> (gh#1065, R-9) -- their CLOSED trades, the same rows
+    /// <c>query_journal</c> exposes. An open trade is deliberately not embedded: it has no realized result yet, so its
+    /// text would change the moment it closed and re-bill the operator for a row that has not settled.
+    /// </summary>
+    private Task<int> EmbedPendingJournalEntriesAsync(
+        GovernorPass? governorPass, string model, DateTimeOffset now, CancellationToken cancellationToken) =>
+        EmbedOwnedPagesAsync(
+            governorPass,
+            EmbeddingOwnerKind.JournalEntry,
+            model,
+            now,
+            async (skip, token) =>
+            [
+                .. (await _database.Trades
+                        .IgnoreQueryFilters()
+                        .AsNoTracking()
+                        .Where(trade => trade.ClosedAt != null)
+                        .OrderBy(trade => trade.ClosedAt)
+                        .ThenBy(trade => trade.Id)
+                        .Skip(skip)
+                        .Take(BatchSize)
+                        .ToListAsync(token))
+                    .Select(trade => new EmbeddableRow(
+                        trade.Id, trade.UserId, ContextEmbeddingContent.ForJournalEntry(trade)))
+            ],
+            cancellationToken);
+
+    /// <summary>
+    /// One page-by-page embedding pass over an <b>owner-scoped</b> producer (gh#1065) -- the shared loop the suggestion
+    /// and journal passes both run, so their cap gate, content-hash idempotence, ledger attribution, upsert and
+    /// stale-model sweep can never drift apart the way two hand-copied siblings would.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why an offset scan rather than the news pass's NOT EXISTS.</b> News is keyed by a string dedup key, so its
+    /// candidate query can anti-join the embedding store directly. These owners are keyed by <c>Guid</c> while
+    /// <c>EmbeddingRecord.OwnerId</c> is text (so any key shape fits), and comparing them in SQL would rest on a
+    /// provider-specific <c>uuid</c>-to-text translation. Materialising a bounded page and resolving the comparison in
+    /// memory needs no such translation and cannot silently stop working on a provider upgrade. It costs a scan of a
+    /// single operator's rows per pass, which is a few thousand at most -- and the paid call is still skipped by the
+    /// content hash, which is what the pass actually exists to protect.
+    /// </para>
+    /// <para>
+    /// <b>Offset paging cannot skip a row</b> the way a timestamp cursor can when two rows share an instant. A row
+    /// inserted mid-pass may shift a later page and be missed, which simply means it is embedded next pass -- the same
+    /// self-healing the news pass relies on.
+    /// </para>
+    /// </remarks>
+    private async Task<int> EmbedOwnedPagesAsync(
+        GovernorPass? governorPass,
+        EmbeddingOwnerKind ownerKind,
+        string model,
+        DateTimeOffset now,
+        Func<int, CancellationToken, Task<List<EmbeddableRow>>> loadPage,
+        CancellationToken cancellationToken)
+    {
+        int embedded = 0;
+        int skip = 0;
+
+        while (true)
+        {
+            List<EmbeddableRow> page = await loadPage(skip, cancellationToken);
+            if (page.Count == 0)
+            {
+                break;
+            }
+
+            skip += page.Count;
+            bool capReachedMidPage = false;
+            List<string> embeddedOwnerIds = []; // owners re-embedded THIS page -> sweep their stale-model rows (gh#889)
+
+            foreach (EmbeddableRow row in page)
+            {
+                // Re-evaluated per item, exactly as the news half does: a long pass can cross the cap mid-page, and
+                // later items must see that rather than only the state at pass start.
+                if (IsCapReached(governorPass))
+                {
+                    capReachedMidPage = true;
+                    break;
+                }
+
+                string ownerId = row.OwnerId.ToString();
+                string hash = EmbeddingContentHash.For(row.Content);
+
+                EmbeddingRecord? existing = await _database.Embeddings.FirstOrDefaultAsync(
+                    embedding => embedding.OwnerKind == ownerKind
+                        && embedding.OwnerId == ownerId
+                        && embedding.Model == model,
+                    cancellationToken);
+
+                if (existing is not null && existing.ContentHash == hash)
+                {
+                    // Unchanged: skip the paid re-embed. Like topics (and unlike news) the candidate set is the
+                    // producer scan itself, so there is nothing to "touch out" of a future candidate query -- leave the
+                    // stored row untouched rather than re-UPDATE every unchanged row on every pass.
+                    continue;
+                }
+
+                long startedTicks = Stopwatch.GetTimestamp();
+                EmbeddingResult result = await _provider.EmbedAsync(row.Content, cancellationToken);
+                TimeSpan latency = Stopwatch.GetElapsedTime(startedTicks);
+
+                // Stamped to the ROW'S OWNER, not the deployment sentinel: this is the operator's own data (R-20).
+                await LedgerAsync(result, row.Owner, latency, now, cancellationToken);
+                governorPass?.Accrue(result.EstimatedCostUsd);
+
+                if (result.Vector is null)
+                {
+                    continue; // rate-limited or a fault -- retry next pass, exactly as the news half does
+                }
+
+                Upsert(existing, ownerKind, ownerId, model, hash, result.Vector, now);
+                embeddedOwnerIds.Add(ownerId);
+                embedded++;
+            }
+
+            await _database.SaveChangesAsync(cancellationToken);
+            await SweepStaleModelRowsAsync(ownerKind, embeddedOwnerIds, model, cancellationToken);
+            _database.ChangeTracker.Clear(); // release the page before loading the next
+
+            if (capReachedMidPage)
+            {
+                _logger.LogInformation(
+                    "The daily AI-spend budget is reached; {OwnerKind} embedding stops for this run.", ownerKind);
+                break;
+            }
+
+            if (page.Count < BatchSize)
+            {
+                break;
+            }
+        }
+
+        return embedded;
+    }
+
+    /// <summary>
+    /// One owner-scoped row reduced to what the embed loop needs: its id, the operator to bill, and the exact text to
+    /// hash and embed -- so the loop below is identical for every owner-scoped kind and knows nothing about the entity
+    /// it came from.
+    /// </summary>
+    private sealed record EmbeddableRow(Guid OwnerId, Guid Owner, string Content);
 
     /// <summary>
     /// Deletes the just-re-embedded owners' <b>other-model</b> rows (gh#889) — the stale-model half of the embedding
@@ -373,12 +566,19 @@ public sealed class NewsEmbeddingService
     }
 
     /// <summary>
-    /// Ledgers one embed call's spend (gh#436, gh#377): stamped to the deployment <see cref="SystemOwner"/> sentinel
-    /// (embedding deployment-global news is infrastructure cost, never an operator's trading decision), regardless
-    /// of outcome -- a rate-limited or failed call is metered too, mirroring how <see cref="IEmbeddingMetrics"/>
-    /// meters every call including a failover.
+    /// Ledgers one embed call's spend (gh#436, gh#377), regardless of outcome -- a rate-limited or failed call is
+    /// metered too, mirroring how <see cref="IEmbeddingMetrics"/> meters every call including a failover.
     /// </summary>
-    private async Task LedgerAsync(EmbeddingResult result, TimeSpan latency, DateTimeOffset now, CancellationToken cancellationToken)
+    /// <remarks>
+    /// <paramref name="owner"/> is the whole R-20 story of this pass. Deployment-global rows (news, topics) are
+    /// stamped to the <see cref="SystemOwner"/> sentinel: embedding them is infrastructure cost, never an operator's
+    /// trading decision. An owner-scoped row (a suggestion, a journal entry) is stamped to <b>its own owner</b>
+    /// (gh#1065), so the operator's spend meter shows the embedding of their own data instead of hiding it in the
+    /// deployment bucket. Both draw on the same platform-wide daily cap, which is read with
+    /// <c>IgnoreQueryFilters</c> precisely because one account funds every owner.
+    /// </remarks>
+    private async Task LedgerAsync(
+        EmbeddingResult result, Guid owner, TimeSpan latency, DateTimeOffset now, CancellationToken cancellationToken)
     {
         // All positional (mirrors LlmTriggerReviewer's own AiCallCost construction): Tier null (embeddings have no
         // model tier) and OutputTokens 0 (an embed returns a vector, not completion tokens) are the ADR-0008-pinned
@@ -393,7 +593,7 @@ public sealed class NewsEmbeddingService
         try
         {
             await _ledger.RecordAsync(
-                new AiUsageEntry(SystemOwner.Id, cost, Activity.Current?.TraceId.ToString(), now), cancellationToken);
+                new AiUsageEntry(owner, cost, Activity.Current?.TraceId.ToString(), now), cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -412,9 +612,6 @@ public sealed class NewsEmbeddingService
         EmbeddingOutcome.RateLimited => AiUsageOutcome.RateLimited,
         _ => AiUsageOutcome.Failed,
     };
-
-    /// <summary>The exact text handed to the provider — title + summary, the same string the content hash is over.</summary>
-    private static string ContentFor(NewsRecord news) => $"{news.Title}\n\n{news.Summary}";
 
     /// <summary>Whether the budget is configured and already spent — a no-op check when the governor is inert.</summary>
     private bool IsCapReached(GovernorPass? governorPass) =>
