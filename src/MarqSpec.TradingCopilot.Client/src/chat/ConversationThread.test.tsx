@@ -291,6 +291,62 @@ describe('ConversationThread — sending a turn', () => {
     expect((screen.getByLabelText(/Message/i) as HTMLInputElement).disabled).toBe(false);
   });
 
+  it('does not duplicate the assistant turn when the hub push wins the race against the REST response', async () => {
+    // ChatEndpoints.TurnAsync pushes the assistant message over the owner-scoped hub -- to EVERY one of the
+    // operator's connections, including the sender's own -- BEFORE returning the REST response. So on an ordinary
+    // send, onChatMessage firing for the assistant's real id before sendChatTurn's promise settles is the near-
+    // guaranteed order, not a rare multi-tab edge case. The success branch must reconcile by id the same way the
+    // onChatMessage handler itself does, or the same turn renders twice under colliding React keys.
+    loadedEmpty();
+    const turn = deferred<Awaited<ReturnType<typeof sendChatTurn>>>();
+    sendMock.mockReturnValue(turn.promise);
+
+    await renderThread();
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'headroom?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    // The hub delivers the assistant's turn FIRST, on this same connection.
+    act(() =>
+      chatMessageHandler?.({
+        conversationId: 'c1',
+        messageId: 'a1',
+        sequence: 2,
+        role: ChatRole.Assistant,
+        content: 'Headroom is $1,800.',
+        at: '2026-08-01T00:02:00Z',
+      }),
+    );
+    expect(screen.getAllByTestId('chat-message').map((row) => row.textContent)).toEqual([
+      'headroom?', // still the optimistic bubble -- the REST response has not settled yet
+      'Headroom is $1,800.',
+    ]);
+
+    // THEN the REST call this same send started resolves with the identical pair.
+    await act(async () => {
+      turn.settle({
+        ok: true,
+        data: {
+          userMessage: message({
+            id: 'u1',
+            sequence: 1,
+            role: ChatRole.User,
+            content: 'headroom?',
+          }),
+          assistantMessage: message({
+            id: 'a1',
+            sequence: 2,
+            role: ChatRole.Assistant,
+            content: 'Headroom is $1,800.',
+          }),
+        },
+      });
+    });
+
+    const rows = screen.getAllByTestId('chat-message');
+    expect(rows.map((row) => row.textContent)).toEqual(['headroom?', 'Headroom is $1,800.']);
+    expect(rows).toHaveLength(2); // exactly one assistant row, not a duplicate under a colliding key
+  });
+
   it('on a refused turn, drops the optimistic bubble, keeps the typed text for retry, and shows the reason', async () => {
     loadedEmpty();
     sendMock.mockResolvedValue({

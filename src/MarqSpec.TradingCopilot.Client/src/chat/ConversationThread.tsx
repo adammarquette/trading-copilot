@@ -191,7 +191,15 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
               {
                 id: PENDING_USER_ID,
                 conversationId,
-                sequence: Number.MAX_SAFE_INTEGER, // always sorts last among real (small, sequential) sequences
+                // One past the highest sequence this client has seen -- exactly the value the server will assign
+                // the real user turn (TryAppendAsync allocates max+1). This has to track the CURRENT max rather
+                // than a fixed sentinel like MAX_SAFE_INTEGER: the assistant's own hub push for THIS turn can
+                // arrive (onChatMessage, with its real, small sequence) before this REST call settles -- see the
+                // module note -- and a fixed huge sentinel would then sort the pending bubble AFTER the reply it
+                // is supposed to precede.
+                sequence:
+                  current.messages.reduce((max, existing) => Math.max(max, existing.sequence), 0) +
+                  1,
                 role: ChatRole.User,
                 content,
                 createdAt: new Date().toISOString(),
@@ -231,11 +239,15 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
           current.kind === 'loaded'
             ? {
                 kind: 'loaded',
-                messages: [
-                  ...current.messages.filter((message) => message.id !== PENDING_USER_ID),
-                  result.data.userMessage,
-                  result.data.assistantMessage,
-                ].sort((a, b) => a.sequence - b.sequence),
+                // foldIn, not an unconditional append: the server pushes the assistant's message over the owner-
+                // scoped hub -- to EVERY one of the operator's connections, including this sender's own -- BEFORE
+                // returning this REST response (ChatEndpoints.TurnAsync), so onChatMessage racing ahead of this
+                // resolve is the ordinary case, not a rare one. Folding by id is what keeps that race from
+                // rendering the same turn twice under a colliding React key.
+                messages: [result.data.userMessage, result.data.assistantMessage].reduce(
+                  foldIn,
+                  current.messages.filter((message) => message.id !== PENDING_USER_ID),
+                ),
               }
             : current,
         );
