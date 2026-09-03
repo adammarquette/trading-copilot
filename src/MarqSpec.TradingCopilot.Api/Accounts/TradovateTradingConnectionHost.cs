@@ -136,13 +136,15 @@ public sealed class TradovateTradingConnectionHost : TradovateSocketConnectionHo
     /// <param name="pollInterval">How often the socket's state is sampled.</param>
     /// <param name="maxBackoff">The ceiling the backoff doubles up to.</param>
     /// <param name="degradedGrace">How long the socket must not deliver before the operator is told.</param>
+    /// <param name="delayAsync">The between-pass wait; the production wait when null (gh#1070).</param>
     internal TradovateTradingConnectionHost(
         IServiceProvider services,
         ILogger<TradovateTradingConnectionHost> logger,
         TimeSpan pollInterval,
         TimeSpan maxBackoff,
-        TimeSpan degradedGrace)
-        : base(services, logger, pollInterval, maxBackoff, degradedGrace)
+        TimeSpan degradedGrace,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+        : base(services, logger, pollInterval, maxBackoff, degradedGrace, delayAsync)
     {
     }
 

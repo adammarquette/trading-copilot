@@ -65,13 +65,18 @@ public class TradovateTradingConnectionHostTests : TradovateSocketConnectionHost
 
     /// <inheritdoc />
     protected override BackgroundService CreateHost(
-        IServiceProvider services, TimeSpan pollInterval, TimeSpan maxBackoff, TimeSpan degradedGrace) =>
+        IServiceProvider services,
+        TimeSpan pollInterval,
+        TimeSpan maxBackoff,
+        TimeSpan degradedGrace,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null) =>
         new TradovateTradingConnectionHost(
             services,
             NullLogger<TradovateTradingConnectionHost>.Instance,
             pollInterval,
             maxBackoff,
-            degradedGrace);
+            degradedGrace,
+            delayAsync);
 
     /// <inheritdoc />
     protected override void Register(ServiceCollection services)
