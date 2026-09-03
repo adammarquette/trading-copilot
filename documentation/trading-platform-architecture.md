@@ -257,6 +257,13 @@ refuses every transmission as `RefusedByKillSwitch` **before the order is sized*
 auto-flatten's close, stop promotion — do not route through this path, so the lock stops new risk without
 stranding open positions.
 
+**The trigger scan sits outside the gate from the other direction (gh#1066, R-4).** `TriggerEvaluationService`
+(`TriggerScanHost`) carries no `IKillSwitch` dependency: with the switch engaged, a mechanical alert still fires
+and an agent-review trigger still wakes the reviewer and stages whatever it decides — a `Suggestion` or a
+suppression — exactly as when disengaged, and taking a suggestion still **arms** a staged ticket (R-11b): arming
+runs `Evaluate`, never `SendAsync`, so it never reaches the check either. Only the transmission that an arm or a
+conditional's fire would lead to reaches `OrderExecutionService` and is refused there.
+
 **Two pairings are enforced rather than assumed**, because nothing structural forces them and both fail in the
 same direction — the gate authorizes one thing, the venue receives another:
 
