@@ -634,6 +634,127 @@ public class QueuedNotificationChannelTests
         A.CallTo(() => _inner.ResolveAsync("flatten:9001:ES", A<CancellationToken>._)).MustHaveHappenedTwiceExactly();
     }
 
+    // --- gh#1077 round-3 review: the collapse race, and one incident staying one push ---
+
+    [Theory]
+    // A resolve queued behind every page for its key: collapsing is safe.
+    [InlineData(10L, null, true)]
+    [InlineData(10L, 4L, true)]
+    // A page queued AFTER the resolve: the queued resolve sits in front of it and cannot close what it reports.
+    [InlineData(4L, 10L, false)]
+    // THE RACED ORDERING, which no single-threaded fixture can produce: the resolve wrote first and took the
+    // lower ordinal, but its bookkeeping landed after the page's. Under the old presence-based rule the marker
+    // was simply "set" and this collapsed; comparing ordinals makes the answer independent of store order.
+    [InlineData(9L, 10L, false)]
+    [InlineData(10L, 10L, false)]
+    public void CollapsesIntoQueuedResolve_ShouldOnlyCollapse_WhenTheResolveIsBehindEveryPageForThatKey(
+        long queuedResolveOrdinal, long? newestPageOrdinal, bool expected)
+    {
+        QueuedNotificationChannel.CollapsesIntoQueuedResolve(queuedResolveOrdinal, newestPageOrdinal)
+            .Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldNotLoseAResolve_WhenAProducerAndTheRelayRaceOnTheSameKey()
+    {
+        // THE ROUND-3 BLOCKING FINDING, as a fixture that can actually fail on it. Every other collapse test here
+        // is single-threaded, which is exactly why the race got through: the bad state needs a resolve's marker to
+        // land AFTER a page for the same key has already cleared it, leaving a resolve queued AHEAD of a page with
+        // the collapse still armed. In production the two threads are AutoFlattenHost and the outbox relay host,
+        // contending on the same flatten key as a matter of routine.
+        //
+        // A stress fixture, deliberately: it cannot fail unless the invariant is broken (the rule only ever errs
+        // toward enqueueing), and it exercises the interleaving rather than asserting it exists. The deterministic
+        // pin for the rule itself is the theory above.
+        INotificationChannel transport = A.Fake<INotificationChannel>();
+        A.CallTo(() => transport.SendAsync(A<Notification>._, A<CancellationToken>._)).Returns(true);
+        A.CallTo(() => transport.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(true);
+        DedupingNotificationChannel deduping = new(transport, A.Fake<ILogger<DedupingNotificationChannel>>());
+        QueuedNotificationChannel channel = new(deduping, deduping, _metrics, _logger);
+
+        for (int round = 0; round < 300; round++)
+        {
+            string key = $"race:{round}";
+
+            // The producer resolves while the relay sends, on the same key. Either order may reach the queue.
+            await Task.WhenAll(
+                Task.Run(() => channel.ResolveAsync(key, CancellationToken.None)),
+                Task.Run(() => channel.SendAsync(Note(key), CancellationToken.None)));
+
+            // The next pass resolves the same key. If a page is queued after the resolve, this MUST be enqueued.
+            await channel.ResolveAsync(key, CancellationToken.None);
+            await channel.DrainPendingAsync(CancellationToken.None);
+
+            // The key must not be left armed: a later, independent incident on it has to reach the operator.
+            await channel.SendAsync(Note(key), CancellationToken.None);
+            await channel.DrainPendingAsync(CancellationToken.None);
+
+            A.CallTo(() => transport.SendAsync(
+                    A<Notification>.That.Matches(n => n.DedupKey == key), A<CancellationToken>._))
+                .MustHaveHappenedTwiceExactly();
+        }
+    }
+
+    [Fact]
+    public async Task DrainPendingAsync_ShouldReleaseTheKeyOnce_WhenSeveralPagesWereQueuedBehindARefusedResolve()
+    {
+        // Round-3 finding 2. Releasing after EVERY covered page let each next page through the dedup it had just
+        // cleared, so one incident became one Emergency push per queued page -- dozens during the wedge this
+        // change exists for, which ADR-0019 §4 calls strictly worse than no pager. The release is now bound to the
+        // LAST page the refusal covered. The previous fixture queued exactly one page, which is why this was
+        // invisible.
+        QueuedNotificationChannel channel = Channel();
+        await channel.SendAsync(Note("outage"), CancellationToken.None);
+        await channel.SendAsync(Note("outage"), CancellationToken.None);
+        await channel.SendAsync(Note("outage"), CancellationToken.None);
+
+        await FillPageBudgetAsync(channel, alreadyQueued: 3);
+        await FillResolveHeadroomAsync(channel);
+        (await channel.ResolveAsync("outage", CancellationToken.None)).Should().BeFalse();
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        // Once at the refusal, once after the LAST covered page -- not once per page.
+        A.CallTo(() => _incidents.ReleaseIncident("outage")).MustHaveHappenedTwiceExactly();
+    }
+
+    [Fact]
+    public async Task ABacklogBehindARefusedResolve_ShouldStillBeOneEmergencyPush_AndStillLeaveTheKeyReleased()
+    {
+        // The same property where it is actually felt, over the REAL dedup decorator: the operator gets ONE push
+        // for one incident however deep the backlog, AND the key ends released so the next incident is reported.
+        // Both halves matter -- bounding the pushes by leaving the key armed would trade the flood back for the
+        // silence this card exists to remove.
+        INotificationChannel transport = A.Fake<INotificationChannel>();
+        A.CallTo(() => transport.SendAsync(A<Notification>._, A<CancellationToken>._)).Returns(true);
+        A.CallTo(() => transport.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(true);
+        DedupingNotificationChannel deduping = new(transport, A.Fake<ILogger<DedupingNotificationChannel>>());
+        QueuedNotificationChannel channel = new(deduping, deduping, _metrics, _logger);
+
+        for (int i = 0; i < 4; i++)
+        {
+            await channel.SendAsync(Note("outage"), CancellationToken.None);
+        }
+
+        await FillPageBudgetAsync(channel, alreadyQueued: 4);
+        await FillResolveHeadroomAsync(channel);
+        (await channel.ResolveAsync("outage", CancellationToken.None)).Should().BeFalse();
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => transport.SendAsync(
+                A<Notification>.That.Matches(n => n.DedupKey == "outage"), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+
+        // ...and the key is released, so the NEXT independent incident on it is still reported.
+        await channel.SendAsync(Note("outage"), CancellationToken.None);
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => transport.SendAsync(
+                A<Notification>.That.Matches(n => n.DedupKey == "outage"), A<CancellationToken>._))
+            .MustHaveHappenedTwiceExactly();
+    }
+
     // --- gh#1077: the invariant the whole card is about, over the REAL dedup decorator ---
 
     [Fact]

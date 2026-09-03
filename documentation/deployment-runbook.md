@@ -843,11 +843,12 @@ go. It reaches you through Layer 2 (Prometheus → Alertmanager) or not at all.
 1. **Check positions manually at the broker**, first and before anything else.
 2. `kind="page"` — the queue was at its budget. The page is **not lost**: it stays owed in the outbox and is
    re-offered on the next relay pass, so it delivers by itself once the transport drains.
-3. `kind="resolve"` — an incident could not be closed. The dedup key is released out of band (and again after any
-   page that was already queued behind it goes out), so later incidents are still reported, but **any Emergency
-   page already raised keeps nagging** until it expires or you acknowledge it in Pushover. One gap remains: if a
-   page *failed* to deliver inside that window it is re-offered later and re-arms the key, so after this alert
-   clears, **confirm you are still being paged** for anything that recurs on the same incident.
+3. `kind="resolve"` — an incident could not be closed. The dedup key is released out of band, and again once the
+   backlog of pages already queued for it has drained, so later incidents are still reported and the backlog
+   still arrives as **one** push rather than one per queued page. **Any Emergency page already raised keeps
+   nagging** until it expires or you acknowledge it in Pushover. One gap remains: a page whose delivery straddled
+   the refusal — in flight, or failed and re-offered later — re-arms the key, so once this alert clears,
+   **confirm you are still being paged** for anything that recurs on the same incident.
 4. Find the cause in the API logs: `Notification queue is full`, then whatever is upstream of it — Pushover
    returning slowly or not at all (`PushoverNotificationChannel` carries a 10-second timeout), or the notification
    pump having stopped (`The notification pump stopped` is logged at Critical).

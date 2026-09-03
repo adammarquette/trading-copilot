@@ -144,18 +144,32 @@ public sealed class QueuedNotificationChannel : INotificationChannel
     private readonly ILogger<QueuedNotificationChannel> _logger;
     private readonly Channel<Delivery> _queue;
 
-    // Keys with a resolve already queued and no page enqueued after it -- a second resolve for one of these would
-    // do exactly what the queued one will, so it is collapsed rather than spending a reserved slot (gh#1077
-    // round-2). Cleared when the resolve leaves the queue, and by any page enqueued for the same key, because a
-    // page after a resolve is a new incident the queued resolve no longer covers.
-    private readonly ConcurrentDictionary<string, byte> _queuedResolves = new(StringComparer.Ordinal);
+    // SERIALISES ordinal assignment, the channel write, and the bookkeeping below it (gh#1077 round-3 review).
+    // Without it the three are independently ordered: a resolve could take an ordinal, be preempted, and have its
+    // marker land AFTER a page for the same key had written and cleared -- leaving a resolve queued AHEAD of a
+    // page with the collapse marker still set, so the next resolve was dropped and nothing ever closed that page.
+    // It also makes the enqueue ordinal agree with the queue's actual order, which the marker logic depends on
+    // and which Interlocked-then-write does not guarantee. Held only across a TryWrite and a few dictionary
+    // operations -- no I/O, no awaits, nothing that can block -- so it is safe on the R-13 caller.
+    private readonly Lock _enqueue = new();
 
-    // Keys whose resolve was REFUSED, against the enqueue ordinal it was refused at. Any page delivered at or
-    // before that ordinal is one the lost resolve would have closed, so the pump releases the key again after
-    // delivering it -- without this, a page queued behind the refusal re-arms the key the refusal released.
+    // Ordinal of the newest PAGE enqueued for each key, and of the newest RESOLVE. A resolve is collapsed into an
+    // already-queued one only when the resolve is newer than every page for that key, which is the same question
+    // as "is it queued behind all of them" now that ordinals follow queue order.
+    private readonly ConcurrentDictionary<string, long> _queuedPages = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, long> _queuedResolves = new(StringComparer.Ordinal);
+
+    // Keys whose resolve was REFUSED, against the ordinal of the LAST page that refusal covers -- the newest page
+    // queued for the key at that moment. The pump releases the key once, after delivering exactly that page, so
+    // the backlog beneath it still dedups to a single push while the key still ends released.
+    //
+    // Lifetime: an entry is consumed by that page's delivery. It outlives the process only in the case named in
+    // the type remarks -- a page whose own delivery straddled the refusal -- and a stale entry is inert, because
+    // it can match no other ordinal. Bounded by distinct incident keys, the same handful that lets
+    // DedupingNotificationChannel hold its incident set with no eviction policy.
     private readonly ConcurrentDictionary<string, long> _lostResolves = new(StringComparer.Ordinal);
 
-    // Monotonic enqueue ordinal, so "was this page queued before that resolve was refused?" is decidable.
+    // Monotonic enqueue ordinal, assigned and consumed under _enqueue so it follows the queue's actual order.
     private long _writes;
 
     /// <summary>Creates the queueing decorator.</summary>
@@ -200,16 +214,31 @@ public sealed class QueuedNotificationChannel : INotificationChannel
     {
         ArgumentNullException.ThrowIfNull(notification);
 
-        // The soft cap is read BEFORE the write, so pages stop at PageCapacity and the slots above it stay for a
-        // resolve. Two concurrent sends can both read a depth just under the cap and both write; the reserve
-        // absorbs that, which is the other reason it is generous rather than exact.
-        long ordinal = Interlocked.Increment(ref _writes);
-        if (_queue.Reader.Count >= PageCapacity || !_queue.Writer.TryWrite(Delivery.Send(notification, ordinal)))
+        bool accepted;
+        lock (_enqueue)
+        {
+            // The soft cap is read inside the lock with the write, so pages stop at PageCapacity exactly. It caps
+            // TOTAL depth, so queued resolves count against it and the effective page budget during a wedge is a
+            // little under PageCapacity -- the conservative direction. The reserve above it belongs to resolves
+            // and is not overshoot room for pages.
+            long ordinal = _writes + 1;
+            accepted = _queue.Reader.Count < PageCapacity
+                && _queue.Writer.TryWrite(Delivery.Send(notification, ordinal));
+
+            if (accepted)
+            {
+                _writes = ordinal;
+                _queuedPages[notification.DedupKey] = ordinal;
+            }
+        }
+
+        if (!accepted)
         {
             // ERROR, deliberately, and never Debug: appsettings.json sets Logging:LogLevel:Default to Information,
             // so anything below that is never written in production -- a "logged" drop nobody can read is the
             // defect being fixed, not the fix. Metered as well (gh#1077), because a log line is visible to an
-            // engineer who goes looking and the operator is exactly who is not being told.
+            // engineer who goes looking and the operator is exactly who is not being told. Outside the lock: a
+            // logging sink is the one thing here that could block.
             _logger.LogError(
                 "Notification queue is full — REFUSED a {Severity} for {Incident}; the transport is not draining. "
                 + "The page is not lost: it stays owed in the outbox and is re-offered on the next relay pass.",
@@ -218,11 +247,25 @@ public sealed class QueuedNotificationChannel : INotificationChannel
             return Task.FromResult(false);
         }
 
-        // A page for this key means any resolve queued ahead of it no longer covers the incident this page
-        // reports, so the next resolve must be enqueued rather than collapsed into that one.
-        _queuedResolves.TryRemove(notification.DedupKey, out _);
         return Task.FromResult(true);
     }
+
+    /// <summary>
+    /// Whether a resolve can be collapsed into one already queued for the same key (gh#1077 round-3 review).
+    /// </summary>
+    /// <remarks>
+    /// The whole decision, as a pure function of two ordinals, because the bug it replaces was one of <i>store
+    /// order</i> rather than of policy: the previous rule asked whether a marker was <b>present</b>, so a
+    /// preempted thread could set it after a page for the same key had already cleared it. Comparing values that
+    /// cannot go backwards makes the answer independent of the order the two bookkeeping writes happen in.
+    /// Exposed so the orderings a race produces can be asserted directly, including the one no single-threaded
+    /// fixture can reach.
+    /// </remarks>
+    /// <param name="queuedResolveOrdinal">Ordinal of the newest resolve queued for the key.</param>
+    /// <param name="newestPageOrdinal">Ordinal of the newest page queued for the key, or <see langword="null"/>.</param>
+    /// <returns><see langword="true"/> when the queued resolve sits behind every queued page for that key.</returns>
+    public static bool CollapsesIntoQueuedResolve(long queuedResolveOrdinal, long? newestPageOrdinal) =>
+        newestPageOrdinal is not { } page || queuedResolveOrdinal > page;
 
     /// <inheritdoc />
     /// <remarks>
@@ -234,40 +277,63 @@ public sealed class QueuedNotificationChannel : INotificationChannel
     /// </remarks>
     public Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken)
     {
-        // COLLAPSE a repeat (gh#1077 round-2 review). AutoFlattenService resolves EVERY configured instrument on
-        // EVERY pass, paged or not, so a wedged transport meets a stream of resolves rather than the handful the
-        // reserve is sized for. A resolve already queued for this key, with no page enqueued after it, will
-        // release the key and cancel the page exactly as this one would -- the operation is keyed and idempotent
-        // -- so `true` here still means what it always meant: accepted for delivery. It is delivered by the item
-        // already carrying it.
-        if (_queuedResolves.ContainsKey(dedupKey))
+        // Guarded because the fallback below reaches a ConcurrentDictionary, which throws on a null key -- and
+        // this method is called from the flatten under a never-throw contract. Before gh#1077 a bad key surfaced
+        // inside the pump's catch; it must not start escaping onto the R-13 thread instead.
+        ArgumentException.ThrowIfNullOrEmpty(dedupKey);
+
+        bool accepted;
+        bool released = false;
+        lock (_enqueue)
         {
-            return Task.FromResult(true);
+            // COLLAPSE a repeat (gh#1077 round-2 review). AutoFlattenService resolves EVERY configured instrument
+            // on EVERY 15 s pass, paged or not, so a wedged transport meets a stream of resolves rather than the
+            // handful the reserve is sized for. A resolve already queued BEHIND every page for this key will
+            // release the key and cancel the page exactly as this one would -- the operation is keyed and
+            // idempotent -- so `true` here still means what it always meant: accepted for delivery, by the item
+            // already carrying it.
+            if (_queuedResolves.TryGetValue(dedupKey, out long queuedResolveAt)
+                && CollapsesIntoQueuedResolve(
+                    queuedResolveAt, _queuedPages.TryGetValue(dedupKey, out long pageAt) ? pageAt : null))
+            {
+                return Task.FromResult(true);
+            }
+
+            long ordinal = _writes + 1;
+            accepted = _queue.Writer.TryWrite(Delivery.Resolve(dedupKey, ordinal));
+
+            if (accepted)
+            {
+                _writes = ordinal;
+                _queuedResolves[dedupKey] = ordinal;
+            }
+            else
+            {
+                // THE BRACE (gh#1077). A resolve carries two halves that fail differently. Cancelling the
+                // outstanding page needs the transport, so it is lost here and `false` asks the caller to try
+                // again -- INotificationChannel's documented meaning for `false`. Releasing the dedup key needs
+                // nothing but a dictionary removal, and NOTHING anywhere remembers that it is owed: there is no
+                // outbox row for a resolve, and a producer that resolves once per outage never comes back. Left
+                // held, the key suppresses every later incident on it for the life of the process -- ADR-0019's
+                // "one notification per process lifetime instead of one per outage" (gh#1045, gh#1051).
+                //
+                // TWO things, because releasing alone does not hold (round-2 review). ReleaseIncident clears a key
+                // armed NOW; the marker covers the pages already queued for this key, which would otherwise re-arm
+                // it on delivery. It records the NEWEST such page, and the pump releases once after delivering
+                // exactly that one -- so the backlog beneath it still dedups to a single push instead of one
+                // Emergency push per queued page (round-3 review), and the key still ends released. With no page
+                // queued there is nothing that can re-arm it, so no marker is recorded at all.
+                if (_queuedPages.TryGetValue(dedupKey, out long coverUpTo))
+                {
+                    _lostResolves[dedupKey] = coverUpTo;
+                }
+
+                released = _incidents.ReleaseIncident(dedupKey);
+            }
         }
 
-        long ordinal = Interlocked.Increment(ref _writes);
-        if (!_queue.Writer.TryWrite(Delivery.Resolve(dedupKey, ordinal)))
+        if (!accepted)
         {
-            // THE BRACE (gh#1077). A resolve carries two halves that fail differently. Cancelling the outstanding
-            // page needs the transport, so it is lost here and `false` asks the caller to try again -- which is
-            // INotificationChannel's documented meaning for `false`. Releasing the dedup key needs nothing but a
-            // dictionary removal, and NOTHING anywhere remembers that it is owed: there is no outbox row for a
-            // resolve, and a producer that resolves once per outage never comes back. Left held, the key
-            // suppresses every later incident on it for the life of the process -- ADR-0019's "one notification
-            // per process lifetime instead of one per outage", reached without any producer doing anything wrong
-            // (gh#1045, gh#1051).
-            //
-            // So the release happens here, on the caller's thread, and ONLY here: doing it on the ordinary path
-            // would let a concurrent escalation on the same key slip past the suppression it is meant to meet.
-            // The cost of releasing is a duplicate page, which is the direction DedupingNotificationChannel
-            // already chose for its own unconditional re-arm.
-            // Two things, because releasing alone does not hold. ReleaseIncident clears a key that is armed NOW;
-            // the marker covers a page still queued behind this refusal, which would otherwise re-arm the key on
-            // delivery (dedup arms on a successful send) with the resolve already gone. Highest ordinal wins: a
-            // later refusal covers everything an earlier one did.
-            _lostResolves.AddOrUpdate(dedupKey, ordinal, (_, existing) => Math.Max(existing, ordinal));
-            bool released = _incidents.ReleaseIncident(dedupKey);
-
             _logger.LogCritical(
                 "Notification queue is full — REFUSED the resolve for {Incident}; the transport is not draining. "
                 + "Its dedup key was released out of band ({Released}), so a later occurrence of this incident is "
@@ -277,11 +343,6 @@ public sealed class QueuedNotificationChannel : INotificationChannel
             _metrics.RecordNotificationRefused(ExecutionMetrics.NotificationRefusedResolve);
             return Task.FromResult(false);
         }
-
-        // A real resolve is on its way now, so it supersedes any earlier lost one for this key, and further
-        // resolves for it collapse into this one until a page is enqueued or it leaves the queue.
-        _lostResolves.TryRemove(dedupKey, out _);
-        _queuedResolves[dedupKey] = 0;
 
         // Accepted for delivery, like SendAsync -- not "the page is cancelled". The retry on a failed cancel is
         // the pump's job (gh#300); a caller on the flatten path must not wait to find out.
@@ -349,14 +410,27 @@ public sealed class QueuedNotificationChannel : INotificationChannel
                 // A failed SEND is deliberately not retried here: DedupingNotificationChannel below declines to
                 // record an incident it could not report, so the next escalation pass re-sends it naturally.
                 // Retrying here as well would double-page.
-                bool sent = await _inner.SendAsync(item.Notification, CancellationToken.None);
+                await _inner.SendAsync(item.Notification, CancellationToken.None);
 
                 // gh#1077 round-2 review: a successful send ARMS the key below, so a page queued behind a refused
-                // resolve would silently undo that refusal's out-of-band release. FIFO makes it decidable -- a
-                // page enqueued at or before the refusal is one the lost resolve would have closed -- so close it
-                // here. A page enqueued AFTER it is a new incident and keeps its suppression; the marker is inert
-                // from then on (ordinals only grow) and is cleared by the next resolve for the key.
-                if (sent && _lostResolves.TryGetValue(item.DedupKey, out long refusedAt) && item.Ordinal <= refusedAt)
+                // resolve would silently undo that refusal's out-of-band release. Round-3: release ONCE, after the
+                // LAST page that refusal covered -- every page beneath it is suppressed by the key it armed, so
+                // one incident stays one Emergency push, and the key still ends released. A page enqueued AFTER
+                // the refusal never matches, so a new incident keeps its suppression.
+                bool releaseNow;
+                lock (_enqueue)
+                {
+                    _queuedPages.TryRemove(new KeyValuePair<string, long>(item.DedupKey, item.Ordinal));
+                    releaseNow = _lostResolves.TryGetValue(item.DedupKey, out long coverUpTo)
+                        && item.Ordinal == coverUpTo;
+
+                    if (releaseNow)
+                    {
+                        _lostResolves.TryRemove(item.DedupKey, out _);
+                    }
+                }
+
+                if (releaseNow)
                 {
                     _incidents.ReleaseIncident(item.DedupKey);
                 }
@@ -364,10 +438,12 @@ public sealed class QueuedNotificationChannel : INotificationChannel
                 return;
             }
 
-            // Off the queue, so the next resolve for this key must be enqueued rather than collapsed into it; and
-            // this one supersedes any lost resolve recorded for the key.
-            _queuedResolves.TryRemove(item.DedupKey, out _);
-            _lostResolves.TryRemove(item.DedupKey, out _);
+            // Off the queue, so the next resolve for this key must be enqueued rather than collapsed into it.
+            // Ordinal-matched, so a NEWER resolve recorded meanwhile is left alone.
+            lock (_enqueue)
+            {
+                _queuedResolves.TryRemove(new KeyValuePair<string, long>(item.DedupKey, item.Ordinal));
+            }
 
             if (await _inner.ResolveAsync(item.DedupKey, CancellationToken.None))
             {
@@ -393,17 +469,27 @@ public sealed class QueuedNotificationChannel : INotificationChannel
             // Error rather than Critical, unlike a refused resolve from a caller, and the difference is real: the
             // dedup layer re-armed this key unconditionally on the call above, so nothing here can leave a key
             // held. What is lost is only the cancel, so the page nags until it expires -- bad, not silent.
-            if (!_queue.Writer.TryWrite(item.NextAttempt()))
+            bool requeued;
+            lock (_enqueue)
+            {
+                requeued = _queue.Writer.TryWrite(item.NextAttempt());
+                if (requeued)
+                {
+                    // The retry keeps its ORIGINAL ordinal, so a page enqueued since is newer and correctly stops
+                    // the next resolve collapsing into it. Max, so a newer resolve recorded meanwhile wins.
+                    _queuedResolves.AddOrUpdate(
+                        item.DedupKey, item.Ordinal, (_, existing) => Math.Max(existing, item.Ordinal));
+                }
+            }
+
+            if (!requeued)
             {
                 _logger.LogError(
                     "Notification queue is full — REFUSED the cancel retry for {Incident}; its page will nag until "
                     + "it expires or is acknowledged.",
                     item.DedupKey);
                 _metrics.RecordNotificationRefused(ExecutionMetrics.NotificationRefusedResolve);
-                return;
             }
-
-            _queuedResolves[item.DedupKey] = 0;
         }
         catch (Exception error)
         {

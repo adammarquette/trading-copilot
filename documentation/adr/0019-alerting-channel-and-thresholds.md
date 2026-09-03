@@ -618,14 +618,37 @@ lost resolve is the unbounded failure of the two — §*the resolve is the load-
 
 Sixty-four is sized against the number of **distinct open incidents**, the same handful that lets
 `DedupingNotificationChannel` hold its incident set with no eviction policy. **That bound only holds because
-repeats are collapsed, and the first cut of this did not collapse them.** Resolves are not rare:
-`AutoFlattenService` resolves *every configured instrument on every 15 s pass*, paged or not, and the watchdog
-does the same every 20 s — roughly sixteen writes a minute, which exhausts a 64-slot reserve in about four
-minutes and makes the "residual case" the steady state of exactly the outage the reserve exists for. So a resolve
-is not enqueued while one for the same key is already queued with no page in between: the operation is keyed and
-idempotent, so the caller's `true` still means *accepted for delivery* — delivered by the item already carrying
-it. The collapse is cleared when that resolve leaves the queue and by any page enqueued for the key, so a second
-incident is never left unclosed by it.
+repeats are collapsed, and the first cut of this did not collapse them.**
+
+Do the arithmetic, because it decides the design rather than merely justifying it. `AutoFlattenService` resolves
+*every configured instrument on every pass*, paged or not (`:246` flat, `:270` partial), and
+`OutboxNotificationChannel.ResolveAsync` always forwards: four built-in instruments at a 15 s poll is **16 queue
+writes per minute per account**. (The watchdog's resolve is conditional on a save, so it does not add to the
+steady rate.) Against a wedged Pushover — 10 s `HttpClient` timeout — the pump drains about **6 per minute**. Net
+fill ≈ 10/min for one account, so a 64-slot reserve is gone in roughly six minutes, and in about three with two
+accounts.
+
+**The alternative was to drop the collapse and raise the reserve, and the arithmetic is why that was rejected.**
+A larger reserve buys time *linear in its size*: ~300 slots for a 30-minute wedge on one account, ~600 for two,
+and several thousand for an overnight partition. Because the fill rate exceeds the drain rate for as long as the
+transport is wedged, **no fixed reserve bounds the failure** — it only postpones it, and what it postpones is the
+fallback path whose residues are documented below. Collapsing makes the queued-resolve count bounded by *distinct
+open keys* — a handful — **independently of how long the wedge lasts**. That is a difference in kind, not in
+constant, so the collapse stays and the number does not move.
+
+So a resolve is not enqueued while one for the same key is already queued behind every page for that key: the
+operation is keyed and idempotent, so the caller's `true` still means *accepted for delivery* — delivered by the
+item already carrying it.
+
+**"Behind every page" is decided by comparing ordinals, not by a flag, and that is the round-3 fix.** The first
+cut asked whether a marker was *present*, and set it *after* the channel write — so a producer thread preempted
+between the two could leave a resolve queued **ahead** of a page for the same key with the collapse still armed,
+and the next resolve was then dropped: the page armed the key and nothing was left to close it. Permanent silence
+on that key, reached through the optimisation. Enqueue, ordinal assignment and the bookkeeping now happen under
+one short lock — no I/O, no awaits, so it is safe on the R-13 caller — which makes the enqueue ordinal agree with
+the queue's actual order, and the collapse a comparison of two values that cannot go backwards. **Nothing in the
+suite could express that race**, because every collapse fixture was single-threaded; there is now a concurrent one
+that fails on it, and the decision rule is a pure function pinned by a theory over the orderings a race produces.
 
 **And a refused resolve still releases the dedup key**, through a new `IIncidentKeyRegistry` that
 `DedupingNotificationChannel` implements over that same incident set. The two halves of a resolve fail
@@ -639,16 +662,26 @@ escalation slip past the suppression it is meant to meet.
 
 **Releasing is not sufficient on its own, and the first cut of this got it wrong.** The dedup decorator *arms* a
 key on a successful send, so a page still sitting in the queue when the resolve was refused re-arms the key the
-refusal just released — and the resolve that would have cleared it is gone. The refusal therefore also records
-the enqueue **ordinal** it was refused at, and the pump releases the key again after delivering any page enqueued
-at or before that point: FIFO makes *"this page is one the lost resolve would have closed"* decidable. A page
-enqueued **after** it is a new incident and keeps its suppression — releasing that one would page on every 15 s
-escalation pass, which is the noise §4 forbids, reached by way of a guard against silence.
+refusal just released — and the resolve that would have cleared it is gone. The refusal therefore records the
+ordinal of the **newest page already queued for that key**, and the pump releases the key once, after delivering
+exactly that page. A page enqueued **after** the refusal never matches, so a new incident keeps its suppression —
+releasing that one would page on every 15 s escalation pass, which is the noise §4 forbids, reached by way of a
+guard against silence.
 
-**What that does not cover, stated rather than claimed away:** a page that *fails* delivery inside that window is
-re-offered by the outbox later under a fresh ordinal, so the marker is inert against it and the key stays armed
-until the producer resolves again. That residue is exactly what the socket hosts' producer-side re-arm (§*Update
-2026-09-02*, `gh#1051`) covers, which is why it **stays** — see the follow-up note below.
+**Releasing after the *last* covered page, rather than after each of them, is what keeps one incident to one
+push.** Releasing eagerly let every page beneath the refusal through the dedup it had just cleared, so a backlog
+of pages for one key — routine during a wedge, since the outbox writes a fresh row per key once the previous is
+stamped — became one **Emergency** push per queued page. That is §4's *"strictly worse than no pager, because it
+manufactures confidence"*, and it is the same harm the ordinal guard already prevents on the other side of the
+line; documenting a flood is not bounding one. Bound this way the backlog still dedups to a single push **and**
+the key still ends released, which are both required: bounding the pushes by leaving the key armed would trade
+the flood back for the silence this card exists to remove.
+
+**What that does not cover, stated rather than claimed away:** a page whose own delivery *straddles* the refusal —
+one already in flight, or one that fails and is re-offered by the outbox later under a fresh ordinal — is not
+matched by the marker, so the key can stay armed until the producer resolves again. That residue is exactly what
+the socket hosts' producer-side re-arm (§*Update 2026-09-02*, `gh#1051`) covers, which is why it **stays** — see
+the follow-up note below.
 
 **Observable, not merely counted — a log, a metric, and a failed result, deliberately all three.** The result is
 what makes it recoverable (the outbox keeps the row owed). The log is at **Error** for a page and **Critical**

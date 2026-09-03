@@ -493,22 +493,26 @@ tests:
               component: alerting
               kind: page
             exp_annotations:
-              summary: "Operator notifications REFUSED (page) — the app cannot page"
+              summary: "Operator notifications REFUSED — the app cannot page"
               description: >-
                 The in-process notification queue refused at least one notification, so a page the app raised did
                 not reach the transport. Assume the operator has NOT been told about whatever raised it — check
                 the API logs for "Notification queue is full" and treat every flatten condition as unreported
-                until this clears.
+                until this clears. The `kind` label says page or resolve; alertmanager.yml groups on [priority,
+                component, alertname] and not on `kind`, so both can be behind one push — read the label list,
+                not the summary.
               runbook: "documentation/deployment-runbook.md#notifications-refused"
           - exp_labels:
               priority: P1
               component: alerting
               kind: resolve
             exp_annotations:
-              summary: "Operator notifications REFUSED (resolve) — the app cannot page"
+              summary: "Operator notifications REFUSED — the app cannot page"
               description: >-
                 The in-process notification queue refused at least one notification, so a page the app raised did
                 not reach the transport. Assume the operator has NOT been told about whatever raised it — check
                 the API logs for "Notification queue is full" and treat every flatten condition as unreported
-                until this clears.
+                until this clears. The `kind` label says page or resolve; alertmanager.yml groups on [priority,
+                component, alertname] and not on `kind`, so both can be behind one push — read the label list,
+                not the summary.
               runbook: "documentation/deployment-runbook.md#notifications-refused"
