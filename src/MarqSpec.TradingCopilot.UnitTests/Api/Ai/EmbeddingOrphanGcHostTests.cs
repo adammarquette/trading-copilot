@@ -42,7 +42,7 @@ public class EmbeddingOrphanGcHostTests
         await SweepAsync();
 
         // Suggestion / JournalEntry gained producers in gh#1065 and moved onto the allow-list; Rule is still waiting on
-        // the rulebook epic (gh#15), MarketSnapshot on its own producer, and Unknown is the refusable sentinel.
+        // its entity (gh#866, of epic gh#489), MarketSnapshot on its own producer, and Unknown is the refusable zero.
         EmbeddingOwnerKind[] producerless =
             [EmbeddingOwnerKind.Unknown, EmbeddingOwnerKind.Rule, EmbeddingOwnerKind.MarketSnapshot];
         foreach (EmbeddingOwnerKind kind in producerless)

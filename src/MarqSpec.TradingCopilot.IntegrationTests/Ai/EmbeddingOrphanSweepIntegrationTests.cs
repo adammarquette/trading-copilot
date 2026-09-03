@@ -174,8 +174,9 @@ public sealed class EmbeddingOrphanSweepIntegrationTests : IClassFixture<Embeddi
 
         deleted.Should().Be(0, "no sweepable-kind row was seeded, so the sweep must report nothing deleted");
         (await ReadEmbeddingsAsync(EmbeddingOwnerKind.Rule, "gh914-orphan-rule")).Should().ContainSingle(
-            "Rule has no producer table yet (the rulebook is epic gh#15) -- the allow-list must keep it out of the "
-            + "sweep entirely, never GC'd to zero just because its owner 'cannot be found'");
+            "Rule has no producer table yet (its entity is gh#866, still backlogged under epic gh#489) -- the "
+            + "allow-list must keep it out of the sweep entirely, never GC'd to zero just because its owner "
+            + "'cannot be found'");
         (await ReadEmbeddingsAsync(EmbeddingOwnerKind.MarketSnapshot, "gh914-orphan-snapshot")).Should().ContainSingle(
             "MarketSnapshot has no producer table yet -- same allow-list guarantee");
     }
