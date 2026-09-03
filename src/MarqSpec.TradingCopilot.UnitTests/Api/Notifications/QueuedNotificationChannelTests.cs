@@ -481,8 +481,10 @@ public class QueuedNotificationChannelTests
 
         await channel.DrainPendingAsync(CancellationToken.None);
 
-        // Twice: once at the refusal (nothing was armed yet), and again after the page that armed it went out.
-        A.CallTo(() => _incidents.ReleaseIncident("outage")).MustHaveHappenedTwiceExactly();
+        // ONCE, and by the covering page's delivery rather than by the refusal (round-4 review). While a page for
+        // the key is queued the refusal must NOT release: the wedge refuses again every 15 s, and each of those
+        // releases would un-suppress the next queued page.
+        A.CallTo(() => _incidents.ReleaseIncident("outage")).MustHaveHappenedOnceExactly();
     }
 
     [Fact]
@@ -714,8 +716,8 @@ public class QueuedNotificationChannelTests
 
         await channel.DrainPendingAsync(CancellationToken.None);
 
-        // Once at the refusal, once after the LAST covered page -- not once per page.
-        A.CallTo(() => _incidents.ReleaseIncident("outage")).MustHaveHappenedTwiceExactly();
+        // ONCE, after the LAST covered page -- not once per page, and not at the refusal as well.
+        A.CallTo(() => _incidents.ReleaseIncident("outage")).MustHaveHappenedOnceExactly();
     }
 
     [Fact]
@@ -753,6 +755,113 @@ public class QueuedNotificationChannelTests
         A.CallTo(() => transport.SendAsync(
                 A<Notification>.That.Matches(n => n.DedupKey == "outage"), A<CancellationToken>._))
             .MustHaveHappenedTwiceExactly();
+    }
+
+    [Fact]
+    public async Task ABacklogBehindRepeatedRefusals_ShouldStillBeOneEmergencyPush()
+    {
+        // THE ROUND-4 BLOCKING FINDING, and the fixture gap that hid it: the storm test refuses ONCE and then
+        // drains uninterrupted, which is not what a wedge does. A wedge refuses a resolve for the same key on
+        // EVERY 15 s flatten pass while the backlog drains at ~6/min, so refusals land BETWEEN deliveries -- and
+        // an unconditional release on each one un-suppressed the next queued page. One push per refusal, which
+        // over a multi-minute wedge is round-3's flood at a lower rate.
+        //
+        // The refusal is injected from inside the transport call, which is exactly where a real one lands: the
+        // pump is mid-delivery, the queue is still full, and the next producer pass resolves.
+        INotificationChannel transport = A.Fake<INotificationChannel>();
+        A.CallTo(() => transport.ResolveAsync(A<string>._, A<CancellationToken>._)).Returns(true);
+        A.CallTo(() => transport.SendAsync(A<Notification>._, A<CancellationToken>._)).Returns(true);
+        DedupingNotificationChannel deduping = new(transport, A.Fake<ILogger<DedupingNotificationChannel>>());
+
+        // The hook fires AFTER the dedup layer has armed the key, which is where a real refusal lands: BETWEEN
+        // two deliveries, not inside one. Injecting from the transport fake instead runs BEFORE dedup arms, so
+        // the release finds nothing held and the scenario evaporates -- the first cut of this fixture did exactly
+        // that and stayed green under the very defect it was written for.
+        QueuedNotificationChannel channel = null!;
+        bool injected = false;
+        AfterSendHook hook = new(deduping, () =>
+        {
+            if (injected)
+            {
+                return;
+            }
+
+            injected = true;
+
+            // Still wedged: refill the slots the pump has freed, then take the next flatten pass's resolve.
+            int i = 0;
+            while (channel.ResolveAsync($"wedge:{i++}", CancellationToken.None).GetAwaiter().GetResult() && i < 1000)
+            {
+            }
+
+            channel.ResolveAsync("outage", CancellationToken.None).GetAwaiter().GetResult()
+                .Should().BeFalse("the wedge is still on, so this pass's resolve is refused too");
+        });
+
+        channel = new QueuedNotificationChannel(hook, deduping, _metrics, _logger);
+
+        for (int i = 0; i < 4; i++)
+        {
+            await channel.SendAsync(Note("outage"), CancellationToken.None);
+        }
+
+        await FillPageBudgetAsync(channel, alreadyQueued: 4);
+        await FillResolveHeadroomAsync(channel);
+        (await channel.ResolveAsync("outage", CancellationToken.None)).Should().BeFalse();
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => transport.SendAsync(
+                A<Notification>.That.Matches(n => n.DedupKey == "outage"), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    /// <summary>
+    /// Runs <c>afterSend</c> once the inner chain has finished a send — so a fixture can act <b>between</b> two
+    /// deliveries, after the dedup layer has armed the key, which a transport-level hook cannot.
+    /// </summary>
+    private sealed class AfterSendHook : INotificationChannel
+    {
+        private readonly INotificationChannel _inner;
+        private readonly Action _afterSend;
+
+        public AfterSendHook(INotificationChannel inner, Action afterSend)
+        {
+            _inner = inner;
+            _afterSend = afterSend;
+        }
+
+        public async Task<bool> SendAsync(Notification notification, CancellationToken cancellationToken)
+        {
+            bool sent = await _inner.SendAsync(notification, cancellationToken);
+            _afterSend();
+            return sent;
+        }
+
+        public Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken) =>
+            _inner.ResolveAsync(dedupKey, cancellationToken);
+    }
+
+    [Fact]
+    public async Task DrainPendingAsync_ShouldStillReleaseTheKey_WhenTheCoveringPagesSendThrows()
+    {
+        // The release's owner is the covering page's delivery, so that delivery must hand the key back even when
+        // it faults -- otherwise a throwing send strands the marker while an earlier backlog page has already
+        // armed the key, and it is held for the life of the process by way of an exception path. That is this
+        // card's own failure family reached from a direction nothing else here covers.
+        QueuedNotificationChannel channel = Channel();
+        await channel.SendAsync(Note("outage"), CancellationToken.None);
+        await FillPageBudgetAsync(channel, alreadyQueued: 1);
+        await FillResolveHeadroomAsync(channel);
+        (await channel.ResolveAsync("outage", CancellationToken.None)).Should().BeFalse();
+
+        A.CallTo(() => _inner.SendAsync(
+                A<Notification>.That.Matches(n => n.DedupKey == "outage"), A<CancellationToken>._))
+            .Throws(new InvalidOperationException("transport exploded"));
+
+        await channel.DrainPendingAsync(CancellationToken.None);
+
+        A.CallTo(() => _incidents.ReleaseIncident("outage")).MustHaveHappenedOnceExactly();
     }
 
     // --- gh#1077: the invariant the whole card is about, over the REAL dedup decorator ---

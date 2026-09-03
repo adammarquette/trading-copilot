@@ -273,7 +273,9 @@ public sealed class QueuedNotificationChannel : INotificationChannel
     /// <see cref="ResolveHeadroom"/> keeps for it, so a queue full of pages cannot crowd it out. In the residual
     /// case where even that is exhausted the dedup key is released <b>out of band</b> before returning
     /// <see langword="false"/>: the cancel is recoverable by a retrying caller, the release is recoverable by
-    /// nobody.
+    /// nobody. The release has exactly <b>one</b> owner — this path when nothing queued can re-arm the key, and
+    /// the covering page's delivery otherwise — because a wedge refuses a resolve for the same key on every pass,
+    /// and releasing on each would un-suppress the next queued page and page per refusal.
     /// </remarks>
     public Task<bool> ResolveAsync(string dedupKey, CancellationToken cancellationToken)
     {
@@ -323,12 +325,28 @@ public sealed class QueuedNotificationChannel : INotificationChannel
                 // exactly that one -- so the backlog beneath it still dedups to a single push instead of one
                 // Emergency push per queued page (round-3 review), and the key still ends released. With no page
                 // queued there is nothing that can re-arm it, so no marker is recorded at all.
-                if (_queuedPages.TryGetValue(dedupKey, out long coverUpTo))
+                // WHO OWES THE RELEASE (gh#1077 round-4 review). The wedge that fills this queue also refuses a
+                // resolve for the same key every 15 s, so releasing unconditionally here released the key the
+                // PREVIOUS backlog page had just armed, and the next page delivered unsuppressed: one Emergency
+                // push per refusal rather than per incident -- round-3's flood at a lower rate. So the release has
+                // exactly one owner. While a page for this key is queued, the covering page's delivery owns it and
+                // later refusals only refresh the marker; with nothing queued that can re-arm the key, this path
+                // owns it and releases now.
+                // A queued page IS the outstanding marker: the two are recorded together here and cleared
+                // together by that page's delivery, both under this lock, so "a marker is owed" and "a page is
+                // queued for this key" are the same question. Asking both would be a second gate no test can
+                // distinguish -- a mutation deleting one survived, which is how this was found.
+                bool pageQueued = _queuedPages.TryGetValue(dedupKey, out long coverUpTo);
+
+                if (pageQueued)
                 {
-                    _lostResolves[dedupKey] = coverUpTo;
+                    // Extend to the newest page queued for the key. It can only widen -- _queuedPages never goes
+                    // backwards -- so a later refusal hands the covering delivery more to answer for, never less.
+                    _lostResolves.AddOrUpdate(
+                        dedupKey, coverUpTo, (_, existing) => Math.Max(existing, coverUpTo));
                 }
 
-                released = _incidents.ReleaseIncident(dedupKey);
+                released = !pageQueued && _incidents.ReleaseIncident(dedupKey);
             }
         }
 
@@ -410,29 +428,38 @@ public sealed class QueuedNotificationChannel : INotificationChannel
                 // A failed SEND is deliberately not retried here: DedupingNotificationChannel below declines to
                 // record an incident it could not report, so the next escalation pass re-sends it naturally.
                 // Retrying here as well would double-page.
-                await _inner.SendAsync(item.Notification, CancellationToken.None);
-
-                // gh#1077 round-2 review: a successful send ARMS the key below, so a page queued behind a refused
-                // resolve would silently undo that refusal's out-of-band release. Round-3: release ONCE, after the
-                // LAST page that refusal covered -- every page beneath it is suppressed by the key it armed, so
-                // one incident stays one Emergency push, and the key still ends released. A page enqueued AFTER
-                // the refusal never matches, so a new incident keeps its suppression.
-                bool releaseNow;
-                lock (_enqueue)
+                // FINALLY, because this bookkeeping is the release's owner (round-4 review). A send that throws
+                // would otherwise strand the marker, and an earlier backlog page may already have armed the key --
+                // leaving it held for the life of the process by way of an exception path, which is the exact
+                // family this card closes.
+                try
                 {
-                    _queuedPages.TryRemove(new KeyValuePair<string, long>(item.DedupKey, item.Ordinal));
-                    releaseNow = _lostResolves.TryGetValue(item.DedupKey, out long coverUpTo)
-                        && item.Ordinal == coverUpTo;
+                    await _inner.SendAsync(item.Notification, CancellationToken.None);
+                }
+                finally
+                {
+                    // gh#1077 round-2 review: a successful send ARMS the key below, so a page queued behind a
+                    // refused resolve would silently undo that refusal's out-of-band release. Round-3: release
+                    // ONCE, after the LAST page that refusal covered -- every page beneath it is suppressed by the
+                    // key it armed, so one incident stays one Emergency push and the key still ends released. A
+                    // page enqueued AFTER the refusal never matches, so a new incident keeps its suppression.
+                    bool releaseNow;
+                    lock (_enqueue)
+                    {
+                        _queuedPages.TryRemove(new KeyValuePair<string, long>(item.DedupKey, item.Ordinal));
+                        releaseNow = _lostResolves.TryGetValue(item.DedupKey, out long coverUpTo)
+                            && item.Ordinal == coverUpTo;
+
+                        if (releaseNow)
+                        {
+                            _lostResolves.TryRemove(item.DedupKey, out _);
+                        }
+                    }
 
                     if (releaseNow)
                     {
-                        _lostResolves.TryRemove(item.DedupKey, out _);
+                        _incidents.ReleaseIncident(item.DedupKey);
                     }
-                }
-
-                if (releaseNow)
-                {
-                    _incidents.ReleaseIncident(item.DedupKey);
                 }
 
                 return;
