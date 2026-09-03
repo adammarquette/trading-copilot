@@ -110,4 +110,5 @@ with none.
   `VITE_BFF_ORIGIN` is set (otherwise nothing) — never the REST/SignalR routes, so sign-in fails through Vite
   alone. To drive the full UI against the live API, `npm run build` and copy `dist/*` into the API's `wwwroot`,
   then use the BFF at `:8080`. `wwwroot` must exist *before* the API starts (`UseStaticFiles` binds its provider
-  when the host is built), so restart after populating it; that copy is a build artifact — do not commit it.
+  when the host is built), so restart after populating it; that copy is a build artifact — do not commit it,
+  and `.gitignore` now enforces that rather than relying on you to remember (gh#1088).
