@@ -254,6 +254,64 @@ describe('ConversationThread — sending a turn', () => {
     expect(screen.queryByTestId('chat-draft')).toBeNull();
   });
 
+  it('drops a chunk that arrives for this conversation AFTER a successful turn has already settled (gh#1085)', async () => {
+    // The hub push is fire-and-forget and can be delivered late (slow connection, a reconnect replay window, or
+    // simple jitter placing it after the terminal REST response) -- a straggler for a turn that already rendered
+    // its settled answer must not resurrect a "the co-pilot is typing…" bubble under it.
+    loadedEmpty();
+    const turn = deferred<Awaited<ReturnType<typeof sendChatTurn>>>();
+    sendMock.mockReturnValue(turn.promise);
+
+    await renderThread();
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'headroom?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await act(async () => {
+      turn.settle({
+        ok: true,
+        data: {
+          userMessage: message({
+            id: 'u1',
+            sequence: 1,
+            role: ChatRole.User,
+            content: 'headroom?',
+          }),
+          assistantMessage: message({
+            id: 'a1',
+            sequence: 2,
+            role: ChatRole.Assistant,
+            content: 'Headroom is $1,800.',
+          }),
+        },
+      });
+    });
+    expect(screen.queryByTestId('chat-draft')).toBeNull(); // sanity: settled cleanly, no draft standing
+
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'a straggler token' }));
+
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+  });
+
+  it('drops a chunk that arrives for this conversation AFTER a refused turn has already settled (gh#1085)', async () => {
+    loadedEmpty();
+    sendMock.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 429,
+      reason: 'Daily AI budget reached; resets at 00:00 UTC.',
+    });
+
+    await renderThread();
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'one more?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByRole('alert'); // the turn has settled (refused) before the straggler arrives
+    expect(screen.queryByTestId('chat-draft')).toBeNull(); // sanity: settled cleanly, no draft standing
+
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'a straggler token' }));
+
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+  });
+
   it('on success, replaces the optimistic turn and the streamed draft with the settled pair, and clears the composer', async () => {
     loadedEmpty();
     const turn = deferred<Awaited<ReturnType<typeof sendChatTurn>>>();
