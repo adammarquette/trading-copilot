@@ -160,7 +160,10 @@ poll-until-refresh until then.
   undifferentiated stream and a single draft. And a **faulted** turn sends no terminator at all — `TurnAsync`
   returns 422 before `MessageAppendedAsync`, and only round 1 streams — so on every other connection its
   half-written draft is retired by a client-side **idle guard** rather than by the contract, and a turn started
-  inside that window still appends to it. Both are closed only by wire changes: a per-turn id on the chunk and the
+  inside that window still appends to it. That guard also catches a **live** turn: only round 1 streams, so a
+  tool-using turn emits its preamble and then goes quiet for the non-streaming rounds, and its draft is retired
+  mid-turn — honest (nothing is feeding it) and repaired by the settled push, but a consequence of the same
+  missing signal rather than an accident. Both are closed only by wire changes: a per-turn id on the chunk and the
   message (gh#1106) and a faulted-turn terminator (gh#1107), neither smuggled in here. A **dropped** message push on
   a live socket degrades the same way — it costs that connection the settled row, and its draft until the guard or
   the next send — which is the state R-19 / ADR-0013's connection indicator exists to declare.

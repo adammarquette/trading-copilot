@@ -33,9 +33,12 @@ type LoadState =
 const PENDING_USER_ID = 'pending-user-turn';
 
 /**
- * How long a streaming draft may sit with no new delta before it is treated as abandoned. Round 1 of a turn is one
- * uninterrupted SSE stream (the tool loop stops streaming entirely, `ChatTurnService.StreamAsync`), so a gap this
- * long inside a live turn does not happen; a faulted turn, which never sends a terminator, is what produces one.
+ * How long a streaming draft may sit with no new delta before it is treated as abandoned. The case it exists for is
+ * a **faulted** turn, which streams and then sends no terminator at all. A gap this long can also occur inside a
+ * turn that is still running: only round 1 streams, so a TOOL-USING turn emits its preamble, then goes quiet for
+ * several non-streaming `CompleteAsync` rounds and the tool calls between them (`ChatTurnService.StreamAsync`).
+ * Retiring the draft there is the honest reading either way -- nothing is feeding it, and the settled push restores
+ * the real answer the moment the turn lands -- but it is a live turn losing its draft, not only a dead one.
  */
 const DRAFT_IDLE_MS = 30_000;
 
@@ -58,7 +61,13 @@ function roleLabel(role: ChatMessage['role']): string {
   }
 }
 
-/** Appends a message unless its id is already present -- the fold used for both cross-connection pushes and reconcile. */
+/**
+ * Appends a message unless its id is already present -- the fold used for cross-connection pushes and for the
+ * reconnect re-read. It dedupes by ID ALONE and never compares content, which is sound only because a thread is
+ * append-only: the chat endpoints expose no update or delete for a message (`ChatEndpoints`), so a row cannot
+ * change under a fold or vanish from it. An edit path would make a folded read permanently wrong rather than merely
+ * stale, and would have to be added here first.
+ */
 function foldIn(messages: readonly ChatMessage[], incoming: ChatMessage): readonly ChatMessage[] {
   if (messages.some((existing) => existing.id === incoming.id)) {
     return messages;
