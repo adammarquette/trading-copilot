@@ -72,11 +72,19 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// trusted to a comment.
 /// </para>
 /// <para>
-/// <b>Prove-red (gh#1096, recorded in the PR body).</b> Commenting the <c>Suggestion</c> index out of the
-/// <c>AddContextVectorIndexes</c> migration reddens the suggestion case at zero neighbours recalled; the same for
-/// the journal-entry index and its case; and each left the other case green, so neither passes on the other's
-/// index. The pre-seed schema guard was proven able to fail too, by smuggling the indexed <c>SoftSignal</c> kind
-/// into the crowd. Restored afterwards — the migration is production code this tier does not edit.
+/// <b>Prove-red (gh#1096, recorded in the PR body).</b> The <i>behavioural</i> proof came first, before the
+/// pre-seed schema guard existed: commenting the <c>Suggestion</c> index out of the <c>AddContextVectorIndexes</c>
+/// migration returned <b>0 of 5</b> suggestion neighbours, the journal-entry index the same for its kind, and each
+/// left the other kind green — so neither passes on the other's index. (Both kinds are recalled before either is
+/// asserted, and their counts asserted as one map, so that claim is read off a single failure rather than inferred
+/// past a fail-fast loop that would have left the second kind <i>unevaluated</i> — which is not the same as green.)
+/// With the schema guard in place the same
+/// break now reddens <i>earlier</i>, at the closed-set assertion, which is a sharper diagnosis of the same defect;
+/// that behavioural evidence is why the index matters and is kept on record rather than superseded. The guard
+/// itself was proven able to fail three ways: smuggling the indexed <c>SoftSignal</c> kind into the crowd, dropping
+/// a target index, and adding a set-predicate index (<c>WHERE "OwnerKind" = ANY (ARRAY[3, 5])</c>) over two noise
+/// kinds — the last being the false negative a substring match would have let through. Restored afterwards — the
+/// migration is production code this tier does not edit.
 /// </para>
 /// </remarks>
 public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<EmbeddingReadTestPostgresFactory>
@@ -160,7 +168,11 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
             mayBePartitioned,
             "exactly the soft-signal index gh#864 added and the two AddContextVectorIndexes added (gh#1065) may "
             + "partition this table -- every target kind needs one for this suite to have anything to prove chosen, "
-            + "and every noise kind must have none for the crowd to crowd at all");
+            + "and every noise kind must have none for the crowd to crowd at all. If you are reading this because a "
+            + "LEGITIMATE new partial index reddened it: that is the guard working. Decide which side the new kind is "
+            + "on -- add it to _targets (and give it a case) if its ranked read is under test, or leave it out of "
+            + "_noiseKinds and add it here if it is neither. Do not widen this to a subset check: the closed set is "
+            + "what makes an index appearing on a NOISE kind impossible to miss");
 
         foreach (EmbeddingOwnerKind kind in _noiseKinds)
         {
@@ -209,19 +221,28 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         IEmbeddingRecall recall = scope.ServiceProvider.GetRequiredService<IEmbeddingRecall>();
 
+        // BOTH kinds are read BEFORE anything is asserted, and their counts are asserted TOGETHER as one map. A
+        // per-kind assertion inside the loop is fail-fast: the first kind's failure would abandon the run with the
+        // second kind never evaluated, which is not the same as the second kind passing -- and "each break left the
+        // OTHER kind green" is precisely the claim this suite's prove-red record makes. Asserting the map makes a
+        // run report every kind's recall, so that claim is readable off a single failure rather than inferred.
+        Dictionary<EmbeddingOwnerKind, IReadOnlyList<SemanticNeighbor>> hitsByKind = [];
         foreach ((RetrievalKind retrieval, EmbeddingOwnerKind owner) in _targets)
         {
-            IReadOnlyList<SemanticNeighbor> hits =
-                await recall.NearestAsync(retrieval, query, RequestedN, CancellationToken.None);
+            hitsByKind[owner] = await recall.NearestAsync(retrieval, query, RequestedN, CancellationToken.None);
+        }
 
-            hits.Should().HaveCount(
-                RequestedN,
-                $"gh#1065's partial HNSW index for {owner} searches inside the owner kind the read filters on, so "
-                + $"{NoiseCountPerKind * _noiseKinds.Length} closer rows of other kinds cannot starve it -- "
-                + $"{TargetCountPerKind} {owner} rows exist. Zero here is the gh#861 starvation, reproduced per kind");
+        hitsByKind.ToDictionary(hits => hits.Key, hits => hits.Value.Count).Should().BeEquivalentTo(
+            _targets.ToDictionary(target => target.Owner, _ => RequestedN),
+            "gh#1065's partial HNSW index for each kind searches inside the owner kind that kind's read filters on, "
+            + $"so the {NoiseCountPerKind * _noiseKinds.Length} closer rows of other kinds cannot starve it -- "
+            + $"{TargetCountPerKind} rows of each target kind exist. A zero here is the gh#861 starvation, "
+            + "reproduced for whichever kind reports it");
 
-            // ...and every hit really is that kind. A count-only assertion would pass if a "fix" had widened the
-            // search instead of scoping it, letting another owner kind's row through as a neighbour.
+        // ...and every hit really is its own kind. A count-only assertion would pass if a "fix" had widened the
+        // search instead of scoping it, letting another owner kind's row through as a neighbour.
+        foreach ((EmbeddingOwnerKind owner, IReadOnlyList<SemanticNeighbor> hits) in hitsByKind)
+        {
             IReadOnlyList<string> expected = [.. rows.Where(row => row.OwnerKind == owner).Select(row => row.OwnerId)];
             hits.Select(hit => hit.OwnerId).Should().BeSubsetOf(
                 expected, $"the read is 'the nearest {owner}', never 'the nearest anything'");
