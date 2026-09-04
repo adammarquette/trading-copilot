@@ -178,11 +178,16 @@ public sealed class CrossKindGroundingIntegrationTests : IClassFixture<NewsGroun
         await ReassignOwnerAsync(foreignSuggestion, foreignTrade, await OperatorIdAsync());
         RecordedLlmCall ownedTurn = await TurnAsync(client, conversationId, prompt);
 
-        // BOTH turns are reduced to named facts and asserted AS ONE MAP. Taking both turns before asserting is not
+        // BOTH turns' GROUNDING facts are named and asserted AS ONE MAP. Taking both turns before asserting is not
         // enough on its own: six sequential assertions in source order are still fail-fast, and with the control's
         // three last, a first-turn failure would leave the control's evidence unobserved -- which is exactly the
         // claim this case rests on ("the same rows DO ground the turn once they are mine"). A map reports every fact,
         // so one run says which half moved. (gh#1112, the same correction the sibling recall suite carries.)
+        //
+        // The one thing still ordered ahead of the map is TurnAsync's own HTTP/call-count contract, asserted per turn
+        // as each is taken: a turn 1 that 500s or makes two model calls does abandon the run before turn 2. No break
+        // recorded for this case reaches that -- the endpoint's grounding catch is fail-open, so a retrieval defect
+        // surfaces as a degraded turn, not a failed one -- but it is ordering, not aggregation, so it is said plainly.
         string foreignMessage = foreignTurn.Request.Messages[^1].Content;
         string ownedMessage = ownedTurn.Request.Messages[^1].Content;
         Dictionary<string, bool> observed = new(StringComparer.Ordinal)
@@ -201,6 +206,11 @@ public sealed class CrossKindGroundingIntegrationTests : IClassFixture<NewsGroun
             ["turn 2: the rationale still never reaches the system prompt"] =
                 !ownedTurn.Request.SystemPrompt.Contains("STRANGER-RATIONALE-gh1096", StringComparison.Ordinal),
         };
+
+        // The expectation is derived from the map's own keys, so it asserts every VALUE but not the membership --
+        // a fact deleted from the map above would narrow this case silently. The count pins the membership.
+        observed.Should().HaveCount(
+            7, "every fact this case rests on is in the map; dropping one narrows the case without failing it");
 
         observed.Should().BeEquivalentTo(
             observed.Keys.ToDictionary(fact => fact, _ => true, StringComparer.Ordinal),

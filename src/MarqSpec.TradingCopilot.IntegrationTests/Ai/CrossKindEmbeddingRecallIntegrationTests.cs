@@ -161,12 +161,20 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
 
         List<EmbeddingRecord> rows = new((TargetCountPerKind * _targets.Length) + (NoiseCountPerKind * _noiseKinds.Length));
 
-        // ANTI-VACUITY, BEFORE THE SEED. Everything below only poses the starvation question while the crowd's
-        // kinds genuinely have NO index of their own: an indexed noise kind is searched inside its own graph, stops
-        // crowding the shared window, and this suite would then return a full n for reasons unconnected to the
-        // indexes it guards -- green forever, proving nothing. No other suite asserts it, and gh#1065 has already
-        // invalidated exactly this assumption once (the sibling gh#861 suite still names Suggestion as unindexed
-        // noise -- gh#1110). So it is read off the LIVE migrated schema, not trusted to a comment.
+        // THE SCHEMA, BEFORE THE SEED -- read off the LIVE migrated database rather than trusted to a comment.
+        //
+        // The load-bearing half is the TARGETS: a target kind with no partial index of its own gives this suite
+        // nothing to prove chosen, and it would report a starvation it was never in a position to prevent.
+        //
+        // The noise half is seed cost and accuracy, NOT protection. An earlier version of this comment said an
+        // indexed noise kind "is searched inside its own graph and stops crowding" -- that is false, and gh#1112
+        // settled it by running it: SoftSignal, which does hold IX_Embeddings_Vector_Cosine_SoftSignal, substituted
+        // into the crowd with the target index dropped still starved the read to 0 of 5. The crowding happens in the
+        // TABLE-WIDE IX_Embeddings_Vector_Cosine, which holds every row of every kind, so a second home in another
+        // partial index changes nothing about the window a noise row fills. What the noise half buys is a bulk seed
+        // that never pays HNSW maintenance for rows this suite will not query, and a _noiseKinds list that cannot
+        // quietly stop meaning what the remarks say -- the drift that hit the sibling gh#861 suite when gh#1065 gave
+        // Suggestion an index (gh#1110, since fixed there; that suite now names Topic / Rule / MarketSnapshot).
         //
         // The assertion is CLOSED and reads integers, not substrings: the set of owner kinds any partial index on
         // this table selects must be exactly {SoftSignal, Suggestion, JournalEntry}. A new partial index on any
