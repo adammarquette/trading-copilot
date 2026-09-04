@@ -232,7 +232,7 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
             hitsByKind[owner] = await recall.NearestAsync(retrieval, query, RequestedN, CancellationToken.None);
         }
 
-        hitsByKind.ToDictionary(hits => hits.Key, hits => hits.Value.Count).Should().BeEquivalentTo(
+        hitsByKind.ToDictionary(entry => entry.Key, entry => entry.Value.Count).Should().BeEquivalentTo(
             _targets.ToDictionary(target => target.Owner, _ => RequestedN),
             "gh#1065's partial HNSW index for each kind searches inside the owner kind that kind's read filters on, "
             + $"so the {NoiseCountPerKind * _noiseKinds.Length} closer rows of other kinds cannot starve it -- "
@@ -240,13 +240,23 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
             + "reproduced for whichever kind reports it");
 
         // ...and every hit really is its own kind. A count-only assertion would pass if a "fix" had widened the
-        // search instead of scoping it, letting another owner kind's row through as a neighbour.
+        // search instead of scoping it, letting another owner kind's row through as a neighbour. Gathered across
+        // every kind and asserted once, for the same reason the counts are: a per-kind assertion inside the loop
+        // would abandon the run at the first offender, and "the other kind was clean" is then an inference about an
+        // iteration that never ran rather than an observation.
+        List<string> foreignHits = [];
         foreach ((EmbeddingOwnerKind owner, IReadOnlyList<SemanticNeighbor> hits) in hitsByKind)
         {
-            IReadOnlyList<string> expected = [.. rows.Where(row => row.OwnerKind == owner).Select(row => row.OwnerId)];
-            hits.Select(hit => hit.OwnerId).Should().BeSubsetOf(
-                expected, $"the read is 'the nearest {owner}', never 'the nearest anything'");
+            HashSet<string> ofThisKind =
+                [.. rows.Where(row => row.OwnerKind == owner).Select(row => row.OwnerId)];
+            foreignHits.AddRange(hits
+                .Where(hit => !ofThisKind.Contains(hit.OwnerId))
+                .Select(hit => $"{owner} recalled {hit.OwnerId}"));
         }
+
+        foreignHits.Should().BeEmpty(
+            "each read is 'the nearest row OF ITS KIND', never 'the nearest anything' -- a widened search would "
+            + "satisfy the counts above while returning another owner kind's rows");
     }
 
     // =================================================================================================================
