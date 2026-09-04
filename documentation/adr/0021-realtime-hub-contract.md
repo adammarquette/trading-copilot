@@ -147,7 +147,10 @@ poll-until-refresh until then.
   catch-up or `?after=` replay can reorder a chunk behind its message the way a sequenced event could. The one
   ordering the hub does *not* own is a client's own **REST turn response**, which can resolve either side of the
   pushes; a connection that settled a turn locally before seeing its message push therefore suppresses the chunks
-  still in flight behind it (gh#1085's straggler) until that push arrives and re-opens the stream. Consequence
-  worth stating plainly: a **dropped message push** now costs that connection its live draft for the *following*
+  still in flight behind it (gh#1085's straggler) until that push arrives and re-opens the stream. Being live-only
+  also means a **reconnect** is the other terminator: a turn that settled while the socket was down is never
+  replayed, so the thread **re-reads over REST on `onResync`** and drops the draft the dropped socket stranded —
+  the discipline the blotter and the chart overlays already take for owner-scoped pushes. Consequence worth stating
+  plainly: a **dropped message push** on a live socket costs that connection its live draft for the *following*
   turn as well as the settled row — the degraded state R-19 / ADR-0013's connection indicator already exists to
   declare, not a silent one.

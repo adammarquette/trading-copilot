@@ -29,6 +29,7 @@ function deferred<T>() {
 
 let chatChunkHandler: ((chunk: RealtimeChatChunk) => void) | null = null;
 let chatMessageHandler: ((message: RealtimeChatMessage) => void) | null = null;
+let resyncHandler: (() => void) | null = null;
 
 function message(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -52,13 +53,17 @@ beforeEach(() => {
   vi.clearAllMocks();
   chatChunkHandler = null;
   chatMessageHandler = null;
+  resyncHandler = null;
   useRealtimeMock.mockReturnValue({
     connectionState: 'live',
     onEvent: vi.fn(() => vi.fn()),
     onOrderState: vi.fn(() => vi.fn()),
     onFill: vi.fn(() => vi.fn()),
     onSuggestion: vi.fn(() => vi.fn()),
-    onResync: vi.fn(() => vi.fn()),
+    onResync: (handler: () => void) => {
+      resyncHandler = handler;
+      return vi.fn();
+    },
     onChatChunk: (handler: (chunk: RealtimeChatChunk) => void) => {
       chatChunkHandler = handler;
       return vi.fn();
@@ -669,6 +674,56 @@ describe('ConversationThread — cross-connection reconciliation', () => {
     );
 
     expect(screen.getByTestId('chat-draft').textContent).toBe('Headroom is ');
+  });
+
+  it('a reconnect drops the stranded draft and re-reads the thread over REST (ADR-0021)', async () => {
+    // Chat pushes are live-only, outside the resume replay: a turn that settles while the socket is down is never
+    // replayed, and the draft it was streaming would otherwise stand forever (nothing else terminates it). ADR-0021
+    // says a reconnect re-fetches that state -- the same discipline the blotter and the chart overlays take.
+    loadedEmptyThread();
+
+    await renderThread();
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is ' }));
+    expect(screen.getByTestId('chat-draft')).toBeTruthy();
+
+    getMock.mockResolvedValue({
+      ok: true,
+      data: {
+        id: 'c1',
+        title: null,
+        createdAt: '',
+        updatedAt: '',
+        messages: [
+          message({
+            id: 'a1',
+            sequence: 2,
+            role: ChatRole.Assistant,
+            content: 'settled while down',
+          }),
+        ],
+      },
+    });
+    await act(async () => resyncHandler?.());
+
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+    expect(screen.getByText('settled while down')).toBeTruthy();
+    expect(getMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('a reconnect leaves a turn THIS connection has in flight to its own REST response', async () => {
+    // The turn was initiated over HTTP and is unaffected by the socket; its settle is the authoritative reconcile
+    // (it drops the optimistic row and folds the real pair). Re-reading underneath it would blank the operator's
+    // own in-flight turn for no gain.
+    loadedEmptyThread();
+    sendMock.mockReturnValue(new Promise(() => {})); // stays in flight across the reconnect
+
+    await renderThread();
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'headroom?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await act(async () => resyncHandler?.());
+
+    expect(getMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('headroom?')).toBeTruthy();
   });
 
   it('streams a LATER cross-connection turn too -- settling one turn is not a latch (gh#1103)', async () => {
