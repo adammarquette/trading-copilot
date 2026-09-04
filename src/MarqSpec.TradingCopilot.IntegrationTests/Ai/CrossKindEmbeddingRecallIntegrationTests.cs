@@ -72,7 +72,7 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// trusted to a comment.
 /// </para>
 /// <para>
-/// <b>Prove-red (gh#1096, recorded in the PR body).</b> The <i>behavioural</i> proof came first, before the
+/// <b>Prove-red (gh#1096, PR #1108; the later breaks gh#1112, PR #1113).</b> The <i>behavioural</i> proof came first, before the
 /// pre-seed schema guard existed: commenting the <c>Suggestion</c> index out of the <c>AddContextVectorIndexes</c>
 /// migration returned <b>0 of 5</b> suggestion neighbours, the journal-entry index the same for its kind, and each
 /// left the other kind green — so neither passes on the other's index. (Both kinds are recalled before either is
@@ -254,9 +254,13 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
                 .Select(hit => $"{owner} recalled {hit.OwnerId}"));
         }
 
+        // The offenders ride the message, not just "at least one item": the whole reason they are gathered rather
+        // than asserted per kind is so one failure names EVERY kind that leaked, and a message that reports only
+        // the first would give that back.
         foreignHits.Should().BeEmpty(
             "each read is 'the nearest row OF ITS KIND', never 'the nearest anything' -- a widened search would "
-            + "satisfy the counts above while returning another owner kind's rows");
+            + "satisfy the counts above while returning another owner kind's rows. Foreign hits: {0}",
+            string.Join("; ", foreignHits));
     }
 
     // =================================================================================================================

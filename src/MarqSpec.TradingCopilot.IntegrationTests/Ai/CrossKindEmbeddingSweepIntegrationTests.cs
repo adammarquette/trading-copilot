@@ -71,7 +71,7 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// A fresh DI scope per pass, exactly as the host does in production.
 /// </para>
 /// <para>
-/// <b>Prove-red (gh#1096, recorded in the PR body).</b> Each guard was run against a deliberately broken local copy
+/// <b>Prove-red (gh#1096, PR #1108; the record corrected in gh#1112, PR #1113).</b> Each guard was run against a deliberately broken local copy
 /// of production and confirmed red for its own reason, then restored: dropping the <c>Suggestion</c> /
 /// <c>JournalEntry</c> arms' anti-join (an unconditional delete) reddens <b>all six</b> cases — not only the
 /// live-owner ones, since the two stale-model cases seed live owners too; making them no-ops
