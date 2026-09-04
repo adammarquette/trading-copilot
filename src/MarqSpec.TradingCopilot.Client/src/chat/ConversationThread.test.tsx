@@ -312,6 +312,57 @@ describe('ConversationThread — sending a turn', () => {
     expect(screen.queryByTestId('chat-draft')).toBeNull();
   });
 
+  it('still streams a later turn when the settled push BEAT the REST response (gh#1103)', async () => {
+    // The straggler window closed by gh#1085 is bounded by the turn's settled message push: chunks and that push
+    // travel the same connection in send order, so nothing of this turn can follow it. When it lands BEFORE the
+    // REST response resolves -- the ordinary race, per the module note -- the turn is already terminated and the
+    // settle must NOT leave this connection deaf to the next turn's chunks (one taken on another screen, which
+    // never re-arms anything here).
+    loadedEmpty();
+    const turn = deferred<Awaited<ReturnType<typeof sendChatTurn>>>();
+    sendMock.mockReturnValue(turn.promise);
+
+    await renderThread();
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'headroom?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is $1,8' }));
+
+    act(() =>
+      chatMessageHandler?.({
+        conversationId: 'c1',
+        messageId: 'a1',
+        sequence: 2,
+        role: ChatRole.Assistant,
+        content: 'Headroom is $1,800.',
+        at: '2026-08-01T00:02:00Z',
+      }),
+    );
+    await act(async () => {
+      turn.settle({
+        ok: true,
+        data: {
+          userMessage: message({
+            id: 'u1',
+            sequence: 1,
+            role: ChatRole.User,
+            content: 'headroom?',
+          }),
+          assistantMessage: message({
+            id: 'a1',
+            sequence: 2,
+            role: ChatRole.Assistant,
+            content: 'Headroom is $1,800.',
+          }),
+        },
+      });
+    });
+    expect(screen.queryByTestId('chat-draft')).toBeNull(); // sanity: settled cleanly, no draft standing
+
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Two contracts' }));
+
+    expect(screen.getByTestId('chat-draft').textContent).toBe('Two contracts');
+  });
+
   it('on success, replaces the optimistic turn and the streamed draft with the settled pair, and clears the composer', async () => {
     loadedEmpty();
     const turn = deferred<Awaited<ReturnType<typeof sendChatTurn>>>();
@@ -515,5 +566,96 @@ describe('ConversationThread — cross-connection reconciliation', () => {
     );
 
     expect(screen.queryByText('not for this thread')).toBeNull();
+  });
+
+  // The chunk half of the same contract (gh#1103). `realtimeChatChunk` is pushed per-OWNER -- to every connection
+  // the operator has open -- and ADR-0021 states the push exists to serve the owner's OTHER connections. So a
+  // connection that never called send() is the audience for the live draft, not an eavesdropper on one.
+  function loadedEmptyThread() {
+    getMock.mockResolvedValue({
+      ok: true,
+      data: { id: 'c1', title: null, createdAt: '', updatedAt: '', messages: [] },
+    });
+  }
+
+  const settledAssistantPush = {
+    conversationId: 'c1',
+    messageId: 'a1',
+    sequence: 2,
+    role: ChatRole.Assistant,
+    content: 'Headroom is $1,800.',
+    at: '2026-08-01T00:02:00Z',
+  };
+
+  it('renders the live streaming draft of a turn taken on ANOTHER connection (gh#1103)', async () => {
+    loadedEmptyThread();
+
+    await renderThread(); // this connection never sends -- it is the other screen watching
+
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is ' }));
+    expect(screen.getByTestId('chat-draft').textContent).toBe('Headroom is ');
+
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: '$1,8' }));
+    expect(screen.getByTestId('chat-draft').textContent).toBe('Headroom is $1,8');
+  });
+
+  it('ignores a streamed chunk for a DIFFERENT conversation on a connection that never sent', async () => {
+    loadedEmptyThread();
+
+    await renderThread('c1');
+    act(() => chatChunkHandler?.({ conversationId: 'OTHER', delta: 'not for this thread' }));
+
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+  });
+
+  it('swaps the passive draft for the settled message, leaving no stale duplicate (gh#1103)', async () => {
+    // The pre-gh#1085 bug this closes rather than relocates: `streaming` was cleared only inside send()'s own
+    // settle path, so a connection that did not send had its draft left standing under the real answer forever.
+    loadedEmptyThread();
+
+    await renderThread();
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is $1,8' }));
+    expect(screen.getByTestId('chat-draft')).toBeTruthy();
+
+    act(() => chatMessageHandler?.(settledAssistantPush));
+
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+    const rows = screen.getAllByTestId('chat-message');
+    expect(rows.map((row) => row.textContent)).toEqual(['Headroom is $1,800.']);
+  });
+
+  it('keeps a live draft standing when the push that arrives is the operator turn, not the answer', async () => {
+    // Only the ASSISTANT message terminates a turn's chunk stream. A user-role push (the operator's own turn,
+    // taken on the other screen) precedes the answer being generated -- clearing the draft on it would blank the
+    // very stream it introduces.
+    loadedEmptyThread();
+
+    await renderThread();
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is ' }));
+    act(() =>
+      chatMessageHandler?.({
+        conversationId: 'c1',
+        messageId: 'u1',
+        sequence: 1,
+        role: ChatRole.User,
+        content: 'headroom?',
+        at: '2026-08-01T00:01:00Z',
+      }),
+    );
+
+    expect(screen.getByTestId('chat-draft').textContent).toBe('Headroom is ');
+  });
+
+  it('streams a LATER cross-connection turn too -- settling one turn is not a latch (gh#1103)', async () => {
+    loadedEmptyThread();
+
+    await renderThread();
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is $1,8' }));
+    act(() => chatMessageHandler?.(settledAssistantPush));
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Two contracts' }));
+
+    expect(screen.getByTestId('chat-draft').textContent).toBe('Two contracts');
   });
 });
