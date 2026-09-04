@@ -14,7 +14,7 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// review flagged in <see cref="PgVectorNewsSimilarity"/>: <c>.Where(OwnerKind == SoftSignal)</c> filters the
 /// HNSW <b>approximate</b> nearest-neighbour scan, and pgvector applies that filter <i>after</i> the scan, not as
 /// part of it (the HNSW access method has no vocabulary for a non-vector predicate). On the polymorphic
-/// <c>Embeddings</c> table — SoftSignal shares one table with Suggestion / Rule / MarketSnapshot per
+/// <c>Embeddings</c> table — SoftSignal shares one table with Topic / Rule / MarketSnapshot per
 /// <see cref="EmbeddingOwnerKind"/> — the query can under-return: fewer than <c>n</c> SoftSignal neighbours even
 /// when <c>n</c> or more exist, because the approximate candidate window fills with other owner kinds first.
 /// </summary>
@@ -38,6 +38,16 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// failure — when it happens — is total (0 of <c>n</c>) rather than a fragile few-rows-short result that could
 /// flip pass/fail on unrelated noise. This is what makes the assertion below a reliable regression guard rather
 /// than an occasionally-flaky one.
+/// </para>
+/// <para>
+/// <b>The noise crowd must be seeded from owner kinds with no partial vector index of their own (gh#1065).</b>
+/// Once some owner kinds acquired their own partial HNSW indexes — e.g. <c>Suggestion</c> now has
+/// <c>IX_Embeddings_Vector_Cosine_Suggestion</c> — a kind indexed for its own read would not crowd the
+/// SoftSignal-only index, so it could no longer starve recall and would miss the hazard. Noise kinds are therefore
+/// chosen from those sharing the polymorphic table with SoftSignal but with no partial index of their own
+/// — currently Topic, Rule, and MarketSnapshot (see <see cref="EmbeddingOwnerKind"/> and check the latest
+/// AddContextVectorIndexes-family migrations in <c>src/MarqSpec.TradingCopilot.Data/Migrations</c> to verify
+/// these remain unindexed).
 /// </para>
 /// <para>
 /// <b>gh#864 (filed alongside this suite):</b> the observed defect is pinned per the QA guard discipline —
@@ -79,7 +89,7 @@ public sealed class NewsEmbeddingRecallIntegrationTests : IClassFixture<Embeddin
 
     private static readonly EmbeddingOwnerKind[] _noiseKinds =
     [
-        EmbeddingOwnerKind.Suggestion,
+        EmbeddingOwnerKind.Topic,
         EmbeddingOwnerKind.Rule,
         EmbeddingOwnerKind.MarketSnapshot,
     ];
