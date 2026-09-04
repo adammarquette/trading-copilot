@@ -151,7 +151,7 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   // Cross-connection reconciliation (gh#906, ADR-0006/ADR-0021): a turn taken on another window/tab is pushed here
   // too. Filtered to THIS conversation and folded in by id, so a redundant delivery (or our own turn's push racing
   // its REST response) never duplicates a row.
-  const { onChatMessage, onChatChunk } = useRealtime();
+  const { onChatMessage, onChatChunk, onResync } = useRealtime();
   useEffect(
     () =>
       onChatMessage((message) => {
@@ -206,6 +206,24 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         setStreaming((current) => ({ text: (current?.text ?? '') + chunk.delta }));
       }),
     [onChatChunk, conversationId],
+  );
+
+  // A reconnect re-reads the thread (ADR-0021: chat pushes are live-only and outside the resume replay, so a turn
+  // that settled while the socket was down is never replayed) and drops whatever draft the dropped socket left
+  // stranded -- nothing else would ever terminate it, and half a turn's tokens with a hole in them is not a draft
+  // worth keeping. The same discipline the blotter and the chart overlays take on `onResync`. A turn THIS
+  // connection has in flight is left alone: it travels over HTTP, unaffected by the socket, and its own settle is
+  // the authoritative reconcile (it drops the optimistic row and folds the real pair).
+  useEffect(
+    () =>
+      onResync(() => {
+        stragglersRef.current = false;
+        setStreaming(null);
+        if (!sendingRef.current) {
+          load();
+        }
+      }),
+    [onResync, load],
   );
 
   const send = useCallback(() => {
