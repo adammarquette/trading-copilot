@@ -147,10 +147,20 @@ poll-until-refresh until then.
   catch-up or `?after=` replay can reorder a chunk behind its message the way a sequenced event could. The one
   ordering the hub does *not* own is a client's own **REST turn response**, which can resolve either side of the
   pushes; a connection that settled a turn locally before seeing its message push therefore suppresses the chunks
-  still in flight behind it (gh#1085's straggler) until that push arrives and re-opens the stream. Being live-only
-  also means a **reconnect** is the other terminator: a turn that settled while the socket was down is never
-  replayed, so the thread **re-reads over REST on `onResync`** and drops the draft the dropped socket stranded —
-  the discipline the blotter and the chart overlays already take for owner-scoped pushes. Consequence worth stating
-  plainly: a **dropped message push** on a live socket costs that connection its live draft for the *following*
-  turn as well as the settled row — the degraded state R-19 / ADR-0013's connection indicator already exists to
-  declare, not a silent one.
+  still in flight behind it (gh#1085's straggler) — a **time-bounded** suppression, since a straggler is a delivery
+  skew of seconds and a suppression left armed waiting on a push that never comes would silently cost the *next*
+  turn its draft. Being live-only also means a **reconnect** is the second terminator: a turn that settled while the
+  socket was down is never replayed, so the thread drops the stranded draft and **re-reads over REST on `onResync`**
+  — as a *background* read that keeps the rendered thread if it fails (a reconcile signal must never nuke a working
+  surface, per gh#760 above) and **folds** rather than replaces (a push landing mid-read would otherwise be
+  overwritten and, being live-only, never come back), skipped only while a turn this connection sent is still in
+  flight over HTTP. The **limits** of the shape are in the payload, and are stated here rather than discovered
+  later. A delta's only correlation key is the conversation (`RealtimeChatChunk` documents "one in-flight turn per
+  conversation", which nothing enforces), so two screens with turns in flight on one conversation share a single
+  undifferentiated stream and a single draft. And a **faulted** turn sends no terminator at all — `TurnAsync`
+  returns 422 before `MessageAppendedAsync`, and only round 1 streams — so on every other connection its
+  half-written draft is retired by a client-side **idle guard** rather than by the contract, and a turn started
+  inside that window still appends to it. Both are closed only by wire changes: a per-turn id on the chunk and the
+  message (gh#1106) and a faulted-turn terminator (gh#1107), neither smuggled in here. A **dropped** message push on
+  a live socket degrades the same way — it costs that connection the settled row, and its draft until the guard or
+  the next send — which is the state R-19 / ADR-0013's connection indicator exists to declare.

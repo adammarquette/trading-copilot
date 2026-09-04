@@ -32,6 +32,19 @@ type LoadState =
 /** The temporary id an optimistic operator turn carries until the server assigns a real one. */
 const PENDING_USER_ID = 'pending-user-turn';
 
+/**
+ * How long a streaming draft may sit with no new delta before it is treated as abandoned. Round 1 of a turn is one
+ * uninterrupted SSE stream (the tool loop stops streaming entirely, `ChatTurnService.StreamAsync`), so a gap this
+ * long inside a live turn does not happen; a faulted turn, which never sends a terminator, is what produces one.
+ */
+const DRAFT_IDLE_MS = 30_000;
+
+/**
+ * How long after a locally settled turn a chunk may still be one of its stragglers (gh#1085). The server had
+ * already sent every delta before it wrote the REST response, so this is a delivery skew, not a duration.
+ */
+const STRAGGLER_WINDOW_MS = 15_000;
+
 function roleLabel(role: ChatMessage['role']): string {
   switch (role) {
     case ChatRole.User:
@@ -76,6 +89,19 @@ function foldIn(messages: readonly ChatMessage[], incoming: ChatMessage): readon
  * push arrives suppresses the chunks still in flight behind it (gh#1085) rather than resurrecting the bubble under
  * an answer already rendered.
  *
+ * **Where that stops being enough, stated rather than assumed.** The draft is one per conversation, which is as
+ * fine-grained as the wire allows: a delta's only correlation key is the conversation id, documented server-side as
+ * "one in-flight turn per conversation" (`RealtimeChatChunk`) but not enforced. Two consequences follow, and both
+ * are pinned by test rather than left to be rediscovered. (1) Two screens *can* have turns in flight on the same
+ * conversation at once; their deltas then arrive as one undifferentiated stream, so the first settled push retires
+ * the draft and the still-running turn's next delta re-opens it from empty. (2) A turn that FAULTS pushes no
+ * terminator at all -- `TurnAsync` returns 422 before `MessageAppendedAsync` -- so its half-written draft is retired
+ * here by the {@link DRAFT_IDLE_MS} idle guard instead, and a delta arriving after that opens a NEW draft rather
+ * than welding onto the abandoned one; a turn started INSIDE that window still appends to it, which no client can
+ * prevent. In every case the settled thread stays correct -- only the live draft is affected. Closing either
+ * properly is a wire change (a per-turn id, gh#1106; a faulted-turn terminator, gh#1107), not something a
+ * connection can infer.
+ *
  * **The optimistic operator turn is provisional.** It renders immediately (temp id {@link PENDING_USER_ID}) so the
  * operator sees what they sent while the turn is in flight, and is replaced by the server's copy on success. On a
  * refusal it is DROPPED rather than left standing: a 429 (governor) persists nothing at all, and a 422 (faulted
@@ -98,48 +124,106 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   const [streaming, setStreaming] = useState<{ readonly text: string } | null>(null);
   const mounted = useRef(true);
   const sendingRef = useRef(false); // synchronous guard: `sending` state lags a tick behind a rapid double-submit
-  // The chunk stream's two guards (see the module note on the streaming draft):
+  // The chunk stream's guards (see the module note on the streaming draft):
   //   `settledTurnsRef` counts the settled assistant pushes seen for THIS conversation -- each one terminates its
   //     turn's chunk stream on this connection, so it is also what re-opens the gate below.
   //   `stragglersRef` is true only in the window where this connection settled a turn over REST but has not yet
   //     seen that turn's terminating push, i.e. the only window a straggling chunk can still arrive in (gh#1085).
   const settledTurnsRef = useRef(0);
   const stragglersRef = useRef(false);
+  const stragglerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Arms / disarms the straggler suppression, TIME-BOUNDED. A straggler is a chunk still in flight behind a turn
+  // this connection already settled, so it is a matter of seconds; leaving the suppression armed indefinitely
+  // waiting for a terminating push that a faulted turn never sends (gh#1107) would silently cost this connection
+  // the NEXT turn's draft -- gh#1103's own bug, re-entered through the error path. So it expires on its own.
+  const suppressStragglers = useCallback((suppress: boolean) => {
+    if (stragglerTimer.current !== null) {
+      clearTimeout(stragglerTimer.current);
+      stragglerTimer.current = null;
+    }
+    stragglersRef.current = suppress;
+    if (suppress) {
+      stragglerTimer.current = setTimeout(() => {
+        stragglersRef.current = false;
+        stragglerTimer.current = null;
+      }, STRAGGLER_WINDOW_MS);
+    }
+  }, []);
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      if (stragglerTimer.current !== null) {
+        clearTimeout(stragglerTimer.current);
+        stragglerTimer.current = null;
+      }
     };
   }, []);
 
+  // Retire a draft nothing is feeding any more. `streaming` is a fresh object per delta, so this re-arms on every
+  // chunk and only fires once the stream has actually gone quiet. It exists because a turn that FAULTS pushes no
+  // terminator at all (`TurnAsync` returns 422 before `MessageAppendedAsync`, and only round 1 streams), which on
+  // a connection that did not send leaves a half-written answer standing with no error and nothing to clear it.
+  // This bounds that: the draft cannot outlive its turn by more than the idle window, and a delta arriving after
+  // it starts a NEW draft instead of welding onto an abandoned one. It does not CLOSE the gap -- a turn started
+  // inside the window still appends to the stale draft, because a delta carries no turn identity and no boundary
+  // signal exists (gh#1107 / gh#1106, both wire changes); it is pinned by test rather than left to be found.
+  useEffect(() => {
+    if (streaming === null) {
+      return;
+    }
+    const timer = setTimeout(() => setStreaming(null), DRAFT_IDLE_MS);
+    return () => clearTimeout(timer);
+  }, [streaming]);
+
   // `conversationId` only ever changes via a remount (the host keys this component by it -- see the module note),
-  // so this effect runs exactly once per mount and the already-`loading` initial state needs no reset here.
-  const load = useCallback(() => {
-    void getConversation(conversationId)
-      .then((result) => {
-        if (!mounted.current) {
-          return;
-        }
-        if (!result.ok) {
-          setState({
-            kind: 'error',
-            message: result.kind === 'refused' ? result.reason : result.error,
-          });
-          return;
-        }
-        // System rows are grounding/instructions, never an operator-visible turn (see the module note).
-        setState({
-          kind: 'loaded',
-          messages: result.data.messages.filter((message) => message.role !== ChatRole.System),
+  // so the mount read runs exactly once per mount and the already-`loading` initial state needs no reset here.
+  //
+  // `background` separates the two readers. The MOUNT read owns the whole surface: nothing is rendered yet, so a
+  // failure has to become the error screen. A BACKGROUND refresh (the reconnect reconcile) must never do that --
+  // a socket blip is exactly when the follow-up GET is most likely to fail too, and taking a working thread and
+  // its composer away because a reconcile read failed is the "reconcile signal nuking a working surface" ADR-0021
+  // rules out (gh#760) and the suggestion panel / blotter avoid. It keeps what is rendered instead. Its success
+  // path FOLDS rather than replaces, for the same reason `onChatMessage` does: a push that lands while the read is
+  // in flight would otherwise be overwritten by the older list and, pushes being live-only, stay missing until a
+  // remount. A thread is append-only, so folding is monotone -- it cannot resurrect a row the server dropped
+  // because the server drops none.
+  const load = useCallback(
+    (background = false) => {
+      void getConversation(conversationId)
+        .then((result) => {
+          if (!mounted.current) {
+            return;
+          }
+          if (!result.ok) {
+            if (!background) {
+              setState({
+                kind: 'error',
+                message: result.kind === 'refused' ? result.reason : result.error,
+              });
+            }
+            return;
+          }
+          // System rows are grounding/instructions, never an operator-visible turn (see the module note).
+          const messages = result.data.messages.filter(
+            (message) => message.role !== ChatRole.System,
+          );
+          setState((current) =>
+            background && current.kind === 'loaded'
+              ? { kind: 'loaded', messages: messages.reduce(foldIn, current.messages) }
+              : { kind: 'loaded', messages },
+          );
+        })
+        .catch(() => {
+          if (mounted.current && !background) {
+            setState({ kind: 'error', message: 'The conversation could not be loaded.' });
+          }
         });
-      })
-      .catch(() => {
-        if (mounted.current) {
-          setState({ kind: 'error', message: 'The conversation could not be loaded.' });
-        }
-      });
-  }, [conversationId]);
+    },
+    [conversationId],
+  );
 
   useEffect(load, [load]);
 
@@ -161,12 +245,14 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         // A settled ASSISTANT message terminates its turn's chunk stream on this connection -- the server pushes
         // it after the last delta (ChatEndpoints.TurnAsync) and both travel one connection in send order, so no
         // chunk of that turn can follow it. It therefore both retires the live draft (on EVERY connection, not
-        // just the sender's -- the stale-duplicate half of gh#1103) and re-opens the gate for the next turn. A
-        // user-role push is the operator's own turn from another screen; it PRECEDES the answer being generated,
-        // so it must leave a live draft standing.
+        // just the sender's -- the stale-duplicate half of gh#1103) and re-opens the gate for the next turn.
+        // Narrowed to Assistant because a user-role push, were one ever added (today `TurnAsync` pushes only the
+        // assistant message, and `AppendAsync` pushes nothing at all), would be the operator's own turn arriving
+        // from another screen -- it PRECEDES the answer being generated, so retiring a draft on it would blank
+        // the very stream it introduces. Defensive, not a description of traffic that exists.
         if (message.role === ChatRole.Assistant) {
           settledTurnsRef.current += 1;
-          stragglersRef.current = false;
+          suppressStragglers(false);
           setStreaming(null);
         }
         setState((current) =>
@@ -188,7 +274,7 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
             : current,
         );
       }),
-    [onChatMessage, conversationId],
+    [onChatMessage, conversationId, suppressStragglers],
   );
   useEffect(
     () =>
@@ -211,19 +297,22 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   // A reconnect re-reads the thread (ADR-0021: chat pushes are live-only and outside the resume replay, so a turn
   // that settled while the socket was down is never replayed) and drops whatever draft the dropped socket left
   // stranded -- nothing else would ever terminate it, and half a turn's tokens with a hole in them is not a draft
-  // worth keeping. The same discipline the blotter and the chart overlays take on `onResync`. A turn THIS
-  // connection has in flight is left alone: it travels over HTTP, unaffected by the socket, and its own settle is
-  // the authoritative reconcile (it drops the optimistic row and folds the real pair).
+  // worth keeping. The same discipline the blotter and the chart overlays take on `onResync`, and a BACKGROUND
+  // read for the same reason they use one: a failed reconcile keeps the surface, never replaces it with an error
+  // screen. The draft is dropped either way -- it is stale on any reconnect -- but the RE-READ is skipped while a
+  // turn THIS connection sent is in flight: that turn travels over HTTP, unaffected by the socket, and its own
+  // settle is the authoritative reconcile (it drops the optimistic row and folds the real pair), so re-reading
+  // underneath it would only blank the operator's own optimistic turn.
   useEffect(
     () =>
       onResync(() => {
-        stragglersRef.current = false;
+        suppressStragglers(false);
         setStreaming(null);
         if (!sendingRef.current) {
-          load();
+          load(true);
         }
       }),
-    [onResync, load],
+    [onResync, load, suppressStragglers],
   );
 
   const send = useCallback(() => {
@@ -238,7 +327,7 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
     setStreaming(null);
     // A new turn begins: whatever the last one left behind, its chunks are live again. The snapshot is what the
     // settle path below compares against to tell "this turn is still streaming to me" from "already terminated".
-    stragglersRef.current = false;
+    suppressStragglers(false);
     const settledTurnsAtStart = settledTurnsRef.current;
     setState((current) =>
       current.kind === 'loaded'
@@ -282,7 +371,7 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         // terminates them re-opens the gate. A push lost outright leaves this connection closed until its own
         // next send -- the same degraded state that already costs it the settled message, which R-19's connection
         // indicator is what surfaces.
-        stragglersRef.current = settledTurnsRef.current === settledTurnsAtStart;
+        suppressStragglers(settledTurnsRef.current === settledTurnsAtStart);
 
         if (!result.ok) {
           // Drop the optimistic row: a 429 persisted nothing, and a 422's persisted user turn has no id this
@@ -326,7 +415,7 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         sendingRef.current = false;
         setSending(false);
         setStreaming(null);
-        stragglersRef.current = settledTurnsRef.current === settledTurnsAtStart; // as above
+        suppressStragglers(settledTurnsRef.current === settledTurnsAtStart); // as above
         setState((current) =>
           current.kind === 'loaded'
             ? {
@@ -337,7 +426,7 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         );
         setSendError('The message could not be sent.');
       });
-  }, [conversationId, draft]);
+  }, [conversationId, draft, suppressStragglers]);
 
   const handleSubmit = useCallback(
     (event: FormEvent<HTMLFormElement>) => {

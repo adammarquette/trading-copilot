@@ -720,10 +720,267 @@ describe('ConversationThread — cross-connection reconciliation', () => {
     await renderThread();
     fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'headroom?' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is ' }));
     await act(async () => resyncHandler?.());
 
     expect(getMock).toHaveBeenCalledTimes(1);
     expect(screen.getByText('headroom?')).toBeTruthy();
+    // The DRAFT is dropped even here: it is stale across any reconnect, whoever sent the turn.
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+  });
+
+  it('a FAILED reconnect re-read keeps the thread rather than replacing it with an error screen', async () => {
+    // A socket blip is exactly when the follow-up GET is most likely to fail too. ADR-0021's own gh#760 note: a
+    // reconcile signal must never nuke a working surface -- so the background read keeps what is rendered, and
+    // `kind: 'error'` stays reserved for the MOUNT read that owns the whole surface.
+    getMock.mockResolvedValue({
+      ok: true,
+      data: {
+        id: 'c1',
+        title: null,
+        createdAt: '',
+        updatedAt: '',
+        messages: [message({ id: 'm1', sequence: 1, content: 'still here' })],
+      },
+    });
+
+    await renderThread();
+    getMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      error: 'The request could not be sent.',
+    });
+    await act(async () => resyncHandler?.());
+
+    expect(screen.queryByTestId('thread-error')).toBeNull();
+    expect(screen.getByText('still here')).toBeTruthy();
+    expect(screen.getByLabelText(/Message/i)).toBeTruthy();
+  });
+
+  it('a THROW out of the reconnect re-read keeps the thread too (gh#973 class)', async () => {
+    getMock.mockResolvedValue({
+      ok: true,
+      data: {
+        id: 'c1',
+        title: null,
+        createdAt: '',
+        updatedAt: '',
+        messages: [message({ id: 'm1', sequence: 1, content: 'still here' })],
+      },
+    });
+
+    await renderThread();
+    getMock.mockRejectedValue(new Error('boom'));
+    await act(async () => resyncHandler?.());
+
+    expect(screen.queryByTestId('thread-error')).toBeNull();
+    expect(screen.getByText('still here')).toBeTruthy();
+  });
+
+  it('a push landing while the reconnect re-read is in flight survives it', async () => {
+    // The re-read FOLDS rather than replaces: chat pushes are live-only, so a message overwritten by an older
+    // list would stay missing until a remount. A thread is append-only, so folding cannot resurrect anything.
+    getMock.mockResolvedValue({
+      ok: true,
+      data: { id: 'c1', title: null, createdAt: '', updatedAt: '', messages: [] },
+    });
+
+    await renderThread();
+    const reread = deferred<Awaited<ReturnType<typeof getConversation>>>();
+    getMock.mockReturnValue(reread.promise);
+    act(() => resyncHandler?.());
+
+    act(() =>
+      chatMessageHandler?.({
+        conversationId: 'c1',
+        messageId: 'pushed',
+        sequence: 2,
+        role: ChatRole.Assistant,
+        content: 'arrived mid-read',
+        at: '2026-08-01T00:02:00Z',
+      }),
+    );
+    await act(async () => {
+      reread.settle({
+        ok: true,
+        data: {
+          id: 'c1',
+          title: null,
+          createdAt: '',
+          updatedAt: '',
+          messages: [message({ id: 'older', sequence: 1, content: 'from the read' })],
+        },
+      });
+    });
+
+    expect(screen.getAllByTestId('chat-message').map((row) => row.textContent)).toEqual([
+      'from the read',
+      'arrived mid-read',
+    ]);
+  });
+
+  it('a reconnect re-arms a chunk stream this connection had suppressed', async () => {
+    // The suppression is armed by settling a turn whose terminating push has not arrived. A reconnect ends any
+    // straggler's flight along with the socket, so leaving it armed would cost the next turn's draft.
+    loadedEmptyThread();
+    sendMock.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 429,
+      reason: 'Daily AI budget reached; resets at 00:00 UTC.',
+    });
+
+    await renderThread();
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'one more?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByRole('alert');
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'suppressed' }));
+    expect(screen.queryByTestId('chat-draft')).toBeNull(); // sanity: armed
+
+    await act(async () => resyncHandler?.());
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'after the reconnect' }));
+
+    expect(screen.getByTestId('chat-draft').textContent).toBe('after the reconnect');
+  });
+
+  describe('a turn that faults sends no terminator (gh#1107)', () => {
+    // `TurnAsync` returns 422 on `!turn.Succeeded` BEFORE `MessageAppendedAsync`, and only round 1 streams
+    // (`ChatTurnService.StreamAsync`) -- so "partial text, then silence, forever" is what a faulted turn looks
+    // like on a connection that did not send it. The sender clears its draft off the 422; nobody else is told.
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('retires a draft nothing is feeding any more', async () => {
+      loadedEmptyThread();
+
+      await renderThread();
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Half an ans' }));
+      expect(screen.getByTestId('chat-draft')).toBeTruthy();
+
+      act(() => vi.advanceTimersByTime(30_000));
+
+      expect(screen.queryByTestId('chat-draft')).toBeNull();
+    });
+
+    it('keeps the draft alive as long as deltas keep arriving', async () => {
+      // The guard must bound an ABANDONED stream, never truncate a live one.
+      loadedEmptyThread();
+
+      await renderThread();
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom ' }));
+      act(() => vi.advanceTimersByTime(29_000));
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'is ' }));
+      act(() => vi.advanceTimersByTime(29_000));
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: '$1,800.' }));
+
+      expect(screen.getByTestId('chat-draft').textContent).toBe('Headroom is $1,800.');
+    });
+
+    it('opens a NEW draft for the next turn rather than welding onto the abandoned one', async () => {
+      loadedEmptyThread();
+
+      await renderThread();
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Half an ans' }));
+      act(() => vi.advanceTimersByTime(30_000));
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Two contracts' }));
+
+      expect(screen.getByTestId('chat-draft').textContent).toBe('Two contracts');
+    });
+
+    it('pins the residue: a turn started INSIDE the idle window still appends to the stale draft', async () => {
+      // A delta carries no turn identity and there is no boundary signal, so no client can tell "the next turn's
+      // first token" from "the same turn, still going". Bounded, pinned, and tracked as gh#1107 rather than
+      // claimed closed.
+      loadedEmptyThread();
+
+      await renderThread();
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Half an ans' }));
+      act(() => vi.advanceTimersByTime(5_000));
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Two contracts' }));
+
+      expect(screen.getByTestId('chat-draft').textContent).toBe('Half an ansTwo contracts');
+    });
+
+    it('expires the straggler suppression instead of waiting for a push that never comes', async () => {
+      // A refused/faulted turn arms the suppression and no terminator will ever disarm it. Left armed, this
+      // connection would silently drop the NEXT turn's draft -- gh#1103's own bug, re-entered by the error path.
+      loadedEmptyThread();
+      sendMock.mockResolvedValue({
+        ok: false,
+        kind: 'refused',
+        status: 429,
+        reason: 'Daily AI budget reached; resets at 00:00 UTC.',
+      });
+
+      await renderThread();
+      fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'one more?' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await act(async () => {}); // let the refusal settle (fake timers -- no findBy)
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'a straggler' }));
+      expect(screen.queryByTestId('chat-draft')).toBeNull(); // sanity: suppressed, gh#1085
+
+      act(() => vi.advanceTimersByTime(15_000));
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'the next turn' }));
+
+      expect(screen.getByTestId('chat-draft').textContent).toBe('the next turn');
+    });
+  });
+
+  it('pins what TWO turns in flight at once do to the draft -- one stream per conversation (#1105 review)', async () => {
+    // The wire's correlation key for a delta is the CONVERSATION, documented server-side as "one in-flight turn
+    // per conversation" (RealtimeChatChunk). A second concurrent turn on the same conversation is not refused --
+    // it simply has nowhere to be told apart: both turns' deltas already arrive as one interleaved stream, so
+    // there is no coherent draft for the terminating push to preserve. The accepted behaviour is therefore that
+    // the first settled push retires the draft and the still-running turn's next delta re-opens it, and the
+    // SETTLED thread is correct regardless. Separating them needs a per-turn id on the payload -- gh#1106, a wire
+    // contract change, not something this connection can infer.
+    loadedEmptyThread();
+    const turn = deferred<Awaited<ReturnType<typeof sendChatTurn>>>();
+    sendMock.mockReturnValue(turn.promise);
+
+    await renderThread();
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'mine?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Mine is ' }));
+
+    // The OTHER screen's concurrent turn settles first.
+    act(() =>
+      chatMessageHandler?.({
+        conversationId: 'c1',
+        messageId: 'other',
+        sequence: 4,
+        role: ChatRole.Assistant,
+        content: 'answered on the other screen',
+        at: '2026-08-01T00:02:00Z',
+      }),
+    );
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+
+    // This connection's own turn is still streaming: its next delta re-opens the draft, from empty.
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'still going' }));
+    expect(screen.getByTestId('chat-draft').textContent).toBe('still going');
+
+    await act(async () => {
+      turn.settle({
+        ok: true,
+        data: {
+          userMessage: message({ id: 'u1', sequence: 1, role: ChatRole.User, content: 'mine?' }),
+          assistantMessage: message({
+            id: 'a1',
+            sequence: 2,
+            role: ChatRole.Assistant,
+            content: 'Mine is still going.',
+          }),
+        },
+      });
+    });
+
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+    expect(screen.getAllByTestId('chat-message').map((row) => row.textContent)).toEqual([
+      'mine?',
+      'Mine is still going.',
+      'answered on the other screen',
+    ]);
   });
 
   it('streams a LATER cross-connection turn too -- settling one turn is not a latch (gh#1103)', async () => {
