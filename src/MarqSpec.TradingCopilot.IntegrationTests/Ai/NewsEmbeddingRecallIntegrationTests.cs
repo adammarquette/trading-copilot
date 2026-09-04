@@ -47,13 +47,16 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// migrations in <c>src/MarqSpec.TradingCopilot.Data/Migrations</c>).
 /// </para>
 /// <para>
-/// <b>What that swap does <i>not</i> mean.</b> gh#1110's first note reasoned that an indexed noise kind "would not
+/// <b>What that swap does <i>not</i> mean.</b> The remark written alongside the swap reasoned that an indexed noise
+/// kind "would not
 /// crowd the SoftSignal-only index, so it could no longer starve recall and would miss the hazard". That is not how
 /// the crowding works, and running it settled the point: the red path here is served by the <i>table-wide</i>
 /// <c>IX_Embeddings_Vector_Cosine</c>, which holds every row of every owner kind, so a noise row having a second
 /// home in some other partial index fills the candidate window exactly as an unindexed one does — measured in
 /// gh#1112 on the sibling <c>CrossKindEmbeddingRecallIntegrationTests</c>, where substituting an <i>indexed</i>
-/// kind into the crowd and dropping the target index still starved the read to 0 of 5. Nothing indexes
+/// kind into the crowd and dropping the target index still starved the read to 0 of 5. gh#1110's own issue body had
+/// it right — it says in as many words that the guard is unaffected — so this is a remark that overtook its card,
+/// not a card that was wrong. Nothing indexes
 /// <c>SoftSignal</c>'s partial graph but SoftSignal rows, so nothing was ever in a position to crowd it. What the
 /// swap buys is a bulk seed that no longer pays incremental HNSW maintenance for 3,750 rows it never queries, and a
 /// noise list that still means what this remark says it means.
