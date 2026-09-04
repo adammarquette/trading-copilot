@@ -30,6 +30,15 @@ seam — a `DelegatingHandler` that refuses any non-`GET`, a stub that cannot re
 answer — do that instead of a reflective or naming check, and no future test can violate it however it is
 written.
 
+**The fixture must be able to produce what the test guards against** — the other half of the rule above. Before
+calling a suite done, ask **"what can this fixture not produce?"**: enumerate the scenarios it is structurally
+incapable of reaching (a second refusal, a concurrent producer, a throwing send, an interleaving at every offset,
+a state reached only by the real transition), and mark each *covered* or *cannot happen, because X*. PR #1084's
+fixture pre-mortem table is the worked example, including its one honestly-uncovered residue. Applies to unit
+fixtures too — gh#1079's fixture never advised at all (`Accept = false` from the start), so its re-arm test held
+vacuously, and its paired double answered `false` where production (`OutboxNotificationChannel`) answers `true`,
+understating a silent defect as a visible retry loop.
+
 ### 2. Pin an observed defect; never bless it
 When a probe finds the system doing the wrong thing, **assert the observed behaviour and mark it as a defect**,
 citing the issue — so the suite documents reality without enshrining it, and the assertion flips into that

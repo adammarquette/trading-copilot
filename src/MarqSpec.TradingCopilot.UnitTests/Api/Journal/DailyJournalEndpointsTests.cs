@@ -290,13 +290,20 @@ public class DailyJournalEndpointsTests
     public async Task GetDayDetail_ShouldExcludeAnAdjacentDaysTrade_AtTheCentralBoundary()
     {
         await SeedAccountAsync();
-        // Central midnight for 08-03 is 05:00Z: one minute before is 08-02 (excluded), one minute after is 08-03.
-        await SeedTradeAsync(realizedPnL: -500m, closedAt: new DateTimeOffset(2026, 8, 3, 4, 59, 0, TimeSpan.Zero));
-        await SeedTradeAsync(realizedPnL: -40m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 1, 0, TimeSpan.Zero));
+        // Central midnight for 08-03 is 05:00Z, so the day's window is [05:00Z 08-03, 05:00Z 08-04) (half-open).
+        // ±1 minute either side of an edge proves "near" the boundary but skips the literal edge value -- a >/>=
+        // or </<= off-by-one there would still pass unnoticed. So each edge gets three points: just outside, AT
+        // the instant itself, and just inside (gh#1082).
+        await SeedTradeAsync(realizedPnL: -500m, closedAt: new DateTimeOffset(2026, 8, 3, 4, 59, 0, TimeSpan.Zero)); // before windowStart, excluded
+        await SeedTradeAsync(realizedPnL: 15m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 0, 0, TimeSpan.Zero));    // AT windowStart, included
+        await SeedTradeAsync(realizedPnL: -40m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 1, 0, TimeSpan.Zero));   // after windowStart, included
+        await SeedTradeAsync(realizedPnL: -7m, closedAt: new DateTimeOffset(2026, 8, 4, 5, 0, 0, TimeSpan.Zero));    // AT windowEndExclusive, excluded
+        await SeedTradeAsync(realizedPnL: -600m, closedAt: new DateTimeOffset(2026, 8, 4, 5, 1, 0, TimeSpan.Zero)); // after windowEndExclusive, excluded
 
         DayDetailResponse detail = DetailOf(await ReadDayAsync(new DateOnly(2026, 8, 3)));
 
-        detail.RealizedPnL.Should().Be(-40m, "only the trade after Central midnight belongs to this day");
+        detail.RealizedPnL.Should().Be(-25m, "only the two trades inside the half-open Central day belong to it");
+        detail.Trades.Should().HaveCount(2);
     }
 
     [Fact]

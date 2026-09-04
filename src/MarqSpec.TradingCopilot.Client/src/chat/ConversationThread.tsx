@@ -164,7 +164,14 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   useEffect(
     () =>
       onChatChunk((chunk) => {
-        if (chunk.conversationId !== conversationId) {
+        // `sendingRef`, not `sending`: this effect is registered once per mount (see the dependency array) and
+        // never re-subscribes when a send starts or ends, so a `sending` read closed over here would be
+        // permanently stale. The ref is read fresh on every delivery, which is what lets a chunk delivered AFTER
+        // its turn has already settled -- a late/reordered hub push is explicitly best-effort, see the module
+        // note -- be dropped instead of resurrecting a "the co-pilot is typing…" bubble under a turn whose real,
+        // settled answer already rendered (gh#1085). Dropping it is a silent no-op, not a failure: the chunk
+        // stream stays fail-open either way.
+        if (chunk.conversationId !== conversationId || !sendingRef.current) {
           return;
         }
         setStreaming((current) => ({ text: (current?.text ?? '') + chunk.delta }));

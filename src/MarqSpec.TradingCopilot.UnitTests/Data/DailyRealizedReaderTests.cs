@@ -238,18 +238,35 @@ public class DailyRealizedByDayReaderTests
     [Fact]
     public async Task RealizedPnLByDay_ShouldRespectTheCentralMidnightBoundary_AtRangeEdges()
     {
-        // Central midnight for 08-03 is 05:00Z. One minute before is still 08-02 (excluded, `from` is 08-03); one
-        // minute after is 08-03 (included). Central midnight for 08-05 (one past `to` = 08-04) is 05:00Z on the 5th;
-        // one minute before is still 08-04 (included); one minute after is 08-05 (excluded, past `to`).
-        await SeedTradeAsync(realizedPnL: -1m, closedAt: new DateTimeOffset(2026, 8, 3, 4, 59, 0, TimeSpan.Zero)); // 08-02, excluded
-        await SeedTradeAsync(realizedPnL: 10m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 1, 0, TimeSpan.Zero));  // 08-03, included
-        await SeedTradeAsync(realizedPnL: 20m, closedAt: new DateTimeOffset(2026, 8, 5, 4, 59, 0, TimeSpan.Zero)); // 08-04, included
-        await SeedTradeAsync(realizedPnL: -1m, closedAt: new DateTimeOffset(2026, 8, 5, 5, 1, 0, TimeSpan.Zero));  // 08-05, excluded
+        // Central midnight for 08-03 is 05:00Z, so the window is [05:00Z 08-03, 05:00Z 08-05) (half-open, `to` is
+        // 08-04). ±1 minute either side of an edge proves "near" the boundary but skips the literal edge value --
+        // a >/>= or </<= off-by-one there would still pass unnoticed. So each edge gets three points: just
+        // outside, AT the instant itself, and just inside (gh#1082).
+        await SeedTradeAsync(realizedPnL: -1m, closedAt: new DateTimeOffset(2026, 8, 3, 4, 59, 0, TimeSpan.Zero)); // before windowStart, excluded
+        await SeedTradeAsync(realizedPnL: 15m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 0, 0, TimeSpan.Zero));  // AT windowStart, included
+        await SeedTradeAsync(realizedPnL: 10m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 1, 0, TimeSpan.Zero));  // after windowStart, included
+        await SeedTradeAsync(realizedPnL: 20m, closedAt: new DateTimeOffset(2026, 8, 5, 4, 59, 0, TimeSpan.Zero)); // before windowEndExclusive, included
+        await SeedTradeAsync(realizedPnL: -7m, closedAt: new DateTimeOffset(2026, 8, 5, 5, 0, 0, TimeSpan.Zero));  // AT windowEndExclusive, excluded
+        await SeedTradeAsync(realizedPnL: -1m, closedAt: new DateTimeOffset(2026, 8, 5, 5, 1, 0, TimeSpan.Zero));  // after windowEndExclusive, excluded
 
         IReadOnlyList<DailyRealized> days = await ReadDaysAsync(new DateOnly(2026, 8, 3), new DateOnly(2026, 8, 4));
 
-        days.Sum(day => day.RealizedPnL).Should().Be(30m, "only the two trades landing inside the Central-day range count");
-        days.Sum(day => day.TradeCount).Should().Be(2);
+        days.Sum(day => day.RealizedPnL).Should().Be(45m, "only the trades landing inside the half-open Central-day range count");
+        days.Sum(day => day.TradeCount).Should().Be(3);
+    }
+
+    [Fact]
+    public async Task RealizedPnLByDay_ShouldRespectTheCentralMidnightBoundary_InWinter()
+    {
+        // Same exact-instant boundary proof as the summer case above, but Central midnight in CST (winter, UTC-6)
+        // is 06:00Z, not 05:00Z -- a reader that hardcoded the summer offset instead of going through MarketClock
+        // would pass that test and fail this one (gh#1082).
+        await SeedTradeAsync(realizedPnL: 15m, closedAt: new DateTimeOffset(2026, 1, 15, 6, 0, 0, TimeSpan.Zero)); // AT windowStart, included
+        await SeedTradeAsync(realizedPnL: -7m, closedAt: new DateTimeOffset(2026, 1, 16, 6, 0, 0, TimeSpan.Zero)); // AT windowEndExclusive, excluded
+
+        IReadOnlyList<DailyRealized> days = await ReadDaysAsync(new DateOnly(2026, 1, 15), new DateOnly(2026, 1, 15));
+
+        days.Should().ContainSingle().Which.RealizedPnL.Should().Be(15m, "only the trade AT windowStart belongs to the requested day");
     }
 
     [Fact]
@@ -348,13 +365,33 @@ public class DailyRealizedByDayReaderTests
     [Fact]
     public async Task TradesForDay_ShouldExcludeAnAdjacentDaysTrades_AtTheCentralBoundary()
     {
-        // Central midnight for 08-03 is 05:00Z: one minute before is the PREVIOUS day, one minute after is this one.
-        await SeedTradeAsync(realizedPnL: -500m, closedAt: new DateTimeOffset(2026, 8, 3, 4, 59, 0, TimeSpan.Zero));
-        await SeedTradeAsync(realizedPnL: -40m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 1, 0, TimeSpan.Zero));
+        // Central midnight for 08-03 is 05:00Z, so the window is [05:00Z 08-03, 05:00Z 08-04) (half-open). ±1
+        // minute either side of an edge proves "near" the boundary but skips the literal edge value -- a >/>= or
+        // </<= off-by-one there would still pass unnoticed. So each edge gets three points: just outside, AT the
+        // instant itself, and just inside (gh#1082).
+        await SeedTradeAsync(realizedPnL: -500m, closedAt: new DateTimeOffset(2026, 8, 3, 4, 59, 0, TimeSpan.Zero)); // before windowStart, excluded
+        await SeedTradeAsync(realizedPnL: 15m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 0, 0, TimeSpan.Zero));    // AT windowStart, included
+        await SeedTradeAsync(realizedPnL: -40m, closedAt: new DateTimeOffset(2026, 8, 3, 5, 1, 0, TimeSpan.Zero));   // after windowStart, included
+        await SeedTradeAsync(realizedPnL: -7m, closedAt: new DateTimeOffset(2026, 8, 4, 5, 0, 0, TimeSpan.Zero));    // AT windowEndExclusive, excluded
+        await SeedTradeAsync(realizedPnL: -600m, closedAt: new DateTimeOffset(2026, 8, 4, 5, 1, 0, TimeSpan.Zero)); // after windowEndExclusive, excluded
 
         IReadOnlyList<Trade> trades = await ReadDayAsync(new DateOnly(2026, 8, 3));
 
-        trades.Should().ContainSingle().Which.RealizedPnL.Should().Be(-40m, "only the trade after Central midnight is today's");
+        trades.Select(trade => trade.RealizedPnL).Should().Equal([15m, -40m], "only the two trades inside the half-open Central day belong to it");
+    }
+
+    [Fact]
+    public async Task TradesForDay_ShouldExcludeAnAdjacentDaysTrades_InWinter()
+    {
+        // Same exact-instant boundary proof as the summer case above, but Central midnight in CST (winter, UTC-6)
+        // is 06:00Z, not 05:00Z -- a reader that hardcoded the summer offset instead of going through MarketClock
+        // would pass that test and fail this one (gh#1082).
+        await SeedTradeAsync(realizedPnL: 15m, closedAt: new DateTimeOffset(2026, 1, 15, 6, 0, 0, TimeSpan.Zero)); // AT windowStart, included
+        await SeedTradeAsync(realizedPnL: -7m, closedAt: new DateTimeOffset(2026, 1, 16, 6, 0, 0, TimeSpan.Zero)); // AT windowEndExclusive, excluded
+
+        IReadOnlyList<Trade> trades = await ReadDayAsync(new DateOnly(2026, 1, 15));
+
+        trades.Should().ContainSingle().Which.RealizedPnL.Should().Be(15m, "only the trade AT windowStart belongs to the requested day");
     }
 
     [Fact]
