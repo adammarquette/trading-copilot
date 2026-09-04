@@ -61,8 +61,8 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api.Chat;
 /// regression gh#1065 exists to end); replacing the suggestion hydrate's filtered read with an
 /// <c>IgnoreQueryFilters</c> one reddens the isolation case (gh#1112: both turns are taken <b>and</b> reduced to
 /// named facts asserted as one map, so the control turn's evidence is observed on that run rather than skipped by a
-/// fail-fast throw three assertions earlier — unevaluated is not green, and this case's whole weight rests on the
-/// control);
+/// fail-fast throw on one of the four turn-1 facts that precede it — unevaluated is not green, and this case's whole
+/// weight rests on the control);
 /// and moving the grounding block from the user message into the system prompt reddens the injection case on the
 /// assertion that matters, not merely on placement. Restored afterwards — this tier does not edit production.
 /// </para>
@@ -185,7 +185,9 @@ public sealed class CrossKindGroundingIntegrationTests : IClassFixture<NewsGroun
         // rows DO ground the turn once they are mine"). A map reports every fact, so one run says which half moved.
         // (gh#1112, the same correction the sibling recall suite carries.)
         //
-        // TWO checks are still ordered ahead of the map, and neither is aggregation:
+        // TWO checks on this case's OWN facts are still ordered ahead of the map, and neither is aggregation.
+        // (The arrange phase asserts too -- the login and the conversation create each expect a 200 -- but a failure
+        // there means no turn was taken at all, so there is no evidence asymmetry to report.)
         //  * TurnAsync's own HTTP/call-count contract, asserted per turn as each is taken -- a turn 1 that 500s or
         //    makes two model calls abandons the run before turn 2 is ever taken. No break recorded for this case
         //    reaches it: the endpoint's grounding catch is fail-open, so a retrieval defect degrades a turn rather
@@ -214,8 +216,10 @@ public sealed class CrossKindGroundingIntegrationTests : IClassFixture<NewsGroun
                 !ownedTurn.Request.SystemPrompt.Contains("STRANGER-RATIONALE-gh1096", StringComparison.Ordinal),
         };
 
-        // The expectation is derived from the map's own keys, so it asserts every VALUE but not the membership --
-        // a fact deleted from the map above would narrow this case silently. The count pins the membership.
+        // The expectation is derived from the map's own keys, so it asserts every VALUE and nothing about WHICH
+        // facts are present -- a fact deleted from the map above would narrow this case silently. The count below
+        // catches exactly that deletion, and only that: swap a fact for a weaker one and the count is still seven.
+        // Identity is held by review of this literal, not by an assertion; say so rather than imply otherwise.
         observed.Should().HaveCount(
             7,
             "every fact this case rests on is in the map, and a deleted one would narrow the case without failing "

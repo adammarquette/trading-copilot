@@ -47,8 +47,8 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// migrations in <c>src/MarqSpec.TradingCopilot.Data/Migrations</c>).
 /// </para>
 /// <para>
-/// <b>What that swap does <i>not</i> mean.</b> The remark written alongside the swap reasoned that an indexed noise
-/// kind "would not
+/// <b>What that swap does <i>not</i> mean.</b> The remark written alongside the swap reasoned that an indexed
+/// noise kind "would not
 /// crowd the SoftSignal-only index, so it could no longer starve recall and would miss the hazard". That is not how
 /// the crowding works, and running it settled the point: the red path here is served by the <i>table-wide</i>
 /// <c>IX_Embeddings_Vector_Cosine</c>, which holds every row of every owner kind, so a noise row having a second
