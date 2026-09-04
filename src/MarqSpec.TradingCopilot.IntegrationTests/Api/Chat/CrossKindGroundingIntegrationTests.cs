@@ -59,9 +59,10 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api.Chat;
 /// <b>Prove-red (gh#1096, PR #1108; the record corrected in gh#1112, PR #1113).</b> Dropping <c>RetrievalKind.Suggestion</c> /
 /// <c>RetrievalKind.JournalEntry</c> from <c>RetrievalKinds.All</c> reddens the grounded case (the news-only
 /// regression gh#1065 exists to end); replacing the suggestion hydrate's filtered read with an
-/// <c>IgnoreQueryFilters</c> one reddens the isolation case (gh#1112: both turns are now <b>taken and captured</b>
-/// before either is asserted, so the re-owned control turn is genuinely evaluated on that run rather than skipped by
-/// a fail-fast throw — unevaluated is not green, and this case's whole weight rests on the control);
+/// <c>IgnoreQueryFilters</c> one reddens the isolation case (gh#1112: both turns are taken <b>and</b> reduced to
+/// named facts asserted as one map, so the control turn's evidence is observed on that run rather than skipped by a
+/// fail-fast throw three assertions earlier — unevaluated is not green, and this case's whole weight rests on the
+/// control);
 /// and moving the grounding block from the user message into the system prompt reddens the injection case on the
 /// assertion that matters, not merely on placement. Restored afterwards — this tier does not edit production.
 /// </para>
@@ -161,8 +162,7 @@ public sealed class CrossKindGroundingIntegrationTests : IClassFixture<NewsGroun
         Guid foreignSuggestion = await SeedSuggestionAsync(stranger, strangerAccount, foreignRationale);
         Guid foreignTrade = await SeedClosedTradeAsync(stranger, strangerAccount, realizedPnL: -412.25m);
 
-        _factory.Llm.Script(request => ScriptedChatLlmProvider.Answer("Echo: " + request.Messages[^1].Content));
-
+        // No Script here: TurnAsync resets and scripts the model per turn, so a script set now would be wiped.
         const string prompt = "Remind me what I proposed and how it worked out.";
 
         // BOTH turns are taken and captured BEFORE either is asserted. The second turn is this case's anti-vacuity
@@ -178,24 +178,38 @@ public sealed class CrossKindGroundingIntegrationTests : IClassFixture<NewsGroun
         await ReassignOwnerAsync(foreignSuggestion, foreignTrade, await OperatorIdAsync());
         RecordedLlmCall ownedTurn = await TurnAsync(client, conversationId, prompt);
 
-        foreignTurn.Request.Messages[^1].Content.Should().Be(
-            prompt,
-            "R-20: the recall is deployment-wide and DID return the stranger's vectors, but the hydrate reads back "
-            + "through the tenant filter, so nothing survives to ground on — leaving the turn byte-identical to an "
-            + "un-grounded one (ADR-0027's 'empty grounding is a no-op'), not merely 'without the stranger's text'");
-        foreignTurn.Request.SystemPrompt.Should().NotContain(
-            "STRANGER-RATIONALE-gh1096", "and it certainly never reaches the system prompt by another route");
-        foreignTurn.Request.Messages[^1].Content.Should().NotContain(
-            "Realized -412.25", "the stranger's journal entry is dropped by the same filtered read");
+        // BOTH turns are reduced to named facts and asserted AS ONE MAP. Taking both turns before asserting is not
+        // enough on its own: six sequential assertions in source order are still fail-fast, and with the control's
+        // three last, a first-turn failure would leave the control's evidence unobserved -- which is exactly the
+        // claim this case rests on ("the same rows DO ground the turn once they are mine"). A map reports every fact,
+        // so one run says which half moved. (gh#1112, the same correction the sibling recall suite carries.)
+        string foreignMessage = foreignTurn.Request.Messages[^1].Content;
+        string ownedMessage = ownedTurn.Request.Messages[^1].Content;
+        Dictionary<string, bool> observed = new(StringComparer.Ordinal)
+        {
+            ["turn 1 (stranger's rows): the message is byte-identical to the bare prompt"] = foreignMessage == prompt,
+            ["turn 1: the stranger's rationale is absent from the message"] =
+                !foreignMessage.Contains("STRANGER-RATIONALE-gh1096", StringComparison.Ordinal),
+            ["turn 1: the stranger's journal entry is absent from the message"] =
+                !foreignMessage.Contains("Realized -412.25", StringComparison.Ordinal),
+            ["turn 1: the stranger's rationale is absent from the system prompt"] =
+                !foreignTurn.Request.SystemPrompt.Contains("STRANGER-RATIONALE-gh1096", StringComparison.Ordinal),
+            ["turn 2 (the SAME rows, now the operator's): the rationale grounds the turn"] =
+                ownedMessage.Contains("STRANGER-RATIONALE-gh1096", StringComparison.Ordinal),
+            ["turn 2: the journal entry grounds the turn"] =
+                ownedMessage.Contains("Realized -412.25, a loser.", StringComparison.Ordinal),
+            ["turn 2: the rationale still never reaches the system prompt"] =
+                !ownedTurn.Request.SystemPrompt.Contains("STRANGER-RATIONALE-gh1096", StringComparison.Ordinal),
+        };
 
-        ownedTurn.Request.Messages[^1].Content.Should().Contain(
-            "STRANGER-RATIONALE-gh1096",
-            "the identical rows, now owned by this operator, DO ground the turn — so the first turn's absence was "
-            + "the R-20 hydrate filter and nothing else");
-        ownedTurn.Request.Messages[^1].Content.Should().Contain(
-            "Realized -412.25, a loser.", "the journal entry crosses the same way once it is the operator's");
-        ownedTurn.Request.SystemPrompt.Should().NotContain(
-            "STRANGER-RATIONALE-gh1096", "owning a row changes where it is dropped, never where it is placed");
+        observed.Should().BeEquivalentTo(
+            observed.Keys.ToDictionary(fact => fact, _ => true, StringComparer.Ordinal),
+            "R-20 is enforced at the HYDRATE: the recall is deployment-wide and DID return the stranger's vectors, "
+            + "but each row is read back through the tenant query filter, so a foreign row is simply absent and the "
+            + "turn stays byte-identical to an un-grounded one (ADR-0027's 'empty grounding is a no-op'), not merely "
+            + "'without the stranger's text'. Turn 2 is the control that makes that reading the only one available: "
+            + "the ONLY thing that changed between the two turns is the owner column, so if turn 1's silence had come "
+            + "from a broken read, a mis-seeded vector or a typo'd sentinel, turn 2 would be silent too");
     }
 
     // =============================================================================================================

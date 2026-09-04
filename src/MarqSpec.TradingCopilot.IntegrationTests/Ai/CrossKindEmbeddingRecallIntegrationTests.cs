@@ -38,8 +38,9 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// gh#1065 is the first increment to add kinds under it.
 /// </para>
 /// <para>
-/// <b>Why one seed serves both kinds.</b> The noise crowd is deliberately built from the three owner kinds that have
-/// <b>no</b> partial vector index of their own (<c>Topic</c> / <c>Rule</c> / <c>MarketSnapshot</c>), every vector of
+/// <b>Why one seed serves both kinds.</b> The noise crowd is built from the three owner kinds that have <b>no</b>
+/// partial vector index of their own (<c>Topic</c> / <c>Rule</c> / <c>MarketSnapshot</c>) — a <i>seed-cost</i>
+/// choice, not a correctness one, see below — every vector of
 /// which is closer to the query than every target row — so for the <c>Suggestion</c> read the crowd is 7,500 nearer
 /// rows plus 3,750 equally-distant <c>JournalEntry</c> rows, and symmetrically for the <c>JournalEntry</c> read.
 /// One 15,000-row seed therefore poses the starvation question independently to each new index, at the same
@@ -63,13 +64,22 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// names this suite's §2 inventory row states.
 /// </para>
 /// <para>
-/// <b>And the crowd's own honesty is asserted before the seed, from <c>pg_indexes</c>.</b> Everything here only
-/// poses the starvation question while the crowd is large and its kinds are genuinely <i>unindexed</i>: an indexed
-/// noise kind is searched inside its own graph and stops crowding the table-wide window, so the reads would return
-/// a full <i>n</i> for reasons unconnected to what this suite guards, and it would stay green forever. That
-/// assumption has already been invalidated once by exactly this increment — the sibling gh#861 suite still names
-/// <c>Suggestion</c> as an unindexed noise kind (gh#1110) — so it is read off the live migrated schema rather than
-/// trusted to a comment.
+/// <b>The schema is asserted before the seed, from <c>pg_indexes</c> — and the load-bearing half is the
+/// <i>targets</i>.</b> Every target kind must have a partial index, or this suite has nothing to prove chosen and
+/// would report a starvation it was never in a position to prevent. That half is the guard.
+/// </para>
+/// <para>
+/// <b>The noise half is cost and honesty, not protection — measured, not assumed (gh#1112).</b> It is tempting to
+/// argue that an indexed noise kind "is searched inside its own graph and stops crowding", and this suite's first
+/// version said exactly that. <b>It is false, and was disproved by running it:</b> with <c>SoftSignal</c> (which
+/// <i>does</i> hold <c>IX_Embeddings_Vector_Cosine_SoftSignal</c>) substituted into the crowd and the
+/// <c>Suggestion</c> index dropped, the suggestion read still starved to <b>0 of 5</b>. The crowding happens in the
+/// <i>table-wide</i> <c>IX_Embeddings_Vector_Cosine</c>, which holds every row of every kind — a noise row having a
+/// second home in some other partial index changes nothing about the window it fills. So the noise assertion buys
+/// two real but smaller things: the bulk seed never pays incremental HNSW maintenance for 7,500 rows it will never
+/// query, and the <c>_noiseKinds</c> list cannot quietly stop meaning what the remarks say it means — the drift that
+/// hit the sibling gh#861 suite when gh#1065 gave <c>Suggestion</c> an index (gh#1110), which for the same reason
+/// was a cost and comment defect there too, never a hole in its guard.
 /// </para>
 /// <para>
 /// <b>Prove-red (gh#1096, PR #1108; the later breaks gh#1112, PR #1113).</b> The <i>behavioural</i> proof came first, before the
@@ -83,8 +93,11 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// that behavioural evidence is why the index matters and is kept on record rather than superseded. The guard
 /// itself was proven able to fail three ways: smuggling the indexed <c>SoftSignal</c> kind into the crowd, dropping
 /// a target index, and adding a set-predicate index (<c>WHERE "OwnerKind" = ANY (ARRAY[3, 5])</c>) over two noise
-/// kinds — the last being the false negative a substring match would have let through. Restored afterwards — the
-/// migration is production code this tier does not edit.
+/// kinds — the last being the false negative a substring match would have let through. One further run was made to
+/// settle the noise-kind question rather than argue it (gh#1112): an <i>indexed</i> kind substituted into the crowd,
+/// with the target index dropped, still starved the read to 0 of 5 — which is why the paragraph above calls the
+/// noise half cost rather than protection. Restored afterwards — the migration is production code this tier does not
+/// edit.
 /// </para>
 /// </remarks>
 public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<EmbeddingReadTestPostgresFactory>
@@ -167,8 +180,10 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
         partitionedKinds.Should().BeEquivalentTo(
             mayBePartitioned,
             "exactly the soft-signal index gh#864 added and the two AddContextVectorIndexes added (gh#1065) may "
-            + "partition this table -- every target kind needs one for this suite to have anything to prove chosen, "
-            + "and every noise kind must have none for the crowd to crowd at all. If you are reading this because a "
+            + "partition this table. The load-bearing half is the TARGETS: without a partial index of its own a "
+            + "target kind's read has nothing for this suite to prove chosen. The noise half is seed cost and "
+            + "honesty, not protection -- an indexed noise row still crowds the table-wide graph, measured (gh#1112). "
+            + "If you are reading this because a "
             + "LEGITIMATE new partial index reddened it: that is the guard working. Decide which side the new kind is "
             + "on -- add it to _targets (and give it a case) if its ranked read is under test, or leave it out of "
             + "_noiseKinds and add it here if it is neither. Do not widen this to a subset check: the closed set is "
@@ -178,8 +193,9 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
         {
             partitionedKinds.Should().NotContain(
                 kind,
-                $"{kind} is a NOISE kind: an index of its own would stop it crowding the approximate window, and "
-                + "this guard would pass without reproducing gh#861 at all");
+                $"{kind} is a NOISE kind. An index of its own would NOT stop it crowding -- that was measured and "
+                + "is false (gh#1112) -- but it would make the bulk seed pay HNSW maintenance for rows this suite "
+                + "never queries, and it would leave _noiseKinds meaning something the remarks do not say");
         }
 
         // The crowd, blended only slightly away from the query -- i.e. deliberately closer to it than every target
