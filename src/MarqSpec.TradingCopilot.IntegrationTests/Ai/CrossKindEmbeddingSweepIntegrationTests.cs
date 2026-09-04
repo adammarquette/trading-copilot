@@ -74,8 +74,11 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// <b>Prove-red (gh#1096, recorded in the PR body).</b> Each guard was run against a deliberately broken local copy
 /// of production and confirmed red for its own reason, then restored: dropping the <c>Suggestion</c> /
 /// <c>JournalEntry</c> arms' anti-join (an unconditional delete) reddens every live-owner case; making them no-ops
-/// reddens every orphan case; removing <c>IgnoreQueryFilters</c> from the <c>Suggestion</c> arm reddens the
-/// cross-operator case; removing the two new kinds from <see cref="EmbeddingOrphanSweep.SweepableKinds"/> reddens
+/// reddens every orphan case; removing <c>IgnoreQueryFilters</c> from both arms reddens <b>every</b> case, not only
+/// the cross-operator one — with no request user the producer look-up matches nothing, so the first pass deletes
+/// each kind entire (its <i>inner</i> repetition on the producer sub-query, by contrast, is inert: removing that
+/// alone leaves all six green, because the root call is query-wide); removing the two new kinds from
+/// <see cref="EmbeddingOrphanSweep.SweepableKinds"/> reddens
 /// the orphan cases (nothing is swept at all); and dropping the stale-model self-<c>EXISTS</c>, or making that
 /// backstop a no-op, reddens exactly one of the two stale-model cases each. The broken copies were never
 /// committed.
