@@ -136,3 +136,18 @@ poll-until-refresh until then.
   REST turn response and the final `realtimeChatMessage` remain the source of truth; the chunks are a live draft a
   client renders and swaps for the canonical message on completion. No new command path — the REST endpoint still
   initiates, the hub still only presents.
+- **Landed** (gh#1103): what **terminates** a chunk stream on a client, spelled out — the clause above says the
+  chunks are "a live draft a client renders", and the SPA had drifted into rendering them only on the connection
+  that *initiated* the turn (gh#1085 gated its handler on a per-tab "am I sending" flag), i.e. on precisely the one
+  audience this contract says the push does **not** exist for. Restated as a rule a consumer can implement: a
+  per-owner chunk **opens** the draft wherever the conversation is open (the multi-screen workspace, ADR-0006 —
+  "serves the owner's *other* connections"), and the turn's **settled `realtimeChatMessage`** is what closes it.
+  That closure is sound because the server sends the message push after the last delta on the same connection
+  (`ChatEndpoints.TurnAsync`), and chat pushes are **live-only — outside the resume replay** — so no reconnect
+  catch-up or `?after=` replay can reorder a chunk behind its message the way a sequenced event could. The one
+  ordering the hub does *not* own is a client's own **REST turn response**, which can resolve either side of the
+  pushes; a connection that settled a turn locally before seeing its message push therefore suppresses the chunks
+  still in flight behind it (gh#1085's straggler) until that push arrives and re-opens the stream. Consequence
+  worth stating plainly: a **dropped message push** now costs that connection its live draft for the *following*
+  turn as well as the settled row — the degraded state R-19 / ADR-0013's connection indicator already exists to
+  declare, not a silent one.

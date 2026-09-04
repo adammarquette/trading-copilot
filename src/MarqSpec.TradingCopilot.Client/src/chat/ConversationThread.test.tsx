@@ -312,6 +312,31 @@ describe('ConversationThread — sending a turn', () => {
     expect(screen.queryByTestId('chat-draft')).toBeNull();
   });
 
+  it('streams the NEXT turn sent from here even if the last one was never terminated by its push', async () => {
+    // The straggler suppression is armed by settling a turn whose push has not arrived; it must not survive into
+    // the turn after it. Sending is itself proof the previous turn is over, so the send re-arms the stream --
+    // otherwise a lost push would leave this connection permanently unable to render its own drafts.
+    loadedEmpty();
+    sendMock.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 429,
+      reason: 'Daily AI budget reached; resets at 00:00 UTC.',
+    });
+
+    await renderThread();
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'one more?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByRole('alert'); // the first turn has settled, with no push behind it
+
+    sendMock.mockReturnValue(new Promise(() => {})); // the second turn stays in flight
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'headroom?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is ' }));
+
+    expect(screen.getByTestId('chat-draft').textContent).toBe('Headroom is ');
+  });
+
   it('still streams a later turn when the settled push BEAT the REST response (gh#1103)', async () => {
     // The straggler window closed by gh#1085 is bounded by the turn's settled message push: chunks and that push
     // travel the same connection in send order, so nothing of this turn can follow it. When it lands BEFORE the

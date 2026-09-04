@@ -59,11 +59,22 @@ function foldIn(messages: readonly ChatMessage[], incoming: ChatMessage): readon
  * rather than an in-place prop swap: no streaming draft, in-flight send, or stale `mounted` guard can leak from one
  * conversation into another (the same discipline `WorkspaceSurface` uses keying `Blotter` by account).
  *
- * **Streaming.** `POST /conversations/{id}/turns` (gh#906) does not answer until the whole turn completes, but the
- * server pushes each token delta over the realtime hub as it generates. This renders those via {@link useRealtime}'s
- * `onChatChunk` as a growing draft bubble, then swaps it for the settled {@link ChatMessage} pair the REST call
- * resolves with -- the chunk stream is presentation-only and best-effort (a dropped chunk is never fatal); the REST
- * response is the turn's source of truth, never the accumulated deltas.
+ * **Streaming, on every screen.** `POST /conversations/{id}/turns` (gh#906) does not answer until the whole turn
+ * completes, but the server pushes each token delta over the realtime hub as it generates. This renders those via
+ * {@link useRealtime}'s `onChatChunk` as a growing draft bubble, then retires it for the settled {@link ChatMessage}
+ * -- the chunk stream is presentation-only and best-effort (a dropped chunk is never fatal); the REST response and
+ * the settled message are the turn's source of truth, never the accumulated deltas.
+ *
+ * Both pushes are per-OWNER (`Clients.User`), i.e. delivered to EVERY connection the operator has open, which
+ * ADR-0021 says is the point of them ("the push serves the owner's *other* connections" -- the multi-screen
+ * workspace, ADR-0006). So the draft is driven by the chunk stream itself, never by whether *this* mounted instance
+ * called `send()` (gh#1103): a second screen watching the same conversation streams it too. What terminates a turn's
+ * stream is its **settled assistant message push** -- the server sends it after the last delta and one connection
+ * receives both in send order (chat pushes are live-only, outside the resume replay, so no catch-up can reorder
+ * them), which is why it can both retire the draft here and re-arm the stream for the next turn. The one thing that
+ * can arrive out of order is this connection's own REST response, which is why a turn settled locally before its
+ * push arrives suppresses the chunks still in flight behind it (gh#1085) rather than resurrecting the bubble under
+ * an answer already rendered.
  *
  * **The optimistic operator turn is provisional.** It renders immediately (temp id {@link PENDING_USER_ID}) so the
  * operator sees what they sent while the turn is in flight, and is replaced by the server's copy on success. On a
@@ -87,6 +98,13 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   const [streaming, setStreaming] = useState<{ readonly text: string } | null>(null);
   const mounted = useRef(true);
   const sendingRef = useRef(false); // synchronous guard: `sending` state lags a tick behind a rapid double-submit
+  // The chunk stream's two guards (see the module note on the streaming draft):
+  //   `settledTurnsRef` counts the settled assistant pushes seen for THIS conversation -- each one terminates its
+  //     turn's chunk stream on this connection, so it is also what re-opens the gate below.
+  //   `stragglersRef` is true only in the window where this connection settled a turn over REST but has not yet
+  //     seen that turn's terminating push, i.e. the only window a straggling chunk can still arrive in (gh#1085).
+  const settledTurnsRef = useRef(0);
+  const stragglersRef = useRef(false);
 
   useEffect(() => {
     mounted.current = true;
@@ -140,6 +158,17 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         if (message.conversationId !== conversationId || message.role === ChatRole.System) {
           return;
         }
+        // A settled ASSISTANT message terminates its turn's chunk stream on this connection -- the server pushes
+        // it after the last delta (ChatEndpoints.TurnAsync) and both travel one connection in send order, so no
+        // chunk of that turn can follow it. It therefore both retires the live draft (on EVERY connection, not
+        // just the sender's -- the stale-duplicate half of gh#1103) and re-opens the gate for the next turn. A
+        // user-role push is the operator's own turn from another screen; it PRECEDES the answer being generated,
+        // so it must leave a live draft standing.
+        if (message.role === ChatRole.Assistant) {
+          settledTurnsRef.current += 1;
+          stragglersRef.current = false;
+          setStreaming(null);
+        }
         setState((current) =>
           current.kind === 'loaded'
             ? {
@@ -164,14 +193,14 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   useEffect(
     () =>
       onChatChunk((chunk) => {
-        // `sendingRef`, not `sending`: this effect is registered once per mount (see the dependency array) and
-        // never re-subscribes when a send starts or ends, so a `sending` read closed over here would be
-        // permanently stale. The ref is read fresh on every delivery, which is what lets a chunk delivered AFTER
-        // its turn has already settled -- a late/reordered hub push is explicitly best-effort, see the module
-        // note -- be dropped instead of resurrecting a "the co-pilot is typing…" bubble under a turn whose real,
-        // settled answer already rendered (gh#1085). Dropping it is a silent no-op, not a failure: the chunk
-        // stream stays fail-open either way.
-        if (chunk.conversationId !== conversationId || !sendingRef.current) {
+        // A chunk is live UNLESS it straggles a turn this connection already settled itself. The gate is a ref,
+        // not state: this effect is registered once per mount (see the dependency array) and never re-subscribes,
+        // so a `streaming`/`sending` value closed over here would be permanently stale -- a ref is read fresh on
+        // every delivery. It is deliberately NOT `sendingRef` (gh#1103): that is only ever true on the tab that
+        // itself called send(), while the push is per-owner and exists to serve the operator's OTHER connections
+        // (ADR-0021), which is exactly where the "the co-pilot is typing…" draft is worth having. Dropping a
+        // straggler is a silent no-op, not a failure: the chunk stream stays fail-open either way (gh#1085).
+        if (chunk.conversationId !== conversationId || stragglersRef.current) {
           return;
         }
         setStreaming((current) => ({ text: (current?.text ?? '') + chunk.delta }));
@@ -189,6 +218,10 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
     setSending(true);
     setSendError(null);
     setStreaming(null);
+    // A new turn begins: whatever the last one left behind, its chunks are live again. The snapshot is what the
+    // settle path below compares against to tell "this turn is still streaming to me" from "already terminated".
+    stragglersRef.current = false;
+    const settledTurnsAtStart = settledTurnsRef.current;
     setState((current) =>
       current.kind === 'loaded'
         ? {
@@ -224,6 +257,14 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         sendingRef.current = false;
         setSending(false);
         setStreaming(null);
+        // Close the gate only if this turn's terminating push has NOT already been seen. If it has, the turn's
+        // chunk stream is over and every later chunk belongs to a NEW turn -- possibly one taken on another
+        // screen, which would never re-arm anything here (gh#1103). If it has not, the REST response has simply
+        // won the race and further chunks are stragglers of the answer already rendered (gh#1085); the push that
+        // terminates them re-opens the gate. A push lost outright leaves this connection closed until its own
+        // next send -- the same degraded state that already costs it the settled message, which R-19's connection
+        // indicator is what surfaces.
+        stragglersRef.current = settledTurnsRef.current === settledTurnsAtStart;
 
         if (!result.ok) {
           // Drop the optimistic row: a 429 persisted nothing, and a 422's persisted user turn has no id this
@@ -267,6 +308,7 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         sendingRef.current = false;
         setSending(false);
         setStreaming(null);
+        stragglersRef.current = settledTurnsRef.current === settledTurnsAtStart; // as above
         setState((current) =>
           current.kind === 'loaded'
             ? {
