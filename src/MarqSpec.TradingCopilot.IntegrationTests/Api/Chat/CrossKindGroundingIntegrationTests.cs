@@ -56,10 +56,12 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api.Chat;
 /// system prompt instead of the user turn — cannot satisfy these assertions.
 /// </para>
 /// <para>
-/// <b>Prove-red (gh#1096, recorded in the PR body).</b> Dropping <c>RetrievalKind.Suggestion</c> /
+/// <b>Prove-red (gh#1096, PR #1108; the record corrected in gh#1112, PR #1113).</b> Dropping <c>RetrievalKind.Suggestion</c> /
 /// <c>RetrievalKind.JournalEntry</c> from <c>RetrievalKinds.All</c> reddens the grounded case (the news-only
 /// regression gh#1065 exists to end); replacing the suggestion hydrate's filtered read with an
-/// <c>IgnoreQueryFilters</c> one reddens the isolation case's first turn while its re-owned second turn stays green;
+/// <c>IgnoreQueryFilters</c> one reddens the isolation case (gh#1112: both turns are now <b>taken and captured</b>
+/// before either is asserted, so the re-owned control turn is genuinely evaluated on that run rather than skipped by
+/// a fail-fast throw — unevaluated is not green, and this case's whole weight rests on the control);
 /// and moving the grounding block from the user message into the system prompt reddens the injection case on the
 /// assertion that matters, not merely on placement. Restored afterwards — this tier does not edit production.
 /// </para>
@@ -162,12 +164,20 @@ public sealed class CrossKindGroundingIntegrationTests : IClassFixture<NewsGroun
         _factory.Llm.Script(request => ScriptedChatLlmProvider.Answer("Echo: " + request.Messages[^1].Content));
 
         const string prompt = "Remind me what I proposed and how it worked out.";
-        using (HttpResponseMessage first = await TakeTurnAsync(client, conversationId, prompt))
-        {
-            first.StatusCode.Should().Be(HttpStatusCode.OK);
-        }
 
-        RecordedLlmCall foreignTurn = _factory.Llm.Calls.Should().ContainSingle().Which;
+        // BOTH turns are taken and captured BEFORE either is asserted. The second turn is this case's anti-vacuity
+        // control -- "the identical rows DO ground the turn once they are mine" -- and a fail-fast assertion on the
+        // first turn would abandon the run with the control never taken, leaving it UNEVALUATED. An unevaluated
+        // control is not a passing one, and the claim this case rests on is precisely that the only difference
+        // between the two turns is the owner column.
+        RecordedLlmCall foreignTurn = await TurnAsync(client, conversationId, prompt);
+
+        // THE CONTROL. Re-own the very same rows -- same ids, same vectors, same content hashes, same embeddings --
+        // and take the same turn again. If the first turn's silence had come from anything but R-20 (a broken read, a
+        // mis-seeded vector, a typo'd sentinel), this second turn would be silent too.
+        await ReassignOwnerAsync(foreignSuggestion, foreignTrade, await OperatorIdAsync());
+        RecordedLlmCall ownedTurn = await TurnAsync(client, conversationId, prompt);
+
         foreignTurn.Request.Messages[^1].Content.Should().Be(
             prompt,
             "R-20: the recall is deployment-wide and DID return the stranger's vectors, but the hydrate reads back "
@@ -178,19 +188,6 @@ public sealed class CrossKindGroundingIntegrationTests : IClassFixture<NewsGroun
         foreignTurn.Request.Messages[^1].Content.Should().NotContain(
             "Realized -412.25", "the stranger's journal entry is dropped by the same filtered read");
 
-        // THE CONTROL. Re-own the very same rows -- same ids, same vectors, same content hashes, same embeddings --
-        // and take the same turn again. If the first turn's silence had come from anything but R-20 (a broken read, a
-        // mis-seeded vector, a typo'd sentinel), this second turn would be silent too.
-        await ReassignOwnerAsync(foreignSuggestion, foreignTrade, await OperatorIdAsync());
-        _factory.Llm.Reset();
-        _factory.Llm.Script(request => ScriptedChatLlmProvider.Answer("Echo: " + request.Messages[^1].Content));
-
-        using (HttpResponseMessage second = await TakeTurnAsync(client, conversationId, prompt))
-        {
-            second.StatusCode.Should().Be(HttpStatusCode.OK);
-        }
-
-        RecordedLlmCall ownedTurn = _factory.Llm.Calls.Should().ContainSingle().Which;
         ownedTurn.Request.Messages[^1].Content.Should().Contain(
             "STRANGER-RATIONALE-gh1096",
             "the identical rows, now owned by this operator, DO ground the turn — so the first turn's absence was "
@@ -421,6 +418,21 @@ public sealed class CrossKindGroundingIntegrationTests : IClassFixture<NewsGroun
 
     private Task<HttpResponseMessage> TakeTurnAsync(HttpClient client, Guid conversationId, string content) =>
         client.PostAsJsonAsync($"/conversations/{conversationId}/turns", new ChatTurnRequest(content));
+
+    /// <summary>
+    /// Takes one turn and returns the single model call it made — resetting the scripted model first, so each turn's
+    /// call is read in isolation. Used where two turns must both be <b>taken</b> before either is asserted, so a
+    /// failure on the first cannot leave the second unevaluated (and unevaluated read as passing).
+    /// </summary>
+    private async Task<RecordedLlmCall> TurnAsync(HttpClient client, Guid conversationId, string prompt)
+    {
+        _factory.Llm.Reset();
+        _factory.Llm.Script(request => ScriptedChatLlmProvider.Answer("Echo: " + request.Messages[^1].Content));
+
+        using HttpResponseMessage response = await TakeTurnAsync(client, conversationId, prompt);
+        response.StatusCode.Should().Be(HttpStatusCode.OK, "grounding never faults a turn, whoever owns the rows");
+        return _factory.Llm.Calls.Should().ContainSingle().Which;
+    }
 
     private async Task<ConversationDetailResponse> ReadConversationAsync(HttpClient client, Guid conversationId)
     {
