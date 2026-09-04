@@ -13,8 +13,9 @@ namespace MarqSpec.TradingCopilot.Api.Ai;
 /// <remarks>
 /// <para>
 /// <see cref="EmbeddingOwnerKind.Rule"/> / <see cref="EmbeddingOwnerKind.MarketSnapshot"/> have <b>no producer
-/// yet</b> — the rulebook is epic gh#15, which has not started — so there is nothing to prove an owner gone, and
-/// sweeping them would delete every such row to zero rather than reclaim orphans. Being an allow-list makes that
+/// yet</b> — the rulebook's <c>Rule</c> entity is gh#866, still backlogged under epic gh#489 — so there is
+/// nothing to prove an owner gone, and sweeping them would delete every such row to zero rather than reclaim
+/// orphans. Being an allow-list makes that
 /// fail safe: a newly added owner kind is <b>not</b> swept until it is deliberately added here alongside its producer
 /// check, so a future kind cannot be GC'd before it has one.
 /// </para>

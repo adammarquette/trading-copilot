@@ -105,6 +105,6 @@ What is genuinely new is a **scoping** obligation the news-only slice did not ha
 a suggestion and a journal entry are not, and the embedding store is deployment-global (it follows its owners), so the
 recall can legitimately return another operator's row. That is resolved at the **hydrate**, which reads each recalled
 owner back through the tenant query filter — a foreign row is simply absent, dropped by the same path that drops a
-deleted owner. The remaining source, the **rulebook**, stays deferred: epic gh#15 has not started, so there is no rule
-entity to embed. **Live positions** are deliberately *not* becoming a retrieval kind — they are current state, served
+deleted owner. The remaining source, the **rulebook**, stays deferred: its `Rule` entity (gh#866, of epic gh#489)
+is still backlogged, so there is nothing to embed. **Live positions** are deliberately *not* becoming a retrieval kind — they are current state, served
 by the `read_positions` tool, not recalled history.
