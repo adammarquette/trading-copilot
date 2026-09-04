@@ -1,3 +1,4 @@
+using System.Data.Common;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Ai;
@@ -60,10 +61,20 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// names this suite's §2 inventory row states.
 /// </para>
 /// <para>
+/// <b>And the crowd's own honesty is asserted before the seed, from <c>pg_indexes</c>.</b> Everything here only
+/// poses the starvation question while the crowd is large and its kinds are genuinely <i>unindexed</i>: an indexed
+/// noise kind is searched inside its own graph and stops crowding the table-wide window, so the reads would return
+/// a full <i>n</i> for reasons unconnected to what this suite guards, and it would stay green forever. That
+/// assumption has already been invalidated once by exactly this increment — the sibling gh#861 suite still names
+/// <c>Suggestion</c> as an unindexed noise kind (gh#1110) — so it is read off the live migrated schema rather than
+/// trusted to a comment.
+/// </para>
+/// <para>
 /// <b>Prove-red (gh#1096, recorded in the PR body).</b> Commenting the <c>Suggestion</c> index out of the
 /// <c>AddContextVectorIndexes</c> migration reddens the suggestion case at zero neighbours recalled; the same for
 /// the journal-entry index and its case; and each left the other case green, so neither passes on the other's
-/// index. Restored afterwards — the migration is production code this tier does not edit.
+/// index. The pre-seed schema guard was proven able to fail too, by smuggling the indexed <c>SoftSignal</c> kind
+/// into the crowd. Restored afterwards — the migration is production code this tier does not edit.
 /// </para>
 /// </remarks>
 public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<EmbeddingReadTestPostgresFactory>
@@ -123,15 +134,46 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
 
         List<EmbeddingRecord> rows = new((TargetCountPerKind * _targets.Length) + (NoiseCountPerKind * _noiseKinds.Length));
 
+        // ANTI-VACUITY, BEFORE THE SEED. Everything below only poses the starvation question while (a) the crowd is
+        // genuinely large and (b) the crowd's kinds genuinely have no partial vector index of their own -- an indexed
+        // noise kind would be searched inside its own graph and would stop crowding the table-wide window, so this
+        // suite would return a full n for reasons unconnected to the indexes it guards, and stay green forever.
+        // Neither condition is asserted by any other suite, and gh#1065 has already invalidated exactly this
+        // assumption once (in the sibling gh#861 suite, whose noise still names Suggestion). Read from pg_indexes,
+        // so it is the live migrated schema that answers rather than a comment.
+        IReadOnlyList<string> vectorIndexes = await VectorIndexDefinitionsAsync();
+        foreach ((RetrievalKind _, EmbeddingOwnerKind owner) in _targets)
+        {
+            vectorIndexes.Should().Contain(
+                definition => definition.Contains($"= {(int)owner}", StringComparison.Ordinal),
+                $"{owner} is a target kind, so AddContextVectorIndexes must have given it a PARTIAL index -- without "
+                + "one there is nothing for this suite to prove chosen");
+        }
+
+        foreach (EmbeddingOwnerKind kind in _noiseKinds)
+        {
+            vectorIndexes.Should().NotContain(
+                definition => definition.Contains($"= {(int)kind}", StringComparison.Ordinal),
+                $"{kind} is a NOISE kind: the crowd must be unindexed, or it stops crowding the approximate window "
+                + "and this guard passes without reproducing gh#861 at all");
+        }
+
+        NoiseCountPerKind.Should().BeGreaterThan(0, "a zero-sized crowd cannot starve anything");
+
         // The crowd, blended only slightly away from the query -- i.e. deliberately closer to it than every target
         // row below. This is what fills the approximate candidate window before any owner-kind filter can run.
+        int noiseSeeded = 0;
         foreach (EmbeddingOwnerKind kind in _noiseKinds)
         {
             for (int i = 0; i < NoiseCountPerKind; i++)
             {
                 rows.Add(Row(kind, $"gh1096-noise-{kind}-{i}", Blend(query, RandomUnit(random), weightOther: 0.15)));
+                noiseSeeded++;
             }
         }
+
+        noiseSeeded.Should().Be(
+            NoiseCountPerKind * _noiseKinds.Length, "sanity: the whole crowd was built, mirroring the gh#861 sibling");
 
         // The answer sets: both new kinds, blended much farther from the query, so every one of them is farther
         // than every noise row. Both sit in the SAME distance band, so each kind's read also has to survive the
@@ -244,6 +286,37 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
         TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
         database.Embeddings.AddRange(rows);
         await database.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Every <c>hnsw</c> index definition on the live, migrated <c>Embeddings</c> table, read from
+    /// <c>pg_indexes</c> — the only authority true by construction for "which owner kinds have a partial vector
+    /// index", since a grep of the append-only migrations would still find a dropped one.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> VectorIndexDefinitionsAsync()
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        DbConnection connection = database.Database.GetDbConnection();
+        if (connection.State != System.Data.ConnectionState.Open)
+        {
+            await connection.OpenAsync();
+        }
+
+        await using DbCommand command = connection.CreateCommand();
+        command.CommandText =
+            """SELECT indexdef FROM pg_indexes WHERE tablename = 'Embeddings' AND indexdef LIKE '%hnsw%';""";
+
+        List<string> definitions = [];
+        await using (DbDataReader reader = await command.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                definitions.Add(reader.GetString(0));
+            }
+        }
+
+        return definitions;
     }
 
     private Task AnalyzeAsync() => ExecuteSqlAsync("""ANALYZE "Embeddings";""");

@@ -204,13 +204,18 @@ public sealed class CrossKindEmbeddingSweepIntegrationTests : IClassFixture<Embe
         await SeedEmbeddingAsync(EmbeddingOwnerKind.JournalEntry, tradeOne.ToString(), ModelA);
         await SeedEmbeddingAsync(EmbeddingOwnerKind.JournalEntry, tradeTwo.ToString(), ModelA);
 
-        // THE CONTROL. Read the same two tables through the SAME tenancy the GC host runs under (no request user).
-        // If these came back non-empty, every assertion below would pass whether the production bypass existed or
-        // not -- this is what makes the case a genuine guard on IgnoreQueryFilters rather than on liveness.
-        (await FilteredSuggestionCountAsync(Guid.Empty)).Should().Be(
-            0, "with no request user the R-20 filter resolves to Guid.Empty and hides every suggestion -- so the "
-            + "sweep's producer check can only see these rows by crossing the filter deliberately");
-        (await FilteredTradeCountAsync(Guid.Empty)).Should().Be(0, "the same, for the journal's producer table");
+        // THE CONTROL. Read the same two tables through the tenancy the GC host ACTUALLY runs under -- resolved from
+        // ICurrentUser in a background scope, not hard-coded, so the control keeps describing the sweep even if a
+        // base factory ever registers a fixed test user. If these came back non-empty, every assertion below would
+        // pass whether the production bypass existed or not -- this is what makes the case a genuine guard on
+        // IgnoreQueryFilters rather than on liveness.
+        Guid sweepUser = await SweepScopeUserIdAsync();
+        sweepUser.Should().NotBe(operatorOne).And.NotBe(
+            operatorTwo, "the GC host is not either owner, so neither owner's rows are visible to it by accident");
+        (await FilteredSuggestionCountAsync(sweepUser)).Should().Be(
+            0, "the background scope has no request user, so the R-20 filter hides every suggestion -- the sweep's "
+            + "producer check can only see these rows by crossing the filter deliberately");
+        (await FilteredTradeCountAsync(sweepUser)).Should().Be(0, "the same, for the journal's producer table");
 
         int swept = await RunSweepAsync();
 
@@ -441,6 +446,17 @@ public sealed class CrossKindEmbeddingSweepIntegrationTests : IClassFixture<Embe
         return await database.Embeddings
             .Where(embedding => embedding.OwnerKind == ownerKind && embedding.OwnerId == ownerId)
             .ToListAsync();
+    }
+
+    /// <summary>
+    /// The user id a background DI scope actually resolves — the tenancy <c>EmbeddingOrphanGcHost</c> runs its sweep
+    /// under. Read from the composed <see cref="ICurrentUser"/> rather than assumed, so the cross-operator control
+    /// stays true by construction rather than true today.
+    /// </summary>
+    private async Task<Guid> SweepScopeUserIdAsync()
+    {
+        await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+        return scope.ServiceProvider.GetRequiredService<ICurrentUser>().UserId;
     }
 
     /// <summary>How many suggestions a context scoped to <paramref name="userId"/> can see — the R-20 filter, live.</summary>
