@@ -1,4 +1,6 @@
 using System.Data.Common;
+using System.Globalization;
+using System.Text.RegularExpressions;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Ai;
@@ -108,6 +110,10 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
         EmbeddingOwnerKind.MarketSnapshot,
     ];
 
+    // The one predicate shape a partial index on this table is allowed to use. Anchored on the quoted column name
+    // and a whole integer, so a two-digit owner kind can never be read as a one-digit one.
+    private static readonly Regex _ownerKindEquality = new(@"""OwnerKind"" = ([0-9]+)\)", RegexOptions.Compiled);
+
     private static readonly DateTimeOffset _recordedAt = new(2026, 9, 3, 12, 0, 0, TimeSpan.Zero);
 
     private readonly EmbeddingReadTestPostgresFactory _factory;
@@ -134,35 +140,39 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
 
         List<EmbeddingRecord> rows = new((TargetCountPerKind * _targets.Length) + (NoiseCountPerKind * _noiseKinds.Length));
 
-        // ANTI-VACUITY, BEFORE THE SEED. Everything below only poses the starvation question while (a) the crowd is
-        // genuinely large and (b) the crowd's kinds genuinely have no partial vector index of their own -- an indexed
-        // noise kind would be searched inside its own graph and would stop crowding the table-wide window, so this
-        // suite would return a full n for reasons unconnected to the indexes it guards, and stay green forever.
-        // Neither condition is asserted by any other suite, and gh#1065 has already invalidated exactly this
-        // assumption once (in the sibling gh#861 suite, whose noise still names Suggestion). Read from pg_indexes,
-        // so it is the live migrated schema that answers rather than a comment.
-        IReadOnlyList<string> vectorIndexes = await VectorIndexDefinitionsAsync();
-        foreach ((RetrievalKind _, EmbeddingOwnerKind owner) in _targets)
-        {
-            vectorIndexes.Should().Contain(
-                definition => definition.Contains($"= {(int)owner}", StringComparison.Ordinal),
-                $"{owner} is a target kind, so AddContextVectorIndexes must have given it a PARTIAL index -- without "
-                + "one there is nothing for this suite to prove chosen");
-        }
+        // ANTI-VACUITY, BEFORE THE SEED. Everything below only poses the starvation question while the crowd's
+        // kinds genuinely have NO index of their own: an indexed noise kind is searched inside its own graph, stops
+        // crowding the shared window, and this suite would then return a full n for reasons unconnected to the
+        // indexes it guards -- green forever, proving nothing. No other suite asserts it, and gh#1065 has already
+        // invalidated exactly this assumption once (the sibling gh#861 suite still names Suggestion as unindexed
+        // noise -- gh#1110). So it is read off the LIVE migrated schema, not trusted to a comment.
+        //
+        // The assertion is CLOSED and reads integers, not substrings: the set of owner kinds any partial index on
+        // this table selects must be exactly {SoftSignal, Suggestion, JournalEntry}. A new partial index on any
+        // other kind -- whatever access method, hnsw or ivfflat -- changes that set and reddens here, and a
+        // two-digit owner kind can never be confused with a one-digit one the way a `Contains("= 1")` would.
+        IReadOnlyList<string> indexDefinitions = await IndexDefinitionsAsync();
+        IReadOnlyList<EmbeddingOwnerKind> partitionedKinds = PartialIndexOwnerKinds(indexDefinitions);
+
+        EmbeddingOwnerKind[] mayBePartitioned =
+            [EmbeddingOwnerKind.SoftSignal, .. _targets.Select(target => target.Owner)];
+        partitionedKinds.Should().BeEquivalentTo(
+            mayBePartitioned,
+            "exactly the soft-signal index gh#864 added and the two AddContextVectorIndexes added (gh#1065) may "
+            + "partition this table -- every target kind needs one for this suite to have anything to prove chosen, "
+            + "and every noise kind must have none for the crowd to crowd at all");
 
         foreach (EmbeddingOwnerKind kind in _noiseKinds)
         {
-            vectorIndexes.Should().NotContain(
-                definition => definition.Contains($"= {(int)kind}", StringComparison.Ordinal),
-                $"{kind} is a NOISE kind: the crowd must be unindexed, or it stops crowding the approximate window "
-                + "and this guard passes without reproducing gh#861 at all");
+            partitionedKinds.Should().NotContain(
+                kind,
+                $"{kind} is a NOISE kind: an index of its own would stop it crowding the approximate window, and "
+                + "this guard would pass without reproducing gh#861 at all");
         }
-
-        NoiseCountPerKind.Should().BeGreaterThan(0, "a zero-sized crowd cannot starve anything");
 
         // The crowd, blended only slightly away from the query -- i.e. deliberately closer to it than every target
         // row below. This is what fills the approximate candidate window before any owner-kind filter can run.
-        int noiseSeeded = 0;
+        int noiseSeeded = 0; // sanity, not a guard -- it mirrors the gh#861 sibling's own seed tally.
         foreach (EmbeddingOwnerKind kind in _noiseKinds)
         {
             for (int i = 0; i < NoiseCountPerKind; i++)
@@ -289,11 +299,51 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
     }
 
     /// <summary>
-    /// Every <c>hnsw</c> index definition on the live, migrated <c>Embeddings</c> table, read from
-    /// <c>pg_indexes</c> — the only authority true by construction for "which owner kinds have a partial vector
-    /// index", since a grep of the append-only migrations would still find a dropped one.
+    /// The owner kinds selected by a <b>partial</b> index on the <c>Embeddings</c> table, parsed out of the live
+    /// index definitions.
     /// </summary>
-    private async Task<IReadOnlyList<string>> VectorIndexDefinitionsAsync()
+    /// <remarks>
+    /// Two things are asserted on the way, so an exotic predicate cannot slip past as "no owner kind": every partial
+    /// index on this table must partition on <c>OwnerKind</c> at all, and must do so by simple equality — a set
+    /// predicate (<c>= ANY (ARRAY[…])</c>) or a range would index several kinds behind a shape this parse does not
+    /// read, which is exactly the false negative that would let an indexed noise kind through.
+    /// </remarks>
+    /// <param name="definitions">Every index definition on the table.</param>
+    /// <returns>The distinct owner kinds any partial index selects.</returns>
+    private static IReadOnlyList<EmbeddingOwnerKind> PartialIndexOwnerKinds(IReadOnlyList<string> definitions)
+    {
+        List<EmbeddingOwnerKind> kinds = [];
+        foreach (string definition in definitions)
+        {
+            int where = definition.IndexOf(" WHERE ", StringComparison.Ordinal);
+            if (where < 0)
+            {
+                continue; // a table-wide index partitions nothing
+            }
+
+            Match match = _ownerKindEquality.Match(definition, where);
+            match.Success.Should().BeTrue(
+                $"every partial index on Embeddings must partition by a simple OwnerKind equality, or this parse "
+                + $"reports 'no kind' for an index that really does cover one -- saw: {definition}");
+
+            EmbeddingOwnerKind kind = (EmbeddingOwnerKind)int.Parse(
+                match.Groups[1].Value, CultureInfo.InvariantCulture);
+            if (!kinds.Contains(kind))
+            {
+                kinds.Add(kind);
+            }
+        }
+
+        return kinds;
+    }
+
+    /// <summary>
+    /// Every index definition on the live, migrated <c>Embeddings</c> table, read from <c>pg_indexes</c> — the only
+    /// authority true by construction for "which owner kinds have an index of their own", since a grep of the
+    /// append-only migrations would still find a dropped one. <b>Unfiltered by access method</b>: an
+    /// <c>ivfflat</c> index on a noise kind would spoil the crowd exactly as an <c>hnsw</c> one would.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> IndexDefinitionsAsync()
     {
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
@@ -305,7 +355,7 @@ public sealed class CrossKindEmbeddingRecallIntegrationTests : IClassFixture<Emb
 
         await using DbCommand command = connection.CreateCommand();
         command.CommandText =
-            """SELECT indexdef FROM pg_indexes WHERE tablename = 'Embeddings' AND indexdef LIKE '%hnsw%';""";
+            """SELECT indexdef FROM pg_indexes WHERE tablename = 'Embeddings';""";
 
         List<string> definitions = [];
         await using (DbDataReader reader = await command.ExecuteReaderAsync())

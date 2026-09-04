@@ -27,9 +27,12 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Data;
 /// FK/index names (<c>FK_Suggestions_Suggestions_SupersedesId</c>, <c>IX_NewsTopics_Name</c>) are never spelled
 /// there, and a raw-SQL constraint trigger (<c>ct_suggestions_mode_matches_account</c>) is not a model object at
 /// all. Only <c>pg_constraint</c> / <c>pg_indexes</c> / <c>pg_trigger</c> answer definitively for every kind
-/// alike. (§2 harvests to <b>16</b> real identifiers today — 12 <c>CK_</c>, 1 <c>IX_</c>, 1 <c>FK_</c>, 1
-/// <c>UX_</c>, 1 <c>ct_</c> — one fewer than gh#981's own "17, 13 CK_" scale estimate: see
-/// <see cref="_identifierChain"/>'s remarks for the naive-shape false positive that measurement included.)
+/// alike. (The harvested set <b>grows with §2</b> — every PR that names a new database object in an inventory row
+/// adds to it, which is the point — so no count is written down here: a tally in a remark rots the first time a
+/// row is added, as this one did between gh#981 and gh#1096. What is pinned instead is the anti-vacuity anchor
+/// below: a non-empty harvest carrying at least one known member of every object kind in play. See
+/// <see cref="_identifierChain"/>'s remarks for the naive-shape false positive gh#981's own scale estimate
+/// included.)
 /// </para>
 /// <para>
 /// <b>The harvest is mechanical</b> — a regex over §2's own markdown text, never a hand-maintained list (a second
@@ -61,10 +64,10 @@ public class InventoryIdentifierLiveSchemaIntegrationTests : IClassFixture<Postg
         identifiers.Should().NotBeEmpty(
             "§2 names several database objects \"by name\" — a harvester that silently matches nothing must not pass");
 
-        // One stable, long-lived member per object kind actually in play (16 real identifiers today: 12 CK_,
-        // 1 IX_, 1 FK_, 1 UX_, 1 ct_ — see the type-level remarks) — so a regex that quietly stopped matching one
-        // kind's backtick shape fails HERE, not by every Theory case for that kind silently disappearing from
-        // the MemberData.
+        // One stable, long-lived member per object kind actually in play -- so a regex that quietly stopped
+        // matching one kind's backtick shape fails HERE, not by every Theory case for that kind silently
+        // disappearing from the MemberData. Deliberately membership, never a count: the harvested set grows with
+        // every PR that names a new object in §2 (see the type-level remarks).
         identifiers.Should().Contain("CK_Trades_Mode_NotUndeclared", "a known CHECK constraint name must survive the harvest");
         identifiers.Should().Contain("IX_NewsTopics_Name", "a known index name must survive the harvest");
         identifiers.Should().Contain("FK_Suggestions_Suggestions_SupersedesId", "a known foreign-key name must survive the harvest");

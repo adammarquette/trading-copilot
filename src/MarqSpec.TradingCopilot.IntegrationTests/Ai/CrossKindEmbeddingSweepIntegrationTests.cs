@@ -7,7 +7,7 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using Pgvector;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
@@ -52,9 +52,17 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// with no request user, so <c>ICurrentUser.UserId</c> is <see cref="System.Guid.Empty"/> and the R-20 default-deny
 /// filter on <see cref="Suggestion"/> / <see cref="Trade"/> matches <b>nothing</b> — every row would look orphaned.
 /// <see cref="Sweep_ShouldNeverTouchALiveOwnersRow_WhenTheOwnerBelongsToAnotherOperator"/> proves the bypass is real
-/// by seeding owners under two <i>different</i> non-empty operators and asserting, in the same case, that a
-/// filtered read of the very same table returns zero rows (the control that stops the assertion passing for the
-/// wrong reason).
+/// by seeding owners under two <i>different</i> non-empty operators and asserting, in the same case, that a read of
+/// the very same tables — scoped to the identity a background DI scope actually resolves, not to an assumed
+/// <see cref="System.Guid.Empty"/> — returns zero rows. That control is what stops the assertion passing for the
+/// wrong reason, and resolving the identity rather than hard-coding it is what keeps it describing the sweep if a
+/// harness ever registers a fixed test user.
+/// </para>
+/// <para>
+/// <b>A swallowed fault is never mistaken for the guarantee.</b> <c>SweepAsync</c> catches per-kind and
+/// per-backstop exceptions and keeps going, so an arm that <i>threw</i> reports exactly the zero a correct no-op
+/// does — and every "nothing was deleted" case here would pass over it. <see cref="RunSweepAsync"/> therefore
+/// drives the sweep through a <see cref="CapturingLogger"/> and asserts nothing warning-or-worse was logged.
 /// </para>
 /// <para>
 /// <b>Every case drives <c>EmbeddingOrphanGcHost.SweepAsync</c></b>, not the store in isolation — that static method
@@ -67,8 +75,10 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// of production and confirmed red for its own reason, then restored: dropping the <c>Suggestion</c> /
 /// <c>JournalEntry</c> arms' anti-join (an unconditional delete) reddens every live-owner case; making them no-ops
 /// reddens every orphan case; removing <c>IgnoreQueryFilters</c> from the <c>Suggestion</c> arm reddens the
-/// cross-operator case; and removing the two new kinds from <see cref="EmbeddingOrphanSweep.SweepableKinds"/>
-/// reddens the orphan cases (nothing is swept at all). The broken copies were never committed.
+/// cross-operator case; removing the two new kinds from <see cref="EmbeddingOrphanSweep.SweepableKinds"/> reddens
+/// the orphan cases (nothing is swept at all); and dropping the stale-model self-<c>EXISTS</c>, or making that
+/// backstop a no-op, reddens exactly one of the two stale-model cases each. The broken copies were never
+/// committed.
 /// </para>
 /// </remarks>
 public sealed class CrossKindEmbeddingSweepIntegrationTests : IClassFixture<EmbeddingReadTestPostgresFactory>
@@ -436,7 +446,18 @@ public sealed class CrossKindEmbeddingSweepIntegrationTests : IClassFixture<Embe
     {
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         IEmbeddingOrphanStore store = scope.ServiceProvider.GetRequiredService<IEmbeddingOrphanStore>();
-        return await EmbeddingOrphanGcHost.SweepAsync(store, currentModel, NullLogger.Instance, CancellationToken.None);
+        CapturingLogger logger = new();
+        int swept = await EmbeddingOrphanGcHost.SweepAsync(store, currentModel, logger, CancellationToken.None);
+
+        // WITHOUT THIS, "0 deleted" is ambiguous. SweepAsync catches per-kind and per-backstop exceptions and keeps
+        // going, so a sweep arm that THREW -- a broken translation, a dropped column, an unmapped kind -- reports
+        // exactly the same count as an arm that correctly found nothing, and every "nothing was deleted" case here
+        // would pass over it. The swallowed fault is only ever visible in the log, so the log is asserted.
+        logger.Faults.Should().BeEmpty(
+            "a sweep arm that faulted is swallowed by SweepAsync's per-kind catch and reports the same zero a "
+            + "correct no-op does -- so a fault must never be mistaken for the guarantee under test");
+
+        return swept;
     }
 
     private async Task<List<EmbeddingRecord>> ReadEmbeddingsAsync(EmbeddingOwnerKind ownerKind, string ownerId)
@@ -494,4 +515,35 @@ public sealed class CrossKindEmbeddingSweepIntegrationTests : IClassFixture<Embe
     }
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
+
+    /// <summary>
+    /// A logger that keeps every warning/error <c>EmbeddingOrphanGcHost.SweepAsync</c> writes, so a swallowed
+    /// per-kind fault cannot masquerade as a correct "nothing to delete".
+    /// </summary>
+    private sealed class CapturingLogger : ILogger
+    {
+        private readonly List<string> _faults = [];
+
+        /// <summary>Every warning-or-worse the sweep logged, in order.</summary>
+        public IReadOnlyList<string> Faults => _faults;
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+            if (logLevel >= LogLevel.Warning)
+            {
+                _faults.Add($"{logLevel}: {formatter(state, exception)}");
+            }
+        }
+    }
 }
