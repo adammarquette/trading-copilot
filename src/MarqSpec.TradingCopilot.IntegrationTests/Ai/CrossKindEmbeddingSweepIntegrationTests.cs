@@ -73,7 +73,8 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Ai;
 /// <para>
 /// <b>Prove-red (gh#1096, recorded in the PR body).</b> Each guard was run against a deliberately broken local copy
 /// of production and confirmed red for its own reason, then restored: dropping the <c>Suggestion</c> /
-/// <c>JournalEntry</c> arms' anti-join (an unconditional delete) reddens every live-owner case; making them no-ops
+/// <c>JournalEntry</c> arms' anti-join (an unconditional delete) reddens <b>all six</b> cases — not only the
+/// live-owner ones, since the two stale-model cases seed live owners too; making them no-ops
 /// reddens every orphan case; removing <c>IgnoreQueryFilters</c> from both arms reddens <b>every</b> case, not only
 /// the cross-operator one — with no request user the producer look-up matches nothing, so the first pass deletes
 /// each kind entire (its <i>inner</i> repetition on the producer sub-query, by contrast, is inert: removing that
