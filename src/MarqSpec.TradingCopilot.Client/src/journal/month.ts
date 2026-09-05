@@ -144,9 +144,33 @@ function realizedOf(day: DailyRealizedPnL): number {
   return toNumber(day.realizedPnL) ?? 0;
 }
 
+/**
+ * A day's realized P&L in **whole cents**, and the reason every total here is accumulated that way.
+ *
+ * `realizedPnL` is a server-side `decimal`; JavaScript has only binary floats, and running `+=` over enough
+ * of them drifts (`0.1 + 0.2 !== 0.3`). The number that drifts is the month **net** and the equity curve's
+ * last point — the figure the operator reconciles against a broker statement — so a total that is a cent off
+ * its own visible days reads as a bug in the journal rather than as rounding.
+ *
+ * Integer cents remove it outright: each day is rounded to the cent it is already displayed at (lossless for
+ * any real money value), summed exactly, and converted back once at the end. `Math.round` rather than a
+ * truncation, so a value that arrived as `12.339999999999998` lands on the cent it means.
+ *
+ * This is a *display* sum. It is not, and must not become, a basis for sizing or a risk decision — those live
+ * below the model in server-side decimal (R-5).
+ */
+function centsOf(day: DailyRealizedPnL): number {
+  return Math.round(realizedOf(day) * 100);
+}
+
+/** Cents back to the dollars the formatters take. One conversion, at the end of an exact integer sum. */
+function fromCents(cents: number): number {
+  return cents / 100;
+}
+
 /** The month's stat strip (R-9), derived from the day rows — never from a second server-side sum. */
 export function monthStats(days: readonly DailyRealizedPnL[]): MonthStats {
-  let net = 0;
+  let netCents = 0;
   let greenDays = 0;
   let redDays = 0;
   let flatDays = 0;
@@ -155,25 +179,28 @@ export function monthStats(days: readonly DailyRealizedPnL[]): MonthStats {
   let worst: DailyRealizedPnL | null = null;
 
   for (const day of days) {
-    const realized = realizedOf(day);
-    net += realized;
+    const cents = centsOf(day);
+    netCents += cents;
     tradeCount += day.tradeCount;
-    if (realized > 0) greenDays += 1;
-    else if (realized < 0) redDays += 1;
+    if (cents > 0) greenDays += 1;
+    else if (cents < 0) redDays += 1;
     else flatDays += 1;
 
-    if (best === null || realized > realizedOf(best)) best = day;
-    if (worst === null || realized < realizedOf(worst)) worst = day;
+    if (best === null || cents > centsOf(best)) best = day;
+    if (worst === null || cents < centsOf(worst)) worst = day;
   }
 
   return {
-    net,
+    net: fromCents(netCents),
     greenDays,
     redDays,
     flatDays,
     best,
     worst,
-    averagePerDay: days.length === 0 ? null : net / days.length,
+    // Divides the EXACT cent total, and is deliberately left unrounded: the drift worth removing is the one
+    // in the accumulation, and rounding the quotient here as well would round twice before the formatter has
+    // rounded once.
+    averagePerDay: days.length === 0 ? null : fromCents(netCents) / days.length,
     tradeCount,
   };
 }
@@ -190,10 +217,12 @@ export interface EquityPoint {
  */
 export function equityCurve(days: readonly DailyRealizedPnL[]): readonly EquityPoint[] {
   const ordered = [...days].sort((left, right) => left.date.localeCompare(right.date));
-  let running = 0;
+  // Integer cents, for the same reason `monthStats` uses them: the curve's last point IS the month net the
+  // stat strip prints beside it, and the two disagreeing by a cent is worse than either being a cent off.
+  let runningCents = 0;
   return ordered.map((day) => {
-    running += realizedOf(day);
-    return { date: day.date, cumulative: running };
+    runningCents += centsOf(day);
+    return { date: day.date, cumulative: fromCents(runningCents) };
   });
 }
 
