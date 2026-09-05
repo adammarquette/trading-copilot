@@ -1,4 +1,5 @@
 using FakeItEasy;
+using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
@@ -64,8 +65,22 @@ public class PositionReduceEndpointTests
         new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
             new FixedUser(_operator));
 
+    private static IAccountEntryGuard PassthroughGuard()
+    {
+        // The account is free: the guard takes the lock and invokes the callback. The real advisory lock (gh#531)
+        // is not evaluable on the EF in-memory provider, so what the unit tier proves is what runs inside it.
+        IAccountEntryGuard guard = A.Fake<IAccountEntryGuard>();
+        A.CallTo(() => guard.TryRunExclusiveAsync<PositionReduceResult?>(
+                A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<PositionReduceResult?>>>._,
+                A<Func<PositionReduceResult?>>._, A<CancellationToken>._))
+            .ReturnsLazily((TradingCopilotDbContext _, Guid _, Func<Task<PositionReduceResult?>> transmit,
+                Func<PositionReduceResult?> _, CancellationToken _) => transmit());
+        return guard;
+    }
+
     private PositionReduceService Service() =>
-        new(Context(), _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
+        new(Context(), _factory, PassthroughGuard(),
+            Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
             NullLogger<PositionReduceService>.Instance);
 
     private async Task<Guid> SeedAccountAsync()
@@ -164,17 +179,36 @@ public class PositionReduceEndpointTests
     }
 
     [Fact]
-    public async Task ReduceAsync_ShouldReturn409_WhenTheVenueStillReportsTheOriginalSize()
+    public async Task ReduceAsync_ShouldReturn409Unconfirmed_WhenTheVenueAcceptedButStillReportsTheOriginalSize()
     {
         // Never 200: an accepted-but-unchanged partial close must not present as done, and the body must carry the
-        // TRUE remaining exposure so the operator sees what they actually hold.
+        // TRUE remaining exposure. The OUTCOME NAME is the safety-critical part -- Unconfirmed, not NotReduced,
+        // because the close was transmitted and may still be settling, so the client must re-read rather than
+        // re-send a non-idempotent write.
         Guid accountId = await SeedAccountAsync();
         ReducesTo(3); // unchanged
 
         IResult result = await Reduce(accountId, "MES", 1);
 
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
-        BodyOf(result).Outcome.Should().Be(nameof(PositionReduceOutcome.NotReduced));
+        BodyOf(result).Outcome.Should().Be(nameof(PositionReduceOutcome.Unconfirmed));
+        BodyOf(result).NetQuantity.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldReturn409Refused_WhenTheVenueDefinitivelyRefusedTheClose()
+    {
+        // A definitive refusal is not an outage: the venue answered, nothing executed, and the body carries the
+        // still-true pre-attempt size rather than a null that would read as "we have no idea".
+        Guid accountId = await SeedAccountAsync();
+        A.CallTo(() => _venue.ReducePositionAsync(
+                A<VenueAccountId>._, A<VenueContractId>._, A<int>._, A<CancellationToken>._))
+            .Throws(new VenueRefusalException("InvalidCloseSize", VenueRefusalKind.Definitive, 5));
+
+        IResult result = await Reduce(accountId, "MES", 1);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        BodyOf(result).Outcome.Should().Be(nameof(PositionReduceOutcome.Refused));
         BodyOf(result).NetQuantity.Should().Be(3);
     }
 

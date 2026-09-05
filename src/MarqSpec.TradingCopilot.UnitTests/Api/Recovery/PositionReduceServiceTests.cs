@@ -1,4 +1,5 @@
 using FakeItEasy;
+using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
@@ -41,6 +42,7 @@ public class PositionReduceServiceTests
     private readonly string _database = Guid.NewGuid().ToString();
     private readonly IProjectXVenueFactory _factory = A.Fake<IProjectXVenueFactory>();
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
+    private IAccountEntryGuard _guard = null!;
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
@@ -54,6 +56,35 @@ public class PositionReduceServiceTests
             .Returns(new ResolvedContract(ContractId, InstrumentId.Parse("MES")));
         Holds(3);      // long 3 by default
         ReducesTo(2);  // the venue takes one off by default
+        _guard = PassthroughGuard();
+    }
+
+    /// <summary>
+    /// The account is free, so the guard takes the lock and just invokes the callback. The real cross-request
+    /// serialization is a Postgres advisory lock (gh#531) the EF in-memory provider cannot evaluate, so the unit
+    /// tier proves what runs INSIDE the lock; the busy path has its own test with a busy fake.
+    /// </summary>
+    private static IAccountEntryGuard PassthroughGuard()
+    {
+        IAccountEntryGuard guard = A.Fake<IAccountEntryGuard>();
+        A.CallTo(() => guard.TryRunExclusiveAsync<PositionReduceResult?>(
+                A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<PositionReduceResult?>>>._,
+                A<Func<PositionReduceResult?>>._, A<CancellationToken>._))
+            .ReturnsLazily((TradingCopilotDbContext _, Guid _, Func<Task<PositionReduceResult?>> transmit,
+                Func<PositionReduceResult?> _, CancellationToken _) => transmit());
+        return guard;
+    }
+
+    /// <summary>A guard whose account is already locked by another transmit: onBusy runs, the callback never does.</summary>
+    private static IAccountEntryGuard BusyGuard()
+    {
+        IAccountEntryGuard guard = A.Fake<IAccountEntryGuard>();
+        A.CallTo(() => guard.TryRunExclusiveAsync<PositionReduceResult?>(
+                A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<PositionReduceResult?>>>._,
+                A<Func<PositionReduceResult?>>._, A<CancellationToken>._))
+            .ReturnsLazily((TradingCopilotDbContext _, Guid _, Func<Task<PositionReduceResult?>> _,
+                Func<PositionReduceResult?> onBusy, CancellationToken _) => Task.FromResult(onBusy()));
+        return guard;
     }
 
     private static PositionSnapshot Position(int net) =>
@@ -80,7 +111,8 @@ public class PositionReduceServiceTests
             new FixedUser(user ?? _operator));
 
     private PositionReduceService Service(string credentialKey = "topstep-main") =>
-        new(Context(), _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
+        new(Context(), _factory, _guard,
+            Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
             NullLogger<PositionReduceService>.Instance);
 
     private async Task<Guid> SeedAccountAsync(string credentialKey = "topstep-main")
@@ -152,17 +184,23 @@ public class PositionReduceServiceTests
     }
 
     [Fact]
-    public async Task ReduceAsync_ShouldReportNotReduced_WhenTheVenueStillReportsTheOriginalSize()
+    public async Task ReduceAsync_ShouldReportUnconfirmed_WhenTheVenueAcceptedButStillReportsTheOriginalSize()
     {
         // The card's central property: a partial close the venue ACCEPTED while still reporting the original size
-        // is not a reduction. Reporting it done would tell the operator their exposure is smaller than it is.
+        // is NOT a reduction. Reporting it done would tell the operator their exposure is smaller than it is.
+        //
+        // It is Unconfirmed rather than NotReduced, and the distinction is safety-critical: a market close is not
+        // instantaneous, so an unchanged read-back means EITHER the fill has not settled OR nothing executed, and
+        // the two are indistinguishable from here. Calling it "not reduced" invites a re-send, and the send is
+        // non-idempotent -- a retry inside the settle window takes the size off twice, past flat into a reversal.
         Guid accountId = await SeedAccountAsync();
         Holds(3);
         ReducesTo(3);
 
         PositionReduceResult? result = await Reduce(accountId, 1);
 
-        result!.Outcome.Should().Be(PositionReduceOutcome.NotReduced);
+        result!.Outcome.Should().Be(PositionReduceOutcome.Unconfirmed);
+        result.Outcome.Should().NotBe(PositionReduceOutcome.Reduced);
         result.NetQuantity.Should().Be(3);
     }
 
@@ -415,7 +453,8 @@ public class PositionReduceServiceTests
 
         await using TradingCopilotDbContext other = Context(Guid.NewGuid());
         PositionReduceService service = new(
-            other, _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
+            other, _factory, _guard,
+            Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
             NullLogger<PositionReduceService>.Instance);
 
         (await service.ReduceAsync(accountId, InstrumentId.Parse("MES"), 1, CancellationToken.None)).Should().BeNull();
@@ -449,5 +488,87 @@ public class PositionReduceServiceTests
 
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
         VenueMustNotHaveBeenAskedToReduce();
+    }
+
+    // --- A definitive refusal is not an outage, and an indeterminate one is not a no-op ---
+
+    [Fact]
+    public async Task ReduceAsync_ShouldReportRefusedWithTheUnchangedSize_WhenTheVenueDefinitivelyRefused()
+    {
+        // The venue ANSWERED, in the negative, and executed nothing (gh#629). Folding that into Unreachable would
+        // state two falsehoods at once -- that the venue was not reached, and that the exposure is unknowable. It
+        // is knowable: it is exactly what it was before the attempt, and the operator gets that number.
+        Guid accountId = await SeedAccountAsync();
+        Holds(4);
+        ReduceThrows(new VenueRefusalException("InvalidCloseSize", VenueRefusalKind.Definitive, 5));
+
+        PositionReduceResult? result = await Reduce(accountId, 1);
+
+        result!.Outcome.Should().Be(PositionReduceOutcome.Refused);
+        result.Outcome.Should().NotBe(PositionReduceOutcome.Unreachable);
+        result.NetQuantity.Should().Be(4);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldReportUnconfirmedWithNoNetQuantity_WhenTheRefusalIsIndeterminate()
+    {
+        // Indeterminate is gh#629's fail-safe default: the close MAY be live. It must never read as "nothing
+        // happened" -- that is what would invite the re-send that takes the size off twice.
+        Guid accountId = await SeedAccountAsync();
+        Holds(4);
+        ReduceThrows(new VenueRefusalException("OrderPending", VenueRefusalKind.Indeterminate, 7));
+
+        PositionReduceResult? result = await Reduce(accountId, 1);
+
+        result!.Outcome.Should().Be(PositionReduceOutcome.Unconfirmed);
+        result.NetQuantity.Should().BeNull();
+    }
+
+    // --- Serialization: a second non-idempotent close must never stack on one in flight ---
+
+    [Fact]
+    public async Task ReduceAsync_ShouldReportAccountBusyAndSendNothing_WhenAnotherTransmitHoldsTheAccountLock()
+    {
+        // The gh#531 hazard class, on a write where it is worse: two concurrent reduces both size against the same
+        // pre-reduce snapshot, both pass the strict-partial guard, and both transmit -- taking off twice what was
+        // asked. Refusing beats waiting, because a queued second close would still be sized against a stale read.
+        Guid accountId = await SeedAccountAsync();
+        _guard = BusyGuard();
+
+        PositionReduceResult? result = await Reduce(accountId, 1);
+
+        result!.Outcome.Should().Be(PositionReduceOutcome.AccountBusy);
+        result.NetQuantity.Should().BeNull();
+        VenueMustNotHaveBeenAskedToReduce();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldTakeTheAccountLockBeforeReadingTheStartingPosition()
+    {
+        // The lock has to span the before-read AND the close, not just the close: the strict-partial guard is sized
+        // off that read, so a lock taken after it would let two racers both read the same size and both proceed.
+        Guid accountId = await SeedAccountAsync();
+        _guard = BusyGuard();
+
+        await Reduce(accountId, 1);
+
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // --- A venue that cannot do this at all refuses loudly, rather than looking like an outage ---
+
+    [Fact]
+    public async Task ReduceAsync_ShouldPropagate_WhenTheVenueCannotSizeAPartialClose()
+    {
+        // The seam's fail-loud default (R-17) throws NotSupportedException. Laundering it into Unreachable would
+        // tell the operator the venue was down when the truth is that this venue cannot size a partial close at
+        // all -- an operator who retries an outage forever never learns the control does not exist here.
+        Guid accountId = await SeedAccountAsync();
+        Holds(3);
+        ReduceThrows(new NotSupportedException("this venue cannot size a partial close"));
+
+        Func<Task> act = async () => await Reduce(accountId, 1);
+
+        await act.Should().ThrowAsync<NotSupportedException>();
     }
 }

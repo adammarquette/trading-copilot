@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Venues;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
@@ -39,6 +40,35 @@ public enum PositionReduceOutcome
     /// venue is touched — a reduce must never silently become a flatten.
     /// </summary>
     ExceedsPosition = 4,
+
+    /// <summary>
+    /// The venue <b>answered in the negative and executed nothing</b> (a definitive refusal — gh#629's
+    /// <see cref="VenueRefusalKind.Definitive"/>). Distinct from <see cref="Unreachable"/>, which claims the venue
+    /// could not be reached, and from <see cref="Unconfirmed"/>, which claims nothing about what executed: here the
+    /// exposure is <b>known</b>, and it is exactly what it was before the attempt.
+    /// </summary>
+    Refused = 5,
+
+    /// <summary>
+    /// The partial close <b>was transmitted</b> and its effect cannot be established — the venue accepted it but
+    /// still reports the position unchanged, or refused it indeterminately. A market close is not instantaneous, so
+    /// an unchanged read-back means <i>either</i> the fill has not settled <i>or</i> nothing executed, and the two
+    /// are <b>indistinguishable</b> from here.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is not "try again".</b> A sized partial close is non-idempotent, so re-sending inside the settle
+    /// window takes the size off <i>twice</i> — past flat, into an opposing position. The only safe response is to
+    /// <b>re-read venue truth</b> and decide from what is actually there. It is a separate outcome from
+    /// <see cref="NotReduced"/> precisely so a caller cannot treat "it did not move" as "it did not happen".
+    /// </remarks>
+    Unconfirmed = 6,
+
+    /// <summary>
+    /// Another transmit already holds this account's serialization lock, so the reduce did <b>not</b> run — nothing
+    /// was sent. Refusing beats waiting: a second non-idempotent partial close must never stack on one in flight
+    /// (the gh#531 hazard class), and the operator can re-issue deliberately once the account is free.
+    /// </summary>
+    AccountBusy = 7,
 }
 
 /// <summary>The result of an operator-initiated reduce (gh#928).</summary>
@@ -88,30 +118,53 @@ public sealed record PositionReduceResult(PositionReduceOutcome Outcome, int? Ne
 /// a partial close <b>has not been observed</b> — gh#1012 scaffolded that verification but it has never been run —
 /// so a resting stop may still cover the <i>original</i> quantity and, on trigger, overshoot the remainder into an
 /// opposing position. Which of auto-resize / refuse-the-desyncing-reduce / warn-loudly answers that is a policy
-/// gh#928 §⚠️ reserves for the operator, and none of them is implemented here. <b>This path is not to be trusted on
-/// a funded account until that gate produces a finding.</b>
+/// gh#928 §⚠️ reserves for the operator, and none of them is implemented here.
+/// </para>
+/// <para>
+/// <b>Known limitation 2 — the partial close is auto-retried below this layer.</b> The ProjectX client's resilience
+/// pipeline excludes exactly one route from transient-fault retry, <c>POST /api/Order/place</c> (ADR-0007, gh#673),
+/// on the reasoning that every other route is a read or an idempotent write. <b>A sized partial close is neither.</b>
+/// <c>partialCloseContract(1)</c> sent twice takes two contracts off, so a lost acknowledgement — a transport fault,
+/// or a <c>5xx</c> returned <i>after</i> the gateway already executed — can silently replay the write up to three
+/// more times before this service's read-back ever runs. On a small position that overshoots past flat into an
+/// <b>opposing</b> one. Widening the client's exclusion is a change to the vendored client repo
+/// (MarqSpec.Client.ProjectX#98), not something this layer can enforce: the retry happens inside the HTTP pipeline,
+/// underneath <c>IProjectXApiClient</c>. Until it lands, this is a <b>named hold condition</b>, not a residual risk
+/// somebody may forget. The verified-reduction rule below still refuses to call an over-reduced position done — it
+/// reports the true, wrong net quantity — but it cannot undo the second send.
+/// </para>
+/// <para>
+/// <b>Both holds point the same way:</b> this path is <b>practice-only</b>, and is not to be trusted on a funded
+/// account until the gh#1012 gate produces a finding <i>and</i> MarqSpec.Client.ProjectX#98 lands.
 /// </para>
 /// </remarks>
 public sealed class PositionReduceService
 {
     private readonly TradingCopilotDbContext _database;
     private readonly IProjectXVenueFactory _venueFactory;
+    private readonly IAccountEntryGuard _accountGuard;
     private readonly IOptions<ProjectXConnectionOptions> _projectXOptions;
     private readonly ILogger<PositionReduceService> _logger;
 
     /// <summary>Creates the reduce service.</summary>
     /// <param name="database">The scoped database (R-20 applies).</param>
     /// <param name="venueFactory">Builds a venue for the connection's firm conventions.</param>
+    /// <param name="accountGuard">
+    /// The per-account transmit lock (gh#531). Required, not optional: without it two concurrent reduces both size
+    /// against the same pre-reduce snapshot and both transmit.
+    /// </param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
     /// <param name="logger">The logger.</param>
     public PositionReduceService(
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
+        IAccountEntryGuard accountGuard,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         ILogger<PositionReduceService> logger)
     {
         _database = database;
         _venueFactory = venueFactory;
+        _accountGuard = accountGuard;
         _projectXOptions = projectXOptions;
         _logger = logger;
     }
@@ -154,9 +207,42 @@ public sealed class PositionReduceService
             return new PositionReduceResult(PositionReduceOutcome.Unreachable, null);
         }
 
+        // Everything from the before-read to the read-back runs under the account's transmit lock (gh#531), and
+        // NON-BLOCKING: if another transmit already holds it, this returns AccountBusy having sent nothing. Waiting
+        // would be worse than refusing -- a sized partial close is non-idempotent, so a second one stacking on one
+        // in flight takes the size off twice, and the strict-partial guard cannot see a close that has not settled.
+        // Refusing lets the operator re-issue deliberately, against a settled read.
+        return await _accountGuard.TryRunExclusiveAsync(
+            _database,
+            accountId,
+            () => ReduceUnderLockAsync(account, instrument, quantity, connection.Id, cancellationToken),
+            () => new PositionReduceResult(PositionReduceOutcome.AccountBusy, null),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// The venue half of the reduce, run while this account's transmit lock is held.
+    /// </summary>
+    /// <param name="account">The caller's account row (already ownership- and credential-checked).</param>
+    /// <param name="instrument">The instrument to reduce.</param>
+    /// <param name="quantity">The positive number of contracts to take off.</param>
+    /// <param name="connectionId">The connection whose firm conventions build the venue.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The outcome, read from venue truth after the attempt.</returns>
+    private async Task<PositionReduceResult?> ReduceUnderLockAsync(
+        Account account,
+        InstrumentId instrument,
+        int quantity,
+        Guid connectionId,
+        CancellationToken cancellationToken)
+    {
+        // Captured before the venue is asked, so a definitive refusal can report the TRUE exposure instead of
+        // claiming it is unknown. Null until the before-read succeeds.
+        int? beforeQuantity = null;
+
         try
         {
-            FirmConventions conventions = await _database.ConventionsForConnectionAsync(connection.Id, cancellationToken);
+            FirmConventions conventions = await _database.ConventionsForConnectionAsync(connectionId, cancellationToken);
             ITradingVenue venue = _venueFactory.Create(conventions);
 
             IReadOnlyList<VenueAccount> roster = await venue.GetAccountsAsync(cancellationToken);
@@ -173,36 +259,70 @@ public sealed class PositionReduceService
             // belief and no IsActive-style filter (gh#929): a filtered exposure read fabricates a flat.
             IReadOnlyList<PositionSnapshot> before = await venue.GetPositionsAsync(venueAccount.Id, cancellationToken);
             PositionSnapshot? position = before.FirstOrDefault(candidate => candidate.Contract == resolved.Contract);
-            int beforeQuantity = position?.NetQuantity ?? 0;
-            int beforeMagnitude = Math.Abs(beforeQuantity);
+            int openQuantity = position?.NetQuantity ?? 0;
+            beforeQuantity = openQuantity;
+            int beforeMagnitude = Math.Abs(openQuantity);
 
             // Strict partial: the request must LEAVE part of the position on. quantity >= what is open is either a
             // full close (which belongs to the exit path, with its OCO-cancel) or a sizing mistake -- refused here,
             // before the venue is touched, so a reduce can never silently become a flatten that strands a bracket.
             if (quantity >= beforeMagnitude)
             {
-                return new PositionReduceResult(PositionReduceOutcome.ExceedsPosition, beforeQuantity);
+                return new PositionReduceResult(PositionReduceOutcome.ExceedsPosition, openQuantity);
             }
 
             PositionSnapshot after = await venue.ReducePositionAsync(
                 venueAccount.Id, resolved.Contract, quantity, cancellationToken);
 
-            // Verified against what was ASKED, not just against direction (gh#928 §⚠️2, settled as exact-delta).
-            // Success is the venue reporting the position smaller by EXACTLY `quantity`, same side. Everything else
-            // is "not done": a partial execution that closed LESS than asked (more exposure remains than the
-            // operator targeted), a close that took off MORE (a protective stop or a concurrent exit fired), a side
-            // flip, and no change at all. The operator asked for a specific reduction, so anything other than that
-            // is a state they must SEE, never a green "reduced" whose net quantity they have to notice is wrong.
-            // (The strict-partial guard above makes the target `beforeMagnitude - quantity` at least 1, so a
-            // same-side match can never be flat: a close all the way to flat is an over-execution, reported
-            // not-done -- which is also what surfaces the dangling-bracket-over-a-flat race gh#1012 describes.)
-            bool reducedByExactlyRequested =
-                Math.Sign(after.NetQuantity) == Math.Sign(beforeQuantity)
-                && Math.Abs(after.NetQuantity) == beforeMagnitude - quantity;
+            // Verified against what was ASKED, not merely against direction (gh#928 §2 of the ratification list --
+            // exact-delta, the card's own proposed default, still awaiting the operator's sign-off). Success is the
+            // venue reporting the position smaller by EXACTLY `quantity`, same side. The strict-partial guard above
+            // makes the target `beforeMagnitude - quantity` at least 1, so a same-side match can never be flat.
+            if (Math.Sign(after.NetQuantity) == Math.Sign(openQuantity)
+                && Math.Abs(after.NetQuantity) == beforeMagnitude - quantity)
+            {
+                return new PositionReduceResult(PositionReduceOutcome.Reduced, after.NetQuantity);
+            }
 
-            return reducedByExactlyRequested
-                ? new PositionReduceResult(PositionReduceOutcome.Reduced, after.NetQuantity)
-                : new PositionReduceResult(PositionReduceOutcome.NotReduced, after.NetQuantity);
+            // TRANSMITTED, and the position has NOT MOVED. A market close is not instantaneous, so this is either a
+            // fill that has not settled or a close that did nothing -- indistinguishable from here. It is reported
+            // as Unconfirmed rather than folded into NotReduced precisely so no caller reads "it did not move" as
+            // "it did not happen" and re-sends: the send is non-idempotent, so a retry inside the settle window
+            // takes the size off twice, past flat into an opposing position. Re-read venue truth instead.
+
+            if (after.NetQuantity == openQuantity)
+            {
+                return new PositionReduceResult(PositionReduceOutcome.Unconfirmed, after.NetQuantity);
+            }
+
+            // The position DID move, but not by what was asked: less off (a partial execution), more off (a stop or
+            // a concurrent exit fired, up to flat), or a side flip. Not done -- and, like Unconfirmed, not an
+            // invitation to re-send. The operator sees the true net and decides from it.
+            return new PositionReduceResult(PositionReduceOutcome.NotReduced, after.NetQuantity);
+        }
+        catch (VenueRefusalException refusal) when (refusal.Kind == VenueRefusalKind.Definitive)
+        {
+            // The venue ANSWERED, in the negative, and executed nothing (gh#629). Calling that "unreachable" would
+            // state two falsehoods at once -- that the venue was not reached, and that the exposure is unknowable --
+            // so it is its own outcome, carrying the pre-attempt size, which is still the true one.
+            _logger.LogWarning(
+                refusal,
+                "The venue refused to reduce {Instrument} on account {Account}; the position is unchanged (gh#928).",
+                instrument,
+                account.Id);
+            return new PositionReduceResult(PositionReduceOutcome.Refused, beforeQuantity);
+        }
+        catch (VenueRefusalException refusal)
+        {
+            // Indeterminate -- the fail-safe default (gh#629): the close MAY be live. Never "nothing happened", and
+            // never an invitation to re-send a non-idempotent write.
+            _logger.LogError(
+                refusal,
+                "The reduce of {Instrument} on account {Account} was transmitted and its fate is unknown; it must "
+                + "not be re-sent (gh#928).",
+                instrument,
+                account.Id);
+            return new PositionReduceResult(PositionReduceOutcome.Unconfirmed, null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -212,14 +332,17 @@ public sealed class PositionReduceService
             // aborted request.
             throw;
         }
-        catch (Exception error)
+        catch (Exception error) when (error is not NotSupportedException)
         {
+            // NotSupportedException is deliberately NOT caught: it is the seam's fail-loud default for a venue that
+            // cannot size a partial close (R-17), and laundering it into "Unreachable" would tell the operator the
+            // venue was down when the truth is that this venue cannot do this at all. It must surface.
             _logger.LogError(
                 error,
                 "Operator reduce of {Instrument} on account {Account} could not be completed — the position may be "
                 + "unchanged, or partly reduced (gh#928).",
                 instrument,
-                accountId);
+                account.Id);
             return new PositionReduceResult(PositionReduceOutcome.Unreachable, null);
         }
     }
