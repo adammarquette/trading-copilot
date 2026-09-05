@@ -25,6 +25,9 @@ public static class PositionReconciliationEndpoints
         endpoints.MapPost("/accounts/{id:guid}/positions/{instrument}/exit", ExitAsync).RequireAuthorization()
             .WithTags("Positions")
             .WithSummary("Close one instrument's position at market — the operator's per-position exit.");
+        endpoints.MapPost("/accounts/{id:guid}/positions/{instrument}/reduce", ReduceAsync).RequireAuthorization()
+            .WithTags("Positions")
+            .WithSummary("Reduce one instrument's position by a number of contracts at market — a sized partial close.");
         return endpoints;
     }
 
@@ -63,6 +66,27 @@ public static class PositionReconciliationEndpoints
                 result.Outcome.ToString(), result.NetQuantity)),
             _ => Results.Conflict(new PositionExitResponse(PositionExitOutcome.Unreachable.ToString(), 0)),
         };
+    }
+
+    /// <summary>
+    /// Reduces one instrument's position by a number of contracts (gh#928, R-11) — the blotter's reduce control.
+    /// </summary>
+    /// <remarks>
+    /// <b>Only a verified reduction is a 200.</b> A partial close the venue accepted while still reporting the
+    /// original size, one that took off a different amount than asked, a side flip, and an unreachable venue all
+    /// resolve to non-200 — an operator told "reduced" would trust a smaller exposure than they hold. A reduce that
+    /// is not strictly partial (at or beyond the open size) is a 400: a full close belongs to the exit control,
+    /// which also cancels the protective legs.
+    /// </remarks>
+    internal static async Task<IResult> ReduceAsync(
+        Guid id,
+        string instrument,
+        PositionReduceRequest request,
+        PositionReduceService reduces,
+        CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        throw new NotImplementedException("gh#928: the reduce route is not implemented yet.");
     }
 
     internal static async Task<IResult> ReconcileAsync(
@@ -124,3 +148,16 @@ public sealed record ReconciledPosition(string Contract, int NetQuantity, decima
 /// <param name="Outcome"><c>Flat</c>, <c>StillOpen</c> or <c>Unreachable</c> — as a name, not an integer.</param>
 /// <param name="NetQuantity">The signed exposure the venue still reports; 0 when flat or unreachable.</param>
 public sealed record PositionExitResponse(string Outcome, int NetQuantity);
+
+/// <summary>How many contracts an operator wants to take off a position (gh#928).</summary>
+/// <param name="Quantity">The positive number of contracts to reduce by; must be strictly less than what is open.</param>
+public sealed record PositionReduceRequest(int Quantity);
+
+/// <summary>The outcome of an operator-initiated reduce (gh#928).</summary>
+/// <param name="Outcome"><c>Reduced</c>, <c>NotReduced</c>, <c>ExceedsPosition</c> or <c>Unreachable</c> — as a name, not an integer.</param>
+/// <param name="NetQuantity">
+/// The signed exposure the venue reports after the attempt — or the current size, when the request was refused
+/// before the venue was touched. <b><c>null</c> when the venue could not be reached</b>: an exposure nobody could
+/// read is unknown, and a <c>0</c> there would let a client render an outage as flat.
+/// </param>
+public sealed record PositionReduceResponse(string Outcome, int? NetQuantity);
