@@ -44,7 +44,7 @@ gate every PR; integration tests run against **staging** after merge; a tagged s
 production deploy and a failure flags the release for rollback. Environments map to branches — dev ← `develop`,
 staging ← `staging`, production ← `main` — on the one-way ladder in [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
-Five constraints that bite in CI:
+Six constraints that bite in CI:
 
 - The repo has **four submodules** under `external/` (ProjectX, Tradovate, Finnhub, Tiingo) — checkout needs `submodules: true`. All four are public; a private one 404s `GITHUB_TOKEN` and fails every checkout (gh#1023).
 - `dotnet format` must run with `--exclude external/`, or it reformats vendored code.
@@ -68,6 +68,15 @@ Five constraints that bite in CI:
 - **Line endings are LF everywhere**, pinned in both `.gitattributes` and `.editorconfig`, which have to agree —
   otherwise `dotnet format` defaults to the host's line ending and a Windows contributor sees violations CI does
   not.
+- **`cancel-in-progress` must not fire on a non-push `pull_request` event.** `branch-policy.yml` listens on
+  `labeled`/`unlabeled`/`edited` too, and both fire from our **own** review loop — `scripts/watch-verdict.sh`
+  applies/clears the `verdict:watching` label, and a routine body edit is `edited` — on the SAME head SHA a run
+  is already testing. A concurrency group keyed only on `github.event_name == 'pull_request'` cancels that
+  in-flight run, leaving required checks (`ladder`, `commit-hygiene`, `issue-link`, `submodule-guard`) reporting
+  `cancelled` against a SHA nothing failed on, which jams the merge (`mergeStateStatus: BLOCKED`) even once a
+  later run goes green — reproduced and fixed at `gh#1119`. Scope `cancel-in-progress` to
+  `github.event.action == 'synchronize'`, the only action that means "a new commit superseded the one this run
+  is testing."
 
 **A local check that disagrees with CI is worse than no local check.** When they diverge, fix the divergence.
 
