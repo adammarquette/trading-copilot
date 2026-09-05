@@ -146,7 +146,8 @@ public sealed class AccountEntryGuard : IAccountEntryGuard
                 // its next entry-transmit with a spurious "busy" until that connector happened to be reused.
                 // Releasing a lock is cleanup: it must run to completion regardless of why the work above stopped.
                 await database.Database.ExecuteSqlAsync(
-                    $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))", CancellationToken.None);
+                    // PROVE-RED gh#1120 -- TEMPORARY, reverted in the very next commit. Do not merge this line.
+                    $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))", cancellationToken);
             }
         }
         finally
@@ -192,7 +193,8 @@ public sealed class AccountEntryGuard : IAccountEntryGuard
                 // more visible, not less: the next try-lock on this account observes it as held and returns
                 // onBusy() -- for the conditional-fire watcher, a fire deferred to the next quote for no reason.
                 await database.Database.ExecuteSqlAsync(
-                    $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))", CancellationToken.None);
+                    // PROVE-RED gh#1120 -- TEMPORARY, reverted in the very next commit. Do not merge this line.
+                    $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))", cancellationToken);
             }
         }
         finally
