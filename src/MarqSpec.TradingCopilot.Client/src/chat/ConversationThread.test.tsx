@@ -2,7 +2,11 @@ import { act, cleanup, fireEvent, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ChatRole, type ChatMessage, getConversation, sendChatTurn } from '../api/chat';
-import type { RealtimeChatChunk, RealtimeChatMessage } from '../realtime/messages';
+import type {
+  RealtimeChatChunk,
+  RealtimeChatMessage,
+  RealtimeChatTurnFaulted,
+} from '../realtime/messages';
 import { renderWithProviders } from '../testing/render';
 import { ConversationThread } from './ConversationThread';
 
@@ -29,6 +33,7 @@ function deferred<T>() {
 
 let chatChunkHandler: ((chunk: RealtimeChatChunk) => void) | null = null;
 let chatMessageHandler: ((message: RealtimeChatMessage) => void) | null = null;
+let chatTurnFaultedHandler: ((faulted: RealtimeChatTurnFaulted) => void) | null = null;
 let resyncHandler: (() => void) | null = null;
 
 function message(overrides: Partial<ChatMessage> = {}): ChatMessage {
@@ -53,6 +58,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   chatChunkHandler = null;
   chatMessageHandler = null;
+  chatTurnFaultedHandler = null;
   resyncHandler = null;
   useRealtimeMock.mockReturnValue({
     connectionState: 'live',
@@ -70,6 +76,10 @@ beforeEach(() => {
     },
     onChatMessage: (handler: (message: RealtimeChatMessage) => void) => {
       chatMessageHandler = handler;
+      return vi.fn();
+    },
+    onChatTurnFaulted: (handler: (faulted: RealtimeChatTurnFaulted) => void) => {
+      chatTurnFaultedHandler = handler;
       return vi.fn();
     },
   });
@@ -843,10 +853,105 @@ describe('ConversationThread — cross-connection reconciliation', () => {
     expect(screen.getByTestId('chat-draft').textContent).toBe('after the reconnect');
   });
 
-  describe('a turn that faults sends no terminator (gh#1107)', () => {
-    // `TurnAsync` returns 422 on `!turn.Succeeded` BEFORE `MessageAppendedAsync`, and only round 1 streams
-    // (`ChatTurnService.StreamAsync`) -- so "partial text, then silence, forever" is what a faulted turn looks
-    // like on a connection that did not send it. The sender clears its draft off the 422; nobody else is told.
+  describe('a faulted turn terminates the draft everywhere (gh#1107)', () => {
+    // `TurnAsync` returns 422 on `!turn.Succeeded`, and only round 1 streams (`ChatTurnService.StreamAsync`), so a
+    // faulted turn is "partial text, then nothing". The sender clears its draft off the 422; every other screen is
+    // told by this push, which names the conversation and carries a display reason or none. No turn id: at most one
+    // turn is in flight on a conversation (gh#1106), so the conversation is a sufficient key.
+    const faultedPush = {
+      conversationId: 'c1',
+      reason: 'The co-pilot could not finish that turn.',
+    };
+
+    it('retires the draft the moment the terminator arrives, on a connection that never sent', async () => {
+      loadedEmptyThread();
+
+      await renderThread();
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Half an ans' }));
+      expect(screen.getByTestId('chat-draft')).toBeTruthy();
+
+      act(() => chatTurnFaultedHandler?.(faultedPush));
+
+      expect(screen.queryByTestId('chat-draft')).toBeNull();
+    });
+
+    it('says why, rather than letting a half-written answer just vanish (R-19 honest states)', async () => {
+      loadedEmptyThread();
+
+      await renderThread();
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Half an ans' }));
+      act(() => chatTurnFaultedHandler?.(faultedPush));
+
+      // The same affordance the sender gets from the 422. A screen that just watched an answer stop mid-sentence
+      // is owed an explanation, not a silent disappearance.
+      expect(screen.getByText('The co-pilot could not finish that turn.')).toBeTruthy();
+    });
+
+    it('still retires the draft when the terminator carries no reason', async () => {
+      loadedEmptyThread();
+
+      await renderThread();
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Half an ans' }));
+      act(() => chatTurnFaultedHandler?.({ conversationId: 'c1', reason: null }));
+
+      expect(screen.queryByTestId('chat-draft')).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull(); // no reason means no alert, never an empty one
+    });
+
+    it('ignores a terminator for a DIFFERENT conversation', async () => {
+      loadedEmptyThread();
+
+      await renderThread();
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Half an ans' }));
+      act(() => chatTurnFaultedHandler?.({ conversationId: 'OTHER', reason: 'not this thread' }));
+
+      expect(screen.getByTestId('chat-draft').textContent).toBe('Half an ans');
+    });
+
+    it('opens a fresh draft for the NEXT turn after a terminator -- it is not a latch', async () => {
+      // The bug gh#1103 closed, re-entered through the error path: a terminator that permanently closed the stream
+      // would cost this connection every later turn's draft.
+      loadedEmptyThread();
+
+      await renderThread();
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Half an ans' }));
+      act(() => chatTurnFaultedHandler?.(faultedPush));
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Two contracts' }));
+
+      expect(screen.getByTestId('chat-draft').textContent).toBe('Two contracts');
+    });
+
+    it('re-arms a chunk stream this connection had suppressed after settling its own refused turn', async () => {
+      // The straggler suppression (gh#1085) is armed by this connection's own settle and disarmed by that turn's
+      // terminator. A FAULTED turn's terminator has to disarm it exactly as a settled message does, or this
+      // connection silently drops the next turn's draft until the idle expiry.
+      loadedEmptyThread();
+      sendMock.mockResolvedValue({
+        ok: false,
+        kind: 'refused',
+        status: 422,
+        reason: 'The co-pilot could not finish that turn.',
+      });
+
+      await renderThread();
+      fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'one more?' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await act(async () => {}); // let the 422 settle -- it arms the suppression
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'a straggler' }));
+      expect(screen.queryByTestId('chat-draft')).toBeNull(); // sanity: suppressed
+
+      act(() => chatTurnFaultedHandler?.(faultedPush));
+      act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'the next turn' }));
+
+      expect(screen.getByTestId('chat-draft').textContent).toBe('the next turn');
+    });
+  });
+
+  describe('the idle guard, now a backstop for a LOST terminator (gh#1107)', () => {
+    // These pinned the ONLY thing retiring a faulted draft before gh#1107. They still earn their place: the
+    // terminator is a fail-open hub push, so it can be dropped outright on a live socket, and the draft would then
+    // stand until the next send or reconnect. The guard also still catches a LIVE turn's quiet stretch -- only
+    // round 1 streams, so a tool-using turn goes silent for its non-streaming rounds.
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());
 
@@ -887,10 +992,11 @@ describe('ConversationThread — cross-connection reconciliation', () => {
       expect(screen.getByTestId('chat-draft').textContent).toBe('Two contracts');
     });
 
-    it('pins the residue: a turn started INSIDE the idle window still appends to the stale draft', async () => {
-      // A delta carries no turn identity and there is no boundary signal, so no client can tell "the next turn's
-      // first token" from "the same turn, still going". Bounded, pinned, and tracked as gh#1107 rather than
-      // claimed closed.
+    it('pins the residue: with the terminator LOST, a turn started inside the window still appends', async () => {
+      // Reachable only when the terminator push was dropped -- it is fail-open, so that is a real if rare state.
+      // A delta carries no turn identity, so with no boundary signal delivered no client can tell "the next turn's
+      // first token" from "the same turn, still going". Bounded and pinned rather than claimed closed; what closes
+      // it in the ordinary case is the terminator above, not this guard.
       loadedEmptyThread();
 
       await renderThread();
@@ -926,61 +1032,36 @@ describe('ConversationThread — cross-connection reconciliation', () => {
     });
   });
 
-  it('pins what TWO turns in flight at once do to the draft -- one stream per conversation (#1105 review)', async () => {
-    // The wire's correlation key for a delta is the CONVERSATION, documented server-side as "one in-flight turn
-    // per conversation" (RealtimeChatChunk). A second concurrent turn on the same conversation is not refused --
-    // it simply has nowhere to be told apart: both turns' deltas already arrive as one interleaved stream, so
-    // there is no coherent draft for the terminating push to preserve. The accepted behaviour is therefore that
-    // the first settled push retires the draft and the still-running turn's next delta re-opens it, and the
-    // SETTLED thread is correct regardless. Separating them needs a per-turn id on the payload -- gh#1106, a wire
-    // contract change, not something this connection can infer.
+  // What used to stand here was `pins what TWO turns in flight at once do to the draft`, which pinned the draft
+  // resetting and re-growing when a second concurrent turn settled first. That state is unreachable now: the
+  // server refuses a second in-flight turn on a conversation (gh#1106), so a delta's conversation key is a
+  // sufficient correlation key rather than merely the only one available. It is retired rather than rewritten --
+  // a test asserting accepted behaviour for a state that can no longer occur is worse than no test, because the
+  // next reader takes it for a description of the system. Its replacement is below: the refusal the operator
+  // actually sees.
+  it('surfaces the server refusing a second in-flight turn, and drops the optimistic bubble (gh#1106)', async () => {
     loadedEmptyThread();
-    const turn = deferred<Awaited<ReturnType<typeof sendChatTurn>>>();
-    sendMock.mockReturnValue(turn.promise);
-
-    await renderThread();
-    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'mine?' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Mine is ' }));
-
-    // The OTHER screen's concurrent turn settles first.
-    act(() =>
-      chatMessageHandler?.({
-        conversationId: 'c1',
-        messageId: 'other',
-        sequence: 4,
-        role: ChatRole.Assistant,
-        content: 'answered on the other screen',
-        at: '2026-08-01T00:02:00Z',
-      }),
-    );
-    expect(screen.queryByTestId('chat-draft')).toBeNull();
-
-    // This connection's own turn is still streaming: its next delta re-opens the draft, from empty.
-    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'still going' }));
-    expect(screen.getByTestId('chat-draft').textContent).toBe('still going');
-
-    await act(async () => {
-      turn.settle({
-        ok: true,
-        data: {
-          userMessage: message({ id: 'u1', sequence: 1, role: ChatRole.User, content: 'mine?' }),
-          assistantMessage: message({
-            id: 'a1',
-            sequence: 2,
-            role: ChatRole.Assistant,
-            content: 'Mine is still going.',
-          }),
-        },
-      });
+    sendMock.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 409,
+      reason:
+        'A turn is already in flight on this conversation; wait for it to finish, then retry.',
     });
 
-    expect(screen.queryByTestId('chat-draft')).toBeNull();
-    expect(screen.getAllByTestId('chat-message').map((row) => row.textContent)).toEqual([
-      'mine?',
-      'Mine is still going.',
-      'answered on the other screen',
-    ]);
+    await renderThread();
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'and another thing' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(
+      await screen.findByText(
+        'A turn is already in flight on this conversation; wait for it to finish, then retry.',
+      ),
+    ).toBeTruthy();
+    // Nothing was persisted server-side (the guard wraps the operator-turn write too), so the optimistic row must
+    // go; the typed text stays in the composer, since retrying after the other turn lands is the whole affordance.
+    expect(screen.queryByTestId('chat-message')).toBeNull();
+    expect((screen.getByLabelText(/Message/i) as HTMLInputElement).value).toBe('and another thing');
   });
 
   it('streams a LATER cross-connection turn too -- settling one turn is not a latch (gh#1103)', async () => {

@@ -6,6 +6,7 @@ import type {
   RealtimeCatchUp,
   RealtimeChatChunk,
   RealtimeChatMessage,
+  RealtimeChatTurnFaulted,
   RealtimeEvent,
   RealtimeFill,
   RealtimeGap,
@@ -31,6 +32,8 @@ export interface RealtimeConnectionCallbacks {
   onChatMessage?: (message: RealtimeChatMessage) => void;
   /** One streamed token delta of an in-flight chat turn (gh#906 inc 3b, gh#1063). Presentation-only, best-effort. */
   onChatChunk?: (chunk: RealtimeChatChunk) => void;
+  /** A faulted turn's terminator (gh#1107) — the draft it opened will never be settled. */
+  onChatTurnFaulted?: (faulted: RealtimeChatTurnFaulted) => void;
   /** The cursor fell off retention (or the resume was too large): re-fetch state over REST, then keep consuming. */
   onGap?: (gap: RealtimeGap) => void;
   /** Fired after a RE-connect: owner-scoped order/fill pushes are live-only (never replayed), so surfaces re-fetch. */
@@ -111,6 +114,9 @@ export function createRealtimeConnection(
       callbacks.onChatMessage?.(message),
     );
     hub.on(RealtimeMethod.ChatChunk, (chunk: RealtimeChatChunk) => callbacks.onChatChunk?.(chunk));
+    hub.on(RealtimeMethod.ChatTurnFaulted, (faulted: RealtimeChatTurnFaulted) =>
+      callbacks.onChatTurnFaulted?.(faulted),
+    );
     hub.onclose(() => onClosed());
   }
 
