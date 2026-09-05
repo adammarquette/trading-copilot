@@ -3,9 +3,9 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 
 /// <summary>
-/// An adversarial <see cref="INewsSource"/> for the gh#360 news-ingestion suite. It stands in for a real
-/// provider (Finnhub / Tiingo, gh#383) that does not exist yet, so the ingestion + dedup engine can be exercised
-/// venue-independently in the pre-merge tier.
+/// An adversarial <see cref="INewsSource"/> for the gh#360 news-ingestion suite. It stands in for a real provider
+/// (Finnhub / Tiingo, gh#383 — since landed) so the ingestion + dedup engine can be exercised venue-independently
+/// in the pre-merge tier, without the real APIs, rate limits, or network flakiness on the PR-feedback path.
 /// </summary>
 /// <remarks>
 /// <para>
