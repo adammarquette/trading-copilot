@@ -104,6 +104,18 @@ export function getConversation(id: string): Promise<ApiResult<ConversationDetai
 }
 
 /**
+ * The refusal envelope's `layer` for the one-in-flight-turn guard (gh#1106). Mirrors
+ * `ChatEndpoints.TurnInFlightLayer`, the same way {@link CONTENT_MAX_LENGTH} mirrors its server constant.
+ *
+ * **Why a caller must key on it.** `POST /turns` has two 409s that demand opposite handling of the live draft, and
+ * the status cannot tell them apart. This one means **this connection's turn never ran** — and it is returned
+ * *precisely when another turn is streaming*, so the draft on screen belongs to that turn: it must not be retired,
+ * and the deltas still arriving must not be suppressed. The other 409 (a lost sequence race on the assistant
+ * append) means this connection's turn DID run, so its draft is finished and its stragglers are suppressible.
+ */
+export const TURN_IN_FLIGHT_LAYER = 'chat-turn-in-flight';
+
+/**
  * Takes a grounded co-pilot chat turn: appends the operator's message, runs the model over the thread (grounded in
  * news, gh#995), and appends the reply -- all in the one call, which the server does not answer until the whole
  * turn completes. There is no separate "send my message" step; the request carries only the text (never a role or
@@ -129,18 +141,6 @@ export function getConversation(id: string): Promise<ApiResult<ConversationDetai
  * the refusal envelope's `layer` ({@link TURN_IN_FLIGHT_LAYER}) — which a caller rendering the live chat draft
  * must key on, because the two demand opposite treatment of it (see {@link TURN_IN_FLIGHT_LAYER}).
  */
-/**
- * The refusal envelope's `layer` for the one-in-flight-turn guard (gh#1106). Mirrors
- * `ChatEndpoints.TurnInFlightLayer`, the same way {@link CONTENT_MAX_LENGTH} mirrors its server constant.
- *
- * **Why a caller must key on it.** `POST /turns` has two 409s that demand opposite handling of the live draft, and
- * the status cannot tell them apart. This one means **this connection's turn never ran** — and it is returned
- * *precisely when another turn is streaming*, so the draft on screen belongs to that turn: it must not be retired,
- * and the deltas still arriving must not be suppressed. The other 409 (a lost sequence race on the assistant
- * append) means this connection's turn DID run, so its draft is finished and its stragglers are suppressible.
- */
-export const TURN_IN_FLIGHT_LAYER = 'chat-turn-in-flight';
-
 export function sendChatTurn(id: string, content: string): Promise<ApiResult<ChatTurnResult>> {
   return requestJson<ChatTurnResult>('POST', `/conversations/${id}/turns`, { content });
 }
