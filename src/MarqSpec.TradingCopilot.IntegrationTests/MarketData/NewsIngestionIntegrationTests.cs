@@ -211,6 +211,54 @@ public sealed class NewsIngestionIntegrationTests : IClassFixture<NewsIngestionT
         row.Title.Should().Be("Has URL");
     }
 
+    // --- R-2 fuzzy fallback (gh#764, continues gh#360, covers branch of #358) ---
+
+    [Fact]
+    public async Task IngestAsync_ShouldKeepSameFeedNearDuplicatesDistinct_WhenUrlsDiffer()
+    {
+        // The same-feed guard: two near-identical headlines from the SAME feed under different URLs are
+        // distinct stories (a follow-up or a correction), not a duplicate to merge. Without the same-feed skip
+        // in FindFuzzyMatch, unioning the feed onto the first would be a HashSet no-op that silently drops the
+        // second row (gh#764 / #827 review). This guards that branch of the fuzzy dedup.
+        DateTimeOffset published = Now.AddMinutes(-5);
+        Finnhub().Items =
+        [
+            Story("https://example.com/story-v1", title: "Fed holds rates steady", publishedAt: published),
+            Story("https://example.com/story-v2", title: "Fed holds rates steady amid inflation concerns", publishedAt: published),
+        ];
+
+        int written = await IngestAsync();
+
+        written.Should().Be(2, "two near-identical stories from the same feed with different URLs stay distinct");
+        List<NewsRecord> rows = await ReadAllAsync();
+        rows.Should().HaveCount(2);
+        rows.Should().AllSatisfy(r => r.SourceFeeds.Should().BeEquivalentTo(["finnhub"]));
+    }
+
+    [Fact]
+    public async Task IngestAsync_ShouldMergeCrossFeedNearDuplicates_WhenUrlsDifferButStoriesMatchFuzzy()
+    {
+        // The positive control for the same-feed guard above: the SAME pair of near-identical headlines from
+        // TWO DIFFERENT feeds collapses to ONE row with both feeds in provenance. This proves the fuzzy matcher
+        // itself is not broken — the first test cannot pass vacuously just because fuzzy matching is disabled
+        // everywhere. The identical content and times ensure both tests' story pairs match the fuzzy rule.
+        DateTimeOffset published = Now.AddMinutes(-5);
+        Finnhub().Items =
+        [
+            Story("https://example.com/finnhub-v1", title: "Fed holds rates steady", publishedAt: published),
+        ];
+        Tiingo().Items =
+        [
+            Story("https://example.com/tiingo-v2", title: "Fed holds rates steady amid inflation concerns", publishedAt: published),
+        ];
+
+        int written = await IngestAsync();
+
+        written.Should().Be(1, "the same near-identical story from two feeds collapses to one row");
+        NewsRecord row = (await ReadAllAsync()).Should().ContainSingle().Subject;
+        row.SourceFeeds.Should().BeEquivalentTo(["finnhub", "tiingo"], "both feeds are recorded in provenance");
+    }
+
     // --- Helpers ---
 
     private async Task<int> IngestAsync()
