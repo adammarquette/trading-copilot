@@ -284,9 +284,12 @@ public class AccountEntryConcurrencyIntegrationTests : IClassFixture<StubbedVenu
         // reuse and hide the defect. Query pg_try_advisory_lock directly from that still-open probe connection
         // rather than routing back through the guard, which would just re-take its own lock.
         Guid accountId = Guid.NewGuid();
-        IAccountEntryGuard guard = _factory.Services.GetRequiredService<IAccountEntryGuard>();
 
         await using AsyncServiceScope probeScope = _factory.Services.CreateAsyncScope();
+        // AccountEntryGuard is stateless by design (its doc comment: "the context is a parameter, not a captured
+        // field"), so resolving it from ANY one scope and reusing it with DbContexts from other scopes below is
+        // safe -- resolving it from the root provider throws instead, since it's registered scoped.
+        IAccountEntryGuard guard = probeScope.ServiceProvider.GetRequiredService<IAccountEntryGuard>();
         TradingCopilotDbContext probeDb = probeScope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
         // Pinned open BEFORE the guard call -- see the method-level remark on why this ordering is load-bearing.
         await probeDb.Database.OpenConnectionAsync();
@@ -348,9 +351,11 @@ public class AccountEntryConcurrencyIntegrationTests : IClassFixture<StubbedVenu
         // (gh#589). Same abort-then-probe shape as the blocking case, except the probe itself IS the
         // production call under test (TryRunExclusiveAsync), from a third, genuinely separate connection.
         Guid accountId = Guid.NewGuid();
-        IAccountEntryGuard guard = _factory.Services.GetRequiredService<IAccountEntryGuard>();
 
         await using AsyncServiceScope abortingScope = _factory.Services.CreateAsyncScope();
+        // Stateless (see the sibling case's remark above) -- safe to resolve here and reuse below against
+        // watcherDb, a DbContext from a wholly separate scope.
+        IAccountEntryGuard guard = abortingScope.ServiceProvider.GetRequiredService<IAccountEntryGuard>();
         TradingCopilotDbContext abortingDb = abortingScope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
 
         using CancellationTokenSource requestAborted = new();
