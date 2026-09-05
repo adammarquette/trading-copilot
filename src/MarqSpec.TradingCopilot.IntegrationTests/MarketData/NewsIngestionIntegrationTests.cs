@@ -259,6 +259,72 @@ public sealed class NewsIngestionIntegrationTests : IClassFixture<NewsIngestionT
         row.SourceFeeds.Should().BeEquivalentTo(["finnhub", "tiingo"], "both feeds are recorded in provenance");
     }
 
+    // --- R-2 fuzzy fallback, ACROSS passes (gh#1132: FindFuzzyStored had no same-feed skip) ---
+
+    [Fact]
+    public async Task IngestAsync_ShouldKeepSameFeedNearDuplicatesDistinct_AcrossPasses()
+    {
+        // The cross-pass counterpart of the same-feed guard above: a follow-up (or correction) under a new URL
+        // from the SAME feed, arriving in a LATER poll, is a distinct story, not a candidate for FindFuzzyStored
+        // to fold into the row that pass 1 already stored. Pre-fix this either overwrites the first row's
+        // Title/Summary (MergeFuzzyStored returns true) or silently drops the follow-up outright (returns false,
+        // the write loop `continue`s regardless) — either way the desk loses the second story (gh#1132).
+        DateTimeOffset published = Now.AddMinutes(-5);
+        Finnhub().Items =
+        [
+            Story("https://example.com/cross-pass-v1", title: "Fed holds rates steady", publishedAt: published),
+        ];
+        await IngestAsync();
+
+        Finnhub().Items =
+        [
+            Story(
+                "https://example.com/cross-pass-v2",
+                title: "Fed holds rates steady amid inflation concerns",
+                publishedAt: published),
+        ];
+        int secondPass = await IngestAsync();
+
+        secondPass.Should().Be(1, "the same-feed follow-up in a later poll is stored as its own row, not merged");
+        List<NewsRecord> rows = await ReadAllAsync();
+        rows.Should().HaveCount(2, "the original and the follow-up both survive as distinct rows");
+        rows.Should().ContainSingle(r => r.Title == "Fed holds rates steady")
+            .Which.Summary.Should().Be(
+                "The FOMC left the target range unchanged.",
+                "the first row's Title/Summary must be untouched by the later same-feed follow-up");
+        rows.Should().ContainSingle(r => r.Title == "Fed holds rates steady amid inflation concerns");
+        rows.Should().AllSatisfy(r => r.SourceFeeds.Should().BeEquivalentTo(["finnhub"]));
+    }
+
+    [Fact]
+    public async Task IngestAsync_ShouldMergeCrossFeedNearDuplicates_AcrossPasses()
+    {
+        // The positive control for the guard above: a genuine CROSS-feed correction — a different feed's
+        // near-identical rendering of the same story, arriving in a later poll — still collapses onto the row
+        // pass 1 stored. This is what stops the same-feed fix from passing by simply disabling FindFuzzyStored
+        // outright: the guard must be feed-scoped, not blanket.
+        DateTimeOffset published = Now.AddMinutes(-5);
+        Finnhub().Items =
+        [
+            Story("https://example.com/cross-pass-finnhub", title: "Fed holds rates steady", publishedAt: published),
+        ];
+        await IngestAsync();
+
+        Tiingo().Items =
+        [
+            Story(
+                "https://example.com/cross-pass-tiingo",
+                title: "Fed holds rates steady amid inflation concerns",
+                publishedAt: published),
+        ];
+        int secondPass = await IngestAsync();
+
+        secondPass.Should().Be(1, "a cross-feed fuzzy match across passes still merges onto the stored row");
+        NewsRecord row = (await ReadAllAsync()).Should().ContainSingle(
+            "the cross-feed correction merges rather than duplicating").Subject;
+        row.SourceFeeds.Should().BeEquivalentTo(["finnhub", "tiingo"], "both feeds are recorded in provenance");
+    }
+
     // --- Helpers ---
 
     private async Task<int> IngestAsync()

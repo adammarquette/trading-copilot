@@ -427,7 +427,7 @@ fire** end to end (R-4), including every point at which it can stop before an LL
 ```mermaid
 flowchart TB
   OP(["Operator states a practice — R-6 chat"])
-  COMPILE["NL → condition compiler (R-7)<br/>deferred, gh#660 — today: structural POST /api/triggers"]
+  COMPILE["NL → condition compiler (R-7)<br/>deferred, gh#866 (of gh#489) — today: structural POST /api/triggers"]
   RULE[("Rule + instrument_dependency_snapshot<br/>deferred — SourceRuleId / SourceConversationId are the seams")]
   TRIG[("TriggerRecord · Confirmation = Unconfirmed<br/>inert regardless of Enabled — gh#470")]
   CONFIRM{"POST /api/triggers/{id}/confirm"}
