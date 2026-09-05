@@ -634,23 +634,56 @@ public class ProjectXVenueTests
         sent.Should().Be(3);
     }
 
-    [Fact]
-    public async Task ReducePositionAsync_ShouldThrowAndNotReadBack_WhenTheGatewayRefusesTheReduce()
+    [Theory]
+    [InlineData(1)] // AccountNotFound
+    [InlineData(2)] // PositionNotFound
+    [InlineData(5)] // InvalidCloseSize
+    [InlineData(6)] // OrderRejected
+    [InlineData(9)] // AccountRejected
+    public async Task ReducePositionAsync_ShouldThrowDefinitiveAndNotReadBack_WhenTheGatewayRejectedOutright(int code)
     {
         // The same reported-failure-without-throwing hazard as the full close: a refusal the adapter swallowed
         // would fall through to the read-back and present an unchanged position as a legitimate answer, hiding a
-        // gateway rejection (e.g. InvalidCloseSize) behind a "the venue just did not move it" reading.
+        // gateway rejection behind a "the venue just did not move it" reading. These codes all mean the gateway
+        // executed NOTHING, so the caller may report the pre-attempt size as still true (gh#629).
         A.CallTo(() => _api.PartialClosePositionAsync(9001, ContractKey, 5, A<CancellationToken>._))
             .Returns(new ClientModels.PartialClosePositionResponse
             {
                 Success = false,
-                ErrorCode = 5,
-                ErrorMessage = "InvalidCloseSize",
+                ErrorCode = code,
+                ErrorMessage = "rejected",
             });
 
         Func<Task> act = async () => await _venue.ReducePositionAsync(Account, Contract, 5, CancellationToken.None);
 
-        await act.Should().ThrowAsync<ProjectXVenueException>();
+        (await act.Should().ThrowAsync<VenueRefusalException>())
+            .Which.Kind.Should().Be(VenueRefusalKind.Definitive);
+        A.CallTo(() => _api.GetOpenPositionsAsync(A<int>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Theory]
+    [InlineData(7)]   // OrderPending -- a close order EXISTS and may still fill
+    [InlineData(8)]   // UnknownError -- the gateway says nothing about what happened
+    [InlineData(42)]  // a code this classifier does not recognise
+    public async Task ReducePositionAsync_ShouldThrowIndeterminate_WhenTheRefusalDoesNotMeanNothingExecuted(int code)
+    {
+        // The classification that matters most, and the one a place-shaped copy would get wrong: unlike an order
+        // placement, a partial-close !success is NOT uniformly "nothing happened". OrderPending says a close order
+        // exists; UnknownError says nothing at all. Asserting Definitive for either would tell the caller the
+        // position is untouched and invite a re-send of a NON-IDEMPOTENT write. Anything not positively known to
+        // have executed nothing stays Indeterminate -- the fail-safe default (gh#629).
+        A.CallTo(() => _api.PartialClosePositionAsync(9001, ContractKey, 5, A<CancellationToken>._))
+            .Returns(new ClientModels.PartialClosePositionResponse
+            {
+                Success = false,
+                ErrorCode = code,
+                ErrorMessage = "pending",
+            });
+
+        Func<Task> act = async () => await _venue.ReducePositionAsync(Account, Contract, 5, CancellationToken.None);
+
+        (await act.Should().ThrowAsync<VenueRefusalException>())
+            .Which.Kind.Should().Be(VenueRefusalKind.Indeterminate);
         A.CallTo(() => _api.GetOpenPositionsAsync(A<int>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 

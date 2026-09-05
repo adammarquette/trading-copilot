@@ -355,13 +355,34 @@ public sealed class ProjectXVenue : ITradingVenue
         int accountId = ProjectXMapping.ToAccountId(account, Id);
         string contractKey = ProjectXMapping.ToContractKey(contract, Id);
 
+        // SAFETY (gh#928, named hold): this send is NON-IDEMPOTENT -- partialCloseContract(1) twice takes two
+        // contracts off -- and the client's resilience pipeline excludes only POST /api/Order/place from
+        // transient-fault retry (ADR-0007, gh#673), on the premise that every other route is a read or an idempotent
+        // write. This route breaks that premise, so a lost ack can replay the reduce underneath us. Widening the
+        // exclusion is a change to the vendored client (MarqSpec.Client.ProjectX#98); nothing here can prevent a
+        // retry that happens inside the HTTP pipeline. Until that lands the reduce is practice-only. The read-back
+        // below still refuses to call an over-reduced position done, but it cannot undo the second send.
         ClientModels.PartialClosePositionResponse response =
             await _api.PartialClosePositionAsync(accountId, contractKey, quantity, cancellationToken);
 
         if (!response.Success)
         {
-            throw new ProjectXVenueException(
+            // Classified HERE, where !success and its code are unambiguous -- never inferred at the catch (gh#629).
+            // Unlike a placement, a partial-close !success is NOT uniformly "nothing happened": the gateway's own
+            // code list carries OrderPending (7), which says a close order exists and may still fill, and
+            // UnknownError (8), which says nothing at all. Only the codes that positively mean the gateway executed
+            // nothing are asserted Definitive; everything else -- 7, 8 and any code this list does not recognise --
+            // stays INDETERMINATE, the fail-safe default, so the caller never reads "may be live" as "did not happen"
+            // and re-sends a non-idempotent write.
+            VenueRefusalKind kind = response.ErrorCode switch
+            {
+                1 or 2 or 3 or 4 or 5 or 6 or 9 => VenueRefusalKind.Definitive,
+                _ => VenueRefusalKind.Indeterminate,
+            };
+
+            throw new VenueRefusalException(
                 $"ProjectX refused to reduce {contract} by {quantity}: {response.ErrorMessage ?? "no reason given"}.",
+                kind,
                 response.ErrorCode);
         }
 
