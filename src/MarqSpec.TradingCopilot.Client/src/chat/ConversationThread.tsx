@@ -117,11 +117,13 @@ function foldIn(messages: readonly ChatMessage[], incoming: ChatMessage): readon
  *
  * **The optimistic operator turn is provisional.** It renders immediately (temp id {@link PENDING_USER_ID}) so the
  * operator sees what they sent while the turn is in flight, and is replaced by the server's copy on success. On a
- * refusal it is DROPPED rather than left standing: a 429 (governor) and a 409 (a turn already in flight on this
- * conversation, gh#1106) persist nothing at all, and a 422 (faulted turn) does persist the operator's turn
- * server-side but this client does not know its real id -- rendering an un-reconciled row would claim a state
- * neither confirmed nor retractable. The typed text is kept in the composer (not cleared) so retrying costs
- * nothing, which is the whole affordance on the 409: the operator retries once the other screen's turn lands.
+ * refusal it is DROPPED rather than left standing, on every refusal, though not for one reason. A 429 (governor)
+ * and the 409 for a turn already in flight (gh#1106) persist nothing at all, so there is nothing to reconcile
+ * against. A 422 (faulted turn) DOES persist the operator's turn server-side -- and so does the OTHER 409, a lost
+ * sequence race on the assistant append, which this client cannot tell from the in-flight refusal by status alone
+ * (see `sendChatTurn`) -- but their persisted row has no id this client knows, so rendering an un-reconciled bubble
+ * would claim a state neither confirmed nor retractable. The typed text is kept in the composer (not cleared) so
+ * retrying costs nothing, which is the whole affordance on an in-flight 409: retry once the other turn lands.
  *
  * **Untrusted content, both roles.** A message's `content` -- assistant or operator -- is rendered as plain text via
  * ordinary JSX interpolation, never `dangerouslySetInnerHTML` or any markdown/HTML interpreter: the always-on news
@@ -413,10 +415,11 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         suppressStragglers(settledTurnsRef.current === settledTurnsAtStart);
 
         if (!result.ok) {
-          // Drop the optimistic row: a 429 and a 409 persisted nothing (the gh#1106 guard wraps the operator-turn
-          // write, so a refused turn contributes nothing to the thread), and a 422's persisted user turn has no id
-          // this client knows -- an un-reconciled row would claim a state we cannot confirm. The typed text
-          // survives in the composer (draft is untouched) so retrying costs nothing.
+          // Drop the optimistic row on every refusal, though the reasons differ (see the module note): a 429 and
+          // the in-flight 409 persisted nothing, while a 422 -- and a sequence-race 409 on the assistant append,
+          // which is indistinguishable here by status -- persisted a user turn whose id this client does not know.
+          // Either way an un-reconciled row would claim a state we cannot confirm. The typed text survives in the
+          // composer (draft is untouched) so retrying costs nothing.
           setState((current) =>
             current.kind === 'loaded'
               ? {
