@@ -19,9 +19,13 @@ The rulebook is designed as two halves. **Only one is built:**
   Order-flow, multi-condition, cross-asset and time-of-day conditions are designed and deferred.
 - **Not built — plain-language rules.** The idea of stating a practice in your own words in chat and having it
   compile into a trigger (the `Rule` entity, the NL → condition compiler) does not exist yet. That work is tracked
-  as [gh#660](https://github.com/adammarquette/trading-copilot/issues/660), which is blocked on the still-undecomposed
-  playbooks epic. `SourceRuleId` and `SourceConversationId` already exist on a trigger record as empty seams, waiting
-  for that compiler to fill them in.
+  as [gh#866](https://github.com/adammarquette/trading-copilot/issues/866) (the `Rule` entity + storage, a task
+  under epic [gh#489](https://github.com/adammarquette/trading-copilot/issues/489)), which is blocked on
+  [gh#18](https://github.com/adammarquette/trading-copilot/issues/18) — the compiler is authored against the chat
+  surface, so its shape can't be pinned before that surface exists. The **rulebook UI surface** is a separate card,
+  [gh#660](https://github.com/adammarquette/trading-copilot/issues/660), blocked instead on the still-undecomposed
+  playbooks epic, [gh#19](https://github.com/adammarquette/trading-copilot/issues/19). `SourceRuleId` and
+  `SourceConversationId` already exist on a trigger record as empty seams, waiting for that compiler to fill them in.
 - **Chat cannot write a trigger for you today**, in either direction — the chat tools are read-only by
   construction ([ADR-0025](adr/0025-chat-tool-read-only-boundary.md)). Authoring happens through the trigger form on the
   Rulebook surface, over `POST /api/triggers`.
