@@ -49,6 +49,15 @@ public static class ChatEndpoints
     /// </summary>
     private const int GroundingTopK = 4;
 
+    /// <summary>
+    /// What a faulted turn says when it states nothing displayable of its own (gh#1107). A blank
+    /// <c>ChatTurnResult.Message</c> is not a reason, and it must not be passed off as one on EITHER path: pushed
+    /// over the hub it would be a terminator with no explanation, and returned in the 422 body it renders an empty
+    /// alert on the sender — the client's refusal reader only checks that <c>error</c> is a string. Both carry this
+    /// instead, so the sender and every other screen read the same explanation for the same fault (R-19).
+    /// </summary>
+    internal const string FaultedTurnFallbackReason = "The co-pilot could not finish that turn.";
+
     /// <summary>Maps the chat CRUD endpoints. All require authentication.</summary>
     /// <param name="endpoints">The endpoint route builder.</param>
     /// <returns>The same builder, for chaining.</returns>
@@ -283,8 +292,9 @@ public static class ChatEndpoints
     /// <b>A faulted turn pushes a terminator</b> (gh#1107). The 422 tells the initiating connection; every other
     /// connection is rendering a draft from the chunk stream and would otherwise keep a half-written answer standing
     /// with no error and nothing to retire it. So the <c>!turn.Succeeded</c> branch also pushes
-    /// <c>RealtimeChatTurnFaulted</c> — the conversation id (a sufficient key, given the guard above) and a display
-    /// reason or none — <b>fail-open</b> like every other push here.
+    /// <c>RealtimeChatTurnFaulted</c> — the conversation id (a sufficient key, given the guard above) and the SAME
+    /// display reason the 422 carries, so no two screens disagree about why the answer stopped — <b>fail-open</b>
+    /// like every other push here.
     /// </para>
     /// </remarks>
     /// <param name="id">The conversation to take a turn in.</param>
@@ -497,6 +507,10 @@ public static class ChatEndpoints
             // and the cost recorded, but no assistant turn is invented.
             if (!turn.Succeeded)
             {
+                // ONE reason, computed once and used on both paths. Normalizing the push but not the 422 would put
+                // an empty alert in front of the one operator who is definitely looking at the screen.
+                string faultReason = Normalize(turn.Message) ?? FaultedTurnFallbackReason;
+
                 // TERMINATE THE DRAFT EVERYWHERE (gh#1107). A faulted turn can have streamed a whole round before it
                 // failed — only round 1 streams, so "partial text then silence" is its ordinary shape — and the 422
                 // below reaches only the connection that sent it. Every other screen is rendering that partial answer
@@ -508,7 +522,7 @@ public static class ChatEndpoints
                 {
                     await notifier.TurnFaultedAsync(
                         conversation.UserId,
-                        new RealtimeChatTurnFaulted(id, Normalize(turn.Message)),
+                        new RealtimeChatTurnFaulted(id, faultReason),
                         cancellationToken);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -520,7 +534,7 @@ public static class ChatEndpoints
                     logger.LogError(error, "Chat turn faulted-terminator push faulted for owner {Owner}; the 422 stands.", conversation.UserId);
                 }
 
-                return Results.UnprocessableEntity(new { error = turn.Message });
+                return Results.UnprocessableEntity(new { error = faultReason });
             }
 
             (ChatMessage? assistantMessage, bool assistantConflict) = await TryAppendAsync(
@@ -645,7 +659,9 @@ public static class ChatEndpoints
         layer = TurnInFlightLayer,
     });
 
-    // A blank title is no title: trim, and collapse empty/whitespace to null so "" and "   " are not stored as a title.
+    // Trim, and collapse empty/whitespace to null. Two callers, one rule: a blank title is no title (so "" and "   "
+    // are never stored as one), and a blank fault message is no reason (so it never becomes an empty alert -- see
+    // FaultedTurnFallbackReason, which is what the caller substitutes).
     private static string? Normalize(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

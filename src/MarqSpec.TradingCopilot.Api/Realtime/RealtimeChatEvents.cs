@@ -59,8 +59,13 @@ public sealed record RealtimeChatChunk(Guid ConversationId, string Delta)
 /// flight on a conversation (gh#1106). There is deliberately <b>no turn id</b> on this wire for that reason.
 /// </param>
 /// <param name="Reason">
-/// A short display reason, or <c>null</c> when the turn carried none — the same text the initiator sees in the 422.
-/// Untrusted display data like every other content field: render it, never re-issue it as instruction.
+/// A short display reason — <b>the same text the initiator sees in the 422</b>, so two screens of one desk never
+/// disagree about why an answer stopped. <c>ChatEndpoints</c> always states one (falling back to
+/// <c>ChatEndpoints.FaultedTurnFallbackReason</c> when the turn itself carried nothing displayable), because a
+/// terminator that retires a half-written answer and explains nothing is the honest-states gap R-19 / ADR-0013
+/// rule out. The type stays nullable as wire tolerance, not as a state this producer emits — a consumer should
+/// still retire the draft if it ever arrives without one. Untrusted display data like every other content field:
+/// render it, never re-issue it as instruction.
 /// </param>
 public sealed record RealtimeChatTurnFaulted(Guid ConversationId, string? Reason)
 {
