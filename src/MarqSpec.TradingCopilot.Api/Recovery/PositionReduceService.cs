@@ -133,7 +133,94 @@ public sealed class PositionReduceService
         int quantity,
         CancellationToken cancellationToken)
     {
-        await Task.Yield();
-        throw new NotImplementedException("gh#928: the verified sized partial close is not implemented yet.");
+        // The endpoint rejects a non-positive quantity as a 400; guard defensively so a mis-wired caller can never
+        // reach the venue with a meaningless size.
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(quantity);
+
+        Account? account = await _database.Accounts
+            .FirstOrDefaultAsync(candidate => candidate.Id == accountId, cancellationToken);
+        if (account is null)
+        {
+            return null; // not found / not owned (R-20)
+        }
+
+        Connection? connection = await _database.Connections
+            .FirstOrDefaultAsync(candidate => candidate.Id == account.ConnectionId, cancellationToken);
+        if (connection is null
+            || !string.Equals(connection.CredentialKey, _projectXOptions.Value.CredentialKey, StringComparison.Ordinal))
+        {
+            // One credential set per process (ADR-0015). Reducing on an account this process does not serve would
+            // be acting through someone else's venue session.
+            return new PositionReduceResult(PositionReduceOutcome.Unreachable, null);
+        }
+
+        try
+        {
+            FirmConventions conventions = await _database.ConventionsForConnectionAsync(connection.Id, cancellationToken);
+            ITradingVenue venue = _venueFactory.Create(conventions);
+
+            IReadOnlyList<VenueAccount> roster = await venue.GetAccountsAsync(cancellationToken);
+            VenueAccount? venueAccount = roster.FirstOrDefault(candidate => candidate.Id.Key == account.VenueAccountKey);
+            if (venueAccount is null)
+            {
+                return new PositionReduceResult(PositionReduceOutcome.Unreachable, null);
+            }
+
+            ResolvedContract resolved = await venue.ResolveContractAsync(instrument, cancellationToken);
+
+            // BEFORE: venue truth for this contract. Load-bearing for BOTH the strict-partial guard and the
+            // verified-reduction check -- without the starting size neither is possible. Deliberately no local
+            // belief and no IsActive-style filter (gh#929): a filtered exposure read fabricates a flat.
+            IReadOnlyList<PositionSnapshot> before = await venue.GetPositionsAsync(venueAccount.Id, cancellationToken);
+            PositionSnapshot? position = before.FirstOrDefault(candidate => candidate.Contract == resolved.Contract);
+            int beforeQuantity = position?.NetQuantity ?? 0;
+            int beforeMagnitude = Math.Abs(beforeQuantity);
+
+            // Strict partial: the request must LEAVE part of the position on. quantity >= what is open is either a
+            // full close (which belongs to the exit path, with its OCO-cancel) or a sizing mistake -- refused here,
+            // before the venue is touched, so a reduce can never silently become a flatten that strands a bracket.
+            if (quantity >= beforeMagnitude)
+            {
+                return new PositionReduceResult(PositionReduceOutcome.ExceedsPosition, beforeQuantity);
+            }
+
+            PositionSnapshot after = await venue.ReducePositionAsync(
+                venueAccount.Id, resolved.Contract, quantity, cancellationToken);
+
+            // Verified against what was ASKED, not just against direction (gh#928 §⚠️2, settled as exact-delta).
+            // Success is the venue reporting the position smaller by EXACTLY `quantity`, same side. Everything else
+            // is "not done": a partial execution that closed LESS than asked (more exposure remains than the
+            // operator targeted), a close that took off MORE (a protective stop or a concurrent exit fired), a side
+            // flip, and no change at all. The operator asked for a specific reduction, so anything other than that
+            // is a state they must SEE, never a green "reduced" whose net quantity they have to notice is wrong.
+            // (The strict-partial guard above makes the target `beforeMagnitude - quantity` at least 1, so a
+            // same-side match can never be flat: a close all the way to flat is an over-execution, reported
+            // not-done -- which is also what surfaces the dangling-bracket-over-a-flat race gh#1012 describes.)
+            bool reducedByExactlyRequested =
+                Math.Sign(after.NetQuantity) == Math.Sign(beforeQuantity)
+                && Math.Abs(after.NetQuantity) == beforeMagnitude - quantity;
+
+            return reducedByExactlyRequested
+                ? new PositionReduceResult(PositionReduceOutcome.Reduced, after.NetQuantity)
+                : new PositionReduceResult(PositionReduceOutcome.NotReduced, after.NetQuantity);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // The CALLER went away -- abort, do not manufacture a business outcome. Narrow on purpose: a venue
+            // timeout also surfaces as an OperationCanceledException, but carrying HttpClient's own internal token,
+            // so it falls through to the fault handler below and reports Unreachable rather than escaping as an
+            // aborted request.
+            throw;
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error,
+                "Operator reduce of {Instrument} on account {Account} could not be completed — the position may be "
+                + "unchanged, or partly reduced (gh#928).",
+                instrument,
+                accountId);
+            return new PositionReduceResult(PositionReduceOutcome.Unreachable, null);
+        }
     }
 }
