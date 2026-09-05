@@ -23,11 +23,17 @@ public enum PositionReduceOutcome
     Reduced = 1,
 
     /// <summary>
-    /// The venue did <b>not</b> report the exact requested reduction — <b>not done</b>. Covers the original size
-    /// still standing, <b>less</b> off than asked (a partial execution), <b>more</b> off than asked (a protective
-    /// stop or a concurrent exit fired, up to and including all the way to flat), and a <b>side flip</b> (a reversal
-    /// is never a reduction, however small its magnitude). Read from venue truth after the attempt.
+    /// The position <b>moved</b>, but not by what was asked — <b>not done</b>. Covers <b>less</b> off than asked
+    /// (a partial execution), <b>more</b> off than asked (a protective stop or a concurrent exit fired, up to and
+    /// including all the way to flat), and a <b>side flip</b> (a reversal is never a reduction, however small its
+    /// magnitude). Read from venue truth after the attempt.
     /// </summary>
+    /// <remarks>
+    /// The original size <b>still standing</b> is deliberately <i>not</i> here — that is
+    /// <see cref="Unconfirmed"/>, because a close that has not settled is indistinguishable from one that did
+    /// nothing, and reading it as "it did not happen" is what invites a re-send of a non-idempotent write. Like
+    /// <see cref="Unconfirmed"/>, this outcome is <b>not</b> an invitation to re-issue: the close was transmitted.
+    /// </remarks>
     NotReduced = 2,
 
     /// <summary>The venue could not be reached or does not serve this account. <b>Never read as reduced.</b></summary>
@@ -69,6 +75,19 @@ public enum PositionReduceOutcome
     /// (the gh#531 hazard class), and the operator can re-issue deliberately once the account is free.
     /// </summary>
     AccountBusy = 7,
+
+    /// <summary>
+    /// The reduce is <b>held</b> and did not run: it is <b>practice-only</b> until both of its named pre-live
+    /// conditions clear, and this account is not a practice account. Nothing was sent.
+    /// </summary>
+    /// <remarks>
+    /// This is not a permanent risk policy about reducing exposure — it is the two holds gh#928 ships behind, made
+    /// <b>structural instead of asserted</b>. A prose hold is a promise a future session can break silently; this
+    /// is the same promise the compiler keeps. It lifts, in one line, when the gh#1012 bracket verification
+    /// produces a finding <i>and</i> MarqSpec.Client.ProjectX#98 lands. Until then the operator's route to a
+    /// smaller position on a funded account is the full exit (gh#656), which has neither hold.
+    /// </remarks>
+    HeldPracticeOnly = 8,
 }
 
 /// <summary>The result of an operator-initiated reduce (gh#928).</summary>
@@ -77,8 +96,14 @@ public enum PositionReduceOutcome
 /// The signed exposure the venue reports <b>after</b> the attempt — or the current size, when the request was
 /// refused before the venue was touched. <b><see langword="null"/> when the venue could not be reached</b>: an
 /// exposure we could not read is unknown, and reporting it as <c>0</c> would fabricate a flat out of an outage,
-/// which is the failure mode gh#929 exists to prevent. It is never <see langword="null"/> for any outcome the
-/// venue actually answered.
+/// which is the failure mode gh#929 exists to prevent. It is also <see langword="null"/> whenever the exposure was
+/// never established — an <b>indeterminate</b> refusal (the venue answered, but not in a way that says what
+/// executed), and the two outcomes that send nothing at all,
+/// <see cref="PositionReduceOutcome.AccountBusy"/> and <see cref="PositionReduceOutcome.HeldPracticeOnly"/>. It
+/// carries a real number only when one was actually read: <see cref="PositionReduceOutcome.Reduced"/>,
+/// <see cref="PositionReduceOutcome.NotReduced"/>, <see cref="PositionReduceOutcome.Unconfirmed"/> from a
+/// post-close read, <see cref="PositionReduceOutcome.Refused"/>, and
+/// <see cref="PositionReduceOutcome.ExceedsPosition"/>.
 /// </param>
 public sealed record PositionReduceResult(PositionReduceOutcome Outcome, int? NetQuantity);
 
@@ -104,12 +129,16 @@ public sealed record PositionReduceResult(PositionReduceOutcome Outcome, int? Ne
 /// <para>
 /// <b>Only a verified reduction is success.</b> The outcome is read from what the venue reports <i>after</i> the
 /// attempt (ADR-0013): the position smaller by <b>exactly the requested amount</b>, same side, is
-/// <see cref="PositionReduceOutcome.Reduced"/>; anything else — the original size still standing, <b>less</b> off
-/// than asked (a partial execution), <b>more</b> off (a stop or a concurrent exit fired, up to flat), or a side
-/// flip — is <see cref="PositionReduceOutcome.NotReduced"/>; any fault is
-/// <see cref="PositionReduceOutcome.Unreachable"/>, never reduced. Reporting anything but the exact reduction as
-/// done would leave the operator to notice from the net quantity that they got something other than what they
-/// asked for.
+/// <see cref="PositionReduceOutcome.Reduced"/>. Nothing else is, and <i>how</i> it is not done is <b>named</b>,
+/// because a sized partial close is non-idempotent and a caller that collapses these into one retry is itself the
+/// hazard: the venue accepting the close while still reporting the original size — or refusing it indeterminately —
+/// is <see cref="PositionReduceOutcome.Unconfirmed"/> (transmitted, effect unestablished, <b>re-read, never
+/// re-send</b>); a position that moved but not by what was asked is
+/// <see cref="PositionReduceOutcome.NotReduced"/>; a venue that answered in the negative and executed nothing is
+/// <see cref="PositionReduceOutcome.Refused"/>; and an unreachable venue is
+/// <see cref="PositionReduceOutcome.Unreachable"/>. None of them is ever <i>reduced</i>. Reporting anything but the
+/// exact reduction as done would leave the operator to notice from the net quantity that they got something other
+/// than what they asked for.
 /// </para>
 /// <para>
 /// <b>Known limitation — the protective bracket is left as it is, and the venue's behaviour is unverified.</b> The
@@ -207,6 +236,27 @@ public sealed class PositionReduceService
             return new PositionReduceResult(PositionReduceOutcome.Unreachable, null);
         }
 
+        // PRACTICE-ONLY, ENFORCED (gh#928). The reduce ships behind two named holds -- the unverified
+        // post-partial-close bracket behaviour (gh#1012, never run) and the client-side auto-retry of this
+        // non-idempotent write (MarqSpec.Client.ProjectX#98). Both say "not on a funded account", and until this
+        // guard existed both said it only in prose. A hold nothing enforces is a promise the next session can break
+        // without noticing, which is exactly how gh#1012 came to be read as cleared when it had never run.
+        //
+        // It refuses Undeclared and Live alike, so it is strictly stronger than R-14 while it stands -- but it is
+        // NOT a ruling on whether R-14 binds reducing actions in general (no reducing path consults
+        // TradingModePolicy: not the exit, not auto-flatten, not the kill switch). That question outlives these
+        // holds and is the operator's; see ADR-0007's 2026-09-05 update. Refusing here costs the operator nothing
+        // they cannot do another way: the full exit carries neither hold.
+        if (account.Mode is not TradingMode.Practice)
+        {
+            _logger.LogWarning(
+                "Reduce refused on account {Account}: the reduce is practice-only until gh#1012 and "
+                + "MarqSpec.Client.ProjectX#98 clear, and this account's mode is {Mode} (gh#928).",
+                accountId,
+                account.Mode);
+            return new PositionReduceResult(PositionReduceOutcome.HeldPracticeOnly, null);
+        }
+
         // Everything from the before-read to the read-back runs under the account's transmit lock (gh#531), and
         // NON-BLOCKING: if another transmit already holds it, this returns AccountBusy having sent nothing. Waiting
         // would be worse than refusing -- a sized partial close is non-idempotent, so a second one stacking on one
@@ -250,6 +300,20 @@ public sealed class PositionReduceService
             if (venueAccount is null)
             {
                 return new PositionReduceResult(PositionReduceOutcome.Unreachable, null);
+            }
+
+            // The same practice-only hold, re-checked against the roster the venue just reported. The row read
+            // above is a persisted derivation that can lag a firm-conventions change; this one cannot. Cheap --
+            // the roster read already happened -- and it means a stale row can never wave a funded account
+            // through a path that is held.
+            if (venueAccount.Mode is not TradingMode.Practice)
+            {
+                _logger.LogWarning(
+                    "Reduce refused on account {Account}: the venue reports mode {Mode}, and the reduce is "
+                    + "practice-only until gh#1012 and MarqSpec.Client.ProjectX#98 clear (gh#928).",
+                    account.Id,
+                    venueAccount.Mode);
+                return new PositionReduceResult(PositionReduceOutcome.HeldPracticeOnly, null);
             }
 
             ResolvedContract resolved = await venue.ResolveContractAsync(instrument, cancellationToken);

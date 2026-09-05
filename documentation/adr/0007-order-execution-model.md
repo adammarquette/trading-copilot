@@ -1356,6 +1356,39 @@ has no idempotency key, so the only defences are *not re-sending it* (the outcom
 *not retrying it underneath us* (the client exclusion). Until the gh#1012 run happens **and**
 MarqSpec.Client.ProjectX#98 lands, the reduce is **practice-only**.
 
+**And that is enforced, not asserted.** Review's decisive objection to the first cut of these holds was that both
+were *prose*, on a path where this repo's own answer to the identical hazard class had been code — gh#673 did not
+document that a placement must not be retried, it removed the retry. On this very feature a **closed card was
+already read as a cleared gate** (gh#1012), which is the failure mode a prose hold has and a compiled one does not.
+So the reduce now refuses any account whose mode is not `Practice` (`HeldPracticeOnly`, nothing sent), checked twice
+— against the persisted `Account.Mode` before the lock is even taken, and again inside it against the **roster the
+venue itself reports**, because the persisted mode is a derivation that can lag a firm-conventions change. It costs
+the operator nothing they cannot do another way: the full exit (gh#656) carries neither hold. When both holds
+clear, one guard comes out.
+
+**A second open question, surfaced by review and left open on purpose — does R-14 bind reducing actions?**
+`TradingModePolicy` is consulted in exactly two places in production code: `OrderExecutionService.Evaluate` (the
+send ladder) and `ConnectionContracts` (account selection). **No reducing action consults it** — not the full exit
+(gh#656), not auto-flatten (R-13), not the kill switch's flatten. The reduce's practice-only hold above happens to
+refuse `Undeclared` and `Live` alike, so while the holds stand it is *stricter* than R-14 would be — but that is a
+**temporary hold on an unfinished feature, not a ruling on the question**, and it lifts when the holds do. Two repo
+rules point opposite ways about the answer:
+
+- The root `AGENTS.md`, in the five that are never traded away, says an `undeclared` account *"is refused
+  everywhere, production included — it produces no orders at all."* A partial close **is** an order at the venue.
+- This ADR's own model says reducing and protective actions do not traverse the path that can refuse them, because
+  **refusing a reduce is refusing to lower risk**.
+
+They collide in exactly one state: an account whose mode is `Undeclared` (or `Live` outside production) that
+**already holds a position** — reachable only if the exposure pre-dates the classification, since the send ladder
+refuses to open one. Gating there means telling an operator with live exposure that they may not take part of it
+off; not gating means a mode the rules say produces no orders can produce one. Neither reading is available to a
+coding increment: whichever wins applies **identically to all four reducing paths**, and gating only the newest of
+them would fork a family that must not drift while leaving the older, more-used paths ungated — safety theatre
+rather than safety. It is recorded here, and on gh#928, for the operator to settle **before the reduce's
+practice-only hold is lifted**, since that is the moment the question stops being academic for this path; if the
+answer is that R-14 binds reducing actions, it is one shared guard across all four, in one change.
+
 **Still unratified, and not settled by this update:** gh#928 §⚠️2 asks the operator to choose between
 *exact-requested-delta* and *any strict reduction* as the verified bar. Exact-delta is what is built, because it is
 the card's own proposed default and because *any strict reduction* lets an under-execution read as a clean success —

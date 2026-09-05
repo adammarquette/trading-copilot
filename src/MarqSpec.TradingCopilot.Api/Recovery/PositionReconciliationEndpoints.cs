@@ -117,10 +117,14 @@ public static class PositionReconciliationEndpoints
             //                twice, past flat into an opposing position.
             //   NotReduced — the position moved, but not by what was asked. The body carries the true net.
             // A client that collapses these into one retry is the hazard, which is why they are distinct names.
+            //   AccountBusy — another transmit holds the account's lock; nothing was sent.
+            //   HeldPracticeOnly — the reduce is held practice-only until its two pre-live conditions clear;
+            //                nothing was sent. A 409 rather than a 403: this is not about who the caller is.
             PositionReduceOutcome.Refused
                 or PositionReduceOutcome.Unconfirmed
                 or PositionReduceOutcome.NotReduced
-                or PositionReduceOutcome.AccountBusy => Results.Conflict(new PositionReduceResponse(
+                or PositionReduceOutcome.AccountBusy
+                or PositionReduceOutcome.HeldPracticeOnly => Results.Conflict(new PositionReduceResponse(
                     result.Outcome.ToString(), result.NetQuantity)),
             // Unreachable, and the fail-closed Unknown with it. The net quantity stays null rather than 0: an
             // exposure nobody could read is unknown, and a 0 here would let a client render an outage as flat.
@@ -193,7 +197,7 @@ public sealed record PositionExitResponse(string Outcome, int NetQuantity);
 public sealed record PositionReduceRequest(int Quantity);
 
 /// <summary>The outcome of an operator-initiated reduce (gh#928).</summary>
-/// <param name="Outcome"><c>Reduced</c>, <c>NotReduced</c>, <c>Unconfirmed</c>, <c>Refused</c>, <c>ExceedsPosition</c>, <c>AccountBusy</c> or <c>Unreachable</c> — as a name, not an integer. Only <c>Reduced</c> is done, and only <c>ExceedsPosition</c>, <c>Refused</c> and <c>AccountBusy</c> are safe to re-issue: the rest may already have executed.</param>
+/// <param name="Outcome"><c>Reduced</c>, <c>NotReduced</c>, <c>Unconfirmed</c>, <c>Refused</c>, <c>ExceedsPosition</c>, <c>AccountBusy</c>, <c>HeldPracticeOnly</c> or <c>Unreachable</c> — as a name, not an integer. Only <c>Reduced</c> is done, and only <c>ExceedsPosition</c>, <c>Refused</c>, <c>AccountBusy</c> and <c>HeldPracticeOnly</c> are safe to re-issue, because those are the ones that provably sent nothing: the rest may already have executed.</param>
 /// <param name="NetQuantity">
 /// The signed exposure the venue reports after the attempt — or the current size, when the request was refused
 /// before the venue was touched. <b><c>null</c> when the venue could not be reached</b>: an exposure nobody could

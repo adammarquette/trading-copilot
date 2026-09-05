@@ -637,6 +637,8 @@ public class ProjectXVenueTests
     [Theory]
     [InlineData(1)] // AccountNotFound
     [InlineData(2)] // PositionNotFound
+    [InlineData(3)] // ContractNotFound
+    [InlineData(4)] // ContractNotActive
     [InlineData(5)] // InvalidCloseSize
     [InlineData(6)] // OrderRejected
     [InlineData(9)] // AccountRejected
