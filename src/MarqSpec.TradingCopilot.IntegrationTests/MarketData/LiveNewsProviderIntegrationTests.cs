@@ -141,8 +141,10 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
     //     near-identical headlines from ONE provider must stay two rows. Removing that skip in production changes
     //     NOTHING on live payloads — a real Finnhub pull carries no two headlines similar enough, within the
     //     60-minute gap, to trip `AreLikelyTheSameStory` (verified: the defect was injected and every assertion
-    //     here stayed green). It needs constructed input, which is the stubbed gh#360 tier's job — where it is
-    //     currently absent too; see the PR for that coverage gap.
+    //     here stayed green). It needs constructed input, which is the stubbed gh#360 tier's job — where gh#1129
+    //     now covers it (`NewsIngestionIntegrationTests`, the same-feed pair plus its cross-feed control). That
+    //     pair binds the WITHIN-pass path only; the across-passes `FindFuzzyStored` carries no equivalent skip
+    //     and is open as gh#1132.
     //   * CROSS-FEED collapse. Blocked by gh#1125, declared below rather than skipped silently.
 
     // --- A refused provider must not sink the other (gh#464 case 4) ---
