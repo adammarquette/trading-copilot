@@ -272,6 +272,127 @@ public class AccountEntryConcurrencyIntegrationTests : IClassFixture<StubbedVenu
             + "second transmit");
     }
 
+    [Fact]
+    public async Task AnAbortedTransmit_ShouldReleaseTheAccountsLock_BeforeRunExclusiveAsyncReturns()
+    {
+        // gh#1120 (gh#1117's abort-recovery proof; sibling of gh#1118's ChatTurnGuard case). A request aborted
+        // mid-transmit -- OperationCanceledException thrown from inside `transmit`, mirroring a RequestAborted
+        // client disconnect -- must not leave the account's session advisory lock stranded on the connector
+        // RunExclusiveAsync used. Reproduction technique is PR #1121's own (see its description): pin a SECOND,
+        // genuinely separate connection open BEFORE the guard call, so Npgsql's pool is forced to hand the guard
+        // a different physical connector -- reusing the SAME connector would silently reset it (DISCARD ALL) on
+        // reuse and hide the defect. Query pg_try_advisory_lock directly from that still-open probe connection
+        // rather than routing back through the guard, which would just re-take its own lock.
+        Guid accountId = Guid.NewGuid();
+
+        await using AsyncServiceScope probeScope = _factory.Services.CreateAsyncScope();
+        // AccountEntryGuard is stateless by design (its doc comment: "the context is a parameter, not a captured
+        // field"), so resolving it from ANY one scope and reusing it with DbContexts from other scopes below is
+        // safe -- resolving it from the root provider throws instead, since it's registered scoped.
+        IAccountEntryGuard guard = probeScope.ServiceProvider.GetRequiredService<IAccountEntryGuard>();
+        TradingCopilotDbContext probeDb = probeScope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        // Pinned open BEFORE the guard call -- see the method-level remark on why this ordering is load-bearing.
+        await probeDb.Database.OpenConnectionAsync();
+
+        try
+        {
+            await using AsyncServiceScope guardScope = _factory.Services.CreateAsyncScope();
+            TradingCopilotDbContext guardDb = guardScope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+
+            using CancellationTokenSource requestAborted = new();
+
+            Func<Task<int>> abortMidTransmit = async () =>
+            {
+                // Simulates the operator paths' shape exactly: the callback spans real work (here, a lock-held
+                // yield standing in for the venue round-trip) and the CALLER's token -- RequestAborted in
+                // production -- is what goes cancelled, not some unrelated token.
+                await Task.Yield();
+                requestAborted.Cancel();
+                throw new OperationCanceledException(requestAborted.Token);
+            };
+
+            await FluentActions.Awaiting(() =>
+                    guard.RunExclusiveAsync(guardDb, accountId, abortMidTransmit, requestAborted.Token))
+                .Should().ThrowAsync<OperationCanceledException>(
+                    "the abort must propagate to the caller -- this guard adds serialization, never swallows a "
+                    + "cancellation");
+        }
+        finally
+        {
+            // Decisive assertion, taken from the SEPARATE probe connection that was never involved in the guard
+            // call: pg_try_advisory_lock both tests AND (if free) re-takes the lock in one atomic step, so a
+            // `true` here is direct proof the account was immediately lockable again after the abort -- not a
+            // wall-clock-timed retry that could pass by luck.
+            bool immediatelyLockable = await probeDb.Database
+                .SqlQuery<bool>($"SELECT pg_try_advisory_lock(hashtext({accountId.ToString()})) AS \"Value\"")
+                .SingleAsync();
+
+            if (immediatelyLockable)
+            {
+                await probeDb.Database.ExecuteSqlAsync(
+                    $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))");
+            }
+
+            await probeDb.Database.CloseConnectionAsync();
+
+            immediatelyLockable.Should().BeTrue(
+                "an aborted transmit must release the account's advisory lock PROMPTLY, before "
+                + "RunExclusiveAsync returns -- not merely eventually, when Npgsql's pool happens to reset the "
+                + "stranded connector on its next, unrelated use");
+        }
+    }
+
+    [Fact]
+    public async Task TryRunExclusiveAsync_ShouldNotReportBusy_ForAnAbortThatHasAlreadyEnded()
+    {
+        // gh#1120's non-blocking-path case. The conditional-fire watcher's specific observable: a lock stranded
+        // by an aborted take/send must not make the WATCHER's own pg_try_advisory_lock see the account as busy
+        // for a turn that has already ended -- that surfaces as a fire deferred to the next quote for no reason
+        // (gh#589). Same abort-then-probe shape as the blocking case, including the SAME pinning discipline:
+        // the watcher's connection is opened BEFORE the aborting call, so Npgsql cannot hand the watcher the
+        // very connector the aborted guard just released. Here the probe itself IS the production call under
+        // test (TryRunExclusiveAsync), taken from that pinned, genuinely separate connection.
+        Guid accountId = Guid.NewGuid();
+
+        // PINNED FIRST, and that ordering is what makes this test able to fail. Leasing the watcher's connector
+        // only after the abort lets the pool hand back the aborted guard's own connector, whose DISCARD ALL
+        // reset releases the leaked session lock before pg_try_advisory_lock ever runs -- so the guard would
+        // acquire, `result` would be 1, and the case would stay GREEN against the unfixed
+        // `CancellationToken.None`-less guard, proving nothing (gh#1120 review).
+        await using AsyncServiceScope watcherScope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext watcherDb = watcherScope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        await watcherDb.Database.OpenConnectionAsync();
+
+        await using AsyncServiceScope abortingScope = _factory.Services.CreateAsyncScope();
+        // Stateless (see the sibling case's remark above) -- safe to resolve here and reuse below against
+        // watcherDb, a DbContext from a wholly separate scope.
+        IAccountEntryGuard guard = abortingScope.ServiceProvider.GetRequiredService<IAccountEntryGuard>();
+        TradingCopilotDbContext abortingDb = abortingScope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+
+        using CancellationTokenSource requestAborted = new();
+        Func<Task<int>> abortMidTransmit = async () =>
+        {
+            await Task.Yield();
+            requestAborted.Cancel();
+            throw new OperationCanceledException(requestAborted.Token);
+        };
+
+        await FluentActions.Awaiting(() =>
+                guard.TryRunExclusiveAsync(
+                    abortingDb, accountId, abortMidTransmit, onBusy: () => -1, requestAborted.Token))
+            .Should().ThrowAsync<OperationCanceledException>();
+
+        int fired = -1;
+        int result = await guard.TryRunExclusiveAsync(
+            watcherDb, accountId, () => Task.FromResult(1), onBusy: () => fired, CancellationToken.None);
+
+        result.Should().Be(
+            1,
+            "the conditional-fire watcher's non-blocking pg_try_advisory_lock must acquire the account's lock "
+            + "immediately after an aborted take/send -- reporting busy here would defer a fire to the next "
+            + "quote for a turn that has already ended");
+    }
+
     // =================================================================================================================
     // Helpers.
     // =================================================================================================================

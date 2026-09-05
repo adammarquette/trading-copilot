@@ -66,10 +66,17 @@ time-indexed row + pgvector embedding). Free and useful for AI-agent context:
   fundamentals; symbol search; SEC filings; recommendation trends.
 - **Not on free:** historical US-stock **candles** (`403`), tick/BBO, international stocks, sentiment/economic
   alt-data, higher rate limits.
-- **Data quality/coverage is UNVERIFIED** — free-feed completeness, latency, and trade-condition coverage haven't
-  been validated against a known-good source. **Treat as unverified until checked** (the PRD open item; candidate
-  **Q-15**). This is *why* Finnhub is worth wiring first — it exercises the data-only-provider path at zero cost
-  before we trust it.
+- **Market-data (websocket trades) quality/coverage is UNVERIFIED** — free-feed completeness, latency, and
+  trade-condition coverage for the trade-print stream (`FinnhubMarketDataSource`) haven't been validated against
+  a known-good source. **Treat as unverified until checked** (the PRD open item; candidate **Q-15**). This is
+  *why* Finnhub is worth wiring first — it exercises the data-only-provider path at zero cost before we trust it.
+  The **news** half of the free tier is a separate, now-checked item: gh#1122's live-provider pass (engineering
+  §"Data sources") validated article delivery, lookback-window age, and ticker tagging — that news-quality
+  finding does **not** extend to this market-data caveat, which stays open.
+- **What that news pass actually measured** (2026-09-05, gh#1122): ~13–37 articles/day from Reuters / CNBC /
+  Bloomberg, every one carrying a URL and a headline, no duplicate URLs in a payload. Two limits: articles
+  arrive **already older than a 60-minute lookback**, so that window admits only ~0–1% of them (gh#1123), and
+  the `general` category carries **no tickers at all** (gh#1124).
 
 ## Fit / integration notes
 - **Data-only provider** → implements the market-data interface of the R-17 abstraction; **no** account/execution
@@ -85,7 +92,8 @@ time-indexed row + pgvector embedding). Free and useful for AI-agent context:
 - Exact websocket fields (trade `conditions`, volume semantics); whether a **quote** stream (not just trades)
   exists on free; whether a **news websocket** (`type:"news"`) is free or premium.
 - Which alternative-data endpoints are free **at integration time** (tiers drift).
-- Real-feed **data-quality** benchmark vs. a known-good source (resolves the Q-15 caveat).
+- Real-feed **market-data quality** benchmark (trade-print completeness/latency/conditions) vs. a known-good
+  source (resolves the Q-15 caveat) — the news half is checked (gh#1122); this market-data half is not.
 
 ## Relevant-link index
 - API docs (home) — https://finnhub.io/docs/api

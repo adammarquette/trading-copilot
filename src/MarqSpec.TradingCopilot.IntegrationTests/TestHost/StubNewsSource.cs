@@ -3,9 +3,15 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 
 /// <summary>
-/// An adversarial <see cref="INewsSource"/> for the gh#360 news-ingestion suite. It stands in for a real
-/// provider (Finnhub / Tiingo, gh#383) that does not exist yet, so the ingestion + dedup engine can be exercised
-/// venue-independently in the pre-merge tier.
+/// An adversarial <see cref="INewsSource"/> for the gh#360 news-ingestion suite. It stands in for a real provider
+/// (Finnhub / Tiingo, gh#383 — since landed) so the ingestion + dedup engine can be exercised venue-independently
+/// in the pre-merge tier, without the real APIs, rate limits, or network flakiness on the PR-feedback path.
+/// <para>
+/// Those providers are now exercised for real by the live-provider tier
+/// (<c>MarketData/LiveNewsProviderIntegrationTests</c>, gh#1122), which does not supersede this stub: it stays the
+/// only way to CONSTRUCT input a live feed does not happen to serve — which is exactly why the same-feed
+/// fuzzy-dedup case (gh#1128) belongs here rather than there.
+/// </para>
 /// </summary>
 /// <remarks>
 /// <para>
