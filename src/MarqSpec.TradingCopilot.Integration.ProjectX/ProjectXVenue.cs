@@ -85,7 +85,8 @@ public sealed class ProjectXVenue : ITradingVenue
         | VenueCapability.AccountStreaming
         // In-place order modify (gh#259): the gateway's modify endpoint, now reached through the neutral contract
         // so an operator can reprice a resting working order without a cancel/replace.
-        | VenueCapability.ModifyOrder);
+        | VenueCapability.ModifyOrder
+        );
 
     /// <summary>
     /// The ProjectX derivation-logic version (ADR-0009, gh#9). History: <b>1</b> — the conservative PRAC-only
@@ -337,6 +338,17 @@ public sealed class ProjectXVenue : ITradingVenue
         return open is null
             ? new PositionSnapshot(account, contract, 0, new Price(0m))
             : ProjectXMapping.ToPositionSnapshot(open, Id);
+    }
+
+    /// <inheritdoc />
+    public async Task<PositionSnapshot> ReducePositionAsync(
+        VenueAccountId account,
+        VenueContractId contract,
+        int quantity,
+        CancellationToken cancellationToken = default)
+    {
+        await Task.Yield();
+        throw new NotImplementedException("gh#928: the sized partial close is not implemented yet.");
     }
 
     /// <inheritdoc />

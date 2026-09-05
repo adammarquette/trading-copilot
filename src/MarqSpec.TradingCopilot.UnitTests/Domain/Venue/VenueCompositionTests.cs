@@ -77,6 +77,24 @@ public class VenueCompositionTests
     }
 
     [Fact]
+    public async Task ReducePositionAsync_ShouldThrowNotSupported_WhenTheVenueCannotSizeAPartialClose()
+    {
+        // The fail-loud default (R-17, gh#928): a venue that has not implemented a sized partial close must REFUSE,
+        // never silently fall back to closing the WHOLE position -- which is the opposite of the reduce's intent and
+        // would flatten an operator who asked to keep part of the trade on. FakeTradingVenue leaves the default in
+        // place, so this is the seam's own contract, not an adapter's.
+        ITradingVenue venue = new FakeTradingVenue();
+
+        Func<Task> act = async () => await venue.ReducePositionAsync(
+            VenueAccountId.Create(venue.Id, "9001"),
+            VenueContractId.Create(venue.Id, "ESM25"),
+            quantity: 1,
+            CancellationToken.None);
+
+        await act.Should().ThrowAsync<NotSupportedException>();
+    }
+
+    [Fact]
     public async Task GetBarsAsync_ShouldThrowCapabilityNotSupported_WhenTheProviderLacksHistoricalBars()
     {
         IMarketDataSource feed = new FakeQuoteFeed();
