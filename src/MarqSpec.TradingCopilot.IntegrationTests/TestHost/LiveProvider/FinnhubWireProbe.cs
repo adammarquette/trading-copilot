@@ -74,10 +74,49 @@ internal static class FinnhubWireProbe
         return articles;
     }
 
-    /// <summary>Normalises a URL for comparison — case and a trailing slash only, never the production key.</summary>
+    private static readonly HashSet<string> _trackingKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "fbclid", "gclid", "mc_cid", "mc_eid", "igshid", "ref", "ref_src",
+    };
+
+    /// <summary>
+    /// Normalises a URL for comparison — independently reimplemented, deliberately <b>not</b> a call into
+    /// <c>NewsDedupKey.For</c> (that would make the probe share the very canonicalization it exists to check,
+    /// so a defect in it would move probe and production together and the probe could never catch it). This is
+    /// a separate implementation reaching for the same tolerances by its own route: lower-cases the host, drops
+    /// the scheme and a leading <c>www.</c>, strips a fixed set of tracking query parameters and sorts what's
+    /// left, and trims a trailing slash. Weaker than that (case + trailing slash alone) risks reporting a
+    /// "dropped story" on a URL production would actually have deduped correctly.
+    /// </summary>
     /// <param name="url">The URL to normalise.</param>
     /// <returns>The comparable form.</returns>
-    public static string Normalize(string url) => url.TrimEnd('/').ToLowerInvariant();
+    public static string Normalize(string url)
+    {
+        string trimmed = url.Trim();
+        if (!Uri.TryCreate(trimmed, UriKind.Absolute, out Uri? uri))
+        {
+            return trimmed.TrimEnd('/').ToLowerInvariant();
+        }
+
+        string host = uri.Host.ToLowerInvariant();
+        if (host.StartsWith("www.", StringComparison.Ordinal))
+        {
+            host = host["www.".Length..];
+        }
+
+        string path = uri.AbsolutePath.TrimEnd('/');
+
+        string[] queryParts = uri.Query
+            .TrimStart('?')
+            .Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Where(pair => !pair.StartsWith("utm_", StringComparison.OrdinalIgnoreCase)
+                && !_trackingKeys.Contains(pair.Split('=', 2)[0]))
+            .OrderBy(pair => pair, StringComparer.Ordinal)
+            .ToArray();
+
+        string query = queryParts.Length == 0 ? string.Empty : "?" + string.Join('&', queryParts);
+        return $"{host}{path}{query}";
+    }
 
     private static string Text(JsonElement element, string property) =>
         element.TryGetProperty(property, out JsonElement value) && value.ValueKind == JsonValueKind.String
