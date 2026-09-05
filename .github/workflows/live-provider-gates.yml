@@ -1,0 +1,78 @@
+name: Live provider gates
+
+# The live-provider tier (gh#1122) runs the `Category=LiveProvider` suite against the REAL Finnhub and Tiingo
+# news APIs. It is a third tier, distinct from both of its neighbours:
+#
+#   * NOT pre-merge. It makes real outbound calls to rate-limited free tiers and needs credentials, so it cannot
+#     run on every PR. The pre-merge `integration tests` job carries no provider keys, so these cases skip by
+#     construction there -- reported, never a silent green -- even though its `Category!=Smoke` filter selects
+#     them. One case in the suite (`Credentials_ShouldResolveFromConfigOnly`) needs NO credentials by design and
+#     therefore DOES run pre-merge; that is deliberate, and why the pre-merge filter is left alone.
+#   * NOT staging. It needs no deployed application at all -- the store is the same throwaway Postgres container
+#     the pre-merge tier uses. That is the whole reason this tier exists: gh#464 assumed a deployed staging
+#     environment for assertions that never needed one, and stayed blocked on an environment that does not exist.
+#   * NOT smoke. Smoke probes production, GET-only, on deploy.
+#
+# News providers are data-only (R-17): they hold no account and execute nothing, so nothing here can touch an
+# order. This workflow forwards no ProjectX credential and must never be given one.
+on:
+  # ON DEMAND ONLY. There is no push trigger by design: the free tiers are rate-limited and the feed changes
+  # slowly (roughly 13-37 articles a day -- gh#1123), so running per-push would spend quota to re-observe an
+  # almost unchanged payload. The operator runs it when the provider surface is what is in question.
+  workflow_dispatch: {}
+
+# Least privilege: the gates read secrets and run tests; they never write to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  # Two overlapping runs would double the request rate against a free tier for no extra signal. Never cancel one
+  # mid-flight either -- a cancelled run leaves the reader unable to tell a rate-limit refusal from a teardown.
+  group: live-provider-gates
+  cancel-in-progress: false
+
+jobs:
+  live-provider-gates:
+    name: live provider gates (news truth)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true  # the adapters build against the four public client submodules (gh#1023)
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore src/MarqSpec.TradingCopilot.slnx
+
+      # Absent keys => the [LiveNewsProviderFact] cases skip, reported. Say so up front rather than leaving a
+      # reader to infer it from a skip count, because "skipped" and "passed" look alike in a summary.
+      - name: Report credential availability
+        env:
+          FINNHUB: ${{ secrets.FINNHUB__APIKEY }}
+          TIINGO: ${{ secrets.TIINGO__APIKEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FINNHUB:-}" ] || [ -z "${TIINGO:-}" ]; then
+            echo "::warning::FINNHUB__APIKEY / TIINGO__APIKEY are not both set -- the live-provider cases will SKIP by construction. They are repository secrets; see the deployment runbook, Secrets & config."
+          else
+            echo "Both provider keys are present; the live-provider cases will run for real."
+          fi
+
+      # The keys are forwarded under the APPLICATION's own configuration names (.env.example), because the suite
+      # hands them straight to the production host so the real registration path is what gets exercised. This is
+      # the ONLY workflow that forwards them, so it is the only place these cases can actually run.
+      #
+      # The spelling matters on Linux: environment variable lookup is case-sensitive here, and the secrets are
+      # stored as FINNHUB__APIKEY / TIINGO__APIKEY. Naming the env vars in the application's casing keeps the
+      # exact-name lookup working; LiveProviderConfig also probes the upper-case form so a rename on either side
+      # degrades to a reported skip rather than a silent one.
+      - name: Live provider gates (Category=LiveProvider)
+        env:
+          Finnhub__ApiKey: ${{ secrets.FINNHUB__APIKEY }}
+          Tiingo__ApiKey: ${{ secrets.TIINGO__APIKEY }}
+        run: dotnet test src/MarqSpec.TradingCopilot.IntegrationTests/MarqSpec.TradingCopilot.IntegrationTests.csproj --configuration Release --filter "Category=LiveProvider" --logger "console;verbosity=detailed"

@@ -175,7 +175,7 @@ Server-side only, from the Railway environment — **never in source** (Options 
 - **Embeddings:** Cohere API key.
 - **LLM (agent review):** `Llm__ApiKey` — the Anthropic key the reviewer wakes a live model with (gh#402/#423); a
   **real secret** like the Cohere key. Absent, the stub reviewer stands in, so production never fabricates geometry.
-- **Data providers:** Finnhub + Tiingo API tokens (free tier).
+- **Data providers:** Finnhub + Tiingo API tokens (free tier). These live in **two** places, for two different consumers, and both are needed: the deployment reads `Finnhub__ApiKey` / `Tiingo__ApiKey` from its Railway environment, and the **live-provider test tier** (gh#1122) reads them from the **GitHub Actions repository secrets** `FINNHUB__APIKEY` / `TIINGO__APIKEY`, forwarded only by [`live-provider-gates.yml`](../.github/workflows/live-provider-gates.yml). A secret set in one place does nothing for the other. **Entitlements are not implied by a valid key** — Tiingo's news endpoint is a paid add-on its free tier refuses with `403` while `/api/test` still answers `200` (gh#1125), so "the key works" and "the feed works" are separate questions.
 - **Database:** connection string (Railway-managed).
 - **Ingestion:** poll intervals; the `Ingestion:Symbols` allowlist; news relevance config (or DB-stored).
 - **AI-spend governor (gh#448, ADR-0008):** `Governor__DailyBudgetUsd` + `Governor__AlertThresholdFraction` — the
@@ -921,9 +921,13 @@ Monthly Railway spend ceiling is **Q-10** (open) — watch always-on ingestion +
 - The Railway deploy integration (CLI / MCP / GitHub trigger) — the GitHub Actions workflows themselves exist
   (`ci.yml` + `branch-policy.yml`; §CI/CD above).
 - Create the `dev` + `staging` Railway environments and map branch → environment.
-- **Once the above exists, it still won't carry news-provider credentials.** Confirmed while investigating gh#464:
-  `Finnhub__ApiKey` / `Tiingo__ApiKey` are wired into no GitHub secret, environment, or workflow — unlike
-  `PROJECTX_*` / `STAGING_*`, which `staging-gates.yml` already forwards. The live cross-source news QA (gh#464)
-  has no credential path even after the `staging` environment is created; both need provisioning together.
+- ~~Once the above exists, it still won't carry news-provider credentials.~~ **Resolved 2026-09-05 (gh#1122).**
+  The operator added `FINNHUB__APIKEY` and `TIINGO__APIKEY` as **repository secrets**, and
+  [`live-provider-gates.yml`](../.github/workflows/live-provider-gates.yml) now forwards them — the only workflow
+  that does. Note what this did **not** need: the live news QA turned out to require no deployed environment at
+  all (the store is a throwaway Postgres container), so it no longer waits on `staging`. What the credentials
+  then revealed is tracked separately — **gh#1125** (Tiingo's plan excludes the News API, so R-2 multi-source
+  news has one live feed), **gh#1123** (the shipped 60-minute lookback admits ~0–1% of Finnhub's feed) and
+  **gh#1124** (its general category tags no tickers).
 - Non-prod **snapshot refresh** cadence + mechanism (§8).
 - Define the **smoke-test set** and the health / verify checks.
