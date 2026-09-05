@@ -11,6 +11,8 @@ name: Live provider news gates
 #   | Store | container Postgres | container Postgres | deployed DB |
 #   | Trigger | every PR | workflow_dispatch | workflow_dispatch |
 #
+# Smoke is a fourth thing again and is not on that axis: it probes PRODUCTION, GET-only, on deploy.
+#
 # `LiveNewsProviderFactAttribute` (src/MarqSpec.TradingCopilot.IntegrationTests/TestHost/LiveProvider) skips by
 # construction without both keys, so the pre-merge `integration tests (pre-merge)` job in ci.yml -- whose
 # `Category!=Smoke` filter technically matches Category=LiveProvider too -- reports those cases skipped rather
@@ -19,10 +21,14 @@ name: Live provider news gates
 # keyless host), so it already runs in the pre-merge job; this workflow re-runs it anyway as part of the same
 # filtered class. THIS workflow is the only place Finnhub__ApiKey / Tiingo__ApiKey are forwarded, so it is the
 # only place the real providers are ever reached from CI (mirrors staging-gates.yml's STAGING_* forwarding).
+#
+# News providers are data-only (R-17): they hold no account and execute nothing, so nothing here can touch an
+# order. This workflow forwards no ProjectX credential and must never be given one.
 on:
   # ON DEMAND ONLY -- a free-tier provider budget is not something a required PR check should spend on every
   # push, and several cases are evidence-gathering (FreeTierFeeds_ShouldReportTheirDataQuality) rather than a
-  # fixed pass/fail a merge queue should block on.
+  # fixed pass/fail a merge queue should block on. The feed moves slowly too (roughly 13-37 articles a day,
+  # gh#1123), so a per-push trigger would mostly re-observe an almost unchanged payload.
   workflow_dispatch: {}
 
 # Least privilege: the suite reads secrets and runs tests; it never writes to the repo.
@@ -31,7 +37,8 @@ permissions:
 
 concurrency:
   # No shared external state to serialize on (unlike staging-gates.yml's one reserved practice account) -- this
-  # only protects against two runs racing the same free-tier rate-limit budget.
+  # only protects against two runs racing the same free-tier rate-limit budget. Never cancel one mid-flight
+  # either: a cancelled run leaves the reader unable to tell a rate-limit refusal from a teardown.
   group: live-provider-news-gates
   cancel-in-progress: false
 
@@ -53,11 +60,30 @@ jobs:
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 
+      # Absent keys => the gated cases skip, reported. Say so up front rather than leaving a reader to infer it
+      # from a skip count, because "skipped" and "passed" look alike in a run summary -- and the whole value of
+      # this tier is that it actually ran.
+      - name: Report credential availability
+        env:
+          FINNHUB: ${{ secrets.FINNHUB__APIKEY }}
+          TIINGO: ${{ secrets.TIINGO__APIKEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FINNHUB:-}" ] || [ -z "${TIINGO:-}" ]; then
+            echo "::warning::FINNHUB__APIKEY / TIINGO__APIKEY are not both set -- the live-provider cases will SKIP by construction. They are repository secrets; see the deployment runbook, Secrets & config."
+          else
+            echo "Both provider keys are present; the live-provider cases will run for real."
+          fi
+
       # Absent => LiveNewsProviderFactAttribute skips every gated case (reported, never a silent green); present
       # => the suite authenticates to the real Finnhub + Tiingo REST APIs and asserts against what they actually
-      # return. LiveProviderConfig probes both the app's own Finnhub__ApiKey / Tiingo__ApiKey spelling and the
-      # repository secrets' FINNHUB__APIKEY / TIINGO__APIKEY spelling, so forwarding either name here is enough --
-      # both are set to the same secret for clarity.
+      # return.
+      #
+      # The keys are forwarded under the APPLICATION's own configuration names (.env.example), because the suite
+      # hands them straight to the production host so the real registration path is what gets exercised. The
+      # spelling matters on Linux, where environment lookup is case-sensitive and the secrets are stored as
+      # FINNHUB__APIKEY / TIINGO__APIKEY: LiveProviderConfig probes both that spelling and the app's own, so a
+      # rename on either side degrades to a reported skip rather than a silent one.
       - name: Live provider news (Category=LiveProvider)
         env:
           Finnhub__ApiKey: ${{ secrets.FINNHUB__APIKEY }}
