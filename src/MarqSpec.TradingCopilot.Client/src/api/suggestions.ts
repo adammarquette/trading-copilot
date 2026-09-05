@@ -58,6 +58,24 @@ export const SuggestionPassReason = {
 } as const;
 export type SuggestionPassReason = (typeof SuggestionPassReason)[keyof typeof SuggestionPassReason];
 
+/**
+ * Which fields a **modified** take changed against the suggestion, as a `[Flags]` bitmask in one integer
+ * (gh#549). `None` (zero) is an unmodified `Taken`.
+ *
+ * This is the server's own record of what the operator changed, computed at take time against an
+ * exact-decimal snapshot — it is what the R-9 loop aggregates. Re-deriving it in the client by comparing
+ * prices would drift from that record the moment either side rounds differently, so the journal reads the
+ * mask and never recomputes it.
+ */
+export const SuggestionDeviation = {
+  None: 0,
+  Entry: 1 << 0,
+  Stop: 1 << 1,
+  Target: 1 << 2,
+  Size: 1 << 3,
+} as const;
+export type SuggestionDeviation = (typeof SuggestionDeviation)[keyof typeof SuggestionDeviation];
+
 /** Mirrors `SuggestionDisposition.NoteMaxLength`. The server refuses a longer note; the field stops it earlier. */
 export const NOTE_MAX_LENGTH = 1000;
 

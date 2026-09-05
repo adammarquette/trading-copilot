@@ -8,6 +8,7 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import type { ComponentType } from 'react';
 
 import { ChatSurface } from '../chat/ChatSurface';
+import { JournalSurface } from '../journal/JournalSurface';
 import { NewsSurface } from '../news/NewsSurface';
 import { RulebookSurface } from '../triggers/RulebookSurface';
 import { SettingsSurface } from '../settings/SettingsSurface';
@@ -88,6 +89,12 @@ export const destinations: readonly Destination[] = [
     requirement: 'R-8',
     Icon: MenuBookIcon,
     tier: 'primary',
+    // P&L by day, drillable into a day (gh#659): the stat strip, equity curve and magnitude-shaded calendar
+    // over `GET /accounts/{id}/journal/daily` (gh#1062), the day's trades over its `/{date}` sibling, and per
+    // trade the taken-vs-suggested delta (gh#549) plus operator feedback (gh#1064). Practice/live and
+    // instrument FILTERS, the shadow-P&L overlay, a strategy label, an R-multiple and a day-level
+    // awaiting-review count all want reads that do not exist yet -- named in the PR, not faked here.
+    Surface: JournalSurface,
   },
   {
     id: 'rulebook',
