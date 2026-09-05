@@ -616,14 +616,33 @@ public static class ChatEndpoints
         error = "A concurrent message took that position in the conversation; retry.",
     });
 
+    /// <summary>
+    /// The refusal envelope's <c>layer</c> for the one-in-flight-turn guard (gh#1106) — the value a client keys on
+    /// to tell this 409 from the endpoint's OTHER 409, the lost sequence race.
+    /// </summary>
+    /// <remarks>
+    /// The two 409s demand opposite behaviour from a client rendering the live draft, and the status alone cannot
+    /// separate them. This one means <b>this connection's turn never ran</b>, and it is returned precisely when
+    /// ANOTHER turn is streaming — so a client must NOT retire the draft or suppress the deltas still arriving; both
+    /// belong to the turn that is still running. The sequence-race 409 on the assistant append means the opposite:
+    /// this connection's turn DID stream, so its draft is finished and its stragglers are suppressible. A client
+    /// that conflated them would discard a live draft and then drop the next seconds of the other turn's deltas —
+    /// re-creating through the refusal the very "draft resets mid-answer" symptom this guard exists to remove.
+    /// <c>layer</c> is the refusal envelope's existing "which gate said no" field (<c>ApiResult.layer</c>), so this
+    /// needs no new wire shape and no new status.
+    /// </remarks>
+    internal const string TurnInFlightLayer = "chat-turn-in-flight";
+
     // The 409 for a second concurrent turn on one conversation (gh#1106). 409 rather than 422 deliberately: this
     // endpoint already spends 422 on "the turn ran and could not produce an answer", and a client that could not
     // tell the two apart would show the wrong affordance for each — a retry hint where an apology belongs, or the
     // reverse. 409 is what this endpoint already means by "a concurrent request took this; retry", which is exactly
-    // this case. The reason is written to be displayed as-is.
+    // this case. The reason is written to be displayed as-is; `layer` names the gate, so the client can also tell
+    // this 409 from the sequence-race one (see TurnInFlightLayer).
     private static IResult TurnAlreadyInFlight() => Results.Conflict(new
     {
         error = "A turn is already in flight on this conversation; wait for it to finish, then retry.",
+        layer = TurnInFlightLayer,
     });
 
     // A blank title is no title: trim, and collapse empty/whitespace to null so "" and "   " are not stored as a title.

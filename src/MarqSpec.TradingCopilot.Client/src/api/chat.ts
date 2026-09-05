@@ -125,8 +125,22 @@ export function getConversation(id: string): Promise<ApiResult<ConversationDetai
  * - **422** (the model call failed / was refused) -- the operator's turn IS still saved server-side.
  *
  * So a caller that needs to know whether its own turn persisted re-reads with {@link getConversation} rather than
- * assuming either way; the two 409 causes are deliberately not distinguished on the wire.
+ * assuming either way. The two 409 causes are not distinguished by STATUS, but the in-flight one names itself in
+ * the refusal envelope's `layer` ({@link TURN_IN_FLIGHT_LAYER}) — which a caller rendering the live chat draft
+ * must key on, because the two demand opposite treatment of it (see {@link TURN_IN_FLIGHT_LAYER}).
  */
+/**
+ * The refusal envelope's `layer` for the one-in-flight-turn guard (gh#1106). Mirrors
+ * `ChatEndpoints.TurnInFlightLayer`, the same way {@link CONTENT_MAX_LENGTH} mirrors its server constant.
+ *
+ * **Why a caller must key on it.** `POST /turns` has two 409s that demand opposite handling of the live draft, and
+ * the status cannot tell them apart. This one means **this connection's turn never ran** — and it is returned
+ * *precisely when another turn is streaming*, so the draft on screen belongs to that turn: it must not be retired,
+ * and the deltas still arriving must not be suppressed. The other 409 (a lost sequence race on the assistant
+ * append) means this connection's turn DID run, so its draft is finished and its stragglers are suppressible.
+ */
+export const TURN_IN_FLIGHT_LAYER = 'chat-turn-in-flight';
+
 export function sendChatTurn(id: string, content: string): Promise<ApiResult<ChatTurnResult>> {
   return requestJson<ChatTurnResult>('POST', `/conversations/${id}/turns`, { content });
 }

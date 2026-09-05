@@ -1039,15 +1039,62 @@ describe('ConversationThread — cross-connection reconciliation', () => {
   // a test asserting accepted behaviour for a state that can no longer occur is worse than no test, because the
   // next reader takes it for a description of the system. Its replacement is below: the refusal the operator
   // actually sees.
-  it('surfaces the server refusing a second in-flight turn, and drops the optimistic bubble (gh#1106)', async () => {
+  const inFlightRefusal = {
+    ok: false,
+    kind: 'refused',
+    status: 409,
+    reason: 'A turn is already in flight on this conversation; wait for it to finish, then retry.',
+    layer: 'chat-turn-in-flight',
+  } as const;
+
+  it("leaves the OTHER turn's live draft alone when its own send is refused as already in flight", async () => {
+    // The refusal is returned precisely when another turn IS streaming, so this connection's send ran nothing and
+    // the draft on screen belongs to that other turn. Treating the refusal like a settled turn of its own --
+    // retiring the draft and arming the straggler suppression -- would discard a live draft and then drop seconds
+    // of the other turn's deltas, re-creating THROUGH THE REFUSAL the "draft resets mid-answer" symptom the
+    // server-side guard exists to remove. Both halves are asserted: the prefix must survive the round-trip, and
+    // the next delta must still land.
+    loadedEmptyThread();
+    sendMock.mockResolvedValue(inFlightRefusal);
+
+    await renderThread();
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is ' }));
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'and another thing' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await act(async () => {}); // let the 409 settle
+
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: '$1,800.' }));
+
+    expect(screen.getByTestId('chat-draft').textContent).toBe('Headroom is $1,800.');
+  });
+
+  it('still treats a NON-in-flight 409 as a settled turn of its own', async () => {
+    // The sequence-race 409 is the opposite case: this connection's turn DID run, so its draft is finished and the
+    // chunks behind it are stragglers to suppress. Only the `layer` discriminator separates the two -- a client
+    // keying on the status alone would have to get one of them wrong. This is the control that stops the case
+    // above from passing by simply never suppressing anything.
     loadedEmptyThread();
     sendMock.mockResolvedValue({
       ok: false,
       kind: 'refused',
       status: 409,
-      reason:
-        'A turn is already in flight on this conversation; wait for it to finish, then retry.',
+      reason: 'A concurrent message took that position in the conversation; retry.',
     });
+
+    await renderThread();
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is ' }));
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'and another thing' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await act(async () => {});
+
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: '$1,800.' }));
+
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+  });
+
+  it('surfaces the server refusing a second in-flight turn, and drops the optimistic bubble (gh#1106)', async () => {
+    loadedEmptyThread();
+    sendMock.mockResolvedValue(inFlightRefusal);
 
     await renderThread();
     fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'and another thing' } });

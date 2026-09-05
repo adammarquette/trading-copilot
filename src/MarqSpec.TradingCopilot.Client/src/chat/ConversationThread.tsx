@@ -11,6 +11,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import {
   CONTENT_MAX_LENGTH,
   ChatRole,
+  TURN_IN_FLIGHT_LAYER,
   type ChatMessage,
   type ChatRoleValue,
   getConversation,
@@ -125,6 +126,16 @@ function foldIn(messages: readonly ChatMessage[], incoming: ChatMessage): readon
  * would claim a state neither confirmed nor retractable. The typed text is kept in the composer (not cleared) so
  * retrying costs nothing, which is the whole affordance on an in-flight 409: retry once the other turn lands.
  *
+ * **A refused send must not disturb the turn that refused it.** The in-flight 409 is returned *precisely when
+ * another turn is streaming*, so this connection ran nothing and the draft on screen is that other turn's. It is
+ * therefore the one refusal that does NOT retire the draft or arm the straggler suppression -- doing either would
+ * discard a live answer and then blank it mid-sentence, which is the symptom gh#1106 exists to remove, reached
+ * through the refusal that was supposed to prevent it. `send()` blanks the draft optimistically (it cannot know
+ * yet), and this refusal puts it back; the restore is exact because at most one turn is in flight, so the true
+ * draft is what was there plus whatever arrived during the round-trip. Keyed on the refusal envelope's `layer`
+ * ({@link TURN_IN_FLIGHT_LAYER}), because the endpoint's other 409 -- a lost sequence race -- means the opposite
+ * and the status alone cannot separate them.
+ *
  * **Untrusted content, both roles.** A message's `content` -- assistant or operator -- is rendered as plain text via
  * ordinary JSX interpolation, never `dangerouslySetInnerHTML` or any markdown/HTML interpreter: the always-on news
  * grounding (gh#995, ADR-0027) that can shape an assistant reply is handed to the model as untrusted user-role data
@@ -148,6 +159,13 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   const settledTurnsRef = useRef(0);
   const stragglersRef = useRef(false);
   const stragglerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirrors the rendered draft so `send()` can snapshot it synchronously (it is not in that callback's deps, and a
+  // closed-over `streaming` would be stale). Only the refusal path below reads it -- see there for why.
+  const streamingRef = useRef<{ readonly text: string } | null>(null);
+
+  useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
 
   // Arms / disarms the straggler suppression, TIME-BOUNDED. A straggler is a chunk still in flight behind a turn
   // this connection already settled, so it is a matter of seconds. A faulted turn now sends a terminator that
@@ -365,9 +383,15 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
     sendingRef.current = true;
     setSending(true);
     setSendError(null);
+    // A new turn begins, so whatever the last one left behind goes and its chunks are live again -- UNLESS this
+    // send turns out to be refused because another turn is already in flight (gh#1106), in which case the draft
+    // just blanked was that turn's and is still growing. This connection cannot know which until the response, so
+    // it blanks optimistically and keeps the text to put back; the restore is exact because there is at most one
+    // turn in flight, so the true draft is simply what was here plus whatever arrived in the meantime.
+    const draftAtSend = streamingRef.current;
     setStreaming(null);
-    // A new turn begins: whatever the last one left behind, its chunks are live again. The snapshot is what the
-    // settle path below compares against to tell "this turn is still streaming to me" from "already terminated".
+    // The snapshot the settle path compares against to tell "this turn is still streaming to me" from "already
+    // terminated".
     suppressStragglers(false);
     const settledTurnsAtStart = settledTurnsRef.current;
     setState((current) =>
@@ -404,15 +428,34 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         }
         sendingRef.current = false;
         setSending(false);
-        setStreaming(null);
-        // Close the gate only if this turn's terminating push has NOT already been seen. If it has, the turn's
-        // chunk stream is over and every later chunk belongs to a NEW turn -- possibly one taken on another
-        // screen, which would never re-arm anything here (gh#1103). If it has not, the REST response has simply
-        // won the race and further chunks are stragglers of the answer already rendered (gh#1085); the push that
-        // terminates them re-opens the gate. A push lost outright leaves this connection closed until its own
-        // next send -- the same degraded state that already costs it the settled message, which R-19's connection
-        // indicator is what surfaces.
-        suppressStragglers(settledTurnsRef.current === settledTurnsAtStart);
+
+        // REFUSED BECAUSE A TURN WAS ALREADY IN FLIGHT (gh#1106): this send ran nothing at all, so none of the
+        // draft bookkeeping below applies to it -- and both halves of that bookkeeping would actively damage the
+        // OTHER turn, the one this refusal proves is streaming right now. Retiring the draft would discard an
+        // answer being rendered correctly; arming the straggler suppression would then drop that turn's deltas for
+        // the whole suppression window and re-open its draft from empty mid-answer, which is precisely the symptom
+        // the server-side guard exists to remove. So instead the optimistic blank above is UNDONE: the true draft
+        // is the text that was there before the blank plus whatever arrived during the round-trip, which is exact
+        // because at most one turn is in flight. (Both null stays null -- never conjure an empty bubble.)
+        const refusedAsAlreadyInFlight =
+          !result.ok && result.kind === 'refused' && result.layer === TURN_IN_FLIGHT_LAYER;
+        if (refusedAsAlreadyInFlight) {
+          setStreaming((current) =>
+            draftAtSend === null && current === null
+              ? null
+              : { text: (draftAtSend?.text ?? '') + (current?.text ?? '') },
+          );
+        } else {
+          setStreaming(null);
+          // Close the gate only if this turn's terminating push has NOT already been seen. If it has, the turn's
+          // chunk stream is over and every later chunk belongs to a NEW turn -- possibly one taken on another
+          // screen, which would never re-arm anything here (gh#1103). If it has not, the REST response has simply
+          // won the race and further chunks are stragglers of the answer already rendered (gh#1085); the push that
+          // terminates them re-opens the gate. A push lost outright leaves this connection closed until its own
+          // next send -- the same degraded state that already costs it the settled message, which R-19's
+          // connection indicator is what surfaces.
+          suppressStragglers(settledTurnsRef.current === settledTurnsAtStart);
+        }
 
         if (!result.ok) {
           // Drop the optimistic row on every refusal, though the reasons differ (see the module note): a 429 and
