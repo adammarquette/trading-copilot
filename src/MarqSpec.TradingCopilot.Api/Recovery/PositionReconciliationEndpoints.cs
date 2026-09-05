@@ -85,8 +85,39 @@ public static class PositionReconciliationEndpoints
         PositionReduceService reduces,
         CancellationToken cancellationToken)
     {
-        await Task.Yield();
-        throw new NotImplementedException("gh#928: the reduce route is not implemented yet.");
+        if (!InstrumentId.TryParse(instrument, out InstrumentId parsed))
+        {
+            return Results.BadRequest(new { error = $"'{instrument}' is not a valid instrument." });
+        }
+
+        if (request is null || request.Quantity <= 0)
+        {
+            // A non-positive reduce is meaningless, and a client mistake told apart from an unreachable venue.
+            return Results.BadRequest(new { error = "quantity must be a positive number of contracts to reduce by." });
+        }
+
+        PositionReduceResult? result = await reduces.ReduceAsync(id, parsed, request.Quantity, cancellationToken);
+        if (result is null)
+        {
+            return Results.NotFound(); // not found / not owned (R-20)
+        }
+
+        return result.Outcome switch
+        {
+            PositionReduceOutcome.Reduced => Results.Ok(new PositionReduceResponse(
+                result.Outcome.ToString(), result.NetQuantity)),
+            // Not strictly partial (>= what is open): a client sizing error, distinct from a transient. The body
+            // carries the current size so the operator can correct — or reach for the exit control for a full close.
+            PositionReduceOutcome.ExceedsPosition => Results.BadRequest(new PositionReduceResponse(
+                result.Outcome.ToString(), result.NetQuantity)),
+            // Accepted-but-not-what-was-asked, or reversed: not done. A 409 is "re-check and try again", never
+            // "it reduced".
+            PositionReduceOutcome.NotReduced => Results.Conflict(new PositionReduceResponse(
+                result.Outcome.ToString(), result.NetQuantity)),
+            // Unreachable, and the fail-closed Unknown with it. The net quantity stays null rather than 0: an
+            // exposure nobody could read is unknown, and a 0 here would let a client render an outage as flat.
+            _ => Results.Conflict(new PositionReduceResponse(PositionReduceOutcome.Unreachable.ToString(), null)),
+        };
     }
 
     internal static async Task<IResult> ReconcileAsync(
