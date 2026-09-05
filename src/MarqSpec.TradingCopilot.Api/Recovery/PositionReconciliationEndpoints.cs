@@ -110,10 +110,18 @@ public static class PositionReconciliationEndpoints
             // carries the current size so the operator can correct — or reach for the exit control for a full close.
             PositionReduceOutcome.ExceedsPosition => Results.BadRequest(new PositionReduceResponse(
                 result.Outcome.ToString(), result.NetQuantity)),
-            // Accepted-but-not-what-was-asked, or reversed: not done. A 409 is "re-check and try again", never
-            // "it reduced".
-            PositionReduceOutcome.NotReduced => Results.Conflict(new PositionReduceResponse(
-                result.Outcome.ToString(), result.NetQuantity)),
+            // The three non-200s that each mean something different, and none of which means "just send it again":
+            //   Refused    — the venue answered no and executed nothing; the net quantity is the TRUE current size.
+            //   Unconfirmed— the close WAS transmitted and its effect cannot be established. Re-read venue truth;
+            //                re-sending a non-idempotent partial close inside the settle window takes the size off
+            //                twice, past flat into an opposing position.
+            //   NotReduced — the position moved, but not by what was asked. The body carries the true net.
+            // A client that collapses these into one retry is the hazard, which is why they are distinct names.
+            PositionReduceOutcome.Refused
+                or PositionReduceOutcome.Unconfirmed
+                or PositionReduceOutcome.NotReduced
+                or PositionReduceOutcome.AccountBusy => Results.Conflict(new PositionReduceResponse(
+                    result.Outcome.ToString(), result.NetQuantity)),
             // Unreachable, and the fail-closed Unknown with it. The net quantity stays null rather than 0: an
             // exposure nobody could read is unknown, and a 0 here would let a client render an outage as flat.
             _ => Results.Conflict(new PositionReduceResponse(PositionReduceOutcome.Unreachable.ToString(), null)),
@@ -185,7 +193,7 @@ public sealed record PositionExitResponse(string Outcome, int NetQuantity);
 public sealed record PositionReduceRequest(int Quantity);
 
 /// <summary>The outcome of an operator-initiated reduce (gh#928).</summary>
-/// <param name="Outcome"><c>Reduced</c>, <c>NotReduced</c>, <c>ExceedsPosition</c> or <c>Unreachable</c> — as a name, not an integer.</param>
+/// <param name="Outcome"><c>Reduced</c>, <c>NotReduced</c>, <c>Unconfirmed</c>, <c>Refused</c>, <c>ExceedsPosition</c>, <c>AccountBusy</c> or <c>Unreachable</c> — as a name, not an integer. Only <c>Reduced</c> is done, and only <c>ExceedsPosition</c>, <c>Refused</c> and <c>AccountBusy</c> are safe to re-issue: the rest may already have executed.</param>
 /// <param name="NetQuantity">
 /// The signed exposure the venue reports after the attempt — or the current size, when the request was refused
 /// before the venue was touched. <b><c>null</c> when the venue could not be reached</b>: an exposure nobody could
