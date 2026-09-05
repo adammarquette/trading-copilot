@@ -73,6 +73,10 @@ time-indexed row + pgvector embedding). Free and useful for AI-agent context:
   The **news** half of the free tier is a separate, now-checked item: gh#1122's live-provider pass (engineering
   §"Data sources") validated article delivery, lookback-window age, and ticker tagging — that news-quality
   finding does **not** extend to this market-data caveat, which stays open.
+- **What that news pass actually measured** (2026-09-05, gh#1122): ~13–37 articles/day from Reuters / CNBC /
+  Bloomberg, every one carrying a URL and a headline, no duplicate URLs in a payload. Two limits: articles
+  arrive **already older than a 60-minute lookback**, so that window admits only ~0–1% of them (gh#1123), and
+  the `general` category carries **no tickers at all** (gh#1124).
 
 ## Fit / integration notes
 - **Data-only provider** → implements the market-data interface of the R-17 abstraction; **no** account/execution
