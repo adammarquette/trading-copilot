@@ -921,9 +921,10 @@ Monthly Railway spend ceiling is **Q-10** (open) — watch always-on ingestion +
 - The Railway deploy integration (CLI / MCP / GitHub trigger) — the GitHub Actions workflows themselves exist
   (`ci.yml` + `branch-policy.yml`; §CI/CD above).
 - Create the `dev` + `staging` Railway environments and map branch → environment.
-- **Once the above exists, it still won't carry news-provider credentials.** Confirmed while investigating gh#464:
-  `Finnhub__ApiKey` / `Tiingo__ApiKey` are wired into no GitHub secret, environment, or workflow — unlike
-  `PROJECTX_*` / `STAGING_*`, which `staging-gates.yml` already forwards. The live cross-source news QA (gh#464)
-  has no credential path even after the `staging` environment is created; both need provisioning together.
+- **The Railway environments above still won't carry a DEPLOYED news poller.** `Finnhub__ApiKey` / `Tiingo__ApiKey`
+  became repository secrets on 2026-09-05 and are forwarded by `live-provider-gates.yml` (gh#1122) — the live
+  cross-source news QA no longer waits on this item, since that suite needs a throwaway Postgres container, not a
+  deployed app. What remains here is gh#464's deployment-only residue: creating the `dev` / `staging` Railway
+  environments (above) is what a deployed news poller would additionally need, since neither exists yet.
 - Non-prod **snapshot refresh** cadence + mechanism (§8).
 - Define the **smoke-test set** and the health / verify checks.
