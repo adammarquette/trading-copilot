@@ -50,8 +50,7 @@ public class PositionReduceServiceTests
     {
         A.CallTo(() => _factory.Create(A<FirmConventions>._)).Returns(_venue);
         A.CallTo(() => _venue.Id).Returns(Projectx);
-        A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
-            [new VenueAccount(VenueAccount, "PRAC-50K", 50_000m, CanTrade: true, IsVisible: true, TradingMode.Practice)]);
+        RosterReports(TradingMode.Practice);
         A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._))
             .Returns(new ResolvedContract(ContractId, InstrumentId.Parse("MES")));
         Holds(3);      // long 3 by default
@@ -90,6 +89,10 @@ public class PositionReduceServiceTests
     private static PositionSnapshot Position(int net) =>
         new(VenueAccount, ContractId, net, new Price(5_000m));
 
+    private void RosterReports(TradingMode mode) =>
+        A.CallTo(() => _venue.GetAccountsAsync(A<CancellationToken>._)).Returns<IReadOnlyList<VenueAccount>>(
+            [new VenueAccount(VenueAccount, "PRAC-50K", 50_000m, CanTrade: true, IsVisible: true, mode)]);
+
     private void Holds(int net) =>
         A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
             .Returns<IReadOnlyList<PositionSnapshot>>(net == 0 ? [] : [Position(net)]);
@@ -115,7 +118,8 @@ public class PositionReduceServiceTests
             Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
             NullLogger<PositionReduceService>.Instance);
 
-    private async Task<Guid> SeedAccountAsync(string credentialKey = "topstep-main")
+    private async Task<Guid> SeedAccountAsync(
+        string credentialKey = "topstep-main", TradingMode mode = TradingMode.Practice)
     {
         Guid firmId = Guid.NewGuid();
         Guid connectionId = Guid.NewGuid();
@@ -138,8 +142,8 @@ public class PositionReduceServiceTests
             ConnectionId = connectionId,
             VenueAccountKey = "9001",
             Name = "PRAC-50K",
-            Stage = AccountStage.Practice,
-            Mode = TradingMode.Practice,
+            Stage = mode == TradingMode.Practice ? AccountStage.Practice : AccountStage.Funded,
+            Mode = mode,
             CanTrade = true,
             IsVisible = true,
         });
@@ -553,6 +557,58 @@ public class PositionReduceServiceTests
         await Reduce(accountId, 1);
 
         A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    // --- The two holds, made structural: practice-only is ENFORCED, not asserted ---
+
+    [Theory]
+    [InlineData(TradingMode.Live)]
+    [InlineData(TradingMode.Undeclared)]
+    public async Task ReduceAsync_ShouldHoldAndSendNothing_WhenTheAccountIsNotAPracticeAccount(TradingMode mode)
+    {
+        // The reduce ships behind two named holds -- the never-run gh#1012 bracket verification, and the
+        // client-side auto-retry of this non-idempotent write (MarqSpec.Client.ProjectX#98). Both say "not on a
+        // funded account", and in prose alone that is a promise the next session can break without noticing. This
+        // is the promise the compiler keeps. Nothing reaches the venue -- not even the position read.
+        Guid accountId = await SeedAccountAsync(mode: mode);
+
+        PositionReduceResult? result = await Reduce(accountId, 1);
+
+        result!.Outcome.Should().Be(PositionReduceOutcome.HeldPracticeOnly);
+        result.NetQuantity.Should().BeNull();
+        VenueMustNotHaveBeenAskedToReduce();
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldHoldAndSendNothing_WhenTheVenueReportsANonPracticeModeForAPracticeRow()
+    {
+        // Defence in depth, and the case a single check cannot cover: the persisted Account.Mode is a DERIVATION
+        // that can lag a firm-conventions change, so a stale row saying "practice" must not wave through an
+        // account the venue's own roster resolves as funded. Checked inside the lock, off the roster read that
+        // already happens.
+        Guid accountId = await SeedAccountAsync(); // the row still says Practice
+        RosterReports(TradingMode.Live);
+
+        PositionReduceResult? result = await Reduce(accountId, 1);
+
+        result!.Outcome.Should().Be(PositionReduceOutcome.HeldPracticeOnly);
+        result.NetQuantity.Should().BeNull();
+        VenueMustNotHaveBeenAskedToReduce();
+        A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldProceed_WhenBothTheRowAndTheRosterSayPractice()
+    {
+        // The paired assertion that keeps the guard honest: it must refuse a funded account WITHOUT refusing a
+        // practice one, or the whole path would be dead and every other test here would pass vacuously.
+        Guid accountId = await SeedAccountAsync();
+        RosterReports(TradingMode.Practice);
+
+        PositionReduceResult? result = await Reduce(accountId, 1);
+
+        result!.Outcome.Should().Be(PositionReduceOutcome.Reduced);
     }
 
     // --- A venue that cannot do this at all refuses loudly, rather than looking like an outage ---

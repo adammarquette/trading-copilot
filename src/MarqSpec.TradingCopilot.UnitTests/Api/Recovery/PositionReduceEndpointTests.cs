@@ -78,12 +78,26 @@ public class PositionReduceEndpointTests
         return guard;
     }
 
+    private IAccountEntryGuard _guard = PassthroughGuard();
+
+    /// <summary>A guard whose account is already locked by another transmit: onBusy runs, the callback never does.</summary>
+    private static IAccountEntryGuard BusyGuard()
+    {
+        IAccountEntryGuard guard = A.Fake<IAccountEntryGuard>();
+        A.CallTo(() => guard.TryRunExclusiveAsync<PositionReduceResult?>(
+                A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<PositionReduceResult?>>>._,
+                A<Func<PositionReduceResult?>>._, A<CancellationToken>._))
+            .ReturnsLazily((TradingCopilotDbContext _, Guid _, Func<Task<PositionReduceResult?>> _,
+                Func<PositionReduceResult?> onBusy, CancellationToken _) => Task.FromResult(onBusy()));
+        return guard;
+    }
+
     private PositionReduceService Service() =>
-        new(Context(), _factory, PassthroughGuard(),
+        new(Context(), _factory, _guard,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
             NullLogger<PositionReduceService>.Instance);
 
-    private async Task<Guid> SeedAccountAsync()
+    private async Task<Guid> SeedAccountAsync(TradingMode mode = TradingMode.Practice)
     {
         Guid firmId = Guid.NewGuid();
         Guid connectionId = Guid.NewGuid();
@@ -106,8 +120,8 @@ public class PositionReduceEndpointTests
             ConnectionId = connectionId,
             VenueAccountKey = "9001",
             Name = "PRAC-50K",
-            Stage = AccountStage.Practice,
-            Mode = TradingMode.Practice,
+            Stage = mode == TradingMode.Practice ? AccountStage.Practice : AccountStage.Funded,
+            Mode = mode,
             CanTrade = true,
             IsVisible = true,
         });
@@ -239,6 +253,36 @@ public class PositionReduceEndpointTests
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
         BodyOf(result).Outcome.Should().Be(nameof(PositionReduceOutcome.Unreachable));
         BodyOf(result).NetQuantity.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldReturn409AccountBusy_WhenAnotherTransmitHoldsTheAccountLock()
+    {
+        // Rides the grouped switch arm, so it is asserted explicitly: a busy account must not fall through to the
+        // Unreachable default, which would tell the operator the venue was down when nothing was even attempted.
+        Guid accountId = await SeedAccountAsync();
+        _guard = BusyGuard();
+
+        IResult result = await Reduce(accountId, "MES", 1);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        BodyOf(result).Outcome.Should().Be(nameof(PositionReduceOutcome.AccountBusy));
+        BodyOf(result).NetQuantity.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldReturn409HeldPracticeOnly_WhenTheAccountIsNotAPracticeAccount()
+    {
+        // The hold, visible at the HTTP surface: the outcome NAME is what tells the blotter to say "held" rather
+        // than "the venue could not be reached", which is what a fall-through to the default would have said.
+        Guid accountId = await SeedAccountAsync(TradingMode.Live);
+
+        IResult result = await Reduce(accountId, "MES", 1);
+
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        BodyOf(result).Outcome.Should().Be(nameof(PositionReduceOutcome.HeldPracticeOnly));
+        A.CallTo(() => _venue.ReducePositionAsync(
+            A<VenueAccountId>._, A<VenueContractId>._, A<int>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
     [Fact]
