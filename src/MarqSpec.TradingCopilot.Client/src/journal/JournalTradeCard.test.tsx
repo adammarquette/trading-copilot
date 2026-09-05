@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { JournalTrade } from '../api/journal';
 import { getSuggestion } from '../api/suggestions';
+import { hexToRgb } from '../testing/color';
 import { renderWithProviders } from '../testing/render';
+import { colorTokens } from '../theme/tokens';
 import { JournalTradeCard } from './JournalTradeCard';
 
 vi.mock('../api/suggestions', async (importOriginal) => ({
@@ -121,5 +123,49 @@ describe('JournalTradeCard', () => {
       expect(screen.getByTestId('suggestion-delta')).toBeTruthy();
     });
     expect(suggestionMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Tone is what actually gets PAINTED, read independently of `toneOf` (gh#1115 — `toneOf` already has
+  // its own unit tests; a test that re-derives its expectation from `toneOf` cannot fail on a wiring
+  // defect such as the realized figure being painted from a hardcoded side check instead of its own
+  // sign). `mode` is forced explicitly — see `src/testing/color.ts` for why.
+  describe('tone — read where it is rendered, not from toneOf', () => {
+    it('paints a winning trade in the profit colour, never the loss one', () => {
+      renderWithProviders(<JournalTradeCard trade={{ ...TRADE, realizedPnL: 1250 }} />, {
+        mode: 'dark',
+      });
+
+      const color = getComputedStyle(screen.getByText('+$1,250.00')).color;
+
+      expect(color).toBe(hexToRgb(colorTokens.dark.trading.long));
+      expect(color).not.toBe(hexToRgb(colorTokens.dark.trading.short));
+    });
+
+    it('paints a losing trade in the loss colour, never the profit one', () => {
+      renderWithProviders(<JournalTradeCard trade={{ ...TRADE, realizedPnL: -400 }} />, {
+        mode: 'dark',
+      });
+
+      const color = getComputedStyle(screen.getByText('-$400.00')).color;
+
+      expect(color).toBe(hexToRgb(colorTokens.dark.trading.short));
+      expect(color).not.toBe(hexToRgb(colorTokens.dark.trading.long));
+    });
+
+    it("paints a scratch trade's $0.00 as untoned, not merely as 'not the loss colour'", () => {
+      // A scratch trade is neither side. Asserting only "not red" would pass just as well if the wiring
+      // painted it green instead — the acceptance bar (gh#1115) is that it takes NO tone, i.e. renders in
+      // the ordinary text colour, so this pins it against the theme's own `text.primary` token rather
+      // than against an absence of one particular wrong answer.
+      renderWithProviders(<JournalTradeCard trade={{ ...TRADE, realizedPnL: 0 }} />, {
+        mode: 'dark',
+      });
+
+      const color = getComputedStyle(screen.getByText('$0.00')).color;
+
+      expect(color).toBe(hexToRgb(colorTokens.dark.content.high));
+      expect(color).not.toBe(hexToRgb(colorTokens.dark.trading.long));
+      expect(color).not.toBe(hexToRgb(colorTokens.dark.trading.short));
+    });
   });
 });
