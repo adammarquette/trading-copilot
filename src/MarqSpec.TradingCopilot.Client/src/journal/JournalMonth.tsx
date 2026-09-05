@@ -48,6 +48,9 @@ export function JournalMonth({ accountId, today }: JournalMonthProps) {
   const [selectedDate, setSelectedDate] = useState<IsoDay>(today);
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const mounted = useRef(true);
+  // Monotonic, bumped by every read this component starts. `mounted` answers "is the component still here",
+  // which is a different question from "is this answer still the one being asked for" -- see `load`.
+  const generation = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -61,8 +64,15 @@ export function JournalMonth({ accountId, today }: JournalMonthProps) {
   // below, both event handlers.
   const load = useCallback(() => {
     const { from, to } = monthWindow(month);
+    // SUPERSESSION, not just teardown. Paging months faster than the reads answer leaves an older request in
+    // flight, and `mounted` does not catch it. Landing it would be worse than stale: `PnlCalendar` filters its
+    // rows to the month it was handed (`monthGrid`), while `MonthSummary` takes `days` unfiltered, so the grid
+    // would discard the late month's rows while the strip beside it rendered all of them -- a calendar with no
+    // traded days next to a net of +$850.00. Only the newest read may write.
+    const mine = generation.current + 1;
+    generation.current = mine;
     void getDailyRealizedPnL(accountId, from, to).then((result) => {
-      if (!mounted.current) {
+      if (!mounted.current || mine !== generation.current) {
         return;
       }
       setState(

@@ -13,7 +13,7 @@ import type { JournalTrade } from '../api/journal';
 import { getSuggestion, type Suggestion } from '../api/suggestions';
 import { LoadingState } from '../components/LoadingState';
 import { toNumber } from '../settings/format';
-import { formatPrice, formatSignedUsd } from './format';
+import { formatPrice, formatSignedUsd, toneOf } from './format';
 import { SuggestionDelta } from './SuggestionDelta';
 import { TradeFeedbackPanel } from './TradeFeedbackPanel';
 
@@ -116,7 +116,14 @@ export function JournalTradeCard({ trade }: JournalTradeCardProps) {
               ml: 'auto',
               fontWeight: 700,
               fontVariantNumeric: 'tabular-nums',
-              color: realized < 0 ? theme.palette.trading.short : theme.palette.trading.long,
+              // A scratch trade is neither side -- painting its $0.00 in the long colour claims a win
+              // it did not make (gh#659 review).
+              color:
+                toneOf(realized) === 'positive'
+                  ? theme.palette.trading.long
+                  : toneOf(realized) === 'negative'
+                    ? theme.palette.trading.short
+                    : undefined,
             }}
           >
             {formatSignedUsd(realized)}

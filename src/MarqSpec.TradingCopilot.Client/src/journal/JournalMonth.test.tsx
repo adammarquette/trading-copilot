@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type DailyRealizedPnL, getDailyRealizedPnL } from '../api/journal';
@@ -33,6 +33,15 @@ afterEach(cleanup);
 
 function renderMonth(today = '2026-09-04') {
   return renderWithProviders(<JournalMonth accountId="a1" today={today} />);
+}
+
+/** A read whose settlement this test controls, so response ORDER can be inverted deliberately. */
+function deferredRead() {
+  let settle!: (value: Awaited<ReturnType<typeof getDailyRealizedPnL>>) => void;
+  const promise = new Promise<Awaited<ReturnType<typeof getDailyRealizedPnL>>>((resolve) => {
+    settle = resolve;
+  });
+  return { promise, settle };
 }
 
 describe('JournalMonth', () => {
@@ -111,5 +120,47 @@ describe('JournalMonth', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
 
     expect(await screen.findByText('September 2026')).toBeTruthy();
+  });
+
+  // `mounted` catches teardown, not supersession. The grid filters its rows to the month it was asked for
+  // (`monthGrid`) while the stat strip takes `days` unfiltered (`monthStats` / `equityCurve`), so a superseded
+  // read does not merely look stale -- it repaints the strip from a month the calendar is no longer drawing.
+  it('never paints one month’s stat strip beside another month’s calendar', async () => {
+    const august = deferredRead();
+    const july = deferredRead();
+    calendarMock.mockReset();
+    calendarMock
+      .mockResolvedValueOnce({ ok: true, data: [] })
+      .mockReturnValueOnce(august.promise)
+      .mockReturnValueOnce(july.promise);
+
+    renderMonth();
+    await screen.findByText('September 2026');
+
+    // The month label only renders once a read has landed, so each step is keyed off the READ it issues --
+    // the deferred months never reach 'loaded' until this test lets them.
+    fireEvent.click(screen.getByRole('button', { name: 'Previous month' }));
+    await waitFor(() => {
+      expect(calendarMock).toHaveBeenLastCalledWith('a1', '2026-08-01', '2026-08-31');
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Previous month' }));
+    await waitFor(() => {
+      expect(calendarMock).toHaveBeenLastCalledWith('a1', '2026-07-01', '2026-07-31');
+    });
+
+    // July answers first and is the month on screen; the superseded August read lands after it.
+    july.settle({ ok: true, data: [] });
+    expect(await screen.findByText('July 2026')).toBeTruthy();
+    expect(screen.getByTestId('journal-stat-net').textContent).toBe('—');
+
+    // Inside `act` so the component's own `.then` and the render it schedules are both flushed before the
+    // assertion -- settling the promise alone leaves the repaint pending and the check passes vacuously.
+    await act(async () => {
+      august.settle({ ok: true, data: DAYS });
+      await august.promise;
+    });
+
+    expect(screen.getByText('July 2026')).toBeTruthy();
+    expect(screen.getByTestId('journal-stat-net').textContent).toBe('—');
   });
 });
