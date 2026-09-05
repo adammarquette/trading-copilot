@@ -76,6 +76,34 @@ describe('SuggestionDelta', () => {
     expect(screen.getByTestId('delta-target').dataset.deviated).toBe('false');
   });
 
+  it('never marks a field the bitmask did not name, even where the two values differ', () => {
+    // The distinguishing case, and the reason the mask is read rather than the prices compared: a PASSED
+    // suggestion was never taken, so every taken price is null while `deviations` is correctly `None`. A
+    // client-side comparison would mark all four fields changed and report deviations on a trade the operator
+    // never placed -- disagreeing with exactly the figure R-9 aggregates.
+    renderWithProviders(
+      <SuggestionDelta
+        suggestion={{
+          ...SUGGESTION,
+          disposition: {
+            ...DISPOSITION,
+            kind: SuggestionDispositionKind.Passed,
+            deviations: SuggestionDeviation.None,
+            takenEntryPrice: null,
+            takenStopPrice: null,
+            takenTargetPrice: null,
+            takenSize: null,
+          },
+        }}
+      />,
+    );
+
+    for (const field of ['entry', 'stop', 'target', 'size']) {
+      expect(screen.getByTestId(`delta-${field}`).dataset.deviated).toBe('false');
+    }
+    expect(screen.getByText('Passed')).toBeTruthy();
+  });
+
   it('names the disposition the operator recorded', () => {
     renderWithProviders(<SuggestionDelta suggestion={SUGGESTION} />);
 
