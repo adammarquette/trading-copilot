@@ -38,8 +38,14 @@ on:
 concurrency:
   group: branch-policy-${{ github.ref }}
   # Never cancel a queue run: the merge queue is waiting on this check to report, and a cancelled run
-  # reports nothing. Superseded PR runs are still cancelled, which is what this was for.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # reports nothing. Superseded PR runs are still cancelled, which is what this was for -- but "superseded"
+  # means a genuine new push, not any `pull_request` event. `labeled`/`unlabeled`/`edited` fire from our own
+  # review loop (scripts/watch-verdict.sh's `verdict:watching` label, a routine body edit) on the SAME head
+  # SHA a run is already testing; cancelling that run leaves `ladder`/`commit-hygiene`/`issue-link`/
+  # `submodule-guard` -- three of them required checks -- reporting `cancelled` against a SHA nothing failed
+  # on, which jams the merge gate even once a later run goes green (gh#1119). Only `synchronize` (a real new
+  # commit) supersedes the run testing the old head; `opened`/`reopened` have nothing in flight yet to cancel.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 jobs:
   ladder:
