@@ -114,10 +114,18 @@ export function getConversation(id: string): Promise<ApiResult<ConversationDetai
  * view and then replaces the draft with this call's settled {@link ChatTurnResult} once it resolves, which is the
  * turn's source of truth (the chunk stream is presentation-only and best-effort).
  *
- * A **refused / faulted turn is a refusal**, never an invented reply: a 429 (the AI-spend governor, nothing
- * persisted), a 422 (the model call failed -- the operator's turn IS still saved server-side), or a 409 (a lost
- * sequence race). A caller that needs to know whether its own turn persisted despite a refusal re-reads with
- * {@link getConversation} rather than assuming either way.
+ * A **refused / faulted turn is a refusal**, never an invented reply. What each status persisted differs, and the
+ * difference matters to a caller rendering an optimistic row:
+ * - **429** (the AI-spend governor) -- nothing persisted, the turn never ran.
+ * - **409, turn already in flight** (gh#1106) -- nothing persisted either: the per-conversation guard wraps the
+ *   operator-turn write, so a refused turn contributes nothing to the thread.
+ * - **409, lost sequence race** -- the operator's turn IS saved when the collision was on the ASSISTANT append
+ *   (the turn ran; a concurrent `POST /messages` took the position), and is NOT when the collision was on the
+ *   operator append itself. This client cannot tell the two apart from the status.
+ * - **422** (the model call failed / was refused) -- the operator's turn IS still saved server-side.
+ *
+ * So a caller that needs to know whether its own turn persisted re-reads with {@link getConversation} rather than
+ * assuming either way; the two 409 causes are deliberately not distinguished on the wire.
  */
 export function sendChatTurn(id: string, content: string): Promise<ApiResult<ChatTurnResult>> {
   return requestJson<ChatTurnResult>('POST', `/conversations/${id}/turns`, { content });
