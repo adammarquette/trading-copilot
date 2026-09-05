@@ -132,7 +132,9 @@ function foldIn(messages: readonly ChatMessage[], incoming: ChatMessage): readon
  * discard a live answer and then blank it mid-sentence, which is the symptom gh#1106 exists to remove, reached
  * through the refusal that was supposed to prevent it. `send()` blanks the draft optimistically (it cannot know
  * yet), and this refusal puts it back; the restore is exact because at most one turn is in flight, so the true
- * draft is what was there plus whatever arrived during the round-trip. Keyed on the refusal envelope's `layer`
+ * draft is what was there plus whatever arrived during the round-trip. It is skipped when that turn TERMINATED
+ * inside the round-trip (`settledTurnsRef` moved) -- the blank was right after all, and restoring dead text would
+ * stand half an answer under the finished one. Keyed on the refusal envelope's `layer`
  * ({@link TURN_IN_FLIGHT_LAYER}), because the endpoint's other 409 -- a lost sequence race -- means the opposite
  * and the status alone cannot separate them.
  *
@@ -440,11 +442,19 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         const refusedAsAlreadyInFlight =
           !result.ok && result.kind === 'refused' && result.layer === TURN_IN_FLIGHT_LAYER;
         if (refusedAsAlreadyInFlight) {
-          setStreaming((current) =>
-            draftAtSend === null && current === null
-              ? null
-              : { text: (draftAtSend?.text ?? '') + (current?.text ?? '') },
-          );
+          // ...but ONLY while the turn that draft belongs to is still running. If its terminator arrived inside
+          // this round-trip -- a settled assistant push, or a faulted one (gh#1107); both bump `settledTurnsRef`
+          // and retire the draft -- then the blank was correct after all and the snapshot is dead text. Putting it
+          // back would stand a half-written copy of the answer now rendered above it for the whole idle window,
+          // which is the stale-draft state gh#1107 exists to remove, re-entered through this refusal. Leave
+          // `streaming` untouched rather than clearing it: by then it may hold a NEW turn's first deltas.
+          if (settledTurnsRef.current === settledTurnsAtStart) {
+            setStreaming((current) =>
+              draftAtSend === null && current === null
+                ? null
+                : { text: (draftAtSend?.text ?? '') + (current?.text ?? '') },
+            );
+          }
         } else {
           setStreaming(null);
           // Close the gate only if this turn's terminating push has NOT already been seen. If it has, the turn's

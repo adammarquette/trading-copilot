@@ -632,8 +632,9 @@ builder.Services.AddSingleton<ISuggestionRealtimeNotifier, SuggestionRealtimeNot
 // the suggestion notifier above. Singleton — it holds only the (singleton) hub context.
 builder.Services.AddSingleton<IChatRealtimeNotifier, ChatRealtimeNotifier>();
 // One in-flight turn per conversation (gh#1106): the per-conversation Postgres advisory lock the chat turn runs
-// inside, so two screens cannot stream two turns into one undifferentiated draft. Scoped, like the account-entry
-// guard it mirrors — it pins the CALLER'S connection, so it must live and die with the request's context.
+// inside, so two screens cannot stream two turns into one undifferentiated draft. The guard is STATELESS — it
+// takes the context it pins as a parameter rather than holding one — so its lifetime is not load-bearing; scoped
+// simply matches the account-entry guard it mirrors, and keeps it a captive-free dependency of the endpoints.
 builder.Services.AddScoped<IChatTurnGuard, ChatTurnGuard>();
 builder.Services.AddHostedService<RealtimeEventLogFanoutHost>();
 

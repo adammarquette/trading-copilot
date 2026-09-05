@@ -1068,6 +1068,61 @@ describe('ConversationThread — cross-connection reconciliation', () => {
     expect(screen.getByTestId('chat-draft').textContent).toBe('Headroom is $1,800.');
   });
 
+  it('does NOT put the draft back when the other turn terminated during the round-trip', async () => {
+    // The restore above is only correct while the turn it belongs to is still running. If that turn TERMINATES
+    // inside the refusal's round-trip -- its settled message push, here -- the draft was already retired for the
+    // right reason, and putting it back would stand a half-written copy of the answer now rendered above it, for
+    // the whole idle window. That is the stale-draft state gh#1107 exists to remove, re-entered through gh#1106's
+    // refusal path. `settledTurnsRef` is the file's existing guard for exactly this settle race (gh#1085, gh#1103);
+    // the restore has to consult it like every other branch does.
+    loadedEmptyThread();
+    const turn = deferred<Awaited<ReturnType<typeof sendChatTurn>>>();
+    sendMock.mockReturnValue(turn.promise);
+
+    await renderThread();
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is $1,8' }));
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'and another thing' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    // The other turn lands while our refusal is still in flight.
+    act(() => chatMessageHandler?.(settledAssistantPush));
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+
+    await act(async () => {
+      turn.settle(inFlightRefusal);
+    });
+
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+    expect(screen.getAllByTestId('chat-message').map((row) => row.textContent)).toEqual([
+      'Headroom is $1,800.',
+    ]);
+  });
+
+  it('does NOT put the draft back when the other turn FAULTED during the round-trip', async () => {
+    // Same race through the other terminator (gh#1107). Restoring here would also stand a half-written answer
+    // under the fault notice explaining that it stopped.
+    loadedEmptyThread();
+    const turn = deferred<Awaited<ReturnType<typeof sendChatTurn>>>();
+    sendMock.mockReturnValue(turn.promise);
+
+    await renderThread();
+    act(() => chatChunkHandler?.({ conversationId: 'c1', delta: 'Headroom is $1,8' }));
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'and another thing' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    act(() =>
+      chatTurnFaultedHandler?.({
+        conversationId: 'c1',
+        reason: 'The co-pilot could not finish that turn.',
+      }),
+    );
+    await act(async () => {
+      turn.settle(inFlightRefusal);
+    });
+
+    expect(screen.queryByTestId('chat-draft')).toBeNull();
+  });
+
   it('still treats a NON-in-flight 409 as a settled turn of its own', async () => {
     // The sequence-race 409 is the opposite case: this connection's turn DID run, so its draft is finished and the
     // chunks behind it are stragglers to suppress. Only the `layer` discriminator separates the two -- a client
