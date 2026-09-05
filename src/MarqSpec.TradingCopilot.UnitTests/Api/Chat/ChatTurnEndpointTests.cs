@@ -496,8 +496,13 @@ public class ChatTurnEndpointTests
         // client that could not tell those apart would show the wrong affordance. 409 is what the endpoint already
         // means by "a concurrent request took this; retry" (the sequence race), which is exactly this case.
         StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
-        result.Should().BeAssignableTo<IValueHttpResult>()
-            .Which.Value!.ToString().Should().Contain("already in flight");
+        string body = ValueOf<object>(result).ToString()!;
+        body.Should().Contain("already in flight");
+        // The refusal envelope's `layer` names the gate that said no, and here it is load-bearing rather than
+        // decorative: this endpoint has a SECOND 409 (the lost sequence race) that demands the OPPOSITE client
+        // behaviour around the live draft, and the status alone cannot separate them. Without this the client
+        // cannot tell "my turn never ran, someone else's is streaming" from "my turn streamed and is over".
+        body.Should().Contain(ChatEndpoints.TurnInFlightLayer);
         A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
             .MustNotHaveHappened();
 

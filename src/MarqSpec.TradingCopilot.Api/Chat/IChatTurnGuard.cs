@@ -51,6 +51,14 @@ namespace MarqSpec.TradingCopilot.Api.Chat;
 /// would have to sweep.
 /// </para>
 /// <para>
+/// <b>The unlock is cleanup, so it does not take the request's token.</b> A turn runs for tens of seconds, so a
+/// client aborting mid-turn is ordinary. Releasing the lock on the caller's (by then cancelled) token would throw
+/// before the <c>pg_advisory_unlock</c> was ever sent, and the pooled connector would go back to Npgsql still
+/// holding it — the conversation then refusing its next turn as "already in flight" until that connector's next
+/// use resets it. The paragraph above is what makes that recoverable rather than permanent; it is <i>not</i> what
+/// makes it prompt, which is why the explicit unlock runs on <see cref="CancellationToken.None"/>.
+/// </para>
+/// <para>
 /// <b>On the key.</b> The conversation id is mapped through <c>hashtext</c> (int4) into the <b>two-argument</b>
 /// advisory-lock space under a fixed class key. Postgres keeps the one-argument (<c>bigint</c>) and two-argument
 /// (<c>int, int</c>) spaces separate, so a chat turn can never collide with
@@ -125,16 +133,27 @@ public sealed class ChatTurnGuard : IChatTurnGuard
             }
             finally
             {
+                // CancellationToken.None, deliberately, and it is load-bearing rather than tidy. A chat turn runs
+                // for tens of seconds, so a client aborting mid-turn is ordinary, not exotic -- and the request's
+                // token is already cancelled by the time this finally runs. Passing it would make ExecuteSqlAsync
+                // throw BEFORE sending pg_advisory_unlock, leaving the session lock held on a connector that
+                // CloseConnectionAsync then returns to Npgsql's pool. The conversation would refuse its next turn
+                // with a spurious "already in flight" until that connector happened to be reused. Releasing a lock
+                // is cleanup: it must run to completion regardless of why the work above stopped.
                 await database.Database.ExecuteSqlAsync(
                     $"SELECT pg_advisory_unlock({ChatTurnLockClass}, hashtext({conversationId.ToString()}))",
-                    cancellationToken);
+                    CancellationToken.None);
             }
         }
         finally
         {
-            // Closing the connection also releases the session lock even if the unlock above never ran (a crash
-            // between lock and unlock), so a conversation can never be stranded locked. (CloseConnectionAsync takes
-            // no token -- closing a connection is not a cancellable operation in EF Core.)
+            // Belt-and-braces behind the explicit unlock above, and stated precisely because the two mechanisms are
+            // not the same. Returning the connection to the pool resets it (Npgsql's DISCARD ALL, which releases
+            // session advisory locks) and a backend that genuinely DROPS releases them outright -- so a crash
+            // between lock and unlock cannot strand a conversation locked forever. What it does NOT give is
+            // promptness: the pooled reset is deferred to that connector's next use, which is exactly why the
+            // unlock above must not be allowed to be skipped. (CloseConnectionAsync takes no token -- closing a
+            // connection is not a cancellable operation in EF Core.)
             await database.Database.CloseConnectionAsync();
         }
     }
