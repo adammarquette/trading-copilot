@@ -23,6 +23,25 @@ export function formatSignedUsd(value: number | string | null): string {
   return amount === null ? '—' : SIGNED_USD.format(amount);
 }
 
+/** Which way a realized figure leans, for the colour that carries it at a glance. */
+export type Tone = 'positive' | 'negative';
+
+/**
+ * The tone a realized figure has earned — from the figure, never from the tile it sits in (gh#659 review).
+ *
+ * A tile whose tone is fixed by its label asserts a sign its value may not have: `Best day` in a month where
+ * every day lost renders a loss in the long colour, and a scratch trade painted green claims a win it did not
+ * make. Colour is the glance on this surface, so a wrong glance is a wrong reading even when the digits and the
+ * sign beside them are right. Flat is `undefined` — neither side, and `$0.00` should not borrow a colour.
+ */
+export function toneOf(value: number | string | null): Tone | undefined {
+  const amount = toNumber(value);
+  if (amount === null || amount === 0) {
+    return undefined;
+  }
+  return amount > 0 ? 'positive' : 'negative';
+}
+
 /** `1 trade` / `3 trades` — pluralized, because "1 trades" in a review surface reads as a bug. */
 export function formatTradeCount(count: number): string {
   return `${String(count)} ${count === 1 ? 'trade' : 'trades'}`;

@@ -5,7 +5,7 @@ import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 
 import type { DailyRealizedPnL } from '../api/journal';
-import { formatSignedUsd } from './format';
+import { formatSignedUsd, toneOf } from './format';
 import { equityCurve, monthStats } from './month';
 
 /**
@@ -14,6 +14,11 @@ import { equityCurve, monthStats } from './month';
  *
  * Everything here is derived from the same day rows the calendar draws, so the strip and the grid can never
  * disagree. Nothing is fetched twice and nothing is summed server-side a second time.
+ *
+ * **Sharing the rows is necessary but not sufficient**, and the difference cost a review round: this component
+ * takes `days` unfiltered while `PnlCalendar` filters them to the month it was handed, so a *superseded* read
+ * landing in state would repaint the strip from a month the grid had already discarded. What actually holds the
+ * invariant is `JournalMonth`'s generation guard, which lets only the newest read write.
  *
  * **Absence stays absence.** A month with no traded days shows an em dash for the average and the extremes,
  * and says the curve is empty rather than drawing a flat line at zero — `$0.00` claims the operator traded to
@@ -90,24 +95,25 @@ export function MonthSummary({ days }: MonthSummaryProps) {
           id="net"
           label="Net (month)"
           value={days.length === 0 ? '—' : formatSignedUsd(stats.net)}
-          tone={stats.net > 0 ? 'positive' : stats.net < 0 ? 'negative' : undefined}
+          tone={toneOf(stats.net)}
         />
         <Stat
           id="days"
           label="Green / red days"
           value={`${String(stats.greenDays)} / ${String(stats.redDays)}`}
         />
+        {/* The best day of an all-red month is still a loss; the tone follows the figure (gh#659 review). */}
         <Stat
           id="best"
           label="Best day"
           value={stats.best === null ? '—' : formatSignedUsd(stats.best.realizedPnL)}
-          tone="positive"
+          tone={stats.best === null ? undefined : toneOf(stats.best.realizedPnL)}
         />
         <Stat
           id="worst"
           label="Worst day"
           value={stats.worst === null ? '—' : formatSignedUsd(stats.worst.realizedPnL)}
-          tone="negative"
+          tone={stats.worst === null ? undefined : toneOf(stats.worst.realizedPnL)}
         />
         <Stat id="average" label="Avg / day" value={formatSignedUsd(stats.averagePerDay)} />
       </Stack>
