@@ -46,4 +46,19 @@ public class ChatRealtimeNotifierTests
         A.CallTo(() => _proxy.SendCoreAsync(RealtimeChatChunk.ClientMethod, A<object?[]>._, A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
     }
+
+    [Fact]
+    public async Task TurnFaultedAsync_ShouldPushTheTerminator_ToTheOwnersConnectionsOnly()
+    {
+        Guid owner = Guid.NewGuid();
+
+        await new ChatRealtimeNotifier(_hub).TurnFaultedAsync(
+            owner, new RealtimeChatTurnFaulted(Guid.NewGuid(), "could not finish"), CancellationToken.None);
+
+        // Per-owner routing (R-20): a faulted turn's terminator reaches this operator's connections, and no one
+        // else's -- it names a conversation, which is owner-scoped data (gh#1107).
+        A.CallTo(() => _clients.User(owner.ToString())).MustHaveHappenedOnceExactly();
+        A.CallTo(() => _proxy.SendCoreAsync(RealtimeChatTurnFaulted.ClientMethod, A<object?[]>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
 }
