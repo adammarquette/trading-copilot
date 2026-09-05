@@ -109,11 +109,73 @@ public class ChatTurnEndpointTests
         await context.SaveChangesAsync();
     }
 
-    private Task<IResult> Invoke(Guid id, string content, DateTimeOffset now, GovernorOptions? governor = null) =>
+    private Task<IResult> Invoke(
+        Guid id, string content, DateTimeOffset now, GovernorOptions? governor = null, IChatTurnGuard? guard = null) =>
         ChatEndpoints.TurnAsync(
             id, new ChatTurnRequest(content), now, Context(),
             _turn, _retrieval, _governor, Options.Create(governor ?? new GovernorOptions()),
-            _ledger, _metrics, _notifier, NullLoggerFactory.Instance, default);
+            _ledger, _metrics, _notifier, guard ?? FreeGuard(), NullLoggerFactory.Instance, default);
+
+    /// <summary>
+    /// The default double for <see cref="IChatTurnGuard"/>: the conversation is free, so it simply invokes the
+    /// callback. The real serialization is a Postgres advisory lock and cannot run on the in-memory provider — what
+    /// the unit tier proves is that the endpoint runs the WHOLE turn inside the callback and refuses on the busy
+    /// path; the cross-request lock itself is QA's on the container-backed tier (the <c>IAccountEntryGuard</c>
+    /// pattern, gh#531).
+    /// </summary>
+    private static IChatTurnGuard FreeGuard()
+    {
+        IChatTurnGuard guard = A.Fake<IChatTurnGuard>();
+        A.CallTo(() => guard.TryRunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<IResult>>>._, A<Func<IResult>>._,
+                A<CancellationToken>._))
+            .ReturnsLazily((TradingCopilotDbContext _, Guid _, Func<Task<IResult>> turn, Func<IResult> _,
+                CancellationToken _) => turn());
+        return guard;
+    }
+
+    /// <summary>The busy path: another turn holds the conversation, so the callback never runs.</summary>
+    private static IChatTurnGuard BusyGuard()
+    {
+        IChatTurnGuard guard = A.Fake<IChatTurnGuard>();
+        A.CallTo(() => guard.TryRunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<IResult>>>._, A<Func<IResult>>._,
+                A<CancellationToken>._))
+            .ReturnsLazily((TradingCopilotDbContext _, Guid _, Func<Task<IResult>> _, Func<IResult> onBusy,
+                CancellationToken _) => Task.FromResult(onBusy()));
+        return guard;
+    }
+
+    /// <summary>
+    /// A guard double that really serializes, in process: one <see cref="SemaphoreSlim"/> per conversation, taken
+    /// NON-BLOCKING so a second holder runs <c>onBusy</c> rather than queueing. It is not the production lock (that
+    /// is Postgres-evaluated, since two HTTP requests share nothing in process), but it has the production lock's
+    /// semantics, which is what lets the interleaving test below drive two genuinely concurrent turns.
+    /// </summary>
+    private sealed class SerializingChatTurnGuard : IChatTurnGuard
+    {
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SemaphoreSlim> _locks = new();
+
+        public async Task<T> TryRunExclusiveAsync<T>(
+            TradingCopilotDbContext database, Guid conversationId, Func<Task<T>> turn, Func<T> onBusy,
+            CancellationToken cancellationToken)
+        {
+            SemaphoreSlim conversationLock = _locks.GetOrAdd(conversationId, _ => new SemaphoreSlim(1, 1));
+            if (!await conversationLock.WaitAsync(0, cancellationToken))
+            {
+                return onBusy();
+            }
+
+            try
+            {
+                return await turn();
+            }
+            finally
+            {
+                conversationLock.Release();
+            }
+        }
+    }
 
     [Fact]
     public async Task TurnAsync_ShouldPersistBothTurns_MeterAndLedger_PushToOwner_AndReturnThem_OnSuccess()
@@ -400,5 +462,195 @@ public class ChatTurnEndpointTests
         StatusOf(result).Should().Be(StatusCodes.Status200OK);
         A.CallTo(() => _retrieval.RetrieveAsync(
                 A<string>._, A<int>._, A<IReadOnlyCollection<RetrievalKind>>._, A<CancellationToken>._)).MustHaveHappenedOnceExactly();
+    }
+
+    // --- One in-flight turn per conversation (gh#1106) ---
+
+    [Fact]
+    public async Task TurnAsync_ShouldRunTheWholeTurn_UnderTheConversationsTurnGuard()
+    {
+        // The guard has to wrap the WHOLE turn, not just the model call: the operator's turn is persisted before the
+        // call and the assistant's after it, so a guard that only wrapped StreamAsync would let a refused second turn
+        // still write into the thread. The keying is the CONVERSATION -- that is the correlation key the chunk stream
+        // has, so it is the granularity the guarantee has to be stated at.
+        Guid id = await SeedConversationAsync();
+        TurnReturns(new ChatTurnResult(true, "ok", [Cost()]));
+        IChatTurnGuard guard = FreeGuard();
+
+        IResult result = await Invoke(id, "hi", At(3), guard: guard);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => guard.TryRunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, id, A<Func<Task<IResult>>>._, A<Func<IResult>>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task TurnAsync_ShouldRefuseWithConflictAndPersistNothing_WhenATurnIsAlreadyInFlight()
+    {
+        Guid id = await SeedConversationAsync();
+
+        IResult result = await Invoke(id, "and another thing", At(3), guard: BusyGuard());
+
+        // 409, not 422: this endpoint already spends 422 on "the turn ran and could not produce an answer", and a
+        // client that could not tell those apart would show the wrong affordance. 409 is what the endpoint already
+        // means by "a concurrent request took this; retry" (the sequence race), which is exactly this case.
+        StatusOf(result).Should().Be(StatusCodes.Status409Conflict);
+        result.Should().BeAssignableTo<IValueHttpResult>()
+            .Which.Value!.ToString().Should().Contain("already in flight");
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+
+        await using TradingCopilotDbContext verify = Context();
+        (await verify.ChatMessages.AnyAsync()).Should().BeFalse(
+            "a refused turn persists nothing at all -- the operator's turn is written INSIDE the guarded section");
+    }
+
+    [Fact]
+    public async Task TurnAsync_ShouldRefuseTheSecondOfTwoGenuinelyConcurrentTurns_OnOneConversation()
+    {
+        // The race is the whole point of gh#1106, so this drives it rather than calling the endpoint twice in
+        // sequence: the first turn is suspended INSIDE its guarded section (parked on the model call) at the moment
+        // the second arrives, which is the interleave a naive check-then-act loses. No wall-clock sleep anywhere --
+        // the handshake is two TaskCompletionSources, and every await is time-bounded so a regression fails the test
+        // rather than hanging the CI run.
+        Guid id = await SeedConversationAsync();
+        SerializingChatTurnGuard guard = new();
+        TaskCompletionSource firstIsInside = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseFirst = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
+            .ReturnsLazily(async () =>
+            {
+                firstIsInside.TrySetResult();
+                await releaseFirst.Task.WaitAsync(TimeSpan.FromSeconds(30));
+                return new ChatTurnResult(true, "the first turn's answer", [Cost()]);
+            });
+
+        Task<IResult> first = Invoke(id, "first", At(3), guard: guard);
+        await firstIsInside.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        IResult second = await Invoke(id, "second", At(4), guard: guard).WaitAsync(TimeSpan.FromSeconds(30));
+        releaseFirst.TrySetResult();
+        IResult firstResult = await first.WaitAsync(TimeSpan.FromSeconds(30));
+
+        StatusOf(second).Should().Be(StatusCodes.Status409Conflict);
+        StatusOf(firstResult).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+
+        await using TradingCopilotDbContext verify = Context();
+        List<ChatMessage> thread = await verify.ChatMessages.OrderBy(message => message.Sequence).ToListAsync();
+        thread.Select(message => message.Content).Should().Equal(
+            ["first", "the first turn's answer"],
+            "the refused turn contributed nothing -- not even the operator message it would have persisted first");
+    }
+
+    [Fact]
+    public async Task TurnAsync_ShouldNotRunTheTurn_WhenTheGuardCannotBeTaken()
+    {
+        // Fail CLOSED. A guard that throws (the lock could not be evaluated) must not degrade into an un-guarded
+        // turn: the request fails and nothing runs, rather than a possibly-concurrent turn reaching the model.
+        Guid id = await SeedConversationAsync();
+        IChatTurnGuard broken = A.Fake<IChatTurnGuard>();
+        A.CallTo(() => broken.TryRunExclusiveAsync<IResult>(
+                A<TradingCopilotDbContext>._, A<Guid>._, A<Func<Task<IResult>>>._, A<Func<IResult>>._,
+                A<CancellationToken>._))
+            .Throws(new InvalidOperationException("advisory lock unavailable"));
+
+        Func<Task> act = () => Invoke(id, "hi", At(3), guard: broken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+        await using TradingCopilotDbContext verify = Context();
+        (await verify.ChatMessages.AnyAsync()).Should().BeFalse();
+    }
+
+    // --- A faulted turn pushes a terminator (gh#1107) ---
+
+    [Fact]
+    public async Task TurnAsync_ShouldPushTheTurnFaultedTerminator_OnAFailedTurn()
+    {
+        // A faulted turn streams and then goes silent: the sender learns from the 422, and until this signal existed
+        // every OTHER connection kept its half-written draft forever. The conversation id is a sufficient correlation
+        // key BECAUSE of gh#1106 -- at most one turn is in flight on a conversation, so there is exactly one draft
+        // for it to retire (which is why no turn id is on the wire).
+        Guid id = await SeedConversationAsync();
+        TurnStreams(new ChatTurnResult(false, "the co-pilot could not finish that turn", [Cost(AiUsageOutcome.Failed, 0m)]), "Half an ans");
+
+        IResult result = await Invoke(id, "hi", At(3));
+
+        StatusOf(result).Should().Be(StatusCodes.Status422UnprocessableEntity);
+        A.CallTo(() => _notifier.TurnFaultedAsync(
+                _operator,
+                A<RealtimeChatTurnFaulted>.That.Matches(signal =>
+                    signal.ConversationId == id && signal.Reason == "the co-pilot could not finish that turn"),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+        A.CallTo(() => _notifier.MessageAppendedAsync(A<Guid>._, A<RealtimeChatMessage>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task TurnAsync_ShouldPushNoReason_WhenTheFaultedTurnCarriesNoDisplayableMessage()
+    {
+        // "A display reason or none" -- a blank message is not a reason, and pushing "" would render an empty alert.
+        Guid id = await SeedConversationAsync();
+        TurnReturns(new ChatTurnResult(false, "   ", [Cost(AiUsageOutcome.Failed, 0m)]));
+
+        await Invoke(id, "hi", At(3));
+
+        A.CallTo(() => _notifier.TurnFaultedAsync(
+                _operator, A<RealtimeChatTurnFaulted>.That.Matches(signal => signal.Reason == null), A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task TurnAsync_ShouldStillReturnTheFault_WhenTheTurnFaultedPushThrows()
+    {
+        // Fail-OPEN, exactly like the chunk and message pushes: a hub fault never changes the turn's outcome or the
+        // HTTP response. The hub is presentation-only (ADR-0021); the REST response is the source of truth.
+        Guid id = await SeedConversationAsync();
+        TurnReturns(new ChatTurnResult(false, "could not answer", [Cost(AiUsageOutcome.Failed, 0m)]));
+        A.CallTo(() => _notifier.TurnFaultedAsync(A<Guid>._, A<RealtimeChatTurnFaulted>._, A<CancellationToken>._))
+            .Throws(new InvalidOperationException("hub down"));
+
+        IResult result = await Invoke(id, "hi", At(3));
+
+        StatusOf(result).Should().Be(StatusCodes.Status422UnprocessableEntity);
+        ValueOf<object>(result).ToString().Should().Contain("could not answer");
+        // Bind the fault to the push that threw it. Without this the test would pass just as happily against a
+        // regression that removed the push altogether -- fail-open would be "proven" by nothing having been tried.
+        A.CallTo(() => _notifier.TurnFaultedAsync(A<Guid>._, A<RealtimeChatTurnFaulted>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task TurnAsync_ShouldPushNoTurnFaultedTerminator_OnASuccessfulTurn()
+    {
+        // The settled message push is a successful turn's terminator; a faulted signal alongside it would retire the
+        // draft with an error affordance the turn does not deserve.
+        Guid id = await SeedConversationAsync();
+        TurnReturns(new ChatTurnResult(true, "ok", [Cost()]));
+
+        IResult result = await Invoke(id, "hi", At(3));
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        A.CallTo(() => _notifier.TurnFaultedAsync(A<Guid>._, A<RealtimeChatTurnFaulted>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task TurnAsync_ShouldPushNoTurnFaultedTerminator_WhenTheTurnNeverRan()
+    {
+        // A governor block returns BEFORE anything streams, so no draft was ever opened on any connection. Pushing a
+        // terminator for a turn that never started would retire the draft of whatever ran before it.
+        Guid id = await SeedConversationAsync();
+        await SeedSpendAsync(usd: 25m, at: At(1));
+
+        IResult result = await Invoke(id, "hi", At(3), governor: new GovernorOptions { DailyBudgetUsd = 10m });
+
+        StatusOf(result).Should().Be(StatusCodes.Status429TooManyRequests);
+        A.CallTo(() => _notifier.TurnFaultedAsync(A<Guid>._, A<RealtimeChatTurnFaulted>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
     }
 }

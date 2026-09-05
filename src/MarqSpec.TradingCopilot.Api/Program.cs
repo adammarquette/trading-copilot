@@ -631,6 +631,10 @@ builder.Services.AddSingleton<ISuggestionRealtimeNotifier, SuggestionRealtimeNot
 // The chat-turn push (gh#906): the chat endpoint calls this after an assistant turn commits, routed per-owner like
 // the suggestion notifier above. Singleton — it holds only the (singleton) hub context.
 builder.Services.AddSingleton<IChatRealtimeNotifier, ChatRealtimeNotifier>();
+// One in-flight turn per conversation (gh#1106): the per-conversation Postgres advisory lock the chat turn runs
+// inside, so two screens cannot stream two turns into one undifferentiated draft. Scoped, like the account-entry
+// guard it mirrors — it pins the CALLER'S connection, so it must live and die with the request's context.
+builder.Services.AddScoped<IChatTurnGuard, ChatTurnGuard>();
 builder.Services.AddHostedService<RealtimeEventLogFanoutHost>();
 
 // The self-documenting API surface (R-10, gh#604): an OpenAPI document generated from the minimal-API routes

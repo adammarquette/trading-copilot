@@ -72,9 +72,10 @@ public static class ChatEndpoints
         group.MapPost("/{id:guid}/turns", (Guid id, ChatTurnRequest? request, TradingCopilotDbContext database,
             IChatTurnService turnService, IContextRetrievalService retrieval, IAiSpendGovernor governor,
             IOptions<GovernorOptions> governorOptions, IAiUsageLedger ledger, ILlmMetrics metrics,
-            IChatRealtimeNotifier notifier, ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
+            IChatRealtimeNotifier notifier, IChatTurnGuard turnGuard, ILoggerFactory loggerFactory,
+            CancellationToken cancellationToken) =>
             TurnAsync(id, request, DateTimeOffset.UtcNow, database, turnService, retrieval, governor, governorOptions,
-                ledger, metrics, notifier, loggerFactory, cancellationToken))
+                ledger, metrics, notifier, turnGuard, loggerFactory, cancellationToken))
             .WithSummary("Take a grounded co-pilot chat turn.");
 
         return endpoints;
@@ -269,6 +270,22 @@ public static class ChatEndpoints
     /// write commits, and that push's failure never fails the turn — the REST response already carries the answer to
     /// the initiating caller. Token streaming (3b) extends the provider seam and is deferred (gh#906).
     /// </para>
+    /// <para>
+    /// <b>One in-flight turn per conversation</b> (gh#1106). The whole turn runs inside
+    /// <see cref="IChatTurnGuard"/>'s per-conversation lock, and a second concurrent turn is refused with a
+    /// <b>409</b> carrying a displayable reason rather than queued. The chunk stream's only correlation key is the
+    /// conversation, so this is what makes <c>RealtimeChatChunk</c>'s "one in-flight turn per conversation" a
+    /// guarantee rather than a comment. The guard wraps the operator-turn persist too, so a refused turn contributes
+    /// <b>nothing</b> to the thread. It fails <b>closed</b>: a guard that cannot be evaluated faults the request
+    /// rather than degrading into an un-serialized turn.
+    /// </para>
+    /// <para>
+    /// <b>A faulted turn pushes a terminator</b> (gh#1107). The 422 tells the initiating connection; every other
+    /// connection is rendering a draft from the chunk stream and would otherwise keep a half-written answer standing
+    /// with no error and nothing to retire it. So the <c>!turn.Succeeded</c> branch also pushes
+    /// <c>RealtimeChatTurnFaulted</c> — the conversation id (a sufficient key, given the guard above) and a display
+    /// reason or none — <b>fail-open</b> like every other push here.
+    /// </para>
     /// </remarks>
     /// <param name="id">The conversation to take a turn in.</param>
     /// <param name="request">The operator's message text.</param>
@@ -281,6 +298,7 @@ public static class ChatEndpoints
     /// <param name="ledger">The durable, fail-open AI-usage ledger.</param>
     /// <param name="metrics">The export-only LLM meter.</param>
     /// <param name="notifier">The per-owner realtime notifier.</param>
+    /// <param name="turnGuard">Serializes turns per conversation — one in flight at a time (gh#1106).</param>
     /// <param name="loggerFactory">The logger factory (fail-open faults are logged, never silently swallowed).</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The persisted turn pair (200), or 400 / 404 / 422 / 429 / 409.</returns>
@@ -296,6 +314,7 @@ public static class ChatEndpoints
         IAiUsageLedger ledger,
         ILlmMetrics metrics,
         IChatRealtimeNotifier notifier,
+        IChatTurnGuard turnGuard,
         ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
     {
@@ -307,6 +326,7 @@ public static class ChatEndpoints
         ArgumentNullException.ThrowIfNull(ledger);
         ArgumentNullException.ThrowIfNull(metrics);
         ArgumentNullException.ThrowIfNull(notifier);
+        ArgumentNullException.ThrowIfNull(turnGuard);
         ArgumentNullException.ThrowIfNull(loggerFactory);
 
         // Validate the turn text FIRST — a 400 reveals nothing about whether the conversation exists.
@@ -319,130 +339,211 @@ public static class ChatEndpoints
             return Results.BadRequest(new { error = $"Message content must be at most {ChatMessage.ContentMaxLength} characters." });
         }
 
+        // Hoisted so the guarded body below reads it as non-null: nullable flow analysis does not cross into a local
+        // function for a captured variable, and this project is warnings-as-errors.
+        string content = request.Content;
+
         // R-20: a foreign or absent conversation is a 404. The loaded owner is the single authority on whose turn this
         // is — the ledger and the hub push both target it, never request input.
-        Conversation? conversation = await database.Conversations
+        Conversation? found = await database.Conversations
             .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
-        if (conversation is null)
+        if (found is null)
         {
             return Results.NotFound();
         }
 
+        Conversation conversation = found; // non-null for the guarded body, as above
+
         ILogger logger = loggerFactory.CreateLogger("MarqSpec.TradingCopilot.Api.Chat.Turn");
 
-        // GOVERNOR GATE (gh#448, ADR-0008): cap deployment-wide daily AI spend before the call — inert until a budget
-        // is configured. The windowed read crosses R-20 with IgnoreQueryFilters (one shared account funds every user)
-        // and is FAIL-OPEN: a spend-read fault leaves the decision null and the turn proceeds un-gated.
-        // groundingSuppressed degrades always-on grounding (gh#995) OFF once spend crosses the pre-alert threshold —
-        // grounding bills an extra embed + rerank, so it is the first thing to shed as the cap nears, though the chat
-        // call itself still runs until the hard cap 429s it below. Fail-open / un-gated leaves it false (grounding on).
-        bool groundingSuppressed = false;
-        AiSpendBudget? budget = governorOptions.Value.ToBudget();
-        if (budget is not null)
+        // ONE IN-FLIGHT TURN PER CONVERSATION (gh#1106). Everything from here down runs inside a per-conversation
+        // lock the database evaluates — the only thing two separate HTTP requests both observe, which is why a
+        // check-then-act here would be no fix at all. Taken NON-BLOCKING: a busy conversation is refused immediately
+        // (409 with a reason the operator can read) rather than queued behind a turn that may run for tens of
+        // seconds. The operator's turn is persisted INSIDE the callback, so a refused turn contributes nothing.
+        //
+        // FAIL-CLOSED: a guard that throws propagates. There is deliberately no catch that would fall through to an
+        // un-serialized turn — refusing the turn is the safe answer, running a possibly-concurrent one is not.
+        return await turnGuard.TryRunExclusiveAsync(database, id, RunTurnAsync, TurnAlreadyInFlight, cancellationToken);
+
+        async Task<IResult> RunTurnAsync()
         {
-            AiSpendDecision? decision = null;
+            // GOVERNOR GATE (gh#448, ADR-0008): cap deployment-wide daily AI spend before the call — inert until a budget
+            // is configured. The windowed read crosses R-20 with IgnoreQueryFilters (one shared account funds every user)
+            // and is FAIL-OPEN: a spend-read fault leaves the decision null and the turn proceeds un-gated.
+            // groundingSuppressed degrades always-on grounding (gh#995) OFF once spend crosses the pre-alert threshold —
+            // grounding bills an extra embed + rerank, so it is the first thing to shed as the cap nears, though the chat
+            // call itself still runs until the hard cap 429s it below. Fail-open / un-gated leaves it false (grounding on).
+            bool groundingSuppressed = false;
+            AiSpendBudget? budget = governorOptions.Value.ToBudget();
+            if (budget is not null)
+            {
+                AiSpendDecision? decision = null;
+                try
+                {
+                    decimal spent = await database.AiUsage
+                        .IgnoreQueryFilters()
+                        .Where(record => record.OccurredAt >= MarketClock.CentralDayStartUtc(now))
+                        .Select(record => (decimal?)record.EstimatedCostUsd)
+                        .SumAsync(cancellationToken) ?? 0m;
+                    decision = governor.Evaluate(budget, spent);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception error)
+                {
+                    logger.LogError(error, "Chat turn could not read AI spend; running this turn un-gated (fail-open).");
+                }
+
+                if (decision is { IsBlocked: true })
+                {
+                    // Nothing persisted, no call made: the operator retries when the daily budget resets.
+                    return Results.Json(new { error = decision.Reason }, statusCode: StatusCodes.Status429TooManyRequests);
+                }
+
+                groundingSuppressed = decision?.ThresholdReached ?? false;
+            }
+
+            // Persist the operator's turn BEFORE the call, so a later LLM fault never loses it (fail-closed keeps it).
+            (ChatMessage? userMessage, bool userConflict) = await TryAppendAsync(
+                database, conversation, ChatRole.User, content, now, cancellationToken);
+            if (userConflict)
+            {
+                return SequenceConflict();
+            }
+
+            // Run the turn over the whole thread in order — the just-persisted user turn is last. A context-window cap is
+            // deferred (gh#906); a single operator's thread is bounded in practice.
+            List<ChatMessage> history = await database.ChatMessages
+                .AsNoTracking()
+                .Where(message => message.ConversationId == id)
+                .OrderBy(message => message.Sequence)
+                .ToListAsync(cancellationToken);
+
+            // Forward each streamed token delta to the owner's connections as it arrives (inc 3b, gh#906) — presentation-
+            // only and FAIL-OPEN: a per-chunk push fault is logged and swallowed, so a broken connection never aborts the
+            // turn. A genuine caller cancellation still propagates and stops the stream.
+            async Task PushDeltaAsync(string delta, CancellationToken chunkToken)
+            {
+                try
+                {
+                    await notifier.ChunkAsync(conversation.UserId, new RealtimeChatChunk(id, delta), chunkToken);
+                }
+                catch (OperationCanceledException) when (chunkToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception error)
+                {
+                    logger.LogWarning(error, "Chat turn realtime chunk push faulted for owner {Owner}; continuing the turn.", conversation.UserId);
+                }
+            }
+
+            // ALWAYS-ON CROSS-KIND GROUNDING (gh#1065, of gh#995; R-6, ADR-0027): now the gate has passed and the
+            // operator's turn is persisted, retrieve a little context for their message across EVERY retrievable kind and
+            // hand it to the model as UNTRUSTED DATA (placed as user-role content, never the system prompt — the service
+            // is read-only by construction, and the owner-scoped kinds are R-20-filtered inside it). It is fully
+            // FAIL-OPEN: any throw degrades to an un-grounded (history-only) turn, belt-and-suspenders over the pipeline's
+            // own degrade-to-empty. It is skipped once spend crossed the pre-alert threshold (grounding bills one embed +
+            // one rerank, whatever the number of kinds); no second governor gate runs — the spend it bills is ledgered
+            // fail-open and seen by the next turn's floor — and a 429-blocked turn returned above, so it never reaches here.
+            IReadOnlyList<RetrievedContextItem> grounding = [];
+            if (!groundingSuppressed)
+            {
+                try
+                {
+                    grounding = await retrieval.RetrieveAsync(
+                        content, GroundingTopK, RetrievalKinds.All, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception error)
+                {
+                    logger.LogWarning(
+                        error, "Chat turn grounding faulted for owner {Owner}; running the turn history-only.", conversation.UserId);
+                }
+            }
+
+            ChatTurnResult turn = await turnService.StreamAsync(history, grounding, PushDeltaAsync, cancellationToken);
+
+            // Meter (export-only, never throws) and ledger (durable, FAIL-OPEN) EVERY model call the turn made — a
+            // tool-using turn makes several (gh#925) — success OR failure, so the governor floor sees each billed call.
+            // The owner is the conversation's (R-20); the clock is the turn's now. A ledger fault on one call is logged and
+            // the rest still record (fail-open); the turn stands regardless.
+            foreach (AiCallCost cost in turn.Costs)
+            {
+                metrics.RecordLlmCall(cost);
+                try
+                {
+                    await ledger.RecordAsync(
+                        new AiUsageEntry(conversation.UserId, cost, Activity.Current?.TraceId.ToString(), now),
+                        cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception error)
+                {
+                    logger.LogError(error, "Chat turn AI-usage ledger write faulted for owner {Owner}; the turn stands.", conversation.UserId);
+                }
+            }
+
+            // Fail-closed: a refused / truncated / faulted turn is a 422 with the reason. The operator's turn stays saved
+            // and the cost recorded, but no assistant turn is invented.
+            if (!turn.Succeeded)
+            {
+                // TERMINATE THE DRAFT EVERYWHERE (gh#1107). A faulted turn can have streamed a whole round before it
+                // failed — only round 1 streams, so "partial text then silence" is its ordinary shape — and the 422
+                // below reaches only the connection that sent it. Every other screen is rendering that partial answer
+                // and, without this, would keep it standing with no error and nothing that would ever retire it. The
+                // conversation id is a sufficient key because at most one turn is in flight on it (the guard above),
+                // which is why no turn id rides this wire. FAIL-OPEN like every other push here: presentation-only,
+                // and the 422 the caller gets is unchanged whatever the hub does (ADR-0021).
+                try
+                {
+                    await notifier.TurnFaultedAsync(
+                        conversation.UserId,
+                        new RealtimeChatTurnFaulted(id, Normalize(turn.Message)),
+                        cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception error)
+                {
+                    logger.LogError(error, "Chat turn faulted-terminator push faulted for owner {Owner}; the 422 stands.", conversation.UserId);
+                }
+
+                return Results.UnprocessableEntity(new { error = turn.Message });
+            }
+
+            (ChatMessage? assistantMessage, bool assistantConflict) = await TryAppendAsync(
+                database, conversation, ChatRole.Assistant, turn.Message, now, cancellationToken);
+            if (assistantConflict)
+            {
+                // Streamed, then no terminator — the same shape gh#1107 closes above, but not reachable by a second
+                // TURN any more (the guard serializes those). What is left is `POST /messages` taking the sequence
+                // mid-turn, which is rare enough that it is left to the client's idle backstop rather than given a
+                // signal of its own; it is untestable at the unit tier, since the in-memory provider enforces no
+                // unique index, and this project does not ship production behaviour no test drives.
+                return SequenceConflict();
+            }
+
+            // Presentation-only push to the owner's OTHER connections, AFTER the write commits; its failure never fails
+            // the turn (the REST response below already carries the answer to the initiating caller).
             try
             {
-                decimal spent = await database.AiUsage
-                    .IgnoreQueryFilters()
-                    .Where(record => record.OccurredAt >= MarketClock.CentralDayStartUtc(now))
-                    .Select(record => (decimal?)record.EstimatedCostUsd)
-                    .SumAsync(cancellationToken) ?? 0m;
-                decision = governor.Evaluate(budget, spent);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception error)
-            {
-                logger.LogError(error, "Chat turn could not read AI spend; running this turn un-gated (fail-open).");
-            }
-
-            if (decision is { IsBlocked: true })
-            {
-                // Nothing persisted, no call made: the operator retries when the daily budget resets.
-                return Results.Json(new { error = decision.Reason }, statusCode: StatusCodes.Status429TooManyRequests);
-            }
-
-            groundingSuppressed = decision?.ThresholdReached ?? false;
-        }
-
-        // Persist the operator's turn BEFORE the call, so a later LLM fault never loses it (fail-closed keeps it).
-        (ChatMessage? userMessage, bool userConflict) = await TryAppendAsync(
-            database, conversation, ChatRole.User, request.Content, now, cancellationToken);
-        if (userConflict)
-        {
-            return SequenceConflict();
-        }
-
-        // Run the turn over the whole thread in order — the just-persisted user turn is last. A context-window cap is
-        // deferred (gh#906); a single operator's thread is bounded in practice.
-        List<ChatMessage> history = await database.ChatMessages
-            .AsNoTracking()
-            .Where(message => message.ConversationId == id)
-            .OrderBy(message => message.Sequence)
-            .ToListAsync(cancellationToken);
-
-        // Forward each streamed token delta to the owner's connections as it arrives (inc 3b, gh#906) — presentation-
-        // only and FAIL-OPEN: a per-chunk push fault is logged and swallowed, so a broken connection never aborts the
-        // turn. A genuine caller cancellation still propagates and stops the stream.
-        async Task PushDeltaAsync(string delta, CancellationToken chunkToken)
-        {
-            try
-            {
-                await notifier.ChunkAsync(conversation.UserId, new RealtimeChatChunk(id, delta), chunkToken);
-            }
-            catch (OperationCanceledException) when (chunkToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception error)
-            {
-                logger.LogWarning(error, "Chat turn realtime chunk push faulted for owner {Owner}; continuing the turn.", conversation.UserId);
-            }
-        }
-
-        // ALWAYS-ON CROSS-KIND GROUNDING (gh#1065, of gh#995; R-6, ADR-0027): now the gate has passed and the
-        // operator's turn is persisted, retrieve a little context for their message across EVERY retrievable kind and
-        // hand it to the model as UNTRUSTED DATA (placed as user-role content, never the system prompt — the service
-        // is read-only by construction, and the owner-scoped kinds are R-20-filtered inside it). It is fully
-        // FAIL-OPEN: any throw degrades to an un-grounded (history-only) turn, belt-and-suspenders over the pipeline's
-        // own degrade-to-empty. It is skipped once spend crossed the pre-alert threshold (grounding bills one embed +
-        // one rerank, whatever the number of kinds); no second governor gate runs — the spend it bills is ledgered
-        // fail-open and seen by the next turn's floor — and a 429-blocked turn returned above, so it never reaches here.
-        IReadOnlyList<RetrievedContextItem> grounding = [];
-        if (!groundingSuppressed)
-        {
-            try
-            {
-                grounding = await retrieval.RetrieveAsync(
-                    request.Content, GroundingTopK, RetrievalKinds.All, cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception error)
-            {
-                logger.LogWarning(
-                    error, "Chat turn grounding faulted for owner {Owner}; running the turn history-only.", conversation.UserId);
-            }
-        }
-
-        ChatTurnResult turn = await turnService.StreamAsync(history, grounding, PushDeltaAsync, cancellationToken);
-
-        // Meter (export-only, never throws) and ledger (durable, FAIL-OPEN) EVERY model call the turn made — a
-        // tool-using turn makes several (gh#925) — success OR failure, so the governor floor sees each billed call.
-        // The owner is the conversation's (R-20); the clock is the turn's now. A ledger fault on one call is logged and
-        // the rest still record (fail-open); the turn stands regardless.
-        foreach (AiCallCost cost in turn.Costs)
-        {
-            metrics.RecordLlmCall(cost);
-            try
-            {
-                await ledger.RecordAsync(
-                    new AiUsageEntry(conversation.UserId, cost, Activity.Current?.TraceId.ToString(), now),
+                await notifier.MessageAppendedAsync(
+                    conversation.UserId,
+                    new RealtimeChatMessage(
+                        id, assistantMessage!.Id, assistantMessage.Sequence, assistantMessage.Role,
+                        assistantMessage.Content, assistantMessage.CreatedAt),
                     cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -451,46 +552,12 @@ public static class ChatEndpoints
             }
             catch (Exception error)
             {
-                logger.LogError(error, "Chat turn AI-usage ledger write faulted for owner {Owner}; the turn stands.", conversation.UserId);
+                logger.LogError(error, "Chat turn realtime push faulted for owner {Owner}; the turn stands.", conversation.UserId);
             }
-        }
 
-        // Fail-closed: a refused / truncated / faulted turn is a 422 with the reason. The operator's turn stays saved
-        // and the cost recorded, but no assistant turn is invented.
-        if (!turn.Succeeded)
-        {
-            return Results.UnprocessableEntity(new { error = turn.Message });
+            return Results.Ok(new ChatTurnResponse(
+                ChatMessageResponse.From(userMessage!), ChatMessageResponse.From(assistantMessage!)));
         }
-
-        (ChatMessage? assistantMessage, bool assistantConflict) = await TryAppendAsync(
-            database, conversation, ChatRole.Assistant, turn.Message, now, cancellationToken);
-        if (assistantConflict)
-        {
-            return SequenceConflict();
-        }
-
-        // Presentation-only push to the owner's OTHER connections, AFTER the write commits; its failure never fails
-        // the turn (the REST response below already carries the answer to the initiating caller).
-        try
-        {
-            await notifier.MessageAppendedAsync(
-                conversation.UserId,
-                new RealtimeChatMessage(
-                    id, assistantMessage!.Id, assistantMessage.Sequence, assistantMessage.Role,
-                    assistantMessage.Content, assistantMessage.CreatedAt),
-                cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception error)
-        {
-            logger.LogError(error, "Chat turn realtime push faulted for owner {Owner}; the turn stands.", conversation.UserId);
-        }
-
-        return Results.Ok(new ChatTurnResponse(
-            ChatMessageResponse.From(userMessage!), ChatMessageResponse.From(assistantMessage!)));
     }
 
     /// <summary>
@@ -547,6 +614,16 @@ public static class ChatEndpoints
     private static IResult SequenceConflict() => Results.Conflict(new
     {
         error = "A concurrent message took that position in the conversation; retry.",
+    });
+
+    // The 409 for a second concurrent turn on one conversation (gh#1106). 409 rather than 422 deliberately: this
+    // endpoint already spends 422 on "the turn ran and could not produce an answer", and a client that could not
+    // tell the two apart would show the wrong affordance for each — a retry hint where an apology belongs, or the
+    // reverse. 409 is what this endpoint already means by "a concurrent request took this; retry", which is exactly
+    // this case. The reason is written to be displayed as-is.
+    private static IResult TurnAlreadyInFlight() => Results.Conflict(new
+    {
+        error = "A turn is already in flight on this conversation; wait for it to finish, then retry.",
     });
 
     // A blank title is no title: trim, and collapse empty/whitespace to null so "" and "   " are not stored as a title.

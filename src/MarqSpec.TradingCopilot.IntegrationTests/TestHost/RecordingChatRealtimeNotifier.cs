@@ -11,6 +11,7 @@ public sealed class ChatRealtimeRecorder
     private readonly Lock _gate = new();
     private readonly List<(Guid OwnerId, RealtimeChatMessage Message)> _messages = [];
     private readonly List<(Guid OwnerId, RealtimeChatChunk Chunk)> _chunks = [];
+    private readonly List<(Guid OwnerId, RealtimeChatTurnFaulted Faulted)> _faults = [];
 
     /// <summary>Every committed message push, with the owner it was routed to.</summary>
     public IReadOnlyList<(Guid OwnerId, RealtimeChatMessage Message)> Messages
@@ -36,13 +37,26 @@ public sealed class ChatRealtimeRecorder
         }
     }
 
-    /// <summary>Clears both recordings — call at the start of each test.</summary>
+    /// <summary>Every faulted-turn terminator push, with the owner it was routed to (gh#1107).</summary>
+    public IReadOnlyList<(Guid OwnerId, RealtimeChatTurnFaulted Faulted)> Faults
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _faults];
+            }
+        }
+    }
+
+    /// <summary>Clears every recording — call at the start of each test.</summary>
     public void Reset()
     {
         lock (_gate)
         {
             _messages.Clear();
             _chunks.Clear();
+            _faults.Clear();
         }
     }
 
@@ -59,6 +73,14 @@ public sealed class ChatRealtimeRecorder
         lock (_gate)
         {
             _chunks.Add((ownerId, chunk));
+        }
+    }
+
+    internal void RecordTurnFaulted(Guid ownerId, RealtimeChatTurnFaulted faulted)
+    {
+        lock (_gate)
+        {
+            _faults.Add((ownerId, faulted));
         }
     }
 }
@@ -102,5 +124,12 @@ public sealed class RecordingChatRealtimeNotifier : IChatRealtimeNotifier
     {
         _recorder.RecordChunk(ownerId, chunk);
         return _inner.ChunkAsync(ownerId, chunk, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task TurnFaultedAsync(Guid ownerId, RealtimeChatTurnFaulted faulted, CancellationToken cancellationToken)
+    {
+        _recorder.RecordTurnFaulted(ownerId, faulted);
+        return _inner.TurnFaultedAsync(ownerId, faulted, cancellationToken);
     }
 }
