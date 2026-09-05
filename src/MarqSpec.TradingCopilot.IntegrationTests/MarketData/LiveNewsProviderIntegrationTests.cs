@@ -7,6 +7,7 @@ using MarqSpec.TradingCopilot.IntegrationTests.TestHost.LiveProvider;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit.Abstractions;
+using static MarqSpec.TradingCopilot.IntegrationTests.TestHost.LiveProvider.FinnhubWireProbe;
 
 namespace MarqSpec.TradingCopilot.IntegrationTests.MarketData;
 
@@ -22,19 +23,20 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.MarketData;
 /// <c>SoftSignal (NewsItem)</c> row), not from the adapter implementations.
 /// </para>
 /// <para>
-/// <b>Expected values are computed independently of production.</b> The suite reads the raw <see cref="NewsItem"/>s
-/// from each <see cref="INewsSource"/> itself and derives what the store ought to contain from those, never by
-/// calling <c>NewsDedupKey</c> — a suite that asked production for the answer could not catch a dedup that only
-/// matches exact strings, which is the regression this tier exists to guard.
+/// <b>Expectations come off the wire, not out of the adapter</b> (<see cref="FinnhubWireProbe"/>). Asking the
+/// registered <c>INewsSource</c> what the store should contain would make the component under test its own
+/// oracle — a defect there moves expectation and outcome together and nothing ever fails. Both the inverted
+/// lookback filter and the dropped blank-summary article were injected and passed unnoticed under an
+/// adapter-derived expectation before this was rewritten to read the provider directly.
 /// </para>
 /// <para>
 /// <b>What this tier found on its first run (2026-09-05), and what it therefore cannot yet prove.</b> Tiingo's
 /// plan does not include the News API, so every Tiingo news call returns <c>403</c> (gh#1125) — the key is valid,
 /// the entitlement is not. R-2's cross-source dedup consequently has <i>one</i> live feed, and the case that
-/// witnesses two feeds collapsing to one row is marked blocked against that issue rather than shipped as a silent
-/// skip. Finnhub's own free tier is live and is asserted here in full. Two further findings are filed, not fixed
-/// (QA contract §3): gh#1123 (the shipped 60-minute lookback admits none of Finnhub's articles) and gh#1124 (its
-/// general category carries no tickers, so relevance resolution has no input).
+/// witnesses two feeds collapsing to one row is a declared block against that issue rather than a silent skip.
+/// Two further findings are filed, not fixed (QA contract §3): gh#1123 (the shipped 60-minute lookback admits
+/// none of Finnhub's articles) and gh#1124 (its general category carries no tickers, so relevance resolution has
+/// no input).
 /// </para>
 /// </remarks>
 [Trait("Category", "LiveProvider")]
@@ -50,56 +52,81 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
         ClearNewsAsync(_factory).GetAwaiter().GetResult();
     }
 
-    // --- The live fan-in, for the feed that is actually entitled (gh#464 case 1, Finnhub half) ---
+    // --- Everything the provider served reaches the store, and nothing else does (gh#464 cases 1 and 3) ---
 
     [LiveNewsProviderFact]
-    public async Task Finnhub_ShouldLandItsNewsOnALivePoll()
+    public async Task EveryStoryTheProviderServed_ShouldReachTheStoreOfRecord()
     {
-        // FAILURE MODE: the adapter maps nothing out of a live payload — a renamed field, the epoch/ISO date
-        // difference the two providers genuinely have, or an over-eager `since` filter — and ingestion quietly
-        // stores zero while reporting a successful pass. Every stubbed test still passes; only a live pull sees
-        // it. (This is not hypothetical: at the SHIPPED lookback it stores zero — gh#1123.)
-        RawSnapshot raw = await ReadRawFeedsAsync(_factory);
+        // FAILURE MODE: a silent drop between provider and store — an over-eager validation rejecting a field the
+        // live feed legitimately leaves blank (one article in a typical payload carries no summary), a mapping
+        // guard swallowing items, a renamed field, or the epoch/ISO date difference the two providers genuinely
+        // have. Ingestion reports a successful pass either way; only comparing against the provider's own payload
+        // shows the gap. The mirror direction — a row the provider never served — would mean the store is
+        // inventing or duplicating stories.
+        DateTimeOffset since = DateTimeOffset.UtcNow.AddMinutes(-LiveNewsProviderFactory.LookbackMinutes);
+        string apiKey = LiveProviderConfig.FinnhubApiKey!;
+
+        // Probed either side of the pass so that an article arriving mid-run cannot flake the assertion: what
+        // appears in BOTH probes was stable throughout and must be stored; the union bounds what may legitimately
+        // have been stored.
+        IReadOnlyList<WireArticle> before = await FetchAsync(apiKey);
         await IngestAsync(_factory);
+        IReadOnlyList<WireArticle> after = await FetchAsync(apiKey);
 
         List<NewsRecord> rows = await ReadAllAsync(_factory);
+        HashSet<string> stored = [.. rows.Select(row => Normalize(row.Url))];
 
-        raw.ItemsFor("finnhub").Should().NotBeEmpty(
-            "Finnhub served nothing over a {0}-minute window", LiveNewsProviderFactory.LookbackMinutes);
-        rows.Where(row => row.SourceFeeds.Contains("finnhub")).Should()
-            .NotBeEmpty("Finnhub served {0} items, so the store must not be empty", raw.ItemsFor("finnhub").Count);
+        HashSet<string> mustBeStored =
+        [
+            .. InWindow(before, since).Intersect(InWindow(after, since)),
+        ];
+        HashSet<string> mayBeStored = [.. before.Concat(after).Select(article => Normalize(article.Url))];
+
+        mustBeStored.Should().NotBeEmpty(
+            "the provider served nothing inside a {0}-minute window, so this run can prove nothing",
+            LiveNewsProviderFactory.LookbackMinutes);
+        mustBeStored.Except(stored).Should().BeEmpty(
+            "every one of the {0} stories the provider served inside the window must reach the store of record",
+            mustBeStored.Count);
+        stored.Except(mayBeStored).Should().BeEmpty(
+            "the store holds a URL the provider never served in either probe — it is inventing or duplicating");
+    }
+
+    // --- The lookback contract, asserted against the provider's own timestamps (gh#464 case 1) ---
+
+    [LiveNewsProviderFact]
+    public async Task StoredNews_ShouldHonourTheLookbackWindow()
+    {
+        // FAILURE MODE: the `publishedAt < since` filter inverted or ignored, so the poller stores exactly the
+        // articles it was asked to exclude. Non-emptiness cannot see this — an inverted filter still returns a
+        // populated list (14 items on the payload this was proven against), just the wrong one.
+        DateTimeOffset since = DateTimeOffset.UtcNow.AddMinutes(-LiveNewsProviderFactory.LookbackMinutes);
+
+        await IngestAsync(_factory);
+        List<NewsRecord> rows = await ReadAllAsync(_factory);
+
+        rows.Should().NotBeEmpty("a live poll over {0} minutes should carry news", LiveNewsProviderFactory.LookbackMinutes);
+        rows.Should().OnlyContain(
+            row => row.PublishedAt >= since,
+            "every stored story must fall inside the {0}-minute window the poller asked for",
+            LiveNewsProviderFactory.LookbackMinutes);
 
         // The mapped shape the rest of R-2 reads, asserted on real payloads rather than fabricated ones.
         rows.Should().OnlyContain(row => !string.IsNullOrWhiteSpace(row.Url), "a URL is the dedup identity");
         rows.Should().OnlyContain(row => !string.IsNullOrWhiteSpace(row.Title), "an untitled story is unreadable");
-        rows.Should().OnlyContain(row => row.PublishedAt != default, "an unmapped timestamp defeats the lookback");
+        rows.Should().OnlyContain(row => row.SourceFeeds.Contains("finnhub"), "provenance names the feed that carried it");
     }
 
-    // --- Distinct live stories must stay distinct (gh#464 case 3) ---
-
-    [LiveNewsProviderFact]
-    public async Task DistinctLiveStories_ShouldEachKeepTheirOwnRow()
-    {
-        // FAILURE MODE: over-collapse. The R-2 fuzzy fallback merges near-identical headlines, and it is
-        // cross-feed BY DESIGN — two similar headlines from the SAME feed are distinct stories (a follow-up or a
-        // correction under a new URL), and merging them would silently delete a real event from the desk's view.
-        // Real newswire copy is where that bites: a live Finnhub pull carries genuinely similar Reuters and CNBC
-        // headlines about one event, which fabricated fixtures never do convincingly.
-        RawSnapshot raw = await ReadRawFeedsAsync(_factory);
-        int distinctFinnhubUrls = raw.DistinctUrlsFor("finnhub").Count;
-
-        await IngestAsync(_factory);
-        List<NewsRecord> rows = await ReadAllAsync(_factory);
-
-        _output.WriteLine(raw.Describe());
-
-        // Only Finnhub is entitled today (gh#1125), so every distinct URL it served must own exactly one row —
-        // no merging within a feed, and no duplication either. An exact equality, in both directions.
-        rows.Should().HaveCount(
-            distinctFinnhubUrls,
-            "Finnhub served {0} distinct URLs and nothing may merge within a single feed or duplicate across passes",
-            distinctFinnhubUrls);
-    }
+    // NOT COVERED HERE, deliberately, and recorded rather than implied (QA contract — "the fixture must be able
+    // to produce what the test guards against"):
+    //
+    //   * SAME-FEED over-collapse. The R-2 fuzzy fallback skips candidates already carrying the feed, so two
+    //     near-identical headlines from ONE provider must stay two rows. Removing that skip in production changes
+    //     NOTHING on live payloads — a real Finnhub pull carries no two headlines similar enough, within the
+    //     60-minute gap, to trip `AreLikelyTheSameStory` (verified: the defect was injected and every assertion
+    //     here stayed green). It needs constructed input, which is the stubbed gh#360 tier's job — where it is
+    //     currently absent too; see the PR for that coverage gap.
+    //   * CROSS-FEED collapse. Blocked by gh#1125, declared below rather than skipped silently.
 
     // --- A refused provider must not sink the other (gh#464 case 4) ---
 
@@ -109,7 +136,7 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
         // FAILURE MODE: one provider rejecting the request aborts the whole pass, so a single bad key or a 429
         // costs the desk ALL news rather than one feed's share. Proven against a real provider refusal, not a
         // stubbed throw — the gh#358 guard catches `Exception`, and only a live call shows what the client
-        // actually throws from inside (here an HttpRequestException out of EnsureSuccessStatusCode).
+        // actually throws from inside (an HttpRequestException out of EnsureSuccessStatusCode).
         LiveNewsProviderTiingoOutageFactory outage = new();
         await ((IAsyncLifetime)outage).InitializeAsync();
         try
@@ -135,13 +162,12 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
 
     [Fact(Skip = "blocked by gh#1125 — Tiingo's plan excludes the News API (403 'You do not have permission to "
         + "access the News API'), so there is no second live feed and a cross-source collapse cannot be witnessed "
-        + "by anything, on any environment. Deliberately a declared block rather than a passing test: a suite "
-        + "that reports coverage it does not have is worse than no suite (PR #1014 / #1013).")]
+        + "on any environment, staging included. Deliberately a declared block rather than a passing test: a "
+        + "suite that reports coverage it does not have is worse than no suite (PR #1014 / #1013).")]
     public Task SameStory_ShouldCollapseToOneRecord_AcrossLiveProviders() =>
-        throw new NotImplementedException(
+        throw new NotSupportedException(
             "Unblock with gh#1125, then assert: a URL both feeds carry becomes exactly one NewsRecord whose "
-            + "SourceFeeds contains finnhub and tiingo. The raw-snapshot helper below already computes the "
-            + "cross-feed overlap set this needs.");
+            + "SourceFeeds contains finnhub and tiingo.");
 
     // --- Credentials come from configuration and nowhere else (gh#464 case 5) ---
 
@@ -183,14 +209,14 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
     {
         // PINS OBSERVED BEHAVIOUR, gh#1125: the configured Tiingo token is valid (/api/test returns 200) but its
         // plan does not include the News API, so every news call is refused. Asserting it keeps "R-2 has one live
-        // feed" visible in CI instead of tribal knowledge — and this test goes RED the moment the entitlement is
+        // feed" visible in CI instead of tribal knowledge — and this goes RED the moment the entitlement is
         // bought, which is exactly the prompt to promote the blocked cross-source case above.
-        RawSnapshot raw = await ReadRawFeedsAsync(_factory);
+        AdapterSnapshot adapters = await ReadThroughAdaptersAsync(_factory);
 
-        raw.FailureFor("tiingo").Should().NotBeNull(
+        adapters.FailureFor("tiingo").Should().NotBeNull(
             "Tiingo's plan excludes the News API (gh#1125); if this is now null the entitlement exists and "
             + "SameStory_ShouldCollapseToOneRecord_AcrossLiveProviders should be unblocked");
-        raw.FailureFor("tiingo")!.Message.Should().Contain(
+        adapters.FailureFor("tiingo")!.Message.Should().Contain(
             ((int)HttpStatusCode.Forbidden).ToString(),
             "the refusal is an HTTP 403 from the provider, not a transport or parsing failure");
     }
@@ -204,33 +230,34 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
         // reports the rest as evidence, so free-tier usability stops being an open question answered by nobody.
         // Engineering "Data sources" flags Finnhub free-tier quality as unverified; this is the first look, and
         // it is where gh#1123 (lookback) and gh#1124 (no tickers) came from.
-        RawSnapshot raw = await ReadRawFeedsAsync(_factory);
-        _output.WriteLine(raw.Describe());
+        IReadOnlyList<WireArticle> wire = await FetchAsync(LiveProviderConfig.FinnhubApiKey!);
+        AdapterSnapshot adapters = await ReadThroughAdaptersAsync(_factory);
 
-        IReadOnlyList<NewsItem> finnhub = raw.ItemsFor("finnhub");
-        finnhub.Should().NotBeEmpty("a free tier that serves nothing is not a usable source");
-        finnhub.Should().OnlyContain(
-            item => !string.IsNullOrWhiteSpace(item.Url),
-            "finnhub: a URL is the dedup identity, so an item without one cannot be stored at all");
-        finnhub.Should().OnlyContain(
-            item => !string.IsNullOrWhiteSpace(item.Title),
-            "finnhub: an untitled story is unreadable in the blotter");
-        finnhub.Should().OnlyContain(
-            item => item.PublishedAt < DateTimeOffset.UtcNow.AddHours(1),
-            "finnhub: a publish time in the future means the timestamp is misparsed");
-        finnhub.Should().OnlyContain(
-            item => item.PublishedAt > DateTimeOffset.UtcNow.AddDays(-30),
-            "finnhub: a publish time far outside the lookback means the timestamp is misparsed");
+        _output.WriteLine(Describe(wire, adapters));
+
+        wire.Should().NotBeEmpty("a free tier that serves nothing is not a usable source");
+        wire.Should().OnlyContain(
+            article => !string.IsNullOrWhiteSpace(article.Headline),
+            "an untitled story is unreadable in the blotter");
+        wire.Should().OnlyContain(
+            article => article.PublishedAt < DateTimeOffset.UtcNow.AddHours(1),
+            "a publish time in the future means the provider's epoch is being misread");
+        wire.Should().OnlyContain(
+            article => article.PublishedAt > DateTimeOffset.UtcNow.AddDays(-30),
+            "a publish time far outside any sane lookback means the provider's epoch is being misread");
 
         // DEFECT gh#1124: the general category tags no tickers, so gh#359 relevance resolution has no input.
         // Pinned as observed, not blessed — it flips into that issue's regression guard when a tagged feed lands.
-        finnhub.Should().OnlyContain(
+        adapters.ItemsFor("finnhub").Should().OnlyContain(
             item => item.Tickers.Count == 0,
             "gh#1124 pins that Finnhub's general category carries NO tickers; tickers appearing here means the "
             + "gap has closed and gh#1124 should be revisited");
     }
 
     // --- Helpers ---
+
+    private static IEnumerable<string> InWindow(IEnumerable<WireArticle> articles, DateTimeOffset since) =>
+        articles.Where(article => article.PublishedAt >= since).Select(article => Normalize(article.Url));
 
     private static async Task<int> IngestAsync(LiveNewsProviderFactory factory)
     {
@@ -253,10 +280,10 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
         await database.News.ExecuteDeleteAsync();
     }
 
-    // Reads every registered source directly, recording what each one SERVED or how it FAILED — the independent
-    // basis for every expectation above. A throwing source is captured rather than propagated, because "one feed
-    // refused us" is a fact this suite reports on, not a reason it cannot run.
-    private static async Task<RawSnapshot> ReadRawFeedsAsync(LiveNewsProviderFactory factory)
+    // What each registered source SERVED or how it FAILED. This is the adapters' view, used only where the
+    // adapter itself is the subject (the ticker pin, the Tiingo refusal) — never as the oracle for what the
+    // store should contain, which comes off the wire.
+    private static async Task<AdapterSnapshot> ReadThroughAdaptersAsync(LiveNewsProviderFactory factory)
     {
         await using AsyncServiceScope scope = factory.Services.CreateAsyncScope();
         DateTimeOffset since = DateTimeOffset.UtcNow.AddMinutes(-LiveNewsProviderFactory.LookbackMinutes);
@@ -277,69 +304,55 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
             }
         }
 
-        return new RawSnapshot(served, refused);
+        return new AdapterSnapshot(served, refused);
     }
 
-    private sealed class RawSnapshot(
+    private static string Describe(IReadOnlyList<WireArticle> wire, AdapterSnapshot adapters)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        List<string> lines =
+        [
+            $"FREE-TIER DATA QUALITY (gh#1122) — observed {now:u}",
+            $"  finnhub wire: {wire.Count} articles, "
+            + $"{wire.Select(article => Normalize(article.Url)).Distinct().Count()} distinct URLs",
+        ];
+
+        // The age profile gh#1123 came from: how much of a live payload each candidate lookback admits.
+        foreach (int window in (int[])[LiveNewsProviderFactory.ProductionDefaultLookbackMinutes, 240, 1440, LiveNewsProviderFactory.LookbackMinutes])
+        {
+            int inside = wire.Count(article => article.PublishedAt > now.AddMinutes(-window));
+            string note = window == LiveNewsProviderFactory.ProductionDefaultLookbackMinutes
+                ? "  <-- the SHIPPED default (gh#1123)"
+                : string.Empty;
+            lines.Add($"    within {window,5} min: {inside,4}{note}");
+        }
+
+        foreach ((string feed, IReadOnlyList<NewsItem> items) in adapters.Served)
+        {
+            lines.Add(
+                $"  {feed} adapter: {items.Count} items, {items.Count(item => item.Tickers.Count > 0)} with tickers");
+        }
+
+        foreach ((string feed, Exception error) in adapters.Refused)
+        {
+            lines.Add($"  {feed} adapter: REFUSED — {error.Message}");
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private sealed class AdapterSnapshot(
         Dictionary<string, IReadOnlyList<NewsItem>> served,
         Dictionary<string, Exception> refused)
     {
+        public IReadOnlyDictionary<string, IReadOnlyList<NewsItem>> Served => served;
+
+        public IReadOnlyDictionary<string, Exception> Refused => refused;
+
         public IReadOnlyList<NewsItem> ItemsFor(string feed) =>
             served.TryGetValue(feed, out IReadOnlyList<NewsItem>? items) ? items : [];
 
         public Exception? FailureFor(string feed) =>
             refused.TryGetValue(feed, out Exception? error) ? error : null;
-
-        public HashSet<string> DistinctUrlsFor(string feed) =>
-            [.. ItemsFor(feed).Select(Normalize)];
-
-        // A URL appearing in more than one feed's payload — the only place a cross-source collapse can be
-        // witnessed by exact identity. Empty while gh#1125 leaves one feed refused; kept because it is exactly
-        // what the blocked case needs the day that changes.
-        public IReadOnlyList<string> UrlsCarriedByMoreThanOneFeed =>
-        [
-            .. served
-                .SelectMany(feed => feed.Value.Select(item => (Feed: feed.Key, Url: Normalize(item))))
-                .GroupBy(pair => pair.Url)
-                .Where(group => group.Select(pair => pair.Feed).Distinct().Count() > 1)
-                .Select(group => group.Key)
-        ];
-
-        public string Describe()
-        {
-            DateTimeOffset now = DateTimeOffset.UtcNow;
-            List<string> lines =
-            [
-                $"FREE-TIER DATA QUALITY (gh#1122) — lookback {LiveNewsProviderFactory.LookbackMinutes} min, "
-                + $"observed {now:u}",
-            ];
-
-            foreach ((string feed, IReadOnlyList<NewsItem> items) in served)
-            {
-                lines.Add(
-                    $"  {feed}: {items.Count} items, {DistinctUrlsFor(feed).Count} distinct URLs, "
-                    + $"{items.Count(item => item.Tickers.Count > 0)} with tickers");
-
-                // The age profile gh#1123 came from: how much of a live payload each candidate lookback admits.
-                foreach (int window in (int[])[LiveNewsProviderFactory.ProductionDefaultLookbackMinutes, 240, 1440])
-                {
-                    int inside = items.Count(item => item.PublishedAt > now.AddMinutes(-window));
-                    string note = window == LiveNewsProviderFactory.ProductionDefaultLookbackMinutes
-                        ? "  <-- the SHIPPED default (gh#1123)"
-                        : string.Empty;
-                    lines.Add($"    within {window,5} min: {inside,4}{note}");
-                }
-            }
-
-            foreach ((string feed, Exception error) in refused)
-            {
-                lines.Add($"  {feed}: REFUSED — {error.Message}");
-            }
-
-            lines.Add($"  URLs carried by more than one feed: {UrlsCarriedByMoreThanOneFeed.Count}");
-            return string.Join(Environment.NewLine, lines);
-        }
-
-        private static string Normalize(NewsItem item) => item.Url.TrimEnd('/').ToLowerInvariant();
     }
 }
