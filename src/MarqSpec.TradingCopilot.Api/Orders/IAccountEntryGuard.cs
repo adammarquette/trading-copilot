@@ -60,6 +60,15 @@ namespace MarqSpec.TradingCopilot.Api.Orders;
 /// <i>same</i> account run concurrently, so it is never a correctness loss. Enforcement lives below the model
 /// (R-5/R-11/R-16, ADR-0007): the gate and this guard hold the limit, the LLM only proposes.
 /// </para>
+/// <para>
+/// <b>The unlock is cleanup, so it does not take the caller's token.</b> The guarded callback spans a venue
+/// round-trip, so a request aborting mid-callback is ordinary. On the operator send / take paths that token is
+/// <c>RequestAborted</c>; releasing the lock on it would throw before the <c>pg_advisory_unlock</c> was ever sent,
+/// and the pooled connector would go back to Npgsql still holding it — the account then refusing its next
+/// entry-transmit (or, on the try-lock path, surfacing a spurious "busy") until that connector's next use resets
+/// it. The paragraph above is what makes that recoverable rather than permanent; it is <i>not</i> what makes it
+/// prompt, which is why the explicit unlock runs on <see cref="CancellationToken.None"/>.
+/// </para>
 /// </remarks>
 public interface IAccountEntryGuard
 {
@@ -129,15 +138,26 @@ public sealed class AccountEntryGuard : IAccountEntryGuard
             }
             finally
             {
+                // CancellationToken.None, deliberately, and it is load-bearing rather than tidy. The callback spans
+                // a venue round-trip, so a request aborting mid-transmit is ordinary, not exotic -- and the
+                // caller's token is already cancelled by the time this finally runs. Passing it would make
+                // ExecuteSqlAsync throw BEFORE sending pg_advisory_unlock, leaving the session lock held on a
+                // connector that CloseConnectionAsync then returns to Npgsql's pool. The account would then refuse
+                // its next entry-transmit with a spurious "busy" until that connector happened to be reused.
+                // Releasing a lock is cleanup: it must run to completion regardless of why the work above stopped.
                 await database.Database.ExecuteSqlAsync(
-                    $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))", cancellationToken);
+                    $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))", CancellationToken.None);
             }
         }
         finally
         {
-            // Closing the connection also releases the session lock even if the unlock above never ran (a crash
-            // between lock and unlock), so the account can never be stranded locked. (CloseConnectionAsync takes no
-            // token -- closing a connection is not a cancellable operation in EF Core.)
+            // Belt-and-braces behind the explicit unlock above, and stated precisely because the two mechanisms are
+            // not the same. Returning the connection to the pool resets it (Npgsql's DISCARD ALL, which releases
+            // session advisory locks) and a backend that genuinely DROPS releases them outright -- so a crash
+            // between lock and unlock cannot strand the account locked forever. What it does NOT give is
+            // promptness: the pooled reset is deferred to that connector's next use, which is exactly why the
+            // unlock above must not be allowed to be skipped. (CloseConnectionAsync takes no token -- closing a
+            // connection is not a cancellable operation in EF Core.)
             await database.Database.CloseConnectionAsync();
         }
     }
@@ -168,12 +188,18 @@ public sealed class AccountEntryGuard : IAccountEntryGuard
             }
             finally
             {
+                // CancellationToken.None -- same reasoning as RunExclusiveAsync's unlock. A stranded lock here is
+                // more visible, not less: the next try-lock on this account observes it as held and returns
+                // onBusy() -- for the conditional-fire watcher, a fire deferred to the next quote for no reason.
                 await database.Database.ExecuteSqlAsync(
-                    $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))", cancellationToken);
+                    $"SELECT pg_advisory_unlock(hashtext({accountId.ToString()}))", CancellationToken.None);
             }
         }
         finally
         {
+            // Belt-and-braces behind the explicit unlock above -- see RunExclusiveAsync's finally for why the two
+            // mechanisms (pool reset / dropped backend vs. the explicit unlock) are not the same, and why only the
+            // latter gives promptness.
             await database.Database.CloseConnectionAsync();
         }
     }
