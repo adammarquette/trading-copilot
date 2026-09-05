@@ -15,6 +15,7 @@ import type { RealtimeConnection, RealtimeConnectionState } from './connection';
 import type {
   RealtimeChatChunk,
   RealtimeChatMessage,
+  RealtimeChatTurnFaulted,
   RealtimeEvent,
   RealtimeFill,
   RealtimeOrderState,
@@ -27,6 +28,7 @@ type FillHandler = (fill: RealtimeFill) => void;
 type SuggestionHandler = (suggestion: RealtimeSuggestion) => void;
 type ChatMessageHandler = (message: RealtimeChatMessage) => void;
 type ChatChunkHandler = (chunk: RealtimeChatChunk) => void;
+type ChatTurnFaultedHandler = (faulted: RealtimeChatTurnFaulted) => void;
 type ResyncHandler = () => void;
 
 export interface RealtimeContextValue {
@@ -42,6 +44,12 @@ export interface RealtimeContextValue {
   onChatMessage(handler: ChatMessageHandler): () => void;
   /** Subscribe to streamed chat token deltas (gh#906 inc 3b, gh#1063) — presentation-only, best-effort. */
   onChatChunk(handler: ChatChunkHandler): () => void;
+  /**
+   * Subscribe to a faulted turn's terminator (gh#1107) — the turn streamed and will never settle, so the draft it
+   * opened has to be retired. Keyed by conversation, which is sufficient: the server refuses a second in-flight
+   * turn on one (gh#1106).
+   */
+  onChatTurnFaulted(handler: ChatTurnFaultedHandler): () => void;
   /**
    * Fired when the client must re-fetch its state over REST — a retention gap, or a reconnect (owner-scoped
    * order/fill/suggestion pushes are live-only and are not replayed). A surface subscribes to reload its REST reads.
@@ -68,6 +76,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
   const suggestionSubs = useRef(new Set<SuggestionHandler>());
   const chatMessageSubs = useRef(new Set<ChatMessageHandler>());
   const chatChunkSubs = useRef(new Set<ChatChunkHandler>());
+  const chatTurnFaultedSubs = useRef(new Set<ChatTurnFaultedHandler>());
   const resyncSubs = useRef(new Set<ResyncHandler>());
 
   const authenticated = session.status === 'authenticated';
@@ -86,6 +95,8 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
         suggestionSubs.current.forEach((handler) => handler(suggestion)),
       onChatMessage: (message) => chatMessageSubs.current.forEach((handler) => handler(message)),
       onChatChunk: (chunk) => chatChunkSubs.current.forEach((handler) => handler(chunk)),
+      onChatTurnFaulted: (faulted) =>
+        chatTurnFaultedSubs.current.forEach((handler) => handler(faulted)),
       onGap: () => resyncSubs.current.forEach((handler) => handler()),
       onResynced: () => resyncSubs.current.forEach((handler) => handler()),
       onStateChange: setConnectionState,
@@ -115,6 +126,10 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
     (handler: ChatChunkHandler) => subscribe(chatChunkSubs.current, handler),
     [],
   );
+  const onChatTurnFaulted = useCallback(
+    (handler: ChatTurnFaultedHandler) => subscribe(chatTurnFaultedSubs.current, handler),
+    [],
+  );
   const onResync = useCallback(
     (handler: ResyncHandler) => subscribe(resyncSubs.current, handler),
     [],
@@ -129,6 +144,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
       onSuggestion,
       onChatMessage,
       onChatChunk,
+      onChatTurnFaulted,
       onResync,
     }),
     [
@@ -139,6 +155,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }): React.J
       onSuggestion,
       onChatMessage,
       onChatChunk,
+      onChatTurnFaulted,
       onResync,
     ],
   );

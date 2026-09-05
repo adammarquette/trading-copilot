@@ -33,12 +33,17 @@ type LoadState =
 const PENDING_USER_ID = 'pending-user-turn';
 
 /**
- * How long a streaming draft may sit with no new delta before it is treated as abandoned. The case it exists for is
- * a **faulted** turn, which streams and then sends no terminator at all. A gap this long can also occur inside a
- * turn that is still running: only round 1 streams, so a TOOL-USING turn emits its preamble, then goes quiet for
- * several non-streaming `CompleteAsync` rounds and the tool calls between them (`ChatTurnService.StreamAsync`).
- * Retiring the draft there is the honest reading either way -- nothing is feeding it, and the settled push restores
- * the real answer the moment the turn lands -- but it is a live turn losing its draft, not only a dead one.
+ * How long a streaming draft may sit with no new delta before it is treated as abandoned.
+ *
+ * **It is a backstop now, not the mechanism.** It was written for the faulted turn that sent no terminator at all;
+ * gh#1107 gave that turn a real one (`realtimeChatTurnFaulted`), which retires the draft at the moment the fault
+ * happens rather than 30 seconds later. It is kept deliberately, for two states the terminator does not cover.
+ * (1) That push is **fail-open** — a hub fault or a dropped frame on a live socket loses it outright, and nothing
+ * else would then retire the draft until this connection's next send or a reconnect. (2) A gap this long occurs
+ * inside a turn that is still running: only round 1 streams, so a TOOL-USING turn emits its preamble, then goes
+ * quiet for several non-streaming `CompleteAsync` rounds and the tool calls between them
+ * (`ChatTurnService.StreamAsync`); nothing is feeding the draft, and the settled push restores the real answer the
+ * moment the turn lands.
  */
 const DRAFT_IDLE_MS = 30_000;
 
@@ -98,25 +103,25 @@ function foldIn(messages: readonly ChatMessage[], incoming: ChatMessage): readon
  * push arrives suppresses the chunks still in flight behind it (gh#1085) rather than resurrecting the bubble under
  * an answer already rendered.
  *
- * **Where that stops being enough, stated rather than assumed.** The draft is one per conversation, which is as
- * fine-grained as the wire allows: a delta's only correlation key is the conversation id, documented server-side as
- * "one in-flight turn per conversation" (`RealtimeChatChunk`) but not enforced. Two consequences follow, and both
- * are pinned by test rather than left to be rediscovered. (1) Two screens *can* have turns in flight on the same
- * conversation at once; their deltas then arrive as one undifferentiated stream, so the first settled push retires
- * the draft and the still-running turn's next delta re-opens it from empty. (2) A turn that FAULTS pushes no
- * terminator at all -- `TurnAsync` returns 422 before `MessageAppendedAsync` -- so its half-written draft is retired
- * here by the {@link DRAFT_IDLE_MS} idle guard instead, and a delta arriving after that opens a NEW draft rather
- * than welding onto the abandoned one; a turn started INSIDE that window still appends to it, which no client can
- * prevent. In every case the settled thread stays correct -- only the live draft is affected. Closing either
- * properly is a wire change (a per-turn id, gh#1106; a faulted-turn terminator, gh#1107), not something a
- * connection can infer.
+ * **One draft per conversation, and the server keeps it true.** A delta's only correlation key is the conversation
+ * id, and `RealtimeChatChunk` documents "one in-flight turn per conversation" -- which the server now *enforces*
+ * (gh#1106): a second concurrent turn on a conversation is refused with a 409 carrying a reason, rather than
+ * streaming into the same undifferentiated draft. So one draft per conversation is the right shape, not a
+ * limitation to work around, and no per-turn id was added to the wire. A turn that FAULTS is terminated too
+ * (gh#1107): `TurnAsync` returns 422 to the sender and pushes `realtimeChatTurnFaulted` to every other connection,
+ * which retires the draft here and shows the reason. What is left is a *lost* push -- these are fail-open, so a
+ * dropped terminator (or dropped settled message) leaves a draft standing, which the {@link DRAFT_IDLE_MS} backstop
+ * bounds and a reconnect clears; a turn started inside that window still appends to the abandoned draft, pinned by
+ * test rather than left to be rediscovered. In every case the settled thread stays correct -- only the live draft
+ * is affected, which is the degraded state R-19 / ADR-0013's connection indicator exists to declare.
  *
  * **The optimistic operator turn is provisional.** It renders immediately (temp id {@link PENDING_USER_ID}) so the
  * operator sees what they sent while the turn is in flight, and is replaced by the server's copy on success. On a
- * refusal it is DROPPED rather than left standing: a 429 (governor) persists nothing at all, and a 422 (faulted
- * turn) does persist the operator's turn server-side but this client does not know its real id -- rendering an
- * un-reconciled row would claim a state neither confirmed nor retractable. The typed text is kept in the composer
- * (not cleared) so retrying costs nothing.
+ * refusal it is DROPPED rather than left standing: a 429 (governor) and a 409 (a turn already in flight on this
+ * conversation, gh#1106) persist nothing at all, and a 422 (faulted turn) does persist the operator's turn
+ * server-side but this client does not know its real id -- rendering an un-reconciled row would claim a state
+ * neither confirmed nor retractable. The typed text is kept in the composer (not cleared) so retrying costs
+ * nothing, which is the whole affordance on the 409: the operator retries once the other screen's turn lands.
  *
  * **Untrusted content, both roles.** A message's `content` -- assistant or operator -- is rendered as plain text via
  * ordinary JSX interpolation, never `dangerouslySetInnerHTML` or any markdown/HTML interpreter: the always-on news
@@ -143,9 +148,10 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   const stragglerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Arms / disarms the straggler suppression, TIME-BOUNDED. A straggler is a chunk still in flight behind a turn
-  // this connection already settled, so it is a matter of seconds; leaving the suppression armed indefinitely
-  // waiting for a terminating push that a faulted turn never sends (gh#1107) would silently cost this connection
-  // the NEXT turn's draft -- gh#1103's own bug, re-entered through the error path. So it expires on its own.
+  // this connection already settled, so it is a matter of seconds. A faulted turn now sends a terminator that
+  // disarms it (gh#1107), and a settled one always did -- but both are fail-open pushes, so the expiry stays:
+  // a suppression left armed waiting on a terminator that was DROPPED would silently cost this connection the
+  // NEXT turn's draft, which is gh#1103's own bug re-entered through the error path.
   const suppressStragglers = useCallback((suppress: boolean) => {
     if (stragglerTimer.current !== null) {
       clearTimeout(stragglerTimer.current);
@@ -172,13 +178,13 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   }, []);
 
   // Retire a draft nothing is feeding any more. `streaming` is a fresh object per delta, so this re-arms on every
-  // chunk and only fires once the stream has actually gone quiet. It exists because a turn that FAULTS pushes no
-  // terminator at all (`TurnAsync` returns 422 before `MessageAppendedAsync`, and only round 1 streams), which on
-  // a connection that did not send leaves a half-written answer standing with no error and nothing to clear it.
-  // This bounds that: the draft cannot outlive its turn by more than the idle window, and a delta arriving after
-  // it starts a NEW draft instead of welding onto an abandoned one. It does not CLOSE the gap -- a turn started
-  // inside the window still appends to the stale draft, because a delta carries no turn identity and no boundary
-  // signal exists (gh#1107 / gh#1106, both wire changes); it is pinned by test rather than left to be found.
+  // chunk and only fires once the stream has actually gone quiet. It is now a BACKSTOP rather than the mechanism
+  // (see {@link DRAFT_IDLE_MS}): a faulted turn pushes its own terminator (gh#1107) and a settled one always did,
+  // so what is left here is a terminator that was LOST -- both pushes are fail-open -- plus a live tool-using
+  // turn's quiet stretch. It bounds the damage: the draft cannot outlive its turn by more than the idle window,
+  // and a delta arriving after it starts a NEW draft instead of welding onto an abandoned one. It still does not
+  // CLOSE that residual gap -- a turn started inside the window appends to the stale draft, because a delta
+  // carries no turn identity -- which is pinned by test rather than left to be found.
   useEffect(() => {
     if (streaming === null) {
       return;
@@ -244,7 +250,7 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   // Cross-connection reconciliation (gh#906, ADR-0006/ADR-0021): a turn taken on another window/tab is pushed here
   // too. Filtered to THIS conversation and folded in by id, so a redundant delivery (or our own turn's push racing
   // its REST response) never duplicates a row.
-  const { onChatMessage, onChatChunk, onResync } = useRealtime();
+  const { onChatMessage, onChatChunk, onChatTurnFaulted, onResync } = useRealtime();
   useEffect(
     () =>
       onChatMessage((message) => {
@@ -301,6 +307,30 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         setStreaming((current) => ({ text: (current?.text ?? '') + chunk.delta }));
       }),
     [onChatChunk, conversationId],
+  );
+
+  // The OTHER terminator (gh#1107). A turn that faults streams its first round and then produces no assistant
+  // message at all, so the settled-message push above never comes: before this signal existed, every connection
+  // that did not send the turn kept the half-written answer standing with no error and nothing to clear it. This
+  // retires it at the same moment the sender's 422 does, and -- R-19 / ADR-0013's honest-states stance, on a
+  // screen that just watched an answer stop mid-sentence -- says why when the server gave a reason. It also
+  // counts as a settled turn and disarms the straggler suppression, for the same reason the settled-message push
+  // does: the turn's chunk stream is over, so a later delta belongs to a NEW turn and must open a fresh draft.
+  useEffect(
+    () =>
+      onChatTurnFaulted((faulted) => {
+        if (faulted.conversationId !== conversationId) {
+          return;
+        }
+        settledTurnsRef.current += 1;
+        suppressStragglers(false);
+        setStreaming(null);
+        // A blank/absent reason is not a reason -- rendering an empty alert would be worse than staying silent.
+        if (faulted.reason) {
+          setSendError(faulted.reason);
+        }
+      }),
+    [onChatTurnFaulted, conversationId, suppressStragglers],
   );
 
   // A reconnect re-reads the thread (ADR-0021: chat pushes are live-only and outside the resume replay, so a turn
@@ -383,9 +413,10 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
         suppressStragglers(settledTurnsRef.current === settledTurnsAtStart);
 
         if (!result.ok) {
-          // Drop the optimistic row: a 429 persisted nothing, and a 422's persisted user turn has no id this
-          // client knows -- an un-reconciled row would claim a state we cannot confirm. The typed text survives
-          // in the composer (draft is untouched) so retrying costs nothing.
+          // Drop the optimistic row: a 429 and a 409 persisted nothing (the gh#1106 guard wraps the operator-turn
+          // write, so a refused turn contributes nothing to the thread), and a 422's persisted user turn has no id
+          // this client knows -- an un-reconciled row would claim a state we cannot confirm. The typed text
+          // survives in the composer (draft is untouched) so retrying costs nothing.
           setState((current) =>
             current.kind === 'loaded'
               ? {

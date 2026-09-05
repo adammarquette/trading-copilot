@@ -96,6 +96,21 @@ export interface RealtimeChatChunk {
   readonly delta: string;
 }
 
+/**
+ * The terminator of a chat turn that **faulted** (gh#1107) — a refused / truncated / provider-faulted turn, which
+ * streams its first round and then produces no assistant message at all. Without it, every connection other than
+ * the one that sent the turn would keep its half-written {@link RealtimeChatChunk} draft standing forever, with no
+ * error and nothing that would ever retire it. Presentation-only and best-effort like the other chat pushes.
+ *
+ * There is deliberately **no turn id**: the server refuses a second in-flight turn on a conversation (gh#1106), so
+ * the conversation is a sufficient correlation key. `reason` is untrusted display data, or `null` when the turn
+ * carried none.
+ */
+export interface RealtimeChatTurnFaulted {
+  readonly conversationId: string;
+  readonly reason: string | null;
+}
+
 /** The SignalR client-method names the hub invokes (the `SendAsync` strings). */
 export const RealtimeMethod = {
   Event: 'realtimeEvent',
@@ -106,4 +121,5 @@ export const RealtimeMethod = {
   Suggestion: 'realtimeSuggestion',
   ChatMessage: 'realtimeChatMessage',
   ChatChunk: 'realtimeChatChunk',
+  ChatTurnFaulted: 'realtimeChatTurnFaulted',
 } as const;

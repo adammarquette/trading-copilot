@@ -167,3 +167,33 @@ poll-until-refresh until then.
   message (gh#1106) and a faulted-turn terminator (gh#1107), neither smuggled in here. A **dropped** message push on
   a live socket degrades the same way — it costs that connection the settled row, and its draft until the guard or
   the next send — which is the state R-19 / ADR-0013's connection indicator exists to declare.
+- **Landed** (gh#1106 / gh#1107): both limits above are closed, and only **one** of them turned out to be a wire
+  change. The two were decided together on purpose: fixed apart they produce incompatible answers, since what the
+  faulted-turn terminator may use as a correlation key depends entirely on whether concurrent turns exist.
+  - **The delta's correlation key is now a guarantee, not an assumption — and no id was added.** The operator's
+    product decision (recorded on gh#1106) is that the product does not want concurrent turns on one conversation at
+    all, so the server **refuses** the second one rather than making the stream attributable: `TurnAsync` runs the
+    whole turn inside a **non-blocking per-conversation Postgres advisory lock** (`IChatTurnGuard`, the
+    `IAccountEntryGuard` shape from gh#531 keyed by conversation), and a busy conversation is a **409** carrying a
+    displayable reason. The race is the point — a check-then-act would let two requests both observe "no turn in
+    flight", and two HTTP requests share no change tracker, so only the database can arbitrate them. It fails
+    **closed** (a guard that cannot be evaluated refuses the turn rather than running an unserialized one) and wraps
+    the operator-turn write, so a refused turn contributes nothing to the thread. The alternative — a per-turn id on
+    `RealtimeChatChunk` **and** `RealtimeChatMessage`, with backward tolerance for an un-redeployed client — was not
+    taken: it is the more expensive answer, and it would let a client render two live drafts in one thread, which is
+    a confusing read whatever the draft does. So `RealtimeChatChunk`'s "one in-flight turn per conversation" now
+    describes something the server keeps.
+  - **A faulted turn does terminate its draft**, and this *is* a wire addition: **`realtimeChatTurnFaulted`**
+    (`RealtimeChatTurnFaulted` = the conversation id + a display reason or `null`), pushed **per-owner** on the
+    `!turn.Succeeded` branch before the 422. It is **fail-open** exactly like the chunk and message pushes — a hub
+    fault never changes the turn's outcome or the HTTP response — and **presentation-only**: the REST read model and
+    the folded-in pushes stay the source of truth. It carries **no turn id**, and the reason it does not need one is
+    the clause above: at most one turn is in flight on a conversation, so the conversation is a sufficient
+    correlation key. A consumer treats it as a terminator with the same standing as the settled message — it retires
+    the draft, disarms the straggler suppression, and does not latch the stream closed — and, per R-19 / ADR-0013's
+    honest-states stance, shows the reason on a screen that just watched an answer stop mid-sentence.
+  - **What is deliberately still bounded client-side.** Both terminators are fail-open pushes, so a **dropped** one
+    leaves a draft standing; the client-side idle guard is therefore **kept, as a backstop rather than the
+    mechanism** (and it still covers a live tool-using turn's non-streaming rounds). The residue it bounds — a turn
+    started inside the idle window welding onto the abandoned draft — is now reachable only when the terminator was
+    lost, not on the ordinary faulted path.

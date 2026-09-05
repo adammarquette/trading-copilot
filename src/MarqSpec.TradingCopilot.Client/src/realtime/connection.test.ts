@@ -161,6 +161,17 @@ describe('createRealtimeConnection', () => {
     expect(onChatChunk).toHaveBeenCalledWith(chunk);
   });
 
+  it('forwards a faulted turn terminator to onChatTurnFaulted (gh#1107)', async () => {
+    const onChatTurnFaulted = vi.fn();
+    const connection = createRealtimeConnection({ onChatTurnFaulted });
+    await connection.start();
+
+    const faulted = { conversationId: 'c1', reason: 'The co-pilot could not finish that turn.' };
+    builds[0].hub.handlers.get(RealtimeMethod.ChatTurnFaulted)!(faulted);
+
+    expect(onChatTurnFaulted).toHaveBeenCalledWith(faulted);
+  });
+
   it('tags events inside a catch-up bracket as historical, and live outside it', async () => {
     const onEvent = vi.fn();
     const connection = createRealtimeConnection({ onEvent });

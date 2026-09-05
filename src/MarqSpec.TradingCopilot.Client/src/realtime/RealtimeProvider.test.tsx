@@ -239,6 +239,35 @@ describe('RealtimeProvider', () => {
     expect(received).toEqual(['Head']); // the unmounted subscriber did not fire
   });
 
+  it('fans a faulted turn terminator out to a subscriber, and unsubscribes on unmount (gh#1107)', () => {
+    authenticate();
+    const { callbacks } = fakeConnection();
+    const received: (string | null)[] = [];
+    function Consumer() {
+      const { onChatTurnFaulted } = useRealtime();
+      useEffect(
+        () => onChatTurnFaulted((faulted) => received.push(faulted.reason)),
+        [onChatTurnFaulted],
+      );
+      return null;
+    }
+
+    const { unmount } = render(
+      <RealtimeProvider>
+        <Consumer />
+      </RealtimeProvider>,
+    );
+
+    act(() =>
+      callbacks().onChatTurnFaulted?.({ conversationId: 'c1', reason: 'could not finish' }),
+    );
+    expect(received).toEqual(['could not finish']);
+
+    unmount();
+    act(() => callbacks().onChatTurnFaulted?.({ conversationId: 'c1', reason: null }));
+    expect(received).toEqual(['could not finish']); // the unmounted subscriber did not fire
+  });
+
   it('routes a resync (gap or reconnect) to resync subscribers', () => {
     authenticate();
     const { callbacks } = fakeConnection();

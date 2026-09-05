@@ -62,6 +62,7 @@ beforeEach(() => {
     onResync: vi.fn(() => vi.fn()),
     onChatChunk: vi.fn(() => vi.fn()),
     onChatMessage: vi.fn(() => vi.fn()),
+    onChatTurnFaulted: vi.fn(() => vi.fn()),
   });
   getMock.mockResolvedValue({
     ok: true,
