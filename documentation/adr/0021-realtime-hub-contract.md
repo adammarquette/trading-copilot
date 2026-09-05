@@ -184,8 +184,10 @@ poll-until-refresh until then.
     a confusing read whatever the draft does. So `RealtimeChatChunk`'s "one in-flight turn per conversation" now
     describes something the server keeps.
   - **A faulted turn does terminate its draft**, and this *is* a wire addition: **`realtimeChatTurnFaulted`**
-    (`RealtimeChatTurnFaulted` = the conversation id + a display reason or `null`), pushed **per-owner** on the
-    `!turn.Succeeded` branch before the 422. It is **fail-open** exactly like the chunk and message pushes — a hub
+    (`RealtimeChatTurnFaulted` = the conversation id + a display reason), pushed **per-owner** on the
+    `!turn.Succeeded` branch before the 422. The reason is the **same text the 422 carries**, computed once — two
+    screens of one desk disagreeing about why an answer stopped is its own dishonesty — and a turn that states
+    nothing displayable falls back to a stated sentence rather than pushing a blank one or returning a blank body. It is **fail-open** exactly like the chunk and message pushes — a hub
     fault never changes the turn's outcome or the HTTP response — and **presentation-only**: the REST read model and
     the folded-in pushes stay the source of truth. It carries **no turn id**, and the reason it does not need one is
     the clause above: at most one turn is in flight on a conversation, so the conversation is a sufficient

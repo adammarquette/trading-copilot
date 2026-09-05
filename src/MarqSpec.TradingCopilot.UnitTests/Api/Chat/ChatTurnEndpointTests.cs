@@ -596,16 +596,41 @@ public class ChatTurnEndpointTests
     }
 
     [Fact]
-    public async Task TurnAsync_ShouldPushNoReason_WhenTheFaultedTurnCarriesNoDisplayableMessage()
+    public async Task TurnAsync_ShouldFallBackToAStatedReason_WhenTheFaultedTurnCarriesNoDisplayableMessage()
     {
-        // "A display reason or none" -- a blank message is not a reason, and pushing "" would render an empty alert.
+        // A blank message is not a reason, and it must not become one anywhere: pushing "   " would render an empty
+        // alert on the other screens, and returning it in the 422 renders an empty alert on the SENDER -- whose
+        // client only checks that `error` is a string. So both carry the same stated fallback. Asserting the two
+        // TOGETHER is the point: normalizing one path and not the other is exactly the bug this pins.
         Guid id = await SeedConversationAsync();
         TurnReturns(new ChatTurnResult(false, "   ", [Cost(AiUsageOutcome.Failed, 0m)]));
 
-        await Invoke(id, "hi", At(3));
+        IResult result = await Invoke(id, "hi", At(3));
 
+        StatusOf(result).Should().Be(StatusCodes.Status422UnprocessableEntity);
+        ValueOf<object>(result).ToString().Should().Contain(ChatEndpoints.FaultedTurnFallbackReason);
         A.CallTo(() => _notifier.TurnFaultedAsync(
-                _operator, A<RealtimeChatTurnFaulted>.That.Matches(signal => signal.Reason == null), A<CancellationToken>._))
+                _operator,
+                A<RealtimeChatTurnFaulted>.That.Matches(signal => signal.Reason == ChatEndpoints.FaultedTurnFallbackReason),
+                A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task TurnAsync_ShouldReturnAndPushTheSameReason_WhenTheFaultedTurnStatesOne()
+    {
+        // The sender and every other screen must read the same explanation for the same fault -- two screens of one
+        // desk disagreeing about why an answer stopped is its own dishonesty (R-19).
+        Guid id = await SeedConversationAsync();
+        TurnReturns(new ChatTurnResult(false, "the model refused that request", [Cost(AiUsageOutcome.Failed, 0m)]));
+
+        IResult result = await Invoke(id, "hi", At(3));
+
+        ValueOf<object>(result).ToString().Should().Contain("the model refused that request");
+        A.CallTo(() => _notifier.TurnFaultedAsync(
+                _operator,
+                A<RealtimeChatTurnFaulted>.That.Matches(signal => signal.Reason == "the model refused that request"),
+                A<CancellationToken>._))
             .MustHaveHappenedOnceExactly();
     }
 
