@@ -348,9 +348,20 @@ public class AccountEntryConcurrencyIntegrationTests : IClassFixture<StubbedVenu
         // gh#1120's non-blocking-path case. The conditional-fire watcher's specific observable: a lock stranded
         // by an aborted take/send must not make the WATCHER's own pg_try_advisory_lock see the account as busy
         // for a turn that has already ended -- that surfaces as a fire deferred to the next quote for no reason
-        // (gh#589). Same abort-then-probe shape as the blocking case, except the probe itself IS the
-        // production call under test (TryRunExclusiveAsync), from a third, genuinely separate connection.
+        // (gh#589). Same abort-then-probe shape as the blocking case, including the SAME pinning discipline:
+        // the watcher's connection is opened BEFORE the aborting call, so Npgsql cannot hand the watcher the
+        // very connector the aborted guard just released. Here the probe itself IS the production call under
+        // test (TryRunExclusiveAsync), taken from that pinned, genuinely separate connection.
         Guid accountId = Guid.NewGuid();
+
+        // PINNED FIRST, and that ordering is what makes this test able to fail. Leasing the watcher's connector
+        // only after the abort lets the pool hand back the aborted guard's own connector, whose DISCARD ALL
+        // reset releases the leaked session lock before pg_try_advisory_lock ever runs -- so the guard would
+        // acquire, `result` would be 1, and the case would stay GREEN against the unfixed
+        // `CancellationToken.None`-less guard, proving nothing (gh#1120 review).
+        await using AsyncServiceScope watcherScope = _factory.Services.CreateAsyncScope();
+        TradingCopilotDbContext watcherDb = watcherScope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+        await watcherDb.Database.OpenConnectionAsync();
 
         await using AsyncServiceScope abortingScope = _factory.Services.CreateAsyncScope();
         // Stateless (see the sibling case's remark above) -- safe to resolve here and reuse below against
@@ -370,12 +381,6 @@ public class AccountEntryConcurrencyIntegrationTests : IClassFixture<StubbedVenu
                 guard.TryRunExclusiveAsync(
                     abortingDb, accountId, abortMidTransmit, onBusy: () => -1, requestAborted.Token))
             .Should().ThrowAsync<OperationCanceledException>();
-
-        // A genuinely separate connection/connector -- created only AFTER the abort completed, so the aborting
-        // context's own connector (already returned to the pool by CloseConnectionAsync) is not necessarily the
-        // one Npgsql hands back here; a fresh scope is enough to make that the pool's choice, not this test's.
-        await using AsyncServiceScope watcherScope = _factory.Services.CreateAsyncScope();
-        TradingCopilotDbContext watcherDb = watcherScope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
 
         int fired = -1;
         int result = await guard.TryRunExclusiveAsync(
