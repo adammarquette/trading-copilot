@@ -97,6 +97,28 @@ describe('monthStats', () => {
     expect(monthStats(DAYS).tradeCount).toBe(7);
   });
 
+  it('sums in whole cents, so a month of many days does not drift off the true total', () => {
+    // Review finding on PR #1114. `realizedPnL` arrives as a `decimal`; accumulating it with plain float
+    // addition drifts (0.1 + 0.2 !== 0.3), and this is the number the operator reconciles against a broker
+    // statement. A month net that is a cent off its own days is a small error that reads as a bug in the
+    // journal -- so the accumulation is done in integer cents.
+    const pennies: readonly DailyRealizedPnL[] = [
+      { date: '2026-09-01', realizedPnL: 0.1, tradeCount: 1 },
+      { date: '2026-09-02', realizedPnL: 0.2, tradeCount: 1 },
+    ];
+
+    expect(monthStats(pennies).net).toBe(0.3);
+  });
+
+  it('averages in whole cents too', () => {
+    const pennies: readonly DailyRealizedPnL[] = [
+      { date: '2026-09-01', realizedPnL: 0.1, tradeCount: 1 },
+      { date: '2026-09-02', realizedPnL: 0.2, tradeCount: 1 },
+    ];
+
+    expect(monthStats(pennies).averagePerDay).toBe(0.15);
+  });
+
   it('reports no average at all for a month with no traded days, never zero', () => {
     // `$0.00 average` claims the operator traded to breakeven. They did not trade.
     const stats = monthStats([]);
@@ -120,6 +142,17 @@ describe('equityCurve', () => {
     expect(equityCurve(shuffled).map((point) => point.cumulative)).toStrictEqual([
       1250, 850, 850, 1000.5,
     ]);
+  });
+
+  it('accumulates in whole cents, so the curve never drifts off its own days', () => {
+    // Same review finding as `monthStats` above: a running float total is a cent adrift after enough days,
+    // and the curve's last point is the month net the strip beside it prints.
+    const points = equityCurve([
+      { date: '2026-09-01', realizedPnL: 0.1, tradeCount: 1 },
+      { date: '2026-09-02', realizedPnL: 0.2, tradeCount: 1 },
+    ]);
+
+    expect(points.map((point) => point.cumulative)).toStrictEqual([0.1, 0.3]);
   });
 
   it('is empty for a month with nothing realized', () => {
