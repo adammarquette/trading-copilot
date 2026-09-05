@@ -58,6 +58,7 @@ public class ProjectXVenueTests
         _venue.Capabilities.Supports(VenueCapability.BracketOrders).Should().BeTrue(); // the always-native safety stop (gh#11 inc 3)
         _venue.Capabilities.Supports(VenueCapability.AccountStreaming).Should().BeTrue(); // the user-hub seam (gh#219)
         _venue.Capabilities.Supports(VenueCapability.ModifyOrder).Should().BeTrue(); // in-place reprice (gh#259)
+        _venue.Capabilities.Supports(VenueCapability.ReducePosition).Should().BeTrue(); // sized partial close (gh#928)
     }
 
     [Theory]
@@ -540,6 +541,145 @@ public class ProjectXVenueTests
         Func<Task> act = async () => await _venue.ClosePositionAsync(Account, Contract, CancellationToken.None);
 
         await act.Should().ThrowAsync<ProjectXVenueException>();
+    }
+
+    // --- Reducing a position: a sized partial close, verified against the venue's own view (gh#928) ---
+
+    private void PartialCloseSucceeds(int size) =>
+        A.CallTo(() => _api.PartialClosePositionAsync(9001, ContractKey, size, A<CancellationToken>._))
+            .Returns(new ClientModels.PartialClosePositionResponse { Success = true });
+
+    private void GatewayReportsOpen(params ClientModels.Position[] positions) =>
+        A.CallTo(() => _api.GetOpenPositionsAsync(9001, A<CancellationToken>._))
+            .Returns<IEnumerable<ClientModels.Position>>(positions);
+
+    private static ClientModels.Position Open(string contractId, int size, ClientModels.PositionType type) =>
+        new()
+        {
+            AccountId = 9001,
+            ContractId = contractId,
+            Type = type,
+            Size = size,
+            AveragePrice = 5_000m,
+        };
+
+    [Fact]
+    public async Task ReducePositionAsync_ShouldReportWhatRemains_WhenTheVenueStillHoldsAReducedPosition()
+    {
+        // The whole point of the reduce: part comes off, part stays. What stays is read back from the venue, never
+        // inferred from the partial close returning -- the caller's "verified reduction only" rule needs it honest.
+        PartialCloseSucceeds(1);
+        GatewayReportsOpen(Open(ContractKey, 2, ClientModels.PositionType.Long));
+
+        PositionSnapshot result = await _venue.ReducePositionAsync(Account, Contract, 1, CancellationToken.None);
+
+        result.IsFlat.Should().BeFalse();
+        result.NetQuantity.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task ReducePositionAsync_ShouldReportTheOriginalSize_WhenTheGatewayAcceptedButNothingCameOff()
+    {
+        // The card's central hazard at the adapter: a partial close the gateway reported Success for while the
+        // position is UNCHANGED. The adapter must surface the original size so the caller can refuse to call it
+        // done -- an adapter that returned the size it expected would make the verification vacuous.
+        PartialCloseSucceeds(1);
+        GatewayReportsOpen(Open(ContractKey, 3, ClientModels.PositionType.Long));
+
+        PositionSnapshot result = await _venue.ReducePositionAsync(Account, Contract, 1, CancellationToken.None);
+
+        result.NetQuantity.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ReducePositionAsync_ShouldReportFlat_WhenTheVenueNoLongerHoldsThePosition()
+    {
+        // A reduce the gateway took all the way to flat is still read from venue truth: the caller decides what
+        // "flat when I asked for a partial" means, on an honest number.
+        PartialCloseSucceeds(1);
+        GatewayReportsOpen();
+
+        PositionSnapshot result = await _venue.ReducePositionAsync(Account, Contract, 1, CancellationToken.None);
+
+        result.IsFlat.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ReducePositionAsync_ShouldReadBackTheRequestedContractOnly()
+    {
+        // The gateway's open-positions read is account-wide. Taking the first row would hand the caller ANOTHER
+        // instrument's size as this position's remainder -- a verified-reduction check on the wrong number.
+        PartialCloseSucceeds(1);
+        GatewayReportsOpen(
+            Open("CON.F.US.ENQ.U26", 9, ClientModels.PositionType.Long),
+            Open(ContractKey, 2, ClientModels.PositionType.Long));
+
+        PositionSnapshot result = await _venue.ReducePositionAsync(Account, Contract, 1, CancellationToken.None);
+
+        result.NetQuantity.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task ReducePositionAsync_ShouldSendTheRequestedSizeToTheGateway()
+    {
+        // Sizing is the caller's; the adapter transmits exactly what it was given to the partial-close endpoint.
+        int? sent = null;
+        A.CallTo(() => _api.PartialClosePositionAsync(9001, ContractKey, A<int>._, A<CancellationToken>._))
+            .Invokes((int _, string _, int size, CancellationToken _) => sent = size)
+            .Returns(new ClientModels.PartialClosePositionResponse { Success = true });
+        GatewayReportsOpen(Open(ContractKey, 2, ClientModels.PositionType.Long));
+
+        await _venue.ReducePositionAsync(Account, Contract, 3, CancellationToken.None);
+
+        sent.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ReducePositionAsync_ShouldThrowAndNotReadBack_WhenTheGatewayRefusesTheReduce()
+    {
+        // The same reported-failure-without-throwing hazard as the full close: a refusal the adapter swallowed
+        // would fall through to the read-back and present an unchanged position as a legitimate answer, hiding a
+        // gateway rejection (e.g. InvalidCloseSize) behind a "the venue just did not move it" reading.
+        A.CallTo(() => _api.PartialClosePositionAsync(9001, ContractKey, 5, A<CancellationToken>._))
+            .Returns(new ClientModels.PartialClosePositionResponse
+            {
+                Success = false,
+                ErrorCode = 5,
+                ErrorMessage = "InvalidCloseSize",
+            });
+
+        Func<Task> act = async () => await _venue.ReducePositionAsync(Account, Contract, 5, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ProjectXVenueException>();
+        A.CallTo(() => _api.GetOpenPositionsAsync(A<int>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task ReducePositionAsync_ShouldThrow_WhenTheQuantityIsNotPositive(int quantity)
+    {
+        // Transport-level sanity (not policy): a non-positive reduce is meaningless and never reaches the gateway.
+        Func<Task> act = async () =>
+            await _venue.ReducePositionAsync(Account, Contract, quantity, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        A.CallTo(() => _api.PartialClosePositionAsync(A<int>._, A<string>._, A<int>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ReducePositionAsync_ShouldThrow_WhenTheContractBelongsToAnotherVenue()
+    {
+        // The venue-qualifier guard, same as the full close: an id from another venue must never be sent to this
+        // gateway on a colliding key.
+        VenueContractId foreign = VenueContractId.Create(VenueId.Parse("tradovate"), ContractKey);
+
+        Func<Task> act = async () => await _venue.ReducePositionAsync(Account, foreign, 1, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        A.CallTo(() => _api.PartialClosePositionAsync(A<int>._, A<string>._, A<int>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
     }
 
     // --- Bars ---
