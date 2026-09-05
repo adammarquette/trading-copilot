@@ -55,6 +55,7 @@ public sealed class ScriptedChatLlmProvider : ILlmProvider
     private Func<LlmRequest, LlmCompletion>? _always;
     private bool _runawayTripped;
     private int _unscriptedCalls;
+    private Func<Task>? _onCall;
 
     /// <summary>Every model call the system made, in order — the offered tools and fed-back results are on each request.</summary>
     public IReadOnlyList<RecordedLlmCall> Calls
@@ -120,8 +121,22 @@ public sealed class ScriptedChatLlmProvider : ILlmProvider
             _always = null;
             _runawayTripped = false;
             _unscriptedCalls = 0;
+            _onCall = null;
         }
     }
+
+    /// <summary>
+    /// Runs <paramref name="effect"/> inside every model call (<see cref="StreamAsync"/> and
+    /// <see cref="CompleteAsync"/>), after the scripted completion is computed but before it is returned — the seam
+    /// gh#1118's chat-turn-guard concurrency suite uses to launch a peer request while <c>ChatTurnGuard</c>'s
+    /// per-conversation advisory lock is still held (the SQL unlock runs only once the whole turn this model call is
+    /// part of has returned). Mirrors <see cref="AdversarialTestProjectXVenueFactory.OnPlaceOrder"/>. Unlike that
+    /// blocking-lock seam, a peer launched here may be safely <b>awaited inline</b>: the chat-turn guard's own check
+    /// is non-blocking (<c>pg_try_advisory_lock</c> fails fast rather than parking), so a peer racing the SAME
+    /// conversation can never deadlock on the lock under test. Passing <see langword="null"/> clears it.
+    /// </summary>
+    /// <param name="effect">The interleave to run, or <see langword="null"/> to clear it.</param>
+    public void OnCall(Func<Task>? effect) => _onCall = effect;
 
     /// <summary>Appends one scripted step, consumed in call order.</summary>
     /// <param name="step">Builds the completion from the request the system issued.</param>
@@ -211,10 +226,17 @@ public sealed class ScriptedChatLlmProvider : ILlmProvider
     }
 
     /// <inheritdoc />
-    public Task<LlmCompletion> CompleteAsync(LlmRequest request, CancellationToken cancellationToken)
+    public async Task<LlmCompletion> CompleteAsync(LlmRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return Task.FromResult(Next(LlmCallKind.Complete, request));
+        LlmCompletion completion = Next(LlmCallKind.Complete, request);
+
+        if (_onCall is { } onCall)
+        {
+            await onCall();
+        }
+
+        return completion;
     }
 
     /// <inheritdoc />
@@ -225,6 +247,11 @@ public sealed class ScriptedChatLlmProvider : ILlmProvider
         ArgumentNullException.ThrowIfNull(onDelta);
 
         LlmCompletion completion = Next(LlmCallKind.Stream, request);
+
+        if (_onCall is { } onCall)
+        {
+            await onCall();
+        }
 
         // Emit the answer as a single delta outside the lock (never await while holding it). The accumulated result
         // matches CompleteAsync, so the caller prices and fail-closes it identically.

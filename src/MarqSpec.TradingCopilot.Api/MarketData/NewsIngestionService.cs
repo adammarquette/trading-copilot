@@ -242,11 +242,30 @@ public sealed class NewsIngestionService
         return null;
     }
 
-    // The first stored row that is likely the same story as `pending` under the R-2 fuzzy rule.
+    // The first stored row that is likely the same story as `pending` under the R-2 fuzzy rule. Mirrors
+    // FindFuzzyMatch's same-feed skip across the poll boundary: a candidate that already carries one of
+    // `pending`'s feeds is skipped, because a same-feed near-duplicate under a new URL is ordinarily a
+    // follow-up or correction, not a duplicate to fold in (gh#1132).
+    //
+    // The mirror is deliberately naive, not the finer-grained "which feed's rendering is currently on the row"
+    // read the asymmetry noted in gh#1132 would need: a stored row can carry SEVERAL feeds by the time it is
+    // consulted (an earlier cross-feed fuzzy merge, or plain canonical corroboration), so "already carries this
+    // feed" is a weaker signal here than it is against a single-feed PendingItem, and can occasionally refuse a
+    // genuine later correction from a feed that only ever contributed provenance, not content. That refusal
+    // costs an extra row for one story -- the SAME direction gh#764 / #827 already chose as the cheaper error:
+    // a false positive here (a wrongly-merged row) destroys a real event, while a false negative (an unmerged
+    // duplicate row) only costs a duplicate view of it. Tracking per-feed content provenance to close that gap
+    // precisely is a bigger, data-model-shaped change (a "which feed authored the surviving Title" column) that
+    // this Work Estimate 2 fix does not attempt -- flagged for the maintainer rather than silently narrowed.
     private NewsRecord? FindFuzzyStored(IEnumerable<NewsRecord> candidates, PendingItem pending)
     {
         foreach (NewsRecord candidate in candidates)
         {
+            if (candidate.SourceFeeds.Any(sourceFeed => pending.Feeds.Contains(sourceFeed, StringComparer.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
             if (NewsFuzzyDedup.AreLikelyTheSameStory(
                 candidate.Title, candidate.PublishedAt, candidate.Tickers,
                 pending.Title, pending.PublishedAt, pending.Tickers,
