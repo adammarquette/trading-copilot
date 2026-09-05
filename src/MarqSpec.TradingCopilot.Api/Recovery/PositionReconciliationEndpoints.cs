@@ -25,6 +25,9 @@ public static class PositionReconciliationEndpoints
         endpoints.MapPost("/accounts/{id:guid}/positions/{instrument}/exit", ExitAsync).RequireAuthorization()
             .WithTags("Positions")
             .WithSummary("Close one instrument's position at market — the operator's per-position exit.");
+        endpoints.MapPost("/accounts/{id:guid}/positions/{instrument}/reduce", ReduceAsync).RequireAuthorization()
+            .WithTags("Positions")
+            .WithSummary("Reduce one instrument's position by a number of contracts at market — a sized partial close.");
         return endpoints;
     }
 
@@ -62,6 +65,66 @@ public static class PositionReconciliationEndpoints
             PositionExitOutcome.StillOpen => Results.Conflict(new PositionExitResponse(
                 result.Outcome.ToString(), result.NetQuantity)),
             _ => Results.Conflict(new PositionExitResponse(PositionExitOutcome.Unreachable.ToString(), 0)),
+        };
+    }
+
+    /// <summary>
+    /// Reduces one instrument's position by a number of contracts (gh#928, R-11) — the blotter's reduce control.
+    /// </summary>
+    /// <remarks>
+    /// <b>Only a verified reduction is a 200.</b> A partial close the venue accepted while still reporting the
+    /// original size, one that took off a different amount than asked, a side flip, and an unreachable venue all
+    /// resolve to non-200 — an operator told "reduced" would trust a smaller exposure than they hold. A reduce that
+    /// is not strictly partial (at or beyond the open size) is a 400: a full close belongs to the exit control,
+    /// which also cancels the protective legs.
+    /// </remarks>
+    internal static async Task<IResult> ReduceAsync(
+        Guid id,
+        string instrument,
+        PositionReduceRequest request,
+        PositionReduceService reduces,
+        CancellationToken cancellationToken)
+    {
+        if (!InstrumentId.TryParse(instrument, out InstrumentId parsed))
+        {
+            return Results.BadRequest(new { error = $"'{instrument}' is not a valid instrument." });
+        }
+
+        if (request is null || request.Quantity <= 0)
+        {
+            // A non-positive reduce is meaningless, and a client mistake told apart from an unreachable venue.
+            return Results.BadRequest(new { error = "quantity must be a positive number of contracts to reduce by." });
+        }
+
+        PositionReduceResult? result = await reduces.ReduceAsync(id, parsed, request.Quantity, cancellationToken);
+        if (result is null)
+        {
+            return Results.NotFound(); // not found / not owned (R-20)
+        }
+
+        return result.Outcome switch
+        {
+            PositionReduceOutcome.Reduced => Results.Ok(new PositionReduceResponse(
+                result.Outcome.ToString(), result.NetQuantity)),
+            // Not strictly partial (>= what is open): a client sizing error, distinct from a transient. The body
+            // carries the current size so the operator can correct — or reach for the exit control for a full close.
+            PositionReduceOutcome.ExceedsPosition => Results.BadRequest(new PositionReduceResponse(
+                result.Outcome.ToString(), result.NetQuantity)),
+            // The three non-200s that each mean something different, and none of which means "just send it again":
+            //   Refused    — the venue answered no and executed nothing; the net quantity is the TRUE current size.
+            //   Unconfirmed— the close WAS transmitted and its effect cannot be established. Re-read venue truth;
+            //                re-sending a non-idempotent partial close inside the settle window takes the size off
+            //                twice, past flat into an opposing position.
+            //   NotReduced — the position moved, but not by what was asked. The body carries the true net.
+            // A client that collapses these into one retry is the hazard, which is why they are distinct names.
+            PositionReduceOutcome.Refused
+                or PositionReduceOutcome.Unconfirmed
+                or PositionReduceOutcome.NotReduced
+                or PositionReduceOutcome.AccountBusy => Results.Conflict(new PositionReduceResponse(
+                    result.Outcome.ToString(), result.NetQuantity)),
+            // Unreachable, and the fail-closed Unknown with it. The net quantity stays null rather than 0: an
+            // exposure nobody could read is unknown, and a 0 here would let a client render an outage as flat.
+            _ => Results.Conflict(new PositionReduceResponse(PositionReduceOutcome.Unreachable.ToString(), null)),
         };
     }
 
@@ -124,3 +187,16 @@ public sealed record ReconciledPosition(string Contract, int NetQuantity, decima
 /// <param name="Outcome"><c>Flat</c>, <c>StillOpen</c> or <c>Unreachable</c> — as a name, not an integer.</param>
 /// <param name="NetQuantity">The signed exposure the venue still reports; 0 when flat or unreachable.</param>
 public sealed record PositionExitResponse(string Outcome, int NetQuantity);
+
+/// <summary>How many contracts an operator wants to take off a position (gh#928).</summary>
+/// <param name="Quantity">The positive number of contracts to reduce by; must be strictly less than what is open.</param>
+public sealed record PositionReduceRequest(int Quantity);
+
+/// <summary>The outcome of an operator-initiated reduce (gh#928).</summary>
+/// <param name="Outcome"><c>Reduced</c>, <c>NotReduced</c>, <c>Unconfirmed</c>, <c>Refused</c>, <c>ExceedsPosition</c>, <c>AccountBusy</c> or <c>Unreachable</c> — as a name, not an integer. Only <c>Reduced</c> is done, and only <c>ExceedsPosition</c>, <c>Refused</c> and <c>AccountBusy</c> are safe to re-issue: the rest may already have executed.</param>
+/// <param name="NetQuantity">
+/// The signed exposure the venue reports after the attempt — or the current size, when the request was refused
+/// before the venue was touched. <b><c>null</c> when the venue could not be reached</b>: an exposure nobody could
+/// read is unknown, and a <c>0</c> there would let a client render an outage as flat.
+/// </param>
+public sealed record PositionReduceResponse(string Outcome, int? NetQuantity);

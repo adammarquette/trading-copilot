@@ -176,6 +176,7 @@ for validating heading-order/index against the trail in CI rather than by hand �
 | 2026-08-09 | [the R-4 suggestion throttle is wired into the scan (gh#551)](#update-2026-08-09--the-r-4-suggestion-throttle-is-wired-into-the-scan-gh551) |
 | 2026-08-13 | [withdraw a pending conditional via the order API (gh#655)](#update-2026-08-13--withdraw-a-pending-conditional-via-the-order-api-gh655) |
 | 2026-08-21 | [the reduce's bracket gate is scaffolded, and the reduce stays unbuilt behind it (gh#1012)](#update-2026-08-21--the-reduces-bracket-gate-is-scaffolded-and-the-reduce-stays-unbuilt-behind-it-gh1012) |
+| 2026-09-05 | [the reduce is built as a sized venue close, and held on the still-unrun bracket gate (gh#928)](#update-2026-09-05--the-reduce-is-built-as-a-sized-venue-close-and-held-on-the-still-unrun-bracket-gate-gh928) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 
@@ -1244,6 +1245,122 @@ and nothing may treat the gate as cleared. If the first staging run comes back r
 gh#928's reduce must itself resize or cancel the bracket — or refuse a reduce that would desync it — before any
 funded use. Until the run happens, the reduce simply stays unbuilt, which is the safe default and the one gh#928
 already chose.
+
+## Update (2026-09-05) — the reduce is built as a sized venue close, and held on the still-unrun bracket gate (gh#928)
+
+The update above closed with *"the reduce simply stays unbuilt, which is the safe default"*. That is now half
+superseded: the reduce **is built** (`POST /accounts/{id}/positions/{instrument}/reduce`), and the half that is
+**not** superseded is the one that matters — **the gh#1012 gate still has not run**, so nothing here may be treated
+as cleared, and this path stays practice-only.
+
+**The sizing decision, recorded.** gh#865 posed the fork: a **sized close on the venue seam**, or an **opposing
+order through the ordinary send ladder**. This ships the sized venue close.
+
+- A reduce **lowers** exposure. An opposing order is a *send*, and every send funnels through the R-5 gate, R-16
+  caps and R-12 re-validation (the first bullet of the Decision above). That path can **refuse** — which on a reduce
+  means *refusing to lower risk*. This ADR's own rule is that reducing and protective actions do not traverse the
+  entry path: auto-flatten (R-13), the kill switch's flatten, `DELETE /orders/{id}` (gh#250, "risk-reducing, so
+  allowed even while the kill switch is engaged") and the full exit (gh#656) are all outside it. A reduce is a
+  *close*, so it belongs with them, and it is likewise **not** gated on the kill switch.
+- The rejected alternative is not merely more code: it would have put the one control an operator reaches for when
+  they want *less* exposure behind a mechanism designed to say no.
+- **The open question the documents do not settle**, stated plainly rather than answered here: *may the gate ever
+  refuse a risk-lowering order?* Nothing in R-5, R-16 or this ADR addresses it, because no risk-lowering action has
+  ever traversed the gate. Choosing the venue-close route means this reduce never poses the question — it is not a
+  policy this PR invents, and it stays open for the operator if a future venue lacks a native partial close and the
+  synthetic route becomes the only one.
+
+**What it enforces.** Two properties, both below the model:
+
+- **Strictly partial.** A request at or beyond the open size is refused (`ExceedsPosition`) **before the venue is
+  touched**. Reducing by the whole position is a *full close*, and a full close is the path that cancels the
+  protective OCO legs (gh#183); routing a flatten through the sized partial close would leave a dangling protective
+  order. The guard is on **magnitude**, so a short is guarded identically, and it is sized off the **requested
+  contract**, not whatever the account-wide read returns first.
+- **Only a verified reduction is success.** Read from venue truth *after* the attempt (ADR-0013), against what was
+  **asked**: the position smaller by *exactly* the requested amount, same side. An unchanged size, an
+  under-execution, an over-execution (up to and including flat), and a side flip are each **not done**. gh#928 §⚠️2
+  offered "exact-requested-delta vs. any strict reduction"; exact-delta is taken, because *any strict reduction*
+  lets a partial execution — the venue closing **less** than asked — read as a clean success while more exposure
+  stands than the operator targeted. An unreachable venue reports **no** net quantity rather than `0`: after a
+  failed partial close the exposure is genuinely unknown, and a `0` there manufactures a flat out of an outage
+  (the failure gh#929 records). The shipped exit endpoint still returns `0` on `Unreachable`; changing a live
+  contract is its own card, and the divergence is deliberate rather than an oversight.
+
+**Still unresolved, and the reason this must not reach a funded account.** Everything the previous update says
+about the bracket stands **unchanged**: the always-native safety bracket carries no size of its own, this reduce
+does not resize it, and whether ProjectX auto-manages a position-linked bracket on `partialCloseContract` has
+**never been observed** — `staging-gates.yml` has zero runs to date. gh#1012 was closed when its suite landed, not
+when it produced a finding; a closed card is not a cleared gate. So the hazard is exactly as described: a stop
+still sized to the original quantity sells the original quantity against a smaller position and **overshoots into
+an opposing one**, and the mirror outcome — a cancelled bracket — leaves the remainder naked.
+
+Two things narrow it without closing it. The strict-partial guard means a reduce can never **silently** become a
+flatten: the size it asks for always leaves part of the position on, measured against the read it just took. It
+does **not** mean a reduce can never *end up* flat — a protective stop or a concurrent exit firing inside the
+attempt takes it there regardless, which is the very race the next paragraph is about. And the exact-delta rule
+means that race (a stop partial-fills underneath the reduce, taking it to zero) surfaces as **not done** with a net
+of 0, so the operator is *alerted* to a state where a dangling leg may cover a flat position rather than shown a
+green success.
+
+**A partial close is not instantaneous, and the first cut of this treated it as if it were.** Review found three
+ways that assumption leaked, each closed here:
+
+- **An unchanged read-back is not "it did not happen".** The venue can accept the close and still report the
+  original size a moment later, because the fill has not settled. Reporting that as `NotReduced` — whose natural
+  reading is *try again* — invites a **re-send of a non-idempotent write**, taking the size off twice, past flat
+  into an opposing position. It is now its own outcome, `Unconfirmed`: **transmitted, effect unestablished, re-read
+  venue truth — do not re-send.** Every non-`Reduced` outcome is now named so that a client cannot collapse them
+  into one retry.
+- **A definitive refusal is not an outage.** A gateway `!success` was being folded into `Unreachable` with no net
+  quantity — two falsehoods at once, since the venue *was* reached and the exposure *is* known. The adapter now
+  classifies at the throw site with gh#629's `VenueRefusalException` / `VenueRefusalKind`, and — unlike a placement,
+  where any `!success` means nothing was placed — asserts `Definitive` only for the codes that positively mean the
+  gateway executed nothing. `OrderPending` (a close order exists and may fill), `UnknownError`, and any unrecognised
+  code stay **Indeterminate**, the fail-safe default, and surface as `Unconfirmed`.
+- **Two concurrent reduces both sized against the same snapshot.** Structurally the gh#531 send-vs-send hazard, and
+  worse here because the write accumulates: both pass the strict-partial guard against the same pre-reduce read and
+  both transmit. The reduce now runs under the same per-account transmit lock, taken **non-blocking**
+  (`TryRunExclusiveAsync`) and spanning the before-read as well as the close — waiting would only queue a second
+  close still sized against a stale read, so a busy account is refused (`AccountBusy`, nothing sent) for the
+  operator to re-issue deliberately.
+
+A residual remains, and it is the same root cause as the retry hold below: `partialCloseContract` carries **no
+idempotency key**, so nothing can make a deliberate operator re-send inside the settle window safe. The outcome
+names and the surfaces built on them are what stand between the operator and that mistake — which is why the
+gh#865 blotter control must render `Unconfirmed` as *re-read*, never as a retry button.
+
+What remains is the operator's, and this update deliberately does not choose it: **the post-reduce protection
+policy** gh#928 §⚠️1 reserves — auto-resize the bracket, refuse a reduce that would desync it, or warn loudly. All
+three are policies about what to do with real protective orders, and picking one on unobserved venue behaviour would
+be a guess wearing a decision's clothes.
+
+**A second hold, found in review — the partial close is auto-retried below the adapter.** The 2026-08-05 update
+above records why `POST /api/Order/place` is excluded from the client's transient-fault retry (gh#673): a
+non-idempotent write that loses its acknowledgement gets **re-sent**, and the duplicate's rejection reads as a
+definitive "nothing was placed". That exclusion is written as *"every other route here is a read/search or an
+idempotent cancel"* — and **`POST /api/Position/partialCloseContract` breaks that premise**. Unlike the full close
+(re-closing a flat position is a no-op) and the modify (absolute values), a *sized* partial close **accumulates**:
+`partialCloseContract(1)` sent twice takes two contracts off. With three retry attempts a reduce-by-1 can take up to
+four off, and on a small enough position it overshoots past flat into an **opposing** one — the same de-risking
+action creating exposure that the bracket hazard describes, by a different route.
+
+Nothing in this repo can prevent it: the retry happens inside the HTTP pipeline, underneath `IProjectXApiClient`.
+The exclusion must widen in the vendored client (**MarqSpec.Client.ProjectX#98**, filed from this review), which is a
+cross-repo change and a submodule pin bump rather than part of this increment. So it is recorded here as the
+**second named hold condition**, not left as a residual risk. The verified-reduction rule still refuses to call an
+over-reduced position done — it reports the true, wrong net quantity — but it cannot undo the second send.
+
+**Both holds point the same way**, and they share the residual above: a sized partial close is non-idempotent and
+has no idempotency key, so the only defences are *not re-sending it* (the outcome names, the account lock) and
+*not retrying it underneath us* (the client exclusion). Until the gh#1012 run happens **and**
+MarqSpec.Client.ProjectX#98 lands, the reduce is **practice-only**.
+
+**Still unratified, and not settled by this update:** gh#928 §⚠️2 asks the operator to choose between
+*exact-requested-delta* and *any strict reduction* as the verified bar. Exact-delta is what is built, because it is
+the card's own proposed default and because *any strict reduction* lets an under-execution read as a clean success —
+but that is an argument for a choice, not the choice being made. It stays on the operator's list alongside the
+post-reduce protection policy.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the
