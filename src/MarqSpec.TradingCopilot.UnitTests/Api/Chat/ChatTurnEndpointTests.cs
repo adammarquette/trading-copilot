@@ -109,11 +109,52 @@ public class ChatTurnEndpointTests
         await context.SaveChangesAsync();
     }
 
+    /// <summary>
+    /// The turn scope the handler enters (gh#1059) — a REAL <see cref="ChatTurnScope"/>, not a fake, so
+    /// <see cref="TurnAsync_ShouldEnterTheTurnScope_SoAWriteToolCanRecordItsProvenance"/> reads back exactly what a
+    /// chat write tool would resolve from DI.
+    /// </summary>
+    private readonly ChatTurnScope _turnScope = new();
+
     private Task<IResult> Invoke(Guid id, string content, DateTimeOffset now, GovernorOptions? governor = null) =>
         ChatEndpoints.TurnAsync(
             id, new ChatTurnRequest(content), now, Context(),
             _turn, _retrieval, _governor, Options.Create(governor ?? new GovernorOptions()),
-            _ledger, _metrics, _notifier, NullLoggerFactory.Instance, default);
+            _ledger, _metrics, _notifier, _turnScope, NullLoggerFactory.Instance, default);
+
+    /// <summary>
+    /// gh#1059: a chat WRITE tool stamps the conversation it was authored in as R-7 provenance (gh#471), and it fails
+    /// closed without one — so the endpoint must enter the scope on the PRODUCTION path, not merely offer a seam that
+    /// something else is expected to fill. Asserted through the real handler, since a tool that only ever saw a
+    /// hand-entered scope in its own tests would pass while production wrote unattributed rules.
+    /// </summary>
+    [Fact]
+    public async Task TurnAsync_ShouldEnterTheTurnScope_SoAWriteToolCanRecordItsProvenance()
+    {
+        Guid id = await SeedConversationAsync();
+        TurnReturns(new ChatTurnResult(true, "staged", [Cost()]));
+        _turnScope.ConversationId.Should().BeNull("the scope starts empty — this case must be able to fail");
+
+        await Invoke(id, "add a rule for me", At(3));
+
+        _turnScope.ConversationId.Should().Be(
+            id, "the handler enters the turn's conversation, so a write tool has provenance to stamp");
+    }
+
+    /// <summary>
+    /// The scope must be entered only for a conversation the caller genuinely owns: a 404'd turn never runs a tool,
+    /// and leaving a foreign id in the scope would hand any later write the wrong provenance.
+    /// </summary>
+    [Fact]
+    public async Task TurnAsync_ShouldNotEnterTheTurnScope_WhenTheConversationIsNotTheCallers()
+    {
+        Guid foreign = await SeedConversationAsync(Guid.NewGuid());
+
+        IResult result = await Invoke(foreign, "add a rule for me", At(3));
+
+        StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
+        _turnScope.ConversationId.Should().BeNull("no turn ran, so nothing may claim to have been authored in one");
+    }
 
     [Fact]
     public async Task TurnAsync_ShouldPersistBothTurns_MeterAndLedger_PushToOwner_AndReturnThem_OnSuccess()

@@ -32,9 +32,12 @@ public sealed record ChatTurnResult(bool Succeeded, string Message, IReadOnlyLis
 /// the endpoint owns those — so it is trivially unit-testable behind a fake provider + fake tools.
 /// </summary>
 /// <remarks>
-/// <b>Enforcement lives below the model.</b> Nothing here places, sizes, or proposes an order — the co-pilot only
-/// converses and reads. Every offered <see cref="IChatTool"/> is read-only by construction; the loop runs whatever the
-/// model asks for from that fixed, read-only set and never invents an action outside it. The system prompt is
+/// <b>Enforcement lives below the model.</b> Nothing here places, sizes, or modifies an order — the co-pilot converses,
+/// reads, and (since gh#1059) <b>proposes</b>. Every offered <see cref="IChatTool"/> reaches no order / venue / gate
+/// type by construction: the read tools only read, and the two write tools stage artifacts that are <b>inert until the
+/// operator acts</b> — a <c>Suggestion</c> only the operator can take (the risk gate runs then), and an
+/// <b>Unconfirmed</b> trigger only the operator can arm. The loop runs whatever the model asks for from that fixed
+/// registered set and never invents an action outside it. The system prompt is
 /// <b>fixed and holds no risk limits or account state</b>, and message <see cref="ChatMessage.Content"/> is
 /// <b>untrusted display data</b>: it becomes a User / Assistant turn, never folded into the system prompt as
 /// instruction. The tool loop is <b>bounded</b> (a hard round cap → fail-closed) so the model can never drive an
@@ -91,9 +94,12 @@ internal sealed class ChatTurnService : IChatTurnService
     /// </summary>
     private const string SystemPrompt =
         "You are a trading co-pilot for a single futures trader. Help them analyse markets, setups, order flow, and "
-        + "their own trading, grounded in the conversation and the read-only tools you are given. You never place, "
+        + "their own trading, grounded in the conversation and the tools you are given. You never place, "
         + "modify, or size orders, and you never give personalized financial advice — execution is always an explicit "
         + "action the trader takes themselves. Use a tool when it would ground your answer in the trader's real data. "
+        + "Two tools write: generate_suggestion stages a proposal the trader must take themselves, and edit_rulebook "
+        + "writes a rule that stays inert until the trader confirms it — so say what you staged and that it is not "
+        + "live yet, and never claim a trade was placed or a rule armed. "
         + "Be concise and specific, and say plainly when you are not sure.";
 
     /// <summary>
@@ -113,9 +119,9 @@ internal sealed class ChatTurnService : IChatTurnService
     private readonly LlmOptions _options;
     private readonly ILogger<ChatTurnService> _logger;
 
-    /// <summary>Creates the service over the provider seam, the read-only tools, and the pricing options.</summary>
+    /// <summary>Creates the service over the provider seam, the registered chat tools, and the pricing options.</summary>
     /// <param name="provider">The provider-neutral LLM seam.</param>
-    /// <param name="tools">The read-only chat tools the model may call (gh#925).</param>
+    /// <param name="tools">The chat tools the model may call — the read set (gh#925) and the write set (gh#1059).</param>
     /// <param name="options">The LLM options — the model id and pinned per-tier rates.</param>
     /// <param name="logger">The logger (a faulted call is logged, never silently swallowed).</param>
     public ChatTurnService(
@@ -252,7 +258,7 @@ internal sealed class ChatTurnService : IChatTurnService
     }
 
     /// <summary>
-    /// Runs each requested tool from the fixed read-only set, fail-closed: an unknown tool or a tool that throws yields
+    /// Runs each requested tool from the fixed registered set, fail-closed: an unknown tool or a tool that throws yields
     /// an <c>IsError</c> result the model reads, never a throw out of the turn. Only a genuine caller cancellation propagates.
     /// </summary>
     private async Task<IReadOnlyList<LlmToolResult>> RunToolsAsync(
@@ -265,7 +271,8 @@ internal sealed class ChatTurnService : IChatTurnService
             if (tool is null)
             {
                 // The model named a tool that is not offered -- never dispatch it; a fail-closed error result lets the
-                // model recover or apologise rather than the turn throwing.
+                // model recover or apologise rather than the turn throwing. This is the guard that keeps an INVENTED,
+                // order-shaped tool name from ever reaching anything, whatever the registered set contains.
                 results.Add(new LlmToolResult(call.Id, "{\"error\":\"unknown tool\"}", IsError: true));
                 continue;
             }

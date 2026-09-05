@@ -111,6 +111,19 @@ public static class AiRegistration
         services.AddScoped<IChatTool, GetQuoteTool>();
         services.AddScoped<IChatTool, ReadPositionsTool>();
 
+        // The WRITE chat tools (gh#1059, ADR-0029): the co-pilot may now PROPOSE a setup and author a rule. They are
+        // still not an execution path -- generate_suggestion stages an Active Suggestion the operator must take
+        // themselves (the risk gate runs then, below the model), and edit_rulebook writes an UNCONFIRMED TriggerRecord
+        // that is inert regardless of Enabled until the operator's own POST /{id}/confirm arms it. Like their read
+        // siblings they reach no order / venue / gate type -- ChatToolBoundaryTests pins that structurally over EVERY
+        // IChatTool, so a future tool is covered by construction rather than by remembering to add it. SCOPED: each
+        // holds the request's ICurrentUser (R-20) and the scoped DbContextOptions, so a singleton would be a captive
+        // dependency failing ValidateScopes at startup. Each builds its OWN owner-scoped context per call (the
+        // AiUsageLedger idiom) so a tool write never enrols in the chat endpoint's transaction.
+        services.AddScoped<IChatTurnScope, ChatTurnScope>();
+        services.AddScoped<IChatTool, GenerateSuggestionTool>();
+        services.AddScoped<IChatTool, EditRulebookTool>();
+
         // The shared CROSS-KIND retrieval pipeline (gh#1065, generalising gh#995; ADR-0027 / ADR-0025 / ADR-0008):
         // embed the query once -> recall each asked kind -> hydrate -> merge nearest-first -> rerank, ledgering its own
         // embed (Embed) + rerank (Chat) spend stamped to the operator. The FIRST IReranker consumer's core (gh#987),

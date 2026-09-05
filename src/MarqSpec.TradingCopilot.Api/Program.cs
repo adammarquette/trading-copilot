@@ -255,10 +255,13 @@ builder.Services.AddOptions<SuggestionOptions>()
             // ranges mirror Declare's: threshold in (0, 1], a positive cap, a conviction floor in [0, 100].
             && options.ThrottleThresholdFraction > 0m && options.ThrottleThresholdFraction <= 1m
             && options.ThrottleFullWindowCap >= 1
-            && options.ThrottleConvictionFloor >= 0 && options.ThrottleConvictionFloor <= 100,
+            && options.ThrottleConvictionFloor >= 0 && options.ThrottleConvictionFloor <= 100
+            // A non-positive chat proposal size would emit a suggestion the CK_Suggestions_Size_Positive CHECK
+            // refuses, so the write tool would fail closed on every call; caught once at startup (gh#1059).
+            && options.ChatProposalSize >= 1,
         "Suggestions: require MaxPageSize >= 1, DefaultPageSize in [1, MaxPageSize], ValidityMinutes >= 1, "
             + "DriftToleranceTicks >= 1, ThrottleThresholdFraction in (0, 1], ThrottleFullWindowCap >= 1, "
-            + "and ThrottleConvictionFloor in [0, 100].")
+            + "ThrottleConvictionFloor in [0, 100], and ChatProposalSize >= 1.")
     .ValidateOnStart();
 
 // Indicator projections over that store (gh#310, R-1, ADR-0001: "indicators are projections… rebuild = replay").

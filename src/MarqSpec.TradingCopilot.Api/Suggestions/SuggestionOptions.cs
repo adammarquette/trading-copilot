@@ -63,4 +63,19 @@ public sealed class SuggestionOptions
 
     /// <summary>The minimum model confidence (0–100) a candidate needs while throttled — "higher-conviction only" (gh#588).</summary>
     public int ThrottleConvictionFloor { get; set; } = 70;
+
+    /// <summary>
+    /// The contract size a <b>chat-proposed</b> suggestion is staged at (gh#1059, <c>generate_suggestion</c>). Must be
+    /// positive; defaults to the smallest tradable size.
+    /// </summary>
+    /// <remarks>
+    /// <b>This exists so the model never sizes.</b> A scan-issued suggestion takes its size from the operator's own
+    /// agent-review trigger; a chat proposal has no trigger, so without an operator-configured value the only other
+    /// source would be the model's own JSON — precisely what "enforcement lives below the model" forbids. So the
+    /// <c>generate_suggestion</c> schema carries no size property at all and this value is used instead, exactly like
+    /// <see cref="ValidityMinutes"/> beside it: deployment configuration, the operator's, validated on start. The
+    /// conservative default of <b>1</b> keeps a fresh deployment at the smallest exposure rather than inheriting a
+    /// number nobody chose; the take-time risk gate is still the enforcing layer below it (R-5).
+    /// </remarks>
+    public int ChatProposalSize { get; set; } = 1;
 }

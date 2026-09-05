@@ -72,9 +72,10 @@ public static class ChatEndpoints
         group.MapPost("/{id:guid}/turns", (Guid id, ChatTurnRequest? request, TradingCopilotDbContext database,
             IChatTurnService turnService, IContextRetrievalService retrieval, IAiSpendGovernor governor,
             IOptions<GovernorOptions> governorOptions, IAiUsageLedger ledger, ILlmMetrics metrics,
-            IChatRealtimeNotifier notifier, ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
+            IChatRealtimeNotifier notifier, IChatTurnScope turnScope, ILoggerFactory loggerFactory,
+            CancellationToken cancellationToken) =>
             TurnAsync(id, request, DateTimeOffset.UtcNow, database, turnService, retrieval, governor, governorOptions,
-                ledger, metrics, notifier, loggerFactory, cancellationToken))
+                ledger, metrics, notifier, turnScope, loggerFactory, cancellationToken))
             .WithSummary("Take a grounded co-pilot chat turn.");
 
         return endpoints;
@@ -281,6 +282,10 @@ public static class ChatEndpoints
     /// <param name="ledger">The durable, fail-open AI-usage ledger.</param>
     /// <param name="metrics">The export-only LLM meter.</param>
     /// <param name="notifier">The per-owner realtime notifier.</param>
+    /// <param name="turnScope">
+    /// The per-request turn scope this handler enters, so a chat <b>write</b> tool (gh#1059) can stamp the
+    /// conversation it was authored in as provenance (gh#471) — and fail closed when it is not in one.
+    /// </param>
     /// <param name="loggerFactory">The logger factory (fail-open faults are logged, never silently swallowed).</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The persisted turn pair (200), or 400 / 404 / 422 / 429 / 409.</returns>
@@ -296,6 +301,7 @@ public static class ChatEndpoints
         IAiUsageLedger ledger,
         ILlmMetrics metrics,
         IChatRealtimeNotifier notifier,
+        IChatTurnScope turnScope,
         ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
     {
@@ -307,6 +313,7 @@ public static class ChatEndpoints
         ArgumentNullException.ThrowIfNull(ledger);
         ArgumentNullException.ThrowIfNull(metrics);
         ArgumentNullException.ThrowIfNull(notifier);
+        ArgumentNullException.ThrowIfNull(turnScope);
         ArgumentNullException.ThrowIfNull(loggerFactory);
 
         // Validate the turn text FIRST — a 400 reveals nothing about whether the conversation exists.
@@ -329,6 +336,11 @@ public static class ChatEndpoints
         }
 
         ILogger logger = loggerFactory.CreateLogger("MarqSpec.TradingCopilot.Api.Chat.Turn");
+
+        // Enter the turn scope now the conversation is loaded and owner-checked (gh#1059). A chat WRITE tool reads it
+        // for the R-7 provenance it stamps (gh#471) and fails closed without it, so this must happen BEFORE the turn
+        // runs -- and only for a conversation the caller genuinely owns, which the R-20 404 above has just settled.
+        turnScope.EnterConversation(conversation.Id);
 
         // GOVERNOR GATE (gh#448, ADR-0008): cap deployment-wide daily AI spend before the call — inert until a budget
         // is configured. The windowed read crosses R-20 with IgnoreQueryFilters (one shared account funds every user)
