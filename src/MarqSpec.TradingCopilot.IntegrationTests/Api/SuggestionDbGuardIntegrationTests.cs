@@ -62,6 +62,37 @@ public sealed class SuggestionDbGuardIntegrationTests
             .Which.ConstraintName.Should().Be("CK_Suggestions_State_NotUnknown");
     }
 
+    [Fact]
+    public async Task Insert_IsRejected_WhenOriginUnknown()
+    {
+        // gh#1134 gave Suggestion a SECOND producer, so "which producer wrote this?" stopped being answerable from a
+        // null TriggerFiringId. The column that answers it is only worth having if it cannot be left unanswered: the
+        // C# `required` member is the compile-time guard, and this is the runtime one for anything that reaches the
+        // table another way. Note the migration DROPS the column default after backfilling history to Scan, precisely
+        // so an unstated producer surfaces here rather than being silently recorded as the scan's.
+        (Guid accountId, Guid operatorId) = await SeedAccountAsync(TradingMode.Practice);
+        Suggestion invalid = ValidSuggestion(accountId, operatorId, TradingMode.Practice);
+        invalid.Origin = SuggestionOrigin.Unknown;
+
+        (await Inserting(invalid).Should().ThrowAsync<DbUpdateException>())
+            .Which.InnerException.Should().BeOfType<PostgresException>()
+            .Which.ConstraintName.Should().Be("CK_Suggestions_Origin_NotUnknown");
+    }
+
+    [Theory]
+    [InlineData(SuggestionOrigin.Scan)]
+    [InlineData(SuggestionOrigin.Chat)]
+    public async Task Insert_IsAccepted_ForEveryDeclaredProducer(SuggestionOrigin origin)
+    {
+        // The control for the case above: the CHECK refuses the zero and NOTHING else, so a passing rejection test
+        // is not merely a column that refuses everything.
+        (Guid accountId, Guid operatorId) = await SeedAccountAsync(TradingMode.Practice);
+        Suggestion valid = ValidSuggestion(accountId, operatorId, TradingMode.Practice);
+        valid.Origin = origin;
+
+        await Inserting(valid).Should().NotThrowAsync();
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]

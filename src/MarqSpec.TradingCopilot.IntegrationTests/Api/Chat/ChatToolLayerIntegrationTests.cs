@@ -409,6 +409,10 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
         staged.Mode.Should().Be(accountMode, "the mode is read live off the account (R-14), not chosen by the model");
         staged.ExpiresAt.Should().BeAfter(staged.CreatedAt, "the system's validity window, satisfying the DB CHECK");
         staged.TriggerFiringId.Should().BeNull("no trigger fired — chat is not the scan");
+        staged.Origin.Should().Be(
+            SuggestionOrigin.Chat,
+            "the producer is stamped on the row against real Postgres, where CK_Suggestions_Origin_NotUnknown would "
+            + "have refused an unstamped one outright");
 
         // The tripwire, with the one number this case legitimately moved stated explicitly.
         await AssertNoOrderPathWasReachedAsync(expectedSuggestions: 1);
@@ -469,11 +473,21 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
         venue.CancelOrderCalls.Should().BeEmpty("a chat turn must never cancel a working order");
         venue.ModifyOrderCalls.Should().BeEmpty("a chat turn must never move a stop or resize an order");
 
-        (int orders, int suggestions, int dispositions) = await _factory.WithDatabaseAsync(async database => (
-            await database.Orders.IgnoreQueryFilters().CountAsync(),
-            await database.Suggestions.IgnoreQueryFilters().CountAsync(),
-            await database.SuggestionDispositions.IgnoreQueryFilters().CountAsync()));
+        // ConditionalOrders and StopPlans join the count (gh#1148 review). A tool holding DbContextOptions holds an
+        // unrestricted write handle to EVERY table, and a ConditionalOrderRecord is the ONE row in this system that
+        // ConditionalFiringService places at the venue with no operator act at all — so counting Orders alone left the
+        // tripwire's own prose ("reaches no order path") wider than what it actually watched.
+        (int orders, int conditionals, int stopPlans, int suggestions, int dispositions) =
+            await _factory.WithDatabaseAsync(async database => (
+                await database.Orders.IgnoreQueryFilters().CountAsync(),
+                await database.ConditionalOrders.IgnoreQueryFilters().CountAsync(),
+                await database.StopPlans.IgnoreQueryFilters().CountAsync(),
+                await database.Suggestions.IgnoreQueryFilters().CountAsync(),
+                await database.SuggestionDispositions.IgnoreQueryFilters().CountAsync()));
         orders.Should().Be(0, "the chat path writes no Order row — a proposal is not an execution");
+        conditionals.Should().Be(
+            0, "nor a ConditionalOrder, which the firing service places at the venue with NO operator act");
+        stopPlans.Should().Be(0, "nor a StopPlan, which is protective-leg state on a live position");
         suggestions.Should().Be(
             expectedSuggestions,
             "a chat turn stages exactly the proposals the tool it called was asked for, and never one more");
@@ -516,12 +530,13 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
             await database.Suggestions.IgnoreQueryFilters().ExecuteDeleteAsync();
             await database.AiUsage.IgnoreQueryFilters().ExecuteDeleteAsync();
 
-            // The accounts too, since gh#1134. Every case builds its own through the production discovery flow, and
-            // the shared container kept the previous case's — so by the fourth case several accounts carried the SAME
-            // venue name. That is a legitimate refusal for a tool that will not guess which money a setup is proposed
-            // against (the name is how the model addresses one), but it made the write cases order-dependent: green
-            // alone, red in the class run. Clearing them makes each case's fixture its own, rather than weakening the
-            // tool to suit the harness. Ordered after the rows that reference an account.
+            // The accounts too, since gh#1134 — per-case hygiene, NOT the fix for what the shared container exposed.
+            // Each case builds its own through the production discovery flow and the container kept the previous
+            // case's, so several accounts came to carry the same venue NAME. That was not a harness artifact: it is
+            // the state two connections genuinely produce, and the tool's name-only matching made it a dead end no
+            // input could resolve. The fix is that accounts are now ADDRESSABLE (the labels in
+            // GenerateSuggestionTool, and the unit cases that pin the round trip); this reset only keeps each case's
+            // fixture its own. Ordered after the rows that reference an account.
             await database.Accounts.IgnoreQueryFilters().ExecuteDeleteAsync();
             return true;
         });

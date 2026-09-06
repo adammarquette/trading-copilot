@@ -1034,7 +1034,7 @@
               <div class="tabs"><span class="tab on">Suggestion</span><span class="tab">Order</span><span class="tab">Positions</span></div>
               <div class="dock__body">
                 <div class="sugg">
-                  <div class="sugg__top"><span class="side long">LONG ES</span><span class="chip" title="timeframe — the bar size this setup is framed on (gh#592); the cited indicator's resolution today, min of aligning timeframes once confluence lands (gh#593)">15m</span>
+                  <div class="sugg__top"><span class="side long">LONG ES</span><span class="chip" title="timeframe — the bar size this setup is framed on (gh#592); the cited indicator's resolution today, min of aligning timeframes once confluence lands (gh#593). A CHAT-PROPOSED suggestion is framed on no bar size and this chip is absent (gh#1134)">15m</span>
                     <span class="chip info">conf 72%</span><span class="chip warn">valid 0:48</span>
                     <span class="tag" style="margin-left:auto">R-4</span></div>
                   <div class="levels">
@@ -1840,6 +1840,46 @@
     <div class="pending2"><span class="chip ghost">Pending · on-trigger</span>
       <div class="txt">Waiting for <b class="mono">5230.25</b> — <b>cancels if</b> price drifts a set amount against it, or the window / session ends. It never fires on a stale setup.</div></div>
     <div class="rej-why" style="margin-top:12px">A scratch resolves as <b>no-fill — not a loss</b> (R-9), and it feeds the <b>trigger-rate</b> metric. If the setup re-forms, the engine issues a <b>new superseding suggestion</b> rather than chasing price.</div>
+  </section>
+
+  <section class="acct">
+    <div class="cap"><h2>A suggestion the co-pilot proposed in chat</h2><span class="bp">R-4 &middot; R-6</span>
+      <span class="muted">same card, same take, same gate &mdash; but it cites no signal, and it says so</span></div>
+    <div class="sugg" style="max-width:520px">
+      <div class="sugg__top"><span class="side long">LONG MES</span>
+        <span class="chip ghost" title="the co-pilot proposed this in chat, at your request">from chat</span>
+        <span class="chip info">conf 70%</span><span class="chip warn">valid 0:52</span>
+        <span class="tag" style="margin-left:auto">R-6</span></div>
+      <div class="levels">
+        <div class="lvl"><div class="k">Entry</div><div class="v">5000.25</div><div class="s" style="color:var(--on-dim)">market</div></div>
+        <div class="lvl stp"><div class="k">Stop</div><div class="v">4990.00</div><div class="s neg">&minus;$51</div></div>
+        <div class="lvl tgt"><div class="k">Target</div><div class="v">5020.50</div><div class="s pos">+$101 &middot; 2.0R</div></div>
+      </div>
+      <div class="why">
+        <div><span class="b">&rsaquo;</span>Reclaimed the overnight low on rising delta</div>
+      </div>
+      <div class="rej-why" style="margin-top:8px"><b>proposed in chat &middot; no cited signal</b></div>
+      <div class="gate">&check; Staged only &mdash; the risk gate runs when <b>you</b> take it <span class="tag" style="margin-left:auto">R-5 &middot; R-11</span></div>
+      <div class="btns"><div class="splitbtn"><button class="main">Approve &amp; arm</button><button class="car" aria-label="Send options">&#9662;</button></div><button class="btn out">Pass</button></div>
+    </div>
+    <div class="sub"><b>Built &middot; gh#1134:</b> the chat <span class="mono">generate_suggestion</span> tool gave
+      <span class="mono">Suggestion</span> a <b>second producer</b>, and the card has to say which one it is showing.
+      Three differences from the scan card above, and <b>only</b> three: a neutral <b>from chat</b> chip, <b>no
+      timeframe chip</b> (a chat proposal is framed on no bar size, so <span class="mono">0m</span> would be a false
+      fact rather than a missing one), and the citation line reads <b>proposed in chat &middot; no cited signal</b>
+      instead of <span class="mono">cited signal &middot; RSI(14) &middot; 15m</span>. Everything else &mdash; the
+      levels, the dollar risk/reward, <b>Approve &amp; arm</b>, <b>Pass</b> &mdash; is identical, because the take
+      path and the risk gate below it are identical: <b>a proposal is not an execution</b>, whoever proposed it, and
+      nothing is placed until the operator takes it.
+      <br><b>Why it is not cosmetic:</b> rendered through the scan card unchanged it read
+      <span class="mono">cited signal &middot; (0) &middot; 0m</span> with a <span class="mono">0m</span> chip &mdash;
+      a <b>malformed scan suggestion</b>, on the surface that commits real money. The card reads the stored
+      <span class="mono">Suggestion.Origin</span>, never the shape of the citation, because zeroed citation fields
+      <i>also</i> mean &ldquo;the read forgot to load the cited factors&rdquo; &mdash; a bug that must stay visible
+      rather than be relabelled as a chat proposal.
+      <br><b>Size, mode and validity are the system's</b> here exactly as on the scan card: the model chooses none of
+      them (its tool schema has no such field), so <span class="mono">conf 70%</span> stays display-only and the
+      contract count comes from the operator's configured chat-proposal size.</div>
   </section>
 
   <section class="acct">

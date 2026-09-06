@@ -47,12 +47,16 @@ namespace MarqSpec.TradingCopilot.Api.Chat.Tools;
 /// another operator's account is not merely refused but invisible.
 /// </para>
 /// <para>
-/// <b>The R-4 issuance throttle is deliberately not applied here.</b> It is a *scan* policy — derived from an
-/// account's daily-drawdown headroom, and it exists so unprompted, agent-issued suggestions thin out as headroom
-/// depletes. A chat proposal is asked for by the operator in the moment, is bounded by the turn's tool-round cap,
-/// and is still gated at take time by R-5, which is the enforcing layer. Wiring the throttle in would silently
-/// suppress an answer the operator explicitly requested; if that is ever wanted it is a carded decision, not a
-/// side effect of this tool.
+/// <b>The R-4 issuance throttle does not couple to a chat proposal in <i>either</i> direction — and the second
+/// direction had to be made true (gh#1148 review).</b> It is a <i>scan</i> policy derived from an account's
+/// daily-drawdown headroom, so unprompted, agent-issued suggestions thin out as headroom depletes. A chat proposal
+/// is asked for by the operator in the moment, is bounded by the turn's tool-round cap, and is still gated at take
+/// time by R-5, which is the enforcing layer — so the throttle does not gate this tool. The <b>reverse</b> coupling
+/// was real and undocumented: the scan's per-account daily window counted <i>every</i> <c>Suggestion</c> row,
+/// because until this tool existed the scan was the only writer of one. Two chat proposals could therefore spend the
+/// scan's cap and silence it for the rest of the trading day, attributable to nothing the operator could see. That
+/// count now filters on <see cref="SuggestionOrigin.Scan"/>, which is what makes the sentence above true rather than
+/// merely intended.
 /// </para>
 /// </remarks>
 public sealed class GenerateSuggestionTool : IChatTool
