@@ -269,7 +269,9 @@ public sealed class GenerateSuggestionTool : IChatTool
                 stopPrice = staged.StopPrice,
                 targetPrice = staged.TargetPrice,
                 mode = staged.Mode.ToString(),
-                account = target.Name,
+                // The LABEL, not the bare name (gh#1148 review): this is the string that addresses the account on a
+                // later call, and echoing a name the tool would refuse costs the model a wasted round to rediscover.
+                account = candidates[0].Label,
                 expiresAt = staged.ExpiresAt,
                 state = staged.State.ToString(),
                 staged = "The proposal is staged for the trader to review. It has NOT been taken and no order exists; "
@@ -330,36 +332,47 @@ public sealed class GenerateSuggestionTool : IChatTool
     /// names accounts the model can actually send back.
     /// </summary>
     /// <remarks>
-    /// The chain widens only as far as it must, so the common case is unchanged: a name that is already unique
-    /// <i>is</i> the label. A duplicate name is qualified by its venue account key — the other half of the
-    /// <c>(ConnectionId, VenueAccountKey)</c> uniqueness the database actually guarantees — and, if two connections
-    /// carry the same account key as well, by the row id, which is unique by definition. So the last rung cannot
-    /// collide, which is what makes "name one of these exactly" a promise rather than a hope.
+    /// <para>
+    /// The chain widens only as far as it must, so the common case is unchanged: while every name is already
+    /// distinct, a name <i>is</i> its label. Otherwise the whole set falls to the next rung — qualified by venue
+    /// account key, the other half of the <c>(ConnectionId, VenueAccountKey)</c> uniqueness the database actually
+    /// guarantees — and then to the row id, which is unique by definition.
+    /// </para>
+    /// <para>
+    /// <b>The rung is chosen for the SET, not per account, and that is the point (gh#1148 review).</b> Choosing per
+    /// account looks tidier and is wrong: rung 1 and rung 2 are each internally distinct but are not checked against
+    /// <i>each other</i>, so an account literally named <c>"PRAC-50K (VK-AAA)"</c> collides with the rung-2 label of
+    /// an account named <c>PRAC-50K</c> whose key is <c>VK-AAA</c> — the same unresolvable refusal one rung deeper.
+    /// Falling the whole set through to the first rung that is <b>wholly</b> distinct is what makes "name one of
+    /// these exactly" a promise rather than a hope, and the id rung always terminates it.
+    /// </para>
     /// </remarks>
     /// <param name="accounts">The operator's proposable accounts.</param>
     /// <returns>Each account with its label.</returns>
-    private static IEnumerable<LabelledAccount> AddressableLabels(IReadOnlyList<Account> accounts)
+    private static IReadOnlyList<LabelledAccount> AddressableLabels(IReadOnlyList<Account> accounts)
     {
-        HashSet<string> ambiguousNames = [.. accounts
-            .GroupBy(account => account.Name, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Count() > 1)
-            .Select(group => group.Key)];
+        // The rungs, narrowest first. The last is unique by definition -- Id is the primary key -- so the search
+        // below always terminates, and every rung is applied to the WHOLE set so the winner is wholly distinct.
+        Func<Account, string>[] rungs =
+        [
+            account => account.Name,
+            account => $"{account.Name} ({account.VenueAccountKey})",
+            account => $"{account.Name} ({account.VenueAccountKey} · {account.Id})",
+        ];
 
-        HashSet<string> ambiguousKeys = [.. accounts
-            .GroupBy(account => account.Name + " " + account.VenueAccountKey, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Count() > 1)
-            .Select(group => group.Key)];
-
-        foreach (Account account in accounts)
+        foreach (Func<Account, string> rung in rungs)
         {
-            string label = !ambiguousNames.Contains(account.Name)
-                ? account.Name
-                : !ambiguousKeys.Contains(account.Name + " " + account.VenueAccountKey)
-                    ? $"{account.Name} ({account.VenueAccountKey})"
-                    : $"{account.Name} ({account.VenueAccountKey} · {account.Id})";
-
-            yield return new LabelledAccount(account, label);
+            List<LabelledAccount> labelled = [.. accounts.Select(account => new LabelledAccount(account, rung(account)))];
+            if (labelled.Select(candidate => candidate.Label).Distinct(StringComparer.OrdinalIgnoreCase).Count()
+                == labelled.Count)
+            {
+                return labelled;
+            }
         }
+
+        // Unreachable: the id rung above cannot repeat a label. Stated rather than assumed, because a silent
+        // fall-through here would hand the model labels that do not address anything.
+        throw new InvalidOperationException("Account labels could not be made distinct.");
     }
 
     /// <summary>The model's parsed proposal — everything it is allowed to choose, and nothing it is not.</summary>

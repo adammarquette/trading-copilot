@@ -369,6 +369,41 @@ public class GenerateSuggestionToolTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_ShouldStillOfferDistinctLabels_WhenANameCollidesWithAnotherAccountsQualifiedLabel()
+    {
+        // The cross-rung collision (gh#1148 review). Choosing a rung PER ACCOUNT makes rung 1 and rung 2 internally
+        // distinct but never checks them against each other: "PRAC-50K (VK-AAA)" is a legal venue account NAME, and
+        // it is also exactly what an account named PRAC-50K with key VK-AAA would be qualified to. The result is the
+        // same unresolvable refusal one rung deeper, which is why the rung is chosen for the whole SET.
+        await SeedAccountAsync(_owner, "PRAC-50K (VK-AAA)", venueAccountKey: "VK-ZZZ");
+        await SeedAccountAsync(_owner, "PRAC-50K", venueAccountKey: "VK-AAA");
+        await SeedAccountAsync(_owner, "PRAC-50K", venueAccountKey: "VK-BBB");
+
+        string[] offered = ErrorIn(await Tool().ExecuteAsync(CoherentBuy, CancellationToken.None))
+            .Split("exactly — ")[1].TrimEnd('.').Split(", ");
+
+        offered.Should().HaveCount(3, "every tradable account is offered");
+        offered.Distinct(StringComparer.OrdinalIgnoreCase).Should().HaveCount(
+            3, "a refusal that offers the same label twice is unresolvable — the promise is that the SET is distinct");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldEchoTheLabelItAccepted_SoTheModelCanReuseIt()
+    {
+        await SeedAccountAsync(_owner, "PRAC-50K", venueAccountKey: "VK-AAA");
+        await SeedAccountAsync(_owner, "PRAC-50K", venueAccountKey: "VK-BBB");
+        string label = ErrorIn(await Tool().ExecuteAsync(CoherentBuy, CancellationToken.None))
+            .Split("exactly — ")[1].TrimEnd('.').Split(", ")[0];
+
+        string result = await Tool().ExecuteAsync(Input("\"account\":\"" + label + "\""), CancellationToken.None);
+
+        Parse(result).GetProperty("account").GetString().Should().Be(
+            label,
+            "the reply must echo the string that ADDRESSES the account — a bare name the tool would refuse costs the "
+            + "model a wasted round to rediscover what it already had");
+    }
+
+    [Fact]
     public async Task ExecuteAsync_ShouldKeepThePlainNameAsTheLabel_WhenItIsAlreadyUnambiguous()
     {
         Account only = await SeedAccountAsync(_owner, "Practice-1");
