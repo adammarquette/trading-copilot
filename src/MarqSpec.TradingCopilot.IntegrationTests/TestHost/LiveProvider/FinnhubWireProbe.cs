@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -33,19 +34,58 @@ internal static class FinnhubWireProbe
     /// <param name="PublishedAt">Publication time, decoded from the provider's Unix-epoch seconds.</param>
     internal sealed record WireArticle(string Url, string Headline, DateTimeOffset PublishedAt);
 
+    /// <summary>
+    /// Thrown when Finnhub answers <b>429 Too Many Requests</b> — distinct from a generic transport failure so a
+    /// reader (and the suite's own outage case) can tell "this run was rate-limited" from "the provider is down"
+    /// (gh#1130).
+    /// </summary>
+    internal sealed class FinnhubRateLimitedException(string message) : Exception(message);
+
     /// <summary>Fetches the provider's current general-news payload.</summary>
     /// <param name="apiKey">The Finnhub token.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>Every article the provider served, unfiltered.</returns>
-    public static async Task<IReadOnlyList<WireArticle>> FetchAsync(
+    /// <exception cref="FinnhubRateLimitedException">
+    /// Finnhub answered <b>429 Too Many Requests</b> — legible as rate-limiting, never as a generic transport
+    /// failure a reader could mistake for a provider outage (gh#1130).
+    /// </exception>
+    public static Task<IReadOnlyList<WireArticle>> FetchAsync(
         string apiKey,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        FetchAsync(apiKey, handler: null, cancellationToken);
+
+    /// <summary>
+    /// The testable seam behind <see cref="FetchAsync(string, CancellationToken)"/>: a caller supplies the
+    /// transport, so the 429 branch can be proven against a fake response instead of a live rate-limited call
+    /// (<c>FinnhubWireProbeTests</c>, gh#1130).
+    /// </summary>
+    /// <param name="apiKey">The Finnhub token.</param>
+    /// <param name="handler">
+    /// The transport to use, or <see langword="null"/> for the real network via a fresh <see cref="HttpClient"/>.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>Every article the provider served, unfiltered.</returns>
+    internal static async Task<IReadOnlyList<WireArticle>> FetchAsync(
+        string apiKey,
+        HttpMessageHandler? handler,
+        CancellationToken cancellationToken)
     {
-        using HttpClient client = new();
+        using HttpClient client = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
         client.DefaultRequestHeaders.Add("X-Finnhub-Token", apiKey);
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
         using HttpResponseMessage response = await client.GetAsync(NewsEndpoint, cancellationToken);
+
+        // Called out BEFORE EnsureSuccessStatusCode(): that call turns every non-2xx into the same opaque
+        // HttpRequestException, so a rate-limited run and a genuine provider outage would read identically in a
+        // failure report. The suite's own outage case (`ARefusedProvider_ShouldNotSinkTheOther`) depends on a
+        // reader being able to tell "the provider is throttling this run" from "the provider is down".
+        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+        {
+            throw new FinnhubRateLimitedException(
+                "Finnhub answered 429 Too Many Requests — this run was RATE-LIMITED, not refused by an outage.");
+        }
+
         response.EnsureSuccessStatusCode();
 
         JsonElement[] payload =
