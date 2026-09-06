@@ -541,6 +541,86 @@ public class EditRulebookToolTests
         authored.Comparison.Should().Be(IndicatorComparison.Below);
     }
 
+    // =================================================================================================================
+    // gh#1155 -- AN AMEND THAT APPLIES NOTHING MUST REFUSE, NEVER REPORT "amended".
+    // =================================================================================================================
+
+    [Theory]
+    [InlineData("\"symbol\":\"NQ\"", "symbol")]
+    [InlineData("\"indicator\":\"atr\"", "indicator")]
+    [InlineData("\"period\":21", "period")]
+    [InlineData("\"resolutionMinutes\":5", "resolutionMinutes")]
+    public async Task ExecuteAsync_ShouldRefuseAndChangeNothing_WhenAnAmendNamesAnIdentityField(
+        string identityJson, string named)
+    {
+        // The identity -- symbol / indicator / period / resolutionMinutes -- names WHICH rule this is. Changing any
+        // of them is authoring a DIFFERENT rule, not editing this one, so a model that sends one must be told, not
+        // have it silently ignored while the rest of the call reports success and disarms a live alert.
+        Guid id = await SeedRuleAsync(
+            confirmation: TriggerConfirmation.Confirmed, armState: TriggerArmState.Fired, armCycle: 3);
+
+        string result = await Tool().ExecuteAsync(
+            $"{{\"triggerId\":\"{id}\",{identityJson}}}", CancellationToken.None);
+
+        ErrorIn(result).Should().NotBeEmpty("naming an identity field on an amend is refused, not ignored");
+        ErrorIn(result).Should().ContainEquivalentOf(named, "the model is told which field it cannot amend");
+        result.Should().NotContainEquivalentOf(
+            "amended", "a refused amend must never claim to have amended anything");
+        TriggerRecord untouched = await SoleRuleAsync();
+        untouched.Confirmation.Should().Be(
+            TriggerConfirmation.Confirmed, "a refused amend does not disarm a live alert");
+        untouched.ArmState.Should().Be(TriggerArmState.Fired, "nor re-seed the debounce");
+        untouched.ArmCycle.Should().Be(3);
+        untouched.Symbol.Should().Be(Symbol, "the identity was not changed either");
+        untouched.Indicator.Should().Be(Indicator);
+        untouched.Period.Should().Be(Period);
+        untouched.ResolutionMinutes.Should().Be(Resolution);
+    }
+
+    [Theory]
+    [InlineData("\"threshold\":\"25\"")]
+    [InlineData("\"hysteresis\":\"2.5\"")]
+    public async Task ExecuteAsync_ShouldRefuseAndChangeNothing_WhenAnAmendedValueIsAStringTypedNumber(
+        string malformedJson)
+    {
+        // A JSON STRING where a number belongs parses cleanly but is not a Number -- TryGetDecimal cannot read it.
+        // Reading that as "the model sent nothing" is the second instance of this defect: a malformed argument
+        // disarmed a live alert while changing nothing at all. "Present but unusable" must refuse, not vanish.
+        Guid id = await SeedRuleAsync(
+            confirmation: TriggerConfirmation.Confirmed, armState: TriggerArmState.Fired, armCycle: 3);
+
+        string result = await Tool().ExecuteAsync(
+            $"{{\"triggerId\":\"{id}\",{malformedJson}}}", CancellationToken.None);
+
+        ErrorIn(result).Should().NotBeEmpty("a present-but-unparseable value is a malformed argument, not an absence");
+        result.Should().NotContainEquivalentOf("amended");
+        TriggerRecord untouched = await SoleRuleAsync();
+        untouched.Threshold.Should().Be(30m, "the malformed value was not applied");
+        untouched.Hysteresis.Should().BeNull();
+        untouched.Confirmation.Should().Be(
+            TriggerConfirmation.Confirmed, "the rule was not disarmed for a change that never happened");
+        untouched.ArmState.Should().Be(TriggerArmState.Fired);
+        untouched.ArmCycle.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldRefuseAndChangeNothing_WhenAnAmendNamesNoField()
+    {
+        // The bare shape: {"triggerId": "..."} and nothing else. Nothing to apply, so nothing may be reported as
+        // applied -- in particular, a live alert must not be disarmed for a call that changed nothing about it.
+        Guid id = await SeedRuleAsync(
+            confirmation: TriggerConfirmation.Confirmed, armState: TriggerArmState.Fired, armCycle: 3);
+
+        string result = await Tool().ExecuteAsync($"{{\"triggerId\":\"{id}\"}}", CancellationToken.None);
+
+        ErrorIn(result).Should().NotBeEmpty("an amend that names no amendable field is refused, not a silent success");
+        result.Should().NotContainEquivalentOf("amended");
+        TriggerRecord untouched = await SoleRuleAsync();
+        untouched.Confirmation.Should().Be(TriggerConfirmation.Confirmed, "nothing changed, so nothing should disarm");
+        untouched.ArmState.Should().Be(TriggerArmState.Fired);
+        untouched.ArmCycle.Should().Be(3);
+    }
+
     [Fact]
     public async Task ExecuteAsync_ShouldApplyEveryAmendableField_AndNothingElse()
     {
