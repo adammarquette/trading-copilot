@@ -483,6 +483,10 @@ builder.Services.AddScoped<PositionReconciliationService>();
 // IPositionReconciler (read only, fakeable in unit tests), never the concrete service, so its dependency is read-only
 // by its very type.
 builder.Services.AddScoped<IPositionReconciler>(provider => provider.GetRequiredService<PositionReconciliationService>());
+// The durable record both operator position actions write (gh#1143): an event-log append (ADR-0001) plus an
+// immutable operator-owned AuditRecord (gh#220), the pair the auto-flatten already writes for a position-level
+// close. Bound to the CONCRETE event log and audit log, never back onto a seam that could resolve onto itself.
+builder.Services.AddScoped<IPositionActionJournal, PositionActionJournal>();
 builder.Services.AddScoped<PositionExitService>();
 // The sized partial-close sibling of the full exit (gh#928): reduce a position toward flat without flattening it.
 builder.Services.AddScoped<PositionReduceService>();
