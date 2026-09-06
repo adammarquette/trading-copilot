@@ -126,10 +126,12 @@ two documents come to disagree about it. Points 1–6 above are the rules it inh
    account and size are never touched at all: chat authors the mechanical route only, so a chat edit can never turn
    an alert into a sized proposal against an account. **That disarm only fires when something actually changed
    (gh#1155):** an amend naming an identity field (symbol / indicator / period / resolutionMinutes — those name
-   *which* rule this is, so changing one is authoring a different rule) or a present-but-wrong-typed value (a
-   string where a number belongs, which a parser had been reading as *absent* rather than as the malformed
-   argument it is) both refuse before the row is touched, and an amend naming no amendable field at all refuses
-   too — a model can no longer report `"amended"`, and disarm a confirmed rule, for a change it never made.
+   *which* rule this is, so changing one is authoring a different rule) or a present-but-wrong-JSON-typed value
+   — the parse helpers had been reading a present-but-unusable value as *absent* rather than as the malformed
+   argument it is, and this now holds for **every** field the model can send (a string-typed number, a
+   number-typed string, alike), not only the one instance a review happened to probe — both refuse before the
+   row is touched, and an amend naming no amendable field at all refuses too — a model can no longer report
+   `"amended"`, and disarm a confirmed rule, for a change it never made.
 
 9. **A second author of an existing entity shares the first author's rules — the code, not a copy.** The condition
    half's refusals moved out of `TriggerEndpoints` into `TriggerAuthoring`, one refusal per check so each caller
