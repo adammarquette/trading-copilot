@@ -82,14 +82,14 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
         List<NewsRecord> rows = await ReadAllAsync(_factory);
         HashSet<string> stored = [.. rows.Select(row => Normalize(row.Url))];
 
-        // Grouped rather than compared raw: the pipeline is entitled to collapse URLs differing only by scheme,
-        // `www.`, a trailing slash or a tracking parameter into ONE row carrying the FIRST one's raw URL.
-        // Comparing raw strings would report the other form as a dropped story -- a red on correct behaviour --
-        // so `Normalize` collapses those same axes (independently reimplemented, never NewsDedupKey) and each
-        // stable group need only be REPRESENTED in the store.
-        Dictionary<string, List<string>> beforeGroups = GroupInWindow(before, since);
-        Dictionary<string, List<string>> afterGroups = GroupInWindow(after, since);
-        List<string> stableKeys = [.. beforeGroups.Keys.Intersect(afterGroups.Keys)];
+        // Compared by NORMALISED identity, not raw string: the pipeline is entitled to collapse URLs differing
+        // only by scheme, `www.`, a trailing slash or a tracking parameter into ONE row carrying the FIRST one's
+        // raw URL. Comparing raw strings would report the other form as a dropped story -- a red on correct
+        // behaviour -- so `Normalize` collapses those same axes (independently reimplemented, never
+        // NewsDedupKey) and each stable identity need only be REPRESENTED in the store under it.
+        HashSet<string> beforeKeys = KeysInWindow(before, since);
+        HashSet<string> afterKeys = KeysInWindow(after, since);
+        List<string> stableKeys = [.. beforeKeys.Intersect(afterKeys)];
         HashSet<string> mayBeStored = [.. before.Concat(after).Select(article => Normalize(article.Url))];
 
         stableKeys.Should().NotBeEmpty(
@@ -101,7 +101,7 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
 
         foreach (string key in stableKeys)
         {
-            beforeGroups[key].Any(stored.Contains).Should().BeTrue(
+            stored.Contains(key).Should().BeTrue(
                 "the provider served '{0}' in both probes, so the store must hold it under one of its forms", key);
         }
 
@@ -295,17 +295,13 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
 
     // --- Helpers ---
 
-    // The in-window articles, keyed by what the pipeline may legitimately treat as one story, each key carrying
-    // every raw form the provider served it under. One of those forms must appear in the store.
-    private static Dictionary<string, List<string>> GroupInWindow(
-        IEnumerable<WireArticle> articles,
-        DateTimeOffset since) =>
-        articles
-            .Where(article => article.PublishedAt >= since)
-            .GroupBy(article => Normalize(article.Url))
-            .ToDictionary(
-                group => group.Key,
-                group => group.Select(article => Normalize(article.Url)).Distinct().ToList());
+    // The set of normalised story identities the provider served inside the window — collapsing URLs that
+    // differ only by scheme, `www.`, a trailing slash or a tracking parameter onto the same key, because
+    // `Normalize` already performs that canonicalisation (gh#1130: a prior version grouped raw forms under
+    // each key for a raw-string comparison this suite no longer makes, leaving every group a redundant
+    // single-element list). One of these identities must appear in the store.
+    private static HashSet<string> KeysInWindow(IEnumerable<WireArticle> articles, DateTimeOffset since) =>
+        [.. articles.Where(article => article.PublishedAt >= since).Select(article => Normalize(article.Url))];
 
     private static async Task<int> IngestAsync(LiveNewsProviderFactory factory)
     {
