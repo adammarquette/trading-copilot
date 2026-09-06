@@ -33,9 +33,11 @@ public class PositionExitEndpointTests
         new(new DbContextOptionsBuilder<TradingCopilotDbContext>().UseInMemoryDatabase(_database).Options,
             new FixedUser(_operator));
 
+    private readonly IPositionActionJournal _journal = A.Fake<IPositionActionJournal>();
+
     private PositionExitService Service() =>
         new(Context(), _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
-            NullLogger<PositionExitService>.Instance);
+            _journal, NullLogger<PositionExitService>.Instance);
 
     [Fact]
     public async Task ExitAsync_ShouldReturnNotFound_WhenTheAccountIsNotTheCallers()

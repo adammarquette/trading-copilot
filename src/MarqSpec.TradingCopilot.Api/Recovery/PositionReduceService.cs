@@ -183,14 +183,21 @@ public sealed class PositionReduceService
     /// against the same pre-reduce snapshot and both transmit.
     /// </param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
+    /// <param name="journal">
+    /// The durable record of what was asked and what happened (gh#1143). <b>Required, not optional</b>: after a
+    /// reduce, the requested quantity is not reconstructable from venue truth, so a silently-absent journal would
+    /// lose the one fact this path cannot recover.
+    /// </param>
     /// <param name="logger">The logger.</param>
     public PositionReduceService(
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
         IAccountEntryGuard accountGuard,
         IOptions<ProjectXConnectionOptions> projectXOptions,
+        IPositionActionJournal journal,
         ILogger<PositionReduceService> logger)
     {
+        ArgumentNullException.ThrowIfNull(journal);
         _database = database;
         _venueFactory = venueFactory;
         _accountGuard = accountGuard;

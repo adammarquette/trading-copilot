@@ -64,13 +64,19 @@ public sealed class PositionExitService
     /// <param name="database">The scoped database.</param>
     /// <param name="venueFactory">Builds a venue for the connection's firm conventions.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
+    /// <param name="journal">
+    /// The durable record of what was asked and what happened (gh#1143). <b>Required, not optional</b>: an optional
+    /// dependency defaults to a silent no-op the moment anything constructs this service without it.
+    /// </param>
     /// <param name="logger">The logger.</param>
     public PositionExitService(
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
         IOptions<ProjectXConnectionOptions> projectXOptions,
+        IPositionActionJournal journal,
         ILogger<PositionExitService> logger)
     {
+        ArgumentNullException.ThrowIfNull(journal);
         _database = database;
         _venueFactory = venueFactory;
         _projectXOptions = projectXOptions;

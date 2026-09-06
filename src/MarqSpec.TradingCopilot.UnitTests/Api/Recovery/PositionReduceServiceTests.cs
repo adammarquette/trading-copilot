@@ -1,4 +1,5 @@
 using FakeItEasy;
+using FakeItEasy.Core;
 using MarqSpec.TradingCopilot.Api.Orders;
 using MarqSpec.TradingCopilot.Api.Recovery;
 using MarqSpec.TradingCopilot.Api.Venues;
@@ -43,6 +44,7 @@ public class PositionReduceServiceTests
     private readonly IProjectXVenueFactory _factory = A.Fake<IProjectXVenueFactory>();
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
     private IAccountEntryGuard _guard = null!;
+    private readonly IPositionActionJournal _journal = A.Fake<IPositionActionJournal>();
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
@@ -116,7 +118,7 @@ public class PositionReduceServiceTests
     private PositionReduceService Service(string credentialKey = "topstep-main") =>
         new(Context(), _factory, _guard,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
-            NullLogger<PositionReduceService>.Instance);
+            _journal, NullLogger<PositionReduceService>.Instance);
 
     private async Task<Guid> SeedAccountAsync(
         string credentialKey = "topstep-main", TradingMode mode = TradingMode.Practice)
@@ -153,6 +155,16 @@ public class PositionReduceServiceTests
 
     private Task<PositionReduceResult?> Reduce(Guid accountId, int quantity) =>
         Service().ReduceAsync(accountId, InstrumentId.Parse("MES"), quantity, CancellationToken.None);
+
+    /// <summary>
+    /// The single entry this reduce journaled (gh#1143), read back off the seam rather than asked of the service.
+    /// </summary>
+    private PositionActionEntry Journaled()
+    {
+        ICompletedFakeObjectCall call = Fake.GetCalls(_journal)
+            .Single(candidate => candidate.Method.Name == nameof(IPositionActionJournal.RecordAsync));
+        return (PositionActionEntry)call.Arguments[0]!;
+    }
 
     // --- Only a verified reduction is success ---
 
@@ -459,7 +471,7 @@ public class PositionReduceServiceTests
         PositionReduceService service = new(
             other, _factory, _guard,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
-            NullLogger<PositionReduceService>.Instance);
+            _journal, NullLogger<PositionReduceService>.Instance);
 
         (await service.ReduceAsync(accountId, InstrumentId.Parse("MES"), 1, CancellationToken.None)).Should().BeNull();
         VenueMustNotHaveBeenAskedToReduce();
@@ -626,5 +638,283 @@ public class PositionReduceServiceTests
         Func<Task> act = async () => await Reduce(accountId, 1);
 
         await act.Should().ThrowAsync<NotSupportedException>();
+    }
+
+    // --- Every outcome leaves a record (gh#1143) ---
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalBothTheRequestedAndTheAchievedQuantities_WhenItReduces()
+    {
+        // The card's central argument. After a reduce, HOW MANY the operator asked to take off is not
+        // reconstructable from venue truth: a long 5 that becomes a long 2 looks identical whether 3 was
+        // requested, or 1 was and a stop took 2, or 3 was requested twice against an unsettled read. Only the
+        // journal can tell those apart, so BOTH numbers have to be on the row.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReducesTo(2);
+
+        await Reduce(accountId, 3);
+
+        PositionActionEntry entry = Journaled();
+        entry.Action.Should().Be(PositionActionKind.Reduce);
+        entry.Outcome.Should().Be(nameof(PositionReduceOutcome.Reduced));
+        entry.OwnerUserId.Should().Be(_operator);
+        entry.AccountId.Should().Be(accountId);
+        entry.VenueAccountKey.Should().Be("9001");
+        entry.Instrument.Should().Be("MES");
+        entry.Contract.Should().Be(Contract);
+        entry.RequestedQuantity.Should().Be(3);
+        entry.NetQuantityBefore.Should().Be(5);
+        entry.NetQuantityAfter.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalTheRequestedQuantity_WhenTheVenueTookOffSomethingElse()
+    {
+        // The case the requested quantity exists for: the position moved, but not by what was asked. Without the
+        // row, "long 5 became long 3" is all anyone can ever see.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReducesTo(3);
+
+        await Reduce(accountId, 3);
+
+        PositionActionEntry entry = Journaled();
+        entry.Outcome.Should().Be(nameof(PositionReduceOutcome.NotReduced));
+        entry.RequestedQuantity.Should().Be(3);
+        entry.NetQuantityBefore.Should().Be(5);
+        entry.NetQuantityAfter.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalTheTransmittedButUnestablishedAttempt_WhenItIsUnconfirmed()
+    {
+        // Transmitted, effect unestablished. This is the row an operator needs most: it says a close WAS sent, so
+        // the answer is to re-read venue truth rather than re-send a non-idempotent write.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReducesTo(5);
+
+        await Reduce(accountId, 3);
+
+        PositionActionEntry entry = Journaled();
+        entry.Outcome.Should().Be(nameof(PositionReduceOutcome.Unconfirmed));
+        entry.RequestedQuantity.Should().Be(3);
+        entry.NetQuantityBefore.Should().Be(5);
+        entry.NetQuantityAfter.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalTheRefusal_WhenTheVenueDefinitivelySaysNo()
+    {
+        // A definitive refusal executed nothing, so the exposure is KNOWN and unchanged -- and the row says so,
+        // rather than claiming the venue was unreachable.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReduceThrows(new VenueRefusalException("InvalidCloseSize", VenueRefusalKind.Definitive, 5));
+
+        await Reduce(accountId, 3);
+
+        PositionActionEntry entry = Journaled();
+        entry.Outcome.Should().Be(nameof(PositionReduceOutcome.Refused));
+        entry.RequestedQuantity.Should().Be(3);
+        entry.NetQuantityBefore.Should().Be(5);
+        entry.NetQuantityAfter.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalNoQuantityAtAll_WhenTheRefusalIsIndeterminate()
+    {
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReduceThrows(new VenueRefusalException("OrderPending", VenueRefusalKind.Indeterminate, 7));
+
+        await Reduce(accountId, 3);
+
+        PositionActionEntry entry = Journaled();
+        entry.Outcome.Should().Be(nameof(PositionReduceOutcome.Unconfirmed));
+        entry.NetQuantityBefore.Should().Be(5);
+        entry.NetQuantityAfter.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalTheAttempt_WhenTheVenueSendTimesOut()
+    {
+        // A venue timeout is an OperationCanceledException carrying HttpClient's OWN internal token, not the
+        // caller's -- durable intent, unknown outcome. It leaves a row saying exactly that: a real sized close may
+        // be live, and nobody could read the exposure back.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        using CancellationTokenSource venueTimeout = new();
+        await venueTimeout.CancelAsync();
+        ReduceThrows(new TaskCanceledException("the venue send timed out", null, venueTimeout.Token));
+
+        await Reduce(accountId, 3);
+
+        PositionActionEntry entry = Journaled();
+        entry.Outcome.Should().Be(nameof(PositionReduceOutcome.Unreachable));
+        entry.RequestedQuantity.Should().Be(3);
+        entry.NetQuantityBefore.Should().Be(5);
+        entry.NetQuantityAfter.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalTheSizingRefusal_WhenTheRequestIsNotStrictlyPartial()
+    {
+        // Refused before the venue was touched, and still a row: what the operator asked for is the fact an
+        // incident wants, and a mis-sized request is exactly the kind of thing that precedes one.
+        Guid accountId = await SeedAccountAsync();
+        Holds(3);
+
+        await Reduce(accountId, 3);
+
+        PositionActionEntry entry = Journaled();
+        entry.Outcome.Should().Be(nameof(PositionReduceOutcome.ExceedsPosition));
+        entry.RequestedQuantity.Should().Be(3);
+        entry.NetQuantityBefore.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalThatNothingWasSent_WhenTheAccountIsBusy()
+    {
+        Guid accountId = await SeedAccountAsync();
+        _guard = BusyGuard();
+
+        await Reduce(accountId, 1);
+
+        PositionActionEntry entry = Journaled();
+        entry.Outcome.Should().Be(nameof(PositionReduceOutcome.AccountBusy));
+        entry.RequestedQuantity.Should().Be(1);
+        entry.NetQuantityBefore.Should().BeNull();
+        entry.NetQuantityAfter.Should().BeNull();
+        VenueMustNotHaveBeenAskedToReduce();
+    }
+
+    [Theory]
+    [InlineData(TradingMode.Live)]
+    [InlineData(TradingMode.Undeclared)]
+    public async Task ReduceAsync_ShouldJournalTheHold_WhenTheAccountIsNotAPracticeAccount(TradingMode mode)
+    {
+        // The hold is untouched by this card -- it still refuses and still sends nothing. What changes is that the
+        // refusal now leaves a record, which is what tells an incident the operator reached for the control at all.
+        Guid accountId = await SeedAccountAsync(mode: mode);
+
+        await Reduce(accountId, 1);
+
+        PositionActionEntry entry = Journaled();
+        entry.Outcome.Should().Be(nameof(PositionReduceOutcome.HeldPracticeOnly));
+        entry.RequestedQuantity.Should().Be(1);
+        VenueMustNotHaveBeenAskedToReduce();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalTheHold_WhenTheVenueReportsANonPracticeModeForAPracticeRow()
+    {
+        Guid accountId = await SeedAccountAsync();
+        RosterReports(TradingMode.Live);
+
+        await Reduce(accountId, 1);
+
+        Journaled().Outcome.Should().Be(nameof(PositionReduceOutcome.HeldPracticeOnly));
+        VenueMustNotHaveBeenAskedToReduce();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalTheRefusal_WhenTheAccountBelongsToAnotherProcessCredentialSet()
+    {
+        Guid accountId = await SeedAccountAsync(credentialKey: "someone-else");
+
+        await Reduce(accountId, 1);
+
+        PositionActionEntry entry = Journaled();
+        entry.Outcome.Should().Be(nameof(PositionReduceOutcome.Unreachable));
+        entry.Contract.Should().BeNull();
+        entry.NetQuantityBefore.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalNothing_WhenTheAccountIsNotTheCallers()
+    {
+        // A 404 for an account this operator does not own: no owner to stamp a row with, and writing one would be
+        // a side channel confirming the id exists (R-20).
+        Guid accountId = await SeedAccountAsync();
+
+        await using TradingCopilotDbContext other = Context(Guid.NewGuid());
+        PositionReduceService service = new(
+            other, _factory, _guard,
+            Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
+            _journal, NullLogger<PositionReduceService>.Instance);
+
+        await service.ReduceAsync(accountId, InstrumentId.Parse("MES"), 1, CancellationToken.None);
+
+        A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._)).MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldStillReportReduced_WhenTheJournalFails()
+    {
+        // A record of a safety action must never be the reason the action fails. The seam is contracted not to
+        // throw; this pins the caller's side of that even if it ever does.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReducesTo(2);
+        A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._))
+            .Throws(new InvalidOperationException("the journal is down"));
+
+        PositionReduceResult? result = await Reduce(accountId, 3);
+
+        result!.Outcome.Should().Be(PositionReduceOutcome.Reduced);
+        result.NetQuantity.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldStillReportUnconfirmed_WhenTheReductionDidNotVerifyAndTheJournalFails()
+    {
+        // The other direction, and the one that matters more: a failing journal must never launder an
+        // unverified reduce into a success. The gh#928 verified-reduction rule is untouched by this card.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReducesTo(5);
+        A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._))
+            .Throws(new InvalidOperationException("the journal is down"));
+
+        PositionReduceResult? result = await Reduce(accountId, 3);
+
+        result!.Outcome.Should().Be(PositionReduceOutcome.Unconfirmed);
+        result.NetQuantity.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalAfterTheVenueWasAsked_WhenItReduces()
+    {
+        // Transmit, then journal -- ADR-0007's accepted ordering for the send path (2026-08-02), applied unchanged
+        // rather than re-answered here. The record carries the VERIFIED outcome, which cannot exist before the
+        // attempt resolves.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReducesTo(2);
+
+        await Reduce(accountId, 3);
+
+        A.CallTo(() => _venue.ReducePositionAsync(
+                A<VenueAccountId>._, A<VenueContractId>._, A<int>._, A<CancellationToken>._))
+            .MustHaveHappened()
+            .Then(A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._))
+                .MustHaveHappened());
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalOnceOnly_WhenItReduces()
+    {
+        // One attempt, one row. A duplicated record would make a single reduce read as two in an incident -- the
+        // exact confusion the requested quantity is being recorded to resolve.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReducesTo(2);
+
+        await Reduce(accountId, 3);
+
+        A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._))
+            .MustHaveHappenedOnceExactly();
     }
 }
