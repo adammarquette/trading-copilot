@@ -72,17 +72,30 @@ What the increment establishes, and what a future write tool inherits:
    tool: **remove the choice from the schema rather than validating the model's answer to it**, because a schema
    the model never sees a field in is a stronger guarantee than a check it might argue past.
 
-3. **Fail closed leaves nothing behind.** An incoherent geometry, a malformed argument, an undeclared /
-   untradable / inactive account, or an *ambiguous* one all stage **nothing** and return an error string the model
-   reads. Ambiguity is deliberately a refusal rather than a default: the account is which money the setup is
-   proposed against, and that choice does not become the model's by default.
+3. **Fail closed leaves nothing behind — and a refusal must be *answerable*.** An incoherent geometry, a
+   malformed argument, an undeclared / untradable / inactive account, or an *ambiguous* one all stage **nothing**
+   and return an error string the model reads. Ambiguity is deliberately a refusal rather than a default: the
+   account is which money the setup is proposed against, and that choice does not become the model's by default.
+   The review of this increment found the sharp edge that comes with it: a fail-closed refusal the model **cannot
+   resolve by any input** is a functional dead end, not a safe default. `Account.Name` is not unique, so two
+   connections carrying same-named venue accounts produced *"name the account explicitly — X, X"* forever. So the
+   rule a write tool inherits is stronger than "fail closed": **whatever a refusal asks the model to send, the tool
+   must accept**. Here each candidate carries a label unique within the operator's proposable set.
 
-4. **A write tool writes in its own owner-scoped transaction**, not the turn endpoint's request context that the
+4. **A second producer of an existing entity owes that entity a producer field.** `generate_suggestion` made
+   `Suggestion` two-producer, and everything downstream had been written when it was one: the operator's card
+   rendered a chat proposal through the scan's citation line as `cited signal · (0) · 0m`, and the R-4 throttle's
+   per-account window counted every row regardless of who wrote it, so chat could silence the scan for a trading
+   day. Neither was reachable before. `Suggestion.Origin` is stored rather than inferred from the absent trigger
+   link, because the absence was already overloaded — an empty cited-factor set is *also* a read bug — and a
+   surface that cannot tell a new producer from a defect will render the defect as the producer.
+
+5. **A write tool writes in its own owner-scoped transaction**, not the turn endpoint's request context that the
    read tools inject. Otherwise a refused turn would commit the proposal anyway when the endpoint saved, and a
    `Suggestion` CHECK violation would surface as a failure of the endpoint's conversation write — a constraint
    backstops only its own transaction's owner.
 
-5. **The boundary is now pinned twice, and the read-only suite was extended rather than replaced.** The
+6. **The boundary is now pinned twice, and the read-only suite was extended rather than replaced.** The
    structural half enumerates **every** `IChatTool` by reflection — so the *next* tool is covered on sight rather
    than when someone remembers a list — and pins a write tool's constructor dependency set *exactly*, because a
    forbidden-fragment scan over direct parameters is defeated by one helper indirection. The behavioural half is

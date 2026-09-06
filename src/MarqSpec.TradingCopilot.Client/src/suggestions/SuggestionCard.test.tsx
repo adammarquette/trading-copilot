@@ -205,7 +205,9 @@ describe('SuggestionCard — the fully-specified setup (R-4)', () => {
 
     expect(screen.queryByTestId('suggestion-origin')).toBeNull();
     expect(screen.getByTestId('suggestion-timeframe').textContent).toBe('15m');
-    expect(screen.getByTestId('suggestion-citation').textContent).toContain('cited signal · RSI(14) · 15m');
+    expect(screen.getByTestId('suggestion-citation').textContent).toContain(
+      'cited signal · RSI(14) · 15m',
+    );
   });
 
   it('reads the PRODUCER, not the shape of the citation — a zeroed scan citation is a bug, not a chat proposal', () => {
