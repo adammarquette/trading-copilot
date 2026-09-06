@@ -163,16 +163,26 @@ public class GenerateSuggestionToolTests
         Parse(result).GetProperty("size").GetInt32().Should().Be(_options.ChatProposalSize);
     }
 
-    [Fact]
-    public async Task ExecuteAsync_ShouldReadTheModeLiveOffTheAccount_WhenTheModelTriesToChooseTheMode()
+    /// <summary>
+    /// Both declared modes, because a Practice-only case cannot fail: an implementation that hard-coded
+    /// <see cref="TradingMode.Practice"/> — or read the model's own JSON — would satisfy it. The row's mode must
+    /// track the ACCOUNT's in each direction, so the model can neither promote a practice proposal nor quietly
+    /// demote a live one. (An in-memory fixture, not a venue: R-14's environment policy is enforced where accounts
+    /// are declared, not here.)
+    /// </summary>
+    [Theory]
+    [InlineData(TradingMode.Practice, "Live")]
+    [InlineData(TradingMode.Live, "Practice")]
+    public async Task ExecuteAsync_ShouldReadTheModeLiveOffTheAccount_WhenTheModelTriesToChooseTheMode(
+        TradingMode accountMode, string modeTheModelAsksFor)
     {
-        await SeedAccountAsync(_owner, mode: TradingMode.Practice);
+        await SeedAccountAsync(_owner, mode: accountMode);
 
-        await Tool().ExecuteAsync(Input("\"mode\":\"Live\""), CancellationToken.None);
+        await Tool().ExecuteAsync(Input("\"mode\":\"" + modeTheModelAsksFor + "\""), CancellationToken.None);
 
         Suggestion staged = (await StagedAsync()).Should().ContainSingle().Which;
         staged.Mode.Should().Be(
-            TradingMode.Practice, "the mode is read live off the account (R-14); the model cannot promote a proposal");
+            accountMode, "the mode is read live off the account (R-14); the model's own JSON is not even read");
     }
 
     [Fact]
