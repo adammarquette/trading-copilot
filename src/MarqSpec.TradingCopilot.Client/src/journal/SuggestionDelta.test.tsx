@@ -44,6 +44,7 @@ const SUGGESTION: Suggestion = {
   riskUsd: 325,
   rewardUsd: 775,
   rationale: 'VWAP reclaim with SPY leading.',
+  origin: SuggestionOrigin.Scan,
   citedIndicator: 'VWAP',
   citedPeriod: 0,
   citedResolutionMinutes: 5,
