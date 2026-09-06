@@ -58,22 +58,30 @@ public sealed class PositionExitService
     private readonly TradingCopilotDbContext _database;
     private readonly IProjectXVenueFactory _venueFactory;
     private readonly IOptions<ProjectXConnectionOptions> _projectXOptions;
+    private readonly IPositionActionJournal _journal;
     private readonly ILogger<PositionExitService> _logger;
 
     /// <summary>Creates the exit service.</summary>
     /// <param name="database">The scoped database.</param>
     /// <param name="venueFactory">Builds a venue for the connection's firm conventions.</param>
     /// <param name="projectXOptions">The credential key this process serves (ADR-0015).</param>
+    /// <param name="journal">
+    /// The durable record of what was asked and what happened (gh#1143). <b>Required, not optional</b>: an optional
+    /// dependency defaults to a silent no-op the moment anything constructs this service without it.
+    /// </param>
     /// <param name="logger">The logger.</param>
     public PositionExitService(
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
         IOptions<ProjectXConnectionOptions> projectXOptions,
+        IPositionActionJournal journal,
         ILogger<PositionExitService> logger)
     {
+        ArgumentNullException.ThrowIfNull(journal);
         _database = database;
         _venueFactory = venueFactory;
         _projectXOptions = projectXOptions;
+        _journal = journal;
         _logger = logger;
     }
 
@@ -96,9 +104,69 @@ public sealed class PositionExitService
             .FirstOrDefaultAsync(candidate => candidate.Id == accountId, cancellationToken);
         if (account is null)
         {
-            return null; // not found / not owned (R-20)
+            // Not found / not owned (R-20), and deliberately NOT journaled: there is no owner to stamp a row with,
+            // and writing one would be a side channel confirming the id exists.
+            return null;
         }
 
+        Attempt attempt = await AttemptAsync(account, instrument, cancellationToken);
+
+        // TRANSMIT, THEN JOURNAL -- ADR-0007's accepted ordering for the send path (2026-08-02 update), applied
+        // here rather than re-answered: the record carries the VERIFIED outcome, which does not exist until the
+        // attempt resolves. The residual it leaves (a crash between the venue accepting and this write) is the same
+        // window that update names, and closing it would need a durable pre-transmit intent -- a change to what this
+        // path DOES, not to what it writes down. Recorded as an open item on the ADR instead.
+        //
+        // The journal cannot fail this: the seam is contracted never to throw, and it takes no cancellation token,
+        // so a client that hung up mid-response cannot cost the record of a real order.
+        await _journal.RecordSafelyAsync(
+            new PositionActionEntry
+            {
+                Action = PositionActionKind.Exit,
+                OwnerUserId = account.UserId,
+                AccountId = account.Id,
+                VenueAccountKey = account.VenueAccountKey,
+                Instrument = instrument.ToString(),
+                Contract = attempt.ContractKey,
+
+                // A full close asks for flat, and reads no starting size: it does not need one, and adding a
+                // pre-read would put another venue round trip -- and another failure mode -- in front of the one
+                // action that reduces real exposure.
+                RequestedQuantity = null,
+                NetQuantityBefore = null,
+
+                // The wire contract answers 0 on Unreachable (a deliberate divergence from the reduce, #1142), but
+                // the journal is what an incident reads back: an exposure nobody could read is recorded as unknown,
+                // never as a 0 that would manufacture a flat out of an outage (gh#929).
+                NetQuantityAfter = attempt.Result.Outcome is PositionExitOutcome.Unreachable
+                    ? null
+                    : attempt.Result.NetQuantity,
+                Outcome = attempt.Result.Outcome.ToString(),
+            },
+            DateTimeOffset.UtcNow,
+            _logger);
+
+        return attempt.Result;
+    }
+
+    /// <summary>The exit itself, plus the contract it resolved to when it got that far (gh#1143).</summary>
+    /// <param name="Result">The outcome, exactly as it is returned to the operator.</param>
+    /// <param name="ContractKey">The venue contract, or <see langword="null"/> when the attempt never resolved one.</param>
+    private sealed record Attempt(PositionExitResult Result, string? ContractKey);
+
+    /// <summary>
+    /// The exit, unchanged by gh#1143 — every decision, guard and outcome is exactly what it was; the record simply
+    /// carries the contract key out alongside the result.
+    /// </summary>
+    /// <param name="account">The caller's account row (already ownership-checked).</param>
+    /// <param name="instrument">The instrument to flatten.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The outcome, read from venue truth after the attempt.</returns>
+    private async Task<Attempt> AttemptAsync(
+        Account account,
+        InstrumentId instrument,
+        CancellationToken cancellationToken)
+    {
         Connection? connection = await _database.Connections
             .FirstOrDefaultAsync(candidate => candidate.Id == account.ConnectionId, cancellationToken);
         if (connection is null
@@ -106,8 +174,12 @@ public sealed class PositionExitService
         {
             // One credential set per process (ADR-0015). Closing on an account this process does not serve would
             // be acting through someone else's venue session.
-            return new PositionExitResult(PositionExitOutcome.Unreachable, 0);
+            return new Attempt(new PositionExitResult(PositionExitOutcome.Unreachable, 0), null);
         }
+
+        // Captured as the attempt walks forward, so a fault after the contract resolved still records WHICH
+        // contract the operator was closing rather than losing it to the catch.
+        string? contractKey = null;
 
         try
         {
@@ -118,20 +190,27 @@ public sealed class PositionExitService
             VenueAccount? venueAccount = roster.FirstOrDefault(candidate => candidate.Id.Key == account.VenueAccountKey);
             if (venueAccount is null)
             {
-                return new PositionExitResult(PositionExitOutcome.Unreachable, 0);
+                return new Attempt(new PositionExitResult(PositionExitOutcome.Unreachable, 0), null);
             }
 
             ResolvedContract resolved = await venue.ResolveContractAsync(instrument, cancellationToken);
+            contractKey = resolved.Contract.Key;
+
             PositionSnapshot after = await venue.ClosePositionAsync(
                 venueAccount.Id, resolved.Contract, cancellationToken);
 
             // Verified, not assumed: the outcome is what the venue reports AFTER the attempt.
-            return after.IsFlat
-                ? new PositionExitResult(PositionExitOutcome.Flat, 0)
-                : new PositionExitResult(PositionExitOutcome.StillOpen, after.NetQuantity);
+            return new Attempt(
+                after.IsFlat
+                    ? new PositionExitResult(PositionExitOutcome.Flat, 0)
+                    : new PositionExitResult(PositionExitOutcome.StillOpen, after.NetQuantity),
+                contractKey);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            // The CALLER went away -- abort rather than manufacture a business outcome. Narrow on purpose: a venue
+            // timeout also surfaces as an OperationCanceledException, but carrying HttpClient's own internal token,
+            // so it falls through to the fault handler below and is reported (and journaled) as Unreachable.
             throw;
         }
         catch (Exception error)
@@ -141,8 +220,8 @@ public sealed class PositionExitService
                 "Operator exit of {Instrument} on account {Account} could not be completed — the position may still "
                 + "be open (gh#656).",
                 instrument,
-                accountId);
-            return new PositionExitResult(PositionExitOutcome.Unreachable, 0);
+                account.Id);
+            return new Attempt(new PositionExitResult(PositionExitOutcome.Unreachable, 0), contractKey);
         }
     }
 }

@@ -9,7 +9,9 @@ namespace MarqSpec.TradingCopilot.Domain.Audit;
 /// <see cref="PositionExit"/> retirement (gh#183), an operator <see cref="OrderCancelled"/> (gh#250), an
 /// operator <see cref="OrderModified"/> reprice (gh#259), the kill switch's <see cref="KillSwitchEngaged"/> /
 /// <see cref="KillSwitchDisengaged"/> transitions and the <see cref="AutoFlatten"/> run (gh#765) — the two
-/// safety-critical write sites §9 named as deferred until they were wired.
+/// safety-critical write sites §9 named as deferred until they were wired — plus the two operator position actions
+/// that transmitted real orders and recorded nothing until gh#1143: <see cref="PositionExitAttempted"/> (gh#656)
+/// and <see cref="PositionReduceAttempted"/> (gh#928).
 /// </remarks>
 public enum AuditAction
 {
@@ -81,4 +83,34 @@ public enum AuditAction
     /// <see langword="null"/> (<c>CK_AuditRecords_Source_MatchesAction</c>).
     /// </summary>
     OutcomeHardDeleted = 8,
+
+    /// <summary>
+    /// An operator's <b>per-position full exit</b> was attempted (ADR-0007, gh#656, gh#1143): the blotter's "exit
+    /// this position" control reached the venue's native close. <c>After</c> carries the verified outcome —
+    /// <c>Flat</c>, <c>StillOpen</c> or <c>Unreachable</c> — and <c>Detail</c> the instrument, the venue account and
+    /// the resulting net quantity.
+    /// </summary>
+    /// <remarks>
+    /// <b>Distinct from <see cref="PositionExit"/>.</b> That one records a <i>stop plan being retired</i> because a
+    /// position went flat (gh#183); this one records the <i>operator action</i> and what it achieved, including the
+    /// outcomes where it achieved nothing. It concerns no single protective leg, so its <c>Placement</c> is
+    /// <see cref="AuditPlacement.None"/> and it carries no <c>synthetic_risk</c>; being outside the kill / flatten
+    /// set its <c>Source</c> is <see langword="null"/> (<c>CK_AuditRecords_Source_MatchesAction</c>) — and there is
+    /// nothing to disambiguate, since an authenticated operator request is its only possible trigger.
+    /// </remarks>
+    PositionExitAttempted = 9,
+
+    /// <summary>
+    /// An operator's <b>sized partial close</b> was attempted (ADR-0007, gh#928, gh#1143): the reduce control asked
+    /// the venue to take a named number of contracts off. <c>Before</c> carries the pre-attempt net quantity and
+    /// <c>After</c> the verified outcome — <c>Reduced</c>, <c>Unconfirmed</c>, <c>NotReduced</c>, <c>Refused</c>,
+    /// <c>ExceedsPosition</c>, <c>AccountBusy</c>, <c>HeldPracticeOnly</c> or <c>Unreachable</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>The row exists for the requested quantity.</b> How many contracts were asked for is <b>not</b>
+    /// reconstructable from venue truth afterwards — the venue reports only the resulting position — so
+    /// <c>Detail</c> (and the paired <c>position.reduce</c> event) is the only place an incident can read it.
+    /// Placement, synthetic-risk and source follow <see cref="PositionExitAttempted"/>.
+    /// </remarks>
+    PositionReduceAttempted = 10,
 }
