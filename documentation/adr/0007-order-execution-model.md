@@ -1471,10 +1471,21 @@ directions carry tests.
 (the journal is written *outside* it, so `AccountBusy` is recordable and the audit keeps its own unit of work), the
 practice-only holds and every outcome are exactly what they were.
 
-**Open for the operator, recorded rather than decided:**
+**Open for the operator, recorded rather than decided (gh#1161):**
 - **A durable pre-transmit intent for the reduce.** Whether the accepted transmit→journal window is acceptable for a
   path whose *requested* quantity is the only record of intent. Closing it means a pre-transmit write — a change to
-  the reduce's control flow on a safety path — and it interacts with the two holds gh#928 already carries.
+  the reduce's control flow on a safety path — and it interacts with the two holds gh#928 already carries. **The
+  window is wider than "a crash", and saying otherwise would understate it:**
+  - **A caller abort is ordinary, not exotic.** `IAccountEntryGuard`'s own remarks say so — the guarded callback
+    spans a venue round-trip, so a request aborting mid-transmit is routine. A browser abort during
+    `ReducePositionAsync`, *after* the gateway executed, propagates the caller's `OperationCanceledException` out of
+    `ReduceAsync` before the journal site is reached, and the requested quantity is lost with **no crash and no
+    error anyone sees**. That is the likeliest way this record goes missing, not a process death.
+  - **The lock's own cleanup can replace the outcome post-transmit.** `TryRunExclusiveAsync` releases the advisory
+    lock and closes the connection in a `finally`; a fault there (a dropped backend, a pool fault) propagates in
+    place of the callback's already-computed result — again after the venue was asked, and again before the record
+    is written.
+  Neither is fixable by writing the record differently; both need the intent to exist *before* the send.
 - **A metric.** Deliberately not added: a `Meter` counter is export-only and cannot be read back in process, so it
   cannot answer *what did the operator ask for* in an incident — the durable ledger is what does. A counter is an
   alerting concern and a change to the shared `IExecutionMetrics` surface; it belongs in its own increment.

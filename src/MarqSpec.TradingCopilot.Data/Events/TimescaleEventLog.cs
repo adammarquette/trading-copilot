@@ -1,6 +1,7 @@
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Events;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 
 namespace MarqSpec.TradingCopilot.Data.Events;
 
@@ -55,8 +56,25 @@ public sealed class TimescaleEventLog : IEventLog
             TraceParent = draft.TraceParent,
         };
 
-        _database.Events.Add(stored);
-        await _database.SaveChangesAsync(cancellationToken);
+        EntityEntry<Event> tracked = _database.Events.Add(stored);
+        try
+        {
+            await _database.SaveChangesAsync(cancellationToken);
+        }
+        catch
+        {
+            // A REFUSED APPEND MUST LEAVE NOTHING BEHIND IT (gh#1143). EF keeps a failed insert in `Added`, and this
+            // log is scoped over the SAME TradingCopilotDbContext as every other writer in the request -- including
+            // the `IAuditLog` that follows almost every event this platform records (the auto-flatten, the kill
+            // switch, the orphan guard, the position-action journal). Without this detach, that next SaveChanges
+            // batches the doomed row with its own, Postgres refuses the batch, and the caller loses the write it
+            // was told could not be affected by ours. Two fault boundaries around one shared change tracker are not
+            // independent unless each one cleans up after itself. Proven in the container tier
+            // (PositionActionJournalFaultIsolationIntegrationTests) -- the in-memory provider raises no constraint,
+            // so it cannot witness this.
+            tracked.State = EntityState.Detached;
+            throw;
+        }
 
         return ToEnvelope(stored);
     }

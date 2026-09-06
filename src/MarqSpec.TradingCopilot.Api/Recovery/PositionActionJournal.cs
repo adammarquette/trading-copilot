@@ -17,8 +17,10 @@ namespace MarqSpec.TradingCopilot.Api.Recovery;
 /// <para>
 /// <b>Why both, rather than the cancel / modify shape.</b> A cancel (gh#250), a reprice / re-stage / resize
 /// (gh#259 / gh#267 / gh#292) and a withdraw (gh#655) all leave a durable row of their own — the <c>Order</c> or
-/// <c>ConditionalOrderRecord</c> whose status <i>is</i> the journal — and add an <see cref="AuditRecord"/> beside
-/// it. A per-position exit or reduce writes <b>no such row</b>: it is a native venue close, not an order the
+/// <c>ConditionalOrderRecord</c> whose status <i>is</i> the journal. Most of them add an <see cref="AuditRecord"/>
+/// beside it; not all do — a cancel whose order had no staged stop plan to retire writes no audit row at all, and a
+/// withdraw writes none ever, because in both cases the status row already carries the whole event. A per-position
+/// exit or reduce writes <b>no such row</b>: it is a native venue close, not an order the
 /// platform journals, so an <see cref="AuditRecord"/> alone would leave the structured facts (what was asked, what
 /// was open, what is open now) only in a prose <c>Detail</c> string. The one other position-level close in the
 /// system, the auto-flatten, already answers this by writing both — so this follows it rather than inventing a
@@ -37,6 +39,16 @@ namespace MarqSpec.TradingCopilot.Api.Recovery;
 /// still leaves the audit row (and the reverse), and <b>nothing</b> propagates — not even cancellation. Every
 /// caller reaches this seam <i>after</i> the venue attempt has resolved, holding the outcome it is about to return;
 /// a throw here would replace a verified answer with an error.
+/// </para>
+/// <para>
+/// <b>The two boundaries are independent only because each store cleans up after itself.</b> <c>TimescaleEventLog</c>
+/// and <c>AuditLog</c> are both scoped over the <b>same</b> <c>TradingCopilotDbContext</c>, and EF leaves a refused
+/// insert tracked as <c>Added</c> — so a failed append would otherwise be re-attempted by the audit's
+/// <c>SaveChanges</c>, be refused again, and take the audit row down with it, losing <i>both</i> records. Each store
+/// therefore detaches its own refused entity before rethrowing (gh#1143). Two <c>try</c> blocks around one shared
+/// change tracker are not two boundaries; this is what makes them two. It is held by
+/// <c>PositionActionJournalFaultIsolationIntegrationTests</c> against real Postgres, because the in-memory provider
+/// raises no constraint and a fake <c>IEventLog</c> never touches the shared context at all.
 /// </para>
 /// </remarks>
 public sealed class PositionActionJournal : IPositionActionJournal

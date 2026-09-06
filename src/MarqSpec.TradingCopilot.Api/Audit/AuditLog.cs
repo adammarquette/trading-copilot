@@ -1,5 +1,6 @@
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
+using Microsoft.EntityFrameworkCore;
 
 namespace MarqSpec.TradingCopilot.Api.Audit;
 
@@ -35,6 +36,22 @@ public sealed class AuditLog : IAuditLog
         }
 
         _database.AuditRecords.AddRange(records);
-        await _database.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await _database.SaveChangesAsync(cancellationToken);
+        }
+        catch
+        {
+            // The mirror of TimescaleEventLog's detach, and here for the same reason (gh#1143): this log shares the
+            // caller's scoped context, so a refused audit row left in `Added` would poison whatever that request
+            // saves next -- turning a swallowed audit failure into someone else's lost write. A secondary write
+            // that cannot fail its caller must not be able to fail the caller's NEXT one either.
+            foreach (AuditRecord record in records)
+            {
+                _database.Entry(record).State = EntityState.Detached;
+            }
+
+            throw;
+        }
     }
 }
