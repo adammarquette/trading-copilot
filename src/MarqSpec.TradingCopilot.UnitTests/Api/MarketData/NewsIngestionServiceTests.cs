@@ -5,6 +5,7 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -57,6 +58,10 @@ public class NewsIngestionServiceTests
     private NewsIngestionService Service(
         TradingCopilotDbContext context, NewsIngestionOptions options, params INewsSource[] sources) =>
         new(context, sources, Options.Create(options), NullLogger<NewsIngestionService>.Instance);
+
+    private NewsIngestionService Service(
+        TradingCopilotDbContext context, ILogger<NewsIngestionService> logger, params INewsSource[] sources) =>
+        new(context, sources, Options.Create(new NewsIngestionOptions { Enabled = true }), logger);
 
     private static NewsRecord Stored(string url, string title, DateTimeOffset published) =>
         new()
@@ -381,6 +386,48 @@ public class NewsIngestionServiceTests
 
         (await context.News.CountAsync()).Should().Be(1);
         (await context.News.SingleAsync()).SourceFeeds.Should().BeEquivalentTo(["finnhub", "tiingo"]);
+    }
+
+    // --- Silent-empty visibility (gh#1123's acceptance, shipped untested -- gh#1147) ---
+
+    [Fact]
+    public async Task IngestAsync_ShouldLogInformation_WhenAPassFetchesItemsButStoresOrUpdatesNone()
+    {
+        // gh#1123: a pass that fetches real items but stores or updates none -- because every one was already
+        // known from the same feed -- is the exact "successful" pass that silently starved the pipeline under the
+        // old 60-minute default. It must say so in a log, or an operator watching only pass/fail has no way to
+        // tell a starved window from a healthy, fully-caught-up steady state.
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            seed.News.Add(Stored("https://site.com/a", "Fed holds rates", Now.AddMinutes(-5)));
+            await seed.SaveChangesAsync();
+        }
+
+        ILogger<NewsIngestionService> logger = A.Fake<ILogger<NewsIngestionService>>();
+        await using TradingCopilotDbContext context = Context();
+
+        // Same URL, same feed as the seeded row -- the canonical match's UnionProvenance is a genuine no-op, so
+        // written stays 0 even though the source served an item (totalFetched > 0).
+        await Service(context, logger, Source(Finnhub, [Item("https://site.com/a")]))
+            .IngestAsync(Now, CancellationToken.None);
+
+        A.CallTo(logger).Where(call => call.Method.Name == "Log" && call.GetArgument<LogLevel>(0) == LogLevel.Information)
+            .MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task IngestAsync_ShouldNotLogInformation_WhenItStoresNewItems()
+    {
+        // The control: a normal pass that actually stores something must stay silent at Information, or the log
+        // becomes noise on every routine poll instead of the "nothing changed" signal it exists to surface.
+        ILogger<NewsIngestionService> logger = A.Fake<ILogger<NewsIngestionService>>();
+        await using TradingCopilotDbContext context = Context();
+
+        await Service(context, logger, Source(Finnhub, [Item("https://site.com/a")]))
+            .IngestAsync(Now, CancellationToken.None);
+
+        A.CallTo(logger).Where(call => call.Method.Name == "Log" && call.GetArgument<LogLevel>(0) == LogLevel.Information)
+            .MustNotHaveHappened();
     }
 
     // --- Failure containment ---
