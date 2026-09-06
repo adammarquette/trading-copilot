@@ -120,7 +120,7 @@ public interface IPositionActionJournal
 /// never to throw and guards each of its two writes separately — but a contract is a promise, and the property it
 /// promises (a record of a safety action must never be able to <i>prevent</i>, <i>fail</i> or <i>alter</i> that
 /// action) is the one that must not depend on a promise. Any implementation of the seam, present or future, is
-/// therefore also swallowed here. It is one shared helper rather than a <c>try</c> in each service, because two
+/// therefore also swallowed here, and so is a null argument to this method. It is one shared helper rather than a <c>try</c> in each service, because two
 /// hand-copied fault boundaries around one shape is precisely how this pair of endpoints drifted in the first place.
 /// </remarks>
 public static class PositionActionJournalExtensions
@@ -136,26 +136,31 @@ public static class PositionActionJournalExtensions
         DateTimeOffset occurredAt,
         ILogger logger)
     {
-        ArgumentNullException.ThrowIfNull(journal);
-        ArgumentNullException.ThrowIfNull(entry);
-        ArgumentNullException.ThrowIfNull(logger);
-
         try
         {
+            // Validated INSIDE the boundary, deliberately. A guard that can throw past the belt is not a belt:
+            // these three are the caller's own wiring, and a wiring defect must not be the one fault that reaches
+            // an operator holding a verified close.
+            ArgumentNullException.ThrowIfNull(journal);
+            ArgumentNullException.ThrowIfNull(entry);
+            ArgumentNullException.ThrowIfNull(logger);
+
             await journal.RecordAsync(entry, occurredAt);
         }
         catch (Exception error)
         {
             // Cancellation included: the caller is holding a verified outcome for an order that already reached a
             // real venue, and turning that into an aborted request would be strictly worse than losing a row.
-            logger.LogError(
+            // Null-tolerant on both operands, because the guards above are now inside the try and may be what
+            // brought us here -- nothing in a catch that exists to absorb a fault may raise one of its own.
+            logger?.LogError(
                 error,
                 "Could not record the operator {Action} of {Instrument} on account {Account} (outcome {Outcome}); "
                 + "the action itself is unaffected (gh#1143).",
-                entry.Action,
-                entry.Instrument,
-                entry.AccountId,
-                entry.Outcome);
+                entry?.Action,
+                entry?.Instrument,
+                entry?.AccountId,
+                entry?.Outcome);
         }
     }
 }

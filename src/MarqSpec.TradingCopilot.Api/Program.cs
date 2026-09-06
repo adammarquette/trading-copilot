@@ -485,7 +485,10 @@ builder.Services.AddScoped<PositionReconciliationService>();
 builder.Services.AddScoped<IPositionReconciler>(provider => provider.GetRequiredService<PositionReconciliationService>());
 // The durable record both operator position actions write (gh#1143): an event-log append (ADR-0001) plus an
 // immutable operator-owned AuditRecord (gh#220), the pair the auto-flatten already writes for a position-level
-// close. Bound to the CONCRETE event log and audit log, never back onto a seam that could resolve onto itself.
+// close. It takes IEventLog and IAuditLog -- the same two seams every other journaling write site takes, resolved
+// to TimescaleEventLog and AuditLog above -- so it shares their scoped TradingCopilotDbContext. That sharing is
+// exactly why each of those two now detaches a refused insert rather than leaving it to poison the other's save
+// (gh#1143); PositionActionJournalFaultIsolationIntegrationTests holds that against real Postgres.
 builder.Services.AddScoped<IPositionActionJournal, PositionActionJournal>();
 builder.Services.AddScoped<PositionExitService>();
 // The sized partial-close sibling of the full exit (gh#928): reduce a position toward flat without flattening it.
