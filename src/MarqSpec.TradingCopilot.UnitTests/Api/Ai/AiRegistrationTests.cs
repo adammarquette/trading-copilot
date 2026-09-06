@@ -1,4 +1,5 @@
 using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.Chat.Tools;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain.Ai;
@@ -121,6 +122,37 @@ public class AiRegistrationTests
             contextLifetime,
             "an enricher out-living the scoped DbContext it injects is a captive dependency that fails scope validation "
             + "at startup");
+    }
+
+    /// <summary>
+    /// The <c>generate_suggestion</c> write tool (gh#1134) must actually be <b>in the offered set</b>. A tool that
+    /// compiles, is unit-tested, and is never registered is a feature that silently does not exist —
+    /// <c>ChatTurnService</c> resolves <c>IEnumerable&lt;IChatTool&gt;</c>, so the registration <i>is</i> the wiring.
+    /// Its lifetime is asserted against the <b>actual</b> lifetime of the <c>DbContextOptions</c> it injects: a
+    /// longer-lived registration would be a captive dependency failing the host's <c>ValidateScopes</c> at startup —
+    /// the API host, with the safety-critical scan / auto-flatten / kill switch it hosts, would never boot.
+    /// </summary>
+    [Fact]
+    public void AddTradingCopilotAi_ShouldOfferTheGenerateSuggestionToolNoLongerLivedThanItsDbContextOptions()
+    {
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddTradingCopilotData("Host=localhost;Database=x;Username=u;Password=p");
+        services.AddTradingCopilotAi(new ConfigurationBuilder().Build());
+
+        ServiceDescriptor tool = services
+            .Where(descriptor => descriptor.ServiceType == typeof(IChatTool))
+            .Should().ContainSingle(descriptor => descriptor.ImplementationType == typeof(GenerateSuggestionTool),
+                "the chat turn offers exactly the registered IChatTool set, so an unregistered tool is unreachable")
+            .Which;
+
+        ServiceLifetime optionsLifetime = services
+            .Single(descriptor => descriptor.ServiceType == typeof(DbContextOptions<TradingCopilotDbContext>)).Lifetime;
+
+        tool.Lifetime.Should().Be(
+            optionsLifetime,
+            "a tool out-living the scoped DbContextOptions it injects is a captive dependency that fails scope "
+            + "validation at startup");
     }
 
     private static ServiceProvider Build(string? apiKey, string? cohereApiKey = null)
