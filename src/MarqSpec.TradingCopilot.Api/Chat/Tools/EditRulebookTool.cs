@@ -65,6 +65,17 @@ namespace MarqSpec.TradingCopilot.Api.Chat.Tools;
 /// <see cref="Guid"/>. <c>ChatToolBoundaryTests</c> pins that structurally, with this tool's constructor dependency
 /// set pinned <i>exactly</i>, since a fragment scan is defeated by one indirection.
 /// </para>
+/// <para>
+/// <b>An amend that applies nothing refuses — it never says "amended" (gh#1155).</b> Two ways an amend could
+/// silently no-op while still disarming: naming an <b>identity</b> field (<c>symbol</c>, <c>indicator</c>,
+/// <c>period</c>, <c>resolutionMinutes</c>) — those name <i>which</i> rule this is, so changing one is authoring a
+/// different rule, not editing this one, and the model is told that rather than having the field quietly dropped;
+/// and a value that is <b>present but the wrong JSON type</b> (a string where a number belongs), which parsed as
+/// "absent" rather than as the malformed argument it is. Both are refused before the row is touched, and an amend
+/// naming no amendable field at all is refused too — success is never reported for a change that did not happen,
+/// and in particular a confirmed rule's <c>Confirmation</c> / <c>ArmState</c> / <c>ArmCycle</c> are never reset
+/// unless something was actually applied.
+/// </para>
 /// </remarks>
 public sealed class EditRulebookTool : IChatTool
 {
@@ -113,10 +124,10 @@ public sealed class EditRulebookTool : IChatTool
         + "only alerts — it never trades, sizes a position, or names an account.",
         "{\"type\":\"object\",\"properties\":{"
         + "\"triggerId\":{\"type\":\"string\",\"description\":\"The id of an existing rule to amend. Omit to author a new one.\"},"
-        + "\"symbol\":{\"type\":\"string\",\"description\":\"The venue-neutral instrument symbol, e.g. ES. Required when authoring.\"},"
-        + "\"indicator\":{\"type\":\"string\",\"enum\":[\"atr\",\"rsi\"],\"description\":\"The indicator to watch. Required when authoring.\"},"
-        + "\"period\":{\"type\":\"integer\",\"description\":\"The indicator period; a positive whole number. Required when authoring.\"},"
-        + "\"resolutionMinutes\":{\"type\":\"integer\",\"description\":\"The bar size in minutes; a positive whole number. Required when authoring.\"},"
+        + "\"symbol\":{\"type\":\"string\",\"description\":\"The venue-neutral instrument symbol, e.g. ES. Required when authoring; not amendable -- omit when passing triggerId, changing it means authoring a new rule.\"},"
+        + "\"indicator\":{\"type\":\"string\",\"enum\":[\"atr\",\"rsi\"],\"description\":\"The indicator to watch. Required when authoring; not amendable -- omit when passing triggerId, changing it means authoring a new rule.\"},"
+        + "\"period\":{\"type\":\"integer\",\"description\":\"The indicator period; a positive whole number. Required when authoring; not amendable -- omit when passing triggerId, changing it means authoring a new rule.\"},"
+        + "\"resolutionMinutes\":{\"type\":\"integer\",\"description\":\"The bar size in minutes; a positive whole number. Required when authoring; not amendable -- omit when passing triggerId, changing it means authoring a new rule.\"},"
         + "\"comparison\":{\"type\":\"string\",\"enum\":[\"Below\",\"Above\"],\"description\":\"Which side of the threshold alerts. Required when authoring.\"},"
         + "\"threshold\":{\"type\":\"number\",\"description\":\"The value to compare against; rsi must be between 0 and 100 exclusive, atr above 0. Required when authoring.\"},"
         + "\"hysteresis\":{\"type\":\"number\",\"description\":\"An optional positive re-arm dead-band.\"},"
@@ -284,6 +295,16 @@ public sealed class EditRulebookTool : IChatTool
             return Error("No such rule for this trader, so nothing was changed.");
         }
 
+        // NOTHING TO APPLY (gh#1155). An amend that names no amendable field must refuse rather than report
+        // "amended" -- silently applying nothing while still disarming a confirmed rule is exactly the shape a
+        // model could use to claim a change it never made.
+        if (edit.Threshold is null && edit.Hysteresis is null && edit.Comparison is null && edit.Severity is null)
+        {
+            return Error(
+                "Nothing to amend -- send at least one of threshold, hysteresis, comparison or severity to change "
+                + "the rule. Nothing was changed.");
+        }
+
         // VALIDATED WHOLE, BEFORE ANYTHING IS APPLIED -- the top-guard shape the patch endpoint uses, so a refused
         // amend leaves the stored rule untouched rather than half-edited, and does not even disarm it.
         if (edit.Threshold is { } proposed
@@ -411,6 +432,22 @@ public sealed class EditRulebookTool : IChatTool
             triggerId = parsedId;
         }
 
+        // IDENTITY IS NOT AMENDABLE (gh#1155). symbol / indicator / period / resolutionMinutes name WHICH rule this
+        // is, not a value on it -- changing any of them is authoring a different rule. Checked against the RAW
+        // property, not the parsed value, so a malformed one (wrong JSON type) is still caught here: "carried but
+        // unusable" must not read as "not carried at all" and fall through to being silently dropped.
+        if (triggerId is not null)
+        {
+            foreach (string identityField in _identityFields)
+            {
+                if (root.TryGetProperty(identityField, out _))
+                {
+                    return $"The {identityField} is not amendable -- changing it means authoring a new rule with "
+                        + "edit_rulebook (omit triggerId), not editing this one.";
+                }
+            }
+        }
+
         IndicatorComparison? comparison = null;
         if (TryString(root, "comparison", out string comparisonText))
         {
@@ -435,6 +472,19 @@ public sealed class EditRulebookTool : IChatTool
             severity = parsedSeverity;
         }
 
+        // PRESENT BUT UNPARSEABLE IS A MALFORMED ARGUMENT, NOT AN ABSENCE (gh#1155). A JSON string where a number
+        // belongs (e.g. "threshold": "25") parses cleanly but is not a Number, and TryGetDecimal cannot read it --
+        // reading that as "the model sent nothing" let a malformed amend apply nothing while still disarming.
+        if (TryDecimal(root, "threshold", out decimal? threshold) is { } thresholdParseError)
+        {
+            return thresholdParseError;
+        }
+
+        if (TryDecimal(root, "hysteresis", out decimal? hysteresis) is { } hysteresisParseError)
+        {
+            return hysteresisParseError;
+        }
+
         edit = new Edit(
             triggerId,
             TryString(root, "symbol", out string symbol) ? symbol : null,
@@ -442,11 +492,14 @@ public sealed class EditRulebookTool : IChatTool
             TryInt(root, "period", out int period) ? period : null,
             TryInt(root, "resolutionMinutes", out int resolution) ? resolution : null,
             comparison,
-            TryDecimal(root, "threshold", out decimal threshold) ? threshold : null,
-            TryDecimal(root, "hysteresis", out decimal hysteresis) ? hysteresis : null,
+            threshold,
+            hysteresis,
             severity);
         return null;
     }
+
+    // The condition's identity (gh#1155): naming which rule an amend targets, not a value on it. Not amendable.
+    private static readonly string[] _identityFields = ["symbol", "indicator", "period", "resolutionMinutes"];
 
     private static bool TryString(JsonElement root, string name, out string value)
     {
@@ -462,12 +515,26 @@ public sealed class EditRulebookTool : IChatTool
         return value.Length > 0;
     }
 
-    private static bool TryDecimal(JsonElement root, string name, out decimal value)
+    /// <summary>
+    /// Reads a decimal property. Absent (or JSON <c>null</c>) is <see langword="null"/> and no error -- the field
+    /// simply was not sent. <b>Present</b> but not a JSON number is a malformed argument and refuses (gh#1155):
+    /// reading it as "absent" let an amend that sent a string-typed number apply nothing while reporting success.
+    /// </summary>
+    private static string? TryDecimal(JsonElement root, string name, out decimal? value)
     {
-        value = 0m;
-        return root.TryGetProperty(name, out JsonElement element)
-            && element.ValueKind == JsonValueKind.Number
-            && element.TryGetDecimal(out value);
+        value = null;
+        if (!root.TryGetProperty(name, out JsonElement element) || element.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (element.ValueKind != JsonValueKind.Number || !element.TryGetDecimal(out decimal parsed))
+        {
+            return $"The {name} must be a number.";
+        }
+
+        value = parsed;
+        return null;
     }
 
     private static bool TryInt(JsonElement root, string name, out int value)
