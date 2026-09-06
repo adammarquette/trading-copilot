@@ -11,6 +11,7 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Chat;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 using Microsoft.EntityFrameworkCore;
@@ -19,16 +20,18 @@ using Microsoft.Extensions.DependencyInjection;
 namespace MarqSpec.TradingCopilot.IntegrationTests.Api.Chat;
 
 /// <summary>
-/// Pre-merge integration coverage for the <b>read-only chat tool layer</b> (gh#930 for gh#925 — R-6, ADR-0025,
-/// extending the grounded turn of gh#916) against <b>real Postgres</b>, driven through the shipped endpoint
-/// <c>POST /conversations/{id}/turns</c>.
+/// Pre-merge integration coverage for the <b>chat tool layer</b> (gh#930 for gh#925 — R-6, ADR-0025, extending the
+/// grounded turn of gh#916; <b>extended</b> for the <c>generate_suggestion</c> write tool of gh#1134) against
+/// <b>real Postgres</b>, driven through the shipped endpoint <c>POST /conversations/{id}/turns</c>.
 /// </summary>
 /// <remarks>
 /// <para>
 /// This is the first surface where <b>the model chooses an action and the app executes it</b>, so the suite is written
-/// against the boundary rather than the happy path. Four failure modes are named and guarded: a turn that claims to be
+/// against the boundary rather than the happy path. Six failure modes are named and guarded: a turn that claims to be
 /// grounded but never ran a tool; a model-invented, <b>order-shaped</b> tool that the loop <i>dispatches</i>; a tool
-/// loop that never terminates; and billed model calls that never reach the AI-usage ledger the spend governor reads.
+/// loop that never terminates; billed model calls that never reach the AI-usage ledger the spend governor reads; a
+/// <b>write</b> tool that reaches an order rather than staging a proposal, or whose proposal arrives already
+/// <i>taken</i>; and an <b>incoherent</b> proposal that commits anyway (gh#1134).
 /// </para>
 /// <para>
 /// <b>How the guards are made able to fail.</b> (1) The scripted model can only produce journal text by echoing what
@@ -42,9 +45,17 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api.Chat;
 /// </para>
 /// <para>
 /// <b>The order tripwire is a recorder, not a name check.</b> Every case asserts the adversarial venue recorded no
-/// place / modify / cancel / close, and that the database holds no <c>Order</c> or <c>Suggestion</c> row — the
-/// mistake §"The guard discipline" cites (PR #140: asserting method *names* never contain "Order") is exactly what
-/// this avoids. A verb is witnessed by a counter that would have moved.
+/// place / modify / cancel / close, and that the database holds no <c>Order</c> row — the mistake §"The guard
+/// discipline" cites (PR #140: asserting method *names* never contain "Order") is exactly what this avoids. A verb is
+/// witnessed by a counter that would have moved.
+/// </para>
+/// <para>
+/// <b>What the write tool changed here, and what it deliberately did not.</b> The staged-<c>Suggestion</c> count was
+/// folded into that same tripwire and is now <b>stated per case</b> rather than assumed zero: every pre-existing case
+/// still asserts <b>zero</b> — including the theory rows, so merely <i>offering</i> a write tool stages nothing — and
+/// only a case that actually calls <c>generate_suggestion</c> expects one. Nothing was relaxed: an <c>Order</c> row,
+/// a venue call, and a <c>SuggestionDisposition</c> stay at zero in <b>every</b> case, the write tool's included,
+/// because a proposal is not an execution and staging is not taking.
 /// </para>
 /// </remarks>
 public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPostgresFactory>
@@ -351,6 +362,89 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
     }
 
     // =============================================================================================================
+    // AC5 (gh#1134) — the WRITE tool proposes; it does not execute, and an incoherent proposal never commits.
+    //
+    // These are the cases the read-only suite could not have: they run the tool that genuinely writes. The pair is one
+    // mechanism with opposite verdicts — the same scripted call, the same fed-back result, the same tripwire, differing
+    // by one number — so "nothing was staged" below is evidence rather than a sentence that could never fail.
+    // =============================================================================================================
+
+    [Fact]
+    public async Task Turn_ShouldStageOneUntakenProposal_AndStillReachNoOrderPath_WhenTheModelGeneratesASuggestion()
+    {
+        await ResetAsync();
+        HttpClient client = await AuthenticatedOperatorClientAsync();
+        Guid ownerId = await OperatorUserIdAsync();
+        await AccountForAsync(client);
+        (Guid accountId, string accountName, TradingMode accountMode) = await TradableAccountAsync(ownerId);
+        Guid conversationId = await StartConversationAsync(client);
+
+        _factory.Llm.Script(_ => ScriptedChatLlmProvider.SignalsToolUse());
+        _factory.Llm.Script(_ => ScriptedChatLlmProvider.WantsTool(
+            "generate_suggestion", ProposalJson(accountName, stopPrice: "4990.00")));
+        _factory.Llm.Script(request => ScriptedChatLlmProvider.Answer(
+            "Staged: " + string.Join(
+                " ", ScriptedChatLlmProvider.ToolResultsIn(request).Select(result => result.Content))));
+
+        using HttpResponseMessage response = await TakeTurnAsync(client, conversationId, "Propose an MES long.");
+        response.StatusCode.Should().Be(HttpStatusCode.OK, "a write-tool turn completes like any other");
+
+        // The premise: this tool really is in the offered set, so the dispatch below is a dispatch.
+        ScriptedChatLlmProvider.OfferedToolNames(_factory.Llm.Calls[1].Request).Should().Contain(
+            "generate_suggestion", "the write tool is offered to the model, or this case proves nothing");
+
+        LlmToolResult fedBack = ScriptedChatLlmProvider.ToolResultsIn(_factory.Llm.Calls[2].Request)
+            .Should().ContainSingle().Which;
+        fedBack.IsError.Should().BeFalse("an offered write tool is dispatched like any other");
+        fedBack.Content.Should().Contain(
+            "NOT been taken", "the model is told plainly, so it cannot report a trade it did not place");
+
+        Suggestion staged = await _factory.WithDatabaseAsync(database =>
+            database.Suggestions.IgnoreQueryFilters().AsNoTracking().SingleAsync());
+        staged.UserId.Should().Be(ownerId, "the proposal belongs to the conversation's owner (R-20)");
+        staged.AccountId.Should().Be(accountId, "and to the account the tool call named");
+        staged.State.Should().Be(SuggestionState.Active, "staged and surfaced — live for the operator to consider");
+        staged.Size.Should().Be(
+            1, "size is the operator's configured ChatProposalSize, never the model's — the schema has no size at all");
+        staged.Mode.Should().Be(accountMode, "the mode is read live off the account (R-14), not chosen by the model");
+        staged.ExpiresAt.Should().BeAfter(staged.CreatedAt, "the system's validity window, satisfying the DB CHECK");
+        staged.TriggerFiringId.Should().BeNull("no trigger fired — chat is not the scan");
+
+        // The tripwire, with the one number this case legitimately moved stated explicitly.
+        await AssertNoOrderPathWasReachedAsync(expectedSuggestions: 1);
+    }
+
+    [Fact]
+    public async Task Turn_ShouldStageNothing_WhenTheModelProposesAnIncoherentGeometry()
+    {
+        await ResetAsync();
+        HttpClient client = await AuthenticatedOperatorClientAsync();
+        await AccountForAsync(client);
+        (_, string accountName, _) = await TradableAccountAsync(await OperatorUserIdAsync());
+        Guid conversationId = await StartConversationAsync(client);
+
+        // Identical to the case above but for one number: the protective stop is ABOVE the entry on a long, which no
+        // coherent setup has. The write must fail closed against real Postgres rather than commit a broken card.
+        _factory.Llm.Script(_ => ScriptedChatLlmProvider.SignalsToolUse());
+        _factory.Llm.Script(_ => ScriptedChatLlmProvider.WantsTool(
+            "generate_suggestion", ProposalJson(accountName, stopPrice: "5010.00")));
+        _factory.Llm.Script(request => ScriptedChatLlmProvider.Answer(
+            "Result: " + string.Join(
+                " ", ScriptedChatLlmProvider.ToolResultsIn(request).Select(result => result.Content))));
+
+        using HttpResponseMessage response = await TakeTurnAsync(client, conversationId, "Propose an MES long.");
+        response.StatusCode.Should().Be(
+            HttpStatusCode.OK, "the turn recovers — a refused proposal is fed back, it does not crash the turn");
+
+        LlmToolResult fedBack = ScriptedChatLlmProvider.ToolResultsIn(_factory.Llm.Calls[2].Request)
+            .Should().ContainSingle().Which;
+        fedBack.Content.Should().Contain(
+            "Nothing was staged", "the model is told why, so it can correct itself rather than claim a proposal");
+
+        await AssertNoOrderPathWasReachedAsync(expectedSuggestions: 0);
+    }
+
+    // =============================================================================================================
     // The order tripwire, and the fixtures.
     // =============================================================================================================
 
@@ -360,7 +454,13 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
     /// is the other write path — so a chat turn that reached either is caught by a moved counter or a new row, not by
     /// a naming convention.
     /// </summary>
-    private async Task AssertNoOrderPathWasReachedAsync()
+    /// <param name="expectedSuggestions">
+    /// How many proposals this case legitimately staged — <b>0</b> for every read-tool case, and for the theory rows,
+    /// so that merely offering a write tool is proven to stage nothing. A case that calls <c>generate_suggestion</c>
+    /// states its own number (gh#1134). This is an EXTENSION, not a relaxation: the number is asserted exactly, and
+    /// the order / venue / disposition guards below are unconditional whatever it is.
+    /// </param>
+    private async Task AssertNoOrderPathWasReachedAsync(int expectedSuggestions = 0)
     {
         AdversarialTestProjectXVenueFactory venue = _factory.Venue;
         venue.TotalPlacedOrderCount.Should().Be(0, "a chat turn must never place an order at the venue");
@@ -369,11 +469,16 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
         venue.CancelOrderCalls.Should().BeEmpty("a chat turn must never cancel a working order");
         venue.ModifyOrderCalls.Should().BeEmpty("a chat turn must never move a stop or resize an order");
 
-        (int orders, int suggestions) = await _factory.WithDatabaseAsync(async database => (
+        (int orders, int suggestions, int dispositions) = await _factory.WithDatabaseAsync(async database => (
             await database.Orders.IgnoreQueryFilters().CountAsync(),
-            await database.Suggestions.IgnoreQueryFilters().CountAsync()));
-        orders.Should().Be(0, "the chat path writes no Order row — the model converses and reads, it does not stage");
-        suggestions.Should().Be(0, "nor does it stage a proposal; the suggestion path is the trigger scan's, not chat's");
+            await database.Suggestions.IgnoreQueryFilters().CountAsync(),
+            await database.SuggestionDispositions.IgnoreQueryFilters().CountAsync()));
+        orders.Should().Be(0, "the chat path writes no Order row — a proposal is not an execution");
+        suggestions.Should().Be(
+            expectedSuggestions,
+            "a chat turn stages exactly the proposals the tool it called was asked for, and never one more");
+        dispositions.Should().Be(
+            0, "and nothing chat stages is ever TAKEN — only the operator's own take disposes a suggestion (R-11)");
     }
 
     /// <summary>Runs a scripted tool-using turn in a fresh conversation and returns the content fed back to the model.</summary>
@@ -407,7 +512,17 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
             await database.ChatMessages.IgnoreQueryFilters().ExecuteDeleteAsync();
             await database.Conversations.IgnoreQueryFilters().ExecuteDeleteAsync();
             await database.Trades.IgnoreQueryFilters().ExecuteDeleteAsync();
+            await database.SuggestionDispositions.IgnoreQueryFilters().ExecuteDeleteAsync();
+            await database.Suggestions.IgnoreQueryFilters().ExecuteDeleteAsync();
             await database.AiUsage.IgnoreQueryFilters().ExecuteDeleteAsync();
+
+            // The accounts too, since gh#1134. Every case builds its own through the production discovery flow, and
+            // the shared container kept the previous case's — so by the fourth case several accounts carried the SAME
+            // venue name. That is a legitimate refusal for a tool that will not guess which money a setup is proposed
+            // against (the name is how the model addresses one), but it made the write cases order-dependent: green
+            // alone, red in the class run. Clearing them makes each case's fixture its own, rather than weakening the
+            // tool to suit the harness. Ordered after the rows that reference an account.
+            await database.Accounts.IgnoreQueryFilters().ExecuteDeleteAsync();
             return true;
         });
     }
@@ -521,6 +636,37 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
         discover.StatusCode.Should().Be(HttpStatusCode.OK);
         List<AccountResponse> accounts = await ReadAsync<List<AccountResponse>>(discover);
         return accounts.First(account => account.CanTrade).Id;
+    }
+
+    /// <summary>
+    /// A coherent MES long, varying only in <paramref name="stopPrice"/> — the one number that separates the accepted
+    /// proposal from the refused one, so the pair differs by nothing else.
+    /// </summary>
+    private static string ProposalJson(string accountName, string stopPrice) =>
+        "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":5000.25,\"stopPrice\":" + stopPrice
+        + ",\"targetPrice\":5020.50,\"rationale\":\"Reclaimed the overnight low on rising delta.\","
+        + "\"confidence\":70,\"account\":\"" + accountName + "\"}";
+
+    /// <summary>
+    /// The operator's proposable account, read back from Postgres rather than assumed: only a mode-DECLARED,
+    /// venue-tradable, active account may carry a proposal, and the discovery stub deliberately returns accounts that
+    /// are not. Naming it in the tool input is also what keeps the case deterministic — the tool refuses to guess
+    /// between several, which is the unit suite's subject.
+    /// </summary>
+    private async Task<(Guid Id, string Name, TradingMode Mode)> TradableAccountAsync(Guid ownerId)
+    {
+        List<Account> proposable = await _factory.WithDatabaseAsync(async database => await database.Accounts
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(account => account.UserId == ownerId)
+            .Where(account => account.Mode != TradingMode.Undeclared && account.CanTrade && account.IsActive)
+            .OrderBy(account => account.Name)
+            .ToListAsync());
+
+        proposable.Should().NotBeEmpty(
+            "the production discovery flow must leave at least one account a proposal could name");
+        Account account = proposable[0];
+        return (account.Id, account.Name, account.Mode);
     }
 
     private async Task<T> ReadAsync<T>(HttpResponseMessage response)
