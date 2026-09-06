@@ -199,3 +199,35 @@ poll-until-refresh until then.
     mechanism** (and it still covers a live tool-using turn's non-streaming rounds). The residue it bounds — a turn
     started inside the idle window welding onto the abandoned draft — is now reachable only when the terminator was
     lost, not on the ordinary faulted path.
+- **Landed (gh#1109): the gh#874 badge is now the shared "this read is behind" affordance, and `ConversationThread`
+  adopts it.** Three surfaces had converged on answering "the socket says live, but my last background read failed"
+  three different ways: the panel above kept its list and flagged it; `useExecutionOverlays` / `useFillMarkers`
+  blank and mark **unavailable**; and the chat thread (gh#1103's reconnect re-read, landed just above) kept the
+  thread and said **nothing at all** — the least honest of the three, because a reconnect re-read is exactly the
+  read most likely to fail and the global connection indicator stays green throughout. What the panel built is now
+  `useBehindIndicator` (`behind: boolean`, set by a failed background refresh, cleared by the next one that
+  succeeds) and `BehindMarker` (the subtle, non-destructive text, never rendered on a loading / error state), both
+  under `components/`. `SuggestionList` itself was refactored onto them — its `staleRefresh` state and inline
+  banner were the extraction's source, not a fourth copy left standing beside it — and `ConversationThread`'s
+  background `load(true)` now marks/clears the same way, rendered above the message list and never shown on
+  `state.kind === 'loading' | 'error'` (those already own their own screens, per the module note above).
+  **The overlays' blank-and-mark-`unavailable` stance was decided to stay deliberately different, not converge:**
+  `useExecutionOverlays` / `useFillMarkers` draw **execution geometry** — a working order's stop / limit price and
+  the net position's average price — directly onto the price axis, where the drawing itself *is* the read. A
+  suggestion list or a chat message is text the operator reads and then decides whether to act on; a stale-but-
+  labelled entry is still legible as "possibly out of date, but here is what it said." A stale-but-labelled price
+  *line* is not the same kind of degraded — the label survives a glance at the badge, but the geometry the operator
+  eyeballs against fresh candles does not carry the same asterisk, and a working order or position that closed
+  during the outage would draw at a price no longer true. That is exactly the risk state R-19 / ADR-0013 name —
+  "never present stale data / risk state as live" — and ADR-0013's own principle keeps **no-risk state (expire)
+  separate from at-risk state (protect + recover)**: a suggestion is no-risk (nothing at the broker until taken),
+  while a working order / open position is the at-risk state that principle is about. Blanking + `unavailable`
+  keeps that distinction sharp — an empty overlay is declared-unknown, never a confirmed flat book — where a stale
+  badge on a live geometry drawing would blur exactly the line ADR-0013 draws. So the two affordances now have one
+  home each, on purpose: `useBehindIndicator` / `BehindMarker` for decision-support text (the suggestion list, the
+  chat thread, and any future surface of that shape), and `stale` / `unavailable` for at-risk chart geometry. Filed
+  for the maintainer rather than assumed: whether a **third** future surface (e.g. a future order-flow / DOM pane,
+  documentation/design/wireframes.html's deferred slot) reads as "text to weigh" or "geometry to eyeball" is a
+  judgement call this ADR cannot make in advance — the test above (does the surface *draw* a price an operator
+  reads directly against the tape, or does it *state* something the operator weighs) is offered as the applicable
+  rule, not a closed list of surfaces.
