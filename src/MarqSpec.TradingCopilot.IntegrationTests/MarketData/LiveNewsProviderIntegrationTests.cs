@@ -34,9 +34,11 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.MarketData;
 /// plan does not include the News API, so every Tiingo news call returns <c>403</c> (gh#1125) — the key is valid,
 /// the entitlement is not. R-2's cross-source dedup consequently has <i>one</i> live feed, and the case that
 /// witnesses two feeds collapsing to one row is a declared block against that issue rather than a silent skip.
-/// Two further findings are filed, not fixed (QA contract §3): gh#1123 (the shipped 60-minute lookback admits
-/// roughly 0–1% of Finnhub's articles — measured twice, 0 of 100 and then 1 of 100) and gh#1124 (its general
-/// category carries no tickers, so relevance resolution has no input).
+/// Two further findings followed (QA contract §3): gh#1123 (the shipped 60-minute lookback admits roughly
+/// 0–1% of Finnhub's articles — measured twice, 0 of 100 and then 1 of 100), filed and tracked separately, and
+/// gh#1124 (its general category carries no tickers) — resolved here: the tickerlessness is Finnhub's
+/// deliberate, symbol-less shape (gh#439), not a gap, and gh#359's relevance resolution already has a second
+/// input for exactly this case (headline/summary topic matching, R-2) that does not depend on a ticker.
 /// </para>
 /// </remarks>
 [Trait("Category", "LiveProvider")]
@@ -285,12 +287,23 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
             article => article.PublishedAt > DateTimeOffset.UtcNow.AddDays(-30),
             "a publish time far outside any sane lookback means the provider's epoch is being misread");
 
-        // DEFECT gh#1124: the general category tags no tickers, so gh#359 relevance resolution has no input.
-        // Pinned as observed, not blessed — it flips into that issue's regression guard when a tagged feed lands.
+        // gh#1124, RESOLVED: general-category tickerlessness is Finnhub's deliberate shape (gh#439 — "the
+        // category that needs no symbol"), not a defect, so this no longer pins an open gap. R-2 already routes
+        // relevance via "ticker-map OR topic (tag/keyword/semantic)" — the topic path reads headline + summary,
+        // so a tickerless story is never structurally unmatchable (proven unit-side by
+        // NewsRelevanceResolverTests' *_WithNoInstrument cases, which pass `[]` tickers). What WOULD be
+        // structural is the chosen input itself coming back empty: a Finnhub item with no ticker AND no
+        // headline/summary text would give the topic path nothing to key on either. This guard therefore has
+        // two legs — the deliberate shape stays asserted, and the fallback input's presence is now a live
+        // guard, not an assumption.
         adapters.ItemsFor("finnhub").Should().OnlyContain(
             item => item.Tickers.Count == 0,
-            "gh#1124 pins that Finnhub's general category carries NO tickers; tickers appearing here means the "
-            + "gap has closed and gh#1124 should be revisited");
+            "Finnhub's general category is deliberately symbol-less (gh#439, gh#1124) — tickers appearing here "
+            + "would mean the provider's shape changed underneath this decision");
+        adapters.ItemsFor("finnhub").Should().OnlyContain(
+            item => !string.IsNullOrWhiteSpace(item.Title) || !string.IsNullOrWhiteSpace(item.Summary),
+            "gh#1124: with no ticker, relevance's ONLY input is headline/summary text (R-2's topic path); an "
+            + "item with neither would be structurally unmatchable, which is the failure mode this guards");
     }
 
     // --- Helpers ---
