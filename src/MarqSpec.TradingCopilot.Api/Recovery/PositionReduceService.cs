@@ -173,6 +173,7 @@ public sealed class PositionReduceService
     private readonly IProjectXVenueFactory _venueFactory;
     private readonly IAccountEntryGuard _accountGuard;
     private readonly IOptions<ProjectXConnectionOptions> _projectXOptions;
+    private readonly IPositionActionJournal _journal;
     private readonly ILogger<PositionReduceService> _logger;
 
     /// <summary>Creates the reduce service.</summary>
@@ -202,6 +203,7 @@ public sealed class PositionReduceService
         _venueFactory = venueFactory;
         _accountGuard = accountGuard;
         _projectXOptions = projectXOptions;
+        _journal = journal;
         _logger = logger;
     }
 
@@ -230,9 +232,75 @@ public sealed class PositionReduceService
             .FirstOrDefaultAsync(candidate => candidate.Id == accountId, cancellationToken);
         if (account is null)
         {
-            return null; // not found / not owned (R-20)
+            // Not found / not owned (R-20), and deliberately NOT journaled: there is no owner to stamp a row with,
+            // and writing one would be a side channel confirming the id exists.
+            return null;
         }
 
+        Attempt attempt = await AttemptAsync(account, instrument, quantity, cancellationToken);
+
+        // ONE journal site, on the single exit of every path -- so an outcome cannot be added later and quietly go
+        // unrecorded, which is how a pair like this drifts. It sits OUTSIDE the transmit lock on purpose: the lock
+        // pins a connection across a venue round-trip, AccountBusy is produced by the guard itself and would be
+        // unreachable from inside, and the audit is contracted to commit in its own unit of work.
+        //
+        // TRANSMIT, THEN JOURNAL -- ADR-0007's accepted ordering for the send path (2026-08-02 update), applied
+        // here rather than re-answered: the record carries the VERIFIED outcome, which does not exist until the
+        // attempt resolves. It leaves the same residual that update names, and it bites harder here, because the
+        // requested quantity is the only record of intent this path has; closing it would need a durable
+        // pre-transmit intent, a change to what this path DOES. Raised for the maintainer on the ADR instead.
+        //
+        // The journal cannot fail this: the seam is contracted never to throw, and it takes no cancellation token,
+        // so a client that hung up mid-response cannot cost the record of a real sized close.
+        await _journal.RecordSafelyAsync(
+            new PositionActionEntry
+            {
+                Action = PositionActionKind.Reduce,
+                OwnerUserId = account.UserId,
+                AccountId = account.Id,
+                VenueAccountKey = account.VenueAccountKey,
+                Instrument = instrument.ToString(),
+                Contract = attempt.ContractKey,
+
+                // The fact venue truth cannot give back afterwards, and the reason this card exists.
+                RequestedQuantity = quantity,
+                NetQuantityBefore = attempt.NetQuantityBefore,
+
+                // Already null wherever no exposure was established (an unreachable venue, an indeterminate
+                // refusal, or a path that sent nothing), so it is carried through rather than zeroed: a 0 would
+                // fabricate a flat out of an outage (gh#929).
+                NetQuantityAfter = attempt.Result.NetQuantity,
+                Outcome = attempt.Result.Outcome.ToString(),
+            },
+            DateTimeOffset.UtcNow,
+            _logger);
+
+        return attempt.Result;
+    }
+
+    /// <summary>
+    /// The reduce's outcome plus the two facts the journal needs and the result does not carry (gh#1143).
+    /// </summary>
+    /// <param name="Result">The outcome, exactly as it is returned to the operator.</param>
+    /// <param name="NetQuantityBefore">The pre-attempt exposure, or <see langword="null"/> when it was never read.</param>
+    /// <param name="ContractKey">The venue contract, or <see langword="null"/> when the attempt never resolved one.</param>
+    private sealed record Attempt(PositionReduceResult Result, int? NetQuantityBefore, string? ContractKey);
+
+    /// <summary>
+    /// The reduce's guard ladder, unchanged by gh#1143 — every decision, guard, lock and outcome is exactly what it
+    /// was; the record simply carries the starting size and the contract key out alongside the result.
+    /// </summary>
+    /// <param name="account">The caller's account row (already ownership-checked).</param>
+    /// <param name="instrument">The instrument to reduce.</param>
+    /// <param name="quantity">The positive number of contracts to take off.</param>
+    /// <param name="cancellationToken">The caller's cancellation token.</param>
+    /// <returns>The outcome, read from venue truth after the attempt.</returns>
+    private async Task<Attempt> AttemptAsync(
+        Account account,
+        InstrumentId instrument,
+        int quantity,
+        CancellationToken cancellationToken)
+    {
         Connection? connection = await _database.Connections
             .FirstOrDefaultAsync(candidate => candidate.Id == account.ConnectionId, cancellationToken);
         if (connection is null
@@ -240,7 +308,7 @@ public sealed class PositionReduceService
         {
             // One credential set per process (ADR-0015). Reducing on an account this process does not serve would
             // be acting through someone else's venue session.
-            return new PositionReduceResult(PositionReduceOutcome.Unreachable, null);
+            return new Attempt(new PositionReduceResult(PositionReduceOutcome.Unreachable, null), null, null);
         }
 
         // PRACTICE-ONLY, ENFORCED (gh#928). The reduce ships behind two named holds -- the unverified
@@ -259,9 +327,9 @@ public sealed class PositionReduceService
             _logger.LogWarning(
                 "Reduce refused on account {Account}: the reduce is practice-only until gh#1012 and "
                 + "MarqSpec.Client.ProjectX#98 clear, and this account's mode is {Mode} (gh#928).",
-                accountId,
+                account.Id,
                 account.Mode);
-            return new PositionReduceResult(PositionReduceOutcome.HeldPracticeOnly, null);
+            return new Attempt(new PositionReduceResult(PositionReduceOutcome.HeldPracticeOnly, null), null, null);
         }
 
         // Everything from the before-read to the read-back runs under the account's transmit lock (gh#531), and
@@ -269,12 +337,28 @@ public sealed class PositionReduceService
         // would be worse than refusing -- a sized partial close is non-idempotent, so a second one stacking on one
         // in flight takes the size off twice, and the strict-partial guard cannot see a close that has not settled.
         // Refusing lets the operator re-issue deliberately, against a settled read.
-        return await _accountGuard.TryRunExclusiveAsync(
+        //
+        // The guarded callback's result type stays PositionReduceResult, exactly as gh#928 shipped it: the two
+        // extra facts the journal needs ride out on captured locals rather than widening what the lock wraps, so
+        // this path's interaction with the transmit lock is byte-for-byte what it was.
+        int? netQuantityBefore = null;
+        string? contractKey = null;
+
+        PositionReduceResult result = await _accountGuard.TryRunExclusiveAsync(
             _database,
-            accountId,
-            () => ReduceUnderLockAsync(account, instrument, quantity, connection.Id, cancellationToken),
+            account.Id,
+            async () =>
+            {
+                Attempt attempt = await ReduceUnderLockAsync(
+                    account, instrument, quantity, connection.Id, cancellationToken);
+                netQuantityBefore = attempt.NetQuantityBefore;
+                contractKey = attempt.ContractKey;
+                return attempt.Result;
+            },
             () => new PositionReduceResult(PositionReduceOutcome.AccountBusy, null),
             cancellationToken);
+
+        return new Attempt(result, netQuantityBefore, contractKey);
     }
 
     /// <summary>
@@ -286,7 +370,7 @@ public sealed class PositionReduceService
     /// <param name="connectionId">The connection whose firm conventions build the venue.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>The outcome, read from venue truth after the attempt.</returns>
-    private async Task<PositionReduceResult?> ReduceUnderLockAsync(
+    private async Task<Attempt> ReduceUnderLockAsync(
         Account account,
         InstrumentId instrument,
         int quantity,
@@ -294,8 +378,13 @@ public sealed class PositionReduceService
         CancellationToken cancellationToken)
     {
         // Captured before the venue is asked, so a definitive refusal can report the TRUE exposure instead of
-        // claiming it is unknown. Null until the before-read succeeds.
+        // claiming it is unknown -- and so the journal records what was open before the attempt. Null until the
+        // before-read succeeds.
         int? beforeQuantity = null;
+
+        // Likewise captured as the attempt walks forward, so a fault after the contract resolved still records
+        // WHICH contract the operator was reducing rather than losing it to the catch.
+        string? contractKey = null;
 
         try
         {
@@ -306,7 +395,8 @@ public sealed class PositionReduceService
             VenueAccount? venueAccount = roster.FirstOrDefault(candidate => candidate.Id.Key == account.VenueAccountKey);
             if (venueAccount is null)
             {
-                return new PositionReduceResult(PositionReduceOutcome.Unreachable, null);
+                return new Attempt(
+                    new PositionReduceResult(PositionReduceOutcome.Unreachable, null), beforeQuantity, contractKey);
             }
 
             // The same practice-only hold, re-checked against the roster the venue just reported. The row read
@@ -320,10 +410,12 @@ public sealed class PositionReduceService
                     + "practice-only until gh#1012 and MarqSpec.Client.ProjectX#98 clear (gh#928).",
                     account.Id,
                     venueAccount.Mode);
-                return new PositionReduceResult(PositionReduceOutcome.HeldPracticeOnly, null);
+                return new Attempt(
+                    new PositionReduceResult(PositionReduceOutcome.HeldPracticeOnly, null), beforeQuantity, contractKey);
             }
 
             ResolvedContract resolved = await venue.ResolveContractAsync(instrument, cancellationToken);
+            contractKey = resolved.Contract.Key;
 
             // BEFORE: venue truth for this contract. Load-bearing for BOTH the strict-partial guard and the
             // verified-reduction check -- without the starting size neither is possible. Deliberately no local
@@ -339,7 +431,10 @@ public sealed class PositionReduceService
             // before the venue is touched, so a reduce can never silently become a flatten that strands a bracket.
             if (quantity >= beforeMagnitude)
             {
-                return new PositionReduceResult(PositionReduceOutcome.ExceedsPosition, openQuantity);
+                return new Attempt(
+                    new PositionReduceResult(PositionReduceOutcome.ExceedsPosition, openQuantity),
+                    beforeQuantity,
+                    contractKey);
             }
 
             PositionSnapshot after = await venue.ReducePositionAsync(
@@ -352,7 +447,10 @@ public sealed class PositionReduceService
             if (Math.Sign(after.NetQuantity) == Math.Sign(openQuantity)
                 && Math.Abs(after.NetQuantity) == beforeMagnitude - quantity)
             {
-                return new PositionReduceResult(PositionReduceOutcome.Reduced, after.NetQuantity);
+                return new Attempt(
+                    new PositionReduceResult(PositionReduceOutcome.Reduced, after.NetQuantity),
+                    beforeQuantity,
+                    contractKey);
             }
 
             // TRANSMITTED, and the position has NOT MOVED. A market close is not instantaneous, so this is either a
@@ -363,13 +461,19 @@ public sealed class PositionReduceService
 
             if (after.NetQuantity == openQuantity)
             {
-                return new PositionReduceResult(PositionReduceOutcome.Unconfirmed, after.NetQuantity);
+                return new Attempt(
+                    new PositionReduceResult(PositionReduceOutcome.Unconfirmed, after.NetQuantity),
+                    beforeQuantity,
+                    contractKey);
             }
 
             // The position DID move, but not by what was asked: less off (a partial execution), more off (a stop or
             // a concurrent exit fired, up to flat), or a side flip. Not done -- and, like Unconfirmed, not an
             // invitation to re-send. The operator sees the true net and decides from it.
-            return new PositionReduceResult(PositionReduceOutcome.NotReduced, after.NetQuantity);
+            return new Attempt(
+                new PositionReduceResult(PositionReduceOutcome.NotReduced, after.NetQuantity),
+                beforeQuantity,
+                contractKey);
         }
         catch (VenueRefusalException refusal) when (refusal.Kind == VenueRefusalKind.Definitive)
         {
@@ -381,7 +485,8 @@ public sealed class PositionReduceService
                 "The venue refused to reduce {Instrument} on account {Account}; the position is unchanged (gh#928).",
                 instrument,
                 account.Id);
-            return new PositionReduceResult(PositionReduceOutcome.Refused, beforeQuantity);
+            return new Attempt(
+                new PositionReduceResult(PositionReduceOutcome.Refused, beforeQuantity), beforeQuantity, contractKey);
         }
         catch (VenueRefusalException refusal)
         {
@@ -393,7 +498,8 @@ public sealed class PositionReduceService
                 + "not be re-sent (gh#928).",
                 instrument,
                 account.Id);
-            return new PositionReduceResult(PositionReduceOutcome.Unconfirmed, null);
+            return new Attempt(
+                new PositionReduceResult(PositionReduceOutcome.Unconfirmed, null), beforeQuantity, contractKey);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -414,7 +520,8 @@ public sealed class PositionReduceService
                 + "unchanged, or partly reduced (gh#928).",
                 instrument,
                 account.Id);
-            return new PositionReduceResult(PositionReduceOutcome.Unreachable, null);
+            return new Attempt(
+                new PositionReduceResult(PositionReduceOutcome.Unreachable, null), beforeQuantity, contractKey);
         }
     }
 }

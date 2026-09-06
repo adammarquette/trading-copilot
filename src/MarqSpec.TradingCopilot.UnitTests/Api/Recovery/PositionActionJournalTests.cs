@@ -22,7 +22,7 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.Recovery;
 /// </remarks>
 public class PositionActionJournalTests
 {
-    private static readonly DateTimeOffset At = new(2026, 9, 6, 14, 30, 0, TimeSpan.Zero);
+    private static DateTimeOffset At => new(2026, 9, 6, 14, 30, 0, TimeSpan.Zero);
 
     private readonly Guid _operator = Guid.NewGuid();
     private readonly Guid _account = Guid.NewGuid();

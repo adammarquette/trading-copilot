@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace MarqSpec.TradingCopilot.Api.Recovery;
 
 /// <summary>Which operator position action a journal entry attests to (gh#1143).</summary>
@@ -110,4 +112,50 @@ public interface IPositionActionJournal
     /// <param name="entry">The attempt, its request and its outcome.</param>
     /// <param name="occurredAt">When the attempt resolved.</param>
     Task RecordAsync(PositionActionEntry entry, DateTimeOffset occurredAt);
+}
+
+/// <summary>The call-site belt for <see cref="IPositionActionJournal"/> (gh#1143).</summary>
+/// <remarks>
+/// <b>Braces to the seam's belt, and shared so the pair cannot drift.</b> The shipped implementation is contracted
+/// never to throw and guards each of its two writes separately — but a contract is a promise, and the property it
+/// promises (a record of a safety action must never be able to <i>prevent</i>, <i>fail</i> or <i>alter</i> that
+/// action) is the one that must not depend on a promise. Any implementation of the seam, present or future, is
+/// therefore also swallowed here. It is one shared helper rather than a <c>try</c> in each service, because two
+/// hand-copied fault boundaries around one shape is precisely how this pair of endpoints drifted in the first place.
+/// </remarks>
+public static class PositionActionJournalExtensions
+{
+    /// <summary>Records one attempt, absorbing any fault the journal implementation lets escape.</summary>
+    /// <param name="journal">The journal.</param>
+    /// <param name="entry">The attempt, its request and its outcome.</param>
+    /// <param name="occurredAt">When the attempt resolved.</param>
+    /// <param name="logger">The caller's logger — the last resort when the record cannot be written at all.</param>
+    public static async Task RecordSafelyAsync(
+        this IPositionActionJournal journal,
+        PositionActionEntry entry,
+        DateTimeOffset occurredAt,
+        ILogger logger)
+    {
+        ArgumentNullException.ThrowIfNull(journal);
+        ArgumentNullException.ThrowIfNull(entry);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        try
+        {
+            await journal.RecordAsync(entry, occurredAt);
+        }
+        catch (Exception error)
+        {
+            // Cancellation included: the caller is holding a verified outcome for an order that already reached a
+            // real venue, and turning that into an aborted request would be strictly worse than losing a row.
+            logger.LogError(
+                error,
+                "Could not record the operator {Action} of {Instrument} on account {Account} (outcome {Outcome}); "
+                + "the action itself is unaffected (gh#1143).",
+                entry.Action,
+                entry.Instrument,
+                entry.AccountId,
+                entry.Outcome);
+        }
+    }
 }

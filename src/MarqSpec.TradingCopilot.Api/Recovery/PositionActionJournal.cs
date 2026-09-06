@@ -73,12 +73,121 @@ public sealed class PositionActionJournal : IPositionActionJournal
     }
 
     /// <inheritdoc />
-    public Task RecordAsync(PositionActionEntry entry, DateTimeOffset occurredAt)
+    public async Task RecordAsync(PositionActionEntry entry, DateTimeOffset occurredAt)
     {
         ArgumentNullException.ThrowIfNull(entry);
-        _ = _eventLog;
-        _ = _auditLog;
-        _ = _logger;
-        return Task.CompletedTask;
+
+        // Two independent fault boundaries, not one: a single try around both would let a failing event append
+        // silently cost the audit row as well, and the two stores fail for unrelated reasons.
+        await AppendEventSafelyAsync(entry, occurredAt);
+        await WriteAuditSafelyAsync(entry, occurredAt);
+    }
+
+    private async Task AppendEventSafelyAsync(PositionActionEntry entry, DateTimeOffset occurredAt)
+    {
+        try
+        {
+            string payload = JsonSerializer.Serialize(new
+            {
+                action = entry.Action.ToString(),
+                account = entry.AccountId,
+                venueAccount = entry.VenueAccountKey,
+                instrument = entry.Instrument,
+                contract = entry.Contract,
+                requestedQuantity = entry.RequestedQuantity,
+                netQuantityBefore = entry.NetQuantityBefore,
+                netQuantityAfter = entry.NetQuantityAfter,
+                outcome = entry.Outcome,
+            });
+
+            await _eventLog.AppendAsync(
+                new EventDraft(EventTypeFor(entry.Action), EventSource, occurredAt, payload), CancellationToken.None);
+        }
+        catch (Exception error)
+        {
+            // Cancellation included, deliberately: see the seam's remarks. The close already happened.
+            _logger.LogError(
+                error,
+                "Could not journal the operator {Action} of {Instrument} on account {Account} (outcome {Outcome}); "
+                + "the action itself is unaffected (gh#1143).",
+                entry.Action,
+                entry.Instrument,
+                entry.AccountId,
+                entry.Outcome);
+        }
+    }
+
+    private async Task WriteAuditSafelyAsync(PositionActionEntry entry, DateTimeOffset occurredAt)
+    {
+        try
+        {
+            string detail = Detail(entry);
+            AuditRecord record = new()
+            {
+                Id = Guid.NewGuid(),
+                UserId = entry.OwnerUserId,
+                Action = AuditActionFor(entry.Action),
+
+                // An account-level action on the position itself, resting on no single protective leg — the
+                // auto-flatten's answer (gh#765). It changes no platform-held protection, so no synthetic_risk.
+                Placement = AuditPlacement.None,
+                SyntheticRisk = false,
+
+                // Source stays null: CK_AuditRecords_Source_MatchesAction binds a non-null source to the kill /
+                // flatten set (5-7) alone, and gh#909 set the precedent for a new action outside it. There is also
+                // nothing to disambiguate — unlike a kill or a flatten, these two actions have exactly one possible
+                // trigger, an authenticated operator request. Widening a safety CHECK to record a constant would be
+                // the wrong trade on this path.
+                Source = null,
+
+                Before = entry.NetQuantityBefore?.ToString(CultureInfo.InvariantCulture),
+
+                // The outcome, exactly as the operator was told it — the auto-flatten's `after: "Flat" / "Escalated"`
+                // shape. The longest name in either set is 16 characters, well inside the column's 32.
+                After = entry.Outcome,
+                Detail = detail.Length > MaxDetail ? detail[..MaxDetail] : detail,
+                RecordedAt = occurredAt,
+            };
+
+            await _auditLog.WriteAsync([record], CancellationToken.None);
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(
+                error,
+                "Could not audit the operator {Action} of {Instrument} on account {Account} (outcome {Outcome}); "
+                + "the action itself is unaffected (gh#1143).",
+                entry.Action,
+                entry.Instrument,
+                entry.AccountId,
+                entry.Outcome);
+        }
+    }
+
+    private static string EventTypeFor(PositionActionKind action) => action switch
+    {
+        PositionActionKind.Exit => ExitEventType,
+        PositionActionKind.Reduce => ReduceEventType,
+        _ => throw new ArgumentOutOfRangeException(nameof(action), action, "There is no event type for this action."),
+    };
+
+    private static AuditAction AuditActionFor(PositionActionKind action) => action switch
+    {
+        PositionActionKind.Exit => AuditAction.PositionExitAttempted,
+        PositionActionKind.Reduce => AuditAction.PositionReduceAttempted,
+        _ => throw new ArgumentOutOfRangeException(nameof(action), action, "There is no audit action for this one."),
+    };
+
+    private static string Detail(PositionActionEntry entry)
+    {
+        string before = entry.NetQuantityBefore?.ToString(CultureInfo.InvariantCulture) ?? "not read";
+        string after = entry.NetQuantityAfter?.ToString(CultureInfo.InvariantCulture) ?? "unknown";
+        string sized = entry.RequestedQuantity is int requested
+            ? string.Create(CultureInfo.InvariantCulture, $" by {requested} contract(s)")
+            : string.Empty;
+
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"Operator {entry.Action} of {entry.Instrument} on account {entry.VenueAccountKey}{sized} — outcome {entry.Outcome}; net quantity {before} → {after}.");
     }
 }
