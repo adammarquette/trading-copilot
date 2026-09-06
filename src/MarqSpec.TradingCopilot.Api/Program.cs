@@ -167,7 +167,13 @@ builder.Services.AddHostedService<BarBackfillHost>();
 // R-2's news / soft-signal ingestion (gh#358): every registered INewsSource polled into the deduped NewsRecord
 // store of record -- the news analogue of the bar store above, collapsed across sources by the dedup key. News is
 // deliberately multi-source (Finnhub + Tiingo) where price data is single-source. Opt-in via News:Enabled.
-builder.Services.Configure<NewsIngestionOptions>(builder.Configuration.GetSection(NewsIngestionOptions.SectionName));
+// gh#1123: validated on start like the other hosted-service knobs below (Configure<T> alone would let a
+// misconfigured LookbackMinutes/PollIntervalSeconds boot clean and starve silently, which is the exact failure
+// mode this card fixed the default for).
+builder.Services.AddOptions<NewsIngestionOptions>()
+    .Bind(builder.Configuration.GetSection(NewsIngestionOptions.SectionName))
+    .Validate(options => options.Validate(), "News: LookbackMinutes and PollIntervalSeconds must both be positive.")
+    .ValidateOnStart();
 builder.Services.AddScoped<NewsIngestionService>();
 builder.Services.AddHostedService<NewsIngestionHost>();
 
