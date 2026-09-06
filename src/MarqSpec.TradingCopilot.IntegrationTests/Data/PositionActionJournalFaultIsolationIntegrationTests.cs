@@ -6,6 +6,7 @@ using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Events;
 using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Audit;
+using MarqSpec.TradingCopilot.Domain.Events;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -101,17 +102,29 @@ public class PositionActionJournalFaultIsolationIntegrationTests : IClassFixture
         await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
         await using TradingCopilotDbContext shared = ContextFor(scope, owner);
 
+        bool theNextWriteSucceeded;
         await AddCheckAsync(
             shared, "AuditRecords", RejectAuditConstraint,
             $"\"Action\" <> {(int)AuditAction.PositionReduceAttempted}");
         try
         {
             await JournalOver(shared).RecordAsync(entry, At);
+
+            // The consequence the audit half's detach actually buys, EXERCISED rather than inferred. "The event row
+            // survives" alone would hold with or without it, because the event was committed before the audit was
+            // refused -- so that assertion cannot fail on this defect. This one can: a refused AuditRecord left in
+            // `Added` is re-attempted by whatever this request saves NEXT and, still refused, takes that unrelated
+            // write down with it. It runs while the constraint is STILL in place, which is what makes it a test.
+            theNextWriteSucceeded = await TryAppendUnrelatedEventAsync(shared, owner);
         }
         finally
         {
             await DropCheckAsync(shared, "AuditRecords", RejectAuditConstraint);
         }
+
+        theNextWriteSucceeded.Should().BeTrue(
+            "a swallowed audit failure must not become someone else's lost write -- the refused row is detached, so "
+            + "the next save on this shared context carries only its own work");
 
         (await EventsForAsync(entry.VenueAccountKey)).Should().ContainSingle(
             "a failing audit write must not cost the event — it was already committed, and it carries the "
@@ -151,6 +164,22 @@ public class PositionActionJournalFaultIsolationIntegrationTests : IClassFixture
     // =================================================================================================================
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
+
+    // An ordinary, unrelated write on the SAME context, used to witness whether a refused row is still poisoning it.
+    private static async Task<bool> TryAppendUnrelatedEventAsync(TradingCopilotDbContext shared, Guid owner)
+    {
+        try
+        {
+            await new TimescaleEventLog(shared).AppendAsync(
+                new EventDraft("gh1143.probe", "position-action", At, $"{{\"owner\":\"{owner}\"}}"),
+                CancellationToken.None);
+            return true;
+        }
+        catch (DbUpdateException)
+        {
+            return false;
+        }
+    }
 
     // Parsed, not string-matched: Postgres normalises jsonb on the way in, so the stored text is not the text the
     // producer serialised. Reading the value back is the only assertion that survives that.
