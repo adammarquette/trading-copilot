@@ -110,11 +110,13 @@ public class ChatTurnEndpointTests
     }
 
     private Task<IResult> Invoke(
-        Guid id, string content, DateTimeOffset now, GovernorOptions? governor = null, IChatTurnGuard? guard = null) =>
+        Guid id, string content, DateTimeOffset now, GovernorOptions? governor = null, IChatTurnGuard? guard = null,
+        IChatTurnScope? scope = null) =>
         ChatEndpoints.TurnAsync(
             id, new ChatTurnRequest(content), now, Context(),
             _turn, _retrieval, _governor, Options.Create(governor ?? new GovernorOptions()),
-            _ledger, _metrics, _notifier, guard ?? FreeGuard(), NullLoggerFactory.Instance, default);
+            _ledger, _metrics, _notifier, guard ?? FreeGuard(), scope ?? new ChatTurnScope(),
+            NullLoggerFactory.Instance, default);
 
     /// <summary>
     /// The default double for <see cref="IChatTurnGuard"/>: the conversation is free, so it simply invokes the
@@ -250,6 +252,38 @@ public class ChatTurnEndpointTests
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
         A.CallTo(() => _turn.StreamAsync(A<IReadOnlyList<ChatMessage>>._, A<IReadOnlyList<RetrievedContextItem>>._, A<Func<string, CancellationToken, Task>>._, A<CancellationToken>._)).MustNotHaveHappened();
         A.CallTo(() => _ledger.RecordAsync(A<AiUsageEntry>._, A<CancellationToken>._)).MustNotHaveHappened();
+    }
+
+    /// <summary>
+    /// A chat WRITE tool (gh#1135) stamps the conversation it wrote in as R-7 provenance (gh#471) and fails closed
+    /// without one, so the endpoint must enter the turn scope. The tool cannot reach turn identity any other way —
+    /// <c>IChatTool.ExecuteAsync</c> receives only the model's own JSON.
+    /// </summary>
+    [Fact]
+    public async Task TurnAsync_ShouldEnterTheTurnScope_SoAWriteToolCanStampItsProvenance()
+    {
+        Guid id = await SeedConversationAsync();
+        ChatTurnScope scope = new();
+
+        await Invoke(id, "write me a rule", At(3), scope: scope);
+
+        scope.ConversationId.Should().Be(id, "a write tool authors under the conversation the turn is really in");
+    }
+
+    /// <summary>
+    /// And it is entered <b>after</b> the R-20 owner check, never before: a write tool handed a conversation the
+    /// caller does not own would stamp somebody else's thread onto the caller's own rule.
+    /// </summary>
+    [Fact]
+    public async Task TurnAsync_ShouldNotEnterTheTurnScope_ForAForeignConversation()
+    {
+        Guid foreign = await SeedConversationAsync(owner: Guid.NewGuid());
+        ChatTurnScope scope = new();
+
+        await Invoke(foreign, "sneak in", At(3), scope: scope);
+
+        scope.ConversationId.Should().BeNull(
+            "the scope is entered only for a conversation the R-20 read has already proved is the caller's");
     }
 
     [Fact]
