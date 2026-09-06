@@ -121,6 +121,10 @@ public static class AiRegistration
         // AiUsageLedger idiom), so a staged proposal never enrols in the chat endpoint's conversation transaction.
         services.AddScoped<IChatTool, GenerateSuggestionTool>();
 
+        // The per-request turn scope a chat WRITE tool reads for its R-7 provenance (gh#471, gh#1135). SCOPED because
+        // its whole value is per-request; a singleton would leak one operator's conversation id into another's turn.
+        services.AddScoped<IChatTurnScope, ChatTurnScope>();
+
         // The shared CROSS-KIND retrieval pipeline (gh#1065, generalising gh#995; ADR-0027 / ADR-0025 / ADR-0008):
         // embed the query once -> recall each asked kind -> hydrate -> merge nearest-first -> rerank, ledgering its own
         // embed (Embed) + rerank (Chat) spend stamped to the operator. The FIRST IReranker consumer's core (gh#987),
