@@ -1179,3 +1179,105 @@ describe('ConversationThread — cross-connection reconciliation', () => {
     expect(screen.getByTestId('chat-draft').textContent).toBe('Two contracts');
   });
 });
+
+describe('ConversationThread — the shared "behind" marker (gh#1109)', () => {
+  // A reconnect re-read is exactly the read most likely to fail (a socket blip is when the network is worst), and
+  // when it does the thread was previously missing whatever settled during the outage with no signal at all while
+  // the global connection indicator stayed green (the gap this issue closes). These pin the fix: the thread is
+  // KEPT (per the FAILED-reread test above) and now also flagged, using the same shared affordance gh#874 built
+  // for the suggestion panel (`useBehindIndicator` / `BehindMarker`).
+  function loadedWith(text: string) {
+    getMock.mockResolvedValue({
+      ok: true,
+      data: {
+        id: 'c1',
+        title: null,
+        createdAt: '',
+        updatedAt: '',
+        messages: [message({ id: 'm1', sequence: 1, content: text })],
+      },
+    });
+  }
+
+  it('shows no marker after a normal mount load', async () => {
+    loadedWith('still here');
+
+    await renderThread();
+
+    expect(screen.queryByTestId('chat-behind')).toBeNull();
+  });
+
+  it('flags the thread as possibly behind when a reconnect re-read fails, without clearing it', async () => {
+    loadedWith('still here');
+
+    await renderThread();
+    getMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      error: 'The request could not be sent.',
+    });
+    await act(async () => resyncHandler?.());
+
+    expect(screen.getByTestId('chat-behind')).toBeTruthy();
+    expect(screen.getByText('still here')).toBeTruthy();
+    expect(screen.queryByTestId('thread-error')).toBeNull(); // never an error screen
+  });
+
+  it('flags the thread when a reconnect re-read THROWS too (gh#973 class)', async () => {
+    loadedWith('still here');
+
+    await renderThread();
+    getMock.mockRejectedValue(new Error('boom'));
+    await act(async () => resyncHandler?.());
+
+    expect(screen.getByTestId('chat-behind')).toBeTruthy();
+  });
+
+  it('clears the marker once the next reconnect re-read succeeds', async () => {
+    loadedWith('still here');
+
+    await renderThread();
+    getMock.mockResolvedValue({ ok: false, kind: 'failed', error: 'down' });
+    await act(async () => resyncHandler?.());
+    expect(screen.getByTestId('chat-behind')).toBeTruthy();
+
+    loadedWith('caught up');
+    await act(async () => resyncHandler?.());
+
+    expect(screen.queryByTestId('chat-behind')).toBeNull();
+  });
+
+  it('never shows the marker on the loading state', () => {
+    getMock.mockReturnValue(new Promise(() => {}));
+
+    renderWithProviders(<ConversationThread conversationId="c1" />);
+
+    expect(screen.getByTestId('loading-state')).toBeTruthy();
+    expect(screen.queryByTestId('chat-behind')).toBeNull();
+  });
+
+  it('never shows the marker on the error state -- a FOREGROUND failure owns its own screen', async () => {
+    getMock.mockResolvedValue({
+      ok: false,
+      kind: 'failed',
+      error: 'The request could not be sent.',
+    });
+
+    await renderThread();
+
+    expect(screen.getByTestId('thread-error')).toBeTruthy();
+    expect(screen.queryByTestId('chat-behind')).toBeNull();
+  });
+
+  it('does not flag the thread when the reconnect re-read is skipped because a send is in flight', async () => {
+    loadedWith('still here');
+    sendMock.mockReturnValue(new Promise(() => {})); // stays in flight across the reconnect
+
+    await renderThread();
+    fireEvent.change(screen.getByLabelText(/Message/i), { target: { value: 'headroom?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await act(async () => resyncHandler?.());
+
+    expect(screen.queryByTestId('chat-behind')).toBeNull();
+  });
+});

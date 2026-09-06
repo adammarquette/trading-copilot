@@ -1,12 +1,13 @@
 import LightbulbOutlinedIcon from '@mui/icons-material/LightbulbOutlined';
 import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
-import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { listActionableSuggestions, type StagedTicket, type Suggestion } from '../api/suggestions';
+import { BehindMarker } from '../components/BehindMarker';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
+import { useBehindIndicator } from '../components/useBehindIndicator';
 import { useRealtime } from '../realtime/RealtimeProvider';
 import { SuggestionCard } from './SuggestionCard';
 
@@ -38,8 +39,9 @@ type LoadState =
 export function SuggestionList({ accountId, referencePrice = null, onArmed }: SuggestionListProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   // A background refresh keeps the current list on a failed read rather than nuking a working panel — but the panel
-  // must still LOOK degraded, so a stale actionable set does not read as confidently current (R-19, gh#874).
-  const [staleRefresh, setStaleRefresh] = useState(false);
+  // must still LOOK degraded, so a stale actionable set does not read as confidently current (R-19, gh#874). The
+  // shared affordance (gh#1109) generalises what this panel built first.
+  const { behind: staleRefresh, markBehind, clearBehind } = useBehindIndicator();
   const mounted = useRef(true);
   // Ordering guards for the two reads that write this panel. `mounted` says the component is still on screen; it
   // says nothing about WHICH account a response belongs to.
@@ -72,7 +74,7 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
       }
       if (result.ok) {
         setState({ kind: 'loaded', suggestions: result.data });
-        setStaleRefresh(false); // an authoritative read landed — the panel is current again
+        clearBehind(); // an authoritative read landed — the panel is current again
       } else {
         setState({
           kind: 'error',
@@ -80,7 +82,7 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
         });
       }
     });
-  }, [accountId]);
+  }, [accountId, clearBehind]);
 
   // Mount (and every account switch) kicks off the load. The initial state is already `loading`, so no state is
   // set synchronously in the effect.
@@ -119,14 +121,14 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
       }
       if (result.ok) {
         setState({ kind: 'loaded', suggestions: result.data });
-        setStaleRefresh(false);
+        clearBehind();
       } else {
         // Keep the current list, but flag it possibly out of date. A failed background read while the socket stays
         // live is the one degraded state the panel would otherwise hide — the operator has no other signal (R-19).
-        setStaleRefresh(true);
+        markBehind();
       }
     });
-  }, [accountId]);
+  }, [accountId, markBehind, clearBehind]);
   useEffect(() => onSuggestion(refresh), [onSuggestion, refresh]);
   useEffect(() => onResync(refresh), [onResync, refresh]);
 
@@ -151,19 +153,11 @@ export function SuggestionList({ accountId, referencePrice = null, onArmed }: Su
     );
   }, []);
 
-  // The R-19 degraded-refresh affordance, shared by the loaded and empty returns below. A failed background read
-  // while the socket stays live is the one degraded state the panel would otherwise hide (see `refresh`); it is
-  // subtle and non-destructive, and never shown on the loading / error states (which own their own screens).
-  const staleBanner = staleRefresh ? (
-    <Typography
-      role="status"
-      data-testid="suggestions-stale"
-      variant="caption"
-      sx={{ color: 'warning.main' }}
-    >
-      The last refresh did not go through — what is shown may be out of date.
-    </Typography>
-  ) : null;
+  // The R-19 degraded-refresh affordance, shared by the loaded and empty returns below — the gh#1109 shared marker,
+  // keyed to this panel's established `suggestions-stale` selector. A failed background read while the socket
+  // stays live is the one degraded state the panel would otherwise hide (see `refresh`); never shown on the
+  // loading / error states (which own their own screens).
+  const staleBanner = staleRefresh ? <BehindMarker testId="suggestions-stale" /> : null;
 
   if (state.kind === 'loading') {
     return <LoadingState label="Loading suggestions" />;

@@ -17,8 +17,10 @@ import {
   getConversation,
   sendChatTurn,
 } from '../api/chat';
+import { BehindMarker } from '../components/BehindMarker';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
+import { useBehindIndicator } from '../components/useBehindIndicator';
 import { useRealtime } from '../realtime/RealtimeProvider';
 
 export interface ConversationThreadProps {
@@ -138,6 +140,16 @@ function foldIn(messages: readonly ChatMessage[], incoming: ChatMessage): readon
  * ({@link TURN_IN_FLIGHT_LAYER}), because the endpoint's other 409 -- a lost sequence race -- means the opposite
  * and the status alone cannot separate them.
  *
+ * **The reconnect re-read now says when it is behind (gh#1109).** A reconnect re-read is exactly the read most
+ * likely to fail -- a socket blip is when the network is worst -- and keeping the thread on that failure (the
+ * previous paragraph) used to keep it *silently*: the thread could be missing whatever settled during the outage
+ * with the global connection indicator still green and the surface looking authoritative. This adopts the shared
+ * affordance gh#874 built for the suggestion panel (`useBehindIndicator` / {@link BehindMarker}) rather than
+ * inventing a third bespoke one: a failed BACKGROUND `load` marks the thread behind, the next one that succeeds
+ * clears it, and the marker never renders on the loading / error states below (which own their own screens) -- see
+ * the module note on {@link BehindMarker}. A FOREGROUND failure (the initial mount read) does not touch it at all;
+ * that failure already owns the whole surface via `state.kind === 'error'`.
+ *
  * **Untrusted content, both roles.** A message's `content` -- assistant or operator -- is rendered as plain text via
  * ordinary JSX interpolation, never `dangerouslySetInnerHTML` or any markdown/HTML interpreter: the always-on news
  * grounding (gh#995, ADR-0027) that can shape an assistant reply is handed to the model as untrusted user-role data
@@ -151,6 +163,8 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState<{ readonly text: string } | null>(null);
+  // The shared "this read is behind" affordance (gh#1109) -- see the module note above.
+  const { behind, markBehind, clearBehind } = useBehindIndicator();
   const mounted = useRef(true);
   const sendingRef = useRef(false); // synchronous guard: `sending` state lags a tick behind a rapid double-submit
   // The chunk stream's guards (see the module note on the streaming draft):
@@ -235,7 +249,11 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
             return;
           }
           if (!result.ok) {
-            if (!background) {
+            if (background) {
+              // Keep the thread, but flag it possibly behind (gh#1109) -- a failed background read while the
+              // socket stays live is the one degraded state this surface would otherwise hide entirely.
+              markBehind();
+            } else {
               setState({
                 kind: 'error',
                 message: result.kind === 'refused' ? result.reason : result.error,
@@ -247,6 +265,7 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
           const messages = result.data.messages.filter(
             (message) => message.role !== ChatRole.System,
           );
+          clearBehind(); // an authoritative read landed -- the thread is current again
           setState((current) =>
             background && current.kind === 'loaded'
               ? { kind: 'loaded', messages: messages.reduce(foldIn, current.messages) }
@@ -254,12 +273,17 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
           );
         })
         .catch(() => {
-          if (mounted.current && !background) {
+          if (!mounted.current) {
+            return;
+          }
+          if (background) {
+            markBehind();
+          } else {
             setState({ kind: 'error', message: 'The conversation could not be loaded.' });
           }
         });
     },
-    [conversationId],
+    [conversationId, markBehind, clearBehind],
   );
 
   useEffect(load, [load]);
@@ -589,6 +613,11 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
       data-testid="conversation-thread"
       sx={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}
     >
+      {behind ? (
+        <Box sx={{ px: 2, pt: 1 }}>
+          <BehindMarker testId="chat-behind" />
+        </Box>
+      ) : null}
       <Box sx={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         {state.messages.length === 0 && streaming === null ? (
           <EmptyState
