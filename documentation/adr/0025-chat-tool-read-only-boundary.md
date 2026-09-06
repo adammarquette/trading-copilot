@@ -1,6 +1,6 @@
 # ADR-0025 — The chat co-pilot's tools are read-only, by construction
 
-**Status:** Accepted (gh#925, chat epic #18 inc 4, R-6)
+**Status:** Accepted (gh#925, chat epic #18 inc 4, R-6) · extended by the first write tool (gh#1134) — see *Update*
 
 ## Context
 
@@ -48,6 +48,54 @@ The operator was asked (2026-08-15) and chose a **read-only** tool set for this 
   adding a tool — and it too must propose, not execute.
 - The round cap and the offered-set-only dispatch are the loop's safety backstops; both carry unit tests
   (round-cap fail-closed, unoffered-tool-never-dispatched).
+
+## Update — 2026-09-05: the first write tool (gh#1134 of gh#1059)
+
+`generate_suggestion` landed. **The decision above is not superseded — it is exercised.** Point 1 said the write
+tools were deliberately out of that increment and that "even those, when they land, propose rather than execute",
+and the Consequences said a write tool would be "a deliberate, separately-reviewed decision (its own increment),
+never an accident of adding a tool". This is that increment, so it is recorded here rather than as a new ADR: no
+prior decision changed, and a second record would leave two documents claiming to define one boundary.
+
+What the increment establishes, and what a future write tool inherits:
+
+1. **A write tool stages an artifact that is inert until the operator acts.** `generate_suggestion` writes an
+   `Active` `Suggestion` and pushes a card. It is **never auto-taken**: only the operator's own take reaches the
+   execution path, and the risk gate runs then, below the model, exactly as it does for a scan-issued suggestion
+   (R-11). *A proposal is not an execution*, and *staging is not taking* — the second half is now asserted
+   directly (zero `SuggestionDisposition` rows in every case of the gh#930 suite, the write cases included).
+
+2. **Nothing the model would be enforcing is in its schema.** The input carries no size, mode or expiry property
+   at all: size is the operator's configured `Suggestions__ChatProposalSize`, mode is read live off the account
+   (R-14), and the expiry is the configured window clamped against the market's auto-flatten deadline (R-13).
+   Prices go through the same `SuggestionGeometry` check the scan applies. This is the general rule for a write
+   tool: **remove the choice from the schema rather than validating the model's answer to it**, because a schema
+   the model never sees a field in is a stronger guarantee than a check it might argue past.
+
+3. **Fail closed leaves nothing behind.** An incoherent geometry, a malformed argument, an undeclared /
+   untradable / inactive account, or an *ambiguous* one all stage **nothing** and return an error string the model
+   reads. Ambiguity is deliberately a refusal rather than a default: the account is which money the setup is
+   proposed against, and that choice does not become the model's by default.
+
+4. **A write tool writes in its own owner-scoped transaction**, not the turn endpoint's request context that the
+   read tools inject. Otherwise a refused turn would commit the proposal anyway when the endpoint saved, and a
+   `Suggestion` CHECK violation would surface as a failure of the endpoint's conversation write — a constraint
+   backstops only its own transaction's owner.
+
+5. **The boundary is now pinned twice, and the read-only suite was extended rather than replaced.** The
+   structural half enumerates **every** `IChatTool` by reflection — so the *next* tool is covered on sight rather
+   than when someone remembers a list — and pins a write tool's constructor dependency set *exactly*, because a
+   forbidden-fragment scan over direct parameters is defeated by one helper indirection. The behavioural half is
+   the gh#930 suite: its order tripwire is unchanged, its staged-suggestion count is now **stated per case**
+   (still zero everywhere it was, the theory rows included, so merely *offering* a write tool stages nothing),
+   and zero dispositions joins it unconditionally.
+
+**What did not change:** points 2–5 of the Decision stand verbatim. The model still runs only tools from the
+fixed offered set, an invented order-shaped name is still never dispatched, the loop is still bounded and
+fail-closed, every model call is still metered and ledgered, and every tool is still R-20 owner-scoped. The
+title's "read-only" is now the *read set's* property rather than the whole layer's; the invariant the title was
+protecting — **no tool reaches an order, venue or gate type** — is unchanged and is what the structural guard
+enumerates.
 
 ## Follow-ups
 
