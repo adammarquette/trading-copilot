@@ -389,8 +389,10 @@ public class EditRulebookToolTests
     [Fact]
     public async Task ExecuteAsync_ShouldRefuseAndChangeNothing_WhenTheAmendedThresholdIsOutOfRange()
     {
-        // The top-guard shape the patch endpoint uses: validated WHOLE before any field is applied, so a refused
-        // amend leaves the stored rule untouched rather than half-edited.
+        // A refused amend leaves the STORED rule untouched rather than half-edited. Stated precisely, because the
+        // red-proof narrowed it: the top-guard ORDERING alone is not what this catches -- an early return before
+        // SaveChanges discards the mutations anyway, so reordering the checks below the applies stays green. What it
+        // catches is a half-edited row that actually REACHES the database, which is the defect that would matter.
         Guid id = await SeedRuleAsync(severity: NotificationSeverity.Notify);
 
         string result = await Tool().ExecuteAsync(
