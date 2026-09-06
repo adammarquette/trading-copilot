@@ -27,15 +27,6 @@ namespace MarqSpec.TradingCopilot.Api.Triggers;
 /// </remarks>
 public static class TriggerEndpoints
 {
-    // The R-22 indicator names a trigger may name (AtrIndicator / RsiIndicator). Case-insensitive in, canonical out,
-    // so the stored name is exactly the IIndicatorSource read identity.
-    private static readonly IReadOnlyDictionary<string, string> _knownIndicators =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            [AtrIndicator.IndicatorName] = AtrIndicator.IndicatorName,
-            [RsiIndicator.IndicatorName] = RsiIndicator.IndicatorName,
-        };
-
     /// <summary>Maps the trigger endpoints. All require authentication.</summary>
     /// <param name="endpoints">The endpoint route builder.</param>
     /// <returns>The same builder, for chaining.</returns>
@@ -58,14 +49,19 @@ public static class TriggerEndpoints
         TradingCopilotDbContext database,
         CancellationToken cancellationToken)
     {
-        if (!InstrumentId.TryParse(request.Symbol, out InstrumentId instrument))
+        // The condition half's refusals are TriggerAuthoring's (gh#1135) -- SHARED with the chat edit_rulebook tool
+        // rather than copied, so a model-authored trigger can never be checked by an older copy of these rules
+        // (gh#1007 is the precedent: the same threshold gap had to be fixed at create AND at patch). The evaluation
+        // ORDER is this endpoint's own and unchanged -- a bad route still refuses before a bad period -- because each
+        // refusal is its own call rather than one whole-request validator, and every refusal string is verbatim.
+        if (TriggerAuthoring.RefuseSymbol(request.Symbol, out InstrumentId instrument) is { } symbolError)
         {
-            return Results.BadRequest(new { error = "A trigger needs a non-blank instrument symbol." });
+            return Results.BadRequest(new { error = symbolError });
         }
 
-        if (request.Comparison == IndicatorComparison.Unknown)
+        if (TriggerAuthoring.RefuseComparison(request.Comparison) is { } comparisonError)
         {
-            return Results.BadRequest(new { error = "The comparison must be Below or Above." });
+            return Results.BadRequest(new { error = comparisonError });
         }
 
         if (request.Route == TriggerRoute.Unknown)
@@ -73,28 +69,24 @@ public static class TriggerEndpoints
             return Results.BadRequest(new { error = "The route must be Mechanical or AgentReview." });
         }
 
-        if (request.Period <= 0)
+        if (TriggerAuthoring.RefusePeriod(request.Period) is { } periodError)
         {
-            return Results.BadRequest(new { error = "The period must be positive." });
+            return Results.BadRequest(new { error = periodError });
         }
 
-        if (request.ResolutionMinutes <= 0)
+        if (TriggerAuthoring.RefuseResolution(request.ResolutionMinutes) is { } resolutionError)
         {
-            return Results.BadRequest(new { error = "The resolution must be a positive number of minutes." });
+            return Results.BadRequest(new { error = resolutionError });
         }
 
-        if (string.IsNullOrWhiteSpace(request.Indicator)
-            || !_knownIndicators.TryGetValue(request.Indicator, out string? indicatorName))
+        if (TriggerAuthoring.RefuseIndicator(request.Indicator, out string indicatorName) is { } indicatorError)
         {
-            return Results.BadRequest(new
-            {
-                error = $"Unknown indicator — supported names are {string.Join(", ", _knownIndicators.Keys)}.",
-            });
+            return Results.BadRequest(new { error = indicatorError });
         }
 
-        if (request.Hysteresis is <= 0m)
+        if (TriggerAuthoring.RefuseHysteresis(request.Hysteresis) is { } hysteresisError)
         {
-            return Results.BadRequest(new { error = "The hysteresis band must be positive when set — null means none." });
+            return Results.BadRequest(new { error = hysteresisError });
         }
 
         // The threshold must sit inside the indicator's meaningful range, or the debounce seeds straight to Fired and
@@ -224,14 +216,15 @@ public static class TriggerEndpoints
             return Results.NotFound();
         }
 
-        if (request.Comparison is { } comparison && comparison == IndicatorComparison.Unknown)
+        if (request.Comparison is { } comparison
+            && TriggerAuthoring.RefuseComparison(comparison) is { } patchComparisonError)
         {
-            return Results.BadRequest(new { error = "The comparison must be Below or Above." });
+            return Results.BadRequest(new { error = patchComparisonError });
         }
 
-        if (request.Hysteresis is <= 0m)
+        if (TriggerAuthoring.RefuseHysteresis(request.Hysteresis) is { } patchHysteresisError)
         {
-            return Results.BadRequest(new { error = "The hysteresis band must be positive when set — null means none." });
+            return Results.BadRequest(new { error = patchHysteresisError });
         }
 
         // Patch is the second writer that had the gh#1007 gap. Validated whole here, BEFORE any field is applied
