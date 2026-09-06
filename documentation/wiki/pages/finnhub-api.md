@@ -75,8 +75,10 @@ time-indexed row + pgvector embedding). Free and useful for AI-agent context:
   finding does **not** extend to this market-data caveat, which stays open.
 - **What that news pass actually measured** (2026-09-05, gh#1122): ~13–37 articles/day from Reuters / CNBC /
   Bloomberg, every one carrying a URL and a headline, no duplicate URLs in a payload. Two limits: articles
-  arrive **already older than a 60-minute lookback**, so that window admits only ~0–1% of them (gh#1123), and
-  the `general` category carries **no tickers at all** (gh#1124).
+  arrive **already older than the then-shipped 60-minute lookback**, so that window admitted only ~0–1% of
+  them (gh#1123) — **fixed** by widening the default to 1440 minutes (24h), sized to the measured provider
+  latency rather than the poll cadence (gh#1146) — and the `general` category carries **no tickers at all**
+  (gh#1124).
 
 ## Fit / integration notes
 - **Data-only provider** → implements the market-data interface of the R-17 abstraction; **no** account/execution
