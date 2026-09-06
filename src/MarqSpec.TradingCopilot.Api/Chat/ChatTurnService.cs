@@ -33,9 +33,10 @@ public sealed record ChatTurnResult(bool Succeeded, string Message, IReadOnlyLis
 /// </summary>
 /// <remarks>
 /// <b>Enforcement lives below the model.</b> Nothing here places, sizes, or modifies an order — the co-pilot
-/// converses, reads, and (since gh#1134) <b>proposes</b>. Every offered <see cref="IChatTool"/> reaches no order /
-/// venue / gate type by construction: the read tools only read, and a write tool stages an artifact that is <b>inert
-/// until the operator acts</b> — a <c>Suggestion</c> only the operator can take, with the risk gate running then. The
+/// converses, reads, <b>proposes</b> (gh#1134), and <b>authors an inert rule</b> (gh#1135). Every offered
+/// <see cref="IChatTool"/> reaches no order / venue / gate type by construction: the read tools only read, and a
+/// write tool stages an artifact that is <b>inert until the operator acts</b> — a <c>Suggestion</c> only the operator
+/// can take, with the risk gate running then, or an <b>Unconfirmed</b> trigger only the operator can arm. The
 /// loop runs whatever the model asks for from that fixed, registered set and never invents an action outside it. The
 /// system prompt is
 /// <b>fixed and holds no risk limits or account state</b>, and message <see cref="ChatMessage.Content"/> is
@@ -97,8 +98,9 @@ internal sealed class ChatTurnService : IChatTurnService
         + "their own trading, grounded in the conversation and the tools you are given. You never place, "
         + "modify, or size orders, and you never give personalized financial advice — execution is always an explicit "
         + "action the trader takes themselves. Use a tool when it would ground your answer in the trader's real data. "
-        + "One tool writes: generate_suggestion stages a proposal the trader must take themselves — so say what you "
-        + "staged and that it is not live, and never claim a trade was placed. "
+        + "Two tools write: generate_suggestion stages a proposal the trader must take themselves, and edit_rulebook "
+        + "writes a rule that stays inert until the trader confirms it — so say what you staged or wrote and that it "
+        + "is not live, and never claim a trade was placed or an alert armed. "
         + "Be concise and specific, and say plainly when you are not sure.";
 
     /// <summary>
