@@ -604,6 +604,63 @@ public class EditRulebookToolTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_ShouldRefuseAndChangeNothing_WhenAnAmendedComparisonIsWrongJsonType()
+    {
+        // TryString had the SAME defect as the old TryDecimal: a present-but-wrong-type value read as absent. A
+        // wrong-typed comparison alongside a VALID threshold must refuse the whole call -- not silently drop the
+        // comparison, apply the threshold, and still disarm and report "amended".
+        Guid id = await SeedRuleAsync(
+            confirmation: TriggerConfirmation.Confirmed, armState: TriggerArmState.Fired, armCycle: 3);
+
+        string result = await Tool().ExecuteAsync(
+            $"{{\"triggerId\":\"{id}\",\"comparison\":123,\"threshold\":31}}", CancellationToken.None);
+
+        ErrorIn(result).Should().NotBeEmpty("a present-but-unparseable comparison is a malformed argument, not an absence");
+        result.Should().NotContainEquivalentOf("amended");
+        TriggerRecord untouched = await SoleRuleAsync();
+        untouched.Threshold.Should().Be(30m, "the valid field beside the malformed one was not applied either");
+        untouched.Confirmation.Should().Be(TriggerConfirmation.Confirmed, "the rule was not disarmed");
+        untouched.ArmState.Should().Be(TriggerArmState.Fired);
+        untouched.ArmCycle.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldRefuseAndChangeNothing_WhenAnAmendedSeverityIsWrongJsonType()
+    {
+        Guid id = await SeedRuleAsync(
+            confirmation: TriggerConfirmation.Confirmed, armState: TriggerArmState.Fired, armCycle: 3);
+
+        string result = await Tool().ExecuteAsync(
+            $"{{\"triggerId\":\"{id}\",\"severity\":123,\"threshold\":31}}", CancellationToken.None);
+
+        ErrorIn(result).Should().NotBeEmpty("a present-but-unparseable severity is a malformed argument, not an absence");
+        result.Should().NotContainEquivalentOf("amended");
+        TriggerRecord untouched = await SoleRuleAsync();
+        untouched.Threshold.Should().Be(30m);
+        untouched.Confirmation.Should().Be(TriggerConfirmation.Confirmed, "the rule was not disarmed");
+        untouched.ArmState.Should().Be(TriggerArmState.Fired);
+        untouched.ArmCycle.Should().Be(3);
+    }
+
+    [Theory]
+    [InlineData(
+        "{\"symbol\":\"ES\",\"indicator\":\"rsi\",\"period\":\"14\",\"resolutionMinutes\":1,"
+        + "\"comparison\":\"Below\",\"threshold\":30}")]
+    [InlineData(
+        "{\"symbol\":\"ES\",\"indicator\":\"rsi\",\"period\":14,\"resolutionMinutes\":\"1\","
+        + "\"comparison\":\"Below\",\"threshold\":30}")]
+    public async Task ExecuteAsync_ShouldRefuseAndWriteNothing_WhenAnAuthoredIntegerIsWrongJsonType(string input)
+    {
+        // TryInt has the same shape as TryString/TryDecimal, and is unreachable through this defect on the AMEND
+        // path today -- an amend naming period or resolutionMinutes is refused as an identity field before TryInt
+        // ever runs. Pin the HELPER directly via the one path that does reach it: authoring.
+        string result = await Tool().ExecuteAsync(input, CancellationToken.None);
+
+        ErrorIn(result).Should().NotBeEmpty("a present-but-unparseable integer is a malformed argument, not an absence");
+        (await RulesAsync()).Should().BeEmpty("nothing is written on any refused authoring call");
+    }
+
+    [Fact]
     public async Task ExecuteAsync_ShouldRefuseAndChangeNothing_WhenAnAmendNamesNoField()
     {
         // The bare shape: {"triggerId": "..."} and nothing else. Nothing to apply, so nothing may be reported as
