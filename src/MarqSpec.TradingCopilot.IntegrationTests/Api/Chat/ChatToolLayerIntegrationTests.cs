@@ -591,8 +591,10 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
         triggers.Should().HaveCount(
             expectedTriggers,
             "a chat turn writes exactly the rules the tool it called was asked for, and never one more");
-        triggers.Should().OnlyContain(
-            rule => rule.Confirmation == TriggerConfirmation.Unconfirmed,
+        // Stated as "none is armed" rather than "all are unconfirmed": OnlyContain FAILS on an empty collection, so
+        // that form would have turned every read-tool case -- which legitimately writes no rule at all -- red.
+        triggers.Should().NotContain(
+            rule => rule.Confirmation != TriggerConfirmation.Unconfirmed,
             "and nothing chat authors is ever ARMED — only the operator's own confirm accepts a rule into the firing "
             + "set (gh#470), whatever Enabled says");
     }
