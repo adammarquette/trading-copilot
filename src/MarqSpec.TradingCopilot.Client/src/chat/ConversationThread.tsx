@@ -167,6 +167,8 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   const { behind, markBehind, clearBehind } = useBehindIndicator();
   const mounted = useRef(true);
   const sendingRef = useRef(false); // synchronous guard: `sending` state lags a tick behind a rapid double-submit
+  // Orders the BEHIND flag against two overlapping `load` calls (gh#1109 review) -- see the module note on `load`.
+  const loadGeneration = useRef(0);
   // The chunk stream's guards (see the module note on the streaming draft):
   //   `settledTurnsRef` counts the settled assistant pushes seen for THIS conversation -- each one terminates its
   //     turn's chunk stream on this connection, so it is also what re-opens the gate below.
@@ -243,16 +245,26 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
   // because the server drops none.
   const load = useCallback(
     (background = false) => {
+      // Guards the BEHIND flag only, against two overlapping background reads (a reconnect flap can fire onResync
+      // more than once before the first re-read resolves) settling out of order. The flag is a plain set/clear,
+      // not a fold, so whichever call resolves LAST would otherwise win regardless of which one started later --
+      // e.g. an older, slow read failing after a newer one already succeeded would incorrectly leave the thread
+      // flagged behind (gh#1109 review). The message state below is NOT guarded by it: `foldIn` is a monotonic,
+      // id-deduped union, so two reads landing out of order still converge on the same total set either way.
+      const generation = (loadGeneration.current += 1);
       void getConversation(conversationId)
         .then((result) => {
           if (!mounted.current) {
             return;
           }
+          const isCurrent = generation === loadGeneration.current;
           if (!result.ok) {
             if (background) {
               // Keep the thread, but flag it possibly behind (gh#1109) -- a failed background read while the
               // socket stays live is the one degraded state this surface would otherwise hide entirely.
-              markBehind();
+              if (isCurrent) {
+                markBehind();
+              }
             } else {
               setState({
                 kind: 'error',
@@ -265,7 +277,9 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
           const messages = result.data.messages.filter(
             (message) => message.role !== ChatRole.System,
           );
-          clearBehind(); // an authoritative read landed -- the thread is current again
+          if (isCurrent) {
+            clearBehind(); // an authoritative read landed -- the thread is current again
+          }
           setState((current) =>
             background && current.kind === 'loaded'
               ? { kind: 'loaded', messages: messages.reduce(foldIn, current.messages) }
@@ -277,7 +291,9 @@ export function ConversationThread({ conversationId }: ConversationThreadProps) 
             return;
           }
           if (background) {
-            markBehind();
+            if (generation === loadGeneration.current) {
+              markBehind();
+            }
           } else {
             setState({ kind: 'error', message: 'The conversation could not be loaded.' });
           }

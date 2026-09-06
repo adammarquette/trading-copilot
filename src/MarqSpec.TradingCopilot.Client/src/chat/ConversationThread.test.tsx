@@ -1247,6 +1247,72 @@ describe('ConversationThread — the shared "behind" marker (gh#1109)', () => {
     expect(screen.queryByTestId('chat-behind')).toBeNull();
   });
 
+  it('a superseded failed reconnect re-read never raises the flag over a newer succeeded one', async () => {
+    // Two reconnect events fire in quick succession (plausible exactly during the flaky-network episodes this
+    // feature targets). The FIRST read is slow and resolves LAST with a failure; the SECOND is fresher and
+    // resolves FIRST with a success. The flag must reflect the current (second) read, not the superseded (first)
+    // one's late-arriving failure -- otherwise the thread would be stuck reading "possibly behind" even though the
+    // most recent reconnect actually caught it up. Mirrors SuggestionList's equivalent guard (gh#874).
+    loadedWith('still here');
+    await renderThread();
+
+    const slowFail = deferred<Awaited<ReturnType<typeof getConversation>>>();
+    getMock
+      .mockImplementationOnce(() => slowFail.promise) // first resync's read -- slow, will FAIL, resolves last
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          id: 'c1',
+          title: null,
+          createdAt: '',
+          updatedAt: '',
+          messages: [message({ id: 'm1', sequence: 1, content: 'still here' })],
+        },
+      }); // second resync -- fresher, succeeds first
+
+    act(() => resyncHandler?.()); // first resync starts (slow)
+    await act(async () => resyncHandler?.()); // second resync starts and resolves (fast, succeeds)
+    expect(screen.queryByTestId('chat-behind')).toBeNull();
+
+    await act(async () => {
+      slowFail.settle({ ok: false, kind: 'failed', error: 'late failure' });
+    });
+
+    expect(screen.queryByTestId('chat-behind')).toBeNull();
+  });
+
+  it('a superseded SUCCEEDED reconnect re-read never clears a flag a newer failure just raised', async () => {
+    // The opposite race: the first (slow) read SUCCEEDS and resolves last; the second (fresher) read FAILS and
+    // resolves first. The flag must reflect the current (second, failed) read -- a late-arriving success from a
+    // superseded read must not clear a flag the more recent attempt just raised.
+    loadedWith('still here');
+    await renderThread();
+
+    const slowSucceed = deferred<Awaited<ReturnType<typeof getConversation>>>();
+    getMock
+      .mockImplementationOnce(() => slowSucceed.promise) // first resync -- slow, will SUCCEED, resolves last
+      .mockResolvedValueOnce({ ok: false, kind: 'failed', error: 'down' }); // second resync -- fresher, fails first
+
+    act(() => resyncHandler?.()); // first resync starts (slow)
+    await act(async () => resyncHandler?.()); // second resync starts and resolves (fast, fails)
+    expect(screen.getByTestId('chat-behind')).toBeTruthy();
+
+    await act(async () => {
+      slowSucceed.settle({
+        ok: true,
+        data: {
+          id: 'c1',
+          title: null,
+          createdAt: '',
+          updatedAt: '',
+          messages: [message({ id: 'm1', sequence: 1, content: 'still here' })],
+        },
+      });
+    });
+
+    expect(screen.getByTestId('chat-behind')).toBeTruthy();
+  });
+
   it('never shows the marker on the loading state', () => {
     getMock.mockReturnValue(new Promise(() => {}));
 
