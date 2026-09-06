@@ -177,6 +177,7 @@ public sealed class SuggestionDbGuardIntegrationTests
     /// </summary>
     private static Suggestion ValidSuggestion(Guid accountId, Guid operatorId, TradingMode mode) => new()
     {
+        Origin = SuggestionOrigin.Scan,
         Id = Guid.NewGuid(),
         AccountId = accountId,
         UserId = operatorId,

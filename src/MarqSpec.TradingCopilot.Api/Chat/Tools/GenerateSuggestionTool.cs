@@ -123,7 +123,7 @@ public sealed class GenerateSuggestionTool : IChatTool
         + "\"targetPrice\":{\"type\":\"number\",\"description\":\"The target price - above entry for a Buy, below for a Sell.\"},"
         + "\"rationale\":{\"type\":\"string\",\"description\":\"A short plain-language reason the trader will read.\"},"
         + "\"confidence\":{\"type\":\"integer\",\"description\":\"Your confidence, 0-100. Display only - it changes nothing about risk.\"},"
-        + "\"account\":{\"type\":\"string\",\"description\":\"The account name to propose against. Omit when the trader has only one tradable account.\"}},"
+        + "\"account\":{\"type\":\"string\",\"description\":\"The account to propose against. Omit when the trader has only one tradable account; if a refusal lists account labels, send one of them back exactly.\"}},"
         + "\"required\":[\"instrument\",\"side\",\"entryPrice\",\"stopPrice\",\"targetPrice\",\"rationale\",\"confidence\"]}");
 
     /// <inheritdoc />
@@ -169,27 +169,45 @@ public sealed class GenerateSuggestionTool : IChatTool
                 .OrderBy(account => account.Name)
                 .ToListAsync(cancellationToken);
 
-            List<Account> candidates = proposal.Account is { Length: > 0 } named
-                ? [.. tradable.Where(account => string.Equals(account.Name, named, StringComparison.OrdinalIgnoreCase))]
-                : tradable;
+            // ADDRESSABILITY (gh#1134 review). `Account.Name` is NOT unique -- only (ConnectionId, VenueAccountKey)
+            // is -- and two connections yielding same-named venue accounts is a state this product's own firms /
+            // connections model produces. Matching on the raw name alone therefore had a dead end with no way out: a
+            // refusal listing "PRAC-101, PRAC-101" that no input could resolve. So each candidate gets a label that is
+            // unique WITHIN this operator's proposable set, the model is offered those labels, and it can send one
+            // back. A label is exactly the account's name whenever that name is already unambiguous, so the ordinary
+            // single-account case reads no differently than before.
+            List<LabelledAccount> labelled = [.. AddressableLabels(tradable)];
+
+            List<LabelledAccount> candidates = proposal.Account is { Length: > 0 } named
+                ? [.. labelled.Where(candidate => candidate.Matches(named))]
+                : labelled;
 
             if (candidates.Count == 0)
             {
                 return Error(
                     "No tradable account matched, so nothing was staged. The trader needs an active account whose "
-                    + "trading mode is declared.");
+                    + "trading mode is declared."
+                    + (labelled.Count == 0
+                        ? string.Empty
+                        : " The accounts available are: " + string.Join(", ", labelled.Select(c => c.Label)) + "."));
             }
 
             if (candidates.Count > 1)
             {
                 // Ambiguity fails CLOSED rather than picking one: the account is which MONEY the setup is proposed
-                // against, and guessing is exactly the kind of choice that must not silently become the model's.
+                // against, and guessing is exactly the kind of choice that must not silently become the model's. The
+                // labels below are distinct BY CONSTRUCTION, so this refusal is always resolvable -- that is the whole
+                // reason they exist.
+                _logger.LogInformation(
+                    "generate_suggestion refused: {Count} tradable accounts matched '{Named}'; nothing staged.",
+                    candidates.Count,
+                    proposal.Account ?? "(unnamed)");
                 return Error(
-                    "Several tradable accounts matched, so nothing was staged. Name the account explicitly — "
-                    + string.Join(", ", candidates.Select(account => account.Name)) + ".");
+                    "Several tradable accounts matched, so nothing was staged. Name one of these exactly — "
+                    + string.Join(", ", candidates.Select(candidate => candidate.Label)) + ".");
             }
 
-            Account target = candidates[0];
+            Account target = candidates[0].Account;
             DateTimeOffset now = _clock.GetUtcNow();
 
             Suggestion staged = new()
@@ -216,6 +234,11 @@ public sealed class GenerateSuggestionTool : IChatTool
                 Confidence = proposal.Confidence,
                 State = SuggestionState.Active,
                 CreatedAt = now,
+
+                // The producer, stated rather than inferred (gh#1134). The operator's card reads THIS to say
+                // "proposed in chat"; a null TriggerFiringId below is a consequence of that provenance, not the
+                // evidence for it.
+                Origin = SuggestionOrigin.Chat,
 
                 // No firing produced this and no signal is cited: chat is not the scan. A chat proposal opens its own
                 // chain (Version 1, superseding nothing) rather than joining a trigger's supersede spine, which is
@@ -278,6 +301,60 @@ public sealed class GenerateSuggestionTool : IChatTool
                 error,
                 "generate_suggestion realtime push failed for suggestion {Suggestion}; it is staged regardless.",
                 staged.Id);
+        }
+    }
+
+    /// <summary>
+    /// One proposable account paired with the label the model addresses it by (gh#1134 review).
+    /// </summary>
+    /// <param name="Account">The account itself.</param>
+    /// <param name="Label">Its label — unique within the operator's proposable set, by construction.</param>
+    private sealed record LabelledAccount(Account Account, string Label)
+    {
+        /// <summary>
+        /// Whether <paramref name="named"/> addresses this account: its label, or its bare name <b>only when that
+        /// name is the label</b>. A bare name is deliberately not accepted once it has been qualified — accepting it
+        /// would re-introduce the ambiguity the qualification exists to remove.
+        /// </summary>
+        /// <param name="named">What the model sent.</param>
+        /// <returns><see langword="true"/> when this is the account meant.</returns>
+        public bool Matches(string named) => string.Equals(Label, named.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Assigns each proposable account a label that is <b>unique within the set</b>, so every refusal this tool emits
+    /// names accounts the model can actually send back.
+    /// </summary>
+    /// <remarks>
+    /// The chain widens only as far as it must, so the common case is unchanged: a name that is already unique
+    /// <i>is</i> the label. A duplicate name is qualified by its venue account key — the other half of the
+    /// <c>(ConnectionId, VenueAccountKey)</c> uniqueness the database actually guarantees — and, if two connections
+    /// carry the same account key as well, by the row id, which is unique by definition. So the last rung cannot
+    /// collide, which is what makes "name one of these exactly" a promise rather than a hope.
+    /// </remarks>
+    /// <param name="accounts">The operator's proposable accounts.</param>
+    /// <returns>Each account with its label.</returns>
+    private static IEnumerable<LabelledAccount> AddressableLabels(IReadOnlyList<Account> accounts)
+    {
+        HashSet<string> ambiguousNames = [.. accounts
+            .GroupBy(account => account.Name, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)];
+
+        HashSet<string> ambiguousKeys = [.. accounts
+            .GroupBy(account => account.Name + " " + account.VenueAccountKey, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)];
+
+        foreach (Account account in accounts)
+        {
+            string label = !ambiguousNames.Contains(account.Name)
+                ? account.Name
+                : !ambiguousKeys.Contains(account.Name + " " + account.VenueAccountKey)
+                    ? $"{account.Name} ({account.VenueAccountKey})"
+                    : $"{account.Name} ({account.VenueAccountKey} · {account.Id})";
+
+            yield return new LabelledAccount(account, label);
         }
     }
 
@@ -365,8 +442,12 @@ public sealed class GenerateSuggestionTool : IChatTool
             return false;
         }
 
-        value = element.GetString() ?? string.Empty;
-        return !string.IsNullOrWhiteSpace(value);
+        // Trimmed BEFORE the blank check, so a whitespace-only value leaves `value` empty rather than three spaces.
+        // Every other caller reads `value` only when this returns true, but `account` reads it regardless -- so
+        // without the trim, a model sending "account": "   " instead of omitting the key would be treated as having
+        // NAMED an account, and would miss the single-account fallback the schema promises it (gh#1148 review).
+        value = (element.GetString() ?? string.Empty).Trim();
+        return value.Length > 0;
     }
 
     private static bool TryDecimal(JsonElement root, string name, out decimal value)

@@ -9,6 +9,7 @@ import {
   SuggestionState,
   passSuggestion,
   takeSuggestion,
+  SuggestionOrigin,
 } from '../api/suggestions';
 import { renderWithProviders } from '../testing/render';
 import { SuggestionCard } from './SuggestionCard';
@@ -46,6 +47,7 @@ function suggestion(overrides: Partial<Suggestion> = {}): Suggestion {
     riskUsd: 412,
     rewardUsd: 912,
     rationale: 'Buy-side delta positive over the last 12 bars; reclaimed session VWAP and holding.',
+    origin: SuggestionOrigin.Scan,
     citedIndicator: 'RSI',
     citedPeriod: 14,
     citedResolutionMinutes: 15,
@@ -156,6 +158,68 @@ describe('SuggestionCard — the fully-specified setup (R-4)', () => {
     renderCard();
 
     expect(screen.getByTestId('suggestion-citation').textContent).toContain('RSI(14) · 15m');
+  });
+
+  // ===============================================================================================================
+  // gh#1134 — the card now has TWO producers to render, and one of them cites no signal.
+  //
+  // The pair is deliberate: the scan case above and the chat case below travel the same component and the same
+  // test ids, so "the chat card says something else" is proven against a control that says the normal thing.
+  // ===============================================================================================================
+
+  it('says a chat proposal cites no signal, rather than rendering a zeroed citation as one', () => {
+    // The server's null-object defaults for "no cited factor". Before gh#1134 this rendered as
+    // `cited signal · (0) · 0m` — which reads as a MALFORMED SCAN suggestion on a surface that commits real money,
+    // not as an honest proposal from another producer.
+    renderCard({
+      origin: SuggestionOrigin.Chat,
+      citedIndicator: '',
+      citedPeriod: 0,
+      citedResolutionMinutes: 0,
+      timeframeMinutes: 0,
+    });
+
+    const citation = screen.getByTestId('suggestion-citation').textContent ?? '';
+    expect(citation).toContain('proposed in chat');
+    expect(citation).not.toContain('(0)');
+    expect(citation).not.toContain('0m');
+    expect(citation).not.toContain('cited signal ·');
+  });
+
+  it('omits the timeframe chip on a chat proposal rather than claiming a 0m bar size', () => {
+    renderCard({ origin: SuggestionOrigin.Chat, timeframeMinutes: 0 });
+
+    // Absent, not blank: a 0-minute timeframe is a false FACT, and the chip is where the operator reads
+    // "scalp or swing?" off the card.
+    expect(screen.queryByTestId('suggestion-timeframe')).toBeNull();
+  });
+
+  it('marks a chat proposal as chat-originated, so the operator can attribute it', () => {
+    renderCard({ origin: SuggestionOrigin.Chat });
+
+    expect(screen.getByTestId('suggestion-origin').dataset.origin).toBe('chat');
+  });
+
+  it('leaves a scan-issued suggestion exactly as it was — the control for the three above', () => {
+    renderCard();
+
+    expect(screen.queryByTestId('suggestion-origin')).toBeNull();
+    expect(screen.getByTestId('suggestion-timeframe').textContent).toBe('15m');
+    expect(screen.getByTestId('suggestion-citation').textContent).toContain('cited signal · RSI(14) · 15m');
+  });
+
+  it('reads the PRODUCER, not the shape of the citation — a zeroed scan citation is a bug, not a chat proposal', () => {
+    // An unloaded cited-factor set produces exactly the same zeros. If the card inferred "chat" from them it would
+    // quietly relabel a server bug as a feature; it must still render the scan citation line so the bug is visible.
+    renderCard({
+      origin: SuggestionOrigin.Scan,
+      citedIndicator: '',
+      citedPeriod: 0,
+      citedResolutionMinutes: 0,
+    });
+
+    expect(screen.getByTestId('suggestion-citation').textContent).toContain('cited signal ·');
+    expect(screen.queryByTestId('suggestion-origin')).toBeNull();
   });
 
   it('carries the account mode and the lifecycle state, so the card says what it would trade', () => {

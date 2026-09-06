@@ -81,9 +81,21 @@ public class Suggestion : IUserOwned
 
     /// <summary>
     /// The firing that produced this suggestion (gh#542) — a soft link; the journal outlives the trigger, so the
-    /// citation below is <b>copied</b> rather than resolved through it.
+    /// citation below is <b>copied</b> rather than resolved through it. <see langword="null"/> on a producer that
+    /// cites no firing; read <see cref="Origin"/> to learn which producer that was, never this column's absence.
     /// </summary>
     public Guid? TriggerFiringId { get; set; }
+
+    /// <summary>
+    /// <b>Which producer staged this row</b> (gh#1134, R-4 / R-6) — the trigger scan, or the chat co-pilot. A DB check
+    /// refuses the <see cref="SuggestionOrigin.Unknown"/> zero, so a row whose producer nobody set never persists.
+    /// </summary>
+    /// <remarks>
+    /// Stored rather than inferred from a null <see cref="TriggerFiringId"/>: an absence is not provenance, and the
+    /// operator's card needs to say what it is showing rather than guess. <b>Provenance, not permission</b> — the
+    /// execution path does not read it, and a chat proposal is taken through the identical gate.
+    /// </remarks>
+    public required SuggestionOrigin Origin { get; set; }
 
     /// <summary>
     /// The model's confidence, 0–100 (gh#543, R-4). A DB check pins the range; the reviewer fails closed on a

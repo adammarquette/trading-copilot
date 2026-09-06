@@ -1,5 +1,6 @@
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain.Suggestions;
 using Microsoft.EntityFrameworkCore;
 
 namespace MarqSpec.TradingCopilot.Data;
@@ -258,6 +259,7 @@ public class TradingCopilotDbContext : TenantDbContext
 
             suggestion.Property(s => s.Version).HasDefaultValue(1);
 
+
             // The read model's query shape (gh#540): the R-20 filter pins UserId, the list filters on State and
             // orders by CreatedAt. Owned by this card so the index does not end up owned by nobody once the
             // suggestion table starts growing -- it is an append-only journal.
@@ -274,6 +276,12 @@ public class TradingCopilotDbContext : TenantDbContext
             {
                 table.HasCheckConstraint("CK_Suggestions_Mode_NotUndeclared", "\"Mode\" <> 0");
                 table.HasCheckConstraint("CK_Suggestions_State_NotUnknown", "\"State\" <> 0");
+
+                // The producer is a FACT of the row (gh#1134), so an unset one is refused exactly as an unset state
+                // is: since the chat tool joined the scan as a second writer, "which producer?" can no longer be
+                // inferred from a null TriggerFiringId, and a row that answered it with the zero would be a row whose
+                // card cannot say what it is showing.
+                table.HasCheckConstraint("CK_Suggestions_Origin_NotUnknown", "\"Origin\" <> 0");
                 table.HasCheckConstraint("CK_Suggestions_Size_Positive", "\"Size\" > 0");
 
                 // The model's confidence is display-only (gh#543), but an out-of-range number is still a malformed

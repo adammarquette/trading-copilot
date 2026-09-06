@@ -26,6 +26,7 @@ public class CitedFactorPersistenceTests
     // The suggestion spine a cited factor hangs from — the fields the model requires, none of them under test here.
     private static Suggestion NewSuggestion(Guid owner) => new()
     {
+        Origin = SuggestionOrigin.Scan,
         Id = Guid.NewGuid(),
         UserId = owner,
         AccountId = Guid.NewGuid(),

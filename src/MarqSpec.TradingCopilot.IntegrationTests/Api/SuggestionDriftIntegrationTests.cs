@@ -366,6 +366,7 @@ public class SuggestionDriftIntegrationTests : IClassFixture<OcoExitTestPostgres
         {
             db.Suggestions.Add(new Suggestion
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = id,
                 UserId = userId ?? operatorId,
                 AccountId = accountId,

@@ -31,6 +31,19 @@ export type OrderSide = (typeof OrderSide)[keyof typeof OrderSide];
 export const SuggestionState = { Unknown: 0, Active: 1, Stale: 2, ExpiredVoid: 3 } as const;
 export type SuggestionState = (typeof SuggestionState)[keyof typeof SuggestionState];
 
+/**
+ * **Which producer staged the suggestion** (gh#1134) — the trigger scan, or the chat co-pilot's
+ * `generate_suggestion` tool. `Unknown` is the refusable zero the server's CHECK never persists.
+ *
+ * The card reads this to decide **whether a cited signal exists at all**. A chat proposal cites none, and the
+ * citation fields then arrive as the server's null-object defaults (`''`, `0`, `0`) — which, rendered through the
+ * scan's citation line, read as `cited signal · (0) · 0m`: a *malformed scan suggestion* rather than an honest
+ * proposal from somewhere else. Never infer the producer from those zeros; they also mean "the read forgot to
+ * include the cited-factor set", which is a bug and must not be indistinguishable from a chat proposal.
+ */
+export const SuggestionOrigin = { Unknown: 0, Scan: 1, Chat: 2 } as const;
+export type SuggestionOrigin = (typeof SuggestionOrigin)[keyof typeof SuggestionOrigin];
+
 /** What the operator did with a suggestion — an operator act only; expiry is the clock's, never a disposition. */
 export const SuggestionDispositionKind = {
   Unknown: 0,
@@ -124,6 +137,8 @@ export interface Suggestion {
    * as markup, and never feed it back into a prompt as instruction.
    */
   readonly rationale: string;
+  /** Which producer staged it (gh#1134). Provenance only — it changes nothing about how a take is gated. */
+  readonly origin: SuggestionOrigin;
   readonly citedIndicator: string;
   readonly citedPeriod: number;
   readonly citedResolutionMinutes: number;

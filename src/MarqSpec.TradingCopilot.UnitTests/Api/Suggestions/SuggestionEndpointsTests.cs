@@ -64,6 +64,7 @@ public class SuggestionEndpointsTests
         await using TradingCopilotDbContext context = Context(ownerId);
         context.Suggestions.Add(new Suggestion
         {
+            Origin = SuggestionOrigin.Scan,
             Id = id,
             UserId = ownerId,
             AccountId = accountId ?? _account,

@@ -264,6 +264,7 @@ public class SuggestionLifecycleRestartIntegrationTests : IClassFixture<Rehydrat
         {
             db.Suggestions.Add(new Suggestion
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = suggestionId,
                 UserId = operatorId,
                 AccountId = accountId,

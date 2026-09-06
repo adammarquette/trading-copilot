@@ -94,6 +94,7 @@ public class SuggestionCitedFactorsBackfillIntegrationTests : IAsyncLifetime
 
         database.Suggestions.Add(new Suggestion
         {
+            Origin = SuggestionOrigin.Scan,
             Id = suggestionId,
             UserId = Guid.NewGuid(),
             AccountId = accountId,

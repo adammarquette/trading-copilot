@@ -2206,12 +2206,16 @@ public class TriggerEvaluationServiceTests
     }
 
     // Seeds one existing ACTIVE suggestion for the account today, so a throttled window's issued-count is non-zero.
-    private async Task SeedSuggestionAsync(Guid accountId, Guid? owner = null)
+    // The PRODUCER is a parameter (gh#1134): the cap counts the scan's own issuance, so which producer wrote the row
+    // is the difference test (j) turns on.
+    private async Task SeedSuggestionAsync(
+        Guid accountId, Guid? owner = null, SuggestionOrigin origin = SuggestionOrigin.Scan)
     {
         Guid ownerId = owner ?? _operator;
         await using TradingCopilotDbContext context = Context(ownerId);
         context.Suggestions.Add(new Suggestion
         {
+            Origin = origin,
             Id = Guid.NewGuid(),
             UserId = ownerId,
             AccountId = accountId,
@@ -2393,6 +2397,34 @@ public class TriggerEvaluationServiceTests
 
         A.CallTo(() => _reviewer.ReviewAsync(A<TriggerReviewContext>._, A<CancellationToken>._, A<bool>._)).MustHaveHappenedOnceExactly();
         (await Context().Suggestions.CountAsync()).Should().Be(1); // only the seeded incumbent -- the new one was refused
+    }
+
+    // (j) THE CAP COUNTS THE SCAN'S OWN ISSUANCE, NOT THE OPERATOR'S REQUESTS (gh#1134). Byte-for-byte test (g)
+    // except that the row already in the window was staged by the CHAT tool rather than the scan. Before this filter
+    // the count had no producer clause -- it did not need one, because the scan was the only writer of a Suggestion
+    // row -- so the operator asking the co-pilot for setups silently spent the scan's daily cap and the scan went
+    // quiet for the rest of the trading day, attributable to nothing they could see. The cap governs what the scan
+    // issues UNPROMPTED as headroom depletes; an answer explicitly asked for is not that, and R-5 at take time is the
+    // enforcing layer for both. The pair (g)/(j) differs ONLY in the producer, so this cannot pass by the cap being
+    // broken generally.
+    [Fact]
+    public async Task ScanAsync_ShouldStillStage_WhenTheWindowHoldsOnlyAChatProposal()
+    {
+        Guid accountId = await SeedAccountAsync();
+        await SeedRiskProfileAsync(accountId, governor: 1_000m);
+        await SeedClosedTradeAsync(accountId, realizedPnL: -950m); // headroom 0.05 -> Throttled, cap 1, exactly as (g)
+        await SeedSuggestionAsync(accountId, origin: SuggestionOrigin.Chat); // the ONLY difference from (g)
+        await AddTriggerAsync(route: TriggerRoute.AgentReview, accountId: accountId, size: 1, armState: TriggerArmState.Armed);
+        IndicatorReturns(25m);
+        ReviewerReturns(new ReviewOutcome.Suggest(OrderSide.Buy, 100m, 99m, 103m, "another setup", 80));
+
+        await Service(suggestionOptions: ThrottleOptions()).ScanAsync(Now, CancellationToken.None);
+
+        await using TradingCopilotDbContext reload = Context();
+        (await reload.Suggestions.CountAsync()).Should().Be(
+            2, "a chat proposal must not consume the scan's per-account daily window — (g) proves the cap still binds");
+        (await reload.Suggestions.CountAsync(candidate => candidate.Origin == SuggestionOrigin.Scan)).Should().Be(
+            1, "and the row the scan added is the scan's own, stamped as such");
     }
 
     // (h) THE R-4 INVARIANT -- CONFIDENCE CANNOT LIFT THE CAP: identical to (g) but the proposal comes in at MAXIMUM

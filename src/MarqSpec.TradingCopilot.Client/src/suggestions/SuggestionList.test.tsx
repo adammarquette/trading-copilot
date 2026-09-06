@@ -9,6 +9,7 @@ import {
   type Suggestion,
   SuggestionState,
   takeSuggestion,
+  SuggestionOrigin,
 } from '../api/suggestions';
 import { renderWithProviders } from '../testing/render';
 import { SuggestionList } from './SuggestionList';
@@ -48,6 +49,7 @@ function suggestion(id: string, overrides: Partial<Suggestion> = {}): Suggestion
     riskUsd: 206,
     rewardUsd: 456,
     rationale: `Rationale for ${id}.`,
+    origin: SuggestionOrigin.Scan,
     citedIndicator: 'RSI',
     citedPeriod: 14,
     citedResolutionMinutes: 15,

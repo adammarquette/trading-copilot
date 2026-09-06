@@ -431,6 +431,7 @@ public class SuggestionDatabaseGuardIntegrationTests : IClassFixture<StubbedVenu
 
     private static Suggestion ValidSuggestion(Guid accountId, Guid operatorId) => new()
     {
+        Origin = SuggestionOrigin.Scan,
         Id = Guid.NewGuid(),
         UserId = operatorId,
         AccountId = accountId,
