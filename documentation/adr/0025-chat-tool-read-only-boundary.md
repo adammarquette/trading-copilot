@@ -49,9 +49,10 @@ The operator was asked (2026-08-15) and chose a **read-only** tool set for this 
 - The round cap and the offered-set-only dispatch are the loop's safety backstops; both carry unit tests
   (round-cap fail-closed, unoffered-tool-never-dispatched).
 
-## Update — 2026-09-05: the first write tool (gh#1134 of gh#1059)
+## Update — 2026-09-05: the write tools (gh#1134 and gh#1135 of gh#1059)
 
-`generate_suggestion` landed. **The decision above is not superseded — it is exercised.** Point 1 said the write
+`generate_suggestion` landed, and then `edit_rulebook` beside it (see *The second write tool* below). **The
+decision above is not superseded — it is exercised.** Point 1 said the write
 tools were deliberately out of that increment and that "even those, when they land, propose rather than execute",
 and the Consequences said a write tool would be "a deliberate, separately-reviewed decision (its own increment),
 never an accident of adding a tool". This is that increment, so it is recorded here rather than as a new ADR: no
@@ -103,6 +104,52 @@ What the increment establishes, and what a future write tool inherits:
    (still zero everywhere it was, the theory rows included, so merely *offering* a write tool stages nothing),
    and zero dispositions joins it unconditionally.
 
+### The second write tool — `edit_rulebook` (gh#1135)
+
+Recorded here rather than as ADR-0029: it is the same boundary, and a second document defining one boundary is how
+two documents come to disagree about it. Points 1–6 above are the rules it inherited; four more it establishes.
+
+7. **A write tool may write into an ARMED subsystem, provided what it writes is in a state that subsystem
+   refuses.** `edit_rulebook` writes a `TriggerRecord` — a row the scan reads on a timer and can turn into a page.
+   That is a materially louder artifact than a `Suggestion`, which sits inert until read. What makes it safe is not
+   the tool's restraint but gh#470's confirmation gate: the scan's due-set predicate takes only `Confirmed` rows,
+   so an authored rule is inert **regardless of `Enabled`**, and the operator's separate `POST /{id}/confirm` is the
+   only thing that arms one. *"Written by the model" and "armed" must never be the same act.* The generalisation:
+   **inertness must be a state the reader enforces, not a promise the writer makes** — a tool that merely declined
+   to set a flag would be one careless edit away from arming.
+
+8. **The amend path is where that gate leaks, so an amend disarms.** Authoring an Unconfirmed rule is obviously
+   safe; editing one the operator had *already confirmed* is the path by which a model change reaches the live
+   firing set, because the confirmation was given to the **old** condition. So every amend returns the rule to
+   Unconfirmed, and re-seeds the debounce (a condition that became true under the old definition must re-seed
+   silently, and a fresh incident cycle stops the next genuine crossing being suppressed as a duplicate). The route,
+   account and size are never touched at all: chat authors the mechanical route only, so a chat edit can never turn
+   an alert into a sized proposal against an account.
+
+9. **A second author of an existing entity shares the first author's rules — the code, not a copy.** The condition
+   half's refusals moved out of `TriggerEndpoints` into `TriggerAuthoring`, one refusal per check so each caller
+   keeps its own evaluation order and no endpoint behaviour moved. gh#1007 is the precedent: the same threshold gap
+   had to be fixed twice, at create *and* at patch — and a model-authored row is exactly the one you least want
+   validated by the older copy. This is the write-side twin of point 4: a new **producer** owes the entity a
+   producer field; a new **author** owes it the existing author's validation.
+
+10. **A write tool gets exactly the turn identity it needs, and fails closed without it.** A chat-authored rule
+    stamps the conversation it came from (`SourceConversationId`, gh#471), which is what makes *"why does this rule
+    exist?"* answerable at the read path. `IChatTurnScope` carries that one `Guid` and nothing else — deliberately
+    not a general per-turn bag, since a seam that accumulates state is how a tool eventually reaches something it
+    should not, and the pinned allow-list can only vouch for what a seam can hand out. It is a **required**
+    dependency: a null scope means the endpoint never entered it, i.e. the wiring is broken, and an optional
+    dependency defaulting to "no provenance" would write an *unattributed* rule and look like it worked. The scope
+    is entered **after** the R-20 owner check, never before.
+
+**And one thing the boundary test learned.** The pinned constructor allow-list is now **one set per write tool**,
+not a shared union. A union lets each write tool inherit the other's collaborators for free — `edit_rulebook` would
+have silently acquired the deadline source and realtime notifier it has no business holding, and the *next* write
+tool would start from everything shipped. The allow-list is a guard only while it is the narrowest true statement
+about each tool. A companion assertion catches a write tool with **no** entry at all (identified structurally, by
+the `DbContextOptions` write handle a read tool never holds), because a guard that silently applies to nothing is
+worse than none.
+
 **What did not change:** points 2–5 of the Decision stand verbatim. The model still runs only tools from the
 fixed offered set, an invented order-shaped name is still never dispatched, the loop is still bounded and
 fail-closed, every model call is still metered and ledgered, and every tool is still R-20 owner-scoped. The
@@ -142,12 +189,17 @@ enumerates.
   still holds no risk limits or account state), carrying the same injection-sentinel guard as the message-content
   path. It rides this increment's **single** governor gate + fail-open ledger, is threshold-skipped before the cap,
   and fails open to a history-only turn — so grounding never widens the execution surface or the instruction surface.
-- **The instrument a write tool is handed is syntax-checked, not validated (gh#1134 review, still open).**
+- **The instrument a write tool is handed is syntax-checked, not validated (gh#1134 review; carded as gh#1153).**
   `generate_suggestion` parses the model's symbol through `InstrumentId.TryParse` but does not confirm it names a
   configured, tradable contract, so a hallucinated symbol stages a card the take path refuses at spec resolution and
   the drift sweep re-resolves once a pass until it expires. It is fail-closed and cosmetic today, and it is recorded
   here rather than in a merged PR's description because it is the one place a model-chosen string transitively
   reaches a venue call — which is worth knowing beside the boundary claim above. Closing it means giving the tool an
   instrument-spec read, which **widens the write tool's pinned constructor allow-list**: a deliberate, separately
-  reviewed act, not a rider on the increment that introduced the tool.
+  reviewed act, not a rider on the increment that introduced the tool. **gh#1135 inherited it rather than closing
+  it**: `edit_rulebook` parses its symbol the same way, and a hallucinated one there writes a rule whose indicator is
+  never measurable — which surfaces as the gh#469 staleness advisory rather than as an authoring refusal. It is also
+  at **parity with the operator's own `POST /api/triggers`**, which has always accepted any parseable symbol, so
+  closing it for the tool alone would make the model's authoring stricter than the operator's — a decision gh#1153
+  has to make rather than inherit.
 - Streaming a *tool-using* turn's final answer (removing the round-1 double-call) is inc 4b.
