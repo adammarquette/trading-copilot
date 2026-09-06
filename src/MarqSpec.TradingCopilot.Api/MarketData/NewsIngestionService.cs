@@ -61,6 +61,12 @@ public sealed class NewsIngestionService
         // provenance rather than producing a second row.
         Dictionary<string, PendingItem> deduped = new(StringComparer.Ordinal);
 
+        // gh#1123: the shipped 60-minute default silently starved the whole pipeline — every pass "succeeded"
+        // while the adapter's own publishedAt filter dropped nearly everything a feed actually returned. Widening
+        // the default fixed the number, but a pass that fetches plenty and stores nothing is still a signal worth
+        // seeing rather than swallowing, so this pass's fetched-vs-stored counts get logged below.
+        int totalFetched = 0;
+
         foreach (INewsSource source in _sources)
         {
             string feed = source.Id.ToString();
@@ -68,6 +74,7 @@ public sealed class NewsIngestionService
             try
             {
                 items = await source.GetNewsAsync(since, cancellationToken);
+                totalFetched += items.Count;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -119,6 +126,7 @@ public sealed class NewsIngestionService
 
         if (deduped.Count == 0)
         {
+            LogIfSilentlyEmpty(totalFetched, written: 0);
             return 0;
         }
 
@@ -199,7 +207,21 @@ public sealed class NewsIngestionService
         }
 
         await _database.SaveChangesAsync(cancellationToken);
+        LogIfSilentlyEmpty(totalFetched, written);
         return written;
+    }
+
+    // gh#1123's "silent success" acceptance: a pass that fetched real items but stored or updated none is worth
+    // seeing. Deliberately Information, not Warning — every item already being known is the NORMAL steady state
+    // once a lookback window has been fully caught up on, not a fault; the point is visibility, not alarm.
+    private void LogIfSilentlyEmpty(int totalFetched, int written)
+    {
+        if (totalFetched > 0 && written == 0)
+        {
+            _logger.LogInformation(
+                "News pass fetched {Fetched} item(s) across {Sources} source(s) but stored or updated none — all already known.",
+                totalFetched, _sources.Count);
+        }
     }
 
     // Unions `feeds` into a stored row's provenance, re-stamping RecordedAt when it actually grew. Returns whether it
