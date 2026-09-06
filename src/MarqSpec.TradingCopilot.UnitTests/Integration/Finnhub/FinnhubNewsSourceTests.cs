@@ -1,5 +1,6 @@
 using FakeItEasy;
 using MarqSpec.Client.Finnhub;
+using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.Integration.Finnhub;
 
@@ -73,6 +74,26 @@ public class FinnhubNewsSourceTests
         IReadOnlyList<NewsItem> items = await Source().GetNewsAsync(since, CancellationToken.None);
 
         items.Should().ContainSingle().Which.Url.Should().Be("https://ex.com/new");
+    }
+
+    [Fact]
+    public async Task GetNewsAsync_ShouldAdmitAnArticleAtRealisticProviderLatency_UnderTheShippedDefaultLookback()
+    {
+        // gh#1123 regression. Measured against the LIVE free-tier feed, the newest article in a 100-article
+        // payload was 98 minutes old, the second 200 minutes -- Finnhub publishes into the feed already older
+        // than that. The gh#360 stubs elsewhere construct items INSIDE whatever window is asked, which is exactly
+        // why the starvation was invisible; this one is deliberately built OUTSIDE a narrow window and must still
+        // survive under the actual shipped default (read off NewsIngestionOptions, not a copy of the number) so
+        // this test tracks the real value that ships rather than one hard-coded here.
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DateTimeOffset since = now - TimeSpan.FromMinutes(new NewsIngestionOptions().LookbackMinutes);
+        DateTimeOffset publishedAt = now.AddMinutes(-98);
+        ClientReturns(Article(url: "https://ex.com/realistic-latency", datetime: publishedAt.ToUnixTimeSeconds()));
+
+        IReadOnlyList<NewsItem> items = await Source().GetNewsAsync(since, CancellationToken.None);
+
+        items.Should().ContainSingle(
+            "Finnhub's free-tier feed routinely publishes stories 90-200+ minutes old; the shipped default lookback must not filter that away");
     }
 
     [Fact]
