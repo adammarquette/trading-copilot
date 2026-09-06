@@ -11,7 +11,9 @@ using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Chat;
+using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Suggestions;
+using MarqSpec.TradingCopilot.Domain.Triggers;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using MarqSpec.TradingCopilot.IntegrationTests.TestHost;
 using Microsoft.EntityFrameworkCore;
@@ -21,7 +23,8 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.Api.Chat;
 
 /// <summary>
 /// Pre-merge integration coverage for the <b>chat tool layer</b> (gh#930 for gh#925 — R-6, ADR-0025, extending the
-/// grounded turn of gh#916; <b>extended</b> for the <c>generate_suggestion</c> write tool of gh#1134) against
+/// grounded turn of gh#916; <b>extended</b> for the <c>generate_suggestion</c> write tool of gh#1134 and the
+/// <c>edit_rulebook</c> write tool of gh#1135) against
 /// <b>real Postgres</b>, driven through the shipped endpoint <c>POST /conversations/{id}/turns</c>.
 /// </summary>
 /// <remarks>
@@ -448,6 +451,90 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
         await AssertNoOrderPathWasReachedAsync(expectedSuggestions: 0);
     }
 
+    [Fact]
+    public async Task Turn_ShouldAuthorOneUnconfirmedRule_AndStillReachNoOrderPath_WhenTheModelEditsTheRulebook()
+    {
+        await ResetAsync();
+        HttpClient client = await AuthenticatedOperatorClientAsync();
+        Guid ownerId = await OperatorUserIdAsync();
+        Guid conversationId = await StartConversationAsync(client);
+
+        _factory.Llm.Script(_ => ScriptedChatLlmProvider.SignalsToolUse());
+        _factory.Llm.Script(_ => ScriptedChatLlmProvider.WantsTool(
+            "edit_rulebook",
+            "{\"symbol\":\"ES\",\"indicator\":\"rsi\",\"period\":14,\"resolutionMinutes\":5,"
+            + "\"comparison\":\"Below\",\"threshold\":30}"));
+        _factory.Llm.Script(request => ScriptedChatLlmProvider.Answer(
+            "Written: " + string.Join(
+                " ", ScriptedChatLlmProvider.ToolResultsIn(request).Select(result => result.Content))));
+
+        using HttpResponseMessage response = await TakeTurnAsync(
+            client, conversationId, "Alert me when ES RSI drops below 30 on the 5-minute.");
+        response.StatusCode.Should().Be(HttpStatusCode.OK, "a write-tool turn completes like any other");
+
+        // The premise: this tool really is in the offered set, so the dispatch below is a dispatch.
+        ScriptedChatLlmProvider.OfferedToolNames(_factory.Llm.Calls[1].Request).Should().Contain(
+            "edit_rulebook", "the write tool is offered to the model, or this case proves nothing");
+
+        LlmToolResult fedBack = ScriptedChatLlmProvider.ToolResultsIn(_factory.Llm.Calls[2].Request)
+            .Should().ContainSingle().Which;
+        fedBack.IsError.Should().BeFalse("an offered write tool is dispatched like any other");
+        fedBack.Content.Should().Contain(
+            "UNCONFIRMED", "the model is told plainly, so it cannot report an alert it did not arm");
+
+        TriggerRecord rule = await _factory.WithDatabaseAsync(database =>
+            database.Triggers.IgnoreQueryFilters().AsNoTracking().SingleAsync());
+        rule.UserId.Should().Be(ownerId, "the rule belongs to the conversation's owner (R-20)");
+        rule.Symbol.Should().Be("ES");
+        rule.Indicator.Should().Be("rsi");
+        rule.Enabled.Should().BeTrue("the rule is enabled — Enabled is not what holds it back");
+        rule.Confirmation.Should().Be(
+            TriggerConfirmation.Unconfirmed,
+            "authorship arms nothing, against real Postgres where CK_Triggers_Confirmation would have refused an "
+            + "unknown value outright and the scan's predicate takes only Confirmed rows (gh#470)");
+        rule.Route.Should().Be(TriggerRoute.Mechanical, "a chat-authored rule alerts; it never proposes a sized trade");
+        rule.AccountId.Should().BeNull("and it names no money at all");
+        rule.Size.Should().BeNull();
+        rule.SourceConversationId.Should().Be(
+            conversationId, "the rule records the conversation it was authored in (gh#471)");
+        rule.SourceRuleId.Should().BeNull("the R-7 Rule entity is gh#866 and still backlogged");
+
+        // The tripwire, with the one number this case legitimately moved stated explicitly.
+        await AssertNoOrderPathWasReachedAsync(expectedTriggers: 1);
+    }
+
+    [Fact]
+    public async Task Turn_ShouldWriteNoRule_WhenTheModelsRuleWouldNeverAlert()
+    {
+        await ResetAsync();
+        HttpClient client = await AuthenticatedOperatorClientAsync();
+        Guid conversationId = await StartConversationAsync(client);
+
+        // Identical to the case above but for one number: an rsi threshold of 0 makes "below 0" permanently false and
+        // "at or above 0" permanently true — ADR-0019's silent monitor, reached from authoring (gh#1007). It must fail
+        // closed against real Postgres, where CK_Triggers_Threshold_InIndicatorRange is the backstop below the tool.
+        _factory.Llm.Script(_ => ScriptedChatLlmProvider.SignalsToolUse());
+        _factory.Llm.Script(_ => ScriptedChatLlmProvider.WantsTool(
+            "edit_rulebook",
+            "{\"symbol\":\"ES\",\"indicator\":\"rsi\",\"period\":14,\"resolutionMinutes\":5,"
+            + "\"comparison\":\"Below\",\"threshold\":0}"));
+        _factory.Llm.Script(request => ScriptedChatLlmProvider.Answer(
+            "Result: " + string.Join(
+                " ", ScriptedChatLlmProvider.ToolResultsIn(request).Select(result => result.Content))));
+
+        using HttpResponseMessage response = await TakeTurnAsync(
+            client, conversationId, "Alert me when ES RSI drops below zero.");
+        response.StatusCode.Should().Be(
+            HttpStatusCode.OK, "the turn recovers — a refused rule is fed back, it does not crash the turn");
+
+        LlmToolResult fedBack = ScriptedChatLlmProvider.ToolResultsIn(_factory.Llm.Calls[2].Request)
+            .Should().ContainSingle().Which;
+        fedBack.Content.Should().NotBeEmpty(
+            "the model is told why, so it can correct itself rather than claim it wrote a rule");
+
+        await AssertNoOrderPathWasReachedAsync(expectedTriggers: 0);
+    }
+
     // =============================================================================================================
     // The order tripwire, and the fixtures.
     // =============================================================================================================
@@ -464,7 +551,13 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
     /// states its own number (gh#1134). This is an EXTENSION, not a relaxation: the number is asserted exactly, and
     /// the order / venue / disposition guards below are unconditional whatever it is.
     /// </param>
-    private async Task AssertNoOrderPathWasReachedAsync(int expectedSuggestions = 0)
+    /// <param name="expectedTriggers">
+    /// The same, for rules (gh#1135). It joins the count for the same reason the suggestion count did: a second write
+    /// tool made a second table reachable from a chat turn, and a tripwire that does not watch it would report "no
+    /// write path reached" while one was. <b>Whatever the number, every trigger a chat turn left behind is asserted
+    /// UNCONFIRMED</b> — that guard is unconditional, because the count alone would pass on a rule that was armed.
+    /// </param>
+    private async Task AssertNoOrderPathWasReachedAsync(int expectedSuggestions = 0, int expectedTriggers = 0)
     {
         AdversarialTestProjectXVenueFactory venue = _factory.Venue;
         venue.TotalPlacedOrderCount.Should().Be(0, "a chat turn must never place an order at the venue");
@@ -477,13 +570,15 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
         // unrestricted write handle to EVERY table, and a ConditionalOrderRecord is the ONE row in this system that
         // ConditionalFiringService places at the venue with no operator act at all — so counting Orders alone left the
         // tripwire's own prose ("reaches no order path") wider than what it actually watched.
-        (int orders, int conditionals, int stopPlans, int suggestions, int dispositions) =
+        (int orders, int conditionals, int stopPlans, int suggestions, int dispositions,
+                List<TriggerRecord> triggers) =
             await _factory.WithDatabaseAsync(async database => (
                 await database.Orders.IgnoreQueryFilters().CountAsync(),
                 await database.ConditionalOrders.IgnoreQueryFilters().CountAsync(),
                 await database.StopPlans.IgnoreQueryFilters().CountAsync(),
                 await database.Suggestions.IgnoreQueryFilters().CountAsync(),
-                await database.SuggestionDispositions.IgnoreQueryFilters().CountAsync()));
+                await database.SuggestionDispositions.IgnoreQueryFilters().CountAsync(),
+                await database.Triggers.IgnoreQueryFilters().AsNoTracking().ToListAsync()));
         orders.Should().Be(0, "the chat path writes no Order row — a proposal is not an execution");
         conditionals.Should().Be(
             0, "nor a ConditionalOrder, which the firing service places at the venue with NO operator act");
@@ -493,6 +588,13 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
             "a chat turn stages exactly the proposals the tool it called was asked for, and never one more");
         dispositions.Should().Be(
             0, "and nothing chat stages is ever TAKEN — only the operator's own take disposes a suggestion (R-11)");
+        triggers.Should().HaveCount(
+            expectedTriggers,
+            "a chat turn writes exactly the rules the tool it called was asked for, and never one more");
+        triggers.Should().OnlyContain(
+            rule => rule.Confirmation == TriggerConfirmation.Unconfirmed,
+            "and nothing chat authors is ever ARMED — only the operator's own confirm accepts a rule into the firing "
+            + "set (gh#470), whatever Enabled says");
     }
 
     /// <summary>Runs a scripted tool-using turn in a fresh conversation and returns the content fed back to the model.</summary>
@@ -538,6 +640,10 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
             // GenerateSuggestionTool, and the unit cases that pin the round trip); this reset only keeps each case's
             // fixture its own. Ordered after the rows that reference an account.
             await database.Accounts.IgnoreQueryFilters().ExecuteDeleteAsync();
+
+            // And the rulebook, since gh#1135 — the tripwire now counts triggers exactly, so a rule left by the
+            // previous case would read as one this case wrote.
+            await database.Triggers.IgnoreQueryFilters().ExecuteDeleteAsync();
             return true;
         });
     }
