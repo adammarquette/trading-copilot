@@ -70,6 +70,7 @@ public class ExecutionJournalTests
         {
             context.Suggestions.Add(new Suggestion
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = suggestionId,
                 UserId = _operator,
                 AccountId = accountId,

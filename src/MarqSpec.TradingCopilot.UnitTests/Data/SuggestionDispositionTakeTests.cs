@@ -17,6 +17,7 @@ public class SuggestionDispositionTakeTests
     private static Suggestion Suggested(
         decimal entry = 5230.25m, decimal stop = 5222.0m, decimal target = 5248.5m, int size = 2) => new()
         {
+            Origin = SuggestionOrigin.Scan,
             Id = Guid.NewGuid(),
             UserId = Guid.NewGuid(),
             AccountId = Guid.NewGuid(),

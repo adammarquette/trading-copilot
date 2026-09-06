@@ -361,6 +361,7 @@ public class UnfilledSuggestionOutcomeIntegrationTests : IClassFixture<OutcomeTe
         {
             db.Suggestions.Add(new Suggestion
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = suggestionId,
                 UserId = owner,
                 AccountId = accountId,

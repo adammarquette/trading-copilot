@@ -996,7 +996,16 @@ public class TriggerEvaluationService
             DateTimeOffset dayStart = CentralDayStartUtc(now);
 
             // Committed suggestions for this account today (the R-20-scoped store)...
+            //
+            // SCAN-ISSUED ONLY (gh#1134). Until the chat write tool landed, the scan was the only writer of a
+            // Suggestion row, so this count could not reach anything else and needed no producer filter. It can now:
+            // a chat proposal carries the same AccountId and CreatedAt, so an unfiltered count would let the
+            // operator's OWN request for setups silently spend the scan's daily cap and go quiet for the rest of the
+            // trading day -- attributable to nothing the operator can see. The cap governs what the scan issues
+            // UNPROMPTED as headroom depletes; an answer the operator explicitly asked for is not that, and R-5 at
+            // take time is the enforcing layer for both.
             int issuedInWindow = await database.Suggestions
+                .Where(candidate => candidate.Origin == SuggestionOrigin.Scan)
                 .Where(candidate => candidate.AccountId == trigger.AccountId && candidate.CreatedAt >= dayStart)
                 .CountAsync(cancellationToken);
 
@@ -1009,6 +1018,7 @@ public class TriggerEvaluationService
             // Unchanged, so neither double-counts against the committed query above.
             issuedInWindow += database.ChangeTracker.Entries<Suggestion>()
                 .Count(entry => entry.State == EntityState.Added
+                    && entry.Entity.Origin == SuggestionOrigin.Scan // the same producer filter as the query above
                     && entry.Entity.AccountId == trigger.AccountId
                     && entry.Entity.CreatedAt >= dayStart);
 
@@ -1161,6 +1171,10 @@ public class TriggerEvaluationService
             // The model's prose, now durable (gh#542) -- it was previously generated, billed and discarded. Capped and
             // validated at the reviewer's parse boundary, so anything unusable never reached here.
             Rationale = suggest.Rationale,
+
+            // The producer (gh#1134). Explicit on the scan's own path too: this row's provenance is a fact it states,
+            // not one a reader infers from the firing link below being present.
+            Origin = SuggestionOrigin.Scan,
 
             // The cited signal (gh#542, gh#729): a soft link to the firing, plus the cited-factor set assembled above
             // — the indicator identity now lives on the primary CitedFactor rather than three columns here.

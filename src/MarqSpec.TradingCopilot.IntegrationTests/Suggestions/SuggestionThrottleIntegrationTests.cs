@@ -501,6 +501,7 @@ public class SuggestionThrottleIntegrationTests : IClassFixture<SuggestionThrott
         {
             database.Suggestions.Add(new Suggestion
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = Guid.NewGuid(),
                 UserId = userId,
                 AccountId = accountId,

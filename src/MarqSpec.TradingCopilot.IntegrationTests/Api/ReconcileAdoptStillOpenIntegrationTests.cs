@@ -532,6 +532,7 @@ public class ReconcileAdoptStillOpenIntegrationTests : IClassFixture<OcoExitTest
 
             database.Suggestions.Add(new Suggestion
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = suggestionId,
                 UserId = armed.UserId,
                 AccountId = accountId,

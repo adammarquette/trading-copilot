@@ -56,6 +56,7 @@ public class OutcomeJournalServiceTests
     // A suggestion in a given lifecycle state (all required spine fields valid; in-memory ignores the CHECKs).
     private static Suggestion NewSuggestion(Guid owner, SuggestionState state) => new()
     {
+        Origin = SuggestionOrigin.Scan,
         Id = Guid.NewGuid(),
         UserId = owner,
         AccountId = Guid.NewGuid(),

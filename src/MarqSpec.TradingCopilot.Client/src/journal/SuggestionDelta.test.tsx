@@ -9,6 +9,7 @@ import {
   SuggestionDeviation,
   SuggestionDispositionKind,
   SuggestionState,
+  SuggestionOrigin,
 } from '../api/suggestions';
 import { renderWithProviders } from '../testing/render';
 import { SuggestionDelta } from './SuggestionDelta';

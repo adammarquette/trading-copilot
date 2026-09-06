@@ -560,6 +560,7 @@ public class OutcomeSuppressionIntegrationTests : IClassFixture<OutcomeTestPostg
         {
             db.Suggestions.Add(new Suggestion
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = suggestionId,
                 UserId = owner,
                 AccountId = accountId,

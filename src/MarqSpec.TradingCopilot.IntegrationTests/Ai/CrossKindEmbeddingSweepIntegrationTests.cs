@@ -355,6 +355,7 @@ public sealed class CrossKindEmbeddingSweepIntegrationTests : IClassFixture<Embe
         TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
         database.Suggestions.Add(new Suggestion
         {
+            Origin = SuggestionOrigin.Scan,
             Id = suggestionId,
             UserId = owner,
             AccountId = accountId,

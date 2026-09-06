@@ -33,6 +33,7 @@ public class ContextEmbeddingContentTests
 
     private static Suggestion Suggestion(string rationale = "trend continuation") => new()
     {
+        Origin = SuggestionOrigin.Scan,
         Id = Guid.NewGuid(),
         UserId = Guid.NewGuid(),
         AccountId = Guid.NewGuid(),

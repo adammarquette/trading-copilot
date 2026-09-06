@@ -406,6 +406,7 @@ public class StateRehydrationIntegrationTests : IClassFixture<RehydrationTestPos
         {
             db.Suggestions.Add(new Suggestion
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = suggestionId,
                 UserId = operatorId,
                 AccountId = accountId,

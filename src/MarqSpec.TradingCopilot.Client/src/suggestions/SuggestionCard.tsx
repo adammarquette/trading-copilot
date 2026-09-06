@@ -18,6 +18,7 @@ import {
   SuggestionState,
   passSuggestion,
   takeSuggestion,
+  SuggestionOrigin,
 } from '../api/suggestions';
 import {
   formatCitation,
@@ -146,6 +147,11 @@ export function SuggestionCard({
 
   const { expired } = useValidity(suggestion.expiresAt);
   const isLong = suggestion.side === OrderSide.Buy;
+
+  // Read the PRODUCER, never the shape of the citation (gh#1134). Zeroed citation fields also mean "the read forgot
+  // to include the cited-factor set" -- a server bug -- and a card that inferred "chat" from them would quietly
+  // relabel that bug as a feature instead of rendering it wrongly in a way somebody notices.
+  const isChatProposal = suggestion.origin === SuggestionOrigin.Chat;
   const busy = action.kind === 'busy';
   const settled = action.kind === 'armed' || action.kind === 'passed';
 
@@ -246,13 +252,32 @@ export function SuggestionCard({
           })}
         />
 
-        <Chip
-          label={formatTimeframe(suggestion.timeframeMinutes)}
-          size="small"
-          variant="outlined"
-          data-testid="suggestion-timeframe"
-          title="The bar size this setup is framed on"
-        />
+        {/* A chat proposal is not framed on a bar size at all (gh#1134), so the chip is ABSENT rather than showing
+            `0m`. A zero here is the server's null-object default for "no cited factor", and rendering it would
+            assert a 0-minute timeframe -- a fact, and a false one, on a surface that commits real money. */}
+        {isChatProposal ? null : (
+          <Chip
+            label={formatTimeframe(suggestion.timeframeMinutes)}
+            size="small"
+            variant="outlined"
+            data-testid="suggestion-timeframe"
+            title="The bar size this setup is framed on"
+          />
+        )}
+
+        {/* Provenance, stated. Neutral outlined chrome like the confidence chip beside it: which producer proposed
+            a setup is context for the operator's judgement, never a recommendation to act on it. */}
+        {isChatProposal ? (
+          <Chip
+            label="from chat"
+            size="small"
+            variant="outlined"
+            color="default"
+            data-testid="suggestion-origin"
+            data-origin="chat"
+            title="The co-pilot proposed this in chat, at your request. It is staged only -- nothing is placed until you take it."
+          />
+        ) : null}
 
         {/* Display only. Neutral by construction: outlined, default colour, identical at 0% and at 99%. The
             moment this gets a colour ramp it starts reading as "act on this", which R-4 forbids. */}
@@ -363,17 +388,21 @@ export function SuggestionCard({
       <Typography variant="body2" data-testid="suggestion-rationale" sx={{ color: 'text.primary' }}>
         {suggestion.rationale}
       </Typography>
+      {/* Only a scan-issued setup HAS a cited signal. A chat proposal's citation fields are the server's
+          null-object defaults, and `cited signal · (0) · 0m` reads as a MALFORMED scan suggestion rather than an
+          honest proposal from another producer -- so it says what it actually is instead (gh#1134). */}
       <Typography
         variant="numeric"
         data-testid="suggestion-citation"
         sx={{ display: 'block', mt: 0.5, fontSize: 11.5, color: 'text.secondary' }}
       >
-        cited signal ·{' '}
-        {formatCitation(
-          suggestion.citedIndicator,
-          suggestion.citedPeriod,
-          suggestion.citedResolutionMinutes,
-        )}
+        {isChatProposal
+          ? 'proposed in chat · no cited signal'
+          : `cited signal · ${formatCitation(
+              suggestion.citedIndicator,
+              suggestion.citedPeriod,
+              suggestion.citedResolutionMinutes,
+            )}`}
       </Typography>
 
       <Typography

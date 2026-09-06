@@ -357,6 +357,7 @@ public sealed class CrossKindGroundingIntegrationTests : IClassFixture<NewsGroun
         {
             Suggestion suggestion = new()
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = Guid.NewGuid(),
                 UserId = owner,
                 AccountId = accountId,

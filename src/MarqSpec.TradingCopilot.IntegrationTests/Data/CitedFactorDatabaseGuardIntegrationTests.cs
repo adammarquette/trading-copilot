@@ -362,6 +362,7 @@ public class CitedFactorDatabaseGuardIntegrationTests : IClassFixture<StubbedVen
 
     private static Suggestion ValidSuggestion(Guid accountId, Guid operatorId, Guid? id = null) => new()
     {
+        Origin = SuggestionOrigin.Scan,
         Id = id ?? Guid.NewGuid(),
         UserId = operatorId,
         AccountId = accountId,

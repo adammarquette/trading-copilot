@@ -672,6 +672,7 @@ public class SuggestionTakeIntegrationTests : IClassFixture<OcoExitTestPostgresF
         {
             db.Suggestions.Add(new Suggestion
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = id,
                 UserId = operatorId,
                 AccountId = accountId,

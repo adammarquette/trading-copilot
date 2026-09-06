@@ -35,6 +35,12 @@ namespace MarqSpec.TradingCopilot.Api.Suggestions;
 /// <param name="TargetPrice">The proposed target.</param>
 /// <param name="Mode">The mode it was issued under (R-14).</param>
 /// <param name="State">Its lifecycle state.</param>
+/// <param name="Origin">
+/// <b>Which producer staged it</b> (gh#1134) — the trigger scan, or the chat co-pilot. The card reads this to say
+/// what it is showing: a chat proposal cites no signal, so rendering it through the scan's citation line produced
+/// <c>cited signal · (0) · 0m</c>, which reads as a <i>malformed</i> scan suggestion rather than an honest one from
+/// another producer. Provenance only — the take path and the risk gate below it do not read it (R-11 / R-5).
+/// </param>
 /// <param name="CreatedAt">When it was issued.</param>
 /// <param name="RewardRiskRatio">
 /// Reward divided by risk as a unit-free multiple (the wireframe's <c>2.2R</c>), or <see langword="null"/> when risk
@@ -95,6 +101,7 @@ public sealed record SuggestionResponse(
     decimal TargetPrice,
     TradingMode Mode,
     SuggestionState State,
+    SuggestionOrigin Origin,
     DateTimeOffset CreatedAt,
     decimal? RewardRiskRatio,
     decimal? RiskUsd,
@@ -131,6 +138,12 @@ public sealed record SuggestionResponse(
         // (gh#592's min-rule) and — while today's set is always one Indicator factor — its indicator identity
         // reconstructs the old CitedIndicator / CitedPeriod / CitedResolutionMinutes for API back-compat. Reads must
         // Include the set; a suggestion with an unloaded (empty) set degrades to the null-object defaults below.
+        //
+        // AN EMPTY SET NOW MEANS TWO THINGS (gh#1134). It still means "the read forgot to Include the set" -- a bug --
+        // and it now also legitimately means "a chat proposal, which cites no signal". The defaults below cannot tell
+        // them apart, and they must not: that is exactly why `Origin` is projected as a first-class field rather than
+        // left to be inferred from this emptiness. The client reads Origin to decide whether a citation exists at all;
+        // it never reads a zeroed citation as one.
         CitedFactor? primary = suggestion.CitedFactors.FirstOrDefault(factor => factor.IsPrimary);
 
         return new SuggestionResponse(
@@ -145,6 +158,7 @@ public sealed record SuggestionResponse(
             suggestion.TargetPrice,
             suggestion.Mode,
             suggestion.State,
+            suggestion.Origin,
             suggestion.CreatedAt,
             RatioOf(suggestion.EntryPrice, suggestion.StopPrice, suggestion.TargetPrice),
             MoneyOf(spec, suggestion.EntryPrice, suggestion.StopPrice, suggestion.Size),

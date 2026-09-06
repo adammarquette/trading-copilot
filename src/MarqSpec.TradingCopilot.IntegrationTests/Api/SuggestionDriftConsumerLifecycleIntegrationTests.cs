@@ -151,6 +151,7 @@ public class SuggestionDriftConsumerLifecycleIntegrationTests : IClassFixture<Su
         {
             db.Suggestions.Add(new Suggestion
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = id,
                 UserId = operatorId,
                 AccountId = accountId,

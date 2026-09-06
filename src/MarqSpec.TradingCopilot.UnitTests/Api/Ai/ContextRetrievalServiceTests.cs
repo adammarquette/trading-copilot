@@ -78,6 +78,7 @@ public class ContextRetrievalServiceTests
 
     private static Suggestion Suggestion(Guid id, Guid owner, string instrument, string rationale) => new()
     {
+        Origin = SuggestionOrigin.Scan,
         Id = id,
         UserId = owner,
         AccountId = Guid.NewGuid(),

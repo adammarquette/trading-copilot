@@ -84,14 +84,17 @@ public class GenerateSuggestionToolTests
         string name = "Practice-1",
         TradingMode mode = TradingMode.Practice,
         bool canTrade = true,
-        bool isActive = true)
+        bool isActive = true,
+        string? venueAccountKey = null)
     {
         Account account = new()
         {
             Id = Guid.NewGuid(),
             UserId = owner,
+            // A fresh connection per account, which is what discovery produces -- two connections are exactly how
+            // two accounts come to share a venue-assigned NAME (gh#1148 review).
             ConnectionId = Guid.NewGuid(),
-            VenueAccountKey = name,
+            VenueAccountKey = venueAccountKey ?? name,
             Name = name,
             Mode = mode,
             CanTrade = canTrade,
@@ -308,6 +311,106 @@ public class GenerateSuggestionToolTests
 
         (await StagedAsync()).Should().BeEmpty("a fault mid-stage leaves nothing written");
         ErrorIn(result).Should().NotBeEmpty("the turn recovers with an error the model reads, never a throw");
+    }
+
+    // =================================================================================================================
+    // ADDRESSABILITY (gh#1148 review finding 1) — `Account.Name` is NOT unique; only (ConnectionId, VenueAccountKey)
+    // is. Two connections yielding same-named venue accounts is a state this product's own model produces, and it
+    // used to make the tool permanently unusable: a refusal reading "Name the account explicitly — X, X." that no
+    // input could resolve. Every refusal this tool emits must name accounts the model can actually send back.
+    // =================================================================================================================
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldOfferDistinctLabels_WhenTwoTradableAccountsShareAName()
+    {
+        await SeedAccountAsync(_owner, "PRAC-50K", venueAccountKey: "VK-AAA");
+        await SeedAccountAsync(_owner, "PRAC-50K", venueAccountKey: "VK-BBB");
+
+        string result = await Tool().ExecuteAsync(CoherentBuy, CancellationToken.None);
+
+        (await StagedAsync()).Should().BeEmpty("ambiguity still fails closed — the tool never guesses the account");
+
+        string error = ErrorIn(result);
+        error.Should().Contain("VK-AAA").And.Contain(
+            "VK-BBB", "a refusal that lists 'PRAC-50K, PRAC-50K' is unresolvable by ANY input the model can send");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldStageAgainstTheLabelledAccount_WhenTheModelSendsALabelBack()
+    {
+        Account first = await SeedAccountAsync(_owner, "PRAC-50K", venueAccountKey: "VK-AAA");
+        await SeedAccountAsync(_owner, "PRAC-50K", venueAccountKey: "VK-BBB");
+
+        // The round trip is the whole point: whatever the refusal offered must be accepted verbatim on the retry,
+        // or the disambiguation is decorative and the operator is still stuck.
+        string label = ErrorIn(await Tool().ExecuteAsync(CoherentBuy, CancellationToken.None))
+            .Split("exactly — ")[1].TrimEnd('.').Split(", ")[0];
+
+        string result = await Tool().ExecuteAsync(
+            Input("\"account\":\"" + label + "\""), CancellationToken.None);
+
+        ErrorIn(result).Should().BeEmpty("the label the tool itself offered must address an account");
+        (await StagedAsync()).Should().ContainSingle().Which.AccountId.Should().Be(
+            first.Id, "and it must address the RIGHT one, not merely some one");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldStillRefuseTheBareName_WhenThatNameIsAmbiguous()
+    {
+        await SeedAccountAsync(_owner, "PRAC-50K", venueAccountKey: "VK-AAA");
+        await SeedAccountAsync(_owner, "PRAC-50K", venueAccountKey: "VK-BBB");
+
+        string result = await Tool().ExecuteAsync(Input("\"account\":\"PRAC-50K\""), CancellationToken.None);
+
+        (await StagedAsync()).Should().BeEmpty(
+            "accepting the bare name once it has been qualified would re-introduce exactly the ambiguity the "
+            + "qualification exists to remove — and would silently pick one of two accounts");
+        ErrorIn(result).Should().NotBeEmpty();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldKeepThePlainNameAsTheLabel_WhenItIsAlreadyUnambiguous()
+    {
+        Account only = await SeedAccountAsync(_owner, "Practice-1");
+
+        string result = await Tool().ExecuteAsync(Input("\"account\":\"Practice-1\""), CancellationToken.None);
+
+        ErrorIn(result).Should().BeEmpty(
+            "the ordinary single-account case must read no differently than before the labels existed");
+        (await StagedAsync()).Should().ContainSingle().Which.AccountId.Should().Be(only.Id);
+    }
+
+    [Theory]
+    [InlineData("   ")]
+    [InlineData("")]
+    public async Task ExecuteAsync_ShouldTreatABlankAccountAsOmitted_NotAsAName(string blank)
+    {
+        // A model sending a blank placeholder instead of omitting the key must still get the single-account
+        // fallback the schema promises it, rather than a "no tradable account matched" dead end.
+        Account only = await SeedAccountAsync(_owner);
+
+        string result = await Tool().ExecuteAsync(
+            Input("\"account\":\"" + blank + "\""), CancellationToken.None);
+
+        ErrorIn(result).Should().BeEmpty("a blank value is an ABSENT value, not an account named with spaces");
+        (await StagedAsync()).Should().ContainSingle().Which.AccountId.Should().Be(only.Id);
+    }
+
+    // =================================================================================================================
+    // PROVENANCE (gh#1148 review finding 3) — the producer is a fact of the row, not an inference from an absence.
+    // =================================================================================================================
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldStampTheChatProducerOnTheStagedRow()
+    {
+        await SeedAccountAsync(_owner);
+
+        await Tool().ExecuteAsync(CoherentBuy, CancellationToken.None);
+
+        (await StagedAsync()).Should().ContainSingle().Which.Origin.Should().Be(
+            SuggestionOrigin.Chat,
+            "the operator's card reads the producer to say what it is showing; inferring it from a null "
+            + "TriggerFiringId would be indistinguishable from a read that forgot to load the cited factors");
     }
 
     // =================================================================================================================

@@ -73,6 +73,7 @@ public class CitedFactorLevelSnapshotImmutabilityIntegrationTests : IClassFixtur
 
             Suggestion suggestion = new()
             {
+                Origin = SuggestionOrigin.Scan,
                 Id = suggestionId,
                 UserId = operatorId,
                 AccountId = accountId,
