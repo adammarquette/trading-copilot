@@ -6,6 +6,7 @@ using MarqSpec.TradingCopilot.Data.Tenancy;
 using MarqSpec.TradingCopilot.Domain.Ai;
 using MarqSpec.TradingCopilot.Domain.Relevance;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Relevance;
@@ -33,8 +34,8 @@ public class NewsRelevanceServiceTests
 
     // A fake provider defaults to IsAvailable=false, so any test that does not call ProviderUp() resolves keyword-only
     // -- exactly the behaviour before gh#854, which leaves the pre-existing pass tests unchanged.
-    private NewsRelevanceService Service(TradingCopilotDbContext context) =>
-        new(context, _provider, _similarity, NullLogger<NewsRelevanceService>.Instance);
+    private NewsRelevanceService Service(TradingCopilotDbContext context, ILogger<NewsRelevanceService>? logger = null) =>
+        new(context, _provider, _similarity, logger ?? NullLogger<NewsRelevanceService>.Instance);
 
     private void EmbedNews(string dedupKey, params float[] vector) => _newsVectors[dedupKey] = vector;
 
@@ -368,5 +369,61 @@ public class NewsRelevanceServiceTests
         NewsRecord stored = await context.News.SingleAsync();
         stored.MatchedTopics.Should().Contain(
             "sentiment", "the last-wins vector ([1,0]) matched the news vector — proving no throw and no degrade");
+    }
+
+    // --- Structurally-empty relevance input (gh#1124): a story with no provider ticker (Finnhub's symbol-less
+    // --- `general` category) still resolves via the topic/keyword path over its headline + summary (R-2's
+    // --- "ticker-map or topic" rule, already proven above by the *_WithNoInstrument tests carrying `[]` tickers).
+    // --- The genuinely structural gap is a DEPLOYMENT with no ticker maps AND no topics curated at all: every
+    // --- item then resolves to an empty match by construction, and the pass previously reported that as a plain
+    // --- success (Debug-level, "N resolved") indistinguishable from "N resolved, all legitimately relevant to
+    // --- nothing". That reads as "nothing was relevant" rather than "there is no configuration to match against" —
+    // --- exactly the failure mode the card calls out — so an entirely empty config now logs loudly (Warning).
+
+    [Fact]
+    public async Task ResolveAsync_ShouldLogWarning_WhenNoMapsAndNoTopicsAreConfigured_SoNothingCanEverMatch()
+    {
+        ILogger<NewsRelevanceService> logger = A.Fake<ILogger<NewsRelevanceService>>();
+
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            // No TickerInstrumentMaps, no NewsTopics -- the config is entirely empty.
+            seed.News.Add(News("a", resolvedVersion: null, "SPY")); // even a ticker present cannot help with no maps
+            await seed.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext context = Context();
+        int resolved = await Service(context, logger).ResolveAsync(Now, CancellationToken.None);
+
+        resolved.Should().Be(1, "the item is still marked resolved -- the pass makes progress, it just cannot match");
+        NewsRecord stored = await context.News.SingleAsync();
+        stored.MatchedInstruments.Should().BeEmpty();
+        stored.MatchedTopics.Should().BeEmpty();
+        A.CallTo(logger).Where(call => call.Method.Name == "Log" && call.GetArgument<LogLevel>(0) == LogLevel.Warning)
+            .MustHaveHappened(); // surfaced loudly -- a zero-match pass over an unconfigured relevance model is not a quiet success
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShouldNotLogWarning_WhenTopicsAreConfigured_EvenIfThisItemMatchesNone()
+    {
+        // A legitimate zero-match (a story that just isn't about any curated topic) is NOT the structural gap --
+        // the config has a genuine input to match against, it simply didn't fire for this item. Only an entirely
+        // unconfigured relevance model (no maps AND no topics) warrants the loud warning above.
+        ILogger<NewsRelevanceService> logger = A.Fake<ILogger<NewsRelevanceService>>();
+
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            seed.NewsTopics.Add(Topic("crude-oil", "crude", "OPEC")); // configured, but absent from this story's text
+            seed.News.Add(News("a", resolvedVersion: null)); // "FOMC holds rates" / "The committee left rates unchanged."
+            await seed.SaveChangesAsync();
+        }
+
+        await using TradingCopilotDbContext context = Context();
+        await Service(context, logger).ResolveAsync(Now, CancellationToken.None);
+
+        (await context.News.SingleAsync()).MatchedTopics.Should().BeEmpty("this story does not mention the configured topic");
+        // A configured-but-unmatched topic is a legitimate zero-match, not a structural gap -- no warning is owed.
+        A.CallTo(logger).Where(call => call.Method.Name == "Log" && call.GetArgument<LogLevel>(0) == LogLevel.Warning)
+            .MustNotHaveHappened();
     }
 }

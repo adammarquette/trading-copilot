@@ -72,6 +72,14 @@ public sealed class NewsRelevanceService
         // read fault, leaves the topics un-embedded so matching degrades to keyword-only (gh#854).
         IReadOnlyList<NewsTopicDefinition> embeddedTopics = await WithTopicEmbeddingsAsync(topics, cancellationToken);
 
+        // gh#1124: with no ticker maps AND no topics curated, NewsRelevanceResolver.Resolve has no possible way to
+        // match anything -- not "this story happens not to be relevant", but "there is no relevance model to check
+        // it against". A story with no provider ticker (Finnhub's symbol-less `general` category, deliberately --
+        // R-2) still resolves via the topic/keyword path over its headline + summary, so that alone is never the
+        // structural gap; an entirely empty config is. Checked once against the config actually read above, not
+        // per item, so it costs nothing on the hot path and never fires while either input exists.
+        bool relevanceModelIsEmpty = maps.Count == 0 && embeddedTopics.Count == 0;
+
         // Page the work: a config change marks ALL prior news stale, and loading the whole history into one
         // SaveChanges would blow memory and eventually time out -- and then never make progress. Resolved rows
         // drop out of the predicate, so each page resolves a fresh set and progress is guaranteed.
@@ -117,6 +125,19 @@ public sealed class NewsRelevanceService
         if (total > 0)
         {
             _logger.LogDebug("Relevance resolved for {Count} news item(s).", total);
+
+            // Loud on purpose (gh#1124): a successful-looking pass over zero configuration reads as "nothing was
+            // relevant" rather than "there is nothing to match against" unless this is surfaced -- the same class
+            // of silent-success gh#1123 hit on the lookback filter. This never fires once the operator curates
+            // even one ticker map or topic.
+            if (relevanceModelIsEmpty)
+            {
+                _logger.LogWarning(
+                    "Relevance resolved {Count} news item(s) against an EMPTY relevance model (no ticker maps, no "
+                    + "topics configured) -- every item matched nothing by construction. Curate at least one "
+                    + "ticker↔instrument map or topic via the relevance config.",
+                    total);
+            }
         }
 
         return total;
