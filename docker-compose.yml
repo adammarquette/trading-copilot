@@ -176,8 +176,8 @@ services:
       # News / soft-signal ingestion (R-2, gh#358) -- the deduped store of record, the news analogue of the bar
       # store above. Scalar options, so there is no indexed list to enumerate and cap here. OPT-IN via
       # News__Enabled (off unless set); null pass-through leaves the app's defaults (cadence 300 s, lookback
-      # 60 min) alone. The concrete provider adapters (Finnhub, Tiingo) are follow-ons -- until one is wired, an
-      # enabled poller finds no source and stays idle.
+      # 1440 min -- sized to provider latency, not the poll cadence; gh#1123) alone. The concrete provider adapters
+      # (Finnhub, Tiingo) are follow-ons -- until one is wired, an enabled poller finds no source and stays idle.
       News__Enabled:
       News__PollIntervalSeconds:
       News__LookbackMinutes:
