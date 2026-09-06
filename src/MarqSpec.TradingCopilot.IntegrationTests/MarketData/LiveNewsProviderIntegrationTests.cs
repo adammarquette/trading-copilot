@@ -34,8 +34,9 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.MarketData;
 /// plan does not include the News API, so every Tiingo news call returns <c>403</c> (gh#1125) — the key is valid,
 /// the entitlement is not. R-2's cross-source dedup consequently has <i>one</i> live feed, and the case that
 /// witnesses two feeds collapsing to one row is a declared block against that issue rather than a silent skip.
-/// Two further findings followed (QA contract §3): gh#1123 (the shipped 60-minute lookback admits roughly
-/// 0–1% of Finnhub's articles — measured twice, 0 of 100 and then 1 of 100), filed and tracked separately, and
+/// Two further findings followed (QA contract §3): gh#1123 (the then-shipped 60-minute lookback admitted
+/// roughly 0–1% of Finnhub's articles — measured twice, 0 of 100 and then 1 of 100 — fixed by gh#1146 widening
+/// the default to 1440 minutes), filed and tracked separately, and
 /// gh#1124 (its general category carries no tickers) — resolved here: the tickerlessness is Finnhub's
 /// deliberate, symbol-less shape (gh#439), not a gap, and gh#359's relevance resolution already has a second
 /// input for exactly this case (headline/summary topic matching, R-2) that does not depend on a ticker.
@@ -375,7 +376,9 @@ public sealed class LiveNewsProviderIntegrationTests : IClassFixture<LiveNewsPro
         ];
 
         // The age profile gh#1123 came from: how much of a live payload each candidate lookback admits.
-        foreach (int window in (int[])[LiveNewsProviderFactory.ProductionDefaultLookbackMinutes, 240, 1440, LiveNewsProviderFactory.LookbackMinutes])
+        // Distinct because ProductionDefaultLookbackMinutes is now DERIVED (gh#1147) rather than a hardcoded 60,
+        // and it now equals the 1440 literal below — without the dedup the profile would print that window twice.
+        foreach (int window in ((int[])[LiveNewsProviderFactory.ProductionDefaultLookbackMinutes, 240, 1440, LiveNewsProviderFactory.LookbackMinutes]).Distinct().Order())
         {
             int inside = wire.Count(article => article.PublishedAt > now.AddMinutes(-window));
             string note = window == LiveNewsProviderFactory.ProductionDefaultLookbackMinutes

@@ -1,3 +1,4 @@
+using MarqSpec.TradingCopilot.Api.MarketData;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -27,20 +28,27 @@ namespace MarqSpec.TradingCopilot.IntegrationTests.TestHost.LiveProvider;
 public class LiveNewsProviderFactory : PostgresApiFactory
 {
     /// <summary>
-    /// How far back a live poll looks, in minutes — three days, far wider than the 60-minute production default.
+    /// How far back a live poll looks, in minutes — three days, still wider than <see cref="ProductionDefaultLookbackMinutes"/>.
     /// </summary>
     /// <remarks>
-    /// Deliberately not the production default, and the gap is itself a finding: measured against the live free
-    /// tier (gh#1123), <b>zero</b> Finnhub articles fall inside a 60-minute window, because the feed publishes
-    /// items that are already older than that. A suite running at the shipped default would therefore assert
-    /// against an empty store and could only ever report "no news", telling us nothing about mapping, dedup or
-    /// provenance. This window is wide enough that the pipeline has real payloads to be judged on; the latency
+    /// Deliberately not the production default, and the gap is itself the gh#1123 finding: measured against the
+    /// live free tier at the <b>then-shipped</b> 60-minute window, <b>zero</b> Finnhub articles fell inside it,
+    /// because the feed publishes items that are already older than that. A suite running at that default would
+    /// therefore have asserted against an empty store and could only ever have reported "no news", telling us
+    /// nothing about mapping, dedup or provenance. gh#1146 widened the shipped default to 1440 minutes on that
+    /// finding; this test window stays at three days — wider still than even the corrected default — so the
+    /// pipeline has real payloads to be judged on regardless of how the production knob is retuned. The latency
     /// itself is measured and reported by the data-quality case rather than smuggled into every other assertion.
     /// </remarks>
     public const int LookbackMinutes = 4320;
 
-    /// <summary>The lookback the application actually ships with — reported against, never tested at.</summary>
-    public const int ProductionDefaultLookbackMinutes = 60;
+    /// <summary>
+    /// The lookback the application actually ships with — reported against, never tested at. Derived from
+    /// <see cref="NewsIngestionOptions.LookbackMinutes"/>'s own default rather than restated as a literal, so this
+    /// cannot silently drift out of step with the shipped value the way the gh#1123 review of gh#1146 found it had
+    /// (gh#1147).
+    /// </summary>
+    public static readonly int ProductionDefaultLookbackMinutes = new NewsIngestionOptions().LookbackMinutes;
 
     /// <summary>The Finnhub key handed to the host; null leaves it unset, so the source is never registered.</summary>
     protected virtual string? FinnhubApiKey => LiveProviderConfig.FinnhubApiKey;
