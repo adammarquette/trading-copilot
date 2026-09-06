@@ -49,7 +49,14 @@ name and stays in `.github/` because GitHub's reviewer reads that exact path; th
   authenticate as the maintainer who authored the PR, so the verdict is rendered by the reviewer GitHub App
   (`…[bot]`) via [`reviewer-review.sh`](../../.github/scripts/reviewer-review.sh), set up in the
   [deployment runbook](../deployment-runbook.md) (gh#141). **Until that App is provisioned**, fall back to a
-  comment whose first line is the verdict — `**Verdict: Request changes**` / `**Verdict: Approve**`.
+  **review submitted with the `COMMENT` event** — `bash .github/scripts/post-verdict.sh review <pr>
+  APPROVE|REQUEST_CHANGES <body-file>`, which posts to `POST /pulls/{n}/reviews` — whose first line is the
+  verdict: `**Verdict: Request changes**` / `**Verdict: Approve**`. **Never a PR comment**
+  (`POST /issues/{n}/comments`): that is a different endpoint, and one the gate never reads — see *Ruling
+  takes an identity* below for the near-misses this has already cost. The review will show state
+  `COMMENTED`, not a formal `APPROVED` / `CHANGES_REQUESTED` — GitHub blocks a formal state on a
+  self-authored PR, and the gate reads the body, not the state, so `COMMENTED` here is **expected**, not a
+  sign anything went wrong.
 
 ## What you do not do
 
@@ -132,13 +139,17 @@ branch ([`CONTRIBUTING.md`](../../CONTRIBUTING.md)). So if you are ever handed a
 reason is gone: review the diff, run **nothing** out of its tree, and hand the verdict to the operator to post.
 Reading a file is not running it, and the diff is what you were asked about anyway (PR #818 security review).
 
-When you cannot post, **say so loudly and rule nowhere else.** The near-misses are the trap: a PR comment holding
-the verdict line goes to an endpoint the gate never reads, and an inline comment creates a review whose body is
-*empty*. Both are perfectly visible to a human and invisible to the check, so the author's watcher waits out its
-deadline next to your ruling and then wakes the operator — worse than silence, because it looks like a verdict
-(`gh#812`, `gh#813` and `gh#814` merged exactly that way). Report that you could not rule, hand over the body, and
-leave the posting to the operator; provisioning an identity is `gh#811` and the
-[runbook](../deployment-runbook.md)'s *Agent review identity*.
+When you cannot post, **say so loudly and rule nowhere else.** The near-misses are the trap — the same trap the
+*Submit the state as the reviewer identity* bullet above exists to head off: a PR comment holding the verdict
+line goes to an endpoint the gate never reads, and an inline comment creates a review whose body is *empty*.
+Both are perfectly visible to a human and invisible to the check, so the author's watcher waits out its deadline
+next to your ruling and then wakes the operator — worse than silence, because it looks like a verdict (`gh#812`,
+`gh#813` and `gh#814` merged exactly that way; `gh#1129`, `#1141` and `#1149` cost more time on 2026-09-05
+because this file told a reviewer to do it). The one thing that *does* count as posting — `post-verdict.sh
+review` — comes back showing state `COMMENTED`; that is the expected shape of a successful fallback ruling, not
+a sign it landed in the wrong place. Report that you could not rule, hand over the body, and leave the posting
+to the operator; provisioning an identity is `gh#811` and the [runbook](../deployment-runbook.md)'s *Agent
+review identity*.
 
 ## Definition of done
 
