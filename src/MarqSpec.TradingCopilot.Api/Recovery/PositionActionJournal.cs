@@ -46,7 +46,11 @@ namespace MarqSpec.TradingCopilot.Api.Recovery;
 /// insert tracked as <c>Added</c> — so a failed append would otherwise be re-attempted by the audit's
 /// <c>SaveChanges</c>, be refused again, and take the audit row down with it, losing <i>both</i> records. Each store
 /// therefore detaches its own refused entity before rethrowing (gh#1143). Two <c>try</c> blocks around one shared
-/// change tracker are not two boundaries; this is what makes them two. It is held by
+/// change tracker are not two boundaries; this is what makes them two. <b>The guarantee is that each store cleans up
+/// after itself, not that it is isolated from a third party</b>: a <c>SaveChanges</c> refused because of some
+/// <i>other</i> entity the request already had pending is not rescued by detaching ours. Unreachable on these two
+/// paths — the exit and reduce read accounts and connections and mutate nothing, so nothing else is ever pending at
+/// the journal site — and stated rather than left for a future caller with pending writes to rediscover. It is held by
 /// <c>PositionActionJournalFaultIsolationIntegrationTests</c> against real Postgres, because the in-memory provider
 /// raises no constraint and a fake <c>IEventLog</c> never touches the shared context at all.
 /// </para>
