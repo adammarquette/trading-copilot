@@ -66,15 +66,17 @@ namespace MarqSpec.TradingCopilot.Api.Chat.Tools;
 /// set pinned <i>exactly</i>, since a fragment scan is defeated by one indirection.
 /// </para>
 /// <para>
-/// <b>An amend that applies nothing refuses — it never says "amended" (gh#1155).</b> Two ways an amend could
+/// <b>An amend that applies nothing refuses — it never says "amended" (gh#1155).</b> Three ways an amend could
 /// silently no-op while still disarming: naming an <b>identity</b> field (<c>symbol</c>, <c>indicator</c>,
 /// <c>period</c>, <c>resolutionMinutes</c>) — those name <i>which</i> rule this is, so changing one is authoring a
 /// different rule, not editing this one, and the model is told that rather than having the field quietly dropped;
-/// and a value that is <b>present but the wrong JSON type</b> (a string where a number belongs), which parsed as
-/// "absent" rather than as the malformed argument it is. Both are refused before the row is touched, and an amend
-/// naming no amendable field at all is refused too — success is never reported for a change that did not happen,
-/// and in particular a confirmed rule's <c>Confirmation</c> / <c>ArmState</c> / <c>ArmCycle</c> are never reset
-/// unless something was actually applied.
+/// a value that is <b>present but the wrong JSON type</b> (a string where a number belongs, a number where a
+/// string belongs), which parsed as "absent" rather than as the malformed argument it is — <c>TryString</c>,
+/// <c>TryInt</c> and <c>TryDecimal</c> share one contract now, so this holds for every field the model can send,
+/// not only the one a review happened to probe; and naming <b>no</b> amendable field at all. All three are refused
+/// before the row is touched — success is never reported for a change that did not happen, and in particular a
+/// confirmed rule's <c>Confirmation</c> / <c>ArmState</c> / <c>ArmCycle</c> are never reset unless something was
+/// actually applied.
 /// </para>
 /// </remarks>
 public sealed class EditRulebookTool : IChatTool
@@ -421,8 +423,17 @@ public sealed class EditRulebookTool : IChatTool
             return "The tool input must be a JSON object.";
         }
 
+        // ONE CONTRACT, THREE TYPES (gh#1155): TryString / TryInt / TryDecimal all agree -- a property that is
+        // ABSENT (or JSON null) is null and no error; a property that is PRESENT but the wrong JSON type is a
+        // malformed argument and refuses. "You sent something I could not read" and "you sent nothing" must never
+        // collapse into the same silent no-op, on any of the model's fields.
+        if (TryString(root, "triggerId", out string? triggerIdText) is { } triggerIdTypeError)
+        {
+            return triggerIdTypeError;
+        }
+
         Guid? triggerId = null;
-        if (TryString(root, "triggerId", out string triggerIdText))
+        if (triggerIdText is not null)
         {
             if (!Guid.TryParse(triggerIdText, out Guid parsedId))
             {
@@ -448,8 +459,33 @@ public sealed class EditRulebookTool : IChatTool
             }
         }
 
+        if (TryString(root, "symbol", out string? symbol) is { } symbolTypeError)
+        {
+            return symbolTypeError;
+        }
+
+        if (TryString(root, "indicator", out string? indicator) is { } indicatorTypeError)
+        {
+            return indicatorTypeError;
+        }
+
+        if (TryInt(root, "period", out int? period) is { } periodTypeError)
+        {
+            return periodTypeError;
+        }
+
+        if (TryInt(root, "resolutionMinutes", out int? resolution) is { } resolutionTypeError)
+        {
+            return resolutionTypeError;
+        }
+
+        if (TryString(root, "comparison", out string? comparisonText) is { } comparisonTypeError)
+        {
+            return comparisonTypeError;
+        }
+
         IndicatorComparison? comparison = null;
-        if (TryString(root, "comparison", out string comparisonText))
+        if (comparisonText is not null)
         {
             if (!Enum.TryParse(comparisonText, ignoreCase: true, out IndicatorComparison parsedComparison)
                 || parsedComparison == IndicatorComparison.Unknown)
@@ -460,8 +496,13 @@ public sealed class EditRulebookTool : IChatTool
             comparison = parsedComparison;
         }
 
+        if (TryString(root, "severity", out string? severityText) is { } severityTypeError)
+        {
+            return severityTypeError;
+        }
+
         NotificationSeverity? severity = null;
-        if (TryString(root, "severity", out string severityText))
+        if (severityText is not null)
         {
             if (!Enum.TryParse(severityText, ignoreCase: true, out NotificationSeverity parsedSeverity)
                 || !Enum.IsDefined(parsedSeverity))
@@ -472,9 +513,6 @@ public sealed class EditRulebookTool : IChatTool
             severity = parsedSeverity;
         }
 
-        // PRESENT BUT UNPARSEABLE IS A MALFORMED ARGUMENT, NOT AN ABSENCE (gh#1155). A JSON string where a number
-        // belongs (e.g. "threshold": "25") parses cleanly but is not a Number, and TryGetDecimal cannot read it --
-        // reading that as "the model sent nothing" let a malformed amend apply nothing while still disarming.
         if (TryDecimal(root, "threshold", out decimal? threshold) is { } thresholdParseError)
         {
             return thresholdParseError;
@@ -485,34 +523,36 @@ public sealed class EditRulebookTool : IChatTool
             return hysteresisParseError;
         }
 
-        edit = new Edit(
-            triggerId,
-            TryString(root, "symbol", out string symbol) ? symbol : null,
-            TryString(root, "indicator", out string indicator) ? indicator : null,
-            TryInt(root, "period", out int period) ? period : null,
-            TryInt(root, "resolutionMinutes", out int resolution) ? resolution : null,
-            comparison,
-            threshold,
-            hysteresis,
-            severity);
+        edit = new Edit(triggerId, symbol, indicator, period, resolution, comparison, threshold, hysteresis, severity);
         return null;
     }
 
     // The condition's identity (gh#1155): naming which rule an amend targets, not a value on it. Not amendable.
     private static readonly string[] _identityFields = ["symbol", "indicator", "period", "resolutionMinutes"];
 
-    private static bool TryString(JsonElement root, string name, out string value)
+    /// <summary>
+    /// Reads a string property. Absent (or JSON <c>null</c>) is <see langword="null"/> and no error -- the field
+    /// simply was not sent. <b>Present</b> but not a JSON string is a malformed argument and refuses (gh#1155):
+    /// reading it as "absent" is exactly the defect <see cref="TryDecimal"/> had for a numeric field.
+    /// </summary>
+    private static string? TryString(JsonElement root, string name, out string? value)
     {
-        value = string.Empty;
-        if (!root.TryGetProperty(name, out JsonElement element) || element.ValueKind != JsonValueKind.String)
+        value = null;
+        if (!root.TryGetProperty(name, out JsonElement element) || element.ValueKind == JsonValueKind.Null)
         {
-            return false;
+            return null;
+        }
+
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            return $"The {name} must be a string.";
         }
 
         // Trimmed BEFORE the blank check, so a whitespace-only value reads as absent rather than as three spaces
         // (the gh#1148 review's finding on the sibling tool, folded in here rather than rediscovered).
-        value = (element.GetString() ?? string.Empty).Trim();
-        return value.Length > 0;
+        string trimmed = (element.GetString() ?? string.Empty).Trim();
+        value = trimmed.Length > 0 ? trimmed : null;
+        return null;
     }
 
     /// <summary>
@@ -537,12 +577,25 @@ public sealed class EditRulebookTool : IChatTool
         return null;
     }
 
-    private static bool TryInt(JsonElement root, string name, out int value)
+    /// <summary>
+    /// Reads an integer property. Same contract as <see cref="TryString"/> / <see cref="TryDecimal"/> (gh#1155):
+    /// absent is <see langword="null"/> and no error, present-but-wrong-type refuses.
+    /// </summary>
+    private static string? TryInt(JsonElement root, string name, out int? value)
     {
-        value = 0;
-        return root.TryGetProperty(name, out JsonElement element)
-            && element.ValueKind == JsonValueKind.Number
-            && element.TryGetInt32(out value);
+        value = null;
+        if (!root.TryGetProperty(name, out JsonElement element) || element.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (element.ValueKind != JsonValueKind.Number || !element.TryGetInt32(out int parsed))
+        {
+            return $"The {name} must be a whole number.";
+        }
+
+        value = parsed;
+        return null;
     }
 
     private static string Error(string message) => JsonSerializer.Serialize(new { error = message });
