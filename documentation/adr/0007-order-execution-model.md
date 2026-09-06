@@ -1406,8 +1406,10 @@ on the append-only event log (ADR-0001). These two were the exception. Both are 
 outcome**, not only the successful one.
 
 **Where — both, following the auto-flatten rather than the cancel.** A cancel, a modify and a withdraw each leave a
-durable row of their own — the `Order` or `ConditionalOrderRecord` whose *status is* the journal — and add an
-`AuditRecord` beside it. A per-position close writes **no such row**: it is a native venue close, not an order the
+durable row of their own — the `Order` or `ConditionalOrderRecord` whose *status is* the journal. Most add an
+`AuditRecord` beside it; **not all do** — a cancel whose order had no staged stop plan to retire writes none, and a
+withdraw (`DELETE /conditionals/{id}`) writes none ever, because in both cases the status row already carries the
+whole event. A per-position close writes **no such row**: it is a native venue close, not an order the
 platform journals, so an `AuditRecord` alone would leave the structured facts (what was asked, what was open, what is
 open now) in a prose `Detail` string. The one other position-level close in the system, the **auto-flatten**, already
 answers this by writing **both** — an event-log append *and* an immutable §9 row — so this follows it rather than
@@ -1461,7 +1463,22 @@ below.
 it is the one property that must not rest on a promise: the journal guards each of its two stores separately (so a
 failing event log still leaves the audit row, and the reverse), and a **shared** call-site belt swallows anything any
 implementation of the seam might let escape — shared rather than hand-copied into each service, because two copies of
-one shape is how this pair drifted in the first place. The seam **takes no cancellation token**: the action being
+one shape is how this pair drifted in the first place.
+
+**What makes those two halves independent, stated precisely.** `TimescaleEventLog` and `AuditLog` are scoped over the
+**same** `TradingCopilotDbContext`, and EF leaves a refused insert tracked as `Added` — so without more, a failed
+append is re-attempted by the audit's `SaveChanges`, refused again, and takes the audit row down with it, losing
+**both** records. Each store therefore **detaches its own refused entity** before rethrowing (gh#1143), which also
+closes the same latent hole for every other writer that appends an event and audits it on one context. What that
+buys is **each store cleaning up after itself** — *not* isolation from a third party: a `SaveChanges` refused because
+of some **other** entity the request already had pending is not rescued by detaching ours, and both rows are still
+lost. That case is unreachable on these two paths (the exit and reduce read `Accounts` and `Connections` and mutate
+nothing, so nothing else is ever pending at the journal site), and it is named here rather than left for a future
+caller with pending writes to rediscover. Held by `PositionActionJournalFaultIsolationIntegrationTests` against real
+Postgres: the in-memory provider raises no constraint, and a fake `IEventLog` never reaches the shared change tracker
+at all, which is exactly why the claim stood unwitnessed until review.
+
+The seam **takes no cancellation token**: the action being
 recorded already happened, so a client hanging up mid-response must not cost the record of a real order, the same
 reasoning `AccountEntryGuard` applies to its advisory unlock. The gh#928 verified-reduction rule is untouched — a
 failing journal can neither fail a close that worked nor let one that did not verify report success, and both
