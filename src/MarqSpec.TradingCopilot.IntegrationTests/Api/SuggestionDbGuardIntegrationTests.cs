@@ -79,6 +79,36 @@ public sealed class SuggestionDbGuardIntegrationTests
             .Which.ConstraintName.Should().Be("CK_Suggestions_Origin_NotUnknown");
     }
 
+    [Fact]
+    public async Task Insert_IsRejected_WhenOriginIsOmittedEntirely()
+    {
+        // What the MIGRATION claims, which the CHECK above does not reach. AddSuggestionOrigin backfills history to
+        // Scan and then DROPS the column default, precisely so a writer that omits its producer FAILS rather than
+        // being silently recorded as the scan's. EF always sends the column, so only raw SQL can omit it — and
+        // without that DROP this insert would quietly succeed as Scan, which is the regression this pins.
+        (Guid accountId, Guid operatorId) = await SeedAccountAsync(TradingMode.Practice);
+
+        Func<Task> insertingWithoutOrigin = async () =>
+        {
+            await using AsyncServiceScope scope = _factory.Services.CreateAsyncScope();
+            TradingCopilotDbContext database = scope.ServiceProvider.GetRequiredService<TradingCopilotDbContext>();
+            await database.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO "Suggestions"
+                  ("Id", "UserId", "AccountId", "Instrument", "Side", "Size", "EntryPrice", "StopPrice",
+                   "TargetPrice", "Mode", "State", "CreatedAt", "Rationale", "Confidence", "ExpiresAt", "Version")
+                VALUES ({0}, {1}, {2}, 'ES', 0, 1, 5000, 4990, 5020, 1, 1, now(), 'No producer stated.', 50,
+                        now() + interval '1 hour', 1)
+                """,
+                Guid.NewGuid(), operatorId, accountId);
+        };
+
+        (await insertingWithoutOrigin.Should().ThrowAsync<PostgresException>())
+            .Which.SqlState.Should().Be(
+                PostgresErrorCodes.NotNullViolation,
+                "with the default dropped, an omitted producer is a NOT NULL violation — it does not fall back to Scan");
+    }
+
     [Theory]
     [InlineData(SuggestionOrigin.Scan)]
     [InlineData(SuggestionOrigin.Chat)]

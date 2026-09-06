@@ -142,4 +142,12 @@ enumerates.
   still holds no risk limits or account state), carrying the same injection-sentinel guard as the message-content
   path. It rides this increment's **single** governor gate + fail-open ledger, is threshold-skipped before the cap,
   and fails open to a history-only turn — so grounding never widens the execution surface or the instruction surface.
+- **The instrument a write tool is handed is syntax-checked, not validated (gh#1134 review, still open).**
+  `generate_suggestion` parses the model's symbol through `InstrumentId.TryParse` but does not confirm it names a
+  configured, tradable contract, so a hallucinated symbol stages a card the take path refuses at spec resolution and
+  the drift sweep re-resolves once a pass until it expires. It is fail-closed and cosmetic today, and it is recorded
+  here rather than in a merged PR's description because it is the one place a model-chosen string transitively
+  reaches a venue call — which is worth knowing beside the boundary claim above. Closing it means giving the tool an
+  instrument-spec read, which **widens the write tool's pinned constructor allow-list**: a deliberate, separately
+  reviewed act, not a rider on the increment that introduced the tool.
 - Streaming a *tool-using* turn's final answer (removing the round-1 double-call) is inc 4b.
