@@ -177,6 +177,7 @@ for validating heading-order/index against the trail in CI rather than by hand �
 | 2026-08-13 | [withdraw a pending conditional via the order API (gh#655)](#update-2026-08-13--withdraw-a-pending-conditional-via-the-order-api-gh655) |
 | 2026-08-21 | [the reduce's bracket gate is scaffolded, and the reduce stays unbuilt behind it (gh#1012)](#update-2026-08-21--the-reduces-bracket-gate-is-scaffolded-and-the-reduce-stays-unbuilt-behind-it-gh1012) |
 | 2026-09-05 | [the reduce is built as a sized venue close, and held on the still-unrun bracket gate (gh#928)](#update-2026-09-05--the-reduce-is-built-as-a-sized-venue-close-and-held-on-the-still-unrun-bracket-gate-gh928) |
+| 2026-09-06 | [the per-position exit and reduce are journaled, every outcome (gh#1143)](#update-2026-09-06--the-per-position-exit-and-reduce-are-journaled-every-outcome-gh1143) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 
@@ -1394,6 +1395,120 @@ answer is that R-14 binds reducing actions, it is one shared guard across all fo
 the card's own proposed default and because *any strict reduction* lets an under-execution read as a clean success —
 but that is an argument for a choice, not the choice being made. It stays on the operator's list alongside the
 post-reduce protection policy.
+
+## Update (2026-09-06) — the per-position exit and reduce are journaled, every outcome (gh#1143)
+
+The **operator's per-position exit** (gh#656) and **reduce** (gh#928) transmitted real orders and wrote **nothing**:
+no journal entry, no `AuditRecord`, no metric. Every other order action in this ADR records what it did — a place, a
+cancel (gh#250), a reprice / re-stage / resize (gh#259 / gh#267 / gh#292), a withdraw (gh#655), the kill switch and
+the auto-flatten (gh#765) — and the *Order lifecycle* decision above says every transition is journaled (R-8 / R-9)
+on the append-only event log (ADR-0001). These two were the exception. Both are now journaled, and **so is every
+outcome**, not only the successful one.
+
+**Where — both, following the auto-flatten rather than the cancel.** A cancel, a modify and a withdraw each leave a
+durable row of their own — the `Order` or `ConditionalOrderRecord` whose *status is* the journal. Most add an
+`AuditRecord` beside it; **not all do** — a cancel whose order had no staged stop plan to retire writes none, and a
+withdraw (`DELETE /conditionals/{id}`) writes none ever, because in both cases the status row already carries the
+whole event. A per-position close writes **no such row**: it is a native venue close, not an order the
+platform journals, so an `AuditRecord` alone would leave the structured facts (what was asked, what was open, what is
+open now) in a prose `Detail` string. The one other position-level close in the system, the **auto-flatten**, already
+answers this by writing **both** — an event-log append *and* an immutable §9 row — so this follows it rather than
+inventing a third shape. *Rejected: the `AuditRecord`-only shape,* on the ground that its siblings' primary journal
+(the order row) has no analogue here.
+
+- **Event log (ADR-0001):** one type per action, `position.exit` and `position.reduce`, source `position-action`,
+  carrying the action, account, venue account key, instrument, contract, **requested quantity**, **pre-** and
+  **post-attempt net quantity**, and the outcome. *Rejected: a type per outcome, the `flatten.*` shape* — those name
+  distinct **events** (a warning, a missed deadline, an unrostered account), several of which are not close attempts
+  at all, whereas here there is one event with a named outcome, and that outcome set is **open** (the reduce's grew
+  from five names to eight during its own review). A payload field means a new outcome cannot silently become an
+  unjournaled event type.
+- **`AuditRecord` (gh#220):** two new actions, **`position-exit-attempted` (9)** and **`position-reduce-attempted`
+  (10)**, operator-owned (R-20), `placement = none` and no `synthetic_risk` — the auto-flatten's answer for an action
+  on the position rather than on a protective leg. `before` carries the pre-attempt net quantity where one was read,
+  `after` carries the **outcome** (the auto-flatten's `after: Flat / Escalated` shape), and `detail` the prose line.
+  **`source` stays null**, the gh#909 precedent: `CK_AuditRecords_Source_MatchesAction` binds a non-null source to
+  the kill / flatten set (5–7), and there is nothing to disambiguate — an authenticated operator request is the only
+  possible trigger of either action, unlike a kill or a flatten. **No migration:** both values are admitted by the
+  existing `"Action" <> 0` check, and no column changed.
+
+**What is recorded, and why the reduce needs more than the exit.** For the **exit**, the position going flat is
+itself the record and venue truth reconstructs the rest — so the row carries the outcome and the resulting exposure,
+and deliberately **no** pre-attempt size: the exit does not read the position before closing it, and adding a
+pre-read would put another venue round trip, and another failure mode, in front of the one action that reduces real
+exposure. For the **reduce** it is different: **how many contracts the operator asked to take off is not
+reconstructable from venue truth afterwards.** The venue reports only the resulting position, and a long 5 that
+became a long 2 looks identical whether 3 was requested, 1 was requested and a stop took 2, or 3 was requested twice
+against an unsettled read — the settle-window hazard gh#928 documents. The requested quantity is the one fact that
+tells those apart, and it now exists.
+
+**Every outcome, including the ones that send nothing.** The reduce's eight (`Reduced`, `Unconfirmed`, `NotReduced`,
+`Refused`, `ExceedsPosition`, `AccountBusy`, `HeldPracticeOnly`, `Unreachable`) and the exit's three (`Flat`,
+`StillOpen`, `Unreachable`) each leave a row, written at **one site on each service's single exit** so a future
+outcome cannot be added and quietly go unrecorded. An exposure that was never established is recorded as **unknown**,
+never as `0` — a zero in the trail would fabricate a flat out of an outage (gh#929). That is the one place the record
+deliberately differs from the wire: `/exit` still answers `0` on `Unreachable` (the divergence gh#928 documents), but
+the journal is what an incident reads back.
+
+**Ordering — transmit, then journal, the same answer the send path gives.** The record carries the **verified**
+outcome, which does not exist until the attempt resolves, so it is written after it: the 2026-08-02 update's
+transmit→journal window applies here unchanged and is **not** re-answered. **It bites harder on the reduce, and that
+is flagged rather than fixed.** The send path narrowed its own window with a *durable pre-transmit intent*
+(`ConditionalStatus.Firing`) and a `customTag` correlation handle; the reduce has neither, and the requested quantity
+it would lose is the only record of intent this path has. Building an intent for it would change what the reduce
+**does**, not what it writes down, so it is **left for the operator** rather than decided here — see the open item
+below.
+
+**It cannot fail, or alter, the action.** This is the gh#220 secondary-write discipline, held in two layers because
+it is the one property that must not rest on a promise: the journal guards each of its two stores separately (so a
+failing event log still leaves the audit row, and the reverse), and a **shared** call-site belt swallows anything any
+implementation of the seam might let escape — shared rather than hand-copied into each service, because two copies of
+one shape is how this pair drifted in the first place.
+
+**What makes those two halves independent, stated precisely.** `TimescaleEventLog` and `AuditLog` are scoped over the
+**same** `TradingCopilotDbContext`, and EF leaves a refused insert tracked as `Added` — so without more, a failed
+append is re-attempted by the audit's `SaveChanges`, refused again, and takes the audit row down with it, losing
+**both** records. Each store therefore **detaches its own refused entity** before rethrowing (gh#1143), which also
+closes the same latent hole for every other writer that appends an event and audits it on one context. What that
+buys is **each store cleaning up after itself** — *not* isolation from a third party: a `SaveChanges` refused because
+of some **other** entity the request already had pending is not rescued by detaching ours, and both rows are still
+lost. That case is unreachable on these two paths (the exit and reduce read `Accounts` and `Connections` and mutate
+nothing, so nothing else is ever pending at the journal site), and it is named here rather than left for a future
+caller with pending writes to rediscover. Held by `PositionActionJournalFaultIsolationIntegrationTests` against real
+Postgres: the in-memory provider raises no constraint, and a fake `IEventLog` never reaches the shared change tracker
+at all, which is exactly why the claim stood unwitnessed until review.
+
+The seam **takes no cancellation token**: the action being
+recorded already happened, so a client hanging up mid-response must not cost the record of a real order, the same
+reasoning `AccountEntryGuard` applies to its advisory unlock. The gh#928 verified-reduction rule is untouched — a
+failing journal can neither fail a close that worked nor let one that did not verify report success, and both
+directions carry tests.
+
+**Nothing about what either path does changed.** Every guard, the strict-partial rule, the per-account transmit lock
+(the journal is written *outside* it, so `AccountBusy` is recordable and the audit keeps its own unit of work), the
+practice-only holds and every outcome are exactly what they were.
+
+**Open for the operator, recorded rather than decided (gh#1161):**
+- **A durable pre-transmit intent for the reduce.** Whether the accepted transmit→journal window is acceptable for a
+  path whose *requested* quantity is the only record of intent. Closing it means a pre-transmit write — a change to
+  the reduce's control flow on a safety path — and it interacts with the two holds gh#928 already carries. **The
+  window is wider than "a crash", and saying otherwise would understate it:**
+  - **A caller abort is ordinary, not exotic.** `IAccountEntryGuard`'s own remarks say so — the guarded callback
+    spans a venue round-trip, so a request aborting mid-transmit is routine. A browser abort during
+    `ReducePositionAsync`, *after* the gateway executed, propagates the caller's `OperationCanceledException` out of
+    `ReduceAsync` before the journal site is reached, and the requested quantity is lost with **no crash and no
+    error anyone sees**. That is the likeliest way this record goes missing, not a process death.
+  - **The lock's own cleanup can replace the outcome post-transmit.** `TryRunExclusiveAsync` releases the advisory
+    lock and closes the connection in a `finally`; a fault there (a dropped backend, a pool fault) propagates in
+    place of the callback's already-computed result — again after the venue was asked, and again before the record
+    is written.
+  Neither is fixable by writing the record differently; both need the intent to exist *before* the send.
+- **A metric.** Deliberately not added: a `Meter` counter is export-only and cannot be read back in process, so it
+  cannot answer *what did the operator ask for* in an incident — the durable ledger is what does. A counter is an
+  alerting concern and a change to the shared `IExecutionMetrics` surface; it belongs in its own increment.
+- **Two paths still propagate rather than journal**, because neither is an *outcome* and catching one to synthesise
+  a name would be inventing policy: the R-17 fail-loud `NotSupportedException` (a venue that cannot size a partial
+  close at all), and a caller-abort `OperationCanceledException` carrying the caller's own token.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the

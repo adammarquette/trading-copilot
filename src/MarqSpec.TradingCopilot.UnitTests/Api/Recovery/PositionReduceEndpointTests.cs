@@ -92,10 +92,12 @@ public class PositionReduceEndpointTests
         return guard;
     }
 
+    private readonly IPositionActionJournal _journal = A.Fake<IPositionActionJournal>();
+
     private PositionReduceService Service() =>
         new(Context(), _factory, _guard,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
-            NullLogger<PositionReduceService>.Instance);
+            _journal, NullLogger<PositionReduceService>.Instance);
 
     private async Task<Guid> SeedAccountAsync(TradingMode mode = TradingMode.Practice)
     {
