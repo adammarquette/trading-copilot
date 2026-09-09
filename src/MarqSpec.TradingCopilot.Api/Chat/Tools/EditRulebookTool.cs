@@ -112,6 +112,13 @@ public sealed class EditRulebookTool : IChatTool
         _logger = logger;
     }
 
+    /// <summary>
+    /// The R-22 indicator names as a JSON array body, taken from <see cref="TriggerAuthoring.KnownIndicators"/> so
+    /// the model's schema cannot drift from the authoring refusals (gh#1156).
+    /// </summary>
+    private static string IndicatorEnumJson =>
+        string.Join(',', TriggerAuthoring.KnownIndicators.Select(name => $"\"{name}\""));
+
     /// <inheritdoc />
     public string Name => "edit_rulebook";
 
@@ -127,7 +134,7 @@ public sealed class EditRulebookTool : IChatTool
         "{\"type\":\"object\",\"properties\":{"
         + "\"triggerId\":{\"type\":\"string\",\"description\":\"The id of an existing rule to amend. Omit to author a new one.\"},"
         + "\"symbol\":{\"type\":\"string\",\"description\":\"The venue-neutral instrument symbol, e.g. ES. Required when authoring; not amendable -- omit when passing triggerId, changing it means authoring a new rule.\"},"
-        + "\"indicator\":{\"type\":\"string\",\"enum\":[\"atr\",\"rsi\"],\"description\":\"The indicator to watch. Required when authoring; not amendable -- omit when passing triggerId, changing it means authoring a new rule.\"},"
+        + $"\"indicator\":{{\"type\":\"string\",\"enum\":[{IndicatorEnumJson}],\"description\":\"The indicator to watch. Required when authoring; not amendable -- omit when passing triggerId, changing it means authoring a new rule.\"}},"
         + "\"period\":{\"type\":\"integer\",\"description\":\"The indicator period; a positive whole number. Required when authoring; not amendable -- omit when passing triggerId, changing it means authoring a new rule.\"},"
         + "\"resolutionMinutes\":{\"type\":\"integer\",\"description\":\"The bar size in minutes; a positive whole number. Required when authoring; not amendable -- omit when passing triggerId, changing it means authoring a new rule.\"},"
         + "\"comparison\":{\"type\":\"string\",\"enum\":[\"Below\",\"Above\"],\"description\":\"Which side of the threshold alerts. Required when authoring.\"},"

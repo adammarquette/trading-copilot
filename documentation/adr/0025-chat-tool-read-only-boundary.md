@@ -164,6 +164,24 @@ title's "read-only" is now the *read set's* property rather than the whole layer
 protecting — **no tool reaches an order, venue or gate type** — is unchanged and is what the structural guard
 enumerates.
 
+## Update — 2026-09-09: write capability is what a tool can reach (gh#1156)
+
+The companion assertion that catches a write-capable tool with **no** allow-list entry no longer keys on
+`DbContextOptions` alone. That rationale was false: `get_quote`, `query_journal` and `read_positions` inject
+`TradingCopilotDbContext` directly — an equally unrestricted *tracked* handle whose `SaveChanges` is the
+endpoint's. A future tool that wrote through the injected context was classified read-only, got no exact-dependency
+pin, and enrolled in the turn transaction. Write capability is now what the tool can *reach*: any `DbContext`, any
+`DbContextOptions`, or a service that saves. Every such tool's constructor set is pinned exactly, including those
+three read tools and a throwaway fixture that injects the context and calls `SaveChanges` so the detector cannot
+quietly regress.
+
+Separately, `edit_rulebook`'s input schema had a hand-kept `"enum": ["atr", "rsi"]` beside `TriggerAuthoring`'s
+R-22 set — the second copy the boundary test said did not exist. The schema enum is now derived from
+`TriggerAuthoring.KnownIndicators`, so adding a third indicator cannot leave the model's view stale.
+
+The paragraph above that identified a write tool "by the `DbContextOptions` write handle a read tool never holds"
+is superseded by this update for the detector; the per-tool (not union) allow-list rule stands.
+
 ## Follow-ups
 
 - ✅ `read_positions` (venue-truth) landed as its own increment (gh#929), completing the
