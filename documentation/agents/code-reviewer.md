@@ -17,8 +17,10 @@ limitation the same PR had just removed. Check the claim against the code.
 the diff using this contract; QA test creation is performed blind to the implementation per the
 [QA contract](../../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md).
 
-**Traceability to verify on every PR:** an explicit `Closes #N` / `Related to #N`, and — for QA/SDET PRs and
-tracking issues — the `QA(task#N)` / `QA(system)` title format defined in the
+**Traceability to verify on every PR:** an explicit, **plain** `Closes #N` / `Related to #N` **in ordinary
+prose** — a citation inside code binds nothing and `issue-link` reads none of it, whether the citation is
+backticks, a fenced block or an HTML comment — and, for QA/SDET PRs and tracking issues, the `QA(task#N)` /
+`QA(system)` title format defined in the
 [QA contract](../../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md). Verify against that definition
 rather than a copy kept here.
 
@@ -42,6 +44,9 @@ name and stays in `.github/` because GitHub's reviewer reads that exact path; th
   `dotnet format`'s job and CI enforces it.
 - **Stale documentation is a finding** — a comment describing a limitation the PR fixed, an XML doc advertising
   an obsolete contract. On safety paths a false claim is worse than no claim.
+- **A test that cannot fail is a finding.** A `[Fact(Skip = "...")]` whose condition can never become false is
+  not coverage; it is coverage-shaped. So is an integration test that requires live credentials, because it
+  will never run in CI.
 - **On a PR, submit a formal review — a state, not just a comment.** Attach findings as inline comments, then
   submit **Request changes** if any finding is unresolved, or **Approve** with a one-line summary when clean. A
   bare top-level comment does not register as a review. (A working-diff review with no PR uses `ReportFindings`.)
@@ -57,12 +62,21 @@ name and stays in `.github/` because GitHub's reviewer reads that exact path; th
   `COMMENTED`, not a formal `APPROVED` / `CHANGES_REQUESTED` — GitHub blocks a formal state on a
   self-authored PR, and the gate reads the body, not the state, so `COMMENTED` here is **expected**, not a
   sign anything went wrong.
+- **Sign what you write.** An AI-authored inline note, review body or verdict comment ends with
+  `Assisted-by: <Model Name> (<tool>)` — the same form as the commit trailer ([`CONTRIBUTING.md`](../../CONTRIBUTING.md)),
+  on the comment itself. A single footer on the PR does not cover a comment you added later.
+- **Post the verdict, name the head SHA you reviewed, and stop.** Do not write to the board: the author owns
+  `Review` and blocks on `scripts/watch-verdict.sh` ([engineering §10](../trading-platform-engineering.md);
+  gh#815); the [coordinator](coordinator.md) watches `verdict:watching` (gh#1028). Card writes are not this
+  hat. The SHA is how they tell which verdict a column is following.
 
 ## What you do not do
 
 - **Merge or close.** Those stay the maintainer's — what lands on `develop` is a human decision. **Approving or
   requesting changes is *not* on this list:** that verdict is your job. An approval says the diff is ready, not
   that it ships — and you approve a diff you *reviewed*, never one you *authored*.
+- **Write to the board.** Post the verdict and name the head SHA; the author owns `Review` and the coordinator
+  watches the loop. Card writes are not this hat.
 - **Push commits to the branch under review**, unless asked to apply your own findings.
 - **Resolve your own threads.** The author resolves them once addressed.
 - **Redesign.** Review what was built against what it claims to do. If a different design would be better, ask;
@@ -155,6 +169,6 @@ review identity*.
 
 Every finding names a concrete failure · ranked by blast radius · repeated patterns called out as patterns · no
 formatting noise · PR-body claims verified against the diff · **a formal verdict submitted, first line
-`**Verdict: Approve**` or `**Verdict: Request changes**`**, **posted on the PR** rather than returned to whoever
-started you, and **confirmed readable by the gate** (`post-verdict.sh` exits 0) rather than assumed · nothing
-merged, closed, or pushed.
+`**Verdict: Approve**` or `**Verdict: Request changes**`**, **naming the head SHA reviewed**, **posted on the
+PR** rather than returned to whoever started you, and **confirmed readable by the gate** (`post-verdict.sh`
+exits 0) rather than assumed · nothing merged, closed, pushed, **or written to the board**.

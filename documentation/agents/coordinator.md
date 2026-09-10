@@ -27,12 +27,13 @@ back to **Planning** saying what is missing, and it gets re-scored.
 
 - Open issue on #2, column `Current ToDo` (or a kickback / stall / conflict that needs an implementer again)
 - Why, Scope, Acceptance criteria present
-- One `work:*` and one `Work Estimate`
+- One `work:*` matching the issue's actual scope (not merely present), and one `Work Estimate`
 - Not `epic` — those decompose; they are not implemented
 - Not `backlog` unless the issue itself says its trigger has fired
 - Not `safety-critical` scored below 4 — re-score first
-- [`scripts/claim.sh`](../../scripts/claim.sh) `<id> --check` is free, or the 4-hour stale-tip rule applies
-  **and** the takeover has been announced on the issue
+- [`scripts/claim.sh`](../../scripts/claim.sh) `<id> --check` **exits 0**, or the 4-hour stale-tip rule
+  applies **and** the takeover has been announced on the issue. A non-zero exit is a decline (claimed,
+  closed, or a non-epic parent already claimed) — read the status, not only the prose
 
 **Pick order**, so two coordinator sessions do not thrash:
 
@@ -74,6 +75,25 @@ Each implementer: claims with `scripts/claim.sh`, owns the `In Progress` → `Re
 PR against `develop` with a plain `Closes #N` in ordinary prose, and reports back. They stop at `Review` and
 run the author-owned loop in [engineering §10](../trading-platform-engineering.md) (`watch-verdict.sh`).
 They do not review their own PR.
+
+## Parallel cohort
+
+After a maintainer merge, **scan remaining open PRs into `develop` first**. `CONFLICTING`, or a head SHA
+behind the last verdict, are pick-order 1 and 2 — they land before any new `Current ToDo`.
+
+**Parallel is the default.** Dispatch every ready `Current ToDo` whose `scripts/claim.sh <id> --check`
+exits 0. Top-of-column still orders the queue; it does not serialise it.
+
+**Keep the pipeline full.** When a PR merges (the card leaves `Review` for `Done`), pick the next ready
+`Current ToDo` (top of the column first). Do not wait for the user to name a next cohort. There is no
+`Ready to Merge` column — `Review` → `Done` is the merge, and merging stays the maintainer's
+([board](../project-board-workflow.md)).
+
+A conflict fix is a **rebase onto `origin/develop`**. Engineering [§10](../trading-platform-engineering.md)
+refuses merge commits on a feature branch.
+
+**You own re-dispatch of the same claim.** The reviewer posts a verdict and **stops**; they do not launch
+the fix agent.
 
 ## The approval loop
 
@@ -121,7 +141,8 @@ Older than two hours is stale, and the stale-tip rule applies as it does to a cl
 PR first**, then remove the label and proceed as though it were absent. Say it even when you are confident —
 the note is what lets the author, if it is somehow still alive, object before you race it.
 
-The reviewer posts a verdict and names the head SHA. Verdicts arrive as a first line of
+The reviewer posts a verdict, names the head SHA, and **stops**. You re-dispatch the fix if one is
+needed; they do not launch the implementer. Verdicts arrive as a first line of
 `**Verdict: Approve**` or `**Verdict: Request changes**` when GitHub blocks self-review.
 
 **A green `reviewer` job is not a review.** Since gh#994 that workflow degrades to a *clean skip* on any API
@@ -184,5 +205,6 @@ finish the loop you started or take the label down as you leave; the command is 
 ## Definition of done
 
 Every dispatched issue matched its hat and tier · in-flight work watched · stalls announced on the issue
-before takeover · conflicted PRs re-dispatched, never reviewed · every mergeable `Review` PR has a reviewer
-on the current head or an author running the loop · nothing merged.
+before takeover · remaining open PRs scanned into `develop` before a new `Current ToDo` · conflicted PRs
+re-dispatched, never reviewed · every mergeable `Review` PR has a reviewer on the current head or an
+author running the loop · a reviewer who has ruled is not the one who fixes · nothing merged.
