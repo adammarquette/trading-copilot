@@ -1,6 +1,8 @@
 using System.Reflection;
 using MarqSpec.TradingCopilot.Api.Chat.Tools;
+using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Domain.Ai;
+using Microsoft.EntityFrameworkCore;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Chat.Tools;
 
@@ -24,11 +26,12 @@ namespace MarqSpec.TradingCopilot.UnitTests.Api.Chat.Tools;
 /// <b>Why each write tool's dependencies are pinned exactly, not merely scanned.</b> A fragment scan over direct
 /// constructor parameters is defeated by one indirection — a tool taking a helper that itself takes an
 /// <c>IOrderExecutor</c> passes it. So <see cref="WriteToolConstructor_ShouldTakeOnlyAllowedCollaborators"/> pins each
-/// write tool's dependency <i>set</i>: any new constructor parameter, forbidden-sounding or not, fails until somebody
-/// deliberately widens that tool's allow-list — which is a review, not an accident. The read tools keep the fragment
-/// guard alone; their dependencies were reviewed in gh#925 / gh#929 / gh#987 and adding to them is not this
-/// increment's risk. <see cref="EveryWriteTool_ShouldHaveItsDependencySetPinned"/> closes the loop the same way the
-/// enumeration does: a write tool with no allow-list entry is caught rather than left silently unpinned.
+/// write-capable tool's dependency <i>set</i>: any new constructor parameter, forbidden-sounding or not, fails until
+/// somebody deliberately widens that tool's allow-list — which is a review, not an accident. Write-capable is what
+/// the tool can <i>reach</i> (a <c>DbContext</c>, <c>DbContextOptions</c>, or a service that saves), so the read
+/// tools that inject the request-scoped context are pinned too (gh#1156). A tool that cannot reach a save keeps the
+/// fragment guard alone. <see cref="EveryWriteTool_ShouldHaveItsDependencySetPinned"/> closes the loop the same way
+/// the enumeration does: a write-capable tool with no allow-list entry is caught rather than left silently unpinned.
 /// </para>
 /// <para>
 /// This is the <b>structural</b> half of the boundary; it fails on a <i>capability</i>. The behavioural half — an
@@ -57,14 +60,15 @@ public class ChatToolBoundaryTests
     ];
 
     /// <summary>
-    /// Each write tool's <b>complete</b> permitted constructor-parameter set (simple names; open generics reflect as
-    /// <c>IOptions`1</c> / <c>ILogger`1</c> / <c>DbContextOptions`1</c>). Widening one of these is a deliberate edit,
-    /// which is the whole point: it is the guard a helper cannot smuggle execution past, one indirection down.
+    /// Each write-capable tool's <b>complete</b> permitted constructor-parameter set (simple names; open generics
+    /// reflect as <c>IOptions`1</c> / <c>ILogger`1</c> / <c>DbContextOptions`1</c>). Widening one of these is a
+    /// deliberate edit, which is the whole point: it is the guard a helper cannot smuggle execution past, one
+    /// indirection down. Write-capable means the tool can <i>reach</i> a save — not that it currently writes.
     /// </summary>
     /// <remarks>
-    /// <b>Per tool, not one shared union (gh#1135).</b> Merging the two sets would let each write tool inherit the
-    /// other's collaborators for free — <c>edit_rulebook</c> would silently acquire <c>ISessionDeadlineSource</c> and
-    /// the realtime notifier it has no business holding, and the *next* write tool would start with the union of
+    /// <b>Per tool, not one shared union (gh#1135).</b> Merging the sets would let each tool inherit the others'
+    /// collaborators for free — <c>edit_rulebook</c> would silently acquire <c>ISessionDeadlineSource</c> and the
+    /// realtime notifier it has no business holding, and the *next* write-capable tool would start with the union of
     /// everything shipped. The allow-list is only a guard while it is the narrowest true statement about each tool.
     /// </remarks>
     private static readonly IReadOnlyDictionary<Type, HashSet<string>> _allowedWriteToolCollaborators =
@@ -87,6 +91,30 @@ public class ChatToolBoundaryTests
                 "IChatTurnScope",     // WHICH CONVERSATION this turn is in -- a Guid?, reaching nothing at all
                 "TimeProvider",
                 "ILogger`1",
+            ],
+            // The three read tools that inject the request-scoped context (gh#1156). They do not write today, but
+            // SaveChanges on that handle is the endpoint's — a future SaveChanges call enrols in the turn
+            // transaction. Pinning the constructor set is what makes that a review, not an accident.
+            [typeof(GetQuoteTool)] =
+            [
+                "TradingCopilotDbContext",
+                "ILogger`1",
+            ],
+            [typeof(QueryJournalTool)] =
+            [
+                "TradingCopilotDbContext",
+                "ILogger`1",
+            ],
+            [typeof(ReadPositionsTool)] =
+            [
+                "TradingCopilotDbContext",
+                "IPositionReconciler", // the read-only venue-truth seam -- no exit / flatten type crosses it
+                "ILogger`1",
+            ],
+            // The throwaway that exists so the detector cannot quietly regress to "takes DbContextOptions".
+            [typeof(ThrowawayDbContextWriterTool)] =
+            [
+                "TradingCopilotDbContext",
             ],
         };
 
@@ -144,7 +172,7 @@ public class ChatToolBoundaryTests
             "a tool that called the model itself would bill spend outside the turn's per-call AIUsage ledger");
     }
 
-    /// <summary>Every write tool the API ships, as the theory source for the exact-dependency pins below.</summary>
+    /// <summary>Every write-capable tool whose constructor set is pinned, as the theory source for the pins below.</summary>
     public static TheoryData<Type> AllWriteTools()
     {
         TheoryData<Type> tools = [];
@@ -192,25 +220,35 @@ public class ChatToolBoundaryTests
                 "an optional dependency defaults to a silent no-op when the tool is constructed by hand");
 
     /// <summary>
-    /// The allow-list map must cover <b>every</b> write tool, or a new one is simply not pinned (gh#1135). A write
-    /// tool is identified structurally — it takes <c>DbContextOptions</c>, the unrestricted write handle a read tool
-    /// never holds — rather than by a name somebody has to remember to keep in a list. This is the same failure the
-    /// reflection theory above exists to prevent, one level up: the exact-dependency pin is the strong guard, and a
-    /// guard that silently applies to nothing is worse than none.
+    /// The allow-list map must cover <b>every</b> write-capable tool, or a new one is simply not pinned (gh#1135,
+    /// gh#1156). Write capability is what a tool can <i>reach</i> — any <see cref="DbContext"/>, any
+    /// <see cref="DbContextOptions"/>, or a service that saves — not one constructor type. The previous detector
+    /// keyed only on <c>DbContextOptions</c>, so a tool that injected <see cref="TradingCopilotDbContext"/> and
+    /// called <c>SaveChanges</c> was classified read-only, got no exact-dependency pin, and enrolled in the
+    /// endpoint's transaction. This is the same failure the reflection theory above exists to prevent, one level
+    /// up: the exact-dependency pin is the strong guard, and a guard that silently applies to nothing is worse
+    /// than none.
     /// </summary>
     [Fact]
     public void EveryWriteTool_ShouldHaveItsDependencySetPinned()
     {
-        List<Type> writeTools = [.. DiscoverChatTools()
-            .Where(tool => tool.GetConstructors()
-                .SelectMany(constructor => constructor.GetParameters())
-                .Any(parameter => parameter.ParameterType.Name == "DbContextOptions`1"))];
+        List<Type> writeTools = [.. DiscoverWriteCapableTools()];
 
         writeTools.Should().NotBeEmpty("the shipped write tools must really be discovered, or this pins nothing");
         writeTools.Should().OnlyContain(
             tool => _allowedWriteToolCollaborators.ContainsKey(tool),
             "a write tool with no entry in the allow-list map is UNPINNED — add it deliberately, under review");
     }
+
+    /// <summary>
+    /// Red-proof for the gh#1156 detector: a throwaway that injects the request-scoped context and calls
+    /// <c>SaveChanges</c> must be classified write-capable. The <c>DbContextOptions</c>-only detector missed it.
+    /// </summary>
+    [Fact]
+    public void CanReachAWrite_ShouldBeTrue_WhenAToolInjectsDbContextAndCallsSaveChanges() =>
+        CanReachAWrite(typeof(ThrowawayDbContextWriterTool)).Should().BeTrue(
+            "a tool that holds TradingCopilotDbContext can SaveChanges on the endpoint's request context — that is "
+            + "write capability, and classifying it read-only leaves it unpinned");
 
     /// <summary>
     /// The discovery itself must be able to fail. A reflection theory that silently finds nothing passes every
@@ -237,4 +275,64 @@ public class ChatToolBoundaryTests
             .GetTypes()
             .Where(type => type is { IsClass: true, IsAbstract: false } && type.IsAssignableTo(typeof(IChatTool)))
             .OrderBy(type => type.Name, StringComparer.Ordinal)];
+
+    /// <summary>
+    /// Every shipped chat tool that can reach a write, plus the throwaway that exists so this detector cannot
+    /// quietly regress to "takes <c>DbContextOptions</c>".
+    /// </summary>
+    private static IReadOnlyList<Type> DiscoverWriteCapableTools() =>
+        [.. DiscoverChatTools()
+            .Append(typeof(ThrowawayDbContextWriterTool))
+            .Where(CanReachAWrite)
+            .OrderBy(type => type.Name, StringComparer.Ordinal)];
+
+    /// <summary>
+    /// Write capability is what the tool can <i>reach</i> through a constructor parameter: a <see cref="DbContext"/>
+    /// (tracked, <c>SaveChanges</c> is the endpoint's), a <see cref="DbContextOptions"/> (the tool builds its own
+    /// context), or a service that itself exposes <c>SaveChanges</c> / <c>SaveChangesAsync</c>.
+    /// </summary>
+    private static bool CanReachAWrite(Type tool) =>
+        tool.GetConstructors()
+            .SelectMany(constructor => constructor.GetParameters())
+            .Select(parameter => parameter.ParameterType)
+            .Any(IsWriteHandle);
+
+    private static bool IsWriteHandle(Type type)
+    {
+        if (typeof(DbContext).IsAssignableFrom(type))
+        {
+            return true;
+        }
+
+        if (type == typeof(DbContextOptions)
+            || (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(DbContextOptions<>)))
+        {
+            return true;
+        }
+
+        return type.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Any(method => method.Name is "SaveChanges" or "SaveChangesAsync");
+    }
+}
+
+/// <summary>
+/// Red-proof fixture for gh#1156 — a writer that injects <see cref="TradingCopilotDbContext"/> and calls
+/// <c>SaveChanges</c>. Lives in the test assembly so it is never registered. The previous detector keyed only on
+/// <c>DbContextOptions</c> and classified this read-only.
+/// </summary>
+public sealed class ThrowawayDbContextWriterTool : IChatTool
+{
+    private readonly TradingCopilotDbContext _database;
+
+    public ThrowawayDbContextWriterTool(TradingCopilotDbContext database) => _database = database;
+
+    public string Name => "throwaway_dbcontext_writer";
+
+    public LlmToolDefinition Definition => new(Name, "test-only throwaway; never registered", "{}");
+
+    public Task<string> ExecuteAsync(string inputJson, CancellationToken cancellationToken)
+    {
+        _database.SaveChanges();
+        return Task.FromResult("{}");
+    }
 }

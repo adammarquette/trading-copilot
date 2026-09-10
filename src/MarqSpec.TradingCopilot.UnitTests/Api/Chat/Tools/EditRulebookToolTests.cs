@@ -679,6 +679,22 @@ public class EditRulebookToolTests
     }
 
     [Fact]
+    public void Definition_ShouldListExactlyTheKnownIndicators_WhenOfferedToTheModel()
+    {
+        using JsonDocument schema = JsonDocument.Parse(Tool().Definition.InputSchema);
+        string[] schemaIndicators = [.. schema.RootElement
+            .GetProperty("properties")
+            .GetProperty("indicator")
+            .GetProperty("enum")
+            .EnumerateArray()
+            .Select(value => value.GetString()!)];
+
+        schemaIndicators.Should().Equal(
+            TriggerAuthoring.KnownIndicators,
+            "the tool schema is the model's view of the R-22 set; a second hand-kept copy goes stale silently");
+    }
+
+    [Fact]
     public async Task ExecuteAsync_ShouldApplyEveryAmendableField_AndNothingElse()
     {
         Guid id = await SeedRuleAsync(
