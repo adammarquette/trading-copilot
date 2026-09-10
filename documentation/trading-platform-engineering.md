@@ -238,7 +238,7 @@ It informs the PRD; it is not read by the built system. The three product subsys
 
 ## 12. Technical Spikes / Open Engineering Questions
 
-A landing zone for the engineering unknowns that need a spike or a decision before they block a phase. Most of the PRD's Open Questions are tagged *(Engineering)* — **Decide:** whether to migrate Q-1…Q-10 here (keeping the product/legal ones in the PRD) so the PRD stays product-focused. Until then, this section just points at them:
+A landing zone for the engineering unknowns that need a spike or a decision before they block a phase. Most of the PRD's Open Questions are tagged *(Engineering)* — **Decide:** whether to migrate the still-open Qs here (keeping the product/legal ones in the PRD) so the PRD stays product-focused. Until then, this section just points at them. Answered Qs stay in PRD §8:
 
 - **Still open:** ProjectX position-query latency (Q-1) · order-flow granularity for footprint (Q-2, R-3) · untaken-suggestion simulation rules (Q-5, §5) · X/Twitter access method (Q-6) · YouTube transcript pipeline (Q-8) · `Rule` entity (Q-11, gh#866) · per-source ToS (Q-13) · remaining venue-capability rows (Q-14) · Finnhub market-data quality (Q-15). Answers live in the PRD §8.
 - **Answered in the PRD:** auto-flatten failure mode (Q-3, ADR-0013) · practice vs. live (Q-4, gh#60) · drift tolerance (Q-7, gh#548/#546) · UI packaging (Q-9, ADR-0010/0020) · cloud host (Q-10, Railway) · alert taxonomy (Q-12, ADR-0019).
