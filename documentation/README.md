@@ -41,9 +41,9 @@ Loaded **on demand by role**, not by directory. See the table at the top of the 
 
 | Contract | ~tok | Read it when |
 |---|---:|---|
-| [`agents/code-reviewer.md`](agents/code-reviewer.md) | 1.1K | You are reviewing any change, anywhere. |
-| [`agents/platform.md`](agents/platform.md) | 1.4K | You are touching CI/CD, the image, compose or deploy. |
-| [`agents/coordinator.md`](agents/coordinator.md) | 1.8K | You are assigning work from the board, or driving a task to approval. Reviewer, Platform and Coordinator **never auto-load**. |
+| [`agents/code-reviewer.md`](agents/code-reviewer.md) | 3.4K | You are reviewing any change, anywhere. |
+| [`agents/platform.md`](agents/platform.md) | 1.9K | You are touching CI/CD, the image, compose or deploy. |
+| [`agents/coordinator.md`](agents/coordinator.md) | 3.3K | You are assigning work from the board, or driving a task to approval. Reviewer, Platform and Coordinator **never auto-load**. |
 
 The two subtree contracts — [`src/AGENTS.md`](../src/AGENTS.md) (Coding) and
 [`IntegrationTests/AGENTS.md`](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) (QA) — load from their

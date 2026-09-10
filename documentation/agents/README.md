@@ -28,6 +28,20 @@ Universal rules that bind all five: the root [`AGENTS.md`](../../AGENTS.md).
 
 The rule, in one line: **put a contract where it must be to load when it applies** — and catalogue them all here.
 
+**The cost of that design is that they will not arrive on their own.** Wearing one of those hats without opening
+its contract is the most common way agents get this repo wrong, which is why the routing table at the top of
+[`AGENTS.md`](../../AGENTS.md) says so out loud. A contract that does not auto-load is also the one whose
+absence nothing catches — no check fails, no reviewer sees a diff, the work is simply done without it.
+
+## Never mix hats in one pass
+
+If you carry more than one role, run them separately. QA writes tests from the requirement, blind to the
+implementation; review reads the implementation against the requirement. The coordinator launches both and
+wears neither. Doing any pair at once collapses the independence that makes either worth running.
+
+The priced `~tok` rows for the three role contracts live in the [routing map](../README.md) — do not add a
+second table here that can drift.
+
 ## Related
 
 - [`.github/copilot-instructions.md`](../../.github/copilot-instructions.md) — the substantive review checklist.
