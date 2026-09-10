@@ -10,7 +10,7 @@ Sizes below are approximate tokens, so you can see what a read costs before you 
 
 | Document | ~tok | Read it when |
 |---|---:|---|
-| [`trading-platform-prd.md`](trading-platform-prd.md) | 23.5K | You need **what** the system must do. Requirements `R-1…R-22`; every capability traces to one. §6 is 76% of the file — **open the `R-#` you need, not the file**. |
+| [`trading-platform-prd.md`](trading-platform-prd.md) | 23.5K | You need **what** the system must do. Requirements `R-1…R-22`; every capability traces to one. §6 is 76% of the file — **open the `R-#` you need, not the file**. Living (gh#1164); §9 is board status, not a future execution phase. |
 | [`trading-platform-architecture.md`](trading-platform-architecture.md) | 7.6K | You need **how the pieces fit** — components, seams, data flow. The cheapest whole-file read here. |
 | [`trigger-workflow-guide.md`](trigger-workflow-guide.md) | 2.8K | **Operator-facing.** You need to explain — to yourself or the operator — how a trigger becomes an alert, what the two routes do, and why a fire can legitimately produce no notification. Companion to the architecture doc's *Trigger / condition engine* diagrams, in prose. |
 | [`trading-platform-engineering.md`](trading-platform-engineering.md) | 15.7K | You need stack, standards, testing, observability, deployment or the Definition of Done. Numbered §1–§12; cite and open by section. |
