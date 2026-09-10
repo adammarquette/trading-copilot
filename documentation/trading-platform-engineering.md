@@ -240,8 +240,8 @@ It informs the PRD; it is not read by the built system. The three product subsys
 
 A landing zone for the engineering unknowns that need a spike or a decision before they block a phase. Most of the PRD's Open Questions are tagged *(Engineering)* — **Decide:** whether to migrate Q-1…Q-10 here (keeping the product/legal ones in the PRD) so the PRD stays product-focused. Until then, this section just points at them:
 
-- **Blocking (before/at build start):** ProjectX order API capabilities (Q-1, gates R-11/R-13) · order-flow granularity for footprint (Q-2, R-3) · **auto-flatten guarantee & failure mode (Q-3, safety-critical — see §9)** · practice vs. live account handling (Q-4, §8) · untaken-suggestion simulation rules (Q-5, §5) · X/Twitter access method (Q-6).
-- **Non-blocking (during implementation):** execution-time validity tolerance (Q-7, R-12) · YouTube transcript pipeline (Q-8) · local UI packaging (Q-9) · cloud host & cost ceiling (Q-10, §2/§8).
+- **Still open:** ProjectX position-query latency (Q-1) · order-flow granularity for footprint (Q-2, R-3) · untaken-suggestion simulation rules (Q-5, §5) · X/Twitter access method (Q-6) · YouTube transcript pipeline (Q-8) · `Rule` entity (Q-11, gh#866) · per-source ToS (Q-13) · remaining venue-capability rows (Q-14) · Finnhub market-data quality (Q-15). Answers live in the PRD §8.
+- **Answered in the PRD:** auto-flatten failure mode (Q-3, ADR-0013) · practice vs. live (Q-4, gh#60) · drift tolerance (Q-7, gh#548/#546) · UI packaging (Q-9, ADR-0010/0020) · cloud host (Q-10, Railway) · alert taxonomy (Q-12, ADR-0019).
 
 - **Architecture spikes:** event-backbone selection — **resolved** as an append-only Timescale event log ([ADR-0001](adr/0001-event-backbone.md)). Open: the **order-flow / DOM heatmap renderer** (canvas vs. WebGL — e.g. PixiJS / regl — against `GatewayDepth` / `GatewayTrade` volumes; Bookmap-class, Phase 3; R-3 / R-10, ADR-0004). Further spikes land here as design proceeds.
 
