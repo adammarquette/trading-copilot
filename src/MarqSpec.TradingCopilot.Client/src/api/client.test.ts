@@ -213,6 +213,24 @@ describe('request — the one JWT-attach path', () => {
     });
   });
 
+  it('maps a 4xx { outcome } to a refusal — reduce/exit name how they are not done', async () => {
+    // Position reduce and exit answer with `{ outcome, netQuantity }`, not `{ error }`. Without this, a 409
+    // HeldPracticeOnly collapses into "the request failed (409)" and the blotter cannot name the hold as a hold.
+    stubFetch(() =>
+      Promise.resolve(response(409, { outcome: 'HeldPracticeOnly', netQuantity: 2 })),
+    );
+
+    const result = await request('POST', '/accounts/1/positions/MES/reduce', { quantity: 1 });
+
+    expect(result).toEqual({
+      ok: false,
+      kind: 'refused',
+      status: 409,
+      reason: 'HeldPracticeOnly',
+      layer: undefined,
+    });
+  });
+
   it('maps a 4xx { error } without a layer to a refusal with no layer', async () => {
     stubFetch(() =>
       Promise.resolve(response(422, { error: 'The kill switch requires confirmation.' })),

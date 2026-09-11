@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { exitPosition, getPositions, getRestingOrders } from './blotter';
+import { exitPosition, getPositions, getRestingOrders, reducePosition } from './blotter';
 
 function response(status: number, body?: unknown): Response {
   const text = body === undefined ? '' : JSON.stringify(body);
@@ -207,5 +207,62 @@ describe('exitPosition', () => {
     stubJson({ outcome: 'StillOpen', netQuantity: 2 }, 409);
 
     expect((await exitPosition('a1', 'MES')).ok).toBe(false);
+  });
+});
+
+describe('reducePosition', () => {
+  it('posts the asked quantity to the account-and-instrument reduce route', async () => {
+    const fetchMock = stubJson({ outcome: 'Reduced', netQuantity: 1 });
+
+    await reducePosition('a1', 'MES', 1);
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/accounts/a1/positions/MES/reduce');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
+    expect(fetchMock.mock.calls[0][1]?.body).toBe(JSON.stringify({ quantity: 1 }));
+  });
+
+  it('encodes an instrument that is not URL-safe', async () => {
+    const fetchMock = stubJson({ outcome: 'Reduced', netQuantity: 1 });
+
+    await reducePosition('a1', 'CON.F.US/MES.U26', 1);
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('CON.F.US%2FMES.U26');
+  });
+
+  it('treats only Reduced as success', async () => {
+    stubJson({ outcome: 'Reduced', netQuantity: 1 });
+
+    const result = await reducePosition('a1', 'MES', 1);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.outcome).toBe('Reduced');
+    }
+  });
+
+  it('surfaces HeldPracticeOnly as a named refusal, not a generic failure', async () => {
+    // The hold is an answer: nothing was sent. Collapsing it into "the request failed" would read as a
+    // venue outage, which is the one reading the acceptance forbids.
+    stubJson({ outcome: 'HeldPracticeOnly', netQuantity: 2 }, 409);
+
+    const result = await reducePosition('a1', 'MES', 1);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.kind === 'refused' ? result.reason : result.error).toBe('HeldPracticeOnly');
+    }
+  });
+
+  it.each([
+    ['NotReduced', 409],
+    ['Unconfirmed', 409],
+    ['Refused', 409],
+    ['Unreachable', 409],
+    ['AccountBusy', 409],
+    ['ExceedsPosition', 400],
+  ] as const)('surfaces %s as not done', async (outcome, status) => {
+    stubJson({ outcome, netQuantity: outcome === 'Unreachable' ? null : 2 }, status);
+
+    expect((await reducePosition('a1', 'MES', 1)).ok).toBe(false);
   });
 });

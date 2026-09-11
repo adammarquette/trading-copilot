@@ -8,6 +8,7 @@ import {
   exitPosition,
   getPositions,
   getRestingOrders,
+  reducePosition,
 } from '../api/blotter';
 import { cancelOrder, type RepriceResult, repriceOrder } from '../api/orders';
 import type { RealtimeContextValue } from '../realtime/RealtimeProvider';
@@ -19,6 +20,7 @@ vi.mock('../api/blotter', async (importOriginal) => ({
   getPositions: vi.fn(),
   getRestingOrders: vi.fn(),
   exitPosition: vi.fn(),
+  reducePosition: vi.fn(),
 }));
 
 vi.mock('../realtime/RealtimeProvider', () => ({ useOptionalRealtime: vi.fn() }));
@@ -34,6 +36,7 @@ const restingOrders = vi.mocked(getRestingOrders);
 const realtime = vi.mocked(useOptionalRealtime);
 const cancel = vi.mocked(cancelOrder);
 const exit = vi.mocked(exitPosition);
+const reduce = vi.mocked(reducePosition);
 const reprice = vi.mocked(repriceOrder);
 
 // A benign reprice result — a full-size approval, no downsize (gh#969); tests that need a downsize override it.
@@ -159,6 +162,7 @@ beforeEach(() => {
   wireRealtime();
   cancel.mockResolvedValue({ ok: true, data: undefined });
   exit.mockResolvedValue({ ok: true, data: { outcome: 'Flat', netQuantity: 0 } });
+  reduce.mockResolvedValue({ ok: true, data: { outcome: 'Reduced', netQuantity: 1 } });
   reprice.mockResolvedValue({ ok: true, data: REPRICED });
 });
 
@@ -847,6 +851,143 @@ describe('Blotter', () => {
     });
 
     expect((screen.getByRole('dialog').textContent ?? '').toLowerCase()).not.toContain('stillopen');
+  });
+
+  it('offers Reduce beside Exit on a position row', async () => {
+    await renderBlotter();
+
+    const row = panel().querySelector('[data-protection]') as HTMLElement;
+    const labels = [...row.querySelectorAll('button')].map((button) => button.textContent);
+    expect(labels).toContain('Reduce');
+    expect(labels).toContain('Exit');
+    expect(labels.indexOf('Reduce')).toBeLessThan(labels.indexOf('Exit'));
+  });
+
+  it('names the contract and refuses a size at or beyond the open quantity', async () => {
+    // A request at or beyond |qty| is a full close, which belongs to Exit (it also cancels protective legs).
+    // The sheet must refuse it here rather than send a request the server would bounce as ExceedsPosition.
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce$/i }));
+    });
+
+    const sheet = screen.getByRole('dialog').textContent ?? '';
+    expect(sheet).toContain('CON.F.US.MES.U26');
+    expect(sheet).toContain('2');
+
+    const confirm = () =>
+      screen.getByRole('button', { name: /^reduce this position$/i }) as HTMLButtonElement;
+
+    for (const invalid of ['0', '2', '3', '-1', '1.5', 'ab']) {
+      await act(async () => {
+        fireEvent.change(screen.getByTestId('reduce-quantity'), { target: { value: invalid } });
+      });
+      expect(confirm().disabled).toBe(true);
+    }
+    expect(screen.getByTestId('reduce-size-bound')).toBeTruthy();
+    expect(reduce).not.toHaveBeenCalled();
+  });
+
+  it('reduces only after a strictly-partial size is confirmed', async () => {
+    await renderBlotter();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('reduce-quantity'), { target: { value: '1' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce this position$/i }));
+    });
+
+    expect(reduce).toHaveBeenCalledWith('a1', 'CON.F.US.MES.U26', 1);
+  });
+
+  it('reports a not-done reduce rather than presenting it as done', async () => {
+    reduce.mockResolvedValue({ ok: false, kind: 'failed', status: 409, error: 'NotReduced' });
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('reduce-quantity'), { target: { value: '1' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce this position$/i }));
+    });
+
+    const dialog = screen.getByRole('dialog').textContent?.toLowerCase() ?? '';
+    expect(dialog).toContain('notreduced');
+    expect(dialog).toContain('may still be open');
+  });
+
+  it('names HeldPracticeOnly as held, not as a venue failure', async () => {
+    reduce.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 409,
+      reason: 'HeldPracticeOnly',
+    });
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('reduce-quantity'), { target: { value: '1' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce this position$/i }));
+    });
+
+    const dialog = screen.getByRole('dialog').textContent?.toLowerCase() ?? '';
+    expect(dialog).toContain('held');
+    expect(dialog).not.toContain('failed');
+    expect(dialog).toContain('may still be open');
+  });
+
+  it('re-reads after a reduce rather than assuming the size changed', async () => {
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('reduce-quantity'), { target: { value: '1' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce this position$/i }));
+    });
+
+    expect(positions).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reduce twice when confirmed twice before the first resolves', async () => {
+    let release: () => void = () => {};
+    reduce.mockReturnValue(
+      new Promise((resolve) => {
+        release = () => resolve({ ok: true, data: { outcome: 'Reduced', netQuantity: 1 } });
+      }),
+    );
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('reduce-quantity'), { target: { value: '1' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce this position$/i }));
+      fireEvent.click(screen.getByRole('button', { name: /^reduce this position$/i }));
+    });
+
+    expect(reduce).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      release();
+    });
   });
 
   it('re-reads after an exit rather than assuming the position is gone', async () => {
