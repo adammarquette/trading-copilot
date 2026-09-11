@@ -1,6 +1,6 @@
 # ADR-0015: Distribution, licensing & governance — self-hosted, Apache-2.0, maintainer-led
 
-**Status:** Accepted · refined by [ADR-0017](0017-single-operator-data-isolation.md) · **Date:** 2026-07-20 · **Deciders:** Adam (operator/maintainer)
+**Status:** Accepted · refined by [ADR-0017](0017-single-operator-data-isolation.md) · software-factory packaging recorded by [ADR-0029](0029-software-factory-packaging.md) · **Date:** 2026-07-20 · **Deciders:** Adam (operator/maintainer)
 **Relates to:** PRD `R-14` (practice vs. live), `R-17` (venue abstraction), `R-18` (auth), `R-20` (tenancy);
 [ADR-0011](0011-multi-user-tenancy.md) (refined here; since **superseded by [ADR-0017](0017-single-operator-data-isolation.md)**), [ADR-0013](0013-failure-recovery-model.md)
 (auto-flatten), [ADR-0012](0012-containerization-local-dev.md) (deployment); `README.md`, `CONTRIBUTING.md`.
@@ -90,6 +90,16 @@ and with it the enforceability of any licence, is genuinely uncertain.
 - **Disclosing AI authorship invites scepticism** from some readers. Accepted as the honest position, and the
   test suites, ADR trail, and traceability are the counter-evidence.
 
+## Decision log
+
+The *Decision* above is extended by increment; the dated updates below are the trail. Oldest first; this index
+mirrors the `## Update` headings, so keep the two in step when an entry is appended (gh#600).
+
+| Date | Update |
+|---|---|
+| 2026-07-20 | narrowed to one operator per deployment |
+| 2026-09-11 | software-factory packaging recorded by [ADR-0029](0029-software-factory-packaging.md) (gh#1177) |
+
 ## Update (2026-07-20) — narrowed to one operator per deployment
 
 The decision above said *multi-user **capable**, single-operator by default*. That is now firmer: **one
@@ -116,6 +126,11 @@ What follows:
 keep it: an accepted ADR is an immutable record, superseded by a later one rather than edited (see the
 [ADR index](README.md)). They remain accurate about *why* those decisions were taken; this ADR narrows the
 deployment model they assumed. `0011`'s tenancy mechanism in particular is still exactly what ships.
+
+## Update (2026-09-11) — software-factory packaging recorded by ADR-0029 (gh#1177)
+
+The factory is **packaging, not a licence change**. Delivery, sync, name, and home are recorded in
+[ADR-0029](0029-software-factory-packaging.md); Apache-2.0 and the rest of this ADR's *Decision* stand.
 
 ## Follow-ups
 
