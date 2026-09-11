@@ -17,6 +17,7 @@ import {
   exitPosition,
   getPositions,
   getRestingOrders,
+  reducePosition,
 } from '../api/blotter';
 import { cancelOrder, isApprovedDownsize, repriceOrder } from '../api/orders';
 import { useOptionalRealtime } from '../realtime/RealtimeProvider';
@@ -25,6 +26,19 @@ import { useOptionalRealtime } from '../realtime/RealtimeProvider';
  * Reads an operator-typed price strictly. A reprice reaches a risk calculation (R-16), so a mistyped price must
  * not be read leniently — `Number.parseFloat('52ab')` is `52`, and that is the one input here that must not slip.
  */
+/**
+ * Reads an operator-typed contract count strictly. A reduce is a sized close, so a mistyped size must
+ * not be read leniently — `Number.parseInt('1ab', 10)` is `1`, and that would send a size they did not type.
+ */
+function parseQuantity(text: string): number | null {
+  const trimmed = text.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const value = Number(trimmed);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 function parsePrice(text: string): number | null {
   const trimmed = text.trim();
   if (!/^\d+(?:\.\d+)?$/.test(trimmed)) {
@@ -93,6 +107,9 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   const [confirming, setConfirming] = useState<BlotterRestingOrder | null>(null);
   const [exiting, setExiting] = useState<BlotterPosition | null>(null);
   const [exitFailure, setExitFailure] = useState<string | null>(null);
+  const [reducing, setReducing] = useState<BlotterPosition | null>(null);
+  const [reduceDraft, setReduceDraft] = useState('');
+  const [reduceFailure, setReduceFailure] = useState<string | null>(null);
   // The reprice sheet: the order being repriced, the operator's new entry, and the current market price the R-16
   // fat-finger band re-measures against (there is no server-side quote read, so the operator supplies it — the same
   // posture the suggestion card takes). A refusal from the re-gate stays on the sheet rather than closing it.
@@ -115,6 +132,7 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   /** Synchronous re-entrancy guard -- a `pending` state would not exclude two clicks in one tick. */
   const cancelling = useRef(false);
   const closing = useRef(false);
+  const reducingInFlight = useRef(false);
   const repricingInFlight = useRef(false);
   const movingStopInFlight = useRef(false);
 
@@ -292,6 +310,46 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
       });
   }, [movingStop, newWorking, workingInBand, load]);
 
+  const openAbs = reducing !== null ? Math.abs(reducing.netQuantity) : 0;
+  const reduceQty = parseQuantity(reduceDraft);
+  const canReduce = reduceQty !== null && reduceQty < openAbs;
+  const reduceAtOrBeyond = reduceQty !== null && reduceQty >= openAbs;
+
+  const confirmReduce = useCallback(() => {
+    if (reducing === null || reducingInFlight.current) {
+      return; // a sized close is not idempotent -- never a second attempt from a second click
+    }
+    if (reduceQty === null || !canReduce) {
+      return; // fail closed on an at-or-beyond or unparseable size even though the control is disabled for it
+    }
+    reducingInFlight.current = true;
+    const contract = reducing.contract;
+
+    void reducePosition(accountId, contract, reduceQty)
+      .then((result) => {
+        if (!result.ok) {
+          const name = result.kind === 'refused' ? result.reason : result.error;
+          // HeldPracticeOnly is a hold (nothing sent), not a venue failure — name it as held so the
+          // operator does not treat the account as unreachable and walk away from a live position.
+          setReduceFailure(
+            name === 'HeldPracticeOnly'
+              ? `Reduce of ${contract} is held (practice accounts only). ` +
+                  'The position may still be open — check before walking away.'
+              : `Reduce of ${contract} did NOT complete (${name}). ` +
+                  'The position may still be open — check before walking away.',
+          );
+          return;
+        }
+        setReduceFailure(null);
+        setReducing(null);
+      })
+      .finally(() => {
+        reducingInFlight.current = false;
+        // Re-read either way: venue truth decides what is open, not the outcome of this click.
+        load();
+      });
+  }, [accountId, reducing, reduceQty, canReduce, load]);
+
   const confirmExit = useCallback(() => {
     if (exiting === null || closing.current) {
       return; // closing at market is not idempotent -- never a second attempt from a second click
@@ -380,6 +438,16 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
                 <ProtectionChip state={protectionOf(position)} />
                 <Button
                   size="small"
+                  onClick={() => {
+                    setReduceFailure(null);
+                    setReduceDraft('');
+                    setReducing(position);
+                  }}
+                >
+                  Reduce
+                </Button>
+                <Button
+                  size="small"
                   color="error"
                   onClick={() => {
                     setExitFailure(null); // a previous failure must not read as this position's result
@@ -450,6 +518,53 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
           ))
         )}
       </Box>
+      <Dialog open={reducing !== null} onClose={() => setReducing(null)}>
+        <DialogTitle>Reduce this position?</DialogTitle>
+        <DialogContent>
+          {reducing !== null ? (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, pt: 0.5 }}>
+              <Typography variant="body2">
+                <strong>{reducing.contract}</strong> · {reducing.netQuantity} @{' '}
+                {reducing.averagePrice}
+              </Typography>
+              <Typography variant="body2">
+                This takes contracts off <strong>at market</strong>, leaving the rest open. A size
+                at or beyond the open {openAbs} is a full close — that is Exit, which also cancels
+                the protective legs.
+              </Typography>
+              <TextField
+                size="small"
+                label="Contracts to reduce"
+                value={reduceDraft}
+                onChange={(event) => setReduceDraft(event.target.value)}
+                slotProps={{
+                  htmlInput: { inputMode: 'numeric', 'data-testid': 'reduce-quantity' },
+                }}
+                helperText={`A positive size strictly less than the open ${openAbs}.`}
+              />
+              {reduceDraft.trim() !== '' && !canReduce ? (
+                <Alert severity="warning" data-testid="reduce-size-bound">
+                  {reduceAtOrBeyond
+                    ? 'That size is at or beyond the open position — that is Exit, which also cancels the protective legs.'
+                    : 'Enter a positive whole number of contracts, strictly less than the open size. At or beyond is Exit.'}
+                </Alert>
+              ) : null}
+              {reduceFailure !== null ? (
+                <Alert severity="error" sx={{ mt: 1 }} data-testid="reduce-failure">
+                  {reduceFailure}
+                </Alert>
+              ) : null}
+            </Box>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setReducing(null)}>Keep it</Button>
+          <Button variant="contained" onClick={confirmReduce} disabled={!canReduce}>
+            Reduce this position
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={exiting !== null} onClose={() => setExiting(null)}>
         <DialogTitle>Exit this position?</DialogTitle>
         <DialogContent>

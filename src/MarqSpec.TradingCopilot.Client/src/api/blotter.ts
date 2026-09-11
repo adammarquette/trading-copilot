@@ -141,3 +141,39 @@ export function exitPosition(
     `/accounts/${accountId}/positions/${encodeURIComponent(instrument)}/exit`,
   );
 }
+
+/**
+ * What a reduce achieved. Only `Reduced` is success — see {@link reducePosition}.
+ */
+export interface PositionReduceResult {
+  readonly outcome: string;
+  /** The signed exposure the venue still reports; `null` when the venue could not be reached. */
+  readonly netQuantity: number | null;
+}
+
+/**
+ * Reduces one instrument's position by a number of contracts (gh#865 / gh#928).
+ *
+ * **Only a verified `Reduced` is a success.** The server answers 400 when the asked size is at or beyond
+ * what is open (`ExceedsPosition`) and 409 for every other not-done outcome (`NotReduced`, `Unconfirmed`,
+ * `Refused`, `Unreachable`, `AccountBusy`, `HeldPracticeOnly`). Treating any of those as done would stop
+ * the operator watching a position that may still be live. `HeldPracticeOnly` is a hold, not a venue
+ * failure — the client surfaces the outcome name so the blotter can say so.
+ */
+export async function reducePosition(
+  accountId: string,
+  instrument: string,
+  quantity: number,
+): Promise<ApiResult<PositionReduceResult>> {
+  const result = await requestJson<PositionReduceResult>(
+    'POST',
+    `/accounts/${accountId}/positions/${encodeURIComponent(instrument)}/reduce`,
+    { quantity },
+  );
+  // Belt and braces: a 200 whose body is not `Reduced` is still not done. The server should never do
+  // this; if it does, the operator must not be told the size came off.
+  if (result.ok && result.data.outcome !== 'Reduced') {
+    return { ok: false, kind: 'failed', error: result.data.outcome };
+  }
+  return result;
+}

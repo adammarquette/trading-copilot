@@ -225,13 +225,18 @@ async function readRefusal(response: Response): Promise<{ reason: string; layer?
     return null;
   }
   const record = payload as Record<string, unknown>;
-  if (typeof record['error'] !== 'string') {
-    return null;
+  if (typeof record['error'] === 'string') {
+    return {
+      reason: record['error'],
+      layer: typeof record['layer'] === 'string' ? record['layer'] : undefined,
+    };
   }
-  return {
-    reason: record['error'],
-    layer: typeof record['layer'] === 'string' ? record['layer'] : undefined,
-  };
+  // Position reduce / exit answer with `{ outcome, netQuantity }`, not `{ error }`. Naming the outcome is
+  // what lets the blotter call HeldPracticeOnly a hold rather than a venue failure (gh#865).
+  if (typeof record['outcome'] === 'string') {
+    return { reason: record['outcome'] };
+  }
+  return null;
 }
 
 // --- Auth operations ------------------------------------------------------------------------------------------
