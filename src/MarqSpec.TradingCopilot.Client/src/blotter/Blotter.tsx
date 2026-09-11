@@ -48,6 +48,18 @@ function parsePrice(text: string): number | null {
   return value > 0 ? value : null;
 }
 
+/**
+ * Outcomes that provably sent nothing, so a later re-issue of the same size is safe (gh#928 / gh#865).
+ * Everything else — Unconfirmed, NotReduced, Unreachable — may already have executed; Confirm must stay
+ * disarmed, because a sized partial close is not idempotent and a second POST takes more off than asked.
+ */
+const REDUCE_SAFE_TO_REISSUE = new Set([
+  'ExceedsPosition',
+  'Refused',
+  'AccountBusy',
+  'HeldPracticeOnly',
+]);
+
 function refusalText(result: {
   readonly kind: string;
   readonly reason?: string;
@@ -110,6 +122,7 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
   const [reducing, setReducing] = useState<BlotterPosition | null>(null);
   const [reduceDraft, setReduceDraft] = useState('');
   const [reduceFailure, setReduceFailure] = useState<string | null>(null);
+  const [reduceLocked, setReduceLocked] = useState(false);
   // The reprice sheet: the order being repriced, the operator's new entry, and the current market price the R-16
   // fat-finger band re-measures against (there is no server-side quote read, so the operator supplies it — the same
   // posture the suggestion card takes). A refusal from the re-gate stays on the sheet rather than closing it.
@@ -312,7 +325,7 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
 
   const openAbs = reducing !== null ? Math.abs(reducing.netQuantity) : 0;
   const reduceQty = parseQuantity(reduceDraft);
-  const canReduce = reduceQty !== null && reduceQty < openAbs;
+  const canReduce = reduceQty !== null && reduceQty < openAbs && !reduceLocked;
   const reduceAtOrBeyond = reduceQty !== null && reduceQty >= openAbs;
 
   const confirmReduce = useCallback(() => {
@@ -338,6 +351,11 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
               : `Reduce of ${contract} did NOT complete (${name}). ` +
                   'The position may still be open — check before walking away.',
           );
+          // Unconfirmed / NotReduced / Unreachable may already have executed. Disarm Confirm so a
+          // second click cannot take the size off twice, past flat into an opposing position.
+          if (!REDUCE_SAFE_TO_REISSUE.has(name)) {
+            setReduceLocked(true);
+          }
           return;
         }
         setReduceFailure(null);
@@ -441,6 +459,7 @@ export function Blotter({ accountId }: { readonly accountId: string }) {
                   onClick={() => {
                     setReduceFailure(null);
                     setReduceDraft('');
+                    setReduceLocked(false);
                     setReducing(position);
                   }}
                 >
