@@ -924,6 +924,59 @@ describe('Blotter', () => {
     expect(dialog).toContain('may still be open');
   });
 
+  it('disarms Confirm after Unconfirmed — a second send would take the size off twice', async () => {
+    // Unconfirmed means the close WAS transmitted and its effect cannot be established. Re-sending a
+    // non-idempotent partial close inside the settle window takes the size off twice, past flat into an
+    // opposing position. The in-flight ref only covers two clicks in one tick; this covers the named outcome.
+    reduce.mockResolvedValue({
+      ok: false,
+      kind: 'refused',
+      status: 409,
+      reason: 'Unconfirmed',
+    });
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('reduce-quantity'), { target: { value: '1' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce this position$/i }));
+    });
+
+    const confirm = screen.getByRole('button', {
+      name: /^reduce this position$/i,
+    }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+    expect(reduce).toHaveBeenCalledTimes(1);
+  });
+
+  it('disarms Confirm after NotReduced — the position already moved, so this is not try-again', async () => {
+    reduce.mockResolvedValue({ ok: false, kind: 'failed', status: 409, error: 'NotReduced' });
+
+    await renderBlotter();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce$/i }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('reduce-quantity'), { target: { value: '1' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^reduce this position$/i }));
+    });
+
+    expect(
+      (screen.getByRole('button', { name: /^reduce this position$/i }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(reduce).toHaveBeenCalledTimes(1);
+  });
+
   it('names HeldPracticeOnly as held, not as a venue failure', async () => {
     reduce.mockResolvedValue({
       ok: false,
