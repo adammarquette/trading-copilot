@@ -68,9 +68,25 @@ factory title.
 - The factory repo does not exist yet; this ADR only names it and the packaging.
 - A working title may change when the repo is created; that is an increment, not a reversal.
 
+## Decision log
+
+The *Decision* above is extended by increment; the dated updates below are the trail. Oldest first; this index
+mirrors the `## Update` headings, so keep the two in step when an entry is appended (gh#600).
+
+| Date | Update |
+|---|---|
+| 2026-09-11 | factory repo exists ([MarqSpec.Repo.Factory](https://github.com/adammarquette/MarqSpec.Repo.Factory)) (gh#1178) |
+
+## Update (2026-09-11) — factory repo exists (gh#1178)
+
+[`MarqSpec.Repo.Factory`](https://github.com/adammarquette/MarqSpec.Repo.Factory) is live: a public GitHub
+template repository (`is_template: true`), default branch `develop`. The name is unchanged from this
+record's *Decision*. Tier 1 + Tier 2 live there; Tier 3 remains [gh#1179](https://github.com/adammarquette/trading-copilot/issues/1179).
+
 ## Follow-ups
 
-- Stand up `MarqSpec.Repo.Factory` as a public GitHub template and extract Tier 1 + Tier 2
-  ([gh#1178](https://github.com/adammarquette/trading-copilot/issues/1178)). Not this card.
+- ~~Stand up `MarqSpec.Repo.Factory` as a public GitHub template and extract Tier 1 + Tier 2
+  ([gh#1178](https://github.com/adammarquette/trading-copilot/issues/1178)). Not this card.~~
+  Done — https://github.com/adammarquette/MarqSpec.Repo.Factory
 - Split factory spines out of product files — Tier 3
   ([gh#1179](https://github.com/adammarquette/trading-copilot/issues/1179)). Tier 4 stays in this product.
