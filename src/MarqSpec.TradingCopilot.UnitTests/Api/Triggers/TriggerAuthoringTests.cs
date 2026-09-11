@@ -1,3 +1,4 @@
+using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.MarketData;
@@ -6,9 +7,11 @@ using MarqSpec.TradingCopilot.Domain.Triggers;
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Triggers;
 
 /// <summary>
-/// <see cref="TriggerAuthoring"/> (gh#1135 of gh#1059, R-7) — the <b>one</b> set of refusals over a trigger's
-/// condition half, lifted out of <c>TriggerEndpoints.CreateTriggerAsync</c> so the chat <c>edit_rulebook</c> tool
-/// makes exactly the same ones rather than a second copy that drifts.
+/// <see cref="TriggerAuthoring"/> (gh#1135 / gh#1153 of gh#1059, R-7) — the <b>one</b> set of refusals over a
+/// trigger's condition half, lifted out of <c>TriggerEndpoints.CreateTriggerAsync</c> so the chat
+/// <c>edit_rulebook</c> tool makes exactly the same ones rather than a second copy that drifts. gh#1153 added the
+/// configured-tradable symbol check here so <c>POST /api/triggers</c>, <c>edit_rulebook</c> and
+/// <c>generate_suggestion</c> share one refusal.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -35,12 +38,31 @@ public class TriggerAuthoringTests
     private const string ResolutionRefusal = "The resolution must be a positive number of minutes.";
     private const string HysteresisRefusal = "The hysteresis band must be positive when set — null means none.";
 
+    // The configured-tradable refusal (gh#1153). Pinned against a fake catalog so the message shape is independent
+    // of the built-in product defaults — those are InstrumentSpecSource's to list, this type's to name.
+    private const string UnconfiguredRefusal = "Unknown instrument — configured contracts are ES, NQ.";
+
+    /// <summary>
+    /// A read-only catalog of the contracts the trader has. The seam is <see cref="IInstrumentSpecSource"/> —
+    /// config-backed, no venue I/O — so a refusal can name the set without the author reaching a venue type.
+    /// </summary>
+    private static IInstrumentSpecSource Catalog(bool configured, params string[] listed)
+    {
+        IInstrumentSpecSource specs = A.Fake<IInstrumentSpecSource>();
+        InstrumentContractSpec? unused = null;
+        A.CallTo(() => specs.TryResolve(A<InstrumentId>._, out unused)).Returns(configured);
+        A.CallTo(() => specs.ConfiguredSymbols).Returns(listed);
+        return specs;
+    }
+
+    private static IInstrumentSpecSource TradableCatalog() => Catalog(true, "ES", "NQ");
+
     [Theory]
     [InlineData("ES")]
-    [InlineData("mnq")]
-    public void RefuseSymbol_ShouldAccept_WhenTheSymbolParses(string symbol)
+    [InlineData("nq")]
+    public void RefuseSymbol_ShouldAccept_WhenTheSymbolNamesAConfiguredContract(string symbol)
     {
-        TriggerAuthoring.RefuseSymbol(symbol, out InstrumentId instrument).Should().BeNull();
+        TriggerAuthoring.RefuseSymbol(symbol, TradableCatalog(), out InstrumentId instrument).Should().BeNull();
         instrument.Symbol.Should().NotBeEmpty("an accepted symbol yields the parsed instrument the caller stores");
     }
 
@@ -49,8 +71,30 @@ public class TriggerAuthoringTests
     [InlineData("")]
     [InlineData("   ")]
     public void RefuseSymbol_ShouldRefuseVerbatim_WhenTheSymbolIsBlank(string? symbol) =>
-        TriggerAuthoring.RefuseSymbol(symbol, out _).Should().Be(
+        TriggerAuthoring.RefuseSymbol(symbol, TradableCatalog(), out _).Should().Be(
             SymbolRefusal, "the API's 400 body must read exactly as it did before the extraction");
+
+    [Fact]
+    public void RefuseSymbol_ShouldRefuseAndNameTheConfiguredSet_WhenTheSymbolIsNotTradable()
+    {
+        string? refusal = TriggerAuthoring.RefuseSymbol("ZZQA", Catalog(false, "ES", "NQ"), out InstrumentId instrument);
+
+        refusal.Should().Be(
+            UnconfiguredRefusal,
+            "a hallucinated symbol is refused as the indicator's unknown-name is — naming what the trader HAS");
+        instrument.Symbol.Should().Be("ZZQA", "it parsed; the miss is configured-tradable, not syntax");
+    }
+
+    [Fact]
+    public void RefuseUnconfiguredInstrument_ShouldAccept_WhenTheSpecSourceResolvesIt() =>
+        TriggerAuthoring.RefuseUnconfiguredInstrument(InstrumentId.Parse("ES"), TradableCatalog()).Should().BeNull();
+
+    [Fact]
+    public void RefuseUnconfiguredInstrument_ShouldRefuseAndNameTheConfiguredSet_WhenTheSpecSourceMisses() =>
+        TriggerAuthoring.RefuseUnconfiguredInstrument(
+            InstrumentId.Parse("MES"), Catalog(false, "ES", "NQ")).Should().Be(
+            UnconfiguredRefusal,
+            "generate_suggestion uses this same string, so a chat proposal and a trigger share one message shape");
 
     [Theory]
     [InlineData(IndicatorComparison.Below)]

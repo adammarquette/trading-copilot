@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FakeItEasy;
 using MarqSpec.TradingCopilot.Api.Chat.Tools;
+using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
 using MarqSpec.TradingCopilot.Data;
@@ -57,11 +58,15 @@ public class GenerateSuggestionToolTests
 
     private TradingCopilotDbContext Context(Guid asUser) => new(DbOptions, new FixedUser(asUser));
 
+    private static readonly IInstrumentSpecSource _catalog =
+        new InstrumentSpecSource(Options.Create(new InstrumentSpecOptions()));
+
     private GenerateSuggestionTool Tool(Guid? asUser = null) => new(
         DbOptions,
         new FixedUser(asUser ?? _owner),
         _deadlines,
         _notifier,
+        _catalog,
         new FakeTimeProvider(_now),
         Options.Create(_options),
         NullLogger<GenerateSuggestionTool>.Instance);
@@ -74,7 +79,7 @@ public class GenerateSuggestionToolTests
 
     // A coherent long: stop below entry, target above. The one input shape every "the system decides" case varies from.
     private const string CoherentBuy =
-        "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":5000.25,\"stopPrice\":4990.00,"
+        "{\"instrument\":\"ES\",\"side\":\"Buy\",\"entryPrice\":5000.25,\"stopPrice\":4990.00,"
         + "\"targetPrice\":5020.50,\"rationale\":\"Reclaimed the overnight low on rising delta.\",\"confidence\":72}";
 
     private static string Input(string extraJson) => CoherentBuy[..^1] + "," + extraJson + "}";
@@ -134,7 +139,7 @@ public class GenerateSuggestionToolTests
             "one accepted proposal stages exactly one row").Which;
         staged.UserId.Should().Be(_owner, "the row belongs to the calling operator (R-20)");
         staged.AccountId.Should().Be(account.Id);
-        staged.Instrument.Should().Be("MES");
+        staged.Instrument.Should().Be("ES");
         staged.Side.Should().Be(OrderSide.Buy);
         staged.EntryPrice.Should().Be(5000.25m);
         staged.StopPrice.Should().Be(4990.00m);
@@ -237,10 +242,10 @@ public class GenerateSuggestionToolTests
     /// <summary>Proposals whose geometry no coherent setup could have — each must stage nothing.</summary>
     public static TheoryData<string, string> IncoherentGeometry() => new()
     {
-        { "stop above entry on a long", "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":5010,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}" },
-        { "target below entry on a long", "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":4980,\"rationale\":\"x\",\"confidence\":50}" },
-        { "stop below entry on a short", "{\"instrument\":\"MES\",\"side\":\"Sell\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":4980,\"rationale\":\"x\",\"confidence\":50}" },
-        { "a non-positive price", "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":0,\"stopPrice\":-1,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}" },
+        { "stop above entry on a long", "{\"instrument\":\"ES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":5010,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}" },
+        { "target below entry on a long", "{\"instrument\":\"ES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":4980,\"rationale\":\"x\",\"confidence\":50}" },
+        { "stop below entry on a short", "{\"instrument\":\"ES\",\"side\":\"Sell\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":4980,\"rationale\":\"x\",\"confidence\":50}" },
+        { "a non-positive price", "{\"instrument\":\"ES\",\"side\":\"Buy\",\"entryPrice\":0,\"stopPrice\":-1,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}" },
     };
 
     [Theory]
@@ -514,11 +519,11 @@ public class GenerateSuggestionToolTests
         { "a JSON array rather than an object", "[1,2,3]" },
         { "no instrument", "{\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}" },
         { "a blank instrument", "{\"instrument\":\"   \",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}" },
-        { "a side that is neither Buy nor Sell", "{\"instrument\":\"MES\",\"side\":\"Hedge\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}" },
-        { "a price sent as a string", "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":\"5000\",\"stopPrice\":4990,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}" },
-        { "a missing rationale", "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":5020,\"confidence\":50}" },
-        { "confidence above 100", "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":150}" },
-        { "confidence sent as a string", "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":\"high\"}" },
+        { "a side that is neither Buy nor Sell", "{\"instrument\":\"ES\",\"side\":\"Hedge\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}" },
+        { "a price sent as a string", "{\"instrument\":\"ES\",\"side\":\"Buy\",\"entryPrice\":\"5000\",\"stopPrice\":4990,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}" },
+        { "a missing rationale", "{\"instrument\":\"ES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":5020,\"confidence\":50}" },
+        { "confidence above 100", "{\"instrument\":\"ES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":150}" },
+        { "confidence sent as a string", "{\"instrument\":\"ES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":\"high\"}" },
     };
 
     [Theory]
@@ -535,11 +540,27 @@ public class GenerateSuggestionToolTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_ShouldRefuseWithTheAuthoringMessage_WhenTheInstrumentIsNotConfigured()
+    {
+        await SeedAccountAsync(_owner);
+
+        string result = await Tool().ExecuteAsync(
+            "{\"instrument\":\"ZZQA\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,"
+            + "\"targetPrice\":5020,\"rationale\":\"x\",\"confidence\":50}",
+            CancellationToken.None);
+
+        ErrorIn(result).Should().Be(
+            "Unknown instrument — configured contracts are CL, ES, GC, NQ.",
+            "generate_suggestion uses TriggerAuthoring.RefuseUnconfiguredInstrument — same shape as a trigger");
+        (await StagedAsync()).Should().BeEmpty("a hallucinated symbol stages nothing");
+    }
+
+    [Fact]
     public async Task ExecuteAsync_ShouldRefuseARationaleLongerThanThePersistedColumn()
     {
         await SeedAccountAsync(_owner);
 
-        string overLong = "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,"
+        string overLong = "{\"instrument\":\"ES\",\"side\":\"Buy\",\"entryPrice\":5000,\"stopPrice\":4990,"
             + "\"targetPrice\":5020,\"confidence\":50,\"rationale\":\"" + new string('x', 2001) + "\"}";
 
         string result = await Tool().ExecuteAsync(overLong, CancellationToken.None);

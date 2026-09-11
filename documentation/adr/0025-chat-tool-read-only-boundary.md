@@ -182,6 +182,19 @@ R-22 set — the second copy the boundary test said did not exist. The schema en
 The paragraph above that identified a write tool "by the `DbContextOptions` write handle a read tool never holds"
 is superseded by this update for the detector; the per-tool (not union) allow-list rule stands.
 
+## Update — 2026-09-11: the instrument a write tool is handed is validated (gh#1153)
+
+The Follow-ups bullet below is closed. The configured / tradable check lives in `TriggerAuthoring`, not in the
+tools: `POST /api/triggers` and `edit_rulebook` share that type, so the operator and the model face one bar, and
+`generate_suggestion` calls `RefuseUnconfiguredInstrument` for the **same refusal string**. A hallucinated symbol
+is refused up front and the message names the configured contracts, so a caller can correct in one round.
+
+The catalog is `IInstrumentSpecSource` — the existing config-backed read (tick / point / safety-stop), now also
+exposing `ConfiguredSymbols` so a refusal can name what the trader *does* have. It is not a venue client:
+`InstrumentSpecSource` reads `InstrumentSpecs` options and does no I/O. Each write tool's pinned constructor
+allow-list was widened **deliberately** for that read seam; the boundary test names it and argues the
+read-only-ness. Points 2–5 of the Decision, and the write-tool rules above, stand.
+
 ## Follow-ups
 
 - ✅ `read_positions` (venue-truth) landed as its own increment (gh#929), completing the
@@ -214,17 +227,9 @@ is superseded by this update for the detector; the per-tool (not union) allow-li
   still holds no risk limits or account state), carrying the same injection-sentinel guard as the message-content
   path. It rides this increment's **single** governor gate + fail-open ledger, is threshold-skipped before the cap,
   and fails open to a history-only turn — so grounding never widens the execution surface or the instruction surface.
-- **The instrument a write tool is handed is syntax-checked, not validated (gh#1134 review; carded as gh#1153).**
-  `generate_suggestion` parses the model's symbol through `InstrumentId.TryParse` but does not confirm it names a
-  configured, tradable contract, so a hallucinated symbol stages a card the take path refuses at spec resolution and
-  the drift sweep re-resolves once a pass until it expires. It is fail-closed and cosmetic today, and it is recorded
-  here rather than in a merged PR's description because it is the one place a model-chosen string transitively
-  reaches a venue call — which is worth knowing beside the boundary claim above. Closing it means giving the tool an
-  instrument-spec read, which **widens the write tool's pinned constructor allow-list**: a deliberate, separately
-  reviewed act, not a rider on the increment that introduced the tool. **gh#1135 inherited it rather than closing
-  it**: `edit_rulebook` parses its symbol the same way, and a hallucinated one there writes a rule whose indicator is
-  never measurable — which surfaces as the gh#469 staleness advisory rather than as an authoring refusal. It is also
-  at **parity with the operator's own `POST /api/triggers`**, which has always accepted any parseable symbol, so
-  closing it for the tool alone would make the model's authoring stricter than the operator's — a decision gh#1153
-  has to make rather than inherit.
+- ✅ **The instrument a write tool is handed is validated (gh#1153).** Closed by validating in `TriggerAuthoring`
+  (option (a) on the card) so `POST /api/triggers` and `edit_rulebook` share the configured-tradable refusal, and
+  `generate_suggestion` uses the same message shape. The catalog is the existing **read** `IInstrumentSpecSource`
+  seam — config-backed, no venue I/O — with `ConfiguredSymbols` so the refusal names what the trader has. Each
+  write tool's allow-list was widened deliberately for that seam; see the 2026-09-11 Update.
 - Streaming a *tool-using* turn's final answer (removing the round-1 double-call) is inc 4b.

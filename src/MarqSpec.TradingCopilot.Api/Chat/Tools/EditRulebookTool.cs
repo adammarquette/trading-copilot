@@ -85,6 +85,7 @@ public sealed class EditRulebookTool : IChatTool
     private readonly DbContextOptions<TradingCopilotDbContext> _options;
     private readonly ICurrentUser _currentUser;
     private readonly IChatTurnScope _turnScope;
+    private readonly IInstrumentSpecSource _specs;
     private readonly TimeProvider _clock;
     private readonly ILogger<EditRulebookTool> _logger;
 
@@ -92,23 +93,31 @@ public sealed class EditRulebookTool : IChatTool
     /// <param name="options">The shared context options, used to build the caller's own R-20-scoped context per call.</param>
     /// <param name="currentUser">The request's operator (R-20) — the owner every row is written under.</param>
     /// <param name="turnScope">The conversation this turn runs in — the rule's authorship provenance (gh#471).</param>
+    /// <param name="specs">
+    /// The configured-contract catalog (gh#1153) — a <b>read</b> of static instrument specs, never venue I/O.
+    /// Passed through to <see cref="TriggerAuthoring"/> so this tool and <c>POST /api/triggers</c> refuse the
+    /// same unconfigured symbol.
+    /// </param>
     /// <param name="clock">The clock, so <c>CreatedAt</c> is testable.</param>
     /// <param name="logger">The logger (a refusal or a write fault is logged, then failed closed).</param>
     public EditRulebookTool(
         DbContextOptions<TradingCopilotDbContext> options,
         ICurrentUser currentUser,
         IChatTurnScope turnScope,
+        IInstrumentSpecSource specs,
         TimeProvider clock,
         ILogger<EditRulebookTool> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(currentUser);
         ArgumentNullException.ThrowIfNull(turnScope);
+        ArgumentNullException.ThrowIfNull(specs);
         ArgumentNullException.ThrowIfNull(clock);
         ArgumentNullException.ThrowIfNull(logger);
         _options = options;
         _currentUser = currentUser;
         _turnScope = turnScope;
+        _specs = specs;
         _clock = clock;
         _logger = logger;
     }
@@ -199,7 +208,7 @@ public sealed class EditRulebookTool : IChatTool
     private async Task<string> AuthorAsync(
         TradingCopilotDbContext database, Edit edit, Guid conversationId, CancellationToken cancellationToken)
     {
-        if (TriggerAuthoring.RefuseSymbol(edit.Symbol, out InstrumentId instrument) is { } symbolError)
+        if (TriggerAuthoring.RefuseSymbol(edit.Symbol, _specs, out InstrumentId instrument) is { } symbolError)
         {
             return Error(symbolError);
         }
