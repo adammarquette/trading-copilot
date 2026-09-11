@@ -389,7 +389,7 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
             "Staged: " + string.Join(
                 " ", ScriptedChatLlmProvider.ToolResultsIn(request).Select(result => result.Content))));
 
-        using HttpResponseMessage response = await TakeTurnAsync(client, conversationId, "Propose an MES long.");
+        using HttpResponseMessage response = await TakeTurnAsync(client, conversationId, "Propose an ES long.");
         response.StatusCode.Should().Be(HttpStatusCode.OK, "a write-tool turn completes like any other");
 
         // The premise: this tool really is in the offered set, so the dispatch below is a dispatch.
@@ -439,7 +439,7 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
             "Result: " + string.Join(
                 " ", ScriptedChatLlmProvider.ToolResultsIn(request).Select(result => result.Content))));
 
-        using HttpResponseMessage response = await TakeTurnAsync(client, conversationId, "Propose an MES long.");
+        using HttpResponseMessage response = await TakeTurnAsync(client, conversationId, "Propose an ES long.");
         response.StatusCode.Should().Be(
             HttpStatusCode.OK, "the turn recovers — a refused proposal is fed back, it does not crash the turn");
 
@@ -762,11 +762,12 @@ public class ChatToolLayerIntegrationTests : IClassFixture<ChatToolLayerTestPost
     }
 
     /// <summary>
-    /// A coherent MES long, varying only in <paramref name="stopPrice"/> — the one number that separates the accepted
-    /// proposal from the refused one, so the pair differs by nothing else.
+    /// A coherent ES long, varying only in <paramref name="stopPrice"/> — the one number that separates the accepted
+    /// proposal from the refused one, so the pair differs by nothing else. ES is a configured contract (gh#1153);
+    /// a hallucinated symbol is now an authoring refusal, so this pair must use one the catalog actually has.
     /// </summary>
     private static string ProposalJson(string accountName, string stopPrice) =>
-        "{\"instrument\":\"MES\",\"side\":\"Buy\",\"entryPrice\":5000.25,\"stopPrice\":" + stopPrice
+        "{\"instrument\":\"ES\",\"side\":\"Buy\",\"entryPrice\":5000.25,\"stopPrice\":" + stopPrice
         + ",\"targetPrice\":5020.50,\"rationale\":\"Reclaimed the overnight low on rising delta.\","
         + "\"confidence\":70,\"account\":\"" + accountName + "\"}";
 
