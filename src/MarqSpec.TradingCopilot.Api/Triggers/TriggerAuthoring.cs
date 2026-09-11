@@ -6,8 +6,8 @@ using MarqSpec.TradingCopilot.Domain.Venue;
 namespace MarqSpec.TradingCopilot.Api.Triggers;
 
 /// <summary>
-/// The <b>one</b> set of authoring refusals over a trigger's condition half (gh#1135 of gh#1059, R-7) — the symbol,
-/// comparison, period, resolution, indicator and hysteresis checks
+/// The <b>one</b> set of authoring refusals over a trigger's condition half (gh#1135 / gh#1153 of gh#1059, R-7) — the symbol
+/// (syntax <i>and</i> configured-tradable), comparison, period, resolution, indicator and hysteresis checks
 /// <see cref="TriggerEndpoints.CreateTriggerAsync"/> has always made, lifted out so a <i>second</i> author can make
 /// exactly the same ones.
 /// </summary>
@@ -25,10 +25,12 @@ namespace MarqSpec.TradingCopilot.Api.Triggers;
 /// before — pinned by <c>TriggerAuthoringTests</c>, since the endpoint suite asserts only the status.
 /// </para>
 /// <para>
-/// Pure: no I/O, no clock, no database. The account / route / size rules stay with their callers, because they
-/// genuinely differ — the agent-review route is the endpoint's alone, and chat authors the mechanical route only.
-/// The per-indicator threshold range is <see cref="TriggerThreshold"/>'s and stays there: it is a domain rule about
-/// an indicator's semantics rather than an authoring-shape check.
+/// Pure: no I/O, no clock, no database of its own. The configured-tradable check (gh#1153) reads
+/// <see cref="IInstrumentSpecSource"/> — a config-backed catalog the caller hands in, never a venue client.
+/// The account / route / size rules stay with their callers, because they genuinely differ — the agent-review
+/// route is the endpoint's alone, and chat authors the mechanical route only. The per-indicator threshold range
+/// is <see cref="TriggerThreshold"/>'s and stays there: it is a domain rule about an indicator's semantics
+/// rather than an authoring-shape check.
 /// </para>
 /// </remarks>
 internal static class TriggerAuthoring
@@ -45,14 +47,37 @@ internal static class TriggerAuthoring
     /// <summary>The canonical indicator names, for a caller that lists them (a tool schema, an error message).</summary>
     public static IReadOnlyCollection<string> KnownIndicators => (IReadOnlyCollection<string>)_knownIndicators.Keys;
 
-    /// <summary>Refuses a blank or unparseable instrument symbol.</summary>
+    /// <summary>
+    /// Refuses a blank, unparseable, or unconfigured instrument symbol (gh#1153). Syntax first, then the
+    /// configured-tradable check, so a blank still reads as the endpoint's original 400.
+    /// </summary>
     /// <param name="symbol">The caller-supplied symbol.</param>
-    /// <param name="instrument">The parsed instrument when accepted; default otherwise.</param>
-    /// <returns>The refusal, or <see langword="null"/> when the symbol is usable.</returns>
-    public static string? RefuseSymbol(string? symbol, out InstrumentId instrument) =>
-        InstrumentId.TryParse(symbol, out instrument)
-            ? null
+    /// <param name="specs">The configured-contract catalog — a read, never venue I/O.</param>
+    /// <param name="instrument">The parsed instrument when the symbol parses; default otherwise.</param>
+    /// <returns>The refusal, or <see langword="null"/> when the symbol names a configured contract.</returns>
+    public static string? RefuseSymbol(string? symbol, IInstrumentSpecSource specs, out InstrumentId instrument)
+    {
+        ArgumentNullException.ThrowIfNull(specs);
+        return InstrumentId.TryParse(symbol, out instrument)
+            ? RefuseUnconfiguredInstrument(instrument, specs)
             : "A trigger needs a non-blank instrument symbol.";
+    }
+
+    /// <summary>
+    /// Refuses a parsed symbol that does not name a configured, tradable contract. The message names what the
+    /// trader <i>does</i> have, so a caller (the operator, or <c>generate_suggestion</c>) can correct in one
+    /// round. Shared so a chat proposal and a trigger refuse with the same shape.
+    /// </summary>
+    /// <param name="instrument">The already-parsed instrument.</param>
+    /// <param name="specs">The configured-contract catalog — a read, never venue I/O.</param>
+    /// <returns>The refusal, or <see langword="null"/> when the instrument is configured.</returns>
+    public static string? RefuseUnconfiguredInstrument(InstrumentId instrument, IInstrumentSpecSource specs)
+    {
+        ArgumentNullException.ThrowIfNull(specs);
+        return specs.TryResolve(instrument, out _)
+            ? null
+            : $"Unknown instrument — configured contracts are {string.Join(", ", specs.ConfiguredSymbols)}.";
+    }
 
     /// <summary>Refuses the fail-closed <see cref="IndicatorComparison.Unknown"/> zero value.</summary>
     /// <param name="comparison">The caller-supplied comparison.</param>

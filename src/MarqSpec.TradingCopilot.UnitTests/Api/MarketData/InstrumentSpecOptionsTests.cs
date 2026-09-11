@@ -59,6 +59,31 @@ public class InstrumentSpecOptionsTests
         spec.Should().BeNull();
     }
 
+    // ---- gh#1153: an authoring refusal must be able to name what the trader DOES have ----
+
+    [Fact]
+    public void ConfiguredSymbols_ShouldListTheBuiltInDefaults_InStableOrder() =>
+        Source().ConfiguredSymbols.Should().Equal(
+            ["CL", "ES", "GC", "NQ"],
+            "a refusal that names the trader's contracts cannot shuffle them between calls");
+
+    [Fact]
+    public void ConfiguredSymbols_ShouldIncludeAConfiguredExtension_AndNotDuplicateAnOverride()
+    {
+        InstrumentSpecOptions options = new()
+        {
+            Instruments =
+            [
+                new InstrumentSpecOption { Symbol = "ES", TickSize = 0.5m, PointValue = 25m, SafetyStopTicks = 40 },
+                new InstrumentSpecOption { Symbol = "RTY", TickSize = 0.1m, PointValue = 50m, SafetyStopTicks = 30 },
+            ],
+        };
+
+        Source(options).ConfiguredSymbols.Should().Equal(
+            ["CL", "ES", "GC", "NQ", "RTY"],
+            "an override replaces a default wholesale; an extension is listed beside them");
+    }
+
     // ---- configuration overrides and extends, mirroring the flatten schedule ----
 
     [Fact]

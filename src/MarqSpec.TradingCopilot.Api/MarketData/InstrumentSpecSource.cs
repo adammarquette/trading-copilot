@@ -24,7 +24,11 @@ public sealed class InstrumentSpecSource : IInstrumentSpecSource
         ArgumentNullException.ThrowIfNull(options);
 
         _specs = options.Value.ToSpecs();
+        ConfiguredSymbols = [.. _specs.Keys.OrderBy(symbol => symbol, StringComparer.OrdinalIgnoreCase)];
     }
+
+    /// <inheritdoc />
+    public IReadOnlyList<string> ConfiguredSymbols { get; }
 
     /// <inheritdoc />
     public bool TryResolve(InstrumentId instrument, [NotNullWhen(true)] out InstrumentContractSpec? spec)

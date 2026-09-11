@@ -44,4 +44,11 @@ public interface IInstrumentSpecSource
     /// <param name="spec">The resolved facts when configured; otherwise <see langword="null"/>.</param>
     /// <returns><see langword="true"/> when the instrument is configured; <see langword="false"/> on an explicit miss.</returns>
     bool TryResolve(InstrumentId instrument, [NotNullWhen(true)] out InstrumentContractSpec? spec);
+
+    /// <summary>
+    /// The configured, tradable symbols (gh#1153) — so an authoring refusal can name what the trader
+    /// <i>does</i> have, rather than only that the one they sent is missing. Stable order, never empty when
+    /// the built-in defaults are in force.
+    /// </summary>
+    IReadOnlyList<string> ConfiguredSymbols { get; }
 }

@@ -1,12 +1,15 @@
+using MarqSpec.TradingCopilot.Api.MarketData;
 using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain;
 using MarqSpec.TradingCopilot.Domain.Notifications;
 using MarqSpec.TradingCopilot.Domain.Triggers;
 using MarqSpec.TradingCopilot.Domain.Venue;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace MarqSpec.TradingCopilot.UnitTests.Api.Triggers;
 
@@ -30,6 +33,16 @@ public class TriggerEndpointsTests
             new FixedUser(asUser ?? _operator));
 
     private static int StatusOf(IResult result) => ((IStatusCodeHttpResult)result).StatusCode ?? 0;
+
+    private static readonly IInstrumentSpecSource _specs =
+        new InstrumentSpecSource(Options.Create(new InstrumentSpecOptions()));
+
+    private static Task<IResult> CreateAsync(
+        CreateTriggerRequest request,
+        ICurrentUser user,
+        TradingCopilotDbContext context,
+        CancellationToken cancellationToken) =>
+        TriggerEndpoints.CreateTriggerAsync(request, user, context, _specs, cancellationToken);
 
     private static CreateTriggerRequest ValidRequest() => new(
         Symbol: "ES",
@@ -102,7 +115,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest(), new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status201Created);
@@ -127,7 +140,7 @@ public class TriggerEndpointsTests
         // straight to Fired and holds it there (ADR-0019's silent monitor). Refused whole; nothing partially stored.
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Comparison = IndicatorComparison.Above, Threshold = 0m },
             new FixedUser(_operator),
             context,
@@ -145,14 +158,14 @@ public class TriggerEndpointsTests
         // "reject zero" would be both too strict and, for an rsi threshold beyond 100, too lax.
         await using TradingCopilotDbContext context = Context();
 
-        IResult atr = await TriggerEndpoints.CreateTriggerAsync(
+        IResult atr = await CreateAsync(
             ValidRequest() with { Indicator = "atr", Comparison = IndicatorComparison.Above, Threshold = 0m },
             new FixedUser(_operator),
             context,
             CancellationToken.None);
         StatusOf(atr).Should().Be(StatusCodes.Status400BadRequest);
 
-        IResult rsi = await TriggerEndpoints.CreateTriggerAsync(
+        IResult rsi = await CreateAsync(
             ValidRequest() with { Threshold = 50m },
             new FixedUser(_operator),
             context,
@@ -240,12 +253,26 @@ public class TriggerEndpointsTests
         // a requirement (gh#471). The reference is for triggers a rule minted from chat, never operator-hand-authored ones.
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest(), new FixedUser(_operator), context, CancellationToken.None);
 
         TriggerResponse response = ((IValueHttpResult)result).Value.Should().BeOfType<TriggerResponse>().Subject;
         response.SourceRuleId.Should().BeNull();
         response.SourceConversationId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Create_ShouldRefuse_WhenTheSymbolIsNotAConfiguredContract()
+    {
+        // gh#1153: the operator's POST faces the same configured-tradable bar as edit_rulebook — syntax-only
+        // parity would let a hallucinated symbol become a rule whose indicator is never measurable.
+        await using TradingCopilotDbContext context = Context();
+
+        IResult result = await CreateAsync(
+            ValidRequest() with { Symbol = "ZZQA" }, new FixedUser(_operator), context, CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
+        (await Context().Triggers.AnyAsync()).Should().BeFalse();
     }
 
     [Theory]
@@ -255,7 +282,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Indicator = indicator }, new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status201Created);
@@ -267,7 +294,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Comparison = IndicatorComparison.Unknown }, new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
@@ -281,7 +308,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Period = period }, new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
@@ -295,7 +322,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { ResolutionMinutes = resolution }, new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
@@ -307,7 +334,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Indicator = "macd" }, new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
@@ -319,7 +346,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Hysteresis = 0m }, new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
@@ -331,7 +358,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Route = TriggerRoute.Unknown }, new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
@@ -345,7 +372,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest(), new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status201Created);
@@ -360,7 +387,7 @@ public class TriggerEndpointsTests
         Guid accountId = await SeedAccountAsync(_operator);
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { AccountId = accountId }, new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
@@ -372,7 +399,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Size = 1 }, new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);
@@ -387,7 +414,7 @@ public class TriggerEndpointsTests
         Guid accountId = await SeedAccountAsync(_operator, TradingMode.Practice);
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             AgentReviewRequest(accountId, size: 3), new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status201Created);
@@ -406,7 +433,7 @@ public class TriggerEndpointsTests
     {
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Route = TriggerRoute.AgentReview, Size = 2 },
             new FixedUser(_operator), context, CancellationToken.None);
 
@@ -422,7 +449,7 @@ public class TriggerEndpointsTests
         Guid accountId = await SeedAccountAsync(_operator);
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Route = TriggerRoute.AgentReview, AccountId = accountId, Size = size },
             new FixedUser(_operator), context, CancellationToken.None);
 
@@ -436,7 +463,7 @@ public class TriggerEndpointsTests
         Guid accountId = await SeedAccountAsync(_operator);
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             ValidRequest() with { Route = TriggerRoute.AgentReview, AccountId = accountId }, // Size left null
             new FixedUser(_operator), context, CancellationToken.None);
 
@@ -450,7 +477,7 @@ public class TriggerEndpointsTests
         Guid theirs = await SeedAccountAsync(Guid.NewGuid()); // another operator's -- the R-20 filter hides it
         await using TradingCopilotDbContext context = Context(); // as _operator
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             AgentReviewRequest(theirs), new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status404NotFound);
@@ -463,7 +490,7 @@ public class TriggerEndpointsTests
         Guid accountId = await SeedAccountAsync(_operator, TradingMode.Undeclared);
         await using TradingCopilotDbContext context = Context();
 
-        IResult result = await TriggerEndpoints.CreateTriggerAsync(
+        IResult result = await CreateAsync(
             AgentReviewRequest(accountId), new FixedUser(_operator), context, CancellationToken.None);
 
         StatusOf(result).Should().Be(StatusCodes.Status400BadRequest);

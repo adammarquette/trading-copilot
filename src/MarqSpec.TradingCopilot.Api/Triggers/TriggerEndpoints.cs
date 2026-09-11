@@ -47,6 +47,7 @@ public static class TriggerEndpoints
         CreateTriggerRequest request,
         ICurrentUser currentUser,
         TradingCopilotDbContext database,
+        IInstrumentSpecSource specs,
         CancellationToken cancellationToken)
     {
         // The condition half's refusals are TriggerAuthoring's (gh#1135) -- SHARED with the chat edit_rulebook tool
@@ -54,7 +55,8 @@ public static class TriggerEndpoints
         // (gh#1007 is the precedent: the same threshold gap had to be fixed at create AND at patch). The evaluation
         // ORDER is this endpoint's own and unchanged -- a bad route still refuses before a bad period -- because each
         // refusal is its own call rather than one whole-request validator, and every refusal string is verbatim.
-        if (TriggerAuthoring.RefuseSymbol(request.Symbol, out InstrumentId instrument) is { } symbolError)
+        // gh#1153: the symbol check now includes configured-tradable, so the operator and the model face one bar.
+        if (TriggerAuthoring.RefuseSymbol(request.Symbol, specs, out InstrumentId instrument) is { } symbolError)
         {
             return Results.BadRequest(new { error = symbolError });
         }

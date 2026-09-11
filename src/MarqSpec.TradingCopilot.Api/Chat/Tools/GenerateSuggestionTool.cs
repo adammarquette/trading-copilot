@@ -1,6 +1,7 @@
 using System.Text.Json;
 using MarqSpec.TradingCopilot.Api.Realtime;
 using MarqSpec.TradingCopilot.Api.Suggestions;
+using MarqSpec.TradingCopilot.Api.Triggers;
 using MarqSpec.TradingCopilot.Data;
 using MarqSpec.TradingCopilot.Data.Entities;
 using MarqSpec.TradingCopilot.Data.Tenancy;
@@ -71,6 +72,7 @@ public sealed class GenerateSuggestionTool : IChatTool
     private readonly ICurrentUser _currentUser;
     private readonly ISessionDeadlineSource _deadlines;
     private readonly ISuggestionRealtimeNotifier _notifier;
+    private readonly IInstrumentSpecSource _specs;
     private readonly TimeProvider _clock;
     private readonly SuggestionOptions _suggestions;
     private readonly ILogger<GenerateSuggestionTool> _logger;
@@ -80,6 +82,11 @@ public sealed class GenerateSuggestionTool : IChatTool
     /// <param name="currentUser">The request's operator (R-20) — the owner every row is written under.</param>
     /// <param name="deadlines">The read-only session-deadline seam the expiry clamp reads (never the flatten machinery).</param>
     /// <param name="notifier">The per-owner realtime notifier the staged card is pushed on (presentation-only, best-effort).</param>
+    /// <param name="specs">
+    /// The configured-contract catalog (gh#1153) — a <b>read</b> of static instrument specs, never venue I/O.
+    /// The tool asks <see cref="TriggerAuthoring.RefuseUnconfiguredInstrument"/> so a hallucinated symbol is
+    /// refused with the same message <c>edit_rulebook</c> and <c>POST /api/triggers</c> emit.
+    /// </param>
     /// <param name="clock">The clock, so issuance and expiry are testable.</param>
     /// <param name="suggestionOptions">The operator's suggestion configuration — the validity window and the chat proposal size.</param>
     /// <param name="logger">The logger (a refusal or a write fault is logged, then failed closed).</param>
@@ -88,6 +95,7 @@ public sealed class GenerateSuggestionTool : IChatTool
         ICurrentUser currentUser,
         ISessionDeadlineSource deadlines,
         ISuggestionRealtimeNotifier notifier,
+        IInstrumentSpecSource specs,
         TimeProvider clock,
         IOptions<SuggestionOptions> suggestionOptions,
         ILogger<GenerateSuggestionTool> logger)
@@ -96,6 +104,7 @@ public sealed class GenerateSuggestionTool : IChatTool
         ArgumentNullException.ThrowIfNull(currentUser);
         ArgumentNullException.ThrowIfNull(deadlines);
         ArgumentNullException.ThrowIfNull(notifier);
+        ArgumentNullException.ThrowIfNull(specs);
         ArgumentNullException.ThrowIfNull(clock);
         ArgumentNullException.ThrowIfNull(suggestionOptions);
         ArgumentNullException.ThrowIfNull(logger);
@@ -103,6 +112,7 @@ public sealed class GenerateSuggestionTool : IChatTool
         _currentUser = currentUser;
         _deadlines = deadlines;
         _notifier = notifier;
+        _specs = specs;
         _clock = clock;
         _suggestions = suggestionOptions.Value;
         _logger = logger;
@@ -120,7 +130,7 @@ public sealed class GenerateSuggestionTool : IChatTool
         + "choose the position quantity, the trading mode, or how long the proposal stays valid — the system sets "
         + "those. A proposal whose stop or target is on the wrong side of entry is rejected and nothing is staged.",
         "{\"type\":\"object\",\"properties\":{"
-        + "\"instrument\":{\"type\":\"string\",\"description\":\"The venue-neutral instrument symbol, e.g. ES or MNQ.\"},"
+        + "\"instrument\":{\"type\":\"string\",\"description\":\"The venue-neutral instrument symbol. It must name a configured contract.\"},"
         + "\"side\":{\"type\":\"string\",\"enum\":[\"Buy\",\"Sell\"],\"description\":\"The proposed direction.\"},"
         + "\"entryPrice\":{\"type\":\"number\",\"description\":\"The proposed entry price.\"},"
         + "\"stopPrice\":{\"type\":\"number\",\"description\":\"The protective stop price - below entry for a Buy, above for a Sell.\"},"
@@ -144,6 +154,13 @@ public sealed class GenerateSuggestionTool : IChatTool
         catch (JsonException)
         {
             return Error("The tool input was not valid JSON.");
+        }
+
+        // Same configured-tradable refusal TriggerAuthoring makes for POST /api/triggers and edit_rulebook
+        // (gh#1153): a hallucinated symbol stages nothing, and the model is told what the trader DOES have.
+        if (TriggerAuthoring.RefuseUnconfiguredInstrument(proposal.Instrument, _specs) is { } unknownInstrument)
+        {
+            return Error(unknownInstrument);
         }
 
         // THE SAME CHECK THE SCAN MAKES (SuggestionGeometry, R-4): a self-evidently broken proposal -- a non-positive

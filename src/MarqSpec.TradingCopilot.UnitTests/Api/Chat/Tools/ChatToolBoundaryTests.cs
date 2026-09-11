@@ -80,15 +80,19 @@ public class ChatToolBoundaryTests
                 "ICurrentUser",                // the request's operator (R-20)
                 "ISessionDeadlineSource",      // the narrow READ seam onto a market's deadline -- no flatten type crosses it
                 "ISuggestionRealtimeNotifier", // presentation-only per-owner push (ADR-0021)
+                "IInstrumentSpecSource",       // gh#1153: config-backed catalog of tradable contracts -- TryResolve +
+                                               // ConfiguredSymbols only; InstrumentSpecSource does no venue I/O
                 "TimeProvider",
                 "IOptions`1",
                 "ILogger`1",
             ],
             [typeof(EditRulebookTool)] =
             [
-                "DbContextOptions`1", // the shared options -- the tool builds its OWN owner-scoped context per call
-                "ICurrentUser",       // the request's operator (R-20)
-                "IChatTurnScope",     // WHICH CONVERSATION this turn is in -- a Guid?, reaching nothing at all
+                "DbContextOptions`1",     // the shared options -- the tool builds its OWN owner-scoped context per call
+                "ICurrentUser",           // the request's operator (R-20)
+                "IChatTurnScope",         // WHICH CONVERSATION this turn is in -- a Guid?, reaching nothing at all
+                "IInstrumentSpecSource",  // gh#1153: the SAME read catalog TriggerAuthoring consults for POST /api/triggers
+                                          // -- config-backed, no venue client, so this tool cannot grow a send path
                 "TimeProvider",
                 "ILogger`1",
             ],

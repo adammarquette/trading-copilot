@@ -85,6 +85,9 @@ public class EditRulebookToolTests
     private readonly IPriceLevelSource _levels = A.Fake<IPriceLevelSource>();
     private readonly IInstrumentSpecSource _specs = A.Fake<IInstrumentSpecSource>();
 
+    private static readonly IInstrumentSpecSource _catalog =
+        new InstrumentSpecSource(Options.Create(new InstrumentSpecOptions()));
+
     public EditRulebookToolTests() =>
         A.CallTo(() => _notifications.SendAsync(A<Notification>._, A<CancellationToken>._)).Returns(true);
 
@@ -103,6 +106,7 @@ public class EditRulebookToolTests
             DbOptions,
             new FixedUser(asUser ?? _owner),
             scope,
+            _catalog,
             new FakeTimeProvider(_now),
             NullLogger<EditRulebookTool>.Instance);
     }
@@ -112,6 +116,7 @@ public class EditRulebookToolTests
         DbOptions,
         new FixedUser(_owner),
         new ChatTurnScope(),
+        _catalog,
         new FakeTimeProvider(_now),
         NullLogger<EditRulebookTool>.Instance);
 
@@ -344,6 +349,20 @@ public class EditRulebookToolTests
 
         ErrorIn(result).Should().Be(expected, "a malformed input is an error string the model reads, never a throw");
         (await RulesAsync()).Should().BeEmpty("a refused call writes nothing at all");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShouldRefuseWithTheAuthoringMessage_WhenTheSymbolIsNotConfigured()
+    {
+        string result = await Tool().ExecuteAsync(
+            "{\"symbol\":\"ZZQA\",\"indicator\":\"rsi\",\"period\":14,\"resolutionMinutes\":1,"
+            + "\"comparison\":\"Below\",\"threshold\":30}",
+            CancellationToken.None);
+
+        ErrorIn(result).Should().Be(
+            "Unknown instrument — configured contracts are CL, ES, GC, NQ.",
+            "edit_rulebook surfaces TriggerAuthoring's refusal verbatim — same shape as generate_suggestion");
+        (await RulesAsync()).Should().BeEmpty("a hallucinated symbol writes no rule");
     }
 
     [Theory]
