@@ -64,6 +64,14 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
     private readonly HashSet<string> _unreadableFillHistoryAccounts = new(StringComparer.Ordinal);
     private readonly List<(string AccountKey, string CustomTag, DateTimeOffset Since)> _fillHistoryQueries = [];
     private Func<Task>? _onFillHistoryRead;
+    // Sized partial close (gh#1162 / gh#928): opt-in, like AccountStreaming. Existing suites never call
+    // ReducePositionAsync, and the IOrderExecutor default throws NotSupported — leaving the capability off keeps
+    // that R-17 refuse-loud path intact unless a suite that drives POST …/reduce asks for it.
+    private bool _reducePositionSupported;
+    private readonly List<(string AccountKey, string ContractKey, int Quantity)> _reduceCalls = [];
+    private readonly Dictionary<string, int> _reduceRemainingByContract = new(StringComparer.Ordinal);
+    private Func<Exception>? _reduceFault;
+    private readonly Dictionary<string, TradingMode> _rosterModes = new(StringComparer.Ordinal);
 
     public AdversarialTestTradingVenue LastVenueCreated { get; private set; } = null!;
 
@@ -136,6 +144,40 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
 
     /// <summary>Whether AccountStreaming is granted (see <see cref="MakeAccountStreamingSupported"/>).</summary>
     internal bool AccountStreamingSupported => _accountStreamingSupported;
+
+    /// <summary>
+    /// Grants <see cref="VenueCapability.ReducePosition"/> so <c>POST …/reduce</c> can reach the venue instead of
+    /// the R-17 <c>NotSupportedException</c> (ADR-0007: that path propagates rather than journals).
+    /// </summary>
+    public void MakeReducePositionSupported() => _reducePositionSupported = true;
+
+    /// <summary>Whether sized partial close is granted (see <see cref="MakeReducePositionSupported"/>).</summary>
+    internal bool ReducePositionSupported => _reducePositionSupported;
+
+    /// <summary>
+    /// Feeds the <b>remaining</b> net the venue reports after a sized partial close. The stub never computes
+    /// before − asked — that is the production verification the reduce path exists to do.
+    /// </summary>
+    public void SeedReduceRemaining(string contractKey, int remainingNet) =>
+        _reduceRemainingByContract[contractKey] = remainingNet;
+
+    /// <summary>
+    /// Makes <c>ReducePositionAsync</c> throw the exception <paramref name="fault"/> builds — a definitive
+    /// <see cref="VenueRefusalException"/>, an indeterminate one, or a hard outage. The double feeds the fault;
+    /// production names the outcome.
+    /// </summary>
+    public void MakeReduceThrow(Func<Exception> fault) => _reduceFault = fault;
+
+    /// <summary>Every <c>ReducePositionAsync</c> this factory's venues issued, in order.</summary>
+    public IReadOnlyList<(string AccountKey, string ContractKey, int Quantity)> ReducePositionCalls =>
+        _reduceCalls.AsReadOnly();
+
+    /// <summary>
+    /// Overrides the roster <see cref="TradingMode"/> for one account. The stub's default is Live for every
+    /// name (an adversarial claim against mode mapping); a reduce that also consults the venue roster needs a
+    /// Practice report on a practice account or every reduce is <c>HeldPracticeOnly</c>.
+    /// </summary>
+    public void ReportRosterMode(string accountKey, TradingMode mode) => _rosterModes[accountKey] = mode;
 
     /// <summary>Whether the venue read path should throw (see <see cref="MakeVenueUnreachable"/>).</summary>
     internal bool VenueUnreachable => _venueUnreachable;
@@ -483,6 +525,11 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         _unreadableFillHistoryAccounts.Clear();
         _fillHistoryQueries.Clear();
         _onFillHistoryRead = null;
+        _reducePositionSupported = false;
+        _reduceCalls.Clear();
+        _reduceRemainingByContract.Clear();
+        _reduceFault = null;
+        _rosterModes.Clear();
         ClearPlaceOrderFaults();
         lock (_placeSpanGate)
         {
@@ -551,6 +598,27 @@ internal class AdversarialTestProjectXVenueFactory : IProjectXVenueFactory
         return new PositionSnapshot(account, contract, 0, new Price(0m)); // flat
     }
 
+    internal TradingMode RosterModeFor(string accountKey) =>
+        _rosterModes.TryGetValue(accountKey, out TradingMode mode) ? mode : TradingMode.Live;
+
+    internal PositionSnapshot RecordReduceAndResult(VenueAccountId account, VenueContractId contract, int quantity)
+    {
+        _reduceCalls.Add((account.Key, contract.Key, quantity));
+
+        if (_reduceFault is not null)
+        {
+            throw _reduceFault();
+        }
+
+        int remaining = _reduceRemainingByContract.TryGetValue(contract.Key, out int seeded)
+            ? seeded
+            : _positions.FirstOrDefault(position => position.Account == account && position.Contract == contract)
+                ?.NetQuantity
+            ?? 0;
+
+        return new PositionSnapshot(account, contract, remaining, new Price(5_000m));
+    }
+
     public ITradingVenue Create(FirmConventions conventions)
     {
         LastVenueCreated = new AdversarialTestTradingVenue(conventions, this);
@@ -595,6 +663,11 @@ internal class AdversarialTestTradingVenue : ITradingVenue
                 capabilities |= VenueCapability.AccountStreaming;
             }
 
+            if (_factory.ReducePositionSupported)
+            {
+                capabilities |= VenueCapability.ReducePosition;
+            }
+
             return VenueCapabilities.Of(capabilities);
         }
     }
@@ -627,13 +700,15 @@ internal class AdversarialTestTradingVenue : ITradingVenue
     {
         AccountStage stage = ProjectXAccountStage.Resolve(name);
 
+        TradingMode mode = _factory.RosterModeFor(key);
+
         return new VenueAccount(
             Id: VenueAccountId.Create(Id, key),
             Name: name,
             Balance: 50_000m,
             CanTrade: canTrade,
             IsVisible: true,
-            Mode: TradingMode.Live) // Adversarial claim!
+            Mode: mode)
         {
             Stage = stage,
         };
@@ -748,4 +823,14 @@ internal class AdversarialTestTradingVenue : ITradingVenue
 
     public Task<PositionSnapshot> ClosePositionAsync(VenueAccountId account, VenueContractId contract, CancellationToken cancellationToken = default) =>
         Task.FromResult(_factory.RecordCloseAndResult(account, contract));
+
+    public Task<PositionSnapshot> ReducePositionAsync(
+        VenueAccountId account,
+        VenueContractId contract,
+        int quantity,
+        CancellationToken cancellationToken = default)
+    {
+        Capabilities.Require(VenueCapability.ReducePosition);
+        return Task.FromResult(_factory.RecordReduceAndResult(account, contract, quantity));
+    }
 }
