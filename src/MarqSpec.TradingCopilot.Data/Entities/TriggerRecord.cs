@@ -108,8 +108,9 @@ public class TriggerRecord : IUserOwned
     public DateTimeOffset? StalenessReportedAt { get; set; }
 
     /// <summary>
-    /// The rulebook rule (R-7) that authored this trigger, when one did — a <b>soft</b> reference (no FK, no
-    /// navigation), so the trigger outlives the rule and the trigger layer stays decoupled from the rulebook.
+    /// The rulebook <see cref="Rule"/> (R-7, gh#866) that authored this trigger, when one did — a <b>soft</b>
+    /// reference (no FK, no navigation), so the trigger outlives the rule. The read path navigates it via
+    /// <c>SourceRuleLookup</c> when a row exists.
     /// </summary>
     public Guid? SourceRuleId { get; set; }
 

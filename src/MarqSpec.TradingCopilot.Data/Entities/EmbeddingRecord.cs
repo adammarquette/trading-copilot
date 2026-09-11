@@ -19,7 +19,7 @@ public enum EmbeddingOwnerKind
     /// </summary>
     Suggestion = 2,
 
-    /// <summary>A rulebook rule (R-7). Arrives with the <c>Rule</c> entity (gh#866, of epic gh#489), still backlogged.</summary>
+    /// <summary>A rulebook <see cref="Rule"/> (R-7, gh#866). The VEC half of data-dictionary §8; no producer writes it yet.</summary>
     Rule = 3,
 
     /// <summary>A market snapshot at issuance (R-8).</summary>

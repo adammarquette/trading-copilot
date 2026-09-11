@@ -185,7 +185,9 @@ public static class TriggerEndpoints
         List<TriggerRecord> triggers = await database.Triggers
             .OrderBy(trigger => trigger.CreatedAt)
             .ToListAsync(cancellationToken);
-        return Results.Ok(triggers.Select(TriggerResponse.From).ToList());
+        IReadOnlyDictionary<Guid, Rule> sourceRules = await SourceRuleLookup.ResolveManyAsync(
+            database.Rules, triggers.Select(trigger => trigger.SourceRuleId), cancellationToken);
+        return Results.Ok(triggers.Select(trigger => TriggerResponse.From(trigger, Lookup(sourceRules, trigger.SourceRuleId))).ToList());
     }
 
     internal static async Task<IResult> GetTriggerAsync(
@@ -197,8 +199,18 @@ public static class TriggerEndpoints
             .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
 
         // The R-20 filter has already hidden another operator's trigger, so "not visible" reads as 404.
-        return trigger is null ? Results.NotFound() : Results.Ok(TriggerResponse.From(trigger));
+        if (trigger is null)
+        {
+            return Results.NotFound();
+        }
+
+        Rule? sourceRule = await SourceRuleLookup.ResolveAsync(
+            database.Rules, trigger.SourceRuleId, cancellationToken);
+        return Results.Ok(TriggerResponse.From(trigger, sourceRule));
     }
+
+    private static Rule? Lookup(IReadOnlyDictionary<Guid, Rule> sourceRules, Guid? sourceRuleId) =>
+        sourceRuleId is Guid id && sourceRules.TryGetValue(id, out Rule? rule) ? rule : null;
 
     internal static async Task<IResult> PatchTriggerAsync(
         Guid id,
@@ -388,7 +400,7 @@ public sealed record PatchTriggerRequest(
 /// <param name="LastEvaluatedValue">The last measured value, if any.</param>
 /// <param name="LastFiredAt">When it last fired, if ever.</param>
 /// <param name="CreatedAt">When it was created.</param>
-/// <param name="SourceRuleId">The rulebook rule that authored the trigger, or null — a soft R-7 provenance reference (gh#471).</param>
+/// <param name="SourceRuleId">The rulebook rule that authored the trigger, or null — a soft R-7 provenance reference (gh#471 / gh#866).</param>
 /// <param name="SourceConversationId">The conversation the trigger's rule was authored in, or null — a soft R-7 provenance reference (gh#471).</param>
 public sealed record TriggerResponse(
     Guid Id,
@@ -413,10 +425,22 @@ public sealed record TriggerResponse(
     Guid? SourceRuleId,
     Guid? SourceConversationId)
 {
+    /// <summary>
+    /// The <see cref="Rule"/> <see cref="SourceRuleId"/> resolves to, when a row exists. Null when the id is
+    /// absent or the rule was deleted — the reference is soft (gh#866).
+    /// </summary>
+    public RuleSummary? SourceRule { get; init; }
+
     /// <summary>Projects a persisted trigger into its API representation.</summary>
     /// <param name="record">The persisted trigger.</param>
+    /// <returns>The response DTO, with no resolved source rule.</returns>
+    public static TriggerResponse From(TriggerRecord record) => From(record, sourceRule: null);
+
+    /// <summary>Projects a persisted trigger, attaching the Rule the soft <see cref="SourceRuleId"/> navigates to.</summary>
+    /// <param name="record">The persisted trigger.</param>
+    /// <param name="sourceRule">The owned rule row, or <see langword="null"/> when the soft reference does not resolve.</param>
     /// <returns>The response DTO.</returns>
-    public static TriggerResponse From(TriggerRecord record) => new(
+    public static TriggerResponse From(TriggerRecord record, Rule? sourceRule) => new(
         record.Id,
         record.Symbol,
         record.Indicator,
@@ -437,5 +461,38 @@ public sealed record TriggerResponse(
         record.LastFiredAt,
         record.CreatedAt,
         record.SourceRuleId,
-        record.SourceConversationId);
+        record.SourceConversationId)
+    {
+        SourceRule = sourceRule is null ? null : RuleSummary.From(sourceRule),
+    };
+}
+
+/// <summary>The durable rulebook row as surfaced on a trigger's read path (gh#866, data dictionary §8).</summary>
+/// <param name="Id">The rule id.</param>
+/// <param name="IntentText">The plain-language practice as authored.</param>
+/// <param name="Enabled">Whether the rule is on.</param>
+/// <param name="Confirmed">Whether the operator has accepted it; unconfirmed is inert.</param>
+/// <param name="NeedsRevalidation">Whether the confirmation-time instrument snapshot is stale.</param>
+/// <param name="SourceConversationId">The conversation the rule was authored in, or null.</param>
+/// <param name="IsArmed">Whether both <paramref name="Enabled"/> and <paramref name="Confirmed"/> are set.</param>
+public sealed record RuleSummary(
+    Guid Id,
+    string IntentText,
+    bool Enabled,
+    bool Confirmed,
+    bool NeedsRevalidation,
+    Guid? SourceConversationId,
+    bool IsArmed)
+{
+    /// <summary>Projects a persisted rule into the compact read-path shape.</summary>
+    /// <param name="rule">The persisted rule.</param>
+    /// <returns>The summary DTO.</returns>
+    public static RuleSummary From(Rule rule) => new(
+        rule.Id,
+        rule.IntentText,
+        rule.Enabled,
+        rule.Confirmed,
+        rule.NeedsRevalidation,
+        rule.SourceConversationId,
+        rule.IsArmed());
 }

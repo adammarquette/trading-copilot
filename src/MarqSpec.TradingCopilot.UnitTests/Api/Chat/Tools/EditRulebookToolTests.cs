@@ -468,7 +468,7 @@ public class EditRulebookToolTests
         authored.SourceConversationId.Should().Be(
             _conversation, "\"why does this rule exist?\" must be answerable without a database walk (gh#471)");
         authored.SourceRuleId.Should().BeNull(
-            "the R-7 Rule entity is gh#866 and still backlogged -- this seam stays null rather than inventing an id");
+            "chat does not author a Rule row (the compiler is gh#489) -- this seam stays null rather than inventing an id");
     }
 
     [Fact]

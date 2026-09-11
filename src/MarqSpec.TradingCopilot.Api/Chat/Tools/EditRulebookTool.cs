@@ -49,8 +49,9 @@ namespace MarqSpec.TradingCopilot.Api.Chat.Tools;
 /// <see cref="TriggerRecord.SourceConversationId"/> (gh#471) from <see cref="IChatTurnScope"/>, so "why does this
 /// exist?" is answerable at the read path. A chat tool only ever runs inside a turn, so a null scope means the wiring
 /// is broken — the tool refuses rather than writing an <i>unattributed</i> rule nobody can later explain.
-/// <see cref="TriggerRecord.SourceRuleId"/> stays <see langword="null"/>: the R-7 <c>Rule</c> entity is gh#866, still
-/// backlogged, and inventing an id for a row that does not exist would be worse than leaving the seam empty.
+/// <see cref="TriggerRecord.SourceRuleId"/> stays <see langword="null"/>: the R-7 <c>Rule</c> row exists (gh#866)
+/// but chat does not author one — the NL→condition compiler that would fill it is still gh#489, and inventing
+/// an id for a row this tool does not write would be worse than leaving the seam empty.
 /// </para>
 /// <para>
 /// <b>Its own transaction, owner-scoped.</b> The write runs in a fresh <see cref="TradingCopilotDbContext"/> built

@@ -141,6 +141,9 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>The append-only audit trail (ADR-0007, gh#220) — safety-relevant transitions, immutable. Operator-owned.</summary>
     public DbSet<AuditRecord> AuditRecords => Set<AuditRecord>();
 
+    /// <summary>Durable rulebook rules (gh#866, R-7, data dictionary §8). Operator-owned.</summary>
+    public DbSet<Rule> Rules => Set<Rule>();
+
     /// <summary>Standing deterministic triggers (gh#385, R-4 / R-7, ADR-0008). Operator-owned.</summary>
     public DbSet<TriggerRecord> Triggers => Set<TriggerRecord>();
 
@@ -787,6 +790,21 @@ public class TradingCopilotDbContext : TenantDbContext
                 table.HasCheckConstraint("CK_PriceLevels_Kind_NotUnknown", "\"Kind\" <> 0");
                 table.HasCheckConstraint("CK_PriceLevels_Timeframe_Positive", "\"TimeframeMinutes\" > 0");
             });
+        });
+
+        modelBuilder.Entity<Rule>(rule =>
+        {
+            rule.Property(r => r.IntentText).HasMaxLength(Rule.IntentTextMaxLength);
+            // jsonb storage for the compiler output and the confirmation-time instrument snapshot — documents,
+            // not queried. The in-memory provider ignores the store type; production is Postgres.
+            rule.Property(r => r.StructuredForm).HasColumnType("jsonb");
+            rule.Property(r => r.InstrumentDependencySnapshot).HasColumnType("jsonb");
+
+            // The operator's rulebook, filtered by the live/confirmed pair the way the trigger scan leads on
+            // Confirmation + Enabled. No FK to Conversation or Trigger — both seams are soft (gh#471 / gh#866).
+            rule.HasIndex(r => new { r.UserId, r.Confirmed, r.Enabled });
+
+            rule.ToTable("Rules");
         });
 
         modelBuilder.Entity<TriggerRecord>(trigger =>
