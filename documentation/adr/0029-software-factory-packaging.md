@@ -75,13 +75,15 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 
 | Date | Update |
 |---|---|
-| 2026-09-11 | factory repo exists ([MarqSpec.Repo.Factory](https://github.com/adammarquette/MarqSpec.Repo.Factory)) (gh#1178) |
+| 2026-09-11 | factory repo exists; `develop` carries Tier 1+2 ([MarqSpec.Repo.Factory](https://github.com/adammarquette/MarqSpec.Repo.Factory)) (gh#1178) |
 
 ## Update (2026-09-11) — factory repo exists (gh#1178)
 
 [`MarqSpec.Repo.Factory`](https://github.com/adammarquette/MarqSpec.Repo.Factory) is live: a public GitHub
 template repository (`is_template: true`), default branch `develop`. The name is unchanged from this
-record's *Decision*. Tier 1 + Tier 2 live there; Tier 3 remains [gh#1179](https://github.com/adammarquette/trading-copilot/issues/1179).
+record's *Decision*. **`develop` carries the Tier 1 + Tier 2 extract** — that is the tree **Use this
+template** copies, not the venue-client `MarqSpec.Repo.Template` bootstrap the repo was created from.
+Tier 3 remains [gh#1179](https://github.com/adammarquette/trading-copilot/issues/1179).
 
 ## Follow-ups
 
