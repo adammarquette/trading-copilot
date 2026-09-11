@@ -198,6 +198,39 @@ public class TriggerEndpointsTests
         TriggerResponse response = ((IValueHttpResult)result).Value.Should().BeOfType<TriggerResponse>().Subject;
         response.SourceRuleId.Should().Be(ruleId);
         response.SourceConversationId.Should().Be(conversationId);
+        response.SourceRule.Should().BeNull(
+            "the id is still a soft reference: a Guid with no Rule row resolves to nothing, and the trigger still reads");
+    }
+
+    [Fact]
+    public async Task GetTrigger_ShouldResolveSourceRuleId_WhenARuleRowExists()
+    {
+        // gh#866: SourceRuleId stays a soft Guid (no FK), but the read path navigates it to the real Rule when one
+        // is present — "why does this trigger exist?" is now a row, not only an id.
+        Guid ruleId = Guid.NewGuid();
+        await using (TradingCopilotDbContext seed = Context())
+        {
+            seed.Rules.Add(new Rule
+            {
+                Id = ruleId,
+                UserId = _operator,
+                IntentText = "Fade an RSI extreme on ES",
+                CreatedAt = DateTimeOffset.UnixEpoch,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        Guid triggerId = await SeedTriggerAsync(_operator, sourceRuleId: ruleId);
+
+        IResult result = await TriggerEndpoints.GetTriggerAsync(triggerId, Context(), CancellationToken.None);
+
+        StatusOf(result).Should().Be(StatusCodes.Status200OK);
+        TriggerResponse response = ((IValueHttpResult)result).Value.Should().BeOfType<TriggerResponse>().Subject;
+        response.SourceRuleId.Should().Be(ruleId);
+        response.SourceRule.Should().NotBeNull();
+        response.SourceRule!.Id.Should().Be(ruleId);
+        response.SourceRule.IntentText.Should().Be("Fade an RSI extreme on ES");
+        response.SourceRule.IsArmed.Should().BeFalse("a newly persisted rule is inert until confirmed");
     }
 
     [Fact]

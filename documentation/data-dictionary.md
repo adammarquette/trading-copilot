@@ -100,9 +100,10 @@ erDiagram
   Trade         ||--o| OutcomeSuppression     : "hard-delete tombstone"
   Suggestion    ||--o| OutcomeSuppression     : "hard-delete tombstone"
 
-  Rule          ||--o{ Trigger                : "compiles to"
+  Rule          ||--o{ Trigger                : "compiles to (soft)"
   Trigger       ||--o{ TriggerFiring          : "fires"
   Rule          }o--o{ Instrument             : "scopes (snapshot)"
+  Conversation  ||--o{ Rule                   : "authored in (soft)"
   SoftSignal    }o--o{ NewsTopic              : matched
   NewsTopic     ||--o{ RelevanceConfig        : "mapped by"
   Conversation  ||--o{ ChatMessage            : contains
