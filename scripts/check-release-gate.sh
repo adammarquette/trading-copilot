@@ -27,15 +27,9 @@ ok() { printf '\033[32m%s\033[0m\n' "$*"; }
 
 WORKFLOWS_DIR="${1:-.github/workflows}"
 
-command -v gh >/dev/null 2>&1 || die "gh is required (https://cli.github.com)"
-gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
-
-REPO="${GITHUB_REPOSITORY:-}"
-if [ -z "$REPO" ]; then
-  REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" \
-    || die "could not determine the repository. Set GITHUB_REPOSITORY=<owner/repo>."
-fi
-
+# Discovery is a file read. Auth is required only for the API half below — a fixture
+# self-test that must go red on a missing key must not fail first as "gh is not
+# authenticated" (that exit is also what a runner without a token produces).
 [ -d "$WORKFLOWS_DIR" ] || die "no such directory: $WORKFLOWS_DIR"
 
 workflow_files=()
@@ -92,6 +86,38 @@ printf '%s\n' "$discovered" | while IFS="$(printf '\t')" read -r file name; do
   info "  $name    ($file)"
 done
 info ""
+
+# File-level faults do not need the API (and must not hide behind "gh is not authenticated").
+uncheckable=0
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  case "$name" in
+    '<unresolved-mapping>')
+      printf '\033[31mUNCHECKABLE\033[0m  an `environment:` mapping with no `name:` under it\n' >&2
+      uncheckable=$((uncheckable + 1))
+      ;;
+    *'${{'*)
+      printf '\033[31mUNCHECKABLE\033[0m  %s\n' "$name" >&2
+      printf '  The environment name is not a literal, so no API call can confirm what it resolves to.\n' >&2
+      uncheckable=$((uncheckable + 1))
+      ;;
+  esac
+done <<PRE
+$(printf '%s\n' "$discovered" | cut -f2- | sort -u)
+PRE
+[ "$uncheckable" -eq 0 ] || die "$uncheckable environment name(s) cannot be vouched for from the file."
+
+command -v gh >/dev/null 2>&1 || die "gh is required (https://cli.github.com)"
+# GH_TOKEN is how Actions authenticates; `gh auth status` is the local login.
+if [ -z "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+  gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
+fi
+
+REPO="${GITHUB_REPOSITORY:-}"
+if [ -z "$REPO" ]; then
+  REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" \
+    || die "could not determine the repository. Set GITHUB_REPOSITORY=<owner/repo>."
+fi
 
 ENV_FIELDS='"\([.protection_rules[]?|select(.type=="required_reviewers")|.reviewers[]?|"\(.type):\(.reviewer.login // .reviewer.slug // "?")"]|join(", "))\t\([.protection_rules[]?|select(.type!="required_reviewers")|.type]|join(", "))\t\([.protection_rules[]?|select(.type=="required_reviewers")|.prevent_self_review][0] // false)\t\(.can_admins_bypass // false)"'
 

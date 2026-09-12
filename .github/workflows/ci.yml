@@ -134,6 +134,8 @@ jobs:
         run: ./scripts/check-deploy-workflows.sh
 
       - name: Release-gate discovery (fixtures)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/check-release-gate-selftest.sh
 
       - name: Deploy-environment script (fixtures)
