@@ -76,6 +76,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 | Date | Update |
 |---|---|
 | 2026-09-11 | factory repo exists; `develop` carries Tier 1+2 ([MarqSpec.Repo.Factory](https://github.com/adammarquette/MarqSpec.Repo.Factory)) (gh#1178) |
+| 2026-09-12 | Tier 3 spines on Factory PR #9; not yet the template tree (gh#1179) |
 
 ## Update (2026-09-11) — factory repo exists (gh#1178)
 
@@ -85,10 +86,24 @@ record's *Decision*. **`develop` carries the Tier 1 + Tier 2 extract** — that 
 template** copies, not the venue-client `MarqSpec.Repo.Template` bootstrap the repo was created from.
 Tier 3 remains [gh#1179](https://github.com/adammarquette/trading-copilot/issues/1179).
 
+## Update (2026-09-12) — Tier 3 spines on Factory PR #9 (gh#1179)
+
+Tier 3 factory spines are on
+[MarqSpec.Repo.Factory PR #9](https://github.com/adammarquette/MarqSpec.Repo.Factory/pull/9)
+(`feature/1179_split-factory-spines`): the `AGENTS.md` contract family (role decomposition, DoD,
+test-first, report-don't-fix, console-config-must-be-recorded), the copilot-instructions review
+format, the engineering-practices skeleton plus current-default vs **Decide:**, the ADR index /
+Nygard / decision-log rules, and the AGENT-MEMORY dated-catch-all concept. Product fill-ins are
+`{{PLACEHOLDER}}`s. They are **not yet** the Use-this-template tree — factory `develop` still
+carries Tier 1+2 only. **This product's contracts are unchanged as this product** — no wholesale
+replace. The *Decision* is unchanged. Tier 4 stays here.
+
 ## Follow-ups
 
 - ~~Stand up `MarqSpec.Repo.Factory` as a public GitHub template and extract Tier 1 + Tier 2
   ([gh#1178](https://github.com/adammarquette/trading-copilot/issues/1178)). Not this card.~~
   Done — https://github.com/adammarquette/MarqSpec.Repo.Factory
 - Split factory spines out of product files — Tier 3
-  ([gh#1179](https://github.com/adammarquette/trading-copilot/issues/1179)). Tier 4 stays in this product.
+  ([gh#1179](https://github.com/adammarquette/trading-copilot/issues/1179)). In flight on
+  [Factory PR #9](https://github.com/adammarquette/MarqSpec.Repo.Factory/pull/9); not yet on factory
+  `develop`. Tier 4 stays in this product.
