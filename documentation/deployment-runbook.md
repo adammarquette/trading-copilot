@@ -31,8 +31,12 @@ cloud environments still need creating, so nothing deploys today.
 | [Open items](#open-items) | you are picking up unfinished platform work |
 
 ## Platform
-- **Cloud:** [Railway](https://railway.com) — project **`soothing-illumination`**
+- **Cloud (running):** [Railway](https://railway.com) — project **`soothing-illumination`**
   (`2601eb74-b5f9-411f-bb9a-0cd19e6fd540`).
+- **Cloud (intended):** AWS — ECS Fargate + ALB, two environments (staging + production), GHCR by digest
+  ([ADR-0030](adr/0030-aws-deployment-topology.md)). This runbook still describes the running Railway cloud;
+  AWS procedures land with the CDK / workflow children, not here. Account id, region, and hostname are
+  operator-supplied before apply — this page does not invent them.
 - **Image registry:** **GHCR** — `ghcr.io/adammarquette/trading-copilot`, **public** ([ADR-0018](adr/0018-image-registry-ghcr.md)).
   CI builds once per merge and pushes; local and Railway both **pull** this artifact. Tags: `:develop` / `:staging` /
   `:main` per environment, plus `:sha-<short>` for an exact rollback target.
