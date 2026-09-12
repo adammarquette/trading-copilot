@@ -98,4 +98,16 @@ public class ReconcileSweepHostTests
         A.CallTo(() => _metrics.RecordReconcileStrandDetected(ExecutionMetrics.ReconcileStrandConditionalFiring))
             .MustHaveHappenedOnceExactly();
     }
+
+    [Fact]
+    public void DetectAndAlert_ShouldTagTheMeterByKind_ForAPositionActionIntentStrand()
+    {
+        ReconcileStrandKey strand = new(ReconcileStrandKind.PositionActionIntent, _owner, Guid.NewGuid());
+        DetectAndAlert([strand], _t0);
+
+        DetectAndAlert([strand], _t0 + _bound);
+
+        A.CallTo(() => _metrics.RecordReconcileStrandDetected(ExecutionMetrics.ReconcileStrandPositionActionIntent))
+            .MustHaveHappenedOnceExactly();
+    }
 }

@@ -185,6 +185,24 @@ public class DecisionStateRehydrationTests
     }
 
     [Fact]
+    public void Analyze_ShouldFlagPositionActionMidIntent_WhenAnOpenIntentSurvivesARestart()
+    {
+        // gh#1161 — the reduce/exit durable pre-transmit intent, the sweep's restart sibling. Open is transient
+        // at runtime (one request resolves it); found PERSISTING at rest, the close may be live at the venue with
+        // no #1160 journal behind it. Fail safe + loud; never silently aged out, never auto-resolved.
+        Guid intent = Guid.NewGuid();
+
+        DecisionSurfaceReport report = DecisionStateRehydration.Analyze(
+            [], [], [], 0, [new RehydratedPositionActionIntent(intent, _owner)]);
+
+        DecisionInconsistency issue = report.Inconsistencies.Should().ContainSingle().Which;
+        issue.Kind.Should().Be(DecisionInconsistencyKind.PositionActionMidIntent);
+        issue.Owner.Should().Be(_owner);
+        issue.EntityId.Should().Be(intent);
+        report.IsConsistent.Should().BeFalse();
+    }
+
+    [Fact]
     public void Analyze_ShouldFlagStopPlanWithoutOrder_WhenTheParentOrderIsAbsent()
     {
         Guid plan = Guid.NewGuid();

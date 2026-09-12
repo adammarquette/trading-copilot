@@ -162,6 +162,11 @@ public class TradingCopilotDbContext : TenantDbContext
     /// <summary>Messages within a conversation (gh#18, R-6) — ordered by <c>Sequence</c>. Operator-owned.</summary>
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
 
+    /// <summary>
+    /// Durable pre-transmit intents for the operator's per-position exit and reduce (gh#1161). Operator-owned.
+    /// </summary>
+    public DbSet<PositionActionIntent> PositionActionIntents => Set<PositionActionIntent>();
+
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -1140,6 +1145,24 @@ public class TradingCopilotDbContext : TenantDbContext
                 // Fail-closed zero (gh#60): a message always has a real author, and a real position in the thread.
                 table.HasCheckConstraint("CK_ChatMessages_Role_NotUnknown", "\"Role\" <> 0");
                 table.HasCheckConstraint("CK_ChatMessages_Sequence_Positive", "\"Sequence\" > 0");
+            });
+        });
+
+        modelBuilder.Entity<PositionActionIntent>(intent =>
+        {
+            intent.Property(row => row.VenueAccountKey).HasMaxLength(64);
+            intent.Property(row => row.Instrument).HasMaxLength(32);
+            intent.Property(row => row.Contract).HasMaxLength(64);
+            intent.Property(row => row.Outcome).HasMaxLength(32);
+
+            // The sweep's Open-only discovery, and the operator's per-account trail.
+            intent.HasIndex(row => row.Status);
+            intent.HasIndex(row => new { row.UserId, row.CreatedAt });
+
+            intent.ToTable(table =>
+            {
+                table.HasCheckConstraint("CK_PositionActionIntents_Action_NotUnknown", "\"Action\" <> 0");
+                table.HasCheckConstraint("CK_PositionActionIntents_Status_NotUnknown", "\"Status\" <> 0");
             });
         });
     }

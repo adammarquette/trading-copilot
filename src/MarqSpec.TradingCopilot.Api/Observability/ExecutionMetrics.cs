@@ -90,6 +90,9 @@ public sealed class ExecutionMetrics : IExecutionMetrics, IDisposable
     /// <summary>Reconcile-strand kind tag: a conditional stranded mid-fire (<c>Firing</c>, gh#577).</summary>
     public const string ReconcileStrandConditionalFiring = "conditional-firing";
 
+    /// <summary>Reconcile-strand kind tag: a position-action intent left Open (gh#1161).</summary>
+    public const string ReconcileStrandPositionActionIntent = "position-action-intent";
+
     /// <summary>
     /// Operator notifications the in-process delivery queue <b>refused</b>, by kind (gh#1077) — the alerting path
     /// reporting its own failure to Layer 2, because a Layer-1 push that never went out is invisible to Layer 1.

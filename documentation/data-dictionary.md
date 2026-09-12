@@ -51,6 +51,7 @@ erDiagram
   Operator      ||--o{ Trade                  : owns
   Operator      ||--o{ Conversation           : owns
   Operator      ||--o{ Invitation             : "issues (dormant)"
+  Operator      ||--o{ PositionActionIntent   : owns
   Operator      ||--o{ SoftSignalFeedback     : rates
   Firm          ||--o{ Connection            : provides
   Firm          ||--o{ FirmStageConvention   : "stage meanings"
@@ -61,6 +62,7 @@ erDiagram
   Account       ||--o{ Position              : holds
   Account       ||--o{ AccountSnapshot       : "intraday history"
   Account       ||--o{ Order                 : "orders on"
+  Account       ||--o{ PositionActionIntent  : "pre-transmit close"
   Account       ||--o{ Trade                 : "journaled on"
   Account       ||--o{ Suggestion            : "proposed on"
 
@@ -120,7 +122,7 @@ identifier, so a domain is never renumbered.
 | **§1** | [Reference & identity](data-dictionary/01-reference-identity.md) | 2117 | Instrument, TradingVenue, DataSource, Strategy, StrategyTemplate, User, Invitation, Firm, FirmStageConvention, Connection |
 | **§2** | [Market data (time-series)](data-dictionary/02-market-data.md) | 1942 | Bar, Tick, Quote, DepthLevel, IndicatorValue, PriceLevel, Event, EventCursor — **and §11 Event backbone**, folded here because it only pointed at these rows |
 | **§3** | [Account & positions](data-dictionary/03-account-positions.md) | 1657 | Account, Position, AccountSnapshot, plus the trading-account parity notes |
-| **§4** | [Orders & execution](data-dictionary/04-orders-execution.md) | 7301 | Order, Fill, Bracket/OCO, StopPlan, ConditionalOrder, KillSwitchState, NotificationOutbox — **the largest domain** |
+| **§4** | [Orders & execution](data-dictionary/04-orders-execution.md) | 7301 | Order, Fill, Bracket/OCO, StopPlan, ConditionalOrder, KillSwitchState, NotificationOutbox, PositionActionIntent — **the largest domain** |
 | **§5** | [Risk](data-dictionary/05-risk.md) | 1542 | RiskProfile / Limits, GateDecision |
 | **§6** | [Suggestions](data-dictionary/06-suggestions.md) | 3272 | Suggestion, SuggestionDisposition, MarketSnapshot, CitedFactor |
 | **§7** | [Journal & outcomes](data-dictionary/07-journal-outcomes.md) | 403 | Trade, TradeFeedback, Outcome, OutcomeSuppression |
@@ -151,7 +153,7 @@ identifier, so a domain is never renumbered.
   owner.
   **All operator-owned data** — Firm / FirmStageConvention, Connection, Account, Position, AccountSnapshot, RiskProfile, GateDecision, Suggestion
   (+ disposition / snapshot / cited factors), Order / Fill / StopPlan / ConditionalOrder / Bracket, Trade / TradeFeedback / Outcome,
-  Rule / Trigger, RelevanceConfig, Embedding, Conversation / ChatMessage, AuditRecord, AIUsage, SoftSignalFeedback — carries an **owning
+  Rule / Trigger, RelevanceConfig, Embedding, Conversation / ChatMessage, AuditRecord, AIUsage, SoftSignalFeedback, PositionActionIntent — carries an **owning
   `user_id`** and is **filtered by the authenticated user at the data layer** (row-level scoping, **default-deny**),
   enforced below the UI. With **one operator per deployment** (ADR-0017) this is a **fail-closed safety property**,
   not a tenancy feature: a query that forgets its scope returns *nothing* instead of *everything*, and a second

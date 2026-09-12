@@ -52,4 +52,13 @@ public enum DecisionInconsistencyKind
     /// <c>customTag</c>) before any resumption; never silently repaired.
     /// </summary>
     OrderMidTaking = 9,
+
+    /// <summary>
+    /// An <see cref="PositionActionIntentStatus.Open"/> position-action intent persists at rest — the reduce /
+    /// exit durable pre-transmit intent (gh#1161). Open is transient: one request resolves it after the attempt.
+    /// Found surviving a restart, the close <b>may have reached the venue</b> while the #1160 journal never
+    /// recorded the outcome — the requested quantity is on this row, and the reconcile sweep (gh#722) surfaces
+    /// it rather than silently aging it out; never auto-resolved.
+    /// </summary>
+    PositionActionMidIntent = 10,
 }

@@ -490,6 +490,7 @@ builder.Services.AddScoped<IPositionReconciler>(provider => provider.GetRequired
 // exactly why each of those two now detaches a refused insert rather than leaving it to poison the other's save
 // (gh#1143); PositionActionJournalFaultIsolationIntegrationTests holds that against real Postgres.
 builder.Services.AddScoped<IPositionActionJournal, PositionActionJournal>();
+builder.Services.AddScoped<IPositionActionIntentStore, PositionActionIntentStore>();
 builder.Services.AddScoped<PositionExitService>();
 // The sized partial-close sibling of the full exit (gh#928): reduce a position toward flat without flattening it.
 builder.Services.AddScoped<PositionReduceService>();

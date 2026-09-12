@@ -34,10 +34,11 @@ public class PositionExitEndpointTests
             new FixedUser(_operator));
 
     private readonly IPositionActionJournal _journal = A.Fake<IPositionActionJournal>();
+    private readonly IPositionActionIntentStore _intents = A.Fake<IPositionActionIntentStore>();
 
     private PositionExitService Service() =>
         new(Context(), _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
-            _journal, NullLogger<PositionExitService>.Instance);
+            _journal, _intents, NullLogger<PositionExitService>.Instance);
 
     [Fact]
     public async Task ExitAsync_ShouldReturnNotFound_WhenTheAccountIsNotTheCallers()

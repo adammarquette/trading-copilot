@@ -85,6 +85,12 @@ public sealed record PositionActionEntry
     /// endpoint returned, so the trail and the response can never tell different stories.
     /// </summary>
     public required string Outcome { get; init; }
+
+    /// <summary>
+    /// The pre-transmit intent this outcome journal references (gh#1161), when one was committed. Null on the
+    /// paths that send nothing — those have no transmit window to close.
+    /// </summary>
+    public Guid? IntentId { get; init; }
 }
 
 /// <summary>

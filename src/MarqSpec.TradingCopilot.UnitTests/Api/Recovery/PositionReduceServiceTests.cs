@@ -45,6 +45,7 @@ public class PositionReduceServiceTests
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
     private IAccountEntryGuard _guard = null!;
     private readonly IPositionActionJournal _journal = A.Fake<IPositionActionJournal>();
+    private readonly IPositionActionIntentStore _intents = A.Fake<IPositionActionIntentStore>();
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
@@ -58,6 +59,8 @@ public class PositionReduceServiceTests
         Holds(3);      // long 3 by default
         ReducesTo(2);  // the venue takes one off by default
         _guard = PassthroughGuard();
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .ReturnsLazily(() => Task.FromResult(Guid.NewGuid()));
     }
 
     /// <summary>
@@ -118,7 +121,7 @@ public class PositionReduceServiceTests
     private PositionReduceService Service(string credentialKey = "topstep-main") =>
         new(Context(), _factory, _guard,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
-            _journal, NullLogger<PositionReduceService>.Instance);
+            _journal, _intents, NullLogger<PositionReduceService>.Instance);
 
     private async Task<Guid> SeedAccountAsync(
         string credentialKey = "topstep-main", TradingMode mode = TradingMode.Practice)
@@ -166,7 +169,15 @@ public class PositionReduceServiceTests
         return (PositionActionEntry)call.Arguments[0]!;
     }
 
-    // --- Only a verified reduction is success ---
+    /// <summary>The single pre-transmit intent this reduce committed (gh#1161).</summary>
+    private PositionActionIntentDraft CommittedIntent()
+    {
+        ICompletedFakeObjectCall call = Fake.GetCalls(_intents)
+            .Single(candidate => candidate.Method.Name == nameof(IPositionActionIntentStore.CommitAsync));
+        return (PositionActionIntentDraft)call.Arguments[0]!;
+    }
+
+    // --- Only a verified reduction is success (gh#1142; pinned again by gh#1161) ---
 
     [Fact]
     public async Task ReduceAsync_ShouldReportReduced_WhenTheVenueClosedExactlyTheRequestedAmount()
@@ -471,7 +482,7 @@ public class PositionReduceServiceTests
         PositionReduceService service = new(
             other, _factory, _guard,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
-            _journal, NullLogger<PositionReduceService>.Instance);
+            _journal, _intents, NullLogger<PositionReduceService>.Instance);
 
         (await service.ReduceAsync(accountId, InstrumentId.Parse("MES"), 1, CancellationToken.None)).Should().BeNull();
         VenueMustNotHaveBeenAskedToReduce();
@@ -571,7 +582,7 @@ public class PositionReduceServiceTests
         A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._)).MustNotHaveHappened();
     }
 
-    // --- The two holds, made structural: practice-only is ENFORCED, not asserted ---
+    // --- The two holds, made structural: practice-only is ENFORCED, not asserted (gh#928; pinned again by gh#1161) ---
 
     [Theory]
     [InlineData(TradingMode.Live)]
@@ -843,7 +854,7 @@ public class PositionReduceServiceTests
         PositionReduceService service = new(
             other, _factory, _guard,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
-            _journal, NullLogger<PositionReduceService>.Instance);
+            _journal, _intents, NullLogger<PositionReduceService>.Instance);
 
         await service.ReduceAsync(accountId, InstrumentId.Parse("MES"), 1, CancellationToken.None);
 
@@ -916,5 +927,108 @@ public class PositionReduceServiceTests
 
         A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._))
             .MustHaveHappenedOnceExactly();
+    }
+
+    // --- Durable pre-transmit intent (gh#1161) ---
+
+    [Fact]
+    public async Task ReduceAsync_ShouldCommitTheIntentBeforeTheVenueIsTouched_WhenItTransmits()
+    {
+        // The window #1160 left open: a caller abort after the gateway executed drops the requested quantity
+        // unless that quantity was already durable. Commit, then transmit, then journal — not the reverse.
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReducesTo(2);
+
+        await Reduce(accountId, 3);
+
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .MustHaveHappened()
+            .Then(A.CallTo(() => _venue.ReducePositionAsync(
+                A<VenueAccountId>._, A<VenueContractId>._, A<int>._, A<CancellationToken>._))
+                .MustHaveHappened())
+            .Then(A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._))
+                .MustHaveHappened());
+
+        PositionActionIntentDraft draft = CommittedIntent();
+        draft.Action.Should().Be(PositionActionKind.Reduce);
+        draft.RequestedQuantity.Should().Be(3);
+        draft.AccountId.Should().Be(accountId);
+        draft.Instrument.Should().Be("MES");
+        draft.Contract.Should().Be(Contract);
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldJournalTheIntentIdAndResolveIt_WhenTheReduceCompletes()
+    {
+        Guid intentId = Guid.NewGuid();
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .Returns(intentId);
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        ReducesTo(2);
+
+        await Reduce(accountId, 3);
+
+        Journaled().IntentId.Should().Be(intentId);
+        A.CallTo(() => _intents.ResolveSafelyAsync(
+                intentId, nameof(PositionReduceOutcome.Reduced), A<DateTimeOffset>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldLeaveTheIntentOpen_WhenTheCallerAbortsAfterTransmit()
+    {
+        // The likeliest miss #1160 named: a browser abort after the gateway executed, before the journal site.
+        // The intent is already committed; synthesizing an outcome would invent policy. Leave it Open.
+        Guid intentId = Guid.NewGuid();
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .Returns(intentId);
+        Guid accountId = await SeedAccountAsync();
+        Holds(5);
+        using CancellationTokenSource cts = new();
+        A.CallTo(() => _venue.ReducePositionAsync(
+                A<VenueAccountId>._, A<VenueContractId>._, A<int>._, A<CancellationToken>._))
+            .Invokes(() => cts.Cancel())
+            .Throws(() => new OperationCanceledException(cts.Token));
+
+        Func<Task> act = () => Service().ReduceAsync(
+            accountId, InstrumentId.Parse("MES"), 3, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._)).MustNotHaveHappened();
+        A.CallTo(() => _intents.ResolveSafelyAsync(A<Guid>._, A<string>._, A<DateTimeOffset>._))
+            .MustNotHaveHappened();
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldNotCommitAnIntent_WhenThePathSendsNothing()
+    {
+        // Held / busy / exceeds / unreachable-before-venue already journal after the attempt. There is no
+        // transmit window to close, so an Open intent here would be a false strand.
+        Guid accountId = await SeedAccountAsync(mode: TradingMode.Live);
+
+        await Reduce(accountId, 1);
+
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
+        A.CallTo(() => _intents.ResolveSafelyAsync(A<Guid>._, A<string>._, A<DateTimeOffset>._))
+            .MustNotHaveHappened();
+    }
+
+    [Fact]
+    public async Task ReduceAsync_ShouldStillReportReducedOnly_WhenTheVenueClosedExactlyTheRequestedAmount()
+    {
+        // gh#1142 / gh#1161: the intent does not loosen verified reduction. Long 3, ask 1, venue reports long 2.
+        Guid accountId = await SeedAccountAsync();
+        Holds(3);
+        ReducesTo(2);
+
+        PositionReduceResult? result = await Reduce(accountId, 1);
+
+        result!.Outcome.Should().Be(PositionReduceOutcome.Reduced);
+        result.Outcome.Should().NotBe(PositionReduceOutcome.Unconfirmed);
     }
 }
