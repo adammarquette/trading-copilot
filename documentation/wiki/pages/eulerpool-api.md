@@ -3,7 +3,7 @@
 > **Trust tier:** authoritative
 > **Verified:** against public vendor developer docs + product/pricing page, 2026-09-12 (docs are server-rendered —
 > directly read). **No live API probe** — `EULERPOOL__APIKEY` was not present in the environment; this card does not
-> buy a plan. · **Sources:** https://eulerpool.com/developers/introduction , https://eulerpool.com/developers/authentication , https://eulerpool.com/developers/rate-limits , https://eulerpool.com/developers/errors , https://eulerpool.com/developers/quickstart , https://eulerpool.com/developers/llms.txt , https://eulerpool.com/financial-data-api
+> buy a plan. · **Sources:** https://eulerpool.com/developers/introduction , https://eulerpool.com/developers/authentication , https://eulerpool.com/developers/rate-limits , https://eulerpool.com/developers/errors , https://eulerpool.com/developers/quickstart , https://eulerpool.com/developers/llms.txt , https://eulerpool.com/llms-full.txt , https://eulerpool.com/developers/api/research/press/releases , https://eulerpool.com/financial-data-api
 > **Access:** public developer docs + published `llms.txt` machine-read directly (no auth wall or paywall on the
 > pages cited). Facts summarised, no vendor text reproduced. Free-tier **news JSON was not exercised** — entitlements
 > below are what the docs claim, not a 200 from the wire (the [Tiingo](tiingo-api.md) news add-on 403s on a free key —
@@ -35,7 +35,7 @@ price feed.
 ## News API (the focus — → R-2)
 
 There is **no news websocket**. Everything below is REST-poll → the R-2 poller, not the live path. Official
-first-party SDKs are Python / Node; no C# client — `HttpClient` behind `INewsSource` if we proceed.
+first-party SDKs are Python / JS/TS / Go; no C# client — `HttpClient` behind `INewsSource` if we proceed.
 
 ### Market news (primary candidate)
 
@@ -74,6 +74,12 @@ first-party SDKs are Python / Node; no C# client — `HttpClient` behind `INewsS
 - **`GET /api/1/crypto-extended/news-feed`** — crypto outlets, refreshed **daily**. Out of scope for the
   futures desk.
 - Analyst **grade-news** / **price-target-news** — equity-research wires, not the R-2 news template.
+- **Press releases (News-category sibling — cannot be `INewsSource`):**
+  `GET https://api.eulerpool.com/api/1/research/press-releases/{ticker}` (docs page
+  `/developers/api/research/press/releases`). Official company releases; path ticker (example `MSFT`).
+  Docs example fields: `symbol`, `datetime` (ISO-8601), `headline`, `description`. **No `url`.** Same rule
+  as sentiment and as the Finnhub adapter: no URL → no `NewsDedupKey` → drop, do not invent one. Leave this
+  feed unwired unless a later card finds a stable URL on the wire.
 
 ## Sentiment (scores — not `INewsSource`)
 
@@ -89,7 +95,9 @@ first-party SDKs are Python / Node; no C# client — `HttpClient` behind `INewsS
 
 The catalog is 375+ endpoints (quotes, OHLCV, fundamentals, options, calendars, ownership, macro series, …).
 **Price / fundamentals stay with [Finnhub](finnhub-api.md)** — activating Eulerpool quotes would duplicate R-1
-the same way Tiingo prices stay built-but-unwired. This page does not inventory that surface.
+the same way Tiingo prices stay built-but-unwired. Futures-desk siblings that are **not** this news eval and
+stay unwired: CFTC **COT** (`GET /api/1/alternative/cot/{symbol}`), **macro / economic calendars**, and CME
+**settlements / crack spreads**. This page does not inventory that surface.
 
 ## Free-tier limits (docs, 2026-09-12)
 
@@ -133,9 +141,11 @@ the same way Tiingo prices stay built-but-unwired. This page does not inventory 
 - Errors — https://eulerpool.com/developers/errors
 - Market coverage — https://eulerpool.com/developers/market-coverage
 - API reference / `llms.txt` — https://eulerpool.com/developers · https://eulerpool.com/developers/llms.txt
+- Full endpoint extract (`llms-full.txt`) — https://eulerpool.com/llms-full.txt
 - OpenAPI 3.0 — https://api.eulerpool.com/api/1/documentation/yaml
 - **Market news** — https://eulerpool.com/developers/api/equity/extended/market/news
 - **Company news** — https://eulerpool.com/developers/api/research/news
+- **Press releases** (no URL — not `INewsSource`) — https://eulerpool.com/developers/api/research/press/releases
 - Datasets market-news feed — https://eulerpool.com/developers/api/datasets/news
 - News RSS — https://eulerpool.com/developers/api/news/feed.xml
 - **News sentiment** — https://eulerpool.com/developers/api/sentiment/news/sentiment

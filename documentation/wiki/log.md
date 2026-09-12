@@ -9,7 +9,7 @@ Chronological ingest / lint history. Prefix: `## [YYYY-MM-DD] <op> | <title>`.
 
 **Key takeaways:**
 - **Decision (c) — augment Tiingo / fill gh#1125, not a clean replace, not a park.** Article surface exists and maps to `NewsItem`. Next card (probe + sibling client + `INewsSource`) should be filed by the next agent; this card does not stand up a client.
-- **Primary wire:** `GET /api/1/equity-extended/market-news` — `headline`/`summary`/`source`/`url`/`datetime` (unix epoch)/`related` (comma tickers). Same shape as the Finnhub general-news adapter. Company-news is 1 ticker/request. Sentiment is aggregated scores (no URL) — not `INewsSource`.
+- **Primary wire:** `GET /api/1/equity-extended/market-news` — `headline`/`summary`/`source`/`url`/`datetime` (unix epoch)/`related` (comma tickers). Same shape as the Finnhub general-news adapter. Company-news is 1 ticker/request. Sentiment is aggregated scores (no URL) — not `INewsSource`. Press releases (`GET /api/1/research/press-releases/{ticker}`) are a News-category sibling with **no `url`** — same drop rule; do not invent a dedup key.
 - **Equity-terminal / macro, not futures-tape.** Docs example is a Fed headline with equity `related` tickers. No ES/NQ/CL ids on the news pages. `related` vs Finnhub's untagged `general` (gh#1124) is the interesting delta — **unverified on the wire**.
 - **Free tier (today's pages):** 100,000 req/month, all endpoints claimed, non-commercial, 15-min delayed prices. Issue text's 1,000/mo is stale. Binding risk is a hidden news paywall (the Tiingo trap), not quota.
 - **Auth:** `https://api.eulerpool.com/api/1`, `?token=` or `Authorization: Bearer`, env `EULERPOOL__APIKEY`. No first-party C# SDK.
