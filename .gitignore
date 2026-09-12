@@ -84,3 +84,8 @@ nunit-*.xml
 
 # Obsidian (local wiki-vault config)
 .obsidian/
+
+# CDK synth output and the CLI's local install (infra/package-lock.json is tracked)
+infra/cdk.out/
+infra/node_modules/
+infra/cdk.context.json

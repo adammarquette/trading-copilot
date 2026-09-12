@@ -175,9 +175,9 @@ procedures land with the CDK / workflow children.
 
 ## Follow-ups
 
-- CDK app under `infra/` (epic child — not this card).
-- OIDC roles + the release-triggered deploy workflow (epic child — not this card). Not a merge-to-`main`
-  deploy.
+- CDK app under `infra/` — landed with gh#1186. GitHub OIDC deploy roles were left to gh#1187 with the
+  release workflow (this increment does not invent a production-gate environment name).
+- OIDC roles + the release-triggered deploy workflow (gh#1187). Not a merge-to-`main` deploy.
 - Operator supplies account id, region, and hostname pattern before the first apply.
 - Dated **Update** on this record when Railway sunsets, after AWS staging has proven R-13 on practice.
 - Measure EFS vs. the EC2 + EBS escalation on staging if WAL/`fsync` cost shows up under a real session.

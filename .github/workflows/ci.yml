@@ -139,6 +139,44 @@ jobs:
       - name: Unit tests
         run: dotnet test src/MarqSpec.TradingCopilot.UnitTests/MarqSpec.TradingCopilot.UnitTests.csproj --configuration Release --no-build
 
+      # gh#1186. The infrastructure under infra/ is CDK in C#, so these steps prove the template a
+      # pull request proposes (ADR-0030). They ride in this job because `build & unit tests` is
+      # already required on all three rungs. NO CREDENTIALS: the runner holds none, `--no-lookups`
+      # makes a context miss fail the synth rather than call AWS, and the stacks are
+      # environment-agnostic (no invented account id).
+      - name: Restore infrastructure
+        run: dotnet restore infra/MarqSpec.TradingCopilot.Infra.slnx
+
+      - name: Format infrastructure (verify)
+        run: dotnet format infra/MarqSpec.TradingCopilot.Infra.slnx --verify-no-changes --no-restore
+
+      - name: Build infrastructure
+        run: dotnet build infra/MarqSpec.TradingCopilot.Infra.slnx --configuration Release --no-restore
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+
+      - name: Infrastructure template tests
+        run: >-
+          dotnet test infra/MarqSpec.TradingCopilot.Infra.Tests/MarqSpec.TradingCopilot.Infra.Tests.csproj
+          --configuration Release --no-build
+
+      # EVERY SHAPE, because the tasks' outbound path is a fork ADR-0030 leaves to the operator:
+      # the app refuses to synthesise without `-c outbound=…`, and this step passes each value
+      # rather than picking one.
+      - name: Synthesise every outbound shape, with no credentials
+        working-directory: infra
+        run: |
+          npm ci --no-audit --no-fund
+          for outbound in PublicIpPerTask NatGateway VpcEndpointsWithPublicIp VpcEndpointsWithNatGateway; do
+            echo "== outbound=$outbound"
+            npx cdk synth --quiet --no-lookups -c "outbound=$outbound"
+          done
+          ls -1 cdk.out/*.template.json
+
   # Pre-merge integration tier (gh#121): the venue-independent QA suites run against a throwaway
   # PostgreSQL container (Testcontainers, the same image the compose stack runs), so the real
   # migrations and DB-level guards are exercised on every PR. Staging/venue integration and the
