@@ -17,6 +17,7 @@ cloud environments still need creating, so nothing deploys today.
 |---|---|
 | [Platform](#platform) | you need the Railway project, the GHCR image, or the database shape |
 | [AWS environment stack (CDK, not yet applied)](#aws-environment-stack-cdk-not-yet-applied) | you need the resources the `infra/` app creates — do not apply until the operator supplies account, region, and hostname |
+| [AWS release / deploy (OIDC, not yet applied)](#aws-release--deploy-oidc-not-yet-applied) | you need the GitHub OIDC roles, the release/rollback workflows, or `scripts/bootstrap.sh` — do not `cdk deploy` from this increment |
 | [Local development (docker-compose)](#local-development-docker-compose) | standing the stack up on your machine |
 | [Environments ↔ branches](#environments--branches) | working out which branch deploys where |
 | [Secrets & config (per environment)](#secrets--config-per-environment) | a variable is missing or wrong — also [operator password recovery](#operator-password-recovery-r-18-adr-0017-operator-lifecycle) |
@@ -38,7 +39,8 @@ cloud environments still need creating, so nothing deploys today.
   ([ADR-0030](adr/0030-aws-deployment-topology.md)). This runbook still describes the running Railway cloud.
   The CDK app is under [`infra/`](../infra/) (gh#1186); see [AWS environment stack](#aws-environment-stack-cdk-not-yet-applied).
   Account id, region, and hostname are operator-supplied before apply — this page does not invent them.
-  OIDC deploy roles and the release workflow are gh#1187. Do not `cdk deploy` from this increment.
+  GitHub OIDC deploy roles and the release/rollback workflows landed with **gh#1187**; see
+  [AWS release / deploy](#aws-release--deploy-oidc-not-yet-applied). Do not `cdk deploy` from this increment.
 - **Image registry:** **GHCR** — `ghcr.io/adammarquette/trading-copilot`, **public** ([ADR-0018](adr/0018-image-registry-ghcr.md)).
   CI builds once per merge and pushes; local and Railway both **pull** this artifact. Tags: `:develop` / `:staging` /
   `:main` per environment, plus `:sha-<short>` for an exact rollback target.
@@ -53,7 +55,8 @@ cloud environments still need creating, so nothing deploys today.
 
 The C# CDK app under [`infra/`](../infra/) (gh#1186) matches [ADR-0030](adr/0030-aws-deployment-topology.md).
 Railway remains the **running** cloud. Do not `cdk deploy` until the operator supplies **account id**, **region**,
-and **hostname** — this page does not invent them. GitHub OIDC deploy roles and the release workflow are **gh#1187**.
+and **hostname** — this page does not invent them. GitHub OIDC deploy roles and the release workflow are
+[below](#aws-release--deploy-oidc-not-yet-applied) (gh#1187).
 
 Shape (pattern library: TopstepX `EnvironmentStack` in `MarqSpec.Mcp.TopstepX` — cite it; do not copy account IDs,
 hostnames, Cognito, or MCP bits):
@@ -89,6 +92,49 @@ Synth without credentials (what CI runs):
 cd infra
 npx cdk synth --no-lookups -c outbound=NatGateway
 ```
+
+## AWS release / deploy (OIDC, not yet applied)
+
+The OIDC stack and the release/rollback workflows (gh#1187) match [ADR-0030](adr/0030-aws-deployment-topology.md)
+decisions 4, 8 and 11. Shape is TopstepX `GitHubOidcStack` + `release.yml` / `deploy.yml` in
+`MarqSpec.Mcp.TopstepX` — cite it; do not copy account IDs, hostnames, Cognito, or MCP bits. Railway remains
+the **running** cloud. This increment does not `cdk deploy` and does not prove a live hostname (gh#1188).
+
+| Piece | Name / trigger | Notes |
+|---|---|---|
+| OIDC stack | `trading-copilot-github-oidc` | One provider, two roles (`GitHubDeploy-staging`, `GitHubDeploy-production`). Environment-agnostic: ARNs use `AWS::AccountId` / `AWS::Region`. No thumbprint list. |
+| Staging trust | `v*` tags **and** `refs/heads/main` | Release path + `workflow_dispatch` rollback. The subject is this repo's **immutable** Actions prefix (`owner@id/name@id`), read from `GET /repos/…/actions/oidc/customization/sub` — a name-only `repo:owner/name` trust never matches. |
+| Production trust | `environment:aws-production` | No wildcard. The reviewer rule on that GitHub Environment is the approval **and** the credential's precondition ([ADR-0030](adr/0030-aws-deployment-topology.md) decision 8). |
+| `release.yml` | published GitHub Release | Retags the merge-published `:sha-<short>` as `:VERSION` (does not rebuild, never `:latest`). Deploys that **digest** to staging, then the same digest to production behind `aws-production`. |
+| `deploy.yml` | `workflow_dispatch` on `main` | Rollback / redeploy. Resolves the digest from the version tag (`imagetools inspect`). Staging has no `environment:` key; production is the literal `aws-production`. |
+| Deploy script | `scripts/deploy-environment.sh` | `cdk deploy --parameters ImageDigest=… Version=…`. Never `put-parameter`, never `{{resolve:ssm}}`. Live hostname prove is gh#1188. |
+
+**No long-lived AWS keys** in GitHub secrets, workflow files, or source. The workflows assume the deploy
+roles through OIDC (`id-token: write`) and read the account / region from repository **variables**
+(`AWS_ACCOUNT_ID`, `AWS_REGION`) — empty is a hard fail, never a guessed literal.
+
+### Operator setup — console actions CI cannot do (gh#1187)
+
+1. **Create the approval environments.** `scripts/bootstrap.sh adammarquette/trading-copilot` creates
+   `production` (gates the version-tag publish) and `aws-production` (gates what runs), each with the
+   running account as the required reviewer. Create-only: a re-run that finds an environment leaves it
+   untouched. An `environment:` key that names a missing environment is **not** a gate — GitHub
+   auto-creates it unprotected.
+2. **Set repository variables** (Settings → Secrets and variables → Actions → Variables), when the
+   operator has chosen them. This page does not invent values:
+   `AWS_ACCOUNT_ID`, `AWS_REGION`, `AWS_OUTBOUND` (one of the four `-c outbound=` shapes), and on first
+   apply `AWS_ROOT_DOMAIN`, `AWS_HOSTNAME_STAGING`, `AWS_HOSTNAME_PRODUCTION`,
+   `AWS_PROJECTX_DATA_TIER_STAGING` (`Simulated`), `AWS_PROJECTX_DATA_TIER_PRODUCTION`,
+   `AWS_ALERTS_EMAIL`.
+3. **First apply of the OIDC stack** uses the operator's own credentials, not GitHub Actions — the
+   roles do not exist yet, so the circular "assume the role that creates the role" cannot run.
+   `cd infra && npx cdk deploy trading-copilot-github-oidc --no-lookups -c outbound=<shape>`.
+   Still not this increment (gh#1188).
+4. **CDK bootstrap** in that account (`cdk bootstrap`) before any apply.
+
+`./scripts/check-release-gate.sh` fails CI when a workflow-named environment is missing or has no
+reviewer. `./scripts/check-deploy-workflows.sh` fails CI when a deploy job references `:latest`,
+writes SSM, names a twelve-digit account ARN, or uses an expression-named environment.
 
 ## Local development (docker-compose)
 `docker compose up -d` from the repo root stands up the local stack ([ADR-0012](adr/0012-containerization-local-dev.md),
@@ -940,15 +986,21 @@ monitor check too** — the app will correctly refuse to vouch for a market noth
 would otherwise page every day.
 
 ## Deploy procedure
-- **Non-prod (dev / staging):** automatic on merge — CI builds + deploys.
-- **Production:** **human-approved** (§9). Promote `staging → main`; CI deploys; smoke tests verify. A person must be
+- **Non-prod (dev / staging):** automatic on merge — CI builds + deploys **Railway** (the running cloud).
+- **Production (Railway):** **human-approved** (§9). Promote `staging → main`; CI deploys; smoke tests verify. A person must be
   aware of and approve any production deploy.
+- **AWS (intended, not yet applied):** a published GitHub Release retags the merge-published digest and deploys
+  it to staging, then the same digest to production behind the `aws-production` reviewer rule
+  ([AWS release / deploy](#aws-release--deploy-oidc-not-yet-applied), [ADR-0030](adr/0030-aws-deployment-topology.md),
+  gh#1187). Do not cut a release expecting AWS to move until gh#1188 has applied the stacks.
 - **Before the first production deploy:** the dead-man's switch above is provisioned and **proven to page**.
 
 ## Rollback procedure
 - Triggered by a **failed production smoke test** or an operator decision.
 - **Human-approved** (§9): roll back via Railway (redeploy the previous release) and confirm with smoke tests. Any
   rollback is an explicit, approved action — never automatic.
+- **AWS rollback** (once applied): `gh workflow run deploy.yml --ref main -f version=<previous> -f environment=production`
+  waits on `aws-production`. Never `:latest`. See [AWS release / deploy](#aws-release--deploy-oidc-not-yet-applied).
 
 ## Verification / smoke tests
 Post-deploy, the tagged **smoke** subset (engineering §5) confirms the critical paths. **The set exists**

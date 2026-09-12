@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <None Include="..\MarqSpec.TradingCopilot.Infra\Collector\otel-collector-config.yaml" Link="otel-collector-config.yaml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\scripts\bootstrap.sh" Link="bootstrap.sh" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
