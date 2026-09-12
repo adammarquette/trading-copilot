@@ -38,6 +38,23 @@ config-driven DB keeps compose-vs-external flexible.
 added; Docker is a prerequisite for local dev; the compose DB image (TimescaleDB + pgvector) must track the extensions
 the app relies on.
 
+## Decision log
+
+The *Decision* above is extended by increment; the dated updates below are the trail. Oldest first; this index
+mirrors the `## Update` headings, so keep the two in step when an entry is appended (gh#600).
+
+| Date | Update |
+|---|---|
+| 2026-09-12 | AWS is a second cloud consumer of the same GHCR image ([ADR-0030](0030-aws-deployment-topology.md)) (gh#1185) |
+
+## Update (2026-09-12) — AWS consumes the same artifact; compose stays local (gh#1185)
+
+The *Decision* (containerize, `docker compose up`, config-driven DB, no secrets in the image) stands.
+[ADR-0030](0030-aws-deployment-topology.md) names **AWS** as a second cloud consumer of the GHCR image this
+compose already pulls: two AWS environments (staging + production); **`develop` stays this compose**. Railway
+remains a parallel consumer until ADR-0030's sunset Update. "Local ≡ cloud" stays "the same GHCR artifact,"
+not "Railway is the only cloud."
+
 ## Follow-ups
 - Author the app **`Dockerfile`** (multi-stage sdk → aspnet, binds `$PORT`) and wire the `app` service in compose once
   the BFF project exists (§3, §8).

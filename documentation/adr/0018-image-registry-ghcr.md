@@ -68,6 +68,24 @@ Nothing shared a built artifact because there was no registry. Adding one closes
 - **First-publish and Railway wiring are console actions** (see runbook), not code — the gap this project has
   already been bitten by, so they are written down rather than assumed.
 
+## Decision log
+
+The *Decision* above is extended by increment; the dated updates below are the trail. Oldest first; this index
+mirrors the `## Update` headings, so keep the two in step when an entry is appended (gh#600).
+
+| Date | Update |
+|---|---|
+| 2026-09-12 | AWS ECS pulls GHCR **by digest**; production AWS deploy is a release, not a merge ([ADR-0030](0030-aws-deployment-topology.md)) (gh#1185) |
+
+## Update (2026-09-12) — AWS pulls by digest; merge still publishes, it does not deploy AWS (gh#1185)
+
+The *Decision* (build once in CI, tag by branch plus `:sha-<short>`, public GHCR, local pull by default)
+stands. [ADR-0030](0030-aws-deployment-topology.md) adds a consumer that **must not** run a floating tag:
+ECS task definitions reference the image **by digest**, never `:latest`, and an AWS production deploy is a
+**human-approved release**, not the merge that published `:main`. Railway remains a parallel consumer of the
+branch tag until ADR-0030's sunset Update. The bullet "Railway deploys the CI-built image" stays true while
+that parallel run lasts; it is not rewritten here.
+
 ## Follow-ups
 
 - **Operator, once (recorded in the [runbook](../deployment-runbook.md)):** set the GHCR package visibility to
@@ -78,3 +96,5 @@ Nothing shared a built artifact because there was no registry. Adding one closes
   never half-wired.
 - **Multi-service images.** The architecture is several services (ingestion, processor, execution, …); today
   only the BFF image exists. Each new service that ships as its own image extends this same publish job.
+- **AWS digest deploy** is [ADR-0030](0030-aws-deployment-topology.md)'s release trigger, not this record's
+  merge-to-branch publish. Lands with the epic's workflow child, not here.
