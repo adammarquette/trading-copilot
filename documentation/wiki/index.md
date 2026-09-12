@@ -21,6 +21,7 @@ place. **Not read by the product.** Conventions + trust tiers: [`SCHEMA.md`](SCH
 | [pages/tradovate-api.md](pages/tradovate-api.md) | Tradovate API (future venue) — shape vs. ProjectX | authoritative | R-17, Q-14 |
 | [pages/finnhub-api.md](pages/finnhub-api.md) | Finnhub API — first **data-only provider** (equities/indices + alt-data, no execution); free-tier limits | authoritative | R-1, R-2, R-17 |
 | [pages/tiingo-api.md](pages/tiingo-api.md) | Tiingo API — data-only provider; first concrete **news feed** (R-2), REST-poll, free 3-mo history; also free EOD prices | authoritative | R-2, R-1, R-17 |
+| [pages/eulerpool-api.md](pages/eulerpool-api.md) | Eulerpool API — data-only provider; R-2 **news eval** (market-news + company-news + sentiment scores); free-tier candidate to augment Tiingo (gh#1125) | authoritative | R-2, R-17 |
 | [pages/webull-api.md](pages/webull-api.md) | Webull OpenAPI — cross-asset **market-data** source (US stocks/futures/crypto) augmenting the futures feed; HMAC auth + MQTT streaming; a **future** options-execution venue. **Futures MD is a paid subscription, maybe not live yet** | authoritative | R-1, R-17, Q-14 |
 | [pages/quantconnect.md](pages/quantconnect.md) | QuantConnect / LEAN — a comparable algo-trading platform, catalogued for **insights only** (not a template to clone) | authoritative | design thinking (R-1/R-22/R-4/R-9/R-11) |
 | [pages/quantower.md](pages/quantower.md) | Quantower — multi-broker discretionary terminal, catalogued for **insights only** (used it; not a template) | authoritative | design thinking (R-3/R-10/R-17/ADR-0006) |
@@ -38,12 +39,15 @@ place. **Not read by the product.** Conventions + trust tiers: [`SCHEMA.md`](SCH
   feed the R-17 venue-capability matrix (Q-14).
 - **Data-only providers (no execution):** [Finnhub](pages/finnhub-api.md) — free real-time equities/indices
   (SPY/QQQ) as cross-asset context for ES/NQ, plus alt-data (R-2) · [Tiingo](pages/tiingo-api.md) — free news +
-  EOD prices · [Webull](pages/webull-api.md) — cross-asset MD (stocks/futures/crypto) that can quote the
+  EOD prices · [Eulerpool](pages/eulerpool-api.md) — equities-centric REST; **news / sentiment eval** (gh#1190),
+  not a price source · [Webull](pages/webull-api.md) — cross-asset MD (stocks/futures/crypto) that can quote the
   **futures contracts themselves**, augmenting the ProjectX/Topstep feed, though **futures MD is a paid
   subscription that may not be available yet** (also a *future* options-execution venue). All are the
   market-data/non-market slice of the R-17 abstraction.
 - **News / soft signals (R-2 non-market template):** [Tiingo](pages/tiingo-api.md) — first concrete free
   **news-API** source (REST-poll, 3-mo history, ticker-tagged); the reference implementation of the news template.
+  [Eulerpool](pages/eulerpool-api.md) — eval (gh#1190): market-news maps to `NewsItem`; candidate to augment
+  Tiingo while that news add-on 403s (gh#1125); not a futures-tape feed.
 - **Reference / example systems** (used / comparable, catalogued for insights — not dependencies, not templates to clone): [QuantConnect / LEAN](pages/quantconnect.md) (engine-first algo platform) · [Quantower](pages/quantower.md) (multi-broker discretionary terminal) · [NinjaTrader](pages/ninjatrader.md) (futures terminal + brokerage).
 - **Prop-firm rules (risk model):** [Topstep vs. Apex](pages/prop-firm-rules.md) — the trailing-drawdown / daily-loss / consistency rules the **R-5 risk gate must enforce**; the load-bearing variable is the trailing **mode** (EOD vs. intraday), and it's **per-account** — Topstep is EOD-only, Apex offers **both** since Mar 2026 (Q-14). Second data point: **[Take Profit Trader](pages/take-profit-trader.md)** — drawdown mode varies by **stage** (EOD→intraday→EOD). The **consistency target** ("$1,500 and stop") drives the R-5 daily-target stand-down.
 - **Live brokerage (self-imposed floor):** [Topstep Brokerage](pages/topstep-brokerage.md) — **real-money**, CFTC introducing broker with **no firm-imposed drawdown**, so R-5 enforces a **self-imposed** floor (the "hold $50K, risk $10K" case).

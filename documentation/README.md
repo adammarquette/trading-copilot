@@ -49,7 +49,7 @@ The two subtree contracts — [`src/AGENTS.md`](../src/AGENTS.md) (Coding) and
 [`IntegrationTests/AGENTS.md`](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) (QA) — load from their
 directory instead.
 
-## Reference — [`wiki/`](wiki/) (18 pages, ~32K)
+## Reference — [`wiki/`](wiki/) (19 pages, ~34K)
 
 External domain knowledge: venue and data-provider APIs, prop-firm rules, market sessions and settlement,
 trading methodologies, .NET conventions. **Ingested reference, not repo truth** — when the wiki and a repo
