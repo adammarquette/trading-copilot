@@ -39,6 +39,7 @@ public class PositionExitServiceTests
     private readonly IProjectXVenueFactory _factory = A.Fake<IProjectXVenueFactory>();
     private readonly ITradingVenue _venue = A.Fake<ITradingVenue>();
     private readonly IPositionActionJournal _journal = A.Fake<IPositionActionJournal>();
+    private readonly IPositionActionIntentStore _intents = A.Fake<IPositionActionIntentStore>();
 
     private sealed record FixedUser(Guid UserId) : ICurrentUser;
 
@@ -51,6 +52,8 @@ public class PositionExitServiceTests
         A.CallTo(() => _venue.ResolveContractAsync(A<InstrumentId>._, A<CancellationToken>._))
             .Returns(new ResolvedContract(VenueContractId.Create(Projectx, Contract), InstrumentId.Parse("MES")));
         Closes(Flat());
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .ReturnsLazily(() => Task.FromResult(Guid.NewGuid()));
     }
 
     /// <summary>
@@ -78,7 +81,7 @@ public class PositionExitServiceTests
 
     private PositionExitService Service(string credentialKey = "topstep-main") =>
         new(Context(), _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = credentialKey }),
-            _journal, NullLogger<PositionExitService>.Instance);
+            _journal, _intents, NullLogger<PositionExitService>.Instance);
 
     private async Task<Guid> SeedAccountAsync(string credentialKey = "topstep-main")
     {
@@ -165,7 +168,7 @@ public class PositionExitServiceTests
         await using TradingCopilotDbContext other = Context(Guid.NewGuid());
         PositionExitService service = new(
             other, _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
-            _journal, NullLogger<PositionExitService>.Instance);
+            _journal, _intents, NullLogger<PositionExitService>.Instance);
 
         (await service.ExitAsync(accountId, InstrumentId.Parse("MES"), CancellationToken.None)).Should().BeNull();
     }
@@ -294,7 +297,7 @@ public class PositionExitServiceTests
         await using TradingCopilotDbContext other = Context(Guid.NewGuid());
         PositionExitService service = new(
             other, _factory, Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
-            _journal, NullLogger<PositionExitService>.Instance);
+            _journal, _intents, NullLogger<PositionExitService>.Instance);
 
         await service.ExitAsync(accountId, InstrumentId.Parse("MES"), CancellationToken.None);
 
@@ -347,5 +350,79 @@ public class PositionExitServiceTests
             .MustHaveHappened()
             .Then(A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._))
                 .MustHaveHappened());
+    }
+
+    [Fact]
+    public async Task ExitAsync_ShouldCommitTheIntentBeforeTheVenueIsTouched_WhenItTransmits()
+    {
+        Guid accountId = await SeedAccountAsync();
+
+        await Service().ExitAsync(accountId, InstrumentId.Parse("MES"), CancellationToken.None);
+
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .MustHaveHappened()
+            .Then(A.CallTo(() => _venue.ClosePositionAsync(
+                A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
+                .MustHaveHappened())
+            .Then(A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._))
+                .MustHaveHappened());
+
+        ICompletedFakeObjectCall call = Fake.GetCalls(_intents)
+            .Single(candidate => candidate.Method.Name == nameof(IPositionActionIntentStore.CommitAsync));
+        PositionActionIntentDraft draft = (PositionActionIntentDraft)call.Arguments[0]!;
+        draft.Action.Should().Be(PositionActionKind.Exit);
+        draft.RequestedQuantity.Should().BeNull();
+        draft.AccountId.Should().Be(accountId);
+        draft.Instrument.Should().Be("MES");
+    }
+
+    [Fact]
+    public async Task ExitAsync_ShouldJournalTheIntentIdAndResolveIt_WhenTheExitCompletes()
+    {
+        Guid intentId = Guid.NewGuid();
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .Returns(intentId);
+        Guid accountId = await SeedAccountAsync();
+
+        await Service().ExitAsync(accountId, InstrumentId.Parse("MES"), CancellationToken.None);
+
+        Journaled().IntentId.Should().Be(intentId);
+        A.CallTo(() => _intents.ResolveSafelyAsync(
+                intentId, nameof(PositionExitOutcome.Flat), A<DateTimeOffset>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ExitAsync_ShouldLeaveTheIntentOpen_WhenTheCallerAbortsAfterTransmit()
+    {
+        Guid intentId = Guid.NewGuid();
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .Returns(intentId);
+        Guid accountId = await SeedAccountAsync();
+        using CancellationTokenSource cts = new();
+        A.CallTo(() => _venue.ClosePositionAsync(
+                A<VenueAccountId>._, A<VenueContractId>._, A<CancellationToken>._))
+            .Invokes(() => cts.Cancel())
+            .Throws(() => new OperationCanceledException(cts.Token));
+
+        Func<Task> act = () => Service().ExitAsync(accountId, InstrumentId.Parse("MES"), cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        A.CallTo(() => _journal.RecordAsync(A<PositionActionEntry>._, A<DateTimeOffset>._)).MustNotHaveHappened();
+        A.CallTo(() => _intents.ResolveSafelyAsync(A<Guid>._, A<string>._, A<DateTimeOffset>._))
+            .MustNotHaveHappened();
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .MustHaveHappenedOnceExactly();
+    }
+
+    [Fact]
+    public async Task ExitAsync_ShouldNotCommitAnIntent_WhenTheVenueIsUnreachableBeforeTransmit()
+    {
+        Guid accountId = await SeedAccountAsync(credentialKey: "someone-else");
+
+        await Service().ExitAsync(accountId, InstrumentId.Parse("MES"), CancellationToken.None);
+
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .MustNotHaveHappened();
     }
 }

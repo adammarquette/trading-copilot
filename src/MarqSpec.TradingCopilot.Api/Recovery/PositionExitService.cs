@@ -59,6 +59,7 @@ public sealed class PositionExitService
     private readonly IProjectXVenueFactory _venueFactory;
     private readonly IOptions<ProjectXConnectionOptions> _projectXOptions;
     private readonly IPositionActionJournal _journal;
+    private readonly IPositionActionIntentStore _intents;
     private readonly ILogger<PositionExitService> _logger;
 
     /// <summary>Creates the exit service.</summary>
@@ -69,19 +70,26 @@ public sealed class PositionExitService
     /// The durable record of what was asked and what happened (gh#1143). <b>Required, not optional</b>: an optional
     /// dependency defaults to a silent no-op the moment anything constructs this service without it.
     /// </param>
+    /// <param name="intents">
+    /// The durable pre-transmit intent (gh#1161). <b>Required</b>: committed before the venue is touched so a
+    /// caller abort after transmit cannot lose that an exit was asked.
+    /// </param>
     /// <param name="logger">The logger.</param>
     public PositionExitService(
         TradingCopilotDbContext database,
         IProjectXVenueFactory venueFactory,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IPositionActionJournal journal,
+        IPositionActionIntentStore intents,
         ILogger<PositionExitService> logger)
     {
         ArgumentNullException.ThrowIfNull(journal);
+        ArgumentNullException.ThrowIfNull(intents);
         _database = database;
         _venueFactory = venueFactory;
         _projectXOptions = projectXOptions;
         _journal = journal;
+        _intents = intents;
         _logger = logger;
     }
 
@@ -111,14 +119,13 @@ public sealed class PositionExitService
 
         Attempt attempt = await AttemptAsync(account, instrument, cancellationToken);
 
-        // TRANSMIT, THEN JOURNAL -- ADR-0007's accepted ordering for the send path (2026-08-02 update), applied
-        // here rather than re-answered: the record carries the VERIFIED outcome, which does not exist until the
-        // attempt resolves. The residual it leaves (a crash between the venue accepting and this write) is the same
-        // window that update names, and closing it would need a durable pre-transmit intent -- a change to what this
-        // path DOES, not to what it writes down. Recorded as an open item on the ADR instead.
+        // JOURNAL AFTER THE ATTEMPT -- the record carries the VERIFIED outcome (gh#1143). The transmit→journal
+        // window is closed by the durable pre-transmit intent (gh#1161) committed immediately before the venue
+        // is touched. The journal references that intent.
         //
         // The journal cannot fail this: the seam is contracted never to throw, and it takes no cancellation token,
         // so a client that hung up mid-response cannot cost the record of a real order.
+        DateTimeOffset resolvedAt = DateTimeOffset.UtcNow;
         await _journal.RecordSafelyAsync(
             new PositionActionEntry
             {
@@ -142,9 +149,15 @@ public sealed class PositionExitService
                     ? null
                     : attempt.Result.NetQuantity,
                 Outcome = attempt.Result.Outcome.ToString(),
+                IntentId = attempt.IntentId,
             },
-            DateTimeOffset.UtcNow,
+            resolvedAt,
             _logger);
+
+        if (attempt.IntentId is Guid intentId)
+        {
+            await _intents.ResolveSafelyAsync(intentId, attempt.Result.Outcome.ToString(), resolvedAt);
+        }
 
         return attempt.Result;
     }
@@ -152,7 +165,8 @@ public sealed class PositionExitService
     /// <summary>The exit itself, plus the contract it resolved to when it got that far (gh#1143).</summary>
     /// <param name="Result">The outcome, exactly as it is returned to the operator.</param>
     /// <param name="ContractKey">The venue contract, or <see langword="null"/> when the attempt never resolved one.</param>
-    private sealed record Attempt(PositionExitResult Result, string? ContractKey);
+    /// <param name="IntentId">The pre-transmit intent, when one was committed before the venue was touched.</param>
+    private sealed record Attempt(PositionExitResult Result, string? ContractKey, Guid? IntentId = null);
 
     /// <summary>
     /// The exit, unchanged by gh#1143 — every decision, guard and outcome is exactly what it was; the record simply
@@ -180,6 +194,7 @@ public sealed class PositionExitService
         // Captured as the attempt walks forward, so a fault after the contract resolved still records WHICH
         // contract the operator was closing rather than losing it to the catch.
         string? contractKey = null;
+        Guid? committedIntentId = null;
 
         try
         {
@@ -196,6 +211,20 @@ public sealed class PositionExitService
             ResolvedContract resolved = await venue.ResolveContractAsync(instrument, cancellationToken);
             contractKey = resolved.Contract.Key;
 
+            // Durable pre-transmit intent (gh#1161): commit BEFORE the venue is touched, in its own unit.
+            committedIntentId = await _intents.CommitAsync(
+                new PositionActionIntentDraft
+                {
+                    Action = PositionActionKind.Exit,
+                    OwnerUserId = account.UserId,
+                    AccountId = account.Id,
+                    VenueAccountKey = account.VenueAccountKey,
+                    Instrument = instrument.ToString(),
+                    Contract = contractKey,
+                    RequestedQuantity = null,
+                },
+                cancellationToken);
+
             PositionSnapshot after = await venue.ClosePositionAsync(
                 venueAccount.Id, resolved.Contract, cancellationToken);
 
@@ -204,7 +233,8 @@ public sealed class PositionExitService
                 after.IsFlat
                     ? new PositionExitResult(PositionExitOutcome.Flat, 0)
                     : new PositionExitResult(PositionExitOutcome.StillOpen, after.NetQuantity),
-                contractKey);
+                contractKey,
+                committedIntentId);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -221,7 +251,8 @@ public sealed class PositionExitService
                 + "be open (gh#656).",
                 instrument,
                 account.Id);
-            return new Attempt(new PositionExitResult(PositionExitOutcome.Unreachable, 0), contractKey);
+            return new Attempt(
+                new PositionExitResult(PositionExitOutcome.Unreachable, 0), contractKey, committedIntentId);
         }
     }
 }

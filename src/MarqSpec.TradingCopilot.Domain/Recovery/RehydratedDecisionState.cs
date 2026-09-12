@@ -31,3 +31,11 @@ public sealed record RehydratedConditional(Guid Id, Guid Owner, ConditionalStatu
 /// <param name="OrderId">The order this plan protects — must resolve to a rehydrated order.</param>
 /// <param name="Staging">Where the actual stop physically rests (hidden / native / orphaned).</param>
 public sealed record RehydratedStopPlan(Guid Id, Guid Owner, Guid OrderId, StopStaging Staging);
+
+/// <summary>
+/// A rehydrated open position-action intent (gh#1161) — a reduce or exit committed before transmit and never
+/// resolved. Only <see cref="PositionActionIntentStatus.Open"/> rows are fed in; resolved ones are coherent.
+/// </summary>
+/// <param name="Id">The intent's id.</param>
+/// <param name="Owner">The owning operator (R-20).</param>
+public sealed record RehydratedPositionActionIntent(Guid Id, Guid Owner);

@@ -18,4 +18,11 @@ public enum ReconcileStrandKind
 
     /// <summary>A conditional stranded mid-fire (<see cref="Execution.ConditionalStatus.Firing"/>, gh#577) — resolved via <c>POST /conditionals/{id}/reconcile</c>.</summary>
     ConditionalFiring,
+
+    /// <summary>
+    /// A position-action intent left <see cref="PositionActionIntentStatus.Open"/> (gh#1161) — the reduce or
+    /// exit was asked, the venue may have been touched, and the #1160 outcome journal never landed. Surfaced
+    /// only; there is no dedicated reconcile endpoint — resolve against venue truth using the intent row.
+    /// </summary>
+    PositionActionIntent,
 }

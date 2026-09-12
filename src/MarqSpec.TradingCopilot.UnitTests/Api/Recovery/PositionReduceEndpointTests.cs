@@ -53,6 +53,8 @@ public class PositionReduceEndpointTests
         A.CallTo(() => _venue.GetPositionsAsync(A<VenueAccountId>._, A<CancellationToken>._))
             .Returns<IReadOnlyList<PositionSnapshot>>([Position(3)]);
         ReducesTo(2);
+        A.CallTo(() => _intents.CommitAsync(A<PositionActionIntentDraft>._, A<CancellationToken>._))
+            .ReturnsLazily(() => Task.FromResult(Guid.NewGuid()));
     }
 
     private static PositionSnapshot Position(int net) => new(VenueAccount, ContractId, net, new Price(5_000m));
@@ -93,11 +95,12 @@ public class PositionReduceEndpointTests
     }
 
     private readonly IPositionActionJournal _journal = A.Fake<IPositionActionJournal>();
+    private readonly IPositionActionIntentStore _intents = A.Fake<IPositionActionIntentStore>();
 
     private PositionReduceService Service() =>
         new(Context(), _factory, _guard,
             Options.Create(new ProjectXConnectionOptions { CredentialKey = "topstep-main" }),
-            _journal, NullLogger<PositionReduceService>.Instance);
+            _journal, _intents, NullLogger<PositionReduceService>.Instance);
 
     private async Task<Guid> SeedAccountAsync(TradingMode mode = TradingMode.Practice)
     {

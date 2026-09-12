@@ -133,15 +133,16 @@ public sealed class ReconcileSweepHost : BackgroundService
     }
 
     /// <summary>
-    /// Discovers every currently-stranded intent across all owners (gh#722): orders left <c>Taking</c> and
-    /// conditionals left <c>Firing</c>. Background plumbing with no request user, so the R-20 default-deny filter is
-    /// bypassed with <c>IgnoreQueryFilters</c> — the discovery discipline of
-    /// <see cref="MarketData.ConditionalFiringService"/> and the rehydrator; ownership is carried on every key.
+    /// Discovers every currently-stranded intent across all owners (gh#722): orders left <c>Taking</c>,
+    /// conditionals left <c>Firing</c>, and position-action intents left <c>Open</c> (gh#1161). Background plumbing
+    /// with no request user, so the R-20 default-deny filter is bypassed with <c>IgnoreQueryFilters</c> — the
+    /// discovery discipline of <see cref="MarketData.ConditionalFiringService"/> and the rehydrator; ownership is
+    /// carried on every key.
     /// </summary>
     /// <param name="database">The pass-scoped database.</param>
     /// <param name="cancellationToken">The caller's cancellation token.</param>
     /// <returns>One key per stranded order and conditional.</returns>
-    private static async Task<IReadOnlyList<ReconcileStrandKey>> DiscoverStrandedAsync(
+    internal static async Task<IReadOnlyList<ReconcileStrandKey>> DiscoverStrandedAsync(
         TradingCopilotDbContext database, CancellationToken cancellationToken)
     {
         // Project straight to the owner-carrying key in the query (the RehydratedOrder projection idiom): the kind is
@@ -158,7 +159,14 @@ public sealed class ReconcileSweepHost : BackgroundService
             .Select(order => new ReconcileStrandKey(ReconcileStrandKind.ConditionalFiring, order.UserId, order.Id))
             .ToListAsync(cancellationToken);
 
-        return [.. takingOrders, .. firingConditionals];
+        List<ReconcileStrandKey> openIntents = await database.PositionActionIntents
+            .IgnoreQueryFilters()
+            .Where(intent => intent.Status == PositionActionIntentStatus.Open)
+            .Select(intent => new ReconcileStrandKey(
+                ReconcileStrandKind.PositionActionIntent, intent.UserId, intent.Id))
+            .ToListAsync(cancellationToken);
+
+        return [.. takingOrders, .. firingConditionals, .. openIntents];
     }
 
     /// <summary>
@@ -207,6 +215,7 @@ public sealed class ReconcileSweepHost : BackgroundService
     {
         ReconcileStrandKind.OrderTaking => ExecutionMetrics.ReconcileStrandOrderTaking,
         ReconcileStrandKind.ConditionalFiring => ExecutionMetrics.ReconcileStrandConditionalFiring,
+        ReconcileStrandKind.PositionActionIntent => ExecutionMetrics.ReconcileStrandPositionActionIntent,
         _ => "unknown",
     };
 
@@ -214,6 +223,8 @@ public sealed class ReconcileSweepHost : BackgroundService
     {
         ReconcileStrandKind.OrderTaking => "POST /orders/{id}/reconcile",
         ReconcileStrandKind.ConditionalFiring => "POST /conditionals/{id}/reconcile",
+        ReconcileStrandKind.PositionActionIntent =>
+            "the PositionActionIntents row (no dedicated reconcile endpoint — read venue truth)",
         _ => "the reconcile endpoint",
     };
 }

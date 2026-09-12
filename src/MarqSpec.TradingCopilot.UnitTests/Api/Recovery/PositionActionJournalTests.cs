@@ -60,6 +60,7 @@ public class PositionActionJournalTests
             NetQuantityBefore = netBefore,
             NetQuantityAfter = netAfter,
             Outcome = outcome,
+            IntentId = null,
         };
 
     /// <summary>The event this journal appended, read back off the seam rather than asked of the writer.</summary>
@@ -122,6 +123,17 @@ public class PositionActionJournalTests
         payload.GetProperty("netQuantityBefore").GetInt32().Should().Be(5);
         payload.GetProperty("netQuantityAfter").GetInt32().Should().Be(2);
         payload.GetProperty("outcome").GetString().Should().Be("Reduced");
+        payload.GetProperty("intentId").ValueKind.Should().Be(JsonValueKind.Null);
+    }
+
+    [Fact]
+    public async Task RecordAsync_ShouldCarryTheIntentId_WhenAPreTransmitIntentWasCommitted()
+    {
+        Guid intentId = Guid.NewGuid();
+        await Journal().RecordAsync(ReduceEntry() with { IntentId = intentId }, At);
+
+        Payload(AppendedEvent()).GetProperty("intentId").GetGuid().Should().Be(intentId);
+        WrittenAudit().Detail.Should().Contain(intentId.ToString());
     }
 
     [Theory]

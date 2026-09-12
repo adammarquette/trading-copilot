@@ -114,6 +114,7 @@ public sealed class PositionActionJournal : IPositionActionJournal
                 netQuantityBefore = entry.NetQuantityBefore,
                 netQuantityAfter = entry.NetQuantityAfter,
                 outcome = entry.Outcome,
+                intentId = entry.IntentId,
             });
 
             await _eventLog.AppendAsync(
@@ -202,8 +203,12 @@ public sealed class PositionActionJournal : IPositionActionJournal
             ? string.Create(CultureInfo.InvariantCulture, $" by {requested} contract(s)")
             : string.Empty;
 
+        string intent = entry.IntentId is Guid intentId
+            ? string.Create(CultureInfo.InvariantCulture, $" intent {intentId}")
+            : string.Empty;
+
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"Operator {entry.Action} of {entry.Instrument} on account {entry.VenueAccountKey}{sized} — outcome {entry.Outcome}; net quantity {before} → {after}.");
+            $"Operator {entry.Action} of {entry.Instrument} on account {entry.VenueAccountKey}{sized} — outcome {entry.Outcome}; net quantity {before} → {after}.{intent}");
     }
 }

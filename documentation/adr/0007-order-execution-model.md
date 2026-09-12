@@ -178,6 +178,7 @@ for validating heading-order/index against the trail in CI rather than by hand �
 | 2026-08-21 | [the reduce's bracket gate is scaffolded, and the reduce stays unbuilt behind it (gh#1012)](#update-2026-08-21--the-reduces-bracket-gate-is-scaffolded-and-the-reduce-stays-unbuilt-behind-it-gh1012) |
 | 2026-09-05 | [the reduce is built as a sized venue close, and held on the still-unrun bracket gate (gh#928)](#update-2026-09-05--the-reduce-is-built-as-a-sized-venue-close-and-held-on-the-still-unrun-bracket-gate-gh928) |
 | 2026-09-06 | [the per-position exit and reduce are journaled, every outcome (gh#1143)](#update-2026-09-06--the-per-position-exit-and-reduce-are-journaled-every-outcome-gh1143) |
+| 2026-09-12 | [the reduce and exit close their transmit→journal window with a durable pre-transmit intent (gh#1161)](#update-2026-09-12--the-reduce-and-exit-close-their-transmitjournal-window-with-a-durable-pre-transmit-intent-gh1161) |
 
 ## Update (2026-07-20) — the risk-gate interface is defined (S2, gh#10)
 
@@ -1509,6 +1510,34 @@ practice-only holds and every outcome are exactly what they were.
 - **Two paths still propagate rather than journal**, because neither is an *outcome* and catching one to synthesise
   a name would be inventing policy: the R-17 fail-loud `NotSupportedException` (a venue that cannot size a partial
   close at all), and a caller-abort `OperationCanceledException` carrying the caller's own token.
+
+## Update (2026-09-12) — the reduce and exit close their transmit→journal window with a durable pre-transmit intent (gh#1161)
+
+The open item the 2026-09-06 update left for the operator is now decided: **a durable pre-transmit intent is
+wanted**, for the reduce and, for symmetry, the exit. The accepted transmit→journal window does **not** stand for
+position closes. The window is wider than a crash — a caller abort after the gateway executed is ordinary
+(`IAccountEntryGuard`'s own remarks), and the lock's `finally` cleanup can replace the already-computed result —
+and the requested quantity is the one fact venue truth cannot reconstruct afterwards. Neither is fixable by
+writing the #1160 journal differently.
+
+**What lands.** Immediately before the venue is touched, and only on the paths that will transmit, each service
+commits an operator-owned `PositionActionIntent` in its **own unit** (`Open`, carrying the action, account,
+instrument, contract, and — for the reduce — the requested quantity). The #1160 journal row then **references**
+that id (`intentId` on the `position.reduce` / `position.exit` payload, and in the audit `Detail`). After the
+journal, the intent is resolved with the verified outcome. A crash or a caller abort between the two leaves an
+`Open` intent with no outcome: the reconcile-strand sweep (gh#722) discovers it and surfaces it rather than
+silently aging it out, and a restart flags it (`PositionActionMidIntent`) so the sweep's empty-at-boot register
+is not a gap. There is no dedicated reconcile endpoint — the intent row *is* the record of what was asked;
+resolve against venue truth.
+
+**What is untouched.** Only a verified reduction is success (gh#1142): the position smaller by exactly the
+requested amount, same side, is `Reduced`; nothing else is. Both practice-only holds (gh#928: the never-run
+gh#1012 bracket verification, and MarqSpec.Client.ProjectX#98) still refuse a non-practice account before any
+intent is committed and before the venue is touched. Enforcement stays below the model.
+
+**What is not an intent.** Paths that send nothing (`HeldPracticeOnly`, `AccountBusy`, `ExceedsPosition`,
+unreachable-before-venue) already journal after the attempt and have no transmit window; they write no Open row,
+so they cannot become a false strand.
 
 ## Follow-ups
 *Most of the original follow-ups have since landed; each is annotated inline. The dated updates above are the

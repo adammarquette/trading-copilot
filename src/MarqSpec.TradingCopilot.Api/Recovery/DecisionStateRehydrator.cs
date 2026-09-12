@@ -86,8 +86,14 @@ public sealed class DecisionStateRehydrator
             .IgnoreQueryFilters()
             .CountAsync(suggestion => suggestion.State == SuggestionState.Active, cancellationToken);
 
+        List<RehydratedPositionActionIntent> openIntents = await _database.PositionActionIntents
+            .IgnoreQueryFilters()
+            .Where(intent => intent.Status == PositionActionIntentStatus.Open)
+            .Select(intent => new RehydratedPositionActionIntent(intent.Id, intent.UserId))
+            .ToListAsync(cancellationToken);
+
         DecisionSurfaceReport report =
-            DecisionStateRehydration.Analyze(orders, conditionals, stopPlans, activeSuggestions)
+            DecisionStateRehydration.Analyze(orders, conditionals, stopPlans, activeSuggestions, openIntents)
             with
             { ExpiredOnRecovery = expiredOnRecovery };
 

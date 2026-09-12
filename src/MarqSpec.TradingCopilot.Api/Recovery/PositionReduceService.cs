@@ -174,6 +174,7 @@ public sealed class PositionReduceService
     private readonly IAccountEntryGuard _accountGuard;
     private readonly IOptions<ProjectXConnectionOptions> _projectXOptions;
     private readonly IPositionActionJournal _journal;
+    private readonly IPositionActionIntentStore _intents;
     private readonly ILogger<PositionReduceService> _logger;
 
     /// <summary>Creates the reduce service.</summary>
@@ -189,6 +190,10 @@ public sealed class PositionReduceService
     /// reduce, the requested quantity is not reconstructable from venue truth, so a silently-absent journal would
     /// lose the one fact this path cannot recover.
     /// </param>
+    /// <param name="intents">
+    /// The durable pre-transmit intent (gh#1161). <b>Required</b>: committed before the venue is touched so a
+    /// caller abort after transmit cannot lose the requested quantity.
+    /// </param>
     /// <param name="logger">The logger.</param>
     public PositionReduceService(
         TradingCopilotDbContext database,
@@ -196,14 +201,17 @@ public sealed class PositionReduceService
         IAccountEntryGuard accountGuard,
         IOptions<ProjectXConnectionOptions> projectXOptions,
         IPositionActionJournal journal,
+        IPositionActionIntentStore intents,
         ILogger<PositionReduceService> logger)
     {
         ArgumentNullException.ThrowIfNull(journal);
+        ArgumentNullException.ThrowIfNull(intents);
         _database = database;
         _venueFactory = venueFactory;
         _accountGuard = accountGuard;
         _projectXOptions = projectXOptions;
         _journal = journal;
+        _intents = intents;
         _logger = logger;
     }
 
@@ -244,14 +252,13 @@ public sealed class PositionReduceService
         // pins a connection across a venue round-trip, AccountBusy is produced by the guard itself and would be
         // unreachable from inside, and the audit is contracted to commit in its own unit of work.
         //
-        // TRANSMIT, THEN JOURNAL -- ADR-0007's accepted ordering for the send path (2026-08-02 update), applied
-        // here rather than re-answered: the record carries the VERIFIED outcome, which does not exist until the
-        // attempt resolves. It leaves the same residual that update names, and it bites harder here, because the
-        // requested quantity is the only record of intent this path has; closing it would need a durable
-        // pre-transmit intent, a change to what this path DOES. Raised for the maintainer on the ADR instead.
+        // JOURNAL AFTER THE ATTEMPT -- the record carries the VERIFIED outcome (gh#1143). The transmit→journal
+        // window that used to lose the requested quantity is closed by the durable pre-transmit intent (gh#1161)
+        // committed inside the lock, immediately before the venue is touched. The journal references that intent.
         //
         // The journal cannot fail this: the seam is contracted never to throw, and it takes no cancellation token,
         // so a client that hung up mid-response cannot cost the record of a real sized close.
+        DateTimeOffset resolvedAt = DateTimeOffset.UtcNow;
         await _journal.RecordSafelyAsync(
             new PositionActionEntry
             {
@@ -271,9 +278,15 @@ public sealed class PositionReduceService
                 // fabricate a flat out of an outage (gh#929).
                 NetQuantityAfter = attempt.Result.NetQuantity,
                 Outcome = attempt.Result.Outcome.ToString(),
+                IntentId = attempt.IntentId,
             },
-            DateTimeOffset.UtcNow,
+            resolvedAt,
             _logger);
+
+        if (attempt.IntentId is Guid intentId)
+        {
+            await _intents.ResolveSafelyAsync(intentId, attempt.Result.Outcome.ToString(), resolvedAt);
+        }
 
         return attempt.Result;
     }
@@ -284,7 +297,9 @@ public sealed class PositionReduceService
     /// <param name="Result">The outcome, exactly as it is returned to the operator.</param>
     /// <param name="NetQuantityBefore">The pre-attempt exposure, or <see langword="null"/> when it was never read.</param>
     /// <param name="ContractKey">The venue contract, or <see langword="null"/> when the attempt never resolved one.</param>
-    private sealed record Attempt(PositionReduceResult Result, int? NetQuantityBefore, string? ContractKey);
+    /// <param name="IntentId">The pre-transmit intent, when one was committed before the venue was touched.</param>
+    private sealed record Attempt(
+        PositionReduceResult Result, int? NetQuantityBefore, string? ContractKey, Guid? IntentId = null);
 
     /// <summary>
     /// The reduce's guard ladder, unchanged by gh#1143 — every decision, guard, lock and outcome is exactly what it
@@ -343,6 +358,7 @@ public sealed class PositionReduceService
         // this path's interaction with the transmit lock is byte-for-byte what it was.
         int? netQuantityBefore = null;
         string? contractKey = null;
+        Guid? intentId = null;
 
         PositionReduceResult result = await _accountGuard.TryRunExclusiveAsync(
             _database,
@@ -353,12 +369,13 @@ public sealed class PositionReduceService
                     account, instrument, quantity, connection.Id, cancellationToken);
                 netQuantityBefore = attempt.NetQuantityBefore;
                 contractKey = attempt.ContractKey;
+                intentId = attempt.IntentId;
                 return attempt.Result;
             },
             () => new PositionReduceResult(PositionReduceOutcome.AccountBusy, null),
             cancellationToken);
 
-        return new Attempt(result, netQuantityBefore, contractKey);
+        return new Attempt(result, netQuantityBefore, contractKey, intentId);
     }
 
     /// <summary>
@@ -385,6 +402,7 @@ public sealed class PositionReduceService
         // Likewise captured as the attempt walks forward, so a fault after the contract resolved still records
         // WHICH contract the operator was reducing rather than losing it to the catch.
         string? contractKey = null;
+        Guid? committedIntentId = null;
 
         try
         {
@@ -437,6 +455,22 @@ public sealed class PositionReduceService
                     contractKey);
             }
 
+            // Durable pre-transmit intent (gh#1161): commit BEFORE the venue is touched, in its own unit.
+            // A caller abort or a lock-cleanup fault after this still leaves the requested quantity on a row
+            // the reconcile sweep can surface. Paths that send nothing never reach here.
+            committedIntentId = await _intents.CommitAsync(
+                new PositionActionIntentDraft
+                {
+                    Action = PositionActionKind.Reduce,
+                    OwnerUserId = account.UserId,
+                    AccountId = account.Id,
+                    VenueAccountKey = account.VenueAccountKey,
+                    Instrument = instrument.ToString(),
+                    Contract = contractKey,
+                    RequestedQuantity = quantity,
+                },
+                cancellationToken);
+
             PositionSnapshot after = await venue.ReducePositionAsync(
                 venueAccount.Id, resolved.Contract, quantity, cancellationToken);
 
@@ -450,7 +484,8 @@ public sealed class PositionReduceService
                 return new Attempt(
                     new PositionReduceResult(PositionReduceOutcome.Reduced, after.NetQuantity),
                     beforeQuantity,
-                    contractKey);
+                    contractKey,
+                    committedIntentId);
             }
 
             // TRANSMITTED, and the position has NOT MOVED. A market close is not instantaneous, so this is either a
@@ -464,7 +499,8 @@ public sealed class PositionReduceService
                 return new Attempt(
                     new PositionReduceResult(PositionReduceOutcome.Unconfirmed, after.NetQuantity),
                     beforeQuantity,
-                    contractKey);
+                    contractKey,
+                    committedIntentId);
             }
 
             // The position DID move, but not by what was asked: less off (a partial execution), more off (a stop or
@@ -473,7 +509,8 @@ public sealed class PositionReduceService
             return new Attempt(
                 new PositionReduceResult(PositionReduceOutcome.NotReduced, after.NetQuantity),
                 beforeQuantity,
-                contractKey);
+                contractKey,
+                committedIntentId);
         }
         catch (VenueRefusalException refusal) when (refusal.Kind == VenueRefusalKind.Definitive)
         {
@@ -486,7 +523,10 @@ public sealed class PositionReduceService
                 instrument,
                 account.Id);
             return new Attempt(
-                new PositionReduceResult(PositionReduceOutcome.Refused, beforeQuantity), beforeQuantity, contractKey);
+                new PositionReduceResult(PositionReduceOutcome.Refused, beforeQuantity),
+                beforeQuantity,
+                contractKey,
+                committedIntentId);
         }
         catch (VenueRefusalException refusal)
         {
@@ -499,7 +539,10 @@ public sealed class PositionReduceService
                 instrument,
                 account.Id);
             return new Attempt(
-                new PositionReduceResult(PositionReduceOutcome.Unconfirmed, null), beforeQuantity, contractKey);
+                new PositionReduceResult(PositionReduceOutcome.Unconfirmed, null),
+                beforeQuantity,
+                contractKey,
+                committedIntentId);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -521,7 +564,10 @@ public sealed class PositionReduceService
                 instrument,
                 account.Id);
             return new Attempt(
-                new PositionReduceResult(PositionReduceOutcome.Unreachable, null), beforeQuantity, contractKey);
+                new PositionReduceResult(PositionReduceOutcome.Unreachable, null),
+                beforeQuantity,
+                contractKey,
+                committedIntentId);
         }
     }
 }

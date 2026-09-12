@@ -23,12 +23,17 @@ public static class DecisionStateRehydration
     /// <param name="conditionals">Every rehydrated conditional-entry order.</param>
     /// <param name="stopPlans">Every rehydrated stop plan.</param>
     /// <param name="activeSuggestions">How many suggestions are still active (inert until taken).</param>
+    /// <param name="openIntents">
+    /// Every still-<see cref="PositionActionIntentStatus.Open"/> position-action intent (gh#1161). Resolved
+    /// intents are omitted by the caller.
+    /// </param>
     /// <returns>The surface report — counts plus any inconsistencies.</returns>
     public static DecisionSurfaceReport Analyze(
         IReadOnlyList<RehydratedOrder> orders,
         IReadOnlyList<RehydratedConditional> conditionals,
         IReadOnlyList<RehydratedStopPlan> stopPlans,
-        int activeSuggestions)
+        int activeSuggestions,
+        IReadOnlyList<RehydratedPositionActionIntent>? openIntents = null)
     {
         ArgumentNullException.ThrowIfNull(orders);
         ArgumentNullException.ThrowIfNull(conditionals);
@@ -125,6 +130,16 @@ public static class DecisionStateRehydration
                     DecisionInconsistencyKind.NativeStopWithoutLiveOrder, plan.Owner, plan.Id,
                     $"A native (at-venue) stop protects order {parent.Id}, which is {parent.Status}, not live."));
             }
+        }
+
+        foreach (RehydratedPositionActionIntent intent in openIntents ?? [])
+        {
+            // Open is a durable pre-transmit intent (gh#1161) that is transient at runtime -- one request
+            // resolves it after the attempt. Caught PERSISTING across a restart, the close may be live at the
+            // venue with no #1160 journal behind it. Flag it (fail safe + loud); never auto-resolved.
+            issues.Add(new DecisionInconsistency(
+                DecisionInconsistencyKind.PositionActionMidIntent, intent.Owner, intent.Id,
+                "A position-action intent is stranded open; the venue may have taken a close that was never journaled."));
         }
 
         return new DecisionSurfaceReport(
