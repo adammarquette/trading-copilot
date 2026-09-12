@@ -124,6 +124,29 @@ jobs:
       - name: Watch-verdict check-read fallback (GraphQL down, REST up, gh#1040)
         run: ./scripts/tests/watch-verdict-check-read.test.sh
 
+      # gh#1187. The AWS deploy path is YAML plus a shell script: a :latest, an SSM write, a
+      # twelve-digit account ARN, or an expression-named environment is silent and green at
+      # synth time. These read the files (and fixture-red the scripts) so a PR cannot ship
+      # that shape. No AWS credentials. The live environment setting is check-release-gate.sh,
+      # which talks to the API — a missing `production` / `aws-production` is the inert-gate
+      # class; scripts/bootstrap.sh creates them.
+      - name: AWS deploy workflow shape
+        run: ./scripts/check-deploy-workflows.sh
+
+      - name: Release-gate discovery (fixtures)
+        run: ./scripts/check-release-gate-selftest.sh
+
+      - name: Deploy-environment script (fixtures)
+        run: ./scripts/deploy-environment-selftest.sh
+
+      - name: Image reference (lowercase)
+        run: ./scripts/tests/image-reference.test.sh
+
+      - name: Release approval environments (live settings)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/check-release-gate.sh
+
       - name: Restore
         run: dotnet restore src/MarqSpec.TradingCopilot.slnx
 

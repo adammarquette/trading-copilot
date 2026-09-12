@@ -36,6 +36,9 @@ public sealed record Synthesised(Template Template, JsonObject Json)
     public static Synthesised Staging(OutboundPath outboundPath, TelemetryProps? telemetry = null) =>
         Environment("staging", outboundPath, telemetry ?? DeployedTelemetry);
 
+    public static Synthesised GitHubOidc() =>
+        Of(new GitHubOidcStack(new App(), "trading-copilot-github-oidc"));
+
     public static Synthesised Of(Stack stack)
     {
         var template = Template.FromStack(stack);
@@ -132,5 +135,28 @@ public sealed record Synthesised(Template Template, JsonObject Json)
         var logicalId = parts.Select(LogicalIdOf).FirstOrDefault(id => id is not null)
             ?? throw new InvalidOperationException($"No Ref inside {Text(valueFrom)}");
         return Properties(Resources("AWS::SecretsManager::Secret")[logicalId])["Name"]!.GetValue<string>();
+    }
+
+    /// <summary>Every statement of every inline <c>AWS::IAM::Policy</c> and every role's embedded policies.</summary>
+    public IEnumerable<JsonObject> PolicyStatements()
+    {
+        foreach (var policy in Resources("AWS::IAM::Policy").Values)
+        {
+            foreach (var statement in Properties(policy)["PolicyDocument"]!["Statement"]!.AsArray())
+            {
+                yield return statement!.AsObject();
+            }
+        }
+
+        foreach (var role in Resources("AWS::IAM::Role").Values)
+        {
+            foreach (var policy in Properties(role)["Policies"]?.AsArray() ?? [])
+            {
+                foreach (var statement in policy!["PolicyDocument"]!["Statement"]!.AsArray())
+                {
+                    yield return statement!.AsObject();
+                }
+            }
+        }
     }
 }

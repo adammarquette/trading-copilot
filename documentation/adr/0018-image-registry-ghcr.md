@@ -76,6 +76,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 | Date | Update |
 |---|---|
 | 2026-09-12 | AWS ECS pulls GHCR **by digest**; production AWS deploy is a release, not a merge ([ADR-0030](0030-aws-deployment-topology.md)) (gh#1185) |
+| 2026-09-12 | Release workflow retags the merge-published `:sha-<short>` as `:VERSION` and deploys that digest (gh#1187) |
 
 ## Update (2026-09-12) — AWS pulls by digest; merge still publishes, it does not deploy AWS (gh#1185)
 
@@ -85,6 +86,13 @@ ECS task definitions reference the image **by digest**, never `:latest`, and an 
 **human-approved release**, not the merge that published `:main`. Railway remains a parallel consumer of the
 branch tag until ADR-0030's sunset Update. The bullet "Railway deploys the CI-built image" stays true while
 that parallel run lasts; it is not rewritten here.
+
+## Update (2026-09-12) — the release retags the already-published digest (gh#1187)
+
+The *Decision* (build once on merge, tag by branch plus `:sha-<short>`) stands. The workflow child
+[ADR-0030](0030-aws-deployment-topology.md) named now lives: `release.yml` **retags** the merge-published
+`:sha-<short>` as `:VERSION` and deploys that digest — it does not rebuild, and it never references
+`:latest`. Railway still consumes the branch tag. Procedure: [runbook, AWS release / deploy](../deployment-runbook.md#aws-release--deploy-oidc-not-yet-applied).
 
 ## Follow-ups
 
@@ -97,4 +105,4 @@ that parallel run lasts; it is not rewritten here.
 - **Multi-service images.** The architecture is several services (ingestion, processor, execution, …); today
   only the BFF image exists. Each new service that ships as its own image extends this same publish job.
 - **AWS digest deploy** is [ADR-0030](0030-aws-deployment-topology.md)'s release trigger, not this record's
-  merge-to-branch publish. Lands with the epic's workflow child, not here.
+  merge-to-branch publish. Landed with gh#1187 (`release.yml` retags `:sha-<short>` as `:VERSION`).
