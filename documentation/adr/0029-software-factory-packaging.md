@@ -77,6 +77,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 |---|---|
 | 2026-09-11 | factory repo exists; `develop` carries Tier 1+2 ([MarqSpec.Repo.Factory](https://github.com/adammarquette/MarqSpec.Repo.Factory)) (gh#1178) |
 | 2026-09-12 | Tier 3 spines on Factory PR #9; not yet the template tree (gh#1179) |
+| 2026-09-12 | Tier 3 spines on factory `develop` (Factory PR #9 merged) (gh#1179) |
 
 ## Update (2026-09-11) — factory repo exists (gh#1178)
 
@@ -98,12 +99,25 @@ Nygard / decision-log rules, and the AGENT-MEMORY dated-catch-all concept. Produ
 carries Tier 1+2 only. **This product's contracts are unchanged as this product** — no wholesale
 replace. The *Decision* is unchanged. Tier 4 stays here.
 
+## Update (2026-09-12) — Tier 3 spines on factory develop (gh#1179)
+
+Tier 3 factory spines are on factory **`develop`**
+([MarqSpec.Repo.Factory PR #9](https://github.com/adammarquette/MarqSpec.Repo.Factory/pull/9)
+merged at `4d0c5996`). The Update above that placed them only on the open PR is
+superseded: `develop` is now the Use-this-template tree for Tier 1+2+3.
+Confirmed on `develop`: the `AGENTS.md` family (root + Coding / QA / Reviewer /
+Platform), `.github/copilot-instructions.md`, `documentation/engineering.md`,
+`documentation/adr/README.md`, and `documentation/AGENT-MEMORY.md`. Product
+fill-ins stay `{{PLACEHOLDER}}`s. **This product's contracts are unchanged as
+this product** — no wholesale replace. The *Decision* is unchanged. Tier 4
+stays here.
+
 ## Follow-ups
 
 - ~~Stand up `MarqSpec.Repo.Factory` as a public GitHub template and extract Tier 1 + Tier 2
   ([gh#1178](https://github.com/adammarquette/trading-copilot/issues/1178)). Not this card.~~
   Done — https://github.com/adammarquette/MarqSpec.Repo.Factory
-- Split factory spines out of product files — Tier 3
-  ([gh#1179](https://github.com/adammarquette/trading-copilot/issues/1179)). In flight on
-  [Factory PR #9](https://github.com/adammarquette/MarqSpec.Repo.Factory/pull/9); not yet on factory
-  `develop`. Tier 4 stays in this product.
+- ~~Split factory spines out of product files — Tier 3
+  ([gh#1179](https://github.com/adammarquette/trading-copilot/issues/1179)).~~
+  Done — factory `develop` at `4d0c5996` (Factory PR #9). Tier 4 stays in this
+  product.
