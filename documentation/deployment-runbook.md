@@ -16,6 +16,7 @@ cloud environments still need creating, so nothing deploys today.
 | Section | Read it when |
 |---|---|
 | [Platform](#platform) | you need the Railway project, the GHCR image, or the database shape |
+| [AWS environment stack (CDK, not yet applied)](#aws-environment-stack-cdk-not-yet-applied) | you need the resources the `infra/` app creates — do not apply until the operator supplies account, region, and hostname |
 | [Local development (docker-compose)](#local-development-docker-compose) | standing the stack up on your machine |
 | [Environments ↔ branches](#environments--branches) | working out which branch deploys where |
 | [Secrets & config (per environment)](#secrets--config-per-environment) | a variable is missing or wrong — also [operator password recovery](#operator-password-recovery-r-18-adr-0017-operator-lifecycle) |
@@ -34,9 +35,10 @@ cloud environments still need creating, so nothing deploys today.
 - **Cloud (running):** [Railway](https://railway.com) — project **`soothing-illumination`**
   (`2601eb74-b5f9-411f-bb9a-0cd19e6fd540`).
 - **Cloud (intended):** AWS — ECS Fargate + ALB, two environments (staging + production), GHCR by digest
-  ([ADR-0030](adr/0030-aws-deployment-topology.md)). This runbook still describes the running Railway cloud;
-  AWS procedures land with the CDK / workflow children, not here. Account id, region, and hostname are
-  operator-supplied before apply — this page does not invent them.
+  ([ADR-0030](adr/0030-aws-deployment-topology.md)). This runbook still describes the running Railway cloud.
+  The CDK app is under [`infra/`](../infra/) (gh#1186); see [AWS environment stack](#aws-environment-stack-cdk-not-yet-applied).
+  Account id, region, and hostname are operator-supplied before apply — this page does not invent them.
+  OIDC deploy roles and the release workflow are gh#1187. Do not `cdk deploy` from this increment.
 - **Image registry:** **GHCR** — `ghcr.io/adammarquette/trading-copilot`, **public** ([ADR-0018](adr/0018-image-registry-ghcr.md)).
   CI builds once per merge and pushes; local and Railway both **pull** this artifact. Tags: `:develop` / `:staging` /
   `:main` per environment, plus `:sha-<short>` for an exact rollback target.
@@ -46,6 +48,47 @@ cloud environments still need creating, so nothing deploys today.
   hypertable/retention/continuous-aggregates) — the app runs, but the ADR-0001 backbone only gets its Timescale
   behaviors on a Timescale-enabled instance (locally: the compose `timescaledb-ha` image, which bundles both
   extensions).
+
+## AWS environment stack (CDK, not yet applied)
+
+The C# CDK app under [`infra/`](../infra/) (gh#1186) matches [ADR-0030](adr/0030-aws-deployment-topology.md).
+Railway remains the **running** cloud. Do not `cdk deploy` until the operator supplies **account id**, **region**,
+and **hostname** — this page does not invent them. GitHub OIDC deploy roles and the release workflow are **gh#1187**.
+
+Shape (pattern library: TopstepX `EnvironmentStack` in `MarqSpec.Mcp.TopstepX` — cite it; do not copy account IDs,
+hostnames, Cognito, or MCP bits):
+
+| Resource | How it is named | Notes |
+|---|---|---|
+| Two stacks | `trading-copilot-production`, `trading-copilot-staging` | Same class. No third AWS env for `develop` (compose stays local). |
+| VPC + four security groups | `trading-copilot/<env>/{alb,app,postgres,efs}` | Internet → ALB 443/80 → app 8080 → Postgres 5432 → EFS 2049. |
+| Outbound path | context `-c outbound=…` | Required. ADR-0030 left NAT vs public IP vs VPC endpoints undecided. CI synths every shape. |
+| ECS cluster | `trading-copilot-<env>` | Fargate. Desired count ≥ 1. Circuit breaker + rollback. |
+| App task | `ghcr.io/adammarquette/trading-copilot@${ImageDigest}` | Digest is a CloudFormation parameter, no default. Never `:latest` or a floating branch tag ([ADR-0018](adr/0018-image-registry-ghcr.md)). Public image — no registry credential. |
+| Store task | `timescale/timescaledb-ha` by digest on EFS | Same image compose tests. Access point uid/gid 1000. Cloud Map `postgres.<env>.tradingcopilot.internal`. |
+| ALB | `trading-copilot-<env>` | TLS at the edge; HTTP → HTTPS; host-header is the `Hostname` parameter; `/health` on 8080. Idle timeout 600 s (SignalR). |
+| Hosted zone | created from `RootDomain` | In-stack so `cdk synth --no-lookups` needs no AWS call. Operator delegates the NS output at their registrar. |
+| Secret shells | `trading-copilot/<env>/{postgres,jwt,bootstrap,projectx,providers,llm,pushover,checkin}` | Empty JSON keys. ECS `valueFrom`. **Never edit a shell literal after values are written.** |
+| Deploy history | `/trading-copilot/<env>/{image-digest,version}` | SSM, written by the stack from the same parameters the task reads. |
+| OTLP sidecar | `otel/opentelemetry-collector-contrib` by digest | Loopback only, `Essential=false`. CloudWatch via SigV4. ADR-0019 paging is not dropped. |
+| Alarms | `trading-copilot-<env>-{app,postgres}-running-tasks`, `unhealthy-hosts`, 5xx, deployment-failed | SNS to the `AlertsEmail` parameter. |
+| App auth | JWT (`Jwt__SigningKey` shell) | R-18. No Cognito. `ASPNETCORE_ENVIRONMENT` is `Production` or `Staging` so R-14 mapping stays honest. |
+
+**Parameters on every apply** (no defaults that would silently pick a digest or a hostname): `ImageDigest`,
+`Version`, `RootDomain`, `Hostname`, `ProjectXDataTier` (`Simulated` / `Live`), `AlertsEmail`.
+
+**After first apply the operator writes the shells by hand** (console or CLI — record the ARNs here when they
+exist). The postgres `connectionString` uses host `postgres.<env>.tradingcopilot.internal`. JWT signing key ≥ 32
+bytes. Staging stays practice-only ([R-14](trading-platform-engineering.md); this runbook's *practice accounts
+only outside production*). The dead-man's switch (`checkin` shell) must run on infrastructure **independent** of
+this stack.
+
+Synth without credentials (what CI runs):
+
+```bash
+cd infra
+npx cdk synth --no-lookups -c outbound=NatGateway
+```
 
 ## Local development (docker-compose)
 `docker compose up -d` from the repo root stands up the local stack ([ADR-0012](adr/0012-containerization-local-dev.md),

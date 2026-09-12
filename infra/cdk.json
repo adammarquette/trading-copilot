@@ -1,0 +1,10 @@
+{
+  "app": "dotnet run --project MarqSpec.TradingCopilot.Infra/MarqSpec.TradingCopilot.Infra.csproj --configuration Release",
+  "output": "cdk.out",
+  "versionReporting": false,
+  "context": {
+    "@aws-cdk/core:newStyleStackSynthesis": true,
+    "@aws-cdk/aws-ecs:removeDefaultDeploymentAlarm": true,
+    "@aws-cdk/aws-elasticloadbalancingv2:albDropInvalidHeaderFields": true
+  }
+}
