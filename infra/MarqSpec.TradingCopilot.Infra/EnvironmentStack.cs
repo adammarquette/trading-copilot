@@ -77,6 +77,7 @@ public sealed class EnvironmentStack : Stack
         : base(scope, id, new StackProps
         {
             Description = $"MarqSpec.TradingCopilot {props?.EnvName}: the BFF and its Timescale store (ADR-0030).",
+            Env = props?.Env,
         })
     {
         ArgumentNullException.ThrowIfNull(props);
@@ -84,6 +85,12 @@ public sealed class EnvironmentStack : Stack
         {
             throw new ArgumentOutOfRangeException(nameof(props), props.OutboundPath,
                 "OutboundPath must be named: ADR-0030 leaves the tasks' outbound path to the operator, and a default would choose for them.");
+        }
+
+        if (!Enum.IsDefined(props.ZoneMode))
+        {
+            throw new ArgumentOutOfRangeException(nameof(props), props.ZoneMode,
+                "ZoneMode must be named: staging looks up the existing zone (gh#1188), and a default would create a second staging.marqspec.com zone.");
         }
 
         var env = props.EnvName;
@@ -115,7 +122,7 @@ public sealed class EnvironmentStack : Stack
         var rootDomain = new CfnParameter(this, "RootDomain", new CfnParameterProps
         {
             Type = "String",
-            Description = "DNS zone this stack creates. Operator-supplied; this repository does not invent a hostname (ADR-0030 decision 14).",
+            Description = "DNS zone name. Under Create the stack creates this zone. Under Lookup it is documentary — FromLookup uses the synth-time RootDomain prop (gh#1188).",
             MinLength = 1,
         });
         var hostname = new CfnParameter(this, "Hostname", new CfnParameterProps
@@ -145,14 +152,37 @@ public sealed class EnvironmentStack : Stack
             Description = "ALB 5xx count in a 5-minute period that pages. Same threshold for ELB-generated and target 5xx.",
         });
 
-        // Zone is created in-stack so `cdk synth --no-lookups` needs no AWS call and no invented
-        // hosted-zone id. Operator delegates the NS at their registrar. A later Lookup import is
-        // a follow-up once that zone exists.
-        var zone = new PublicHostedZone(this, "Zone", new PublicHostedZoneProps
+        // Create is the fixture / `cdk synth --no-lookups` path (no AWS call). Lookup is the
+        // apply path: staging.marqspec.com already exists (Z00545362JA49XMTT3U7Q) and Cloudflare
+        // already delegates to its NS. A second created zone would mint new NS and undo that
+        // swap (TopstepX ZoneMode.Lookup / gh#519; this product gh#1188).
+        IHostedZone zone;
+        if (props.ZoneMode == ZoneMode.Lookup)
         {
-            ZoneName = rootDomain.ValueAsString,
-            Comment = $"trading-copilot {env}: created by the stack; operator delegates NS (ADR-0030).",
-        });
+            if (string.IsNullOrWhiteSpace(props.RootDomain))
+            {
+                throw new ArgumentException(
+                    "ZoneMode.Lookup requires RootDomain at synth time: HostedZone.FromLookup cannot read a CloudFormation parameter.",
+                    nameof(props));
+            }
+
+            if (string.IsNullOrWhiteSpace(props.Env?.Account) || string.IsNullOrWhiteSpace(props.Env.Region))
+            {
+                throw new ArgumentException(
+                    "ZoneMode.Lookup requires Env.Account and Env.Region (apply-time -c account= -c region=).",
+                    nameof(props));
+            }
+
+            zone = HostedZone.FromLookup(this, "Zone", new HostedZoneProviderProps { DomainName = props.RootDomain });
+        }
+        else
+        {
+            zone = new PublicHostedZone(this, "Zone", new PublicHostedZoneProps
+            {
+                ZoneName = rootDomain.ValueAsString,
+                Comment = $"trading-copilot {env}: created by the stack; operator delegates NS (ADR-0030).",
+            });
+        }
 
         var vpc = new Vpc(this, "Vpc", new VpcProps
         {
@@ -586,13 +616,18 @@ public sealed class EnvironmentStack : Stack
         _ = new CfnOutput(this, "LoadBalancerDnsName", new CfnOutputProps
         {
             Value = alb.LoadBalancerDnsName,
-            Description = "The ALB DNS name. The Hostname A record aliases here once the operator delegates the zone.",
+            Description = props.ZoneMode == ZoneMode.Lookup
+                ? "The ALB DNS name. The Hostname A record aliases here in the looked-up zone."
+                : "The ALB DNS name. The Hostname A record aliases here once the operator delegates the zone.",
         });
-        _ = new CfnOutput(this, "HostedZoneNameServers", new CfnOutputProps
+        if (props.ZoneMode == ZoneMode.Create && zone.HostedZoneNameServers is { } nameServers)
         {
-            Value = Fn.Join(",", zone.HostedZoneNameServers ?? []),
-            Description = "NS to delegate at the registrar. This stack does not invent a parent zone.",
-        });
+            _ = new CfnOutput(this, "HostedZoneNameServers", new CfnOutputProps
+            {
+                Value = Fn.Join(",", nameServers),
+                Description = "NS to delegate at the registrar. This stack does not invent a parent zone. Omitted under Lookup — the existing zone already has NS.",
+            });
+        }
 
         _ = postgresService;
     }

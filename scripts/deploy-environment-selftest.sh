@@ -104,11 +104,37 @@ else
 fi
 status=0
 
+out="$(DEPLOY_OUTBOUND=NatGateway DEPLOY_ROOT_DOMAIN= bash "$SCRIPT" staging 1.2.3 "$SOUND_DIGEST" 2>&1)" || status=$?
+if [ "${status:-0}" -eq 0 ] || ! printf '%s' "$out" | grep -q "DEPLOY_ROOT_DOMAIN"; then
+  red "SELF-TEST FAILED  missing root domain"
+  printf '%s\n' "$out" | sed 's/^/  | /'
+  failures=$((failures + 1))
+else
+  ok "rejected  missing root domain"
+fi
+status=0
+
+out="$(DEPLOY_ENVIRONMENT_FAKE_DIR="$FIXTURES" \
+  DEPLOY_ENVIRONMENT_AWS="$FIXTURES/aws" \
+  DEPLOY_ENVIRONMENT_CDK="$FIXTURES/cdk" \
+  DEPLOY_OUTBOUND=NatGateway \
+  DEPLOY_ROOT_DOMAIN=staging.marqspec.com \
+  bash "$SCRIPT" production 1.2.3 "$SOUND_DIGEST" 2>&1)" || status=$?
+if [ "${status:-0}" -eq 0 ] || ! printf '%s' "$out" | grep -q "second staging.marqspec.com"; then
+  red "SELF-TEST FAILED  production reused staging root domain"
+  printf '%s\n' "$out" | sed 's/^/  | /'
+  failures=$((failures + 1))
+else
+  ok "rejected  production reused staging root domain"
+fi
+status=0
+
 write_fakes "$FIXTURES"
 if ! out="$(DEPLOY_ENVIRONMENT_FAKE_DIR="$FIXTURES" \
   DEPLOY_ENVIRONMENT_AWS="$FIXTURES/aws" \
   DEPLOY_ENVIRONMENT_CDK="$FIXTURES/cdk" \
   DEPLOY_OUTBOUND="NatGateway" \
+  DEPLOY_ROOT_DOMAIN="staging.marqspec.com" \
   bash "$SCRIPT" staging 1.2.3 "$SOUND_DIGEST" 2>&1)"; then
   red "SELF-TEST FAILED  sound staging run"
   printf '%s\n' "$out" | sed 's/^/  | /'
@@ -120,7 +146,14 @@ else
   printf '%s' "$cdk_log" | grep -Fq "ImageDigest=${SOUND_DIGEST}" || missing="${missing} digest"
   printf '%s' "$cdk_log" | grep -Fq "Version=1.2.3" || missing="${missing} version"
   printf '%s' "$cdk_log" | grep -Fq "outbound=NatGateway" || missing="${missing} outbound"
-  printf '%s' "$cdk_log" | grep -Fq -- "--no-lookups" || missing="${missing} no-lookups"
+  printf '%s' "$cdk_log" | grep -Fq "account=999999999999" || missing="${missing} account"
+  printf '%s' "$cdk_log" | grep -Fq "region=eu-west-1" || missing="${missing} region"
+  printf '%s' "$cdk_log" | grep -Fq "rootDomain=staging.marqspec.com" || missing="${missing} rootDomain"
+  if printf '%s' "$cdk_log" | grep -Fq -- "--no-lookups"; then
+    red "SELF-TEST FAILED  sound staging run passed --no-lookups (staging apply must Lookup the existing zone)"
+    printf '%s\n' "$cdk_log" | sed 's/^/  | /'
+    failures=$((failures + 1))
+  fi
   if [ -n "$missing" ]; then
     red "SELF-TEST FAILED  sound staging run — cdk log missing:$missing"
     printf '%s\n' "$cdk_log" | sed 's/^/  | /'

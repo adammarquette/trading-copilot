@@ -145,7 +145,7 @@ jobs:
       - name: Deploy the published digest
         env:
           DEPLOY_OUTBOUND: ${{ vars.AWS_OUTBOUND }}
-          DEPLOY_ROOT_DOMAIN: ${{ vars.AWS_ROOT_DOMAIN }}
+          DEPLOY_ROOT_DOMAIN: ${{ vars.AWS_ROOT_DOMAIN_STAGING }}
           DEPLOY_HOSTNAME: ${{ vars.AWS_HOSTNAME_STAGING }}
           DEPLOY_PROJECTX_DATA_TIER: ${{ vars.AWS_PROJECTX_DATA_TIER_STAGING }}
           DEPLOY_ALERTS_EMAIL: ${{ vars.AWS_ALERTS_EMAIL }}
@@ -197,7 +197,7 @@ jobs:
       - name: Deploy the same digest
         env:
           DEPLOY_OUTBOUND: ${{ vars.AWS_OUTBOUND }}
-          DEPLOY_ROOT_DOMAIN: ${{ vars.AWS_ROOT_DOMAIN }}
+          DEPLOY_ROOT_DOMAIN: ${{ vars.AWS_ROOT_DOMAIN_PRODUCTION }}
           DEPLOY_HOSTNAME: ${{ vars.AWS_HOSTNAME_PRODUCTION }}
           DEPLOY_PROJECTX_DATA_TIER: ${{ vars.AWS_PROJECTX_DATA_TIER_PRODUCTION }}
           DEPLOY_ALERTS_EMAIL: ${{ vars.AWS_ALERTS_EMAIL }}

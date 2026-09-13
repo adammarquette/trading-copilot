@@ -134,12 +134,14 @@ public sealed class AppTaskTests(EnvironmentTemplates templates) : IClassFixture
         {
             EnvName = "production",
             OutboundPath = EnvironmentTemplates.FixtureShape,
+            ZoneMode = ZoneMode.Create,
             Telemetry = Synthesised.DeployedTelemetry,
         });
         _ = new EnvironmentStack(app, "trading-copilot-staging", new EnvironmentStackProps
         {
             EnvName = "staging",
             OutboundPath = EnvironmentTemplates.FixtureShape,
+            ZoneMode = ZoneMode.Create,
             Telemetry = Synthesised.DeployedTelemetry,
         });
 

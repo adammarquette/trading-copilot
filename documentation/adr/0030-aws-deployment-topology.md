@@ -181,6 +181,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 | Date | Update |
 |---|---|
 | 2026-09-12 | GitHub OIDC deploy roles + release/rollback workflows; production-gate environment is `aws-production` (gh#1187) |
+| 2026-09-12 | Operator inventory + staging zone Lookup for first AWS apply (gh#1188) |
 
 ## Update (2026-09-12) — OIDC roles and digest-only release/rollback workflows (gh#1187)
 
@@ -193,10 +194,34 @@ Actions `sub` on `v*` tags and `refs/heads/main`; production trusts `environment
 invented; stacks stay environment-agnostic. No `cdk deploy`. Live staging proof remains gh#1188; Railway
 sunset remains gh#1189.
 
+## Update (2026-09-12) — operator inventory and staging zone Lookup (gh#1188)
+
+The *Decision* (two AWS envs, digest-only ECS, OIDC, human-approved production, release trigger, account /
+region / hostname operator-supplied at apply) stands and is not rewritten. The operator pinned the inventory
+this record left open under decision 14:
+
+| | Staging (this increment) | Production (not this card) |
+|---|---|---|
+| Account | `045296582762` | same |
+| Region | `us-east-1` | same |
+| `RootDomain` | `staging.marqspec.com` | `marqspec.com` |
+| `Hostname` | `trading-copilot.staging.marqspec.com` | `trading-copilot.marqspec.com` |
+| Outbound (synth context only) | `PublicIpPerTask` | unset |
+| `ProjectXDataTier` | `Simulated` (R-14) | later |
+
+Those values are apply-time context (`-c account= -c region= -c rootDomain=`) and runbook inventory, not
+literals that close decision 14 in `Program.cs`. Staging **looks up** the existing public hosted zone
+`Z00545362JA49XMTT3U7Q` (TopstepX already uses it; Cloudflare already delegates its NS). Creating a second
+`staging.marqspec.com` zone would mint new NS and undo that swap. Tests and `cdk synth --no-lookups` keep
+the Create fixture so CI makes no AWS call. Railway stays the running cloud; the sunset remains gh#1189.
+`AlertsEmail` and the secret-shell values stay operator-written after apply — this Update does not invent
+them.
+
 ## Follow-ups
 
 - CDK app under `infra/` — landed with gh#1186.
 - OIDC roles + the release-triggered deploy workflow — landed with gh#1187. Not a merge-to-`main` deploy.
-- Operator supplies account id, region, and hostname pattern before the first apply.
+- Operator inventory + staging Lookup — this increment (gh#1188). First apply still needs operator
+  `AlertsEmail` and secret-shell values; production hostname apply is later.
 - Dated **Update** on this record when Railway sunsets, after AWS staging has proven R-13 on practice (gh#1189).
 - Measure EFS vs. the EC2 + EBS escalation on staging if WAL/`fsync` cost shows up under a real session.
