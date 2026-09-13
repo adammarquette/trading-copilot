@@ -92,7 +92,7 @@ that parallel run lasts; it is not rewritten here.
 The *Decision* (build once on merge, tag by branch plus `:sha-<short>`) stands. The workflow child
 [ADR-0030](0030-aws-deployment-topology.md) named now lives: `release.yml` **retags** the merge-published
 `:sha-<short>` as `:VERSION` and deploys that digest — it does not rebuild, and it never references
-`:latest`. Railway still consumes the branch tag. Procedure: [runbook, AWS release / deploy](../deployment-runbook.md#aws-release--deploy-oidc-not-yet-applied).
+`:latest`. Railway still consumes the branch tag. Procedure: [runbook, AWS release / deploy](../deployment-runbook.md#aws-release--deploy-oidc).
 
 ## Follow-ups
 

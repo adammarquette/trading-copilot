@@ -19,9 +19,14 @@
 # The workflow that calls it has already assumed GitHubDeploy-<env>.
 #
 # Outbound is still a fork (ADR-0030). Pass it as DEPLOY_OUTBOUND — a default here would choose
-# for the operator. Other stack parameters (RootDomain, Hostname, ProjectXDataTier, AlertsEmail)
-# are forwarded from DEPLOY_* when set, and omitted when not (CloudFormation keeps previous
-# values on update; first create fails naming the missing parameter).
+# for the operator. Account and region are passed as synth context (never literals in this
+# file) so staging can Lookup the existing zone (gh#1188). Do not pass --no-lookups on apply.
+# Other stack parameters (Hostname, ProjectXDataTier, AlertsEmail) are forwarded from DEPLOY_*
+# when set, and omitted when not (CloudFormation keeps previous values on update; first create
+# fails naming the missing parameter). DEPLOY_ROOT_DOMAIN is required: Program.cs looks the
+# staging zone up whenever account/region are set, and a missing -c rootDomain= throws before
+# any stack applies. Production must not reuse the staging domain (that would Create a second
+# staging.marqspec.com zone).
 #
 # THE TEST SEAMS. `DEPLOY_ENVIRONMENT_AWS` and `DEPLOY_ENVIRONMENT_CDK` replace `aws` and
 # `npx cdk` so the self-test never needs a credential.
@@ -84,6 +89,12 @@ STACK="trading-copilot-${ENV_NAME}"
 OUTBOUND="${DEPLOY_OUTBOUND:-}"
 [ -n "$OUTBOUND" ] || die "DEPLOY_OUTBOUND is empty; the tasks' outbound path is undecided (ADR-0030) and nothing here chooses for the operator"
 
+ROOT_DOMAIN="${DEPLOY_ROOT_DOMAIN:-}"
+[ -n "$ROOT_DOMAIN" ] || die "DEPLOY_ROOT_DOMAIN is empty; credentialed synth looks the staging zone up and needs -c rootDomain="
+if [ "$ENV_NAME" = "production" ] && [ "$ROOT_DOMAIN" = "staging.marqspec.com" ]; then
+  die "DEPLOY_ROOT_DOMAIN=staging.marqspec.com on production would Create a second staging.marqspec.com zone (gh#1188)"
+fi
+
 REGION="$(run_aws configure get region 2>/dev/null || true)"
 if [ -z "$REGION" ]; then
   REGION="${AWS_DEFAULT_REGION:-${AWS_REGION:-}}"
@@ -101,31 +112,35 @@ add_param() {
   [ -n "$value" ] || return 0
   extra_params+=(--parameters "${name}=${value}")
 }
-add_param RootDomain "${DEPLOY_ROOT_DOMAIN:-}"
+add_param RootDomain "${ROOT_DOMAIN}"
 add_param Hostname "${DEPLOY_HOSTNAME:-}"
 add_param ProjectXDataTier "${DEPLOY_PROJECTX_DATA_TIER:-}"
 add_param AlertsEmail "${DEPLOY_ALERTS_EMAIL:-}"
 
 info "deploying $STACK  version=$VERSION  digest=$DIGEST  outbound=$OUTBOUND"
+context_args=(
+  -c "outbound=${OUTBOUND}"
+  -c "account=${ACCOUNT}"
+  -c "region=${REGION}"
+  -c "rootDomain=${ROOT_DOMAIN}"
+)
 (
   cd "$REPO_ROOT/infra"
   if [ "${#extra_params[@]}" -gt 0 ]; then
     run_cdk deploy "$STACK" \
       --require-approval never \
-      --no-lookups \
-      -c "outbound=${OUTBOUND}" \
+      "${context_args[@]}" \
       --parameters "ImageDigest=${DIGEST}" \
       --parameters "Version=${VERSION}" \
       "${extra_params[@]}"
   else
     run_cdk deploy "$STACK" \
       --require-approval never \
-      --no-lookups \
-      -c "outbound=${OUTBOUND}" \
+      "${context_args[@]}" \
       --parameters "ImageDigest=${DIGEST}" \
       --parameters "Version=${VERSION}"
   fi
 )
 
 ok "deployed $ENV_NAME  $VERSION  $DIGEST"
-info "live prove of the hostname is gh#1188 — this script does not invent one and does not probe one"
+info "probe the hostname from the runbook; this script does not invent one and does not curl one"

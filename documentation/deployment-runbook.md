@@ -16,8 +16,8 @@ cloud environments still need creating, so nothing deploys today.
 | Section | Read it when |
 |---|---|
 | [Platform](#platform) | you need the Railway project, the GHCR image, or the database shape |
-| [AWS environment stack (CDK, not yet applied)](#aws-environment-stack-cdk-not-yet-applied) | you need the resources the `infra/` app creates — do not apply until the operator supplies account, region, and hostname |
-| [AWS release / deploy (OIDC, not yet applied)](#aws-release--deploy-oidc-not-yet-applied) | you need the GitHub OIDC roles, the release/rollback workflows, or `scripts/bootstrap.sh` — do not `cdk deploy` from this increment |
+| [AWS environment stack](#aws-environment-stack) | you need the resources the `infra/` app creates, the staging inventory, or how to tell staging is up |
+| [AWS release / deploy (OIDC)](#aws-release--deploy-oidc) | you need the GitHub OIDC roles, the release/rollback workflows, or `scripts/bootstrap.sh` |
 | [Local development (docker-compose)](#local-development-docker-compose) | standing the stack up on your machine |
 | [Environments ↔ branches](#environments--branches) | working out which branch deploys where |
 | [Secrets & config (per environment)](#secrets--config-per-environment) | a variable is missing or wrong — also [operator password recovery](#operator-password-recovery-r-18-adr-0017-operator-lifecycle) |
@@ -37,10 +37,11 @@ cloud environments still need creating, so nothing deploys today.
   (`2601eb74-b5f9-411f-bb9a-0cd19e6fd540`).
 - **Cloud (intended):** AWS — ECS Fargate + ALB, two environments (staging + production), GHCR by digest
   ([ADR-0030](adr/0030-aws-deployment-topology.md)). This runbook still describes the running Railway cloud.
-  The CDK app is under [`infra/`](../infra/) (gh#1186); see [AWS environment stack](#aws-environment-stack-cdk-not-yet-applied).
-  Account id, region, and hostname are operator-supplied before apply — this page does not invent them.
-  GitHub OIDC deploy roles and the release/rollback workflows landed with **gh#1187**; see
-  [AWS release / deploy](#aws-release--deploy-oidc-not-yet-applied). Do not `cdk deploy` from this increment.
+  The CDK app is under [`infra/`](../infra/) (gh#1186 / gh#1188); see [AWS environment stack](#aws-environment-stack).
+  Operator inventory (2026-09-12, gh#1188 — do not invent others): account `045296582762`, region `us-east-1`,
+  staging hostname `trading-copilot.staging.marqspec.com`. GitHub OIDC deploy roles and the release/rollback
+  workflows landed with **gh#1187**; see [AWS release / deploy](#aws-release--deploy-oidc). Production
+  (`trading-copilot.marqspec.com`) is not this card.
 - **Image registry:** **GHCR** — `ghcr.io/adammarquette/trading-copilot`, **public** ([ADR-0018](adr/0018-image-registry-ghcr.md)).
   CI builds once per merge and pushes; local and Railway both **pull** this artifact. Tags: `:develop` / `:staging` /
   `:main` per environment, plus `:sha-<short>` for an exact rollback target.
@@ -51,15 +52,39 @@ cloud environments still need creating, so nothing deploys today.
   behaviors on a Timescale-enabled instance (locally: the compose `timescaledb-ha` image, which bundles both
   extensions).
 
-## AWS environment stack (CDK, not yet applied)
+## AWS environment stack
 
-The C# CDK app under [`infra/`](../infra/) (gh#1186) matches [ADR-0030](adr/0030-aws-deployment-topology.md).
-Railway remains the **running** cloud. Do not `cdk deploy` until the operator supplies **account id**, **region**,
-and **hostname** — this page does not invent them. GitHub OIDC deploy roles and the release workflow are
-[below](#aws-release--deploy-oidc-not-yet-applied) (gh#1187).
+The C# CDK app under [`infra/`](../infra/) (gh#1186 / gh#1188) matches [ADR-0030](adr/0030-aws-deployment-topology.md).
+Railway remains the **running** cloud until that record's sunset (gh#1189). GitHub OIDC deploy roles and the
+release workflow are [below](#aws-release--deploy-oidc) (gh#1187).
 
-Shape (pattern library: TopstepX `EnvironmentStack` in `MarqSpec.Mcp.TopstepX` — cite it; do not copy account IDs,
-hostnames, Cognito, or MCP bits):
+### Operator inventory (2026-09-12, gh#1188)
+
+Pinned on the issue. Do not invent others. Production hostnames are recorded for later and are **not** this card.
+
+| | Staging (this card) | Production (later) |
+|---|---|---|
+| Account | `045296582762` (same AWS account as TopstepX) | same |
+| Region | `us-east-1` | same |
+| `RootDomain` | `staging.marqspec.com` | `marqspec.com` |
+| `Hostname` | `trading-copilot.staging.marqspec.com` | `trading-copilot.marqspec.com` |
+| Hosted zone | **Lookup** `Z00545362JA49XMTT3U7Q` | later |
+| Outbound synth context | `PublicIpPerTask` (match TopstepX standing staging; not a `Program.cs` literal) | unset |
+| `ProjectXDataTier` | `Simulated` ([R-14](trading-platform-prd.md)) | `Live` only on the live rung |
+
+**Staging looks up the existing zone.** TopstepX already uses hosted zone `Z00545362JA49XMTT3U7Q` for
+`staging.marqspec.com` (Cloudflare delegates its NS). Creating a second public zone for that name would mint
+new NS and undo that swap (TopstepX `ZoneMode.Lookup`, gh#519). The zone id lives here, not as a hardcoded
+surprise in product code — apply passes `-c account=045296582762 -c region=us-east-1 -c rootDomain=staging.marqspec.com`
+and CDK looks the zone up. A default AWS CLI region of `us-east-2` reports `Stack does not exist` — pass
+`--region us-east-1` (same trap TopstepX recorded).
+
+`AlertsEmail` is still operator-supplied. First apply cannot invent an inbox; pass it as
+`--parameters AlertsEmail=…` / `DEPLOY_ALERTS_EMAIL` / repository variable `AWS_ALERTS_EMAIL`. SNS will send a
+confirmation to that address.
+
+Shape (pattern library: TopstepX `EnvironmentStack` in `MarqSpec.Mcp.TopstepX` — cite it; do not copy Cognito
+or MCP bits):
 
 | Resource | How it is named | Notes |
 |---|---|---|
@@ -70,7 +95,7 @@ hostnames, Cognito, or MCP bits):
 | App task | `ghcr.io/adammarquette/trading-copilot@${ImageDigest}` | Digest is a CloudFormation parameter, no default. Never `:latest` or a floating branch tag ([ADR-0018](adr/0018-image-registry-ghcr.md)). Public image — no registry credential. |
 | Store task | `timescale/timescaledb-ha` by digest on EFS | Same image compose tests. Access point uid/gid 1000. Cloud Map `postgres.<env>.tradingcopilot.internal`. |
 | ALB | `trading-copilot-<env>` | TLS at the edge; HTTP → HTTPS; host-header is the `Hostname` parameter; `/health` on 8080. Idle timeout 600 s (SignalR). |
-| Hosted zone | created from `RootDomain` | In-stack so `cdk synth --no-lookups` needs no AWS call. Operator delegates the NS output at their registrar. |
+| Hosted zone | **Lookup** on staging apply; **Create** in tests / `cdk synth --no-lookups` | Staging apply must not Create: a second `staging.marqspec.com` zone breaks the Cloudflare swap (gh#1188). |
 | Secret shells | `trading-copilot/<env>/{postgres,jwt,bootstrap,projectx,providers,llm,pushover,checkin}` | Empty JSON keys. ECS `valueFrom`. **Never edit a shell literal after values are written.** |
 | Deploy history | `/trading-copilot/<env>/{image-digest,version}` | SSM, written by the stack from the same parameters the task reads. |
 | OTLP sidecar | `otel/opentelemetry-collector-contrib` by digest | Loopback only, `Essential=false`. CloudWatch via SigV4. ADR-0019 paging is not dropped. |
@@ -78,27 +103,112 @@ hostnames, Cognito, or MCP bits):
 | App auth | JWT (`Jwt__SigningKey` shell) | R-18. No Cognito. `ASPNETCORE_ENVIRONMENT` is `Production` or `Staging` so R-14 mapping stays honest. |
 
 **Parameters on every apply** (no defaults that would silently pick a digest or a hostname): `ImageDigest`,
-`Version`, `RootDomain`, `Hostname`, `ProjectXDataTier` (`Simulated` / `Live`), `AlertsEmail`.
+`Version`, `RootDomain`, `Hostname`, `ProjectXDataTier` (`Simulated` / `Live`), `AlertsEmail`. Apply-time synth
+context: `-c outbound=PublicIpPerTask -c account=045296582762 -c region=us-east-1 -c rootDomain=staging.marqspec.com`.
+Never `:latest` or a floating branch tag ([ADR-0018](adr/0018-image-registry-ghcr.md)).
 
-**After first apply the operator writes the shells by hand** (console or CLI — record the ARNs here when they
-exist). The postgres `connectionString` uses host `postgres.<env>.tradingcopilot.internal`. JWT signing key ≥ 32
-bytes. Staging stays practice-only ([R-14](trading-platform-engineering.md); this runbook's *practice accounts
-only outside production*). The dead-man's switch (`checkin` shell) must run on infrastructure **independent** of
-this stack.
+### How to deploy staging
 
-Synth without credentials (what CI runs):
+Always-on: desired count ≥ 1 ([ADR-0030](adr/0030-aws-deployment-topology.md) decision 10 — staging stays ≥ 1
+while flatten is proven on practice). Digest-only image from GHCR. Practice credentials only.
+
+```bash
+# from infra/, pinned CLI (`npm ci` then `npx cdk`). Never :latest.
+# ImageDigest is sha256:<64 hex> from `docker buildx imagetools inspect ghcr.io/adammarquette/trading-copilot:<tag>`.
+# AlertsEmail is operator-supplied — do not invent one.
+
+npx cdk bootstrap aws://045296582762/us-east-1 \
+  -c outbound=PublicIpPerTask -c account=045296582762 -c region=us-east-1 \
+  -c rootDomain=staging.marqspec.com
+
+# OIDC roles (operator credentials, not GitHub Actions — the roles do not exist yet).
+# account/region make Program.cs Lookup staging, so rootDomain is required even for this stack.
+npx cdk deploy trading-copilot-github-oidc \
+  -c outbound=PublicIpPerTask -c account=045296582762 -c region=us-east-1 \
+  -c rootDomain=staging.marqspec.com \
+  --require-approval never
+
+npx cdk deploy trading-copilot-staging \
+  -c outbound=PublicIpPerTask -c account=045296582762 -c region=us-east-1 \
+  -c rootDomain=staging.marqspec.com \
+  --parameters ImageDigest=sha256:<64 hex> \
+  --parameters Version=<MAJOR.MINOR.PATCH> \
+  --parameters RootDomain=staging.marqspec.com \
+  --parameters Hostname=trading-copilot.staging.marqspec.com \
+  --parameters ProjectXDataTier=Simulated \
+  --parameters AlertsEmail="$ALERTS_EMAIL"
+```
+
+The release path after OIDC exists: `scripts/deploy-environment.sh staging <version> <digest>` (or
+`gh workflow run deploy.yml --ref main -f version=<tag> -f environment=staging`). That script passes
+account/region as context from the assumed role and does **not** pass `--no-lookups`. Do not `cdk deploy`
+production from this card.
+
+### How to tell staging is up
+
+```bash
+curl -sSI https://trading-copilot.staging.marqspec.com/health
+
+aws ecs describe-services --region us-east-1 \
+  --cluster trading-copilot-staging \
+  --services trading-copilot-staging-app \
+  --query 'services[0].{desired:desiredCount,running:runningCount,taskDef:taskDefinition}'
+
+aws ssm get-parameter --region us-east-1 --name /trading-copilot/staging/image-digest
+aws ssm get-parameter --region us-east-1 --name /trading-copilot/staging/version
+```
+
+`/health` must be 200. Desired/running **1**. SSM digest must match the task definition image
+(`ghcr.io/adammarquette/trading-copilot@sha256:…`). Do **not** `put-parameter`; the stack writes these
+([ADR-0030](adr/0030-aws-deployment-topology.md) decision 5).
+
+### Flatten / liveness on staging
+
+Staging hosts the same always-on app task as production will, on **practice** only ([R-14](trading-platform-prd.md)).
+The CloudWatch alarms that page `AlertsEmail` are `trading-copilot-staging-app-running-tasks` (RunningTaskCount < 1,
+missing data breaching), `trading-copilot-staging-unhealthy-hosts`, 5xx, and `trading-copilot-staging-deployment-failed`.
+Those sit beside [ADR-0019](adr/0019-alerting-channel-and-thresholds.md) flatten / liveness / Pushover paging; they
+do not replace it. The dead-man's switch check-in must **not** share this host
+([below](#the-dead-mans-switch-operator-setup--required-before-live)).
+
+### After first apply — write the secret shells
+
+Shells stay empty in git. After the stack exists, the operator writes values by hand (console or CLI).
+**Do not invent** JWT, ProjectX, bootstrap, or provider values. **Never edit a shell literal in the
+template after values are written** — CloudFormation creates a new secret version whenever `SecretString`
+changes.
+
+```bash
+# names the stack created. Fill only practice ProjectX credentials on staging (R-14).
+aws secretsmanager put-secret-value --region us-east-1 \
+  --secret-id trading-copilot/staging/postgres \
+  --secret-string '{"password":"<generated>","connectionString":"Host=postgres.staging.tradingcopilot.internal;Port=5432;Database=tradingcopilot;Username=copilot;Password=<same>"}'
+
+aws secretsmanager put-secret-value --region us-east-1 \
+  --secret-id trading-copilot/staging/jwt \
+  --secret-string '{"signingKey":"<≥32 random bytes>"}'
+
+# bootstrap / projectx / providers / llm / pushover / checkin — same shape, operator values.
+# checkin.heartbeatUrl must point at infrastructure that is not this stack.
+```
+
+The postgres `connectionString` host is `postgres.staging.tradingcopilot.internal`. JWT signing key ≥ 32
+bytes. An empty postgres shell makes the store task exit and trips the ECS circuit breaker — fill it during
+`CREATE_IN_PROGRESS` if the first create races the task.
+
+Synth without credentials (what CI runs — Create path, no account/region, no lookup):
 
 ```bash
 cd infra
 npx cdk synth --no-lookups -c outbound=NatGateway
 ```
 
-## AWS release / deploy (OIDC, not yet applied)
+## AWS release / deploy (OIDC)
 
 The OIDC stack and the release/rollback workflows (gh#1187) match [ADR-0030](adr/0030-aws-deployment-topology.md)
 decisions 4, 8 and 11. Shape is TopstepX `GitHubOidcStack` + `release.yml` / `deploy.yml` in
-`MarqSpec.Mcp.TopstepX` — cite it; do not copy account IDs, hostnames, Cognito, or MCP bits. Railway remains
-the **running** cloud. This increment does not `cdk deploy` and does not prove a live hostname (gh#1188).
+`MarqSpec.Mcp.TopstepX` — cite it; do not copy Cognito or MCP bits. Railway remains the **running** cloud.
+Staging apply and the live hostname are [above](#aws-environment-stack) (gh#1188).
 
 | Piece | Name / trigger | Notes |
 |---|---|---|
@@ -107,7 +217,7 @@ the **running** cloud. This increment does not `cdk deploy` and does not prove a
 | Production trust | `environment:aws-production` | No wildcard. The reviewer rule on that GitHub Environment is the approval **and** the credential's precondition ([ADR-0030](adr/0030-aws-deployment-topology.md) decision 8). |
 | `release.yml` | published GitHub Release | Retags the merge-published `:sha-<short>` as `:VERSION` (does not rebuild, never `:latest`). Deploys that **digest** to staging, then the same digest to production behind `aws-production`. |
 | `deploy.yml` | `workflow_dispatch` on `main` | Rollback / redeploy. Resolves the digest from the version tag (`imagetools inspect`). Staging has no `environment:` key; production is the literal `aws-production`. |
-| Deploy script | `scripts/deploy-environment.sh` | `cdk deploy --parameters ImageDigest=… Version=…`. Never `put-parameter`, never `{{resolve:ssm}}`. Live hostname prove is gh#1188. |
+| Deploy script | `scripts/deploy-environment.sh` | `cdk deploy --parameters ImageDigest=… Version=…` plus `-c account= -c region= -c rootDomain=` (no `--no-lookups`). Never `put-parameter`, never `{{resolve:ssm}}`. |
 
 **No long-lived AWS keys** in GitHub secrets, workflow files, or source. The workflows assume the deploy
 roles through OIDC (`id-token: write`) and read the account / region from repository **variables**
@@ -120,17 +230,17 @@ roles through OIDC (`id-token: write`) and read the account / region from reposi
    running account as the required reviewer. Create-only: a re-run that finds an environment leaves it
    untouched. An `environment:` key that names a missing environment is **not** a gate — GitHub
    auto-creates it unprotected.
-2. **Set repository variables** (Settings → Secrets and variables → Actions → Variables), when the
-   operator has chosen them. This page does not invent values:
-   `AWS_ACCOUNT_ID`, `AWS_REGION`, `AWS_OUTBOUND` (one of the four `-c outbound=` shapes), and on first
-   apply `AWS_ROOT_DOMAIN`, `AWS_HOSTNAME_STAGING`, `AWS_HOSTNAME_PRODUCTION`,
-   `AWS_PROJECTX_DATA_TIER_STAGING` (`Simulated`), `AWS_PROJECTX_DATA_TIER_PRODUCTION`,
-   `AWS_ALERTS_EMAIL`.
+2. **Set repository variables** (Settings → Secrets and variables → Actions → Variables). Staging
+   pins (gh#1188): `AWS_ACCOUNT_ID=045296582762`, `AWS_REGION=us-east-1`, `AWS_OUTBOUND=PublicIpPerTask`,
+   `AWS_ROOT_DOMAIN_STAGING=staging.marqspec.com`, `AWS_HOSTNAME_STAGING=trading-copilot.staging.marqspec.com`,
+   `AWS_PROJECTX_DATA_TIER_STAGING=Simulated`. Do **not** set a single `AWS_ROOT_DOMAIN` — production
+   Create would mint a second `staging.marqspec.com` zone. Still operator-supplied, never invent:
+   `AWS_ALERTS_EMAIL`, `AWS_ROOT_DOMAIN_PRODUCTION`, `AWS_HOSTNAME_PRODUCTION`,
+   `AWS_PROJECTX_DATA_TIER_PRODUCTION`.
 3. **First apply of the OIDC stack** uses the operator's own credentials, not GitHub Actions — the
-   roles do not exist yet, so the circular "assume the role that creates the role" cannot run.
-   `cd infra && npx cdk deploy trading-copilot-github-oidc --no-lookups -c outbound=<shape>`.
-   Still not this increment (gh#1188).
-4. **CDK bootstrap** in that account (`cdk bootstrap`) before any apply.
+   roles do not exist yet, so the circular "assume the role that creates the role" cannot run. See
+   [How to deploy staging](#how-to-deploy-staging).
+4. **CDK bootstrap** in that account (`cdk bootstrap aws://045296582762/us-east-1`) before any apply.
 
 `./scripts/check-release-gate.sh` fails CI when a workflow-named environment is missing or has no
 reviewer. `./scripts/check-deploy-workflows.sh` fails CI when a deploy job references `:latest`,
@@ -966,7 +1076,8 @@ nothing else notices.
 1. **Create the Pushover application** and note the user key + app token (ADR-0019 — Emergency priority repeats until
    acknowledged and bypasses Do Not Disturb; a channel without both is not a pager).
 2. **Create the monitor checks** on a cron-monitor (healthchecks.io or equivalent) — **on infrastructure independent
-   of this app.** One sharing this host or this Railway project is not a dead-man's switch, it is a second thing that
+   of this app.** One sharing this host, this Railway project, or the AWS staging hostname
+   (`trading-copilot.staging.marqspec.com`, gh#1188) is not a dead-man's switch, it is a second thing that
    dies at the same moment.
    - **Liveness:** period 1 min, grace 3 min.
    - **Per instrument:** expected on **weekdays**, by that market's flatten deadline **+ 5 min** (ES/NQ ~14:35 CT,
@@ -989,20 +1100,24 @@ would otherwise page every day.
 - **Non-prod (dev / staging):** automatic on merge — CI builds + deploys **Railway** (the running cloud).
 - **Production (Railway):** **human-approved** (§9). Promote `staging → main`; CI deploys; smoke tests verify. A person must be
   aware of and approve any production deploy.
-- **AWS (intended, not yet applied):** a published GitHub Release retags the merge-published digest and deploys
-  it to staging, then the same digest to production behind the `aws-production` reviewer rule
-  ([AWS release / deploy](#aws-release--deploy-oidc-not-yet-applied), [ADR-0030](adr/0030-aws-deployment-topology.md),
-  gh#1187). Do not cut a release expecting AWS to move until gh#1188 has applied the stacks.
+- **AWS staging:** first apply is [How to deploy staging](#how-to-deploy-staging) (gh#1188). After OIDC exists, a
+  published GitHub Release retags the merge-published digest and deploys it to staging, then the same digest to
+  production behind the `aws-production` reviewer rule ([AWS release / deploy](#aws-release--deploy-oidc),
+  [ADR-0030](adr/0030-aws-deployment-topology.md)). Do not cut a release expecting production to move — that is
+  not this card.
 - **Before the first production deploy:** the dead-man's switch above is provisioned and **proven to page**.
 
 ## Rollback procedure
 - Triggered by a **failed production smoke test** or an operator decision.
 - **Human-approved** (§9): roll back via Railway (redeploy the previous release) and confirm with smoke tests. Any
   rollback is an explicit, approved action — never automatic.
-- **AWS rollback** (once applied): `gh workflow run deploy.yml --ref main -f version=<previous> -f environment=production`
-  waits on `aws-production`. Never `:latest`. See [AWS release / deploy](#aws-release--deploy-oidc-not-yet-applied).
+- **AWS rollback** (once applied): `gh workflow run deploy.yml --ref main -f version=<previous> -f environment=staging`
+  (or `production`, which waits on `aws-production`). Never `:latest`. See [AWS release / deploy](#aws-release--deploy-oidc).
 
 ## Verification / smoke tests
+**AWS staging health (gh#1188):** `https://trading-copilot.staging.marqspec.com/health` must return 200 after
+the first apply. See [How to tell staging is up](#how-to-tell-staging-is-up).
+
 Post-deploy, the tagged **smoke** subset (engineering §5) confirms the critical paths. **The set exists**
 (gh#131): `SystemSmokeIntegrationTests`, tagged `Category=Smoke`, **strictly read-only** — `GET /health`,
 `GET /auth/me`, `/firms`, `/connections`, `/connections/{id}/accounts`, `/accounts/{id}/risk`. Nothing

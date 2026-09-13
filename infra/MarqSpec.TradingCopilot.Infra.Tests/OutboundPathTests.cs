@@ -19,6 +19,7 @@ public sealed class OutboundPathTests
         {
             EnvName = "staging",
             OutboundPath = default,
+            ZoneMode = ZoneMode.Create,
         });
 
         act.Should().Throw<ArgumentOutOfRangeException>().WithMessage("*OutboundPath*");

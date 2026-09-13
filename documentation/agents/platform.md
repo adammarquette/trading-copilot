@@ -10,7 +10,7 @@ as `.github/workflows/`.
 | Container image (the **same** artifact local and deployed) | [`Api/Dockerfile`](../../src/MarqSpec.TradingCopilot.Api/Dockerfile), build context = repo root |
 | Image registry — built once in CI, pulled by local + Railway; AWS pulls by digest ([ADR-0030](../adr/0030-aws-deployment-topology.md)) | `ghcr.io/adammarquette/trading-copilot` (public) |
 | Local stack — pull (default) / dev-build override | [`docker-compose.yml`](../../docker-compose.yml), [`docker-compose.dev.yml`](../../docker-compose.dev.yml) |
-| AWS environment stacks (staging + production; not yet applied) | [`infra/`](../../infra/) |
+| AWS environment stacks (staging Lookup gh#1188; first apply still waiting) | [`infra/`](../../infra/) |
 | Deploy resources, procedures, rulesets | [`deployment-runbook.md`](../deployment-runbook.md) |
 | Deployment decisions | [ADR-0012](../adr/0012-containerization-local-dev.md), [ADR-0018](../adr/0018-image-registry-ghcr.md), [ADR-0015](../adr/0015-distribution-licensing-governance.md), [ADR-0030](../adr/0030-aws-deployment-topology.md) (intended AWS topology) |
 

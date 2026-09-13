@@ -1,4 +1,5 @@
 using FluentAssertions;
+using MarqSpec.TradingCopilot.Infra;
 
 namespace MarqSpec.TradingCopilot.Infra.Tests;
 
@@ -67,6 +68,56 @@ public sealed class EdgeTests(EnvironmentTemplates templates) : IClassFixture<En
         var t = templates.For(env);
         var (_, zone) = t.Single("AWS::Route53::HostedZone");
         Synthesised.Text(t.Properties(zone)["Name"]).Should().Contain("RootDomain");
-        t.Json.ToJsonString().Should().NotContain("HostedZoneFromLookup", "synth must not look up a zone (no invented id)");
+        t.Json.ToJsonString().Should().NotContain("HostedZoneFromLookup", "the Create fixture must not look up a zone (CI synth --no-lookups)");
+        t.Json.ToJsonString().Should().Contain("HostedZoneNameServers", "Create still emits NS for a registrar that does not already delegate");
+    }
+
+    [Fact]
+    public void Lookup_creates_no_zone_and_emits_no_name_servers()
+    {
+        var t = Synthesised.StagingLookup(EnvironmentTemplates.FixtureShape);
+        t.Resources("AWS::Route53::HostedZone").Should().BeEmpty(
+            "staging.marqspec.com zone Z00545362JA49XMTT3U7Q already exists and Cloudflare already delegates "
+            + "to its NS. Create would mint a second zone and undo that swap (gh#1188)");
+        t.Json.ToJsonString().Should().NotContain("HostedZoneNameServers", "Lookup must not ask the operator to re-delegate NS they already swapped");
+    }
+
+    [Fact]
+    public void Lookup_without_a_synth_time_root_domain_is_refused()
+    {
+        var act = () => Synthesised.Environment(
+            "staging",
+            EnvironmentTemplates.FixtureShape,
+            Synthesised.DeployedTelemetry,
+            zoneMode: ZoneMode.Lookup,
+            env: Synthesised.TestEnv);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*RootDomain*");
+    }
+
+    [Fact]
+    public void Lookup_without_account_and_region_is_refused()
+    {
+        var act = () => Synthesised.Environment(
+            "staging",
+            EnvironmentTemplates.FixtureShape,
+            Synthesised.DeployedTelemetry,
+            zoneMode: ZoneMode.Lookup,
+            rootDomain: "staging.marqspec.com");
+
+        act.Should().Throw<ArgumentException>().WithMessage("*account*");
+    }
+
+    [Fact]
+    public void A_stack_cannot_be_synthesised_without_naming_a_zone_mode()
+    {
+        var act = () => new EnvironmentStack(new Amazon.CDK.App(), "trading-copilot-staging", new EnvironmentStackProps
+        {
+            EnvName = "staging",
+            OutboundPath = EnvironmentTemplates.FixtureShape,
+            ZoneMode = default,
+        });
+
+        act.Should().Throw<ArgumentOutOfRangeException>().WithMessage("*ZoneMode*");
     }
 }

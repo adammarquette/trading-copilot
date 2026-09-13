@@ -14,21 +14,43 @@ public sealed record Synthesised(Template Template, JsonObject Json)
 {
     public static TelemetryProps DeployedTelemetry => new();
 
+    /// <summary>
+    /// Dummy account/region so <see cref="ZoneMode.Lookup"/> resolves at synth. With no
+    /// <c>cdk.context.json</c> the CDK answers with its own dummy zone, which is what a
+    /// template test wants (TopstepX <c>Synthesised.TestEnv</c>).
+    /// </summary>
+    public static readonly Amazon.CDK.Environment TestEnv = new() { Account = "123456789012", Region = "us-east-1" };
+
     public static Synthesised Environment(
         string envName,
         OutboundPath outboundPath,
         TelemetryProps? telemetry,
-        string? stackId = null)
+        string? stackId = null,
+        ZoneMode zoneMode = ZoneMode.Create,
+        string? rootDomain = null,
+        Amazon.CDK.Environment? env = null)
     {
         var app = new App();
         var stack = new EnvironmentStack(app, stackId ?? $"trading-copilot-{envName}", new EnvironmentStackProps
         {
             EnvName = envName,
             OutboundPath = outboundPath,
+            ZoneMode = zoneMode,
+            RootDomain = rootDomain,
+            Env = env,
             Telemetry = telemetry,
         });
         return Of(stack);
     }
+
+    public static Synthesised StagingLookup(OutboundPath outboundPath, TelemetryProps? telemetry = null) =>
+        Environment(
+            "staging",
+            outboundPath,
+            telemetry ?? DeployedTelemetry,
+            zoneMode: ZoneMode.Lookup,
+            rootDomain: "staging.marqspec.com",
+            env: TestEnv);
 
     public static Synthesised Production(OutboundPath outboundPath, TelemetryProps? telemetry = null) =>
         Environment("production", outboundPath, telemetry ?? DeployedTelemetry);
