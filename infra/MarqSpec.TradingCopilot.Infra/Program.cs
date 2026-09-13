@@ -1,9 +1,9 @@
 using Amazon.CDK;
 using MarqSpec.TradingCopilot.Infra;
 
-// The CDK app (ADR-0030): the same EnvironmentStack twice. GitHub OIDC deploy roles land with
-// gh#1187 and the release workflow — this app does not invent a production-gate environment name.
-// Run through infra/cdk.json; never by hand.
+// The CDK app (ADR-0030): the same EnvironmentStack twice, and the OIDC stack that lets GitHub
+// Actions deploy them. Run through infra/cdk.json; never by hand. Do not cdk deploy from a
+// workflow child's checkout — first apply is the operator's (gh#1188).
 var app = new App();
 
 Amazon.CDK.Tags.Of(app).Add("Project", "trading-copilot");
@@ -34,6 +34,10 @@ _ = new EnvironmentStack(app, "trading-copilot-staging", new EnvironmentStackPro
     OutboundPath = outbound,
     Telemetry = new TelemetryProps(),
 });
+
+// Account-scoped: one provider, two roles. No Env.Account / Env.Region — same reason as the
+// environment stacks. The production-gate environment name is aws-production (gh#1187).
+_ = new GitHubOidcStack(app, "trading-copilot-github-oidc");
 
 app.Synth();
 

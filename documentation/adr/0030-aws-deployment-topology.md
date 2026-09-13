@@ -173,11 +173,30 @@ procedures land with the CDK / workflow children.
 - Backup cadence, WAF, budget alarms, cost tags.
 - CDK stack and project names under `infra/`.
 
+## Decision log
+
+The *Decision* above is extended by increment; the dated updates below are the trail. Oldest first; this index
+mirrors the `## Update` headings, so keep the two in step when an entry is appended (gh#600).
+
+| Date | Update |
+|---|---|
+| 2026-09-12 | GitHub OIDC deploy roles + release/rollback workflows; production-gate environment is `aws-production` (gh#1187) |
+
+## Update (2026-09-12) — OIDC roles and digest-only release/rollback workflows (gh#1187)
+
+The *Decision* (two AWS envs, digest-only ECS, OIDC, human-approved production, release trigger) stands and
+is not rewritten. This increment adds `GitHubOidcStack` (`trading-copilot-github-oidc`) and the workflows
+that assume `GitHubDeploy-staging` / `GitHubDeploy-production`. The production-gate environment name left
+open under *What this does not decide* is **`aws-production`**. Staging trusts this repository's immutable
+Actions `sub` on `v*` tags and `refs/heads/main`; production trusts `environment:aws-production` only.
+`scripts/bootstrap.sh` creates the GitHub Environments CI cannot. No account id, region, or hostname is
+invented; stacks stay environment-agnostic. No `cdk deploy`. Live staging proof remains gh#1188; Railway
+sunset remains gh#1189.
+
 ## Follow-ups
 
-- CDK app under `infra/` — landed with gh#1186. GitHub OIDC deploy roles were left to gh#1187 with the
-  release workflow (this increment does not invent a production-gate environment name).
-- OIDC roles + the release-triggered deploy workflow (gh#1187). Not a merge-to-`main` deploy.
+- CDK app under `infra/` — landed with gh#1186.
+- OIDC roles + the release-triggered deploy workflow — landed with gh#1187. Not a merge-to-`main` deploy.
 - Operator supplies account id, region, and hostname pattern before the first apply.
-- Dated **Update** on this record when Railway sunsets, after AWS staging has proven R-13 on practice.
+- Dated **Update** on this record when Railway sunsets, after AWS staging has proven R-13 on practice (gh#1189).
 - Measure EFS vs. the EC2 + EBS escalation on staging if WAL/`fsync` cost shows up under a real session.
