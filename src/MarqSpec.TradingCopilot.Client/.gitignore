@@ -1,0 +1,11 @@
+# Node toolchain output. The lockfile IS committed -- CI runs `npm ci`, which refuses to run without it.
+node_modules/
+dist/
+
+# Vite's on-disk dependency pre-bundle cache; regenerated on every dev start.
+.vite/
+
+# Local env overrides (e.g. VITE_BFF_ORIGIN for the dev proxy). Never commit one -- see AGENTS.md.
+.env
+.env.local
+.env.*.local

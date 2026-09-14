@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512" role="img" aria-label="Trading Co-Pilot">
+  <title>Trading Co-Pilot — Co-Pilot Chevron</title>
+  <rect width="64" height="64" rx="14" fill="#101318"/>
+  <rect x=".5" y=".5" width="63" height="63" rx="13.5" fill="none" stroke="#29313F"/>
+  <g fill="none" stroke="#9DC3FF" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M19 31 L32 19.5 L45 31"/>
+    <path d="M19 45 L32 33.5 L45 45" opacity=".45"/>
+  </g>
+</svg>

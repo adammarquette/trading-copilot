@@ -1,0 +1,91 @@
+name: Live provider news gates
+
+# The live-provider news suite (gh#1122, the "no staging required" half of gh#464) runs the REAL Finnhub +
+# Tiingo news APIs over a throwaway Postgres container -- no deployed app, unlike staging-gates.yml. A third
+# tier alongside pre-merge (no network) and staging (a deployed app + a reserved practice account):
+#
+#   | | pre-merge integration | live provider (this workflow) | staging |
+#   |---|---|---|---|
+#   | Real outbound network | no | yes (Finnhub + Tiingo) | yes |
+#   | Needs a deployed app | no | no | yes |
+#   | Store | container Postgres | container Postgres | deployed DB |
+#   | Trigger | every PR | workflow_dispatch | workflow_dispatch |
+#
+# Smoke is a fourth thing again and is not on that axis: it probes PRODUCTION, GET-only, on deploy.
+#
+# `LiveNewsProviderFactAttribute` (src/MarqSpec.TradingCopilot.IntegrationTests/TestHost/LiveProvider) skips by
+# construction without both keys, so the pre-merge `integration tests (pre-merge)` job in ci.yml -- whose
+# `Category!=Smoke` filter technically matches Category=LiveProvider too -- reports those cases skipped rather
+# than running them for real, exactly like the existing Category=Staging suites do there.
+# `Credentials_ShouldResolveFromConfigOnly` is deliberately NOT gated (it needs no live credential, only a
+# keyless host), so it already runs in the pre-merge job; this workflow re-runs it anyway as part of the same
+# filtered class. THIS workflow is the only place Finnhub__ApiKey / Tiingo__ApiKey are forwarded, so it is the
+# only place the real providers are ever reached from CI (mirrors staging-gates.yml's STAGING_* forwarding).
+#
+# News providers are data-only (R-17): they hold no account and execute nothing, so nothing here can touch an
+# order. This workflow forwards no ProjectX credential and must never be given one.
+on:
+  # ON DEMAND ONLY -- a free-tier provider budget is not something a required PR check should spend on every
+  # push, and several cases are evidence-gathering (FreeTierFeeds_ShouldReportTheirDataQuality) rather than a
+  # fixed pass/fail a merge queue should block on. The feed moves slowly too (roughly 13-37 articles a day,
+  # gh#1123), so a per-push trigger would mostly re-observe an almost unchanged payload.
+  workflow_dispatch: {}
+
+# Least privilege: the suite reads secrets and runs tests; it never writes to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  # No shared external state to serialize on (unlike staging-gates.yml's one reserved practice account) -- this
+  # only protects against two runs racing the same free-tier rate-limit budget. Never cancel one mid-flight
+  # either: a cancelled run leaves the reader unable to tell a rate-limit refusal from a teardown.
+  group: live-provider-news-gates
+  cancel-in-progress: false
+
+jobs:
+  live-provider-news:
+    name: live provider news (Finnhub + Tiingo, real APIs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true  # adapters build against the MarqSpec.Client.Finnhub / .Tiingo submodules (gh#1023)
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore src/MarqSpec.TradingCopilot.slnx
+
+      # Absent keys => the gated cases skip, reported. Say so up front rather than leaving a reader to infer it
+      # from a skip count, because "skipped" and "passed" look alike in a run summary -- and the whole value of
+      # this tier is that it actually ran.
+      - name: Report credential availability
+        env:
+          FINNHUB: ${{ secrets.FINNHUB__APIKEY }}
+          TIINGO: ${{ secrets.TIINGO__APIKEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FINNHUB:-}" ] || [ -z "${TIINGO:-}" ]; then
+            echo "::warning::FINNHUB__APIKEY / TIINGO__APIKEY are not both set -- the live-provider cases will SKIP by construction. They are repository secrets; see the deployment runbook, Secrets & config."
+          else
+            echo "Both provider keys are present; the live-provider cases will run for real."
+          fi
+
+      # Absent => LiveNewsProviderFactAttribute skips every gated case (reported, never a silent green); present
+      # => the suite authenticates to the real Finnhub + Tiingo REST APIs and asserts against what they actually
+      # return.
+      #
+      # The keys are forwarded under the APPLICATION's own configuration names (.env.example), because the suite
+      # hands them straight to the production host so the real registration path is what gets exercised. The
+      # spelling matters on Linux, where environment lookup is case-sensitive and the secrets are stored as
+      # FINNHUB__APIKEY / TIINGO__APIKEY: LiveProviderConfig probes both that spelling and the app's own, so a
+      # rename on either side degrades to a reported skip rather than a silent one.
+      - name: Live provider news (Category=LiveProvider)
+        env:
+          Finnhub__ApiKey: ${{ secrets.FINNHUB__APIKEY }}
+          Tiingo__ApiKey: ${{ secrets.TIINGO__APIKEY }}
+        run: dotnet test src/MarqSpec.TradingCopilot.IntegrationTests/MarqSpec.TradingCopilot.IntegrationTests.csproj --configuration Release --filter "Category=LiveProvider" --logger "console;verbosity=detailed"

@@ -1,0 +1,68 @@
+# OpenTelemetry Collector — the single ingress for all three signals (gh#231, ADR-0002).
+#
+# The app exports OTLP here and nowhere else. That indirection is the point: swapping a backend, sampling, or
+# adding a second destination becomes a change to THIS file rather than to application configuration, and the
+# app never learns which backend is behind it.
+#
+# See engineering §7 for what each signal is for.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Bound memory before the collector becomes the thing that falls over. It sits beside a trading process on a
+  # developer laptop; an unbounded queue here would be an outage caused by observability.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  # Traces -> Tempo over OTLP.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Logs -> Loki's native OTLP endpoint (Loki 3.x), so no format translation is needed.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  # Metrics -> Prometheus via remote write. Chosen over letting Prometheus scrape the collector because remote
+  # write carries EXEMPLARS, which is what makes a latency spike clickable through to the exact trace (§7).
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
+    tls:
+      insecure: true
+    # Keeps service.name / deployment.environment queryable as labels rather than losing them in the conversion.
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/loki]

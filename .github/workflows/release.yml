@@ -1,0 +1,209 @@
+name: Release container image
+
+# Triggered by a published GitHub release (ADR-0030 decision 11). CI already published
+# :sha-<short> on merge (ADR-0018); this workflow retags that digest as :VERSION — it does
+# not rebuild and it never references :latest. deploy-staging assumes GitHubDeploy-staging
+# with no environment: key. deploy-production waits on the literal aws-production
+# environment and deploys the same digest. Rollback is deploy.yml, dispatched on main.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  # THE JOB BELOW IS INERT WITHOUT A SETTING THIS FILE CANNOT DECLARE.
+  # `environment: production` does not create or require anything: if the environment
+  # does not exist, GitHub CREATES IT AT RUN TIME WITH NO PROTECTION RULES. This job
+  # declares NO environment: of its own — a check on the approval gate that is itself
+  # gated by the approval gate can only run after the thing it is checking has already
+  # let it through. scripts/bootstrap.sh creates the environments.
+  verify-gate:
+    name: Verify the approval gate is real
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The release approval gate exists and requires a human
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/check-release-gate.sh
+
+      - name: Self-test — that check still rejects an inert gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/check-release-gate-selftest.sh
+
+  gate:
+    name: Await release approval
+    needs: verify-gate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Release approved
+        run: echo "Release approved - proceeding to retag and deploy."
+
+  publish:
+    name: Retag the merge-published digest
+    needs: gate
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+      version: ${{ steps.tag.outputs.version }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the tag looks like a version
+        id: tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Tag '$TAG' is not a vMAJOR.MINOR.PATCH release tag."
+            exit 1
+          fi
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the image reference
+        run: |
+          ref="$(./scripts/image-reference.sh)"
+          [ -n "$ref" ] || { echo "::error::image-reference.sh exited 0 without naming a reference"; exit 1; }
+          echo "IMAGE=$ref" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Retag, do not rebuild (ADR-0018). The merge already published :sha-<short>.
+      # Assigned on its own line, then checked — a failed inspect must not export an
+      # empty digest and then deploy :latest.
+      - name: Retag the published digest as the release version
+        id: digest
+        run: |
+          short="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
+          source="${IMAGE}:sha-${short}"
+          raw="$(docker buildx imagetools inspect "${source}" --format '{{json .Manifest.Digest}}')"
+          [ -n "$raw" ] || { echo "::error::imagetools inspect returned no digest for ${source}"; exit 1; }
+          digest="$(printf '%s' "$raw" | tr -d '"')"
+          [ -n "$digest" ] || { echo "::error::digest was empty after stripping quotes"; exit 1; }
+          printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' \
+            || { echo "::error::digest '$digest' is not sha256:<64 hex>"; exit 1; }
+          docker buildx imagetools create -t "${IMAGE}:${VERSION}" "${source}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+  deploy-staging:
+    name: Deploy staging
+    needs: publish
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ needs.publish.outputs.digest }}
+      version: ${{ needs.publish.outputs.version }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The deploy role account and region are variables, not literals
+        run: |
+          account="${{ vars.AWS_ACCOUNT_ID }}"
+          [ -n "$account" ] || { echo "::error::repository variable AWS_ACCOUNT_ID is empty"; exit 1; }
+          region="${{ vars.AWS_REGION }}"
+          [ -n "$region" ] || { echo "::error::repository variable AWS_REGION is empty"; exit 1; }
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/GitHubDeploy-staging
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+
+      - name: Install the pinned CDK CLI
+        working-directory: infra
+        run: npm ci --no-audit --no-fund
+
+      - name: Deploy the published digest
+        env:
+          DEPLOY_OUTBOUND: ${{ vars.AWS_OUTBOUND }}
+          DEPLOY_ROOT_DOMAIN: ${{ vars.AWS_ROOT_DOMAIN_STAGING }}
+          DEPLOY_HOSTNAME: ${{ vars.AWS_HOSTNAME_STAGING }}
+          DEPLOY_PROJECTX_DATA_TIER: ${{ vars.AWS_PROJECTX_DATA_TIER_STAGING }}
+          DEPLOY_ALERTS_EMAIL: ${{ vars.AWS_ALERTS_EMAIL }}
+        run: |
+          digest="${{ needs.publish.outputs.digest }}"
+          [ -n "$digest" ] || { echo "::error::publish exposed no digest"; exit 1; }
+          version="${{ needs.publish.outputs.version }}"
+          [ -n "$version" ] || { echo "::error::publish exposed no version"; exit 1; }
+          ./scripts/deploy-environment.sh staging "$version" "$digest"
+
+  deploy-production:
+    name: Deploy production
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: aws-production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The deploy role account and region are variables, not literals
+        run: |
+          account="${{ vars.AWS_ACCOUNT_ID }}"
+          [ -n "$account" ] || { echo "::error::repository variable AWS_ACCOUNT_ID is empty"; exit 1; }
+          region="${{ vars.AWS_REGION }}"
+          [ -n "$region" ] || { echo "::error::repository variable AWS_REGION is empty"; exit 1; }
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/GitHubDeploy-production
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+
+      - name: Install the pinned CDK CLI
+        working-directory: infra
+        run: npm ci --no-audit --no-fund
+
+      - name: Deploy the same digest
+        env:
+          DEPLOY_OUTBOUND: ${{ vars.AWS_OUTBOUND }}
+          DEPLOY_ROOT_DOMAIN: ${{ vars.AWS_ROOT_DOMAIN_PRODUCTION }}
+          DEPLOY_HOSTNAME: ${{ vars.AWS_HOSTNAME_PRODUCTION }}
+          DEPLOY_PROJECTX_DATA_TIER: ${{ vars.AWS_PROJECTX_DATA_TIER_PRODUCTION }}
+          DEPLOY_ALERTS_EMAIL: ${{ vars.AWS_ALERTS_EMAIL }}
+        run: |
+          digest="${{ needs.deploy-staging.outputs.digest }}"
+          [ -n "$digest" ] || { echo "::error::deploy-staging exposed no digest"; exit 1; }
+          version="${{ needs.deploy-staging.outputs.version }}"
+          [ -n "$version" ] || { echo "::error::deploy-staging exposed no version"; exit 1; }
+          ./scripts/deploy-environment.sh production "$version" "$digest"

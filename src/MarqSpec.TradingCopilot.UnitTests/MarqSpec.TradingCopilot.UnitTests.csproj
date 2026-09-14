@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="FakeItEasy" />
+    <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="FluentAssertions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Domain\MarqSpec.TradingCopilot.Domain.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Data\MarqSpec.TradingCopilot.Data.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Api\MarqSpec.TradingCopilot.Api.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Finnhub\MarqSpec.TradingCopilot.Integration.Finnhub.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.ProjectX\MarqSpec.TradingCopilot.Integration.ProjectX.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Tiingo\MarqSpec.TradingCopilot.Integration.Tiingo.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Tradovate\MarqSpec.TradingCopilot.Integration.Tradovate.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The Api is a Web SDK project; loading its types in tests needs the ASP.NET shared framework. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+</Project>

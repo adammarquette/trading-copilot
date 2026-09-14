@@ -1,0 +1,457 @@
+# ADR-0013: Failure & recovery model
+
+**Status:** Accepted · **Date:** 2026-07-19 · **Deciders:** Adam (operator)
+**Relates to:** PRD `R-1` (ingestion recovery), `R-4` (suggestion lifecycle / recovery), `R-12` (execution
+re-validation), `R-13` (auto-flatten — safety-critical), `R-19` (PWA), `R-20` (tenancy); engineering §2 (SignalR
+resume), §9 (safety-critical); [ADR-0001](0001-event-backbone.md) (event log / clean-historical),
+[ADR-0007](0007-order-execution-model.md) (execution / orphan handling), [ADR-0010](0010-progressive-web-app.md),
+[ADR-0011](0011-multi-user-tenancy.md).
+
+## Context
+Things fail: the user's client drops, the backend restarts, the venue connection breaks, or — worst — the cloud tier
+is unreachable near the flatten deadline. The recovery behaviour for each already exists, but **spread across
+R-4 / R-12 / R-13 / ADR-0001 / ADR-0007** — no single place states the whole model, and one part (the auto-flatten
+guarantee) is a known-hard open item. This ADR **consolidates the recovery model for visibility** and names the piece
+that still needs engineering design. It records *what already holds*; it does not invent new mechanisms (each stays
+owned by its requirement / ADR).
+
+## Decision — a layered recovery model
+- **The client is presentation-only; it loses nothing.** All state lives server-side; the PWA (ADR-0010) resumes on
+  reconnect via the **SignalR outbox + monotonic-sequence + idempotent-resume** pattern (engineering §2), catching up
+  missed updates. A crashed / closed / slept client is a non-event.
+- **On backend restart, state is rehydrated, not replayed live.** Decision state (suggestions, orders, positions,
+  rules, templates) **rehydrates from its persisted store**; market / indicator state **rebuilds from the
+  clean-historical** store, *not* the short-retention event log (ADR-0001 — "rebuild = reprocess clean-historical");
+  ingestion **backfills gaps on reconnect** (R-1). Rehydration **preserves per-user isolation** (R-20). An
+  **explicit startup pass** now makes this concrete (**implemented gh#221**): `Api/Recovery/DecisionStateRehydrator`
+  reads the whole decision surface back **inertly** — it *observes* what returned (staged orders, pending
+  conditionals, hidden stops, active suggestions) and resumes **none** of it (every resumption path stays request-
+  or quote-driven and re-validates against fresh truth, R-12). It reads across all owners (background plumbing
+  bypasses the R-20 filter) yet **carries ownership** on every row, and if a crash mid-write left an **impossible
+  cross-entity combination** — a staged order holding a venue key, a fired conditional linked to no order, a native
+  (at-venue) stop with no live order, a stop plan whose owner drifted from its order's — the pure
+  `Domain/Recovery/DecisionStateRehydration.Analyze` flags it and the pass **fails safe and loud**: it engages the
+  **kill switch (HaltOnly — no new orders; open positions rest on their native safety stops)**, persists the durable
+  lock, and alerts (`synthetic_risk`), **never silently repairing**. These are **cross-entity** invariants a
+  single-row DB check cannot express — a crash between two independent writes leaves each row valid but the whole
+  contradictory — and an existing operator kill-switch lock is **preserved**, never downgraded.
+- **No-risk state fails safe by expiring.** A **suggestion carries no risk** (nothing at the broker until taken). On
+  any recovery, suggestions apply their normal lifecycle: past the **validity window** or with broken drift / thesis
+  → **stale → expired / void**; a survivor must still pass **R-12** before it can be taken; **nothing is auto-taken or
+  silently resumed**; a re-formed setup is a **new** suggestion (R-4). Same for a **pending conditional order** (its
+  cancel-if / expiry, R-11).
+- **At-risk state is protected independently of client and app.** A live position always has a **native, exchange-held
+  safety stop** (ADR-0007) — it survives *any* app / backend / connection failure. On **venue-connection loss**, in-app
+  **synthetic** orders (hidden entries, un-promoted stops) go **orphaned → emergency** with an operator alert; on
+  reconnect the system **re-validates and re-arms** — nothing silently resumes (ADR-0007; **implemented gh#209** —
+  a connection-liveness monitor over the `IVenueConnection` seam orphans hidden working stops on a drop; and
+  **gh#191** — re-arm now **re-validates each stop against venue truth first**, re-arming only a still-open position
+  and **retiring** the stop of one that closed during the outage, so the invariant below genuinely holds rather than
+  leaning on the venue to reject a stale promotion; **gh#220** — each transition is written to the immutable
+  **`AuditRecord`** carrying `synthetic_risk` (a secondary write that never fails the safety action); and **gh#704** —
+  the orphan and re-arm transitions now also **journal an event-log event** (`protection.orphaned` /
+  `protection.restored`, carrying the count and the R-19 "native stop remains the floor" distinction, a second
+  best-effort write) so the realtime hub can raise the **real-time** operator alert (gh#645 / gh#222). The
+  high-severity log carrying `synthetic_risk` remains the interim human-visible alert until the Phase-4 SPA renders
+  that event).
+- **The hard case — the auto-flatten guarantee (R-13).** The auto-flatten is **our system feature**, fired at a
+  **configurable, per-instrument deadline** (equity-index default ~2:30 PM CT ahead of MOC; **crude / gold settle earlier**) — **earlier than any venue-forced flatten** (Topstep
+  ~3:10 PM CT), and a **live brokerage has none**, so we **cannot lean on the venue** as the net. It is
+  **safety-critical and must fire even if the primary tier is degraded** → a **redundant / independent trigger** (a
+  watchdog separate from the main scheduler), a defined behaviour if a flatten order is *rejected* near the deadline,
+  and possibly a **local fallback flatten path**. **Both tiers are implemented** — the primary scheduler
+  (**gh#185**) and the independent watchdog on its own separate loop (**gh#187**); see *Follow-ups* for what each
+  does and what remains (an opposing-market-order alternative close, and a client-side fallback). It is **still the
+  gating risk for live trading**: implemented is not proven, and the exit criterion is that it fires reliably on a
+  **practice** account every session (PRD §9). See [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md).
+- **The end-of-day / settlement boundary (R-13 companion).** The CME's **daily maintenance / settlement**
+  (~4:00–5:00 PM CT) **re-marks** any position carried through it at the **settlement price** — the mark on return
+  isn't the last trade seen. So end-of-day handling **leans on resiliency + fail-over, not on a live price**: on any
+  disconnect / restart near the close, **reconcile positions / fills from the venue as source of truth** (never local
+  state), stay **aware of the maintenance window**, and **reconcile the settlement re-mark** rather than presenting a
+  stale pre-settlement mark as live.
+
+**Principles (invariants).** Never present **stale data / risk state as live** (R-19); never **auto-act on rehydrated
+state** (re-validate first, R-12); keep **no-risk state (expire) separate from at-risk state (protect + recover)**;
+the **exchange-held stop is the physical floor**; every recovery transition is **audited** (§9, ADR-0007).
+
+## Alternatives considered
+- **Hold critical state on the client.** Rejected — the client is presentation-only and unreliable (offline, evicted,
+  asleep); safety can't depend on it (ADR-0010 / ADR-0011).
+- **Auto-resume suggestions / orders after an outage as-was.** Rejected — acting on unmonitored, possibly-stale state
+  is unsafe; **expire + re-validate** instead.
+- **Trust the venue to hold all protection.** Rejected — synthetic orders are in-app by design (to hide entries); the
+  native safety stop + orphan handling cover the gap.
+- **A single durable scheduler for auto-flatten.** Insufficient alone — a tier outage takes it down too, and the
+  flatten fires **ahead of the venue's forced-flatten backstop** (so the venue can't cover a miss); hence a
+  **redundant / independent** trigger (to be designed).
+
+## Consequences
+**Positive** — one coherent, auditable recovery story; client failures are non-events; proposals fail safe; live risk
+is protected server / exchange-side; the hard problem (auto-flatten guarantee) is **named and isolated**, not buried.
+**Negative / costs** — the **auto-flatten watchdog / fallback is real safety-critical engineering** (high-rigor suites,
+§5 / §9) and **gates live trading**; **state rehydration needs deterministic-eval coverage** (incl. cross-user
+isolation on rehydrate); the **expire-on-uncertainty bias** discards some still-valid setups after an outage
+(accepted — they re-form as new suggestions).
+
+## Follow-ups
+- **The auto-flatten guarantee** (R-13): both tiers are **implemented** — the **primary scheduler** (gh#185), the
+  supervised DST-aware host that fires at each instrument's **configurable pre-MOC deadline** verifying against venue
+  truth, and the **redundant / independent watchdog** (gh#187) on its own **separate** loop, which backstops the
+  primary's failures past a grace window, **persists** on a rejected close rather than giving up, and escalates to a
+  **critical** alarm past the firing window rather than firing blind — so the flatten still fires when the primary
+  tier is degraded. Respects a deliberately-disabled market (the operator's own-risk override). Remaining as
+  follow-ups (not the gating spine): an **opposing-market-order** alternative close if the venue's own close
+  primitive keeps rejecting, and a **client-side local fallback** (a future PWA, ADR-0010 — flattens when the whole
+  cloud tier is unreachable). **Prove on practice before live.**
+- **The blind spot both tiers shared is closed (gh#244, 2026-07-25, [ADR-0019](0019-alerting-channel-and-thresholds.md)).**
+  This ADR's own argument against a single scheduler — *"a tier outage takes it down too"* — applied just as much to
+  the **alerting**: the primary, the watchdog and any in-stack rule engine all die with the host, so a host that died
+  before a deadline flattened nothing **and said nothing**. The worst failure produced perfect silence. A
+  **dead-man's switch** now inverts it: `Api/Flatten/DeadMansSwitchHost` reports each instrument flat to a monitor on
+  **independent infrastructure** once its deadline has passed and venue truth confirms no exposure, plus an
+  unconditional liveness heartbeat — and the monitor pages when a report **fails to arrive**. `FlattenCheckIn.Decide`
+  withholds the report whenever exposure remains, so **silence is the alarm** exactly when it should be. A flat
+  session still reports (otherwise every quiet day pages), and a deliberately-disabled market reports *not
+  applicable* rather than an all-clear it is not entitled to give. **It makes the failure visible, not self-healing**
+  — a page still needs a human with a phone, which is what the client-side local fallback above would change.
+- **End-of-day / settlement reconciliation:** **the settlement boundary is handled (gh#193, 2026-07-25).**
+  `Domain/Flatten/MarketSession` derives the per-instrument settlement / maintenance window from the instrument's
+  session close on the DST-aware `MarketClock`; `Api/Recovery/PositionReconciliationService` (and `GET
+  /accounts/{id}/positions`) reports positions from **venue truth** tagged with a `PositionMarkBasis` — `Live`,
+  `Settlement` (a re-mark, never read as live movement, R-13), or **`Unknown`** when the venue cannot be reached
+  (declared-unknown, fail-safe, never a stale live view — R-19). *Still open:* firing the reconcile automatically
+  on reconnect (the connection monitor is gh#209; restart rehydration is **gh#221**), **fill**-level reconcile
+  (needs the account-event seam **gh#219**), and per-position mark precision. Wiki:
+  [market sessions & settlement](../wiki/pages/market-sessions-and-settlement.md).
+- **State rehydration (gh#221, 2026-07-25):** the explicit startup pass is **implemented** —
+  `DecisionStateRehydrator` brings the decision surface back inertly, preserves ownership (R-20), and fails safe to
+  no-new-orders (kill switch, HaltOnly) + loud on any impossible cross-entity combination, never repairing. *Still
+  open:* the **suggestion validity-window recompute** — its blocker is **cleared**: the R-4 validity field landed as
+  `Suggestion.ExpiresAt` (gh#544), stamped by a pure policy and clamped to the market's auto-flatten deadline so a
+  suggestion can never outlive the flatten. The **recompute itself** has **landed (gh#545)**: the steady-state
+  **expire sweep** and the **startup recompute** (run *before* the rehydrator counts, so a suggestion that expired
+  while the process was down is voided, not reported active) **share one guarded one-way `State` writer** — its
+  predicate the pure `SuggestionLifecycle.Decide` (a live suggestion past its window), voiding it to `ExpiredVoid`
+  with a `StateChangedAt` audit stamp — so recovery and normal operation cannot diverge. A suggestion still returns
+  **inert**, and **the take path that re-gates it has landed (gh#548, R-12):** `POST /suggestions/{id}/take` arms an
+  order ticket only after re-checking — **synchronously, against the clock and the current price, not the
+  eventually-consistent state flag** — that the survivor is still `Active`, inside its window, un-dispositioned and
+  un-drifted; a survivor that expired or drifted while the process was down is **refused, never silently armed**, and
+  a successful arm stamps `Order.SuggestionId` but **transmits nothing** (sending stays the separate, gated endpoint).
+  **The drift writer completes the lifecycle (gh#546):** the `Active → Stale` transition named in the *no-risk state*
+  principle now has its own writer — a third `market.quote` consumer that marks a drifted suggestion `Stale` in steady
+  state, forward-only and guarded exactly like the expire sweep. Recovery needs no special path for it: a survivor that
+  drifted while the process was down is caught **synchronously** by the take-time re-check above, and re-marked `Stale`
+  by the consumer on the next quote — eventually consistent, never a chase, and *cannot-measure ⇒ no transition* keeps
+  a missing quote from fabricating one.
+  *Still open:* **restart-triggered venue reconcile** pairs with the
+  settlement pass (gh#193) and the connection monitor (gh#209); **fill**-level reconcile needs the account-event
+  seam (gh#219); and the **cross-user-isolation-through-restart** proof (positions / templates keep their owner)
+  is the QA suite's. *(**Delivered** for suggestions **and their dispositions** by
+  `SuggestionLifecycleRestartIntegrationTests`, gh#552 — owner preserved, a second operator gets `404` through the
+  restart — and for staged orders by gh#223; positions / templates remain.)*
+- **Reconnect / backfill** verification (R-1 gap detection) and **recovery event / audit** records (ADR-0001, §9).
+- Client **resume** edge cases (dedup, ordering) under the SignalR idempotent-resume pattern.
+
+## Update (2026-07-28) — the venue-truth read family gains a resting-orders sibling (gh#381)
+
+This ADR's venue-as-truth reconcile had one HTTP read: `GET /accounts/{id}/positions` (gh#193). It now has two.
+`GET /accounts/{id}/orders` reports the **working orders resting at the venue**, including the attached
+protective bracket and its size, under the **same discipline**:
+
+- the same **Live / Settlement / Unknown** basis vocabulary, so a caller has one way to judge how far to trust
+  either payload;
+- **declared-unknown on unreachable**, with the payload withheld rather than returned empty;
+- the same **ADR-0015 credential-key guard** — a connection this process holds no credentials for is unknown, and
+  the venue is not even asked;
+- the same **R-20 default-deny**: an account not owned by the caller is *not found*, never "found but empty".
+
+**One nuance worth stating rather than inheriting silently.** For positions the basis describes a *price mark* —
+a settlement re-mark must never read as live movement. An order has no mark, so for this read `Settlement` means
+the view was taken **inside the maintenance window**, when the venue's own book may be mid-transition. Same
+vocabulary, and deliberately so; a second enum would be a second thing to keep straight for no gain.
+
+**Why declared-unknown matters more here than anywhere.** The question this read answers is *"is protection
+standing?"* — and for that question, **"we could not ask" and "nothing is there" are opposite answers**. Returning
+an empty list for an unreachable venue would be the single most dangerous shape this endpoint could take.
+
+## Update (2026-08-02) — the rehydration gains a mid-firing-conditional inconsistency (gh#577)
+
+The impossible-combination list this ADR's rehydration pass (gh#221) checks — a staged order at the venue, a fired
+conditional linked to no order, a native stop with no live order, an owner-drifted stop plan — gains one: **a
+conditional stranded `Firing`**. `ConditionalStatus.Firing` (gh#577, [ADR-0007](0007-order-execution-model.md)) is a
+**durable pre-transmit intent** the firing service commits *before* it touches the venue, so a fault in the
+transmit→journal window leaves the conditional there rather than back at `Pending`, where a pure level test would
+blind-re-fire it. It is transient at runtime — the firing pass moves it on to `Fired` or `Pending` within one fire —
+so one found **persisting across a restart** means a crash caught it mid-flight, with an order that **may be live at
+the venue** and no journal behind it. `DecisionStateRehydration.Analyze` now flags it
+(`DecisionInconsistencyKind.ConditionalMidFiring`), so the pass fails **safe and loud** — kill switch (HaltOnly) + a
+`synthetic_risk` alert, never a silent repair — the very principle this ADR states: *never auto-act on rehydrated
+state; re-validate against venue truth first* (the order's `customTag` carries the conditional's id so that reconcile
+can match it). The **operator-driven runtime reconcile** that recovers the order without a restart — `POST
+/conditionals/{id}/reconcile`, the sibling of the take's `/orders/{id}/reconcile`, matching the live order by that
+`customTag` — **is now built** (gh#589 review): on a reachable book it **adopts** the fired order (creating the
+`Working` row the fault-interrupted fire never journaled) or, nothing-resting-and-flat, **releases** the conditional to
+`Pending`; it **refuses** on an open position or an unreachable book. So `ConditionalMidFiring` here is the
+**restart-time backstop, not the only recovery**; only the **automatic** background reconcile sweep (no operator in the
+loop) stays deferred (gh#578). This also let the account no-stacking check start **counting** a `Firing` conditional as
+imminent exposure (it could not while a strand had no recovery — the same sequencing `Taking` went through, gh#589).
+
+A typed **venue-refusal outcome** now narrows what can strand at all (gh#629): the adapter classifies a gateway
+`!success` rejection as **definitive** — it responded in the negative and placed nothing — versus **indeterminate**
+(accepted-but-no-id, a timeout, a transport fault, where the order may be live). A definitive rejection **auto-resolves**
+— the fire reverts to `Pending`, the take releases to `Staged` — so only a genuinely-indeterminate fault ever leaves a
+`Firing` / `Taking` strand for the reconcile or this rehydration backstop. Classification is at the adapter's throw
+site (where `!success` is unambiguous), and anything a catch site does not positively recognise as definitive stays
+indeterminate **by construction** — the one direction that could release a maybe-live order is never taken by default.
+
+## Update (2026-08-02) — a re-formed setup's "new suggestion" is now a superseding one in data (gh#550)
+
+This ADR states — under *No-risk state fails safe by expiring*, and again in *Consequences* — that a scratched or
+expired setup is **not resurrected**: *"a re-formed setup is a **new** suggestion (R-4)"*, and the
+expire-on-uncertainty bias is accepted because discarded setups *"re-form as new suggestions"*. That held only in
+prose; the old and new rows carried no link. gh#550 makes it true in **data**. `Suggestion` gains `Version` (default
+1) and a self-referencing `SupersedesId` (R-4; [data dictionary §6](../data-dictionary/06-suggestions.md)): when the trigger scan
+stages a new suggestion and a **non-terminal (active/stale), undispositioned** incumbent exists for the **same
+trigger + instrument + side** — keyed on the originating firing's `TriggerId`, **not** the symbol, so distinct
+indicators / periods on one symbol do not void one another — the incumbent is voided (reusing
+`SuggestionState.ExpiredVoid`) and the new row is issued at `Version + 1` with `SupersedesId` pointing at it, all **in
+the scan pass's shared transaction** alongside the firing journal and the trigger arm-state transition.
+
+- **Single-incumbent is enforced in application code, not a partial unique index.** An index violation would abort
+  that shared `SaveChanges` and lose the firing journal + arm transition — the gh#455 pattern (*a constraint backstops
+  only its transaction's owner*), the same reason the auto-flatten producers enlist rather than rely on a unique
+  constraint.
+- **The incumbent's trade parameters are never mutated** — only its lifecycle state — so the journal-integrity
+  invariant this model leans on (R-4) holds: a superseding row records the re-form, it does not rewrite history.
+- **The self-FK is `OnDelete: Restrict`,** so a superseded row can never be deleted while a later version points at
+  it and the lineage the R-9 learning loop reads never silently vanishes. There is no suggestion (or account)
+  **hard-delete** path today — accounts are **soft-deleted** — so any interaction between this `Restrict` and an
+  account-level cascade delete is **dormant** rather than a live conflict.
+- **A side-flip re-arm issues an independent row, by design.** An opposite-side re-arm on the same trigger is a
+  legitimately distinct setup, so the dedup key includes side: it starts a new chain (`Version` 1, no `SupersedesId`)
+  rather than superseding the incumbent.
+
+Consistent with this ADR's principles: no-risk state still **fails safe** (the voided incumbent is `ExpiredVoid`, out
+of the actionable set), nothing is **auto-taken or silently resumed** (the head of the chain still re-gates under R-12
+before it can be taken), and the transition is journalled in the shared transaction rather than as a side effect.
+
+## Update (2026-08-03) — the rehydration gains a mid-taking-order inconsistency (gh#589)
+
+The impossible-combination list gains a second transient-intent-caught-at-rest case, the take path's exact analog of
+the mid-firing conditional above. `OrderStatus.Taking` (gh#530, [ADR-0007](0007-order-execution-model.md)) is the
+**durable pre-transmit intent of a take**: the claim moves a staged row Staged → `Taking` *before* the venue is
+touched, so a fault in the transmit→journal window leaves it there rather than back at `Staged`, where it could be
+re-taken over a possibly-live order. It is transient at runtime — one take request resolves it to `Working` or
+releases it to `Staged` — so one found **persisting across a restart** means a crash (or a client disconnect the
+runtime could not release) caught a take mid-flight, with an order that **may be live at the venue** and no journal
+marking it `Working`. `DecisionStateRehydration.Analyze` now flags it (`DecisionInconsistencyKind.OrderMidTaking`),
+so the pass fails **safe and loud** — kill switch (HaltOnly) + a `synthetic_risk` alert, never a silent repair — the
+same principle as the conditional case: *never auto-act on rehydrated state; re-validate against venue truth first*
+(the take now stamps the row id as the venue `customTag` so a reconcile can match it). This is the recovery half of
+gh#589, which also let the account no-stacking check start **counting** `Taking` (it could not while a strand had no
+recovery); at runtime the take path leaves the claim **`Taking` + loud on *any* post-send fault** — a venue rejection,
+a timeout, or a disconnect alike, all indistinguishable-from-live at the send — never releasing a maybe-live order
+(only a **pre-venue** compose / build fault releases the claim, because nothing was placed). The operator then resolves
+a left-`Taking` row **without a restart** via `POST /orders/{id}/reconcile`
+(the `customTag` consumer, [ADR-0007](0007-order-execution-model.md)): it reads venue truth and **adopts** the order
+if it rests (→ `Working`), **releases** the ticket if nothing rests (→ `Staged`), and **refuses** on an unreachable
+book — the same *"unknown ≠ empty"* rule as the resting-orders read (gh#381). So `OrderMidTaking` here is the
+restart-time backstop, not the only recovery. Only the **automatic** background reconcile sweep stays deferred, as
+for the conditional (gh#578-class).
+
+## Update (2026-08-03) — the reconcile gains a fill-history read, closing the round-tripped ambiguity (gh#631)
+
+§9's "uncertainty resolves to the safe state" had one case it could not actually resolve. The runtime reconcile
+reads *what rests* and *what positions are open*; an entry that placed, **filled and round-tripped** leaves neither,
+so it is indistinguishable from an attempt that never reached the market. For a one-shot conditional the two demand
+opposite handling — release the second, never the first, because releasing it re-arms a completed entry and
+`HasFired` is a level test, so the next quote past the trigger fires it again.
+
+A third venue-truth read now separates them: `FillReconciliationService`, the fill-history sibling of the
+resting-orders and positions reads, asking whether an order under a given `customTag` ever filled.
+
+It is deliberately a **veto and never an authorisation** — a reported fill may stop a release, no other answer may
+start one. `NoFillFound` is a negative existence claim over an external index, and this model does not let one of
+those authorise a re-transmission. **Unavailable** therefore strands the row for the operator rather than releasing
+it, which is the same posture §9 already takes toward an unreachable venue: not-knowing resolves to the safe state,
+and here the safe state is "leave it stranded", not "assume it never happened".
+
+Adopting a fill whose position is **still open** remains deferred; both paths still refuse loudly there, with the
+position protected by its native bracket and the auto-flatten meanwhile. *(The **take** path now adopts this case —
+see the 2026-08-10 update below, gh#723; the conditional-fire sibling stays deferred.)*
+
+## Update (2026-08-10) — the take reconcile adopts a still-open fill (gh#723)
+
+The last strand the runtime reconcile could not clear now clears for the **take** path. When `POST
+/orders/{id}/reconcile` finds nothing resting under the row's `customTag` but an **open position**, it no longer only
+refuses: it consults the same fill-history read (gh#631) for that tag and, on a **positively reported fill**, adopts
+the take onto the row as **`Filled`** — sized to the fill, keyed by the venue's own order id (the position snapshot
+carries none) — rather than leaving it stuck `Taking` and loud for manual intervention. This was the *likeliest*
+strand: a take that faulted at the seam **after** the venue had already filled it.
+
+Two properties keep it inside the model. First, **the veto stays a veto**: only `TaggedFillStatus.Filled` adopts;
+`Unavailable`, `NoFillFound` and `Unsupported` all keep the pre-gh#723 refusal (leave it `Taking`, loud), because a
+non-fill answer over an open position cannot confirm the position is *this* take's, and this model never adopts — any
+more than it releases — on an unknown. Second, **no synthetic stop is written**: the open position rides the **native
+safety bracket** the venue attached on fill (a position is never opened unprotected, gh#589 / [ADR-0007](0007-order-execution-model.md)),
+so reconstructing a Hidden promotion plan would only race a *second* native stop over the venue's existing leg — the
+round-tripped branch writes none for the analogous reason. The disposition (gh#549) *is* journaled, as the adopt-live
+branch does, because a confirmed fill is a taken suggestion the R-9 loop should see; it is written in its own save
+after the adopt so it can never abort it (gh#455). Adoption opens no stacking window: the send path already refuses a
+take while a position is open, and the whole reconcile holds the per-account entry lock (gh#531).
+
+**Still deferred:** the **conditional-fire** sibling (`POST /conditionals/{id}/reconcile`) still refuses on a
+still-open fill — its adoption is a distinct path (it mints a new `Order` rather than flipping an existing `Taking`
+row) and belongs with the rest of #619. And a limitation this inherits from the round-tripped branch: the adopted
+`Filled` order lands in the **order journal**, but the eventual close does **not** yet compose a realized-PnL `Trade`
+— the entry `Fill` rows streamed in while the row carried no venue key and were dropped, and the native bracket's
+exit leg is untracked — closing that needs the bracket legs journaled as orders (gh#731's remit), tracked as a
+follow-up.
+
+**Update (2026-08-11, gh#770) — the entry half of that limitation is closed; the exit half is not.** Both adopt
+branches now **backfill the entry `Fill` rows** from venue fill history, so the side the strand dropped is
+recovered. The safety of that rests on one property: `TaggedFillEvidence` carries the venue's **own** fill keys
+(read from the gateway's trade search), so a backfilled row is indistinguishable from a streamed one and `Fill`'s
+`(OrderId, VenueFillKey)` unique index makes a later delivery or replay an **idempotent no-op by construction**. A
+synthesized key would not collide, and the entry would be counted **twice** — the mirror of the under-counting this
+fixes, and equally wrong for the R-5 governor. A venue that cannot enumerate its fills supplies no legs and nothing
+is written; the fill **veto** never regresses, because the trade read is a second, journalling-only call.
+
+**A `Trade` still does not compose**, so the realized P&L still does not reach the gh#746 readers: the native
+bracket's **exit** legs remain untracked (venue-spawned, no `Order` row), and `ProcessFlatAsync` cannot balance a
+round trip from an entry alone. gh#770 therefore stays open, blocked on **gh#731**'s bracket-leg tracking.
+
+**Update (2026-08-16, gh#770) — the exit half is still missing, but it is no longer silent.** A fill whose venue
+order key matches no `Order` this process holds used to be dropped with a log line and nothing more. That is the
+un-actable-but-observable shape this ADR already treats elsewhere (gh#527 / gh#850 in the flatten tiers), and the
+stakes here are the same: the dropped fill is usually the bracket's exit leg, so the money it represents leaves the
+account while the R-5 governor, the R-9 window and the R-4 throttle keep reading the headroom it should have
+consumed. It now journals **`fill.unmatched`** naming the account, both venue keys and the size — best-effort, so a
+recording fault cannot stall the consumer's cursor, and cancellation still stops the host.
+
+It **records the gap rather than closing it**, deliberately: attributing the fill would mean guessing which order a
+venue-spawned leg belongs to, and a wrong attribution *mis-states* realized P&L rather than merely missing it —
+worse, on the path that feeds a risk limit.
+
+**What still gates the real fix**, recorded because it is a venue fact rather than a scoping choice: the gateway's
+order model carries **no parent / linked-order field** (`Id · AccountId · ContractId · Side · Size · prices ·
+CustomTag`), and we set no tag on a leg the venue spawns. So journalling the legs depends on whether ProjectX
+copies the parent's `CustomTag` onto them — answerable only by observation against a practice account. If it does
+not, the only identification left is a heuristic over account + contract + side + time, which this model does not
+put on a risk-limit input.
+
+## Update (2026-08-14) — a held account the venue roster does not report is recorded, not skipped in silence (gh#527)
+
+The primary tier enumerates the accounts to act on from **our** rows (the credential set this process serves, R-20
+filters bypassed) and matches each against the venue's **live** roster before touching it. A row whose
+`VenueAccountKey` the roster does **not** return was skipped by a bare `continue` — genuinely un-actable (with no
+venue account id there is nothing to read positions from or send a close against), but a safety net going quietly
+inert on an account it holds is the exact failure this ADR forbids, whether the cause is a benign de-provisioning
+or a partial-roster glitch masking real exposure the pass never got to see.
+
+The skip now **records** instead of hiding: a **`flatten.unrostered`** journal event names the account, and the
+`trading.flatten.deadlines` counter meters **`outcome="unrostered"`** so a persistent roster gap is *alertable*
+rather than log-only (the gh#370 "journalled but never metered" lesson). It is deliberately **not paged** — the
+pass cannot read the account's exposure, so it cannot claim risk, and a page on every roster hiccup would spend the
+[ADR-0019](0019-alerting-channel-and-thresholds.md) noise budget on a maybe-nothing; the observable signal is what
+a rediscovery, or an operator's own Grafana rule, follows. The account is still not flattened — it cannot be from
+here — but it is no longer invisible **to the primary tier**.
+
+**Scoped to the primary tier — the redundant tiers still share the gap.** The same held-but-unrostered skip is
+still silent in the **redundant watchdog** (gh#187, a bare `continue`) and the **dead-man's switch** (gh#244,
+which filters the account out, so its "silence is the alarm" never learns to expect a report for it) — the two
+tiers whose redundancy exists precisely to catch what the primary misses. This update closes the R-13 gap in the
+primary tier only; widening the signal to the watchdog and giving the dead-man's switch an explicit
+*not-applicable* report is tracked in **gh#850**. Until then the honest statement is the narrow one: the primary
+tier no longer goes quietly inert on an account it holds — the backstops still can.
+
+## Update (2026-08-15) — the other two tiers, and a worse defect than the scoping note supposed (gh#850)
+
+**The watchdog** now mirrors the primary: `flatten.watchdog.unrostered` on the journal and `outcome="unrostered"`
+metered under the watchdog tier, best-effort so a recording fault cannot abort a pass and starve an account the
+tier could still save. Its own event type, so a gap is attributable to the tier that saw it.
+
+**The dead-man's switch turned out not to have the defect described above.** The note supposed its "silence is the
+alarm" merely *never learned to expect* a report for the account — a hole in the alarm. The actual behaviour was
+the inverse and worse: the check-in aggregates exposure across **all** the accounts it serves and reports flat per
+*instrument*, so silently dropping an unreadable account left the remaining ones free to make an instrument look
+flat **on evidence that excluded an account we hold**. It did not fail to page; it actively vouched to the external
+monitor for a flatness nobody had verified — withdrawing the page at exactly the moment it was warranted. A unit
+test written against the old code shows the switch calling `ReportFlatAsync` while a held account was unreadable.
+
+So the resolution is not a *not-applicable* report, which would have made that silence official. **Unknown exposure
+is treated as exposure:** a pass that cannot read every held account vouches for **nothing** and stays silent, so
+the monitor pages. It withholds the whole pass rather than the affected connection, because the report is per
+instrument and aggregated across every account the process serves — a sibling connection reporting the same
+instrument flat would reinstate the exact claim being withheld — and because nothing bounds *which* instrument an
+unreadable account is exposed in.
+
+The cost is deliberate: a persistent roster gap now pages daily until the account is rediscovered or a stale row
+removed. That is the correct bias for a dead-man's switch, and the primary and watchdog journals name the account
+so the page is actionable rather than mysterious. With this, the R-13 statement is no longer narrow — **no tier
+goes quietly inert on an account it holds.**
+
+## Update (2026-08-15) — a flat that beats its closing fill into the stream is deferred, not lost (gh#748)
+
+`PositionEvent` (flat) and `FillEvent` (fill) are **independent, unordered** callbacks into the one account-event
+stream (gh#219), and the venue does not guarantee the closing fill reaches the wire before the position-flat. When
+the flat was processed **first**, `TradeJournalService.ProcessFlatAsync` found the window not yet reconciled to flat,
+recorded `not-composable`, and returned — and the later fill **never retried** the journal. The round trip was then
+**permanently lost**: the account is flat, no further flat event fires for it, and nothing re-composes. Silent — and
+the mirror image of the gh#631 / gh#723 reconciles above: those adopt a *stranded order* into `Filled`; this loses the
+*journal* of a cleanly-closed one. Its realized P&L never reached the R-5 daily-loss gate, the R-9 consistency window,
+or the R-4 throttle (the gh#746 readers), so a **real loss read as free headroom**.
+
+**The fix — defer and retry in-process, not a sweep.** `TradeRoundTrip` now reports *why* a window did not compose: a
+**`StillOpen`** window (leftover open exposure — a closing fill missing or not yet ingested) is distinguished from a
+terminal **`Ambiguous`** one (an unclassifiable side, or a same-instant opposite-side tie whose sign is undecidable).
+On `StillOpen`, `ProcessFlatAsync` parks the flat in an in-memory, thread-safe singleton `PendingFlatJournal` (a new
+`deferred` journal outcome + a structured log), and `AccountEventStreamHost` **retries** every deferred flat for an
+account the moment a `FillEvent` for it lands — through the same swallow-and-continue path, so the OCO safety-retire
+still leads and a journal fault never aborts the stream. A retry that finally composes is idempotent on the
+`(ClosingFillId, OpeningFillId)` key (gh#759), so it cannot double-count; `Ambiguous` stays terminal, so the register
+never fills with un-completable flats.
+
+**Bounded to the in-process race, on purpose.** The register is **in-memory** — it survives the supervisor's
+drop-and-reconnect cycles (a singleton) but **not a process restart**. A flat deferred then lost to a restart before
+its fill lands, and a genuinely-never-arriving fill (a venue drop), remain the **reconcile sweep's** job (gh#722
+DESIGN — the persistent backstop this ADR's layered model reserves for state-without-an-operator), alongside gh#770's
+adopt-time fill backfill. The recurring `deferred` metric keeps a stuck account observable meanwhile: `deferred` that
+never resolves to `journalled` is a closing fill that never came.
+
+## Update (2026-08-15) — a runtime detection sweep for stranded orders, propose-and-confirm (gh#722)
+
+A stranded `Taking` order or `Firing` conditional — a durable pre-transmit intent caught mid-flight, possibly live at
+the venue with no journal behind it — was resolved only two ways: the operator calling `POST /orders/{id}/reconcile`
+at runtime, or, at startup, `DecisionStateRehydrator` flagging `OrderMidTaking` / `ConditionalMidFiring` and engaging
+the kill switch `HaltOnly`. Neither is automatic *during a session*, so a strand that forms while the process is up
+sits until a human happens to notice. gh#722 closes that runtime gap — carefully, because an automatic actor on
+rehydrated state is the shape of the **rejected** "auto-resume … as-was" alternative above, and of the "never
+auto-act on rehydrated state" invariant.
+
+**The autonomy question was settled as PROPOSE-AND-CONFIRM (the operator's ratification).** The sweep **detects** a
+strand past an age bound and **raises an operator alert**; the operator confirms the resolution through the *existing*
+reconcile endpoint. The sweep **transmits nothing, adopts nothing, releases nothing, and changes no order state** — so
+this is **not** a supersession of the human-in-the-loop stance but an **addition** to it: a third detector (runtime),
+beside the operator's own eye and the restart rehydrator, all three of which still route the *action* through a human.
+The considered auto-adopt — autonomously promoting a maybe-live, kill-switch-invisible `Taking` order to
+tracked/cancellable, where *tracked* exposure is arguably safer than *untracked* — was weighed but **deliberately
+deferred**; it would reverse the stance, so it needs its own ratified card, not this one.
+
+**Mechanics that keep it inside the invariant:**
+- **Age by an in-memory first-seen register**, not a new persisted timestamp — so **no migration and no change to the
+  take path**. The two coverage windows are disjoint: runtime strands are seen becoming `Taking`/`Firing` by the sweep
+  and clocked; restart strands stay the rehydrator's job (the register starting empty at boot is therefore not a gap).
+  The bound (~2 min, configurable) mirrors the auto-flatten watchdog's grace and clears the send-resilience + reconnect
+  windows.
+- **Runs under `HaltOnly`** and never disengages it: detection reads and alerts only, and a strand is often *why* the
+  switch engaged, so halting the detector would deadlock recovery. The resume-trading ratification stays the operator's.
+- **Alerts once** per strand (idempotent) via the same operator-alert path the rehydrator uses, plus a strand-detected
+  metric, so a persistent strand is visible without re-paging every pass.
+
+Scope boundary: this is the **order-strand** detector (`Taking`/`Firing`). The gh#748 update above points here for its
+restart edge, but that — a round trip that *did not journal*, not an order stuck mid-send — is the **journal-side**
+reconcile, a sibling in the same "reconcile family" this ADR's layered model reserves; it and gh#770's adopt-time
+backfill remain their own follow-ups. The sweep's implementation and its independent QA are separate cards per gh#722.

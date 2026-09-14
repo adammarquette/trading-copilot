@@ -1,0 +1,760 @@
+using System.Text;
+using MarqSpec.Client.Finnhub;
+using MarqSpec.Client.ProjectX.DependencyInjection;
+using MarqSpec.Client.Tiingo;
+using MarqSpec.TradingCopilot.Api;
+using MarqSpec.TradingCopilot.Api.Accounts;
+using MarqSpec.TradingCopilot.Api.Ai;
+using MarqSpec.TradingCopilot.Api.Audit;
+using MarqSpec.TradingCopilot.Api.Auth;
+using MarqSpec.TradingCopilot.Api.Chat;
+using MarqSpec.TradingCopilot.Api.Documentation;
+using MarqSpec.TradingCopilot.Api.Firms;
+using MarqSpec.TradingCopilot.Api.Flatten;
+using MarqSpec.TradingCopilot.Api.Journal;
+using MarqSpec.TradingCopilot.Api.Kill;
+using MarqSpec.TradingCopilot.Api.MarketData;
+using MarqSpec.TradingCopilot.Api.Notifications;
+using MarqSpec.TradingCopilot.Api.Observability;
+using MarqSpec.TradingCopilot.Api.Orders;
+using MarqSpec.TradingCopilot.Api.Realtime;
+using MarqSpec.TradingCopilot.Api.Recovery;
+using MarqSpec.TradingCopilot.Api.Relevance;
+using MarqSpec.TradingCopilot.Api.Risk;
+using MarqSpec.TradingCopilot.Api.Signals;
+using MarqSpec.TradingCopilot.Api.Suggestions;
+using MarqSpec.TradingCopilot.Api.Triggers;
+using MarqSpec.TradingCopilot.Api.Venues;
+using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Data.Events;
+using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.Ai;
+using MarqSpec.TradingCopilot.Domain.Events;
+using MarqSpec.TradingCopilot.Domain.Execution;
+using MarqSpec.TradingCopilot.Domain.Flatten;
+using MarqSpec.TradingCopilot.Domain.MarketData;
+using MarqSpec.TradingCopilot.Domain.Notifications;
+using MarqSpec.TradingCopilot.Domain.Triggers;
+using MarqSpec.TradingCopilot.Domain.Venue;
+using MarqSpec.TradingCopilot.Integration.Finnhub;
+using MarqSpec.TradingCopilot.Integration.ProjectX;
+using MarqSpec.TradingCopilot.Integration.Tiingo;
+using MarqSpec.TradingCopilot.Integration.Tradovate;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
+using Npgsql;
+
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+// Observability first (gh#230, ADR-0002): wire the SDK before anything else registers, so every signal from
+// startup onward is captured. With no exporter configured this is a no-op -- instrumentation must never be able
+// to break trading (engineering §9).
+builder.AddTradingCopilotTelemetry();
+
+builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
+JwtOptions jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+if (string.IsNullOrWhiteSpace(jwt.SigningKey))
+{
+    throw new InvalidOperationException(
+        $"Configure '{JwtOptions.SectionName}:SigningKey' via env / user-secrets — it must never live in source.");
+}
+
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<ICurrentUser, HttpContextCurrentUser>();
+builder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
+builder.Services.AddSingleton<ITokenIssuer, JwtTokenIssuer>();
+builder.Services.AddTradingCopilotData(builder.Configuration.GetConnectionString("Default") ?? string.Empty);
+
+// The ProjectX client (credentials from the "ProjectX" section -- env, never source). One credential set per
+// process: the client's websocket is a singleton (ADR-0015); ProjectX:CredentialKey names whose it is, and the
+// discovery endpoint refuses a connection whose key this process does not hold.
+builder.Services.AddProjectXApiClient(builder.Configuration);
+builder.Services.Configure<ProjectXConnectionOptions>(
+    builder.Configuration.GetSection(ProjectXConnectionOptions.SectionName));
+builder.Services.AddScoped<IProjectXVenueFactory, ProjectXVenueFactory>();
+
+// The venue setup contract (ADR-0023, gh#64): ProjectX self-describes its onboarding — the credential schema with
+// labels that make the ApiKey-is-really-a-username trap legible. Discovery is compile-time: a declared-in-source
+// singleton resolved by VenueId, never dynamically loaded (a venue places orders and auto-flattens, R-13). It holds
+// no credential values, so it is a plain singleton independent of the per-process credential set above.
+builder.Services.AddSingleton<IVenueSetupContract, ProjectXSetupContract>();
+
+// Tradovate self-describes its seven-field onboarding (ADR-0023, gh#41) — the case the fixed two-field form could not
+// serve. A declaration only (no credential values, no runtime venue yet); the execution adapter joins in gh#977.
+builder.Services.AddSingleton<IVenueSetupContract, TradovateSetupContract>();
+
+// The Tradovate market-data socket's lifecycle (R-17, gh#977). The register is what makes a reconnect non-silent:
+// the client replays subscriptions only on ITS own reconnect, and the manual connect that is the only way back from
+// Disconnected does not -- so the adapter records what it subscribed and the host resubscribes after a connect it
+// drove. Both are process-wide singletons: one credential set per process (ADR-0015) -> one market-data socket. The
+// host stands down (logging, never throwing) while Tradovate's client is unregistered, which it still is -- the
+// venue's runtime wiring is the remaining gh#977 slice.
+builder.Services.AddSingleton<TradovateQuoteSubscriptions>();
+builder.Services.AddHostedService<TradovateMarketDataConnectionHost>();
+
+// The Tradovate TRADING socket's lifecycle (R-17, gh#977) — the other half of the pair above, and the one that
+// carries order, position and fill events. Its post-connect obligation is a single `user/syncrequest`, which the
+// client sends only on ITS own reconnect: a socket the manual connect brought back is authorized and permanently
+// silent, because Tradovate pushes entity frames only to a socket that has synced. Stands down (logging, never
+// throwing) while Tradovate's client is unregistered, which it still is.
+//
+// The sync register beside it (gh#1051) is the market-data register's counterpart, and a singleton for the same
+// reason: one credential set per process -> one trading socket, so "has this socket been synced?" is one answer.
+// It is the ONLY way anything above the client can tell a socket that was never subscribed from a quiet account,
+// because TradingState reports Connected either way.
+//
+// What reads it, and -- just as load-bearing -- what does NOT. TradovateSocketConnectionHost escalates a socket
+// that has stopped delivering to the operator, and TradovateAccountEventStream REPORTS on teardown when it rode a
+// socket that never synced. That stream deliberately does not REFUSE an unsynced socket, and nothing else may
+// either: IsSynced only becomes true after SyncCompleted has already been raised, so a consumer gated on it can
+// only ever attach on the far side of the snapshot -- which makes the snapshot's handler unreachable and loses,
+// permanently, the fills that executed while the socket was down. That is a worse failure than the one this
+// register exists to expose, and it is the shape a reader of this line is most likely to build (gh#1051 review).
+builder.Services.AddSingleton<TradovateTradingSocketSync>();
+builder.Services.AddHostedService<TradovateTradingConnectionHost>();
+
+// Venue connection liveness (R-17, gh#209): a process-wide singleton over the venue's websocket client, so the
+// orphan guard can watch for a drop. One credential set per process (ADR-0015) -> one connection.
+builder.Services.AddSingleton<IVenueConnection, ProjectXConnection>();
+
+// The account-event streaming seam (R-17, gh#219): a process-wide singleton over the venue's user hub, carrying
+// order / position / fill events. One credential set per process (ADR-0015) -> one user hub, so a singleton like
+// the connection seam above, kept off the scoped ITradingVenue.
+builder.Services.AddSingleton<IAccountEventStream, ProjectXAccountEventStream>();
+
+// The event backbone (ADR-0001) behind its seam: today a Timescale hypertable; a future bus is an adapter
+// change, not a rewrite. Producers/consumers arrive with market-data ingestion (R-1).
+builder.Services.AddScoped<IEventLog, TimescaleEventLog>();
+
+// The backbone's first producer (R-1, gh#13): normalises a venue quote stream into the append-only log, and
+// the hosted service that drives it -- a supervised subscription per configured contract. Opt-in: with no
+// Ingestion:Symbols configured, the host does nothing, so a run that wants no live feed simply omits them.
+builder.Services.AddScoped<QuoteIngestionService>();
+builder.Services.Configure<IngestionOptions>(builder.Configuration.GetSection(IngestionOptions.SectionName));
+builder.Services.AddHostedService<MarketDataIngestionHost>();
+
+// Cross-asset CONTEXT prices (gh#496, of gh#411, R-1): equities/indices last-trade prints for correlation --
+// SPY against ES, QQQ against NQ. Deliberately its OWN event type and its OWN host: a context source publishes no
+// book, so it must never reach `market.quote` (the stream the stop-promotion and conditional-firing watchers act
+// on), and an outage on this optional feed must never disturb tradeable ingestion. Opt-in via ContextIngestion:Symbols.
+builder.Services.Configure<ContextIngestionOptions>(
+    builder.Configuration.GetSection(ContextIngestionOptions.SectionName));
+builder.Services.AddScoped<ContextTradeIngestionService>();
+builder.Services.AddHostedService<ContextIngestionHost>();
+
+// R-1's SECOND market-data path (gh#302): the clean-historical bar store, filled by periodic REST backfill.
+// Kept deliberately apart from the live stream above -- R-1 says they are "stored and treated separately", and
+// the historical series, not the live feed, is "the system of record for bars used in journaling and replay".
+// It is also what ADR-0001 means by a full indicator rebuild reprocessing the clean historical store rather than
+// the 24-hour event log. Opt-in and configured independently of Ingestion:Symbols: an operator may want history
+// without a live subscription, or the reverse.
+builder.Services.Configure<BarBackfillOptions>(builder.Configuration.GetSection(BarBackfillOptions.SectionName));
+// The restart heal's session calendar (gh#696) is validated at startup: a malformed SessionClose or holiday
+// entry fails fast rather than mid-heal, the same fail-fast stance as the Flatten schedule below.
+BarBackfillOptions healOptions = builder.Configuration.GetSection(BarBackfillOptions.SectionName).Get<BarBackfillOptions>() ?? new BarBackfillOptions();
+_ = BarSessionCalendar.Parse(healOptions.SessionClose, healOptions.SessionHolidays);
+builder.Services.AddScoped<BarBackfillService>();
+// The restart heal pass (gh#696, R-1): the durable tables are the anchor on ingestion start -- interior holes
+// are backfilled from the venue's retained history and the tail resumes forward, before the periodic poll loop
+// takes over. Distinct from the event-log gap backfill above (gh#306): the store's missing history IS state to
+// rebuild, not a cursor to advance.
+builder.Services.AddScoped<BarStoreHealService>();
+builder.Services.AddHostedService<BarBackfillHost>();
+
+// R-2's news / soft-signal ingestion (gh#358): every registered INewsSource polled into the deduped NewsRecord
+// store of record -- the news analogue of the bar store above, collapsed across sources by the dedup key. News is
+// deliberately multi-source (Finnhub + Tiingo) where price data is single-source. Opt-in via News:Enabled.
+// gh#1123: validated on start like the other hosted-service knobs below (Configure<T> alone would let a
+// misconfigured LookbackMinutes/PollIntervalSeconds boot clean and starve silently, which is the exact failure
+// mode this card fixed the default for).
+builder.Services.AddOptions<NewsIngestionOptions>()
+    .Bind(builder.Configuration.GetSection(NewsIngestionOptions.SectionName))
+    .Validate(options => options.Validate(), "News: LookbackMinutes and PollIntervalSeconds must both be positive.")
+    .ValidateOnStart();
+builder.Services.AddScoped<NewsIngestionService>();
+builder.Services.AddHostedService<NewsIngestionHost>();
+
+// The news sources (of gh#383), each registered ONLY when its key is configured -- the same graceful-absence
+// pattern as the Cohere provider. An enabled poller with no key for a source simply does not have it; with both
+// keys set it fans in Finnhub + Tiingo and dedups across them (R-2). Keys are never in source; they come from
+// Finnhub__ApiKey / Tiingo__ApiKey (config/env).
+FinnhubOptions finnhubOptions = builder.Configuration.GetSection("Finnhub").Get<FinnhubOptions>() ?? new FinnhubOptions();
+if (!string.IsNullOrWhiteSpace(finnhubOptions.ApiKey))
+{
+    builder.Services.AddSingleton(finnhubOptions);
+    builder.Services.AddHttpClient<IFinnhubNewsClient, FinnhubNewsClient>();
+    builder.Services.AddScoped<INewsSource, FinnhubNewsSource>();
+
+    // The cross-asset CONTEXT price surface (gh#496, of gh#411) — the same key, a different feed. One multiplexed
+    // websocket carries every subscribed symbol and holds the free-tier cap, so the stream is registered once and
+    // the adapter subscribes each configured symbol on it.
+    builder.Services.AddScoped<IFinnhubQuoteStream>(_ =>
+        new FinnhubQuoteStream(() => new ClientWebSocketTransport(), finnhubOptions));
+    builder.Services.AddScoped<IContextMarketDataSource, FinnhubMarketDataSource>();
+}
+
+TiingoOptions tiingoOptions = builder.Configuration.GetSection("Tiingo").Get<TiingoOptions>() ?? new TiingoOptions();
+if (!string.IsNullOrWhiteSpace(tiingoOptions.ApiKey))
+{
+    builder.Services.AddSingleton(tiingoOptions);
+    builder.Services.AddHttpClient<ITiingoNewsClient, TiingoNewsClient>();
+    builder.Services.AddScoped<INewsSource, TiingoNewsSource>();
+}
+
+// R-2's news relevance resolution (gh#359): materializes matched instruments/topics onto ingested news via the
+// deployment's GLOBAL ticker<->instrument maps + topics. Always on like the indicator projection; its work is
+// whatever news needs resolving (unresolved, or stale since a config change), so a config edit re-resolves the
+// affected news predictably. It maps; the per-user salience over these matches is a separate concern (gh#27).
+builder.Services.Configure<NewsRelevanceOptions>(builder.Configuration.GetSection(NewsRelevanceOptions.SectionName));
+builder.Services.AddScoped<NewsRelevanceService>();
+builder.Services.AddHostedService<NewsRelevanceHost>();
+
+// R-2's per-operator salience over those matches (gh#27, ADR-0014): a star raises, a mute lowers, the salience of
+// SIMILAR future news, decayed by recency. Options only -- the personalized feed is computed on read by the
+// /api/news endpoints (no host). A soft weight that never reaches the risk gate or order sizing (ADR-0007).
+builder.Services.AddOptions<SalienceOptions>()
+    .Bind(builder.Configuration.GetSection(SalienceOptions.SectionName))
+    // Fail fast on a misconfiguration rather than throwing from Math.Clamp on every feed read. The floor must sit at
+    // or below the neutral 1.0 and the cap at or above it, so a cold-start item (raw 1.0) is never clamped off base.
+    .Validate(
+        options => options.MultiplierFloor > 0 && options.MultiplierFloor <= 1.0 && options.MultiplierCap >= 1.0
+            && options.MaxFeedLimit >= 1 && options.DefaultFeedLimit >= 1 && options.DefaultFeedLimit <= options.MaxFeedLimit,
+        "Salience: require 0 < MultiplierFloor <= 1 <= MultiplierCap, MaxFeedLimit >= 1, and DefaultFeedLimit in [1, MaxFeedLimit].")
+    .ValidateOnStart();
+
+// Per-instrument contract facts (gh#541, R-4/R-16, ADR-0007): tick size, point value and the catastrophic
+// safety-stop distance a SERVER-originated proposal needs to become an order ticket. A manual ticket carries these
+// on the request because a human authored it; a suggestion has no author to ask, and letting the browser supply them
+// would feed client-controlled numbers into the sizing ladder and the fat-finger band. Built-in defaults for the
+// products the flatten schedule governs, overridable per instrument; validated on start, because a zero tick size
+// would silently mis-size every risk calculation rather than fail.
+builder.Services.AddOptions<InstrumentSpecOptions>()
+    .Bind(builder.Configuration.GetSection(InstrumentSpecOptions.SectionName))
+    .Validate(
+        options => options.Validate(),
+        "InstrumentSpecs: every configured instrument needs a symbol and a positive TickSize, PointValue and SafetyStopTicks.")
+    .ValidateOnStart();
+builder.Services.AddSingleton<IInstrumentSpecSource, InstrumentSpecSource>();
+// The session-deadline read seam (gh#544): one source of truth for a market's deadline, so the agent-review path
+// can RESPECT it without depending on the flatten machinery that ACTS on it (the gh#402 constructor-graph guard).
+builder.Services.AddSingleton<ISessionDeadlineSource, SessionDeadlineSource>();
+
+// The suggestion read model's limits (gh#540, R-4). A cap rather than an unbounded list: the suggestion table is an
+// append-only journal, so an uncapped page would let one call pull the whole history. Validated on start so a bad
+// configuration fails the host once rather than throwing from Math.Clamp on every read (the SalienceOptions idiom).
+builder.Services.AddOptions<SuggestionOptions>()
+    .Bind(builder.Configuration.GetSection(SuggestionOptions.SectionName))
+    .Validate(
+        options => options.MaxPageSize >= 1 && options.DefaultPageSize >= 1 && options.DefaultPageSize <= options.MaxPageSize
+            // A non-positive validity would emit a suggestion the CK_Suggestions_ExpiresAfterCreated CHECK refuses,
+            // so it is caught once at startup rather than on every fire (gh#544).
+            && options.ValidityMinutes >= 1
+            // A non-positive drift band would collapse the take-time re-check to "any move refuses" (or worse, a
+            // negative band that never refuses); caught once at startup rather than at take time (gh#548).
+            && options.DriftToleranceTicks >= 1
+            // The three R-4 throttle knobs (gh#551) feed SuggestionThrottlePolicy.Declare on every agent-review fire,
+            // which THROWS on an out-of-range value; caught once here at startup rather than aborting an owner's scan
+            // pass per fire (validated even when the throttle is off, so turning it on can never surprise the host). The
+            // ranges mirror Declare's: threshold in (0, 1], a positive cap, a conviction floor in [0, 100].
+            && options.ThrottleThresholdFraction > 0m && options.ThrottleThresholdFraction <= 1m
+            && options.ThrottleFullWindowCap >= 1
+            && options.ThrottleConvictionFloor >= 0 && options.ThrottleConvictionFloor <= 100
+            // A non-positive chat proposal size would emit a suggestion the CK_Suggestions_Size_Positive CHECK
+            // refuses, so generate_suggestion would fail closed on every call; caught once at startup (gh#1134).
+            && options.ChatProposalSize >= 1,
+        "Suggestions: require MaxPageSize >= 1, DefaultPageSize in [1, MaxPageSize], ValidityMinutes >= 1, "
+            + "DriftToleranceTicks >= 1, ThrottleThresholdFraction in (0, 1], ThrottleFullWindowCap >= 1, "
+            + "ThrottleConvictionFloor in [0, 100], and ChatProposalSize >= 1.")
+    .ValidateOnStart();
+
+// Indicator projections over that store (gh#310, R-1, ADR-0001: "indicators are projections… rebuild = replay").
+// ALWAYS runs and needs no symbol list of its own -- its work is whatever the bar store holds, so bars can never
+// exist without their indicators. IIndicatorSource is the read seam the promotion watcher will consult (gh#311)
+// once the band is resolved by the caller rather than inside StopPlan, which stays pure.
+builder.Services.Configure<IndicatorOptions>(builder.Configuration.GetSection(IndicatorOptions.SectionName));
+builder.Services.Configure<MarketDataReadOptions>(builder.Configuration.GetSection(MarketDataReadOptions.SectionName));
+// The bar-derived indicator set (R-22): ATR at the safety band's period + RSI. Built from options in one place
+// (IndicatorSet), so the safety band's producer cannot be configured away. A third indicator is one line here — but
+// it is also a trigger-threshold subject: give it a bound in TriggerThreshold + the CK_Triggers_Threshold_InIndicatorRange
+// arm (both fail closed for an unruled indicator, gh#1007) and the TriggerEndpoints _knownIndicators gate, together.
+builder.Services.AddSingleton<IReadOnlyList<IIndicator>>(sp =>
+    IndicatorSet.FromOptions(sp.GetRequiredService<IOptions<IndicatorOptions>>().Value));
+builder.Services.AddScoped<IndicatorProjectionService>();
+builder.Services.AddScoped<IIndicatorSource, StoredIndicatorSource>();
+builder.Services.AddHostedService<IndicatorProjectionHost>();
+
+// The Outcome writer (gh#909, R-9): composes an Outcome for each closed trade that lacks one, so the R-15 report
+// surface and the calibration / expectancy readers (gh#21 / gh#22) have outcomes to read. ALWAYS runs -- its work
+// list is whatever the journal holds -- and is idempotent on Outcome.TradeId's unique index. The IndicatorProjection
+// shape: a scoped service driven by a hosted per-pass sweep.
+builder.Services.Configure<OutcomeJournalOptions>(builder.Configuration.GetSection(OutcomeJournalOptions.SectionName));
+builder.Services.AddScoped<OutcomeJournalService>();
+builder.Services.AddHostedService<OutcomeJournalHost>();
+
+// The read seam over persisted key-level zones (gh#596) that confluence (gh#593) and any chart overlay consult;
+// the detector that writes them is gh#597.
+builder.Services.AddScoped<IPriceLevelSource, StoredPriceLevelSource>();
+
+// The key-level projection (gh#597, R-10 / R-22): a scoped detector driven by a hosted per-pass sweep, mirroring
+// the indicator projection above. It recomputes swing-pivot / ATR zones (KeyLevels.Detect, © Bjorgum defaults,
+// gh#626) over the bar store and reconciles them into the PriceLevel table, reusing gh#311's stored ATR. ALWAYS
+// runs -- its work list is whatever the bar store holds -- on a slower cadence, since levels form over many bars.
+builder.Services.AddOptions<KeyLevelDetectorOptions>()
+    .Bind(builder.Configuration.GetSection(KeyLevelDetectorOptions.SectionName))
+    // Fail fast on start rather than at runtime: a non-positive PollIntervalSeconds throws from Task.Delay inside the
+    // host's retry loop -- and a faulting BackgroundService stops the whole host process -- while a non-positive
+    // MaxLevelsPerKind makes every Detect pass throw (swallowed per series), so the host runs but writes no level.
+    .Validate(
+        options => options.Validate(),
+        "KeyLevels: require PollIntervalSeconds > 0 and MaxLevelsPerKind > 0.")
+    .ValidateOnStart();
+builder.Services.AddScoped<KeyLevelProjectionService>();
+builder.Services.AddHostedService<KeyLevelProjectionHost>();
+
+// The AI seam for the agent-review route (gh#402, R-4, ADR-0008): the provider-neutral ILlmProvider (a no-I/O stub
+// this increment) and the ALWAYS-bound ITriggerReviewer -- the real LlmTriggerReviewer when an Llm:ApiKey is
+// configured, else the honest inert NullTriggerReviewer. Enforcement lives below the model: nothing bound here can
+// place or size an order. Registered before the trigger scan below, which now depends on ITriggerReviewer.
+builder.Services.AddTradingCopilotAi(builder.Configuration);
+
+// The deterministic trigger layer (gh#385, gh#402, R-4 / R-7, ADR-0008): a standing-alert scan over the projected
+// indicators above. Each pass evaluates every enabled MECHANICAL and AGENT-REVIEW trigger and fires the crossing
+// edges -- a mechanical fire alerts through the notification channel; an agent-review fire wakes the reviewer once,
+// stages a Suggestion (never an order), and advises. Reads indicators globally (derived market data), reads/writes
+// triggers per-owner (R-20). Harmless with no triggers, so it always runs.
+builder.Services.Configure<TriggerOptions>(builder.Configuration.GetSection(TriggerOptions.SectionName));
+// Confluence assembly (gh#730, ADR-0026 §3): the proximity band + corroboration ladder issuance uses to cite the
+// supporting factors. It feeds the HOSTED scan (TriggerEvaluationService, below), so validate on start -- a
+// non-positive KTicks/FAtr would mint a zero/negative band that silently mis-measures every level, and a non-positive
+// ladder entry a nonsensical timeframe (the KeyLevelDetectorOptions idiom). An empty ladder is a valid, inert opt-out.
+builder.Services.AddOptions<ConfluenceOptions>()
+    .Bind(builder.Configuration.GetSection(ConfluenceOptions.SectionName))
+    .Validate(
+        options => options.Validate(),
+        "Confluence: require KTicks > 0, FAtr > 0, and every TimeframeMinutes entry > 0.")
+    .ValidateOnStart();
+builder.Services.AddScoped<TriggerEvaluationService>();
+builder.Services.AddHostedService<TriggerScanHost>();
+
+// The event log's first consumer (ADR-0007, gh#153): the stop-promotion watcher reads market.quote events and
+// promotes hidden actual stops as price comes within their band. Harmless with no staged stops, so it always runs.
+builder.Services.AddScoped<StopPromotionService>();
+
+// The recovery path for an event-log retention gap (gh#306): what a blind window is still recoverable from, read
+// from the clean-historical bar store rather than the log, which by then no longer has it.
+builder.Services.AddScoped<GapBackfillService>();
+builder.Services.AddHostedService<StopPromotionHost>();
+
+// The event log's second consumer (ADR-0007, gh#198): the conditional-order firing watcher reads market.quote
+// events and fires / cancels / expires pending conditional entries on their trigger. Harmless with none.
+builder.Services.AddScoped<ConditionalFiringService>();
+builder.Services.AddHostedService<ConditionalOrderHost>();
+
+// The suggestion expire sweep (gh#545, ADR-0013): a time-driven pass that voids every live suggestion past its
+// validity window, so a dead suggestion drops off the actionable surface without an operator act. The guarded
+// one-way State transition (scoped) is shared with the drift (gh#546) and supersede (gh#550) writers; the startup
+// path (StartupTasks) runs the same transition before the rehydrator counts, so recovery and steady state cannot diverge.
+builder.Services.AddScoped<ISuggestionExpiry, SuggestionExpiry>();
+builder.Services.AddHostedService<SuggestionExpiryHost>();
+
+// The event log's third market.quote consumer (gh#546, R-4 / R-12): the suggestion-drift watcher marks an Active
+// suggestion Stale once price drifts past the entry tolerance, so a scratched setup greys out BEFORE execution
+// (the take-time re-check, gh#548, is the synchronous backstop). Its guarded Active→Stale update is the sibling of
+// the expire sweep's writer above; unlike the other consumers it resolves each Active symbol → contract per pass,
+// so it takes a venue. Harmless with no Active suggestions.
+builder.Services.AddScoped<ISuggestionDrift, SuggestionDrift>();
+builder.Services.AddScoped<SuggestionDriftService>();
+builder.Services.AddHostedService<SuggestionDriftHost>();
+
+// The immutable audit trail (engineering §9, ADR-0007, gh#220): a secondary, failure-tolerant write the orphan
+// guard uses to record each synthetic-stop transition with its synthetic_risk flag. Scoped alongside the guard.
+builder.Services.AddScoped<IAuditLog, AuditLog>();
+
+// Connection-loss orphan handling (ADR-0007, ADR-0013, gh#209): the monitor watches the venue connection and,
+// on a drop, orphans the hidden synthetic stops (the native safety stop stays the floor); on reconnect it
+// re-arms them. Harmless with no hidden stops, so it always runs.
+builder.Services.AddScoped<OrphanGuardService>();
+builder.Services.AddHostedService<VenueConnectionMonitorHost>();
+
+// The protection census (gh#370, ADR-0019): periodically reconciles venue POSITIONS against venue WORKING ORDERS
+// and publishes how many live positions have no protective stop resting at the exchange. ADR-0019 makes that a
+// P1, and until now nothing measured it -- so the rule gh#245 wanted could not be written. Measurement only: it
+// reports on the protection the execution path is responsible for, and never places an order itself.
+// The embedding seam (gh#109, engineering §2). Cohere when a key is configured (gh#403), the KEYLESS default
+// otherwise -- the substrate stays usable, and every test runs, without an API key or any spend.
+builder.Services.Configure<CohereOptions>(builder.Configuration.GetSection(CohereOptions.SectionName));
+builder.Services.AddHttpClient(CohereEmbeddingProvider.HttpClientName);
+builder.Services.AddSingleton<EmbeddingMetrics>();
+builder.Services.AddSingleton<IEmbeddingMetrics>(provider => provider.GetRequiredService<EmbeddingMetrics>());
+// The LLM-spend meter (gh#477) rides the SAME MarqSpec.TradingCopilot.Ai meter, so it exports with no exporter
+// change; singleton like the embed meter (a Meter is a long-lived process-wide object). Required, never optional --
+// an unmetered call is invisible spend (the gh#403 posture).
+builder.Services.AddSingleton<LlmMetrics>();
+builder.Services.AddSingleton<ILlmMetrics>(provider => provider.GetRequiredService<LlmMetrics>());
+// The governor's configured ceiling, published as a gauge (gh#506) so the dashboard computes headroom from
+// Prometheus alone rather than a hand-copied Grafana constant that drifts the moment Governor__DailyBudgetUsd
+// changes. Resolved eagerly below so the observable callback is live even before anything else touches it.
+// Observability only -- enforcement stays on the AIUsage ledger floor, a meter being export-only (gh#448).
+builder.Services.AddSingleton<GovernorMetrics>();
+
+builder.Services.AddSingleton<UnavailableEmbeddingProvider>();
+
+// Probed once at startup (gh#474). A key is only half of "available": the AddEmbeddingStore migration skips the
+// table entirely on a Postgres without pgvector, so a keyed deployment there embedded on every poll -- real spend
+// -- and faulted at the upsert every time. Defaults to NOT present, so a caller racing the probe declines.
+builder.Services.AddSingleton<VectorStore>();
+builder.Services.AddSingleton<CohereEmbeddingProvider>();
+builder.Services.AddSingleton<IEmbeddingProvider>(provider =>
+    provider.GetRequiredService<IOptions<CohereOptions>>().Value.IsConfigured
+        ? provider.GetRequiredService<CohereEmbeddingProvider>()
+        : provider.GetRequiredService<UnavailableEmbeddingProvider>());
+
+// The news-embedding pass (gh#377, R-2): the first production consumer of the seam above, populating the pgvector
+// embedding behind each ingested NewsRecord. Always on, mirroring the relevance pass -- with no provider configured
+// (or no news needing it) the pass is a cheap no-op, so there is nothing to opt into. IAiUsageLedger / IAiSpendGovernor
+// / GovernorOptions are already bound by AddTradingCopilotAi above; this is their first embed-side consumer (gh#436).
+builder.Services.Configure<NewsEmbeddingOptions>(builder.Configuration.GetSection(NewsEmbeddingOptions.SectionName));
+builder.Services.AddScoped<NewsEmbeddingService>();
+builder.Services.AddHostedService<NewsEmbeddingHost>();
+
+// The embedding orphan GC (gh#902): the periodic backstop for embedding rows whose owner was renamed or pruned, which
+// the stale-model sweep (gh#889) never reaches (a re-embed never touches a dead owner). EmbeddingOrphanStore is SCOPED
+// -- it holds the scoped DbContext, so a singleton would be a captive dependency failing ValidateScopes at startup
+// (the AiUsageLedger lesson); the host opens a fresh scope per sweep to resolve it. The anti-join DELETE is
+// relational-only (gh#109), so it is exercised by QA, not a unit test; the sweep orchestration + allow-list are.
+builder.Services.Configure<EmbeddingOrphanGcOptions>(builder.Configuration.GetSection(EmbeddingOrphanGcOptions.SectionName));
+builder.Services.AddScoped<IEmbeddingOrphanStore, EmbeddingOrphanStore>();
+builder.Services.AddHostedService<EmbeddingOrphanGcHost>();
+
+// The embedding READ seams (gh#852, R-2; generalised gh#1065): the query side of the write pass above.
+// PgVectorNewsSimilarity serves the two BY-OWNER vector reads (NewsRelevanceService's semantic topic match and
+// SemanticSalienceAxis), while PgVectorEmbeddingRecall serves the KIND-PARAMETERISED ranked nearest-neighbour recall
+// the cross-kind retrieval pipeline runs on. Both SCOPED: each holds the scoped TradingCopilotDbContext, so a
+// singleton would be a captive dependency failing ValidateScopes at startup (the AiUsageLedger lesson). Both are
+// relational-only (gh#109) -- the Vector column has no in-memory mapping -- so they are exercised by QA (#855 and the
+// gh#1065 paired card), not by unit tests; their consumers depend on the seams so their own logic stays unit-testable.
+builder.Services.AddScoped<INewsEmbeddingSimilarity, PgVectorNewsSimilarity>();
+builder.Services.AddScoped<IEmbeddingRecall, PgVectorEmbeddingRecall>();
+
+// The semantic-embedding salience axis (gh#853, R-2, R-9): the news-feed consumer of the read seam above. It ranks
+// each candidate's embedding nearness to the operator's STARRED items (max cosine similarity) into the operator-
+// relative axis SalienceScorer folds into an item's multiplier, degrading to an empty map -- the categorical-only
+// feed -- when the provider or the pgvector read is unavailable. SCOPED: it holds the scoped INewsEmbeddingSimilarity
+// (its production impl carries the scoped DbContext), so a singleton would be a captive dependency (the #852 lesson).
+builder.Services.AddScoped<SemanticSalienceAxis>();
+
+builder.Services.AddScoped<ProtectionMonitorService>();
+builder.Services.AddHostedService<ProtectionMonitorHost>();
+
+// The account-event consumer (R-17, R-11, gh#219): reads order / fill events off the user-hub seam and turns
+// venue truth into journal state -- writing Fill rows (the entity's first producer) and advancing an order to
+// Filled / PartiallyFilled / Rejected. Before this an order stopped at Working, blind to what the venue did next.
+// Harmless with no accounts / no events, so it always runs; a fresh scope per event holds no scoped dep across
+// the stream, and the capability is Require'd through the seam at the call (R-17).
+builder.Services.AddScoped<AccountEventIngestionService>();
+
+// OCO-cancel-on-exit (R-11, ADR-0007, gh#183): the account-event seam's first real consumer. When the stream
+// reports a position flat, it retires the synthetic stop plans and cancels the dangling native protective legs
+// (safety bracket, promoted stop, take-profit) -- a dangling safety stop is a live resting order with no position
+// behind it. Every exit route (manual flatten, the promoted stop firing, auto-flatten, kill-switch flatten-all)
+// reaches it the same way. Resolved per-event by AccountEventStreamHost.
+builder.Services.AddScoped<OcoExitService>();
+
+// The production Trade writer (gh#731, R-8/R-9): the same flat signal closes a round trip, which is journalled
+// with a signed tick-value-aware RealizedPnL. This is what makes DailyRealizedReader (gh#587) and the consistency
+// window read real money rather than the zero they returned while nothing wrote Trade. Resolved per-event by
+// AccountEventStreamHost, after the OCO retire.
+// The register of flats deferred awaiting their closing fill (gh#748): PositionEvent(flat) and FillEvent(fill) are
+// independent, unordered venue callbacks, so a flat can be processed before the closing fill is ingested. A
+// SINGLETON, shared by TradeJournalService (which parks a not-yet-reconciled flat) and AccountEventStreamHost (which
+// retries it when a fill lands) -- it must survive the supervisor's reconnects, so it cannot be scoped.
+builder.Services.AddSingleton<PendingFlatJournal>();
+builder.Services.AddScoped<TradeJournalService>();
+builder.Services.AddHostedService<AccountEventStreamHost>();
+
+// Settlement-boundary position reconcile (R-13, ADR-0013, gh#193): reports positions from venue truth tagged
+// with their mark basis (live / settlement re-mark / declared-unknown), so a settlement re-mark is never read
+// as live and an unreachable venue is not shown as a stale live view.
+builder.Services.AddScoped<PositionReconciliationService>();
+// The read-only reconcile seam (gh#929) points at the same scoped instance -- the chat read_positions tool injects
+// IPositionReconciler (read only, fakeable in unit tests), never the concrete service, so its dependency is read-only
+// by its very type.
+builder.Services.AddScoped<IPositionReconciler>(provider => provider.GetRequiredService<PositionReconciliationService>());
+// The durable record both operator position actions write (gh#1143): an event-log append (ADR-0001) plus an
+// immutable operator-owned AuditRecord (gh#220), the pair the auto-flatten already writes for a position-level
+// close. It takes IEventLog and IAuditLog -- the same two seams every other journaling write site takes, resolved
+// to TimescaleEventLog and AuditLog above -- so it shares their scoped TradingCopilotDbContext. That sharing is
+// exactly why each of those two now detaches a refused insert rather than leaving it to poison the other's save
+// (gh#1143); PositionActionJournalFaultIsolationIntegrationTests holds that against real Postgres.
+builder.Services.AddScoped<IPositionActionJournal, PositionActionJournal>();
+builder.Services.AddScoped<IPositionActionIntentStore, PositionActionIntentStore>();
+builder.Services.AddScoped<PositionExitService>();
+// The sized partial-close sibling of the full exit (gh#928): reduce a position toward flat without flattening it.
+builder.Services.AddScoped<PositionReduceService>();
+
+// The resting-orders sibling of the positions read (gh#381): venue truth for the working orders standing on an
+// account, including the attached protective bracket and its SIZE. Read-only -- the gate is untouched.
+builder.Services.AddScoped<WorkingOrderReconciliationService>();
+
+// The FILL-HISTORY sibling of the two reads above (gh#631). Neither of them can see an order that placed, filled
+// and round-tripped -- a fill is not a working order, and its bracket leaves the account flat again -- so through
+// those two alone that outcome is indistinguishable from an attempt that never reached the market. Only this read
+// separates them, which is what stops a stranded one-shot conditional being re-armed after it already executed.
+// Scoped like its siblings: it takes the request-scoped DbContext, so the R-20 filter applies.
+builder.Services.AddScoped<FillReconciliationService>();
+
+// The journaled-fills read (gh#792) for the gh#727 chart fill-marker overlay: the operator's fills on an account +
+// instrument over a window, read from the durable journal (Fill joined to Order), NOT venue truth. Scoped so the
+// R-20 filter applies to both sides of the join.
+builder.Services.AddScoped<FillJournalReadService>();
+
+// Auto-flatten (R-13, gh#185, ADR-0013): the PRIMARY scheduler that closes open positions at each instrument's
+// per-market deadline on the DST-aware market clock. On by default and cannot be silently disabled -- so it
+// ALWAYS runs; a market is turned off per-instrument in the Flatten config, not by omitting the host. The
+// redundant / independent watchdog above it is gh#187. Validate the schedule at startup so a malformed deadline
+// fails fast rather than mid-session, the same fail-fast stance as the Jwt signing key above.
+builder.Services.Configure<FlattenOptions>(builder.Configuration.GetSection(FlattenOptions.SectionName));
+_ = (builder.Configuration.GetSection(FlattenOptions.SectionName).Get<FlattenOptions>() ?? new FlattenOptions()).ToSchedules();
+builder.Services.AddScoped<IStagedOrderClaim, StagedOrderClaim>();
+builder.Services.AddScoped<IAccountEntryGuard, AccountEntryGuard>();
+builder.Services.AddScoped<AutoFlattenService>();
+builder.Services.AddHostedService<AutoFlattenHost>();
+
+// ...and REPORT that resolved schedule once the host exists (gh#255): which markets are armed, at what deadline,
+// and -- the load-bearing part -- whether each came from configuration or the built-in default. Validating alone
+// left the safety path silent about its own configuration, so a DROPPED override was indistinguishable from an
+// intended default; that is precisely how gh#236 hid. Singleton: it reads fixed configuration and holds no state.
+builder.Services.AddSingleton<FlattenScheduleReporter>();
+
+// The redundant watchdog (R-13, gh#187, ADR-0013): the INDEPENDENT second tier above the primary scheduler -- a
+// SEPARATE host on its own cadence, so the flatten still fires when the primary is degraded (hung host, per-pass
+// give-up, transient fault). It shares FlattenOptions (schedule + grace) but has its own loop and its own
+// trigger/close logic, so a bug in the primary cannot disable it. Always on, like the primary (R-13).
+builder.Services.AddScoped<AutoFlattenWatchdogService>();
+builder.Services.AddHostedService<AutoFlattenWatchdogHost>();
+
+// The operator-notification chain, queue -> dedup -> transport (gh#243, gh#289, ADR-0019). Extracted to
+// NotificationRegistration (gh#320) so the SHAPE of the binding is assertable: the auto-flatten calls
+// INotificationChannel on the R-13 hot path, and a regression that bound a blocking transport there would leave
+// every existing test green.
+builder.AddTradingCopilotNotifications();
+
+// The dead-man's switch (R-13, gh#244, ADR-0019): the THIRD tier, and the only one that lives OUTSIDE this
+// process. Both tiers above die with the host -- so if it dies before a deadline, the flatten never fires and
+// nothing alerts. This inverts that: the app reports flat to an external monitor, which pages when the report
+// FAILS TO ARRIVE. Silence becomes the alarm. Validate the check URLs at startup so a malformed one fails fast
+// rather than at 14:35; an UNCONFIGURED switch is allowed but warns loudly from the host (never silent).
+builder.Services.Configure<CheckInOptions>(builder.Configuration.GetSection(CheckInOptions.SectionName));
+CheckInOptions checkIn = builder.Configuration.GetSection(CheckInOptions.SectionName).Get<CheckInOptions>() ?? new CheckInOptions();
+_ = checkIn.HeartbeatUri;
+foreach (FlattenSchedule schedule in (builder.Configuration.GetSection(FlattenOptions.SectionName).Get<FlattenOptions>() ?? new FlattenOptions()).ToSchedules())
+{
+    _ = checkIn.UrlFor(schedule.Instrument);
+}
+
+// A short timeout by design: a hung monitor must never become a hung safety path.
+builder.Services.AddHttpClient<IDeadMansSwitch, HttpDeadMansSwitch>(
+    client => { client.Timeout = TimeSpan.FromSeconds(10); });
+builder.Services.AddScoped<FlattenCheckInService>();
+builder.Services.AddHostedService<DeadMansSwitchHost>();
+
+// The R-14 environment, mapped ONCE at the composition root from the host (gh#9): practice anywhere, live only
+// in production, undeclared nowhere -- and an unrecognised environment name fails closed to Development
+// (practice-only). Wrapped so endpoints bind it from services, never from a request.
+// The R-16 execution sanity caps -- conservative defaults, overridable via the Execution config section.
+builder.Services.Configure<ExecutionOptions>(builder.Configuration.GetSection(ExecutionOptions.SectionName));
+
+builder.Services.AddSingleton(new HostTradingEnvironment(
+    DeploymentEnvironmentMapping.From(builder.Environment.EnvironmentName)));
+
+// The kill switch (R-11, ADR-0007, gh#189): a process-wide flag the enforcing send path reads to refuse every
+// outbound order while engaged. A singleton (the mutable runtime state) exposed through its domain reader
+// interface, so OrderExecutionService stays pure. The persisted KillSwitchState row rehydrates it at startup, so
+// the operator's lock survives a restart -- nothing silently re-enables trading (ADR-0013).
+builder.Services.AddSingleton<KillSwitch>();
+builder.Services.AddSingleton<IKillSwitch>(services => services.GetRequiredService<KillSwitch>());
+builder.Services.AddScoped<KillSwitchService>();
+
+// Decision-state rehydration (R-20, R-12, ADR-0013, gh#221): an explicit startup pass that reads the decision
+// surface back inertly (nothing resumes) and, on an IMPOSSIBLE combination a crash left, fails safe to no-new-
+// orders (the kill switch, HaltOnly) and loud -- never silently repairing. Scoped: it runs in the startup scope
+// alongside migrate + bootstrap.
+builder.Services.AddScoped<DecisionStateRehydrator>();
+
+// The RUNTIME sibling of the rehydrator above (R-20, R-12, ADR-0013, gh#722): a periodic sweep that detects an
+// order stranded Taking / a conditional stranded Firing past an age bound and raises an operator alert so the human
+// reconciles it (POST /orders|conditionals/{id}/reconcile). It is propose-and-confirm -- it transmits nothing,
+// adopts nothing, releases nothing and changes no order state, preserving "never auto-act on rehydrated state".
+// Age is measured by the in-memory first-seen register (per process lifetime, no timestamp column): a runtime
+// strand is clocked when the sweep sees it, and a restart strand is already covered by the rehydrator, so the
+// register starting empty at boot is not a gap. The register is a SINGLETON (it must survive the sweep's per-pass
+// scopes); the cadence/bound are validated on start so a bad configuration fails the host once, not every pass.
+builder.Services.AddSingleton<ReconcileStrandRegister>();
+builder.Services.AddOptions<ReconcileSweepOptions>()
+    .Bind(builder.Configuration.GetSection(ReconcileSweepOptions.SectionName))
+    .Validate(
+        options => options.SweepIntervalSeconds >= 1 && options.StrandAgeThresholdSeconds >= 1,
+        "ReconcileSweep: require SweepIntervalSeconds >= 1 and StrandAgeThresholdSeconds >= 1.")
+    .ValidateOnStart();
+builder.Services.AddHostedService<ReconcileSweepHost>();
+
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = jwt.Issuer,
+            ValidateAudience = true,
+            ValidAudience = jwt.Audience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.SigningKey)),
+            ValidateLifetime = true,
+        };
+
+        // A SignalR WebSocket cannot send an Authorization header, so the JWT arrives on the query string for the
+        // hub path; lift it onto the token the handler validates. Scoped to the hub path (R-18) so no other route
+        // ever accepts a query-string token.
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                string? accessToken = context.Request.Query["access_token"];
+                if (!string.IsNullOrEmpty(accessToken)
+                    && context.HttpContext.Request.Path.StartsWithSegments(RealtimeHub.Path))
+                {
+                    context.Token = accessToken;
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+    });
+builder.Services.AddAuthorization();
+
+// The realtime hub (gh#645, R-10). SignalR ships in the ASP.NET Core shared framework; the fan-out host tails the
+// event log and pushes each presentation signal to connected clients. Nothing is invocable on the hub.
+builder.Services.AddSignalR();
+// Per-owner routing for the owner-scoped pushes (gh#683): a custom IUserIdProvider (the `sub` claim, since
+// MapInboundClaims=false) so Clients.User resolves, and the notifier the account-ingestion path pushes through.
+builder.Services.AddSingleton<IUserIdProvider, RealtimeUserIdProvider>();
+builder.Services.AddSingleton<IAccountRealtimeNotifier, AccountRealtimeNotifier>();
+// The suggestion lifecycle push (gh#684): the trigger scan calls this after a suggestion write commits, routed
+// per-owner exactly like the order/fill notifier above. Singleton — it holds only the (singleton) hub context.
+builder.Services.AddSingleton<ISuggestionRealtimeNotifier, SuggestionRealtimeNotifier>();
+// The chat-turn push (gh#906): the chat endpoint calls this after an assistant turn commits, routed per-owner like
+// the suggestion notifier above. Singleton — it holds only the (singleton) hub context.
+builder.Services.AddSingleton<IChatRealtimeNotifier, ChatRealtimeNotifier>();
+// One in-flight turn per conversation (gh#1106): the per-conversation Postgres advisory lock the chat turn runs
+// inside, so two screens cannot stream two turns into one undifferentiated draft. The guard is STATELESS — it
+// takes the context it pins as a parameter rather than holding one — so its lifetime is not load-bearing; scoped
+// simply matches the account-entry guard it mirrors, and keeps it a captive-free dependency of the endpoints.
+builder.Services.AddScoped<IChatTurnGuard, ChatTurnGuard>();
+builder.Services.AddHostedService<RealtimeEventLogFanoutHost>();
+
+// The self-documenting API surface (R-10, gh#604): an OpenAPI document generated from the minimal-API routes
+// below, and a Scalar reference UI over it. The spec is the source of truth the README links to (#605); a
+// generated spec cannot silently drop an endpoint the way the hand-kept table could.
+builder.Services.AddTradingCopilotOpenApi();
+
+WebApplication app = builder.Build();
+
+// Resolve the governor gauge EAGERLY (gh#506). An ObservableGauge only exists once its owner is constructed,
+// and this singleton has no injected consumer -- lazily registered it would never be built, the callback would
+// never be attached, and the series would simply never appear. Nothing would fail; the panel would read empty,
+// which on a cost view is indistinguishable from "no spend". Touching it here is what makes it real.
+_ = app.Services.GetRequiredService<GovernorMetrics>();
+
+// Report the armed flatten schedule FIRST (gh#255, R-13) -- before migration, so the operator still sees which
+// deadlines are configured even on a start that later fails to reach the database.
+app.Services.GetRequiredService<FlattenScheduleReporter>().Report(DateTimeOffset.UtcNow);
+
+await StartupTasks.MigrateAndBootstrapAsync(app);
+
+// The built SPA, served from this origin (ADR-0020, gh#646). Deliberately BEFORE authentication: a browser cannot
+// present a token until it has loaded the page that collects one, so the shell must be reachable anonymously. That
+// is not a hole in R-18 -- the shell is static markup and script carrying no data and no action, and every API
+// route it goes on to call still requires a token. It is recorded by name in the R-18 authorization sweep's
+// allow-list so it stays a decision on the record rather than an omission.
+//
+// Serving static files when no bundle has been built is a no-op, so a pure-backend `dotnet run` is unaffected.
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapAuthEndpoints();
+app.MapFirmEndpoints();
+app.MapConnectionEndpoints();
+app.MapVenueEndpoints();
+app.MapAccountEndpoints();
+app.MapRiskEndpoints();
+app.MapTriggerEndpoints();
+app.MapRelevanceEndpoints();
+app.MapNewsEndpoints();
+app.MapSuggestionEndpoints();
+app.MapOrderEndpoints();
+app.MapKillSwitchEndpoints();
+app.MapProtectionEndpoints();
+app.MapFlattenScheduleEndpoints();
+app.MapPositionEndpoints();
+app.MapWorkingOrderEndpoints();
+app.MapFillEndpoints();
+app.MapMarketDataEndpoints();
+app.MapAiSpendEndpoints();
+app.MapAiAttributionEndpoints();
+app.MapChatEndpoints();
+app.MapOutcomeEndpoints();
+app.MapDailyJournalEndpoints();
+app.MapTradeFeedbackEndpoints();
+
+// The realtime hub (gh#645, R-10 / R-18). A literal path so it is a concrete authenticated route ahead of the SPA
+// fallback; RequireAuthorization so the R-18 auth-surface sweep treats its negotiate / connect endpoints as gated.
+// ExcludeFromDescription keeps the WebSocket hub out of the REST OpenAPI document (gh#604/#612) — it is not an HTTP
+// operation a client generator can call, and it must not perturb that spec's exact-set drift-guard.
+app.MapHub<RealtimeHub>(RealtimeHub.Path).RequireAuthorization().ExcludeFromDescription();
+
+// The generated spec (/openapi/v1.json, everywhere) and the Scalar reference UI (/scalar/v1, disabled in
+// production). Mapped after the endpoint groups so the document reflects every route above (gh#604).
+app.MapTradingCopilotApiReference();
+
+// Liveness: answers from the process alone and touches NO dependency (§7). A liveness probe that queries the
+// database restarts a healthy app during a database blip -- taking the auto-flatten scheduler down with it.
+app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
+
+// Readiness: the opposite contract -- it MUST touch the database, because "ready" means ready to serve. A failure
+// takes this instance out of rotation without killing it, which is the right response to an unreachable database.
+app.MapGet("/ready", async (TradingCopilotDbContext database, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return await database.Database.CanConnectAsync(cancellationToken)
+            ? Results.Ok(new { status = "ready" })
+            : Results.Json(new { status = "not-ready", reason = "database unreachable" }, statusCode: 503);
+    }
+    catch (Exception error) when (error is InvalidOperationException or NpgsqlException or TimeoutException)
+    {
+        return Results.Json(new { status = "not-ready", reason = "database unreachable" }, statusCode: 503);
+    }
+});
+
+// The SPA fallback (ADR-0020): a client-side route hard-refreshed -- /suggestions, say -- must return the shell
+// rather than 404, because the router that understands that path lives in the bundle. Mapped LAST so it can never
+// shadow an API route.
+//
+// Mapped UNCONDITIONALLY, not only when a bundle is present. Gating it on the file existing was the first instinct
+// and it is the wrong one: the test host has no built bundle, so the route would vanish from the route table the
+// R-18 authorization sweep reads, and production would carry an anonymous endpoint the sweep had never seen. A
+// guard that inspects a different surface than the one that ships is not a guard. With no bundle the fallback
+// simply 404s like any missing file, so an API-only `dotnet run` behaves exactly as before.
+app.MapFallbackToFile("index.html").AllowAnonymous();
+
+app.Run();
+
+/// <summary>The WebApplication entry point for testing integration.</summary>
+public partial class Program { }

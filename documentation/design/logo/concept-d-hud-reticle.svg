@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512" role="img" aria-label="Trading Co-Pilot">
+  <title>Trading Co-Pilot — HUD Reticle</title>
+  <rect width="64" height="64" rx="14" fill="#101318"/>
+  <rect x=".5" y=".5" width="63" height="63" rx="13.5" fill="none" stroke="#29313F"/>
+  <g fill="none" stroke="#9DC3FF" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity=".5">
+    <path d="M17.5 26 L17.5 17.5 L26 17.5"/>
+    <path d="M38 17.5 L46.5 17.5 L46.5 26"/>
+    <path d="M17.5 38 L17.5 46.5 L26 46.5"/>
+    <path d="M46.5 38 L46.5 46.5 L38 46.5"/>
+  </g>
+  <path d="M25 36 L32 27.5 L39 36" fill="none" stroke="#9DC3FF"
+        stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

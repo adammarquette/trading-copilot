@@ -1,0 +1,457 @@
+# docker-compose — local development environment.
+# `docker compose up -d` from the repo root stands up the local stack.
+# See ADR-0012 (containerization) and ADR-0018 (build-once → GHCR), and engineering §8.
+#
+# By default the `app` service PULLS the image CI built and pushed to GHCR -- the SAME artifact
+# Railway runs (ADR-0018), so nothing is rebuilt just to run locally. To run YOUR local changes
+# instead, layer the dev override, which builds from source:
+#
+#   docker compose up -d                                              # pull GHCR image (default)
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build   # build my changes
+#
+# IMAGE_TAG selects which published build to pull (default: develop, the dev-environment tag).
+# If the pull fails with `unauthorized`/`not found`, the GHCR package isn't public yet (it's created
+# private on first merge; see the deployment runbook) -- use the dev override above to build from
+# source, which needs no registry access.
+#
+# The DATABASE is config-driven: the app reads its connection string from config
+# (ConnectionStrings__* / appsettings), so it can use the `db` service below OR an external /
+# managed Postgres -- swapping is a config change, not a code change.
+#
+# Scaffold: services are added as the src/ solution is built (only `db` is concrete today).
+services:
+  db:
+    # TimescaleDB (time-series) + pgvector (vectors) -- the two Postgres extensions the app uses.
+    # NOTE: confirm image tag + PGDATA volume path (ADR-0012 follow-up); the -ha image bundles both.
+    image: timescale/timescaledb-ha:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-copilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-copilot}   # local dev only -- real secrets never committed
+      POSTGRES_DB: ${POSTGRES_DB:-tradingcopilot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-copilot} -d ${POSTGRES_DB:-tradingcopilot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    # The BFF -- the CI-built image from GHCR, the SAME artifact Railway runs (ADR-0018). No `build`
+    # here on purpose: `docker compose up` PULLS rather than rebuilds. docker-compose.dev.yml adds the
+    # build for the "run my local changes" workflow.
+    image: "ghcr.io/adammarquette/trading-copilot:${IMAGE_TAG:-develop}"
+    depends_on:
+      db:
+        condition: service_healthy
+    # This block is an ALLOWLIST: compose forwards only the keys named here, so a .env value whose key is
+    # absent is read for interpolation and then silently dropped (gh#236). Two entry shapes, and the
+    # difference matters:
+    #
+    #   KEY: "${KEY:-default}"   sets KEY ALWAYS, falling back to a compose-level default.
+    #   KEY:                     (null value) passes through ONLY IF the var is defined (in .env or the
+    #                            shell); when undefined the key is ABSENT from the container, not empty --
+    #                            identical to a bare `- KEY` list entry (verified via `docker compose config`).
+    #
+    # Prefer the null pass-through for anything the APP already defaults. An empty string BINDS and
+    # overwrites the app's default -- for `Flatten__` that would mean a zeroed attempt cap or an
+    # unparseable deadline on the R-13 safety path, and for a required field (Instruments__N__Symbol)
+    # a startup crash. Absent is the only value that means "the app decides".
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: "http://+:8080"
+      # DB connection is config-driven: the compose `db`, or override to a managed Postgres.
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=${POSTGRES_DB:-tradingcopilot};Username=${POSTGRES_USER:-copilot};Password=${POSTGRES_PASSWORD:-copilot}"
+      # Local-dev defaults -- override via .env; real secrets (staging/prod) are never committed.
+      Jwt__SigningKey: "${Jwt__SigningKey:-local-dev-signing-key-change-me-at-least-32-bytes}"
+      Bootstrap__Email: "${Bootstrap__Email:-operator@local}"
+      Bootstrap__Password: "${Bootstrap__Password:-changeme-local}"
+      # The password-recovery opt-in (runbook "Operator password recovery"): set true for ONE restart to re-hash
+      # Bootstrap__Password onto the EXISTING operator, then remove. Off by default so a stale env password can
+      # never silently overwrite the stored credential.
+      Bootstrap__ResetPassword: "${Bootstrap__ResetPassword:-false}"
+      # Broker credentials, passed through from .env. Deliberately NO local-dev default: a made-up
+      # value would let the app start and fail obscurely at the first venue call. Empty is honest.
+      # Practice accounts only outside production (R-14).
+      ProjectX__ApiKey: "${ProjectX__ApiKey:-}"
+      ProjectX__ApiSecret: "${ProjectX__ApiSecret:-}"
+      # Defaulted, not passed through empty: this map is an allowlist, and an empty value would BIND
+      # over the client's own default and point the app at nowhere. Override in .env for other firms.
+      ProjectX__BaseUrl: "${ProjectX__BaseUrl:-https://api.topstepx.com}"
+      # Which Connection.CredentialKey the credentials above belong to (one credential set per process,
+      # ADR-0015) and which market-data universe they are entitled to (Simulated is the fail-safe default).
+      ProjectX__CredentialKey: "${ProjectX__CredentialKey:-projectx}"
+      ProjectX__DataTier: "${ProjectX__DataTier:-Simulated}"
+      # Market-data ingestion (R-1, gh#13) -- OPT-IN. No symbols means the host stays idle; set one to subscribe.
+      #
+      # The watchlist is ENUMERATED AND CAPPED AT EIGHT (0-7), because compose cannot forward an open-ended
+      # indexed list. Eight covers a realistic futures watchlist including micros (ES, NQ, CL, GC, RTY, YM, MES,
+      # MNQ); a ninth needs another line here, which is a deliberate edit rather than a silent limit. Before
+      # gh#304 only __0 was forwarded while .env.example told operators to add __1, __2 -- so a multi-symbol
+      # watchlist bound exactly one symbol and said nothing, leaving R-1's "watchlist user-configurable without
+      # redeploy" unmet under the documented run path.
+      #
+      # The slots are INDEPENDENT, not positional: the .NET binder collects whatever indices are present, so
+      # setting __2 alone binds correctly and gaps are harmless (verified against the binder, gh#236).
+      #
+      # Null pass-through, not "${...:-}": an empty value BINDS an empty entry into the array. Harmless for a
+      # symbol list, which filters blanks -- but absent is what actually means "not configured", and the
+      # difference stops mattering the moment a future option treats "" and absent differently.
+      Ingestion__Symbols__0:
+      Ingestion__Symbols__1:
+      Ingestion__Symbols__2:
+      Ingestion__Symbols__3:
+      Ingestion__Symbols__4:
+      Ingestion__Symbols__5:
+      Ingestion__Symbols__6:
+      Ingestion__Symbols__7:
+      # Null pass-through for the same reason as the Flatten block below: the app already defaults this to 5 s,
+      # and restating it here would make compose a second source of truth for it.
+      Ingestion__ReconnectDelaySeconds:
+      # Cross-asset CONTEXT symbols (gh#496) -- equities/indices prints for correlation (SPY against ES), on a
+      # data-only source. A SEPARATE list from Ingestion__Symbols above on purpose: those are tradeable contracts
+      # on the execution venue, these are colour from a provider that publishes no book, and the two must never be
+      # edited into one another. Enumerated and capped like every indexed list here (gh#304): a ninth symbol needs
+      # its own line, and the cap is documented in .env.example. Finnhub's free tier caps concurrent subscriptions
+      # well above this, so the binding limit is deliberateness, not the provider.
+      ContextIngestion__Symbols__0:
+      ContextIngestion__Symbols__1:
+      ContextIngestion__Symbols__2:
+      ContextIngestion__Symbols__3:
+      ContextIngestion__Symbols__4:
+      ContextIngestion__Symbols__5:
+      ContextIngestion__Symbols__6:
+      ContextIngestion__Symbols__7:
+      # Null pass-through: the app already defaults this to 5 s.
+      ContextIngestion__ReconnectDelaySeconds:
+      # The clean-historical bar store (R-1, gh#302) -- the SECOND market-data path, and the system of record.
+      # Null pass-through throughout: the app already defaults the cadence and lookback, and an empty value
+      # would bind over those defaults rather than leaving them alone. Unset means the backfill stays idle.
+      #
+      # Indexed lists are ENUMERATED AND CAPPED because compose cannot forward an open-ended list -- four
+      # instruments and three resolutions here. A fifth instrument needs another line; that is a deliberate
+      # edit, not a silent limit (gh#236 records the same constraint, and gh#304 the same gap on Ingestion).
+      Backfill__PollIntervalSeconds:
+      Backfill__LookbackMinutes:
+      Backfill__Instruments__0:
+      Backfill__Instruments__1:
+      Backfill__Instruments__2:
+      Backfill__Instruments__3:
+      Backfill__ResolutionMinutes__0:
+      Backfill__ResolutionMinutes__1:
+      Backfill__ResolutionMinutes__2:
+      # The restart heal's window and session calendar (gh#696). SessionClose defaults to 16:00 CT (CME equity
+      # index); SessionHolidays is an enumerated list like the instruments above -- a fifth declared holiday
+      # needs another line.
+      Backfill__MaxHealWindowMinutes:
+      Backfill__SessionClose:
+      Backfill__SessionHolidays__0:
+      Backfill__SessionHolidays__1:
+      Backfill__SessionHolidays__2:
+      Backfill__SessionHolidays__3:
+      # Indicator projections over that store (gh#310). No symbol list: the projection's work is whatever the bar
+      # store holds, so bars can never exist without their indicators. Null pass-through -- the app defaults the
+      # period to Wilder's 14, the band resolution to 1 minute, and the cadence to 60 s.
+      # BandResolutionMinutes is which bar size an ATR PROMOTION BAND is measured on (gh#311); it must be one of
+      # Backfill__ResolutionMinutes above, or ATR-banded stops find no value and do not promote.
+      Indicators__AtrPeriod:
+      Indicators__BandResolutionMinutes:
+      Indicators__PollIntervalSeconds:
+      # The deterministic trigger scan (R-4, gh#385) evaluates enabled indicator triggers over the projections
+      # above and fires a mechanical alert on the arming edge. Always on -- its work is whatever triggers exist.
+      # Null pass-through, not an empty value: an empty string BINDS and would overwrite the app's 60s default.
+      Triggers__PollIntervalSeconds:
+      # News relevance resolution (R-2, gh#359) materializes matched instruments/topics onto ingested news via the
+      # global ticker<->instrument maps + topics. Always on; null pass-through leaves the app's 60s default.
+      Relevance__PollIntervalSeconds:
+      # News embedding (R-2, gh#377) populates the pgvector embedding behind each ingested news item via the
+      # Cohere__ApiKey seam below. Always on -- harmless with no provider configured (or no news needing it);
+      # null pass-through leaves the app's 60s default.
+      Embedding__PollIntervalSeconds:
+      # Embedding orphan GC (R-2, gh#902) -- a conservative periodic sweep deletes embedding rows whose owner was
+      # renamed or pruned, off the hot embed path; null pass-through leaves the app's 6h default.
+      EmbeddingGc__SweepIntervalSeconds:
+      # News / soft-signal ingestion (R-2, gh#358) -- the deduped store of record, the news analogue of the bar
+      # store above. Scalar options, so there is no indexed list to enumerate and cap here. OPT-IN via
+      # News__Enabled (off unless set); null pass-through leaves the app's defaults (cadence 300 s, lookback
+      # 1440 min -- sized to provider latency, not the poll cadence; gh#1123) alone. The concrete provider adapters
+      # (Finnhub, Tiingo) are follow-ons -- until one is wired, an enabled poller finds no source and stays idle.
+      News__Enabled:
+      News__PollIntervalSeconds:
+      News__LookbackMinutes:
+      # Per-operator news salience (R-2/R-6, gh#27, ADR-0014) -- a star raises, a mute lowers, the salience of
+      # SIMILAR future news, decayed by recency. Computed on read by /api/news (no host); a SOFT weight, never a
+      # risk control. Null pass-through leaves the app's defaults (14d half-life, cap 5x, floor 0.25x); the
+      # per-dimension weights keep their defaults unless tuned in config.
+      Salience__HalfLifeDays:
+      Salience__MultiplierCap:
+      Salience__MultiplierFloor:
+      # The dead-man's switch (R-13, gh#244, ADR-0019) -- the only alerting tier that survives THIS process
+      # dying, so a deployment without it is silently missing its most important safety net. Deliberately NOT
+      # defaulted: these are capability URLs (whoever holds one can forge an all-clear), so there is no sane
+      # made-up value -- empty is honest, and the host warns loudly at startup when nothing is set.
+      # The notification channel (gh#243, ADR-0019) -- Layer 1, the push the app sends itself. Both values are
+      # secrets and deliberately UNDEFAULTED: a made-up token would let the app believe it can reach the operator
+      # when it cannot. Absent, the app logs what it would have sent and says so at startup.
+      Pushover__AppToken:
+      Pushover__UserKey:
+      # Null pass-through, not a compose-level default: the app already defaults these (60 s / 1800 s per
+      # ADR-0019), and restating them here would make compose a SECOND source of truth for how long a page
+      # nags. Switched from `${…:-60}` when gh#236 established the convention documented above.
+      Pushover__PageRetrySeconds:
+      Pushover__PageExpireSeconds:
+      # The agent-review LLM (gh#402 / gh#423, ADR-0008). Null pass-through: Llm__ApiKey is an UNDEFAULTED secret --
+      # absent, the agent-review route runs review-less (it still fires and still tells the operator a setup needs
+      # review) rather than waking a model, so a dev stack makes no paid calls unless the operator sets it. The model
+      # ids + timeout the app already defaults (a cheap triage model + a stronger deep one), so compose must not
+      # restate them and become a second source of truth.
+      Llm__ApiKey:
+      Llm__TriageModel:
+      Llm__DeepModel:
+      Llm__TimeoutSeconds:
+      # The AI-spend governor (gh#448, ADR-0008). Null pass-through, both NON-secret. Governor__DailyBudgetUsd is
+      # UNDEFAULTED -- absent leaves the governor INERT (no cap, today's status quo), so a dev stack is never
+      # surprised by a paused co-pilot; set a positive USD number to activate the platform-wide daily cap.
+      # Governor__AlertThresholdFraction the app already defaults (0.8), so compose passes it through empty rather
+      # than restating it and becoming a second source of truth.
+      Governor__DailyBudgetUsd:
+      Governor__AlertThresholdFraction:
+      CheckIn__HeartbeatUrl:
+      CheckIn__HeartbeatIntervalSeconds:
+      CheckIn__PollIntervalSeconds:
+      # Per-instrument checks. An indexed list cannot be open-ended through compose, so the first FOUR slots are
+      # forwarded -- matching the four markets that carry built-in flatten deadlines (ES, NQ, CL, GC). A fifth
+      # market needs another pair added here; gh#236 records the same constraint for Flatten__Instruments__*.
+      # Null pass-through like the Flatten slots below: an empty Symbol would bind a required field and crash
+      # startup, and an empty Url would look configured while pointing nowhere.
+      CheckIn__Instruments__0__Symbol:
+      CheckIn__Instruments__0__Url:
+      CheckIn__Instruments__1__Symbol:
+      CheckIn__Instruments__1__Url:
+      CheckIn__Instruments__2__Symbol:
+      CheckIn__Instruments__2__Url:
+      CheckIn__Instruments__3__Symbol:
+      CheckIn__Instruments__3__Url:
+      # Telemetry export (gh#230/gh#231, ADR-0002). Null pass-through: with the `observability` profile off
+      # there is no collector to export to, and an endpoint pointing at nothing would have the app retrying a
+      # dead address forever. Set it (or run the profile) to turn export on.
+      # Telemetry export (gh#230/gh#231, ADR-0002). These are the app's OWN Options section (TelemetryOptions,
+      # SectionName = "Telemetry") -- NOT the OpenTelemetry SDK's OTEL_* variables, which this app does not read.
+      # gh#231 forwarded OTEL_* by mistake, so the LGTM stack it shipped could not be pointed at by anything
+      # documented; gh#325's check caught it. Null pass-through: unset means no export, and the app runs normally.
+      Telemetry__OtlpEndpoint:
+      Telemetry__ServiceName:
+      # Data-only market providers and the embeddings key (R-1, R-2, R-8). Documented for the operator and
+      # forwarded now so the wiring is right the day each adapter lands; unset until then, which is the default.
+      Finnhub__ApiKey:
+      Tiingo__ApiKey:
+      Cohere__ApiKey:
+      # Auto-flatten (R-13, gh#185/gh#187) -- pass-through, never defaulted here. Auto-flatten is ON BY
+      # DEFAULT in the app with built-in per-market deadlines, and it CANNOT be disabled by omission; these
+      # keys only OVERRIDE. Leaving them unset is the normal case and keeps the app's own defaults, which is
+      # why the null-value pass-through is required: a compose-level default here would silently become a
+      # second source of truth for a safety deadline (gh#236).
+      Flatten__PollIntervalSeconds:
+      Flatten__MaxFlattenAttempts:
+      Flatten__WatchdogGraceMinutes:
+      Flatten__WatchdogPollIntervalSeconds:
+      # Per-instrument overrides. Compose cannot forward an open-ended indexed list, so the slots are
+      # ENUMERATED and CAPPED AT FOUR (0-3) -- exactly the four markets that carry built-in deadlines
+      # (ES, NQ, CL, GC), so every governed market can be retimed or deliberately disabled. A FIFTH market
+      # needs another block added here; that is a deliberate edit, not a silent limit. The slots are
+      # INDEPENDENT, not positional: the .NET binder collects whatever indices are present, so using __2__
+      # alone binds correctly and gaps are harmless (verified against the binder, gh#236). Keep each
+      # instrument's fields on the SAME index -- that is what groups them into one entry.
+      Flatten__Instruments__0__Symbol:
+      Flatten__Instruments__0__Enabled:
+      Flatten__Instruments__0__SessionClose:
+      Flatten__Instruments__0__DeadlineOverride:
+      Flatten__Instruments__1__Symbol:
+      Flatten__Instruments__1__Enabled:
+      Flatten__Instruments__1__SessionClose:
+      Flatten__Instruments__1__DeadlineOverride:
+      Flatten__Instruments__2__Symbol:
+      Flatten__Instruments__2__Enabled:
+      Flatten__Instruments__2__SessionClose:
+      Flatten__Instruments__2__DeadlineOverride:
+      Flatten__Instruments__3__Symbol:
+      Flatten__Instruments__3__Enabled:
+      Flatten__Instruments__3__SessionClose:
+      Flatten__Instruments__3__DeadlineOverride:
+      # Per-instrument contract facts (R-4/R-16, gh#541): tick size, point value and the catastrophic safety-stop
+      # distance a SERVER-originated proposal needs to become an order ticket. Null pass-through, because the app
+      # ships built-in specs for the same four markets that carry built-in flatten deadlines (ES, NQ, CL, GC) --
+      # an empty string would BIND and overwrite a good default with a zero, which is precisely the value that
+      # silently mis-sizes every risk calculation. CAPPED AT FOUR slots, like Flatten__Instruments__* above; a
+      # fifth market needs its four keys added here.
+      InstrumentSpecs__Instruments__0__Symbol:
+      InstrumentSpecs__Instruments__0__TickSize:
+      InstrumentSpecs__Instruments__0__PointValue:
+      InstrumentSpecs__Instruments__0__SafetyStopTicks:
+      InstrumentSpecs__Instruments__1__Symbol:
+      InstrumentSpecs__Instruments__1__TickSize:
+      InstrumentSpecs__Instruments__1__PointValue:
+      InstrumentSpecs__Instruments__1__SafetyStopTicks:
+      InstrumentSpecs__Instruments__2__Symbol:
+      InstrumentSpecs__Instruments__2__TickSize:
+      InstrumentSpecs__Instruments__2__PointValue:
+      InstrumentSpecs__Instruments__2__SafetyStopTicks:
+      InstrumentSpecs__Instruments__3__Symbol:
+      InstrumentSpecs__Instruments__3__TickSize:
+      InstrumentSpecs__Instruments__3__PointValue:
+      InstrumentSpecs__Instruments__3__SafetyStopTicks:
+      # The suggestion read model's page limits (R-4, gh#540). Forwarded here because gh#540 added the options
+      # without an allowlist entry, so they were unreachable by an operator -- the exact silent-drop this map exists
+      # to prevent. Null pass-through: the app's defaults stand unless deliberately set.
+      Suggestions__DefaultPageSize:
+      Suggestions__MaxPageSize:
+      Suggestions__ValidityMinutes:
+      Suggestions__ChatProposalSize:
+      # Execution sanity caps (R-16, gh#11) -- the last-line fat-finger bounds, and the stop-promotion band.
+      # Pass-through for the same reason: the app's conservative defaults must win unless deliberately set.
+      Execution__MaxContractsPerOrder:
+      Execution__MaxNotional:
+      Execution__FatFingerBandTicks:
+      Execution__StopPromotionTicks:
+    ports:
+      - "8080:8080"
+
+  # ---------------------------------------------------------------------------------------------------------
+  # Observability — the self-hosted LGTM stack (gh#231, ADR-0002, engineering §7).
+  #
+  # Behind the `observability` PROFILE, so it is OFF by default:
+  #
+  #   docker compose up -d                                  # app + db only (unchanged)
+  #   docker compose --profile observability up -d          # ...plus Prometheus / Loki / Tempo / Grafana
+  #
+  # Opt-in because the app must run normally without it. Telemetry export is fire-and-forget, so a developer
+  # who does not want five extra containers is not blocked -- and an absent stack can never become a reason
+  # trading does not work. Footprint with the profile on is roughly 1 GB RAM; see the deployment runbook.
+  #
+  # Everything is PROVISIONED AS CODE under ./observability. Nothing here is configured by clicking.
+  # ---------------------------------------------------------------------------------------------------------
+  otel-collector:
+    # The single ingress for all three signals; the app knows this address and no backend's.
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    profiles: ["observability"]
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    depends_on: [prometheus, loki, tempo]
+    mem_limit: 300m
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # Remote write carries EXEMPLARS; exemplar storage is what makes them queryable. Both are required for
+      # the metric -> trace pivot (§7), and neither is on by default.
+      - --web.enable-remote-write-receiver
+      - --enable-feature=exemplar-storage
+      # 7 days: enough to investigate last week, bounded so a laptop does not fill its disk unattended.
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    mem_limit: 512m
+
+  # Alertmanager -- routing, dedup and delivery for the rules Prometheus evaluates (gh#245, ADR-0019, R-13).
+  # Chosen over Grafana unified alerting because ADR-0019's noise budget is written in this component's own
+  # vocabulary (group_wait / group_interval / repeat_interval / inhibition), and because rules stay plain files a
+  # PR can review and `promtool test rules` can execute.
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    # Alertmanager has NO env-var expansion in its config, so credentials cannot be passed as `environment:` and
+    # referenced as ${VAR} -- they would be sent to Pushover as that literal string, and every page would fail
+    # auth while the stack looked healthy. `secrets:` with an `environment:` source keeps `.env` as the single
+    # place the operator configures, while Alertmanager reads real files via its `*_file` options.
+    secrets:
+      - pushover_user_key
+      - pushover_token
+      - heartbeat_url
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "9093:9093"
+    mem_limit: 256m
+
+  loki:
+    image: grafana/loki:3.3.2
+    profiles: ["observability"]
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./observability/loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    mem_limit: 512m
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    profiles: ["observability"]
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
+    mem_limit: 512m
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    profiles: ["observability"]
+    environment:
+      # Local-dev credentials only, and never a real secret: this stack is not exposed off the machine. A
+      # deployed Grafana takes these from the environment's secret store (runbook).
+      GF_SECURITY_ADMIN_USER: "${GF_SECURITY_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_SECURITY_ADMIN_PASSWORD:-admin}"
+      # No anonymous access even locally -- the habit is the point.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      # Dashboards as FILES (gh#366). Read-only, and the provider sets allowUiUpdates:false -- a dashboard
+      # clicked together in the UI cannot be reviewed in a PR and does not survive a `down -v`.
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus, loki, tempo]
+    mem_limit: 384m
+
+# Alertmanager's credentials, materialised as files from .env values (gh#245). Sourced from the environment
+# rather than checked-in files so nothing secret lands in the repo, and so the operator configures one place.
+# Defaulted to obvious placeholders: an unset token must not stop the container starting, or a missing credential
+# would take down the thing that reports every other failure. The runbook's "send a test page" step is what
+# surfaces a bad token.
+secrets:
+  pushover_user_key:
+    environment: PUSHOVER_USER_KEY
+  pushover_token:
+    environment: PUSHOVER_API_TOKEN
+  heartbeat_url:
+    environment: ALERTMANAGER_HEARTBEAT_URL
+
+volumes:
+  db-data:
+  prometheus-data:
+  # Alertmanager's notification log and silences. Persisted so a restart does not re-page every open incident
+  # (its dedup state lives here) and does not forget a silence you set (gh#245).
+  alertmanager-data:
+  loki-data:
+  tempo-data:
+  grafana-data:

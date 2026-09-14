@@ -1,0 +1,65 @@
+# Grafana datasources — provisioned AS CODE (gh#231, ADR-0002).
+#
+# Checked in rather than clicked in, deliberately: a dashboard nobody can reproduce is not observability, and
+# `docker compose down && up` must return the same stack. The Platform contract's rule applies here too —
+# configuration that exists only in a web console does not exist.
+#
+# The cross-pillar links below are the point of the whole stack (engineering §7): trace <-> logs <-> metrics, so
+# a latency spike, a log line, and a waterfall are three views of one incident rather than three investigations.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      # Turns a spike on a latency histogram into a link to the exact trace behind it.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      # From a span, jump to the logs it emitted.
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        filterByTraceID: true
+        filterBySpanID: false
+      # From a span, jump to that service's RED metrics (fed by Tempo's metrics_generator).
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+      # Renders the producer/consumer service graph the span links build across the event log's async boundary.
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+      streamingEnabled:
+        search: true
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      # From a log line, jump to its trace. This is the pivot that pays for carrying trace_id on every line.
+      derivedFields:
+        - name: TraceID
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: tempo
+          url: "$${__value.raw}"
+          urlDisplayLabel: "View trace"

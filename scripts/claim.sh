@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+#
+# Claims a work item for this session: checks whether anyone already has it, then creates the worktree,
+# branches off develop, and pushes the branch EMPTY so the claim is globally visible before any work starts.
+#
+#   scripts/claim.sh 375                    # infers type=feature and the slug from the issue title
+#   scripts/claim.sh 375 bug my-short-slug  # explicit type and slug
+#   scripts/claim.sh 375 --check            # report only; claim nothing
+#
+# WHY THIS EXISTS (gh#375)
+# -----------------------
+# Parallel sessions duplicated a full session's work in one evening: gh#289 (#299 merged / #301 discarded),
+# gh#295 (#316 / #319), gh#330 (#363 / #364), and one four-line compile break that produced THREE issues and
+# THREE fixes -- #353 was opened ten minutes before the fix that merged. It was first and it was correct; it lost
+# a race, not an argument.
+#
+# The cause is that a session claims work by creating a LOCAL worktree, which no other session can see, and the
+# first globally visible artifact -- the pushed branch -- appears only when the work is essentially finished.
+# This moves the push to the front. Cost: about a second. Benefit: the claim exists from the moment work starts.
+#
+# WHY NOT THE OTHER SIGNALS
+# -------------------------
+#   * Issue assignee  -- single-operator repo, every issue reads `adammarquette`. No information.
+#   * Board column    -- manual and demonstrably stale (auto-add leaves Status empty; cards go unmoved).
+#   * Local worktree  -- catches same-machine collisions only, and a worktree is not proof of an ACTIVE claim
+#                        (29 stale ones were swept in a single evening).
+# The remote branch is the only signal that is both global and self-describing: `<type>/<id>_<title>` embeds the
+# issue number, so a claim is greppable without a registry to maintain.
+#
+# WHAT THIS DOES NOT DO
+# ---------------------
+# It does not make claiming atomic. Two sessions can check within the same second and both proceed. It narrows
+# the collision window from HOURS OF WORK to seconds; a genuinely atomic claim needs a lock, which is
+# disproportionate here. See CONTRIBUTING.md for the staleness rule that stops claims from becoming permanent.
+set -euo pipefail
+
+# The MAIN clone, never the worktree this script happens to live in. Agents run this from inside a worktree far
+# more often than from the main checkout, and `dirname $BASH_SOURCE/..` would then resolve to that worktree --
+# so `git worktree add .worktrees/<id>` would NEST a worktree inside a worktree. The common git dir is shared by
+# every worktree and always points at the main clone's `.git`, so its parent is the root regardless of where
+# this is invoked from.
+REPO_ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+STALE_AFTER_HOURS=4
+
+die() { echo "error: $*" >&2; exit 1; }
+
+# The one branch-name -> claim rule, shared with scripts/tests/claim.test.sh so the check and its proof cannot
+# drift (gh#833). Sourced by BASH_SOURCE path, so it resolves whatever cwd this is invoked from.
+# shellcheck source=lib/claim-branch-match.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/claim-branch-match.sh"
+
+ID="${1:-}"
+[ -n "$ID" ] || die "usage: scripts/claim.sh <issue-id> [type] [slug]   (type: feature|bug|hotfix)"
+[[ "$ID" =~ ^[0-9]+$ ]] || die "the work-item id must be the tracking GitHub issue NUMBER, got '$ID'"
+
+CHECK_ONLY=false
+TYPE="feature"
+SLUG=""
+for arg in "${@:2}"; do
+    case "$arg" in
+        --check)               CHECK_ONLY=true ;;
+        feature|bug|hotfix)    TYPE="$arg" ;;
+        *)                     SLUG="$arg" ;;
+    esac
+done
+
+cd "$REPO_ROOT"
+git fetch origin --prune --quiet
+
+# ---------------------------------------------------------------------------------------------------------
+# 0. Is it already DONE? (gh#427)
+# ---------------------------------------------------------------------------------------------------------
+# The branch check below answers "is anyone working on this?" but not "is this already finished?" -- and the
+# second case costs exactly as much. gh#360 was picked up after a parallel session had already delivered and
+# merged it: their branch had auto-deleted, so there was correctly no claim to find, and the work was simply
+# done. Nothing caught it until the first file turned out to already exist.
+#
+# Fails closed: a closed issue is nearly always finished work, and deliberately reopening one is rare enough to
+# deserve an explicit second look. Degrades to a warning when gh is missing or unauthenticated -- an unreachable
+# API must never be the thing that stops work.
+if command -v gh >/dev/null 2>&1; then
+    STATE="$(gh issue view "$ID" --json state --jq .state 2>/dev/null || echo "")"
+    if [ "$STATE" = "CLOSED" ]; then
+        echo "CLOSED — #${ID} is already closed."
+        echo "Its work is very likely already on develop; check before claiming (a parallel session may have"
+        echo "delivered it while this one was busy). Reopen it deliberately if the pickup is still right."
+        exit 1
+    elif [ -z "$STATE" ]; then
+        echo "note: could not read #${ID}'s state from GitHub — proceeding without the already-done check." >&2
+    fi
+fi
+
+# ---------------------------------------------------------------------------------------------------------
+# 0b. Is the PARENT claimed? (gh#453)
+# ---------------------------------------------------------------------------------------------------------
+# The branch check below matches on this issue's own id, which works right up until an issue is SPLIT: the child
+# gets a new id and the claim held on its parent becomes invisible. gh#437 was picked up that way -- a session had
+# been building the same work under gh#400 for 38 minutes, `claim.sh 437` grepped `/437_`, found nothing, and
+# correctly reported UNCLAIMED. Four commits were superseded.
+#
+# THE RESPONSE DEPENDS ON WHAT KIND OF PARENT IT IS, because the two cases mean opposite things:
+#
+#   * a NON-EPIC parent (gh#437's case: gh#400 was an ordinary issue that had been split) -- its claim almost
+#     certainly overlaps this child's scope. REFUSE.
+#   * an EPIC parent (gh#361 -> [D2] gh#14, gh#412 -> [X1] gh#26) -- epics are long-lived cards that stay In
+#     Progress for weeks while children land under them. A claim there says nothing about this child, and
+#     refusing would fire on most issues in the repo and train everyone to route around the check. WARN.
+#
+# That split is measured, not assumed: sampling recent issues, both shapes are common.
+if command -v gh >/dev/null 2>&1; then
+    PARENT="$(gh api "repos/{owner}/{repo}/issues/$ID" \
+        --jq '.parent_issue_url // "" | split("/") | last' 2>/dev/null || echo "")"
+
+    if [ -n "$PARENT" ] && [ "$PARENT" != "null" ]; then
+        PARENT_CLAIM="$(git ls-remote --heads origin 2>/dev/null | sed 's|.*refs/heads/||' \
+            | claim_branches_for "$PARENT")"
+
+        if [ -n "$PARENT_CLAIM" ]; then
+            IS_EPIC="$(gh api "repos/{owner}/{repo}/issues/$PARENT" \
+                --jq '[.labels[].name] | index("epic") // "" | tostring' 2>/dev/null || echo "")"
+
+            echo "The PARENT of #${ID} — #${PARENT} — is claimed:"
+            while IFS= read -r branch; do
+                [ -n "$branch" ] || continue
+                TIP="$(git log -1 --format='%ct' "origin/${branch}" 2>/dev/null || echo 0)"
+                AGE_H=$(( ($(date -u +%s) - TIP) / 3600 ))
+                BASE="$(git merge-base "origin/${branch}" origin/develop 2>/dev/null || echo '')"
+                AHEAD="$(git rev-list --count "${BASE}..origin/${branch}" 2>/dev/null || echo '?')"
+                echo "    ${branch}  (${AHEAD} commit(s), last activity ${AGE_H}h ago)"
+            done <<< "$PARENT_CLAIM"
+
+            if [ "$IS_EPIC" = "" ] || [ "$IS_EPIC" = "null" ]; then
+                echo ""
+                echo "REFUSED — #${PARENT} is not an epic, so that claim very likely covers this work too."
+                echo "This is the gh#437 shape: an issue was split and the child looked free because the claim"
+                echo "sits on the parent's id. Read that branch, and coordinate on the issue before proceeding."
+                exit 1
+            fi
+
+            echo ""
+            echo "note: #${PARENT} is an EPIC, so its claim does not imply this child is taken — proceeding." >&2
+            echo "      Still worth a glance at that branch if the scopes look close." >&2
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------------------------------------
+# 1. Is it already claimed?
+# ---------------------------------------------------------------------------------------------------------
+# A claim is any pushed branch whose name embeds this id as a whole token -- the canonical `<type>/<id>_<title>`,
+# but equally a `wip/<id>-...` or a Cursor Cloud `cursor/<name>-<id>-<suffix>` (gh#833). Matching only `/<id>_`
+# missed every branch of the latter two shapes and reported "unclaimed" for genuinely claimed issues -- exactly
+# the duplicate work this guards against. claim_branches_for matches the id anywhere, digit-bounded so 1731/7310
+# never satisfy 731 (scripts/lib/claim-branch-match.sh).
+EXISTING="$(git ls-remote --heads origin 2>/dev/null | sed 's|.*refs/heads/||' | claim_branches_for "$ID")"
+
+if [ -n "$EXISTING" ]; then
+    echo "CLAIMED — a remote branch for #${ID} already exists:"
+    while IFS= read -r branch; do
+        [ -n "$branch" ] || continue
+        TIP="$(git log -1 --format='%ct' "origin/${branch}" 2>/dev/null || echo 0)"
+        NOW="$(date -u +%s)"
+        AGE_H=$(( (NOW - TIP) / 3600 ))
+        BASE="$(git merge-base "origin/${branch}" origin/develop 2>/dev/null || echo '')"
+        AHEAD="$(git rev-list --count "${BASE}..origin/${branch}" 2>/dev/null || echo '?')"
+        FLAG=""
+        [ "$AGE_H" -ge "$STALE_AFTER_HOURS" ] && FLAG="  <-- STALE (>= ${STALE_AFTER_HOURS}h)"
+        echo "    ${branch}  (${AHEAD} commit(s), last activity ${AGE_H}h ago)${FLAG}"
+    done <<< "$EXISTING"
+    echo ""
+    echo "If it is stale, say so ON THE ISSUE before taking it over (CONTRIBUTING.md, 'Claiming work')."
+    echo "Announcing is what makes a wrong staleness call recoverable instead of a second collision."
+    exit 1
+fi
+
+LOCAL_WT="$(git worktree list | grep -E "[/\\\\]${ID}_" || true)"
+if [ -n "$LOCAL_WT" ]; then
+    echo "note: a LOCAL worktree for #${ID} exists but nothing is pushed — a previous session here may have"
+    echo "      abandoned it, or may be mid-work without having claimed properly:"
+    echo "$LOCAL_WT" | sed 's/^/    /'
+    echo ""
+fi
+
+if [ "$CHECK_ONLY" = true ]; then
+    echo "UNCLAIMED — #${ID} has no remote branch."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------------------------------------
+# 2. Claim it.
+# ---------------------------------------------------------------------------------------------------------
+if [ -z "$SLUG" ]; then
+    TITLE="$(gh issue view "$ID" --json title --jq .title 2>/dev/null || true)"
+    # Strip the title's prefix, lowercase, non-alphanumerics to dashes, first 4 words. Two forms, deliberately
+    # separate: `feat(scope): ` / `QA(task#267) - ` (scoped, either separator) and `docs: ` (unscoped, colon
+    # only). Allowing a bare `-` separator without the parens would eat the first word of a hyphenated title --
+    # "Multi-login: lift the …" would claim as `login-lift-the-one`.
+    SLUG="$(printf '%s' "$TITLE" \
+        | sed -E 's/^[a-zA-Z]+\([^)]*\)!? *[:-] *//; s/^[a-zA-Z]+!?: *//' \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
+        | cut -d- -f1-4)"
+    [ -n "$SLUG" ] || die "could not derive a slug from issue #${ID}; pass one explicitly"
+fi
+
+BRANCH="${TYPE}/${ID}_${SLUG}"
+WORKTREE=".worktrees/${ID}_${SLUG}"
+
+[ -e "$WORKTREE" ] && die "$WORKTREE already exists — remove it, or 'git worktree prune', before claiming"
+
+echo "claiming #${ID} as ${BRANCH}"
+git worktree add "$WORKTREE" -b "$BRANCH" origin/develop >/dev/null
+git -C "$WORKTREE" push -u origin "$BRANCH" --quiet
+
+# Submodules are NOT populated in a fresh worktree; the ProjectX-dependent projects fail to compile without this.
+git -C "$WORKTREE" submodule update --init --recursive --quiet 2>/dev/null || true
+
+echo ""
+echo "claimed. the branch is pushed and empty, so every other session can see it now."
+echo "  worktree: ${WORKTREE}"
+echo "  branch:   ${BRANCH}"
+echo ""
+echo "push your commits as you go — the branch tip is the heartbeat the staleness rule reads."
+echo "if you abandon this, delete the branch (git push origin --delete ${BRANCH}) so it stops blocking."

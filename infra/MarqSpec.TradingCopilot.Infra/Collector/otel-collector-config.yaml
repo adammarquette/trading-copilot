@@ -1,0 +1,103 @@
+# The OTLP collector sidecar (ADR-0030 decision 13).
+#
+# THERE IS NO TOKEN IN THIS FILE. Auth is SigV4 on the task role. The three AWS OTLP URLs
+# arrive as ${env:...} from region/context.
+#
+# A Fargate task has no disk to mount a file, so EnvironmentStack embeds this text in
+# OTEL_COLLECTOR_CONFIG and starts the collector with --config=env:OTEL_COLLECTOR_CONFIG.
+# A template test asserts the task carries this file byte for byte.
+#
+# Receives OTLP on the task loopback, stamps environment and release, exports to CloudWatch
+# over OTLP/HTTP. The file is byte-identical in both environments.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:DEPLOYMENT_ENVIRONMENT}
+        action: upsert
+      - key: service.version
+        value: ${env:SERVICE_VERSION}
+        action: upsert
+
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+extensions:
+  sigv4auth/traces:
+    region: ${env:AWS_REGION}
+    service: xray
+  sigv4auth/metrics:
+    region: ${env:AWS_REGION}
+    service: monitoring
+  sigv4auth/logs:
+    region: ${env:AWS_REGION}
+    service: logs
+
+exporters:
+  otlp_http/xray:
+    traces_endpoint: ${env:AWS_OTLP_TRACES_ENDPOINT}
+    compression: gzip
+    auth:
+      authenticator: sigv4auth/traces
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+
+  otlp_http/metrics:
+    metrics_endpoint: ${env:AWS_OTLP_METRICS_ENDPOINT}
+    compression: gzip
+    auth:
+      authenticator: sigv4auth/metrics
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+
+  otlp_http/logs:
+    logs_endpoint: ${env:AWS_OTLP_LOGS_ENDPOINT}
+    compression: gzip
+    headers:
+      x-aws-log-group: ${env:AWS_OTLP_LOG_GROUP}
+      x-aws-log-stream: otlp
+    auth:
+      authenticator: sigv4auth/logs
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+
+service:
+  extensions: [sigv4auth/traces, sigv4auth/metrics, sigv4auth/logs]
+  telemetry:
+    logs:
+      level: info
+      encoding: json
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp_http/xray]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp_http/metrics]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp_http/logs]

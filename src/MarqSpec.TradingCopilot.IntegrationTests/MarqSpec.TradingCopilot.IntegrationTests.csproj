@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- QA-owned integration + smoke tests. Contract: AGENTS.md.
+       No mocking library by design — integration tests use real dependencies. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <PackageReference Include="Testcontainers.PostgreSql" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Api\MarqSpec.TradingCopilot.Api.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Data\MarqSpec.TradingCopilot.Data.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Domain\MarqSpec.TradingCopilot.Domain.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.ProjectX\MarqSpec.TradingCopilot.Integration.ProjectX.csproj" />
+    <!-- The cross-asset CONTEXT price adapter and its transport seam (gh#705, of gh#496): the outage / capability
+         cases assert against the REAL FinnhubMarketDataSource resolved from the host, and stand its
+         IFinnhubQuoteStream down, rather than replacing the adapter with a stub. -->
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Finnhub\MarqSpec.TradingCopilot.Integration.Finnhub.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="FluentAssertions" />
+  </ItemGroup>
+
+  <!-- The observability assets the AlertRuleSeriesReconciliation suite reads (gh#536), copied next to the test
+       binary under observability/ so the suite reads them from BaseDirectory rather than walking up the tree. -->
+  <ItemGroup>
+    <Content Include="..\..\observability\**\*.*" LinkBase="observability" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- The audit doc the InventoryIdentifierLiveSchema suite harvests §2's "proven by name" identifiers from
+       (gh#981), copied next to the test binary under documentation/ for the same BaseDirectory-not-source-tree
+       reason as the observability assets above. -->
+  <ItemGroup>
+    <Content Include="..\..\documentation\integration-test-audit.md" LinkBase="documentation" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

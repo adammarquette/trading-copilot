@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The CDK app (ADR-0030): one EnvironmentStack instantiated for staging and for production.
+    GitHub OIDC deploy roles are left to gh#1187 with the release workflow. The app references
+    no product project: nothing here enters the GHCR image.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>MarqSpec.TradingCopilot.Infra</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Amazon.CDK.Lib" />
+    <PackageReference Include="Constructs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Collector\otel-collector-config.yaml" LogicalName="otel-collector-config.yaml" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!-- The BFF host (R-18 auth, R-10 API). Minimal API + JWT bearer. Common settings from ../Directory.Build.props. -->
+
+  <ItemGroup>
+    <!-- Identity's PasswordHasher comes from the ASP.NET shared framework (Web SDK); only JWT bearer needs a package. -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <!-- Self-documenting API (gh#604, R-10): OpenAPI document generation + a Scalar reference UI over it. -->
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Scalar.AspNetCore" />
+    <!-- Observability (gh#230, ADR-0002): SDK + OTLP export + the instrumentations engineering §7 names. -->
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
+    <PackageReference Include="Npgsql.OpenTelemetry" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Data\MarqSpec.TradingCopilot.Data.csproj" />
+    <!-- The composition root builds venue adapters (R-17); the ProjectX client arrives transitively. -->
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Finnhub\MarqSpec.TradingCopilot.Integration.Finnhub.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.ProjectX\MarqSpec.TradingCopilot.Integration.ProjectX.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Tiingo\MarqSpec.TradingCopilot.Integration.Tiingo.csproj" />
+    <ProjectReference Include="..\MarqSpec.TradingCopilot.Integration.Tradovate\MarqSpec.TradingCopilot.Integration.Tradovate.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Endpoint handlers are internal; unit tests exercise them directly (integration tests hit the HTTP surface). -->
+    <InternalsVisibleTo Include="MarqSpec.TradingCopilot.UnitTests" />
+  </ItemGroup>
+
+</Project>

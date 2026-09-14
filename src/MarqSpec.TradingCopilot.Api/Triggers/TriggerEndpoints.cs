@@ -1,0 +1,500 @@
+using MarqSpec.TradingCopilot.Data;
+using MarqSpec.TradingCopilot.Data.Entities;
+using MarqSpec.TradingCopilot.Data.Tenancy;
+using MarqSpec.TradingCopilot.Domain;
+using MarqSpec.TradingCopilot.Domain.MarketData;
+using MarqSpec.TradingCopilot.Domain.Notifications;
+using MarqSpec.TradingCopilot.Domain.Triggers;
+using MarqSpec.TradingCopilot.Domain.Venue;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.EntityFrameworkCore;
+
+namespace MarqSpec.TradingCopilot.Api.Triggers;
+
+/// <summary>
+/// The <c>/api/triggers</c> endpoints (gh#385, gh#402, R-4 / R-7, ADR-0008) — the operator authors and manages
+/// standing deterministic triggers; the scan evaluates exactly what is persisted. Every write is validated at the
+/// boundary (a corrupt enum, a non-positive period, an unknown indicator are all refused) so a malformed trigger
+/// never reaches the scan or the database check constraints.
+/// </summary>
+/// <remarks>
+/// Both routes are authorable. The <b>route/account pairing</b> is validated here and mirrored by two DB checks: an
+/// <c>AgentReview</c> trigger <b>requires</b> an <c>AccountId</c> and a positive <c>Size</c> (and an account whose
+/// live mode is not <c>Undeclared</c>) — <c>CK_Triggers_AgentReview_RequiresAccountAndSize</c>; a <c>Mechanical</c>
+/// trigger carrying either is refused — <c>CK_Triggers_Mechanical_NoAccount</c>.
+/// </remarks>
+public static class TriggerEndpoints
+{
+    /// <summary>Maps the trigger endpoints. All require authentication.</summary>
+    /// <param name="endpoints">The endpoint route builder.</param>
+    /// <returns>The same builder, for chaining.</returns>
+    public static IEndpointRouteBuilder MapTriggerEndpoints(this IEndpointRouteBuilder endpoints)
+    {
+        RouteGroupBuilder group = endpoints.MapGroup("/api/triggers").RequireAuthorization().WithTags("Triggers");
+        group.MapPost("/", CreateTriggerAsync).WithSummary("Author a standing deterministic trigger.");
+        group.MapGet("/", ListTriggersAsync).WithSummary("List the operator's triggers.");
+        group.MapGet("/{id:guid}", GetTriggerAsync).WithSummary("Get a trigger by id.");
+        group.MapPatch("/{id:guid}", PatchTriggerAsync).WithSummary("Update a trigger.");
+        group.MapPost("/{id:guid}/confirm", ConfirmTriggerAsync)
+            .WithSummary("Confirm a trigger that requires operator confirmation.");
+        group.MapDelete("/{id:guid}", DeleteTriggerAsync).WithSummary("Delete a trigger.");
+        return endpoints;
+    }
+
+    internal static async Task<IResult> CreateTriggerAsync(
+        CreateTriggerRequest request,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        IInstrumentSpecSource specs,
+        CancellationToken cancellationToken)
+    {
+        // The condition half's refusals are TriggerAuthoring's (gh#1135) -- SHARED with the chat edit_rulebook tool
+        // rather than copied, so a model-authored trigger can never be checked by an older copy of these rules
+        // (gh#1007 is the precedent: the same threshold gap had to be fixed at create AND at patch). The evaluation
+        // ORDER is this endpoint's own and unchanged -- a bad route still refuses before a bad period -- because each
+        // refusal is its own call rather than one whole-request validator, and every refusal string is verbatim.
+        // gh#1153: the symbol check now includes configured-tradable, so the operator and the model face one bar.
+        if (TriggerAuthoring.RefuseSymbol(request.Symbol, specs, out InstrumentId instrument) is { } symbolError)
+        {
+            return Results.BadRequest(new { error = symbolError });
+        }
+
+        if (TriggerAuthoring.RefuseComparison(request.Comparison) is { } comparisonError)
+        {
+            return Results.BadRequest(new { error = comparisonError });
+        }
+
+        if (request.Route == TriggerRoute.Unknown)
+        {
+            return Results.BadRequest(new { error = "The route must be Mechanical or AgentReview." });
+        }
+
+        if (TriggerAuthoring.RefusePeriod(request.Period) is { } periodError)
+        {
+            return Results.BadRequest(new { error = periodError });
+        }
+
+        if (TriggerAuthoring.RefuseResolution(request.ResolutionMinutes) is { } resolutionError)
+        {
+            return Results.BadRequest(new { error = resolutionError });
+        }
+
+        if (TriggerAuthoring.RefuseIndicator(request.Indicator, out string indicatorName) is { } indicatorError)
+        {
+            return Results.BadRequest(new { error = indicatorError });
+        }
+
+        if (TriggerAuthoring.RefuseHysteresis(request.Hysteresis) is { } hysteresisError)
+        {
+            return Results.BadRequest(new { error = hysteresisError });
+        }
+
+        // The threshold must sit inside the indicator's meaningful range, or the debounce seeds straight to Fired and
+        // holds there — ADR-0019's silent monitor, reached from authoring (gh#1007). Validated against the RESOLVED
+        // indicator, because the bound is the indicator's own semantics, not a blanket rule (TriggerThreshold).
+        if (TriggerThreshold.Refusal(indicatorName, request.Threshold) is { } thresholdRefusal)
+        {
+            return Results.BadRequest(new { error = thresholdRefusal });
+        }
+
+        // Account + size are the agent-review route's alone: it issues a sized suggestion against an account on fire,
+        // where a mechanical trigger only alerts. Validated whole here (the DB check constraints are the backstop):
+        // an agent-review trigger REQUIRES an owned, mode-declared account and a positive size; a mechanical trigger
+        // must carry neither. Mode is read LIVE from the account here only to REFUSE an undeclared one -- it is never
+        // stored on the trigger; the suggestion re-reads it at issuance.
+        Guid? accountId = null;
+        int? size = null;
+        if (request.Route == TriggerRoute.AgentReview)
+        {
+            if (request.AccountId is not { } requestedAccount)
+            {
+                return Results.BadRequest(new { error = "An agent-review trigger needs an account to issue against." });
+            }
+
+            if (request.Size is not > 0)
+            {
+                return Results.BadRequest(new { error = "An agent-review trigger needs a positive size." });
+            }
+
+            // The default-deny R-20 filter scopes this read to the caller, so another operator's account -- or one
+            // that does not exist -- is indistinguishable from absent, and reads as 404.
+            Account? account = await database.Accounts
+                .FirstOrDefaultAsync(candidate => candidate.Id == requestedAccount, cancellationToken);
+            if (account is null)
+            {
+                return Results.NotFound(new { error = "No such account for this operator." });
+            }
+
+            if (account.Mode == TradingMode.Undeclared)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "The account's trading mode is undeclared — declare it before issuing suggestions on it.",
+                });
+            }
+
+            accountId = requestedAccount;
+            size = request.Size;
+        }
+        else if (request.AccountId is not null || request.Size is not null)
+        {
+            // Mechanical (the only other buildable route): an account or size is a category error, not a variant.
+            return Results.BadRequest(new
+            {
+                error = "A mechanical trigger takes no account or size — those are for the agent-review route.",
+            });
+        }
+
+        TriggerRecord trigger = new()
+        {
+            Id = Guid.NewGuid(),
+            UserId = currentUser.UserId,
+            Symbol = instrument.Symbol,
+            Indicator = indicatorName,
+            Period = request.Period,
+            ResolutionMinutes = request.ResolutionMinutes,
+            ConditionKind = TriggerConditionKind.IndicatorThreshold,
+            Comparison = request.Comparison,
+            Threshold = request.Threshold,
+            Hysteresis = request.Hysteresis,
+            Route = request.Route,
+            AccountId = accountId,
+            Size = size,
+            Severity = request.Severity,
+            Enabled = true,
+            // FAIL-CLOSED (gh#470): a newly authored trigger is UNCONFIRMED, so it is inert until the operator
+            // confirms it -- even though Enabled is true. Authorship arms nothing; confirmation is the separate,
+            // deliberate act (POST /{id}/confirm) that accepts a trigger into the firing set. This is the whole point
+            // of the gate: an agent-proposed or hastily-created trigger cannot page or wake the reviewer on its own.
+            Confirmation = TriggerConfirmation.Unconfirmed,
+            ArmState = TriggerArmState.Unseeded,
+            ArmCycle = 0,
+            CreatedAt = DateTimeOffset.UtcNow,
+        };
+        database.Triggers.Add(trigger);
+        await database.SaveChangesAsync(cancellationToken);
+
+        return Results.Created($"/api/triggers/{trigger.Id}", TriggerResponse.From(trigger));
+    }
+
+    internal static async Task<IResult> ListTriggersAsync(
+        TradingCopilotDbContext database,
+        CancellationToken cancellationToken)
+    {
+        // The default-deny R-20 filter scopes this to the caller's triggers -- no explicit owner predicate needed.
+        List<TriggerRecord> triggers = await database.Triggers
+            .OrderBy(trigger => trigger.CreatedAt)
+            .ToListAsync(cancellationToken);
+        IReadOnlyDictionary<Guid, Rule> sourceRules = await SourceRuleLookup.ResolveManyAsync(
+            database.Rules, triggers.Select(trigger => trigger.SourceRuleId), cancellationToken);
+        return Results.Ok(triggers.Select(trigger => TriggerResponse.From(trigger, Lookup(sourceRules, trigger.SourceRuleId))).ToList());
+    }
+
+    internal static async Task<IResult> GetTriggerAsync(
+        Guid id,
+        TradingCopilotDbContext database,
+        CancellationToken cancellationToken)
+    {
+        TriggerRecord? trigger = await database.Triggers
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+
+        // The R-20 filter has already hidden another operator's trigger, so "not visible" reads as 404.
+        if (trigger is null)
+        {
+            return Results.NotFound();
+        }
+
+        Rule? sourceRule = await SourceRuleLookup.ResolveAsync(
+            database.Rules, trigger.SourceRuleId, cancellationToken);
+        return Results.Ok(TriggerResponse.From(trigger, sourceRule));
+    }
+
+    private static Rule? Lookup(IReadOnlyDictionary<Guid, Rule> sourceRules, Guid? sourceRuleId) =>
+        sourceRuleId is Guid id && sourceRules.TryGetValue(id, out Rule? rule) ? rule : null;
+
+    internal static async Task<IResult> PatchTriggerAsync(
+        Guid id,
+        PatchTriggerRequest request,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        CancellationToken cancellationToken)
+    {
+        _ = currentUser; // ownership is enforced by the R-20 filter below; the parameter documents the intent.
+
+        TriggerRecord? trigger = await database.Triggers
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (trigger is null)
+        {
+            return Results.NotFound();
+        }
+
+        if (request.Comparison is { } comparison
+            && TriggerAuthoring.RefuseComparison(comparison) is { } patchComparisonError)
+        {
+            return Results.BadRequest(new { error = patchComparisonError });
+        }
+
+        if (TriggerAuthoring.RefuseHysteresis(request.Hysteresis) is { } patchHysteresisError)
+        {
+            return Results.BadRequest(new { error = patchHysteresisError });
+        }
+
+        // Patch is the second writer that had the gh#1007 gap. Validated whole here, BEFORE any field is applied
+        // (the top-guard shape) — against the trigger's STORED indicator, since patch cannot change the indicator.
+        if (request.Threshold is { } proposedThreshold
+            && TriggerThreshold.Refusal(trigger.Indicator, proposedThreshold) is { } thresholdRefusal)
+        {
+            return Results.BadRequest(new { error = thresholdRefusal });
+        }
+
+        if (request.Enabled is { } enabled)
+        {
+            trigger.Enabled = enabled;
+        }
+
+        if (request.Threshold is { } threshold)
+        {
+            trigger.Threshold = threshold;
+        }
+
+        if (request.Hysteresis is { } hysteresis)
+        {
+            trigger.Hysteresis = hysteresis;
+        }
+
+        if (request.Comparison is { } newComparison)
+        {
+            trigger.Comparison = newComparison;
+        }
+
+        if (request.Severity is { } severity)
+        {
+            trigger.Severity = severity;
+        }
+
+        // A condition that became true while disabled or under an old definition must re-seed SILENTLY, not fire on
+        // re-enable -- so any edit resets the debounce to Unseeded. Bump the incident cycle too: a currently-fired
+        // trigger has an OPEN dedup incident under its current cycle key, and without a fresh cycle the next genuine
+        // crossing would mint that same key and be SUPPRESSED as a duplicate -- a silent miss, with a firing row
+        // that lies it fired. The counter only ever moves forward; the firing history is the journal's, not the
+        // request's. (The old incident lingers open until it ages out; it is a tell-once Notify, not a nagging Page.)
+        trigger.ArmState = TriggerArmState.Unseeded;
+        trigger.ArmCycle++;
+        await database.SaveChangesAsync(cancellationToken);
+
+        return Results.Ok(TriggerResponse.From(trigger));
+    }
+
+    internal static async Task<IResult> ConfirmTriggerAsync(
+        Guid id,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        CancellationToken cancellationToken)
+    {
+        _ = currentUser; // ownership is enforced by the R-20 filter below; the parameter documents the intent.
+
+        TriggerRecord? trigger = await database.Triggers
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (trigger is null)
+        {
+            return Results.NotFound();
+        }
+
+        // Confirming is the deliberate act that accepts an authored trigger into the firing set (gh#470); it is
+        // separate from creation on purpose. Idempotent: confirming an already-confirmed trigger is a no-op that still
+        // reads 200, so a retried request is harmless. The debounce is left untouched -- a freshly authored trigger is
+        // already Unseeded, so its first scan after confirmation seeds silently (adopts current truth, no fire) and
+        // only an observed crossing fires, exactly as create-then-enable behaved before this gate existed.
+        trigger.Confirmation = TriggerConfirmation.Confirmed;
+        await database.SaveChangesAsync(cancellationToken);
+
+        return Results.Ok(TriggerResponse.From(trigger));
+    }
+
+    internal static async Task<IResult> DeleteTriggerAsync(
+        Guid id,
+        ICurrentUser currentUser,
+        TradingCopilotDbContext database,
+        CancellationToken cancellationToken)
+    {
+        _ = currentUser; // ownership is enforced by the R-20 filter below; the parameter documents the intent.
+
+        TriggerRecord? trigger = await database.Triggers
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (trigger is null)
+        {
+            return Results.NotFound();
+        }
+
+        database.Triggers.Remove(trigger);
+        await database.SaveChangesAsync(cancellationToken);
+        return Results.NoContent();
+    }
+}
+
+/// <summary>The body of a create-trigger request (gh#385). Only the indicator-threshold kind is authored today.</summary>
+/// <param name="Symbol">The venue-neutral instrument symbol (e.g. <c>ES</c>).</param>
+/// <param name="Indicator">The R-22 indicator name (<c>atr</c> / <c>rsi</c>), case-insensitive.</param>
+/// <param name="Period">The indicator period; must be positive.</param>
+/// <param name="ResolutionMinutes">The bar size in minutes; must be positive.</param>
+/// <param name="Comparison">Below or Above; Unknown is refused.</param>
+/// <param name="Threshold">The threshold to compare against.</param>
+/// <param name="Route">Where a fire routes; Mechanical or AgentReview.</param>
+/// <param name="Hysteresis">The optional re-arm dead-band; null means none, and it must be positive when set.</param>
+/// <param name="Severity">How loudly the alert arrives; defaults to <see cref="NotificationSeverity.Notify"/>.</param>
+/// <param name="AccountId">
+/// The account a fired agent-review suggestion issues against — <b>required</b> for AgentReview (owned + mode
+/// declared), <b>refused</b> for Mechanical. Null otherwise.
+/// </param>
+/// <param name="Size">
+/// The contract size a fired agent-review suggestion issues at — <b>required</b> and positive for AgentReview,
+/// <b>refused</b> for Mechanical. The operator's size, never the model's.
+/// </param>
+public sealed record CreateTriggerRequest(
+    string Symbol,
+    string Indicator,
+    int Period,
+    int ResolutionMinutes,
+    IndicatorComparison Comparison,
+    decimal Threshold,
+    TriggerRoute Route,
+    decimal? Hysteresis = null,
+    NotificationSeverity Severity = NotificationSeverity.Notify,
+    Guid? AccountId = null,
+    int? Size = null);
+
+/// <summary>
+/// The body of a patch-trigger request (gh#385). Every field is optional — null means "leave unchanged". The
+/// debounce state (<c>ArmState</c>, <c>ArmCycle</c>, <c>LastFiredAt</c>, <c>LastEvaluatedValue</c>) is deliberately
+/// absent: it is the scan's and the journal's, never the caller's, and any edit re-seeds the arm state silently.
+/// </summary>
+/// <param name="Enabled">Enable or disable the trigger.</param>
+/// <param name="Threshold">A new threshold.</param>
+/// <param name="Hysteresis">A new re-arm dead-band; must be positive when set (clearing it is not offered here).</param>
+/// <param name="Comparison">A new comparison; Unknown is refused.</param>
+/// <param name="Severity">A new alert severity.</param>
+public sealed record PatchTriggerRequest(
+    bool? Enabled = null,
+    decimal? Threshold = null,
+    decimal? Hysteresis = null,
+    IndicatorComparison? Comparison = null,
+    NotificationSeverity? Severity = null);
+
+/// <summary>The trigger as returned by the API (gh#385) — the persisted state, including the debounce memory.</summary>
+/// <param name="Id">The trigger id.</param>
+/// <param name="Symbol">The instrument symbol.</param>
+/// <param name="Indicator">The indicator name.</param>
+/// <param name="Period">The indicator period.</param>
+/// <param name="ResolutionMinutes">The bar size in minutes.</param>
+/// <param name="Comparison">The comparison.</param>
+/// <param name="Threshold">The threshold.</param>
+/// <param name="Hysteresis">The re-arm dead-band, if any.</param>
+/// <param name="Route">Where a fire routes.</param>
+/// <param name="AccountId">The agent-review account a fire issues against, or null for a mechanical trigger.</param>
+/// <param name="Size">The agent-review contract size a fire issues at, or null for a mechanical trigger.</param>
+/// <param name="Severity">The alert severity.</param>
+/// <param name="Enabled">Whether the scan evaluates it.</param>
+/// <param name="Confirmation">Whether the operator has confirmed it for live evaluation; unconfirmed is inert (gh#470).</param>
+/// <param name="ArmState">The debounce state.</param>
+/// <param name="ArmCycle">The incident counter.</param>
+/// <param name="LastEvaluatedValue">The last measured value, if any.</param>
+/// <param name="LastFiredAt">When it last fired, if ever.</param>
+/// <param name="CreatedAt">When it was created.</param>
+/// <param name="SourceRuleId">The rulebook rule that authored the trigger, or null — a soft R-7 provenance reference (gh#471 / gh#866).</param>
+/// <param name="SourceConversationId">The conversation the trigger's rule was authored in, or null — a soft R-7 provenance reference (gh#471).</param>
+public sealed record TriggerResponse(
+    Guid Id,
+    string Symbol,
+    string Indicator,
+    int Period,
+    int ResolutionMinutes,
+    IndicatorComparison Comparison,
+    decimal Threshold,
+    decimal? Hysteresis,
+    TriggerRoute Route,
+    Guid? AccountId,
+    int? Size,
+    NotificationSeverity Severity,
+    bool Enabled,
+    TriggerConfirmation Confirmation,
+    TriggerArmState ArmState,
+    int ArmCycle,
+    decimal? LastEvaluatedValue,
+    DateTimeOffset? LastFiredAt,
+    DateTimeOffset CreatedAt,
+    Guid? SourceRuleId,
+    Guid? SourceConversationId)
+{
+    /// <summary>
+    /// The <see cref="Rule"/> <see cref="SourceRuleId"/> resolves to, when a row exists. Null when the id is
+    /// absent or the rule was deleted — the reference is soft (gh#866).
+    /// </summary>
+    public RuleSummary? SourceRule { get; init; }
+
+    /// <summary>Projects a persisted trigger into its API representation.</summary>
+    /// <param name="record">The persisted trigger.</param>
+    /// <returns>The response DTO, with no resolved source rule.</returns>
+    public static TriggerResponse From(TriggerRecord record) => From(record, sourceRule: null);
+
+    /// <summary>Projects a persisted trigger, attaching the Rule the soft <see cref="SourceRuleId"/> navigates to.</summary>
+    /// <param name="record">The persisted trigger.</param>
+    /// <param name="sourceRule">The owned rule row, or <see langword="null"/> when the soft reference does not resolve.</param>
+    /// <returns>The response DTO.</returns>
+    public static TriggerResponse From(TriggerRecord record, Rule? sourceRule) => new(
+        record.Id,
+        record.Symbol,
+        record.Indicator,
+        record.Period,
+        record.ResolutionMinutes,
+        record.Comparison,
+        record.Threshold,
+        record.Hysteresis,
+        record.Route,
+        record.AccountId,
+        record.Size,
+        record.Severity,
+        record.Enabled,
+        record.Confirmation,
+        record.ArmState,
+        record.ArmCycle,
+        record.LastEvaluatedValue,
+        record.LastFiredAt,
+        record.CreatedAt,
+        record.SourceRuleId,
+        record.SourceConversationId)
+    {
+        SourceRule = sourceRule is null ? null : RuleSummary.From(sourceRule),
+    };
+}
+
+/// <summary>The durable rulebook row as surfaced on a trigger's read path (gh#866, data dictionary §8).</summary>
+/// <param name="Id">The rule id.</param>
+/// <param name="IntentText">The plain-language practice as authored.</param>
+/// <param name="Enabled">Whether the rule is on.</param>
+/// <param name="Confirmed">Whether the operator has accepted it; unconfirmed is inert.</param>
+/// <param name="NeedsRevalidation">Whether the confirmation-time instrument snapshot is stale.</param>
+/// <param name="SourceConversationId">The conversation the rule was authored in, or null.</param>
+/// <param name="IsArmed">Whether both <paramref name="Enabled"/> and <paramref name="Confirmed"/> are set.</param>
+public sealed record RuleSummary(
+    Guid Id,
+    string IntentText,
+    bool Enabled,
+    bool Confirmed,
+    bool NeedsRevalidation,
+    Guid? SourceConversationId,
+    bool IsArmed)
+{
+    /// <summary>Projects a persisted rule into the compact read-path shape.</summary>
+    /// <param name="rule">The persisted rule.</param>
+    /// <returns>The summary DTO.</returns>
+    public static RuleSummary From(Rule rule) => new(
+        rule.Id,
+        rule.IntentText,
+        rule.Enabled,
+        rule.Confirmed,
+        rule.NeedsRevalidation,
+        rule.SourceConversationId,
+        rule.IsArmed());
+}

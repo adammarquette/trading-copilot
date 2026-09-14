@@ -1,0 +1,164 @@
+{
+  "uid": "tc-auto-flatten",
+  "title": "Auto-flatten reliability",
+  "description": "R-13's obligation, made visible (gh#366, proposed by gh#332). The absence of a series is the alarm here — a deadline emits on EVERY evaluation including idle ones, so 'no data' means the loop did not run, not that nothing happened.",
+  "tags": ["trading-copilot", "safety-critical"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-2d", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How to read this board",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "**A blank panel is the alarm, not a quiet day.** `trading_flatten_deadlines_total` is emitted on every deadline evaluation — including `outcome=\"nothing-to-do\"` — so an absent series means the auto-flatten loop did not run. A zero bar and no bar mean opposite things.\n\n**Any watchdog save means the primary tier failed.** Nothing is exposed at that moment, but something needs fixing before the next session (ADR-0019 P2)."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Deadlines evaluated — by tier × outcome",
+      "description": "The absence signal. `nothing-to-do` is what proves the deadline was actually evaluated on a quiet day.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tier, outcome) (increase(trading_flatten_deadlines_total[1h]))",
+          "legendFormat": "{{tier}} · {{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } }, "min": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Watchdog saves (24h)",
+      "description": "ANY non-zero value means the primary tier did not flatten and the backstop did. Investigate before the next session.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(trading_flatten_deadlines_total{tier=\"watchdog\",outcome=\"executed\"}[24h]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Escalated / missed (24h)",
+      "description": "The P1 conditions ADR-0019 pages on. Non-zero means exposure outlived its deadline.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(trading_flatten_deadlines_total{outcome=~\"escalated|missed\"}[24h]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Flatten loop reporting?",
+      "description": "1 = the loop has emitted within the last 30m. 0 = SILENT, which is the TelemetryPipelineSilent P1 — assume unmonitored, not healthy.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "absent_over_time(trading_flatten_deadlines_total[30m]) != 1 or vector(0)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "SILENT", "color": "red", "index": 0 },
+                "1": { "text": "reporting", "color": "green", "index": 1 }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Time to flat — p50 / p95 / p99, by tier",
+      "description": "The tail is what matters against a market close; a mean would hide it. Exemplars drill through to the trace (gh#338).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le, tier) (rate(trading_flatten_time_to_flat_milliseconds_bucket[5m])))",
+          "legendFormat": "p50 {{tier}}",
+          "exemplar": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, tier) (rate(trading_flatten_time_to_flat_milliseconds_bucket[5m])))",
+          "legendFormat": "p95 {{tier}}",
+          "exemplar": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le, tier) (rate(trading_flatten_time_to_flat_milliseconds_bucket[5m])))",
+          "legendFormat": "p99 {{tier}}",
+          "exemplar": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 60000 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

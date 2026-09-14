@@ -1,0 +1,36 @@
+# Prometheus — metrics (gh#231, ADR-0002).
+#
+# Metrics arrive by REMOTE WRITE from the collector rather than by scraping it, because remote write carries
+# exemplars (engineering §7: a latency spike must be clickable through to its trace). Remote write and exemplar
+# storage are both enabled by flags on the command line in docker-compose.yml.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    # Distinguishes series if a second environment ever writes into the same Prometheus.
+    environment: local
+
+# Alerting rules (gh#245). `tests/` holds promtool rule tests, which are NOT rules -- the glob is one level deep
+# on purpose so Prometheus never tries to load them as rule files.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+# Where the fired alerts go (gh#245, ADR-0019). Alertmanager owns grouping, quiet hours, inhibition and the
+# Pushover receivers; Prometheus only evaluates and hands off.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # Prometheus watching itself -- the cheapest way to notice the metrics backend is unhealthy.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # The collector's own health/throughput. If this goes quiet, telemetry is being dropped somewhere upstream of
+  # every dashboard -- which otherwise looks identical to "nothing is happening".
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]

@@ -1,0 +1,95 @@
+{
+  "uid": "tc-synthetic-risk",
+  "title": "Synthetic risk & pipeline health",
+  "description": "Protection that is platform-held rather than exchange-held, and the event-log consumers two safety paths ride on (gh#366, proposed by gh#332).",
+  "tags": ["trading-copilot", "safety-critical"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-12h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "What these two numbers mean",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Orphaned stops** and **unprotected positions** are different conditions and both matter.\n\n- *Orphaned* — a stop that **was** venue-held and was moved to `Orphaned` on a connection drop. A known, handled transition; the native safety stop is still the floor, and it should return to 0 after re-arm.\n- *Unprotected* (on the Execution board) — exposure with **nothing behind it at all**, including cases nothing ever recorded.\n\nA sustained non-zero orphan count past a re-arm window is the alert candidate gh#366 proposed."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Orphaned stops (live)",
+      "description": "Live synthetic-risk exposure during an outage. Must return to 0 after re-arm — a plateau is the signal.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
+      "targets": [{ "refId": "A", "expr": "max(trading_stops_orphaned)", "legendFormat": "orphaned" }],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 20 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Venue connection (0 = down)",
+      "description": "Orphaning follows a drop, so read this panel alongside the one on its left.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
+      "targets": [{ "refId": "A", "expr": "min(trading_venue_connected)", "legendFormat": "connected" }],
+      "fieldConfig": {
+        "defaults": { "min": 0, "max": 1, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20 } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Event-log pipeline lag — p95 by consumer group",
+      "description": "A consumer falling behind is a safety-adjacent silence: stop promotion and conditional firing both ride this log.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, consumer_group) (rate(trading_eventlog_pipeline_lag_milliseconds_bucket[5m])))",
+          "legendFormat": "{{consumer_group}}",
+          "exemplar": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Retention gaps — by consumer group",
+      "description": "gh#227's silent hole, made visible. gh#306 backfills what it can from the bar store; a shortfall is reported in the logs.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (consumer_group) (increase(trading_eventlog_retention_gaps_total[1h]))",
+          "legendFormat": "{{consumer_group}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars" }, "min": 0 },
+        "overrides": []
+      }
+    }
+  ]
+}

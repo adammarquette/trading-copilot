@@ -1,0 +1,42 @@
+# ADR-0004: Charting — Lightweight Charts for the central chart; bespoke canvas/WebGL for order flow
+
+**Status:** Accepted · **Date:** 2026-07-18 · **Deciders:** Adam (operator)
+**Relates to:** PRD `R-10` (charting — the central UI surface), `R-3` (order-flow analytics), `R-22` (indicator pipeline — the pre-computed indicator panes / overlays the chart renders), `R-1` (market data / DOM), engineering §2, [architecture](../trading-platform-architecture.md).
+
+## Context
+The **chart is the central UI component** (R-10) — a candlestick chart onto which indicators (incl. custom), price levels, suggestion zones, and live positions / orders / fills overlay. Requirements:
+- Candlesticks (multi-resolution) + **indicator subcharts** (RSI, MACD, …) in their own panes.
+- Custom indicators overlaid — which we **pre-compute** in the processor (ADR-0001), so the front only renders series.
+- **No hand-drawing** needed (trendlines / freehand are out of scope).
+- **Depth-of-Market + order flow** ("Bookmap-style" — a real-time liquidity heatmap over time × price, plus trades) as an **option**.
+- Real-time, tick-fed → performance matters.
+
+## Decision
+- **Central candlestick chart + indicator subcharts: TradingView Lightweight Charts.** Canvas-based, ~45 KB, Apache-2.0, handles 50k+ candles in real time; **panes** carry the RSI / MACD subcharts; indicators, price lines, and markers render from **our pre-computed data** as overlays. (KLineCharts is an acceptable fallback — batteries-included indicators — but with drawing out of scope and indicators pre-computed, Lightweight Charts' performance + fit make it the choice.)
+- **No built-in drawing tools** — dropped from scope.
+- **DOM / order flow ("Bookmap-style") is a separate, bespoke visualization component** — *not* provided by any candlestick library. It renders a high-density, real-time **time × price liquidity heatmap + trades** from ProjectX's **`GatewayDepth`** (DOM) and **`GatewayTrade`** streams (see the wiki's ProjectX page). It needs **canvas or WebGL** rendering (SVG / d3 can't sustain the density) — its own component, feeding R-3.
+- **d3 / canvas** for other bespoke views (footprint, volume profile), never the main chart.
+
+## Alternatives considered
+- **d3 for the main chart.** Rejected — reinvents pan/zoom/crosshair/perf a purpose-built library gives free; SVG struggles at tick scale.
+- **KLineCharts.** Fine (built-in indicators + drawing), but drawing is out of scope and we pre-compute indicators, so its edge doesn't apply; kept as a documented fallback.
+- **TradingView embed widget.** Can't carry *our* overlays (shows TradingView's data) — stays supplemental (R-10), not primary.
+- **A charting library for the DOM heatmap.** None does Bookmap-class order flow off the shelf; it is inherently a bespoke component.
+
+## Consequences
+**Positive**
+- The central chart is fast, native-feeling, and renders our pre-computed indicators + overlays directly; RSI/MACD subcharts are native panes.
+- Clean separation: candlestick chart (library) · order-flow heatmap (bespoke canvas/WebGL) · other bespoke viz (d3).
+
+**Negative / costs**
+- We compute indicators ourselves — already the plan (the processor pre-computes them).
+- **The order-flow / DOM heatmap is the hardest piece** — a Bookmap-class component is real R&D (canvas/WebGL, dense real-time data). Scope it deliberately; it lands with order-flow work (Phase 3) and is "an option," not a Phase-1 must.
+
+## Follow-ups
+- **Landed** (gh#726): the Lightweight Charts pane setup — RSI / ATR each render in their own pane below the candles from the pre-computed series (R-22), toggled by the operator. MACD is not computed server-side, so it is not offered.
+- **Landed** (gh#727, increment 1): the **overlay contract** — a `PriceLineSpec` price-line primitive (`chart/overlays.ts`) an overlay maps its pre-computed data onto — and its first consumer, **price-level overlays**: active support / resistance levels from `/api/marketdata/levels` (gh#644), drawn as horizontal price lines on the candle series and toggled by the operator.
+- **Landed** (gh#727, increment 2): **suggestion-zone overlays** — an active suggestion's entry / stop / target draw as price lines (coloured by role: entry, stop = risk, target = reward), owner-scoped, from a `useSuggestionZones` hook (the R-4 actionable list filtered to the charted instrument). Because supersession is keyed on `(trigger, instrument, side)` rather than the symbol (data dictionary §6), several Active suggestions can share one instrument; when they do, each zone's three lines carry a shared ordinal (`Entry #1` / `Stop #1` / `Target #1`, `Entry #2` / …) so a stop reads unambiguously against the entry it protects — a lone zone stays unsuffixed. They refresh on reconnect and are labelled **stale** while the socket is not `live` (R-19). Instant per-issue / per-supersede refresh awaits the `realtimeSuggestion` client-method wiring (gh#760); the suggestion panel is load-once for the same reason.
+- **Landed** (gh#727, increment 3): **execution overlays** — the operator's live working orders (stop / limit price lines) and net position (average-entry line) on the charted instrument, from the instrument-scoped venue-truth reads (gh#772: `GET /accounts/{id}/orders` and `/positions` with `?instrument=`). A `useExecutionOverlays` hook loads them owner-scoped for the active account and re-reads on every order-state / fill push (gh#683 — the pushes are refresh *signals*, not marker data, which sidesteps the fill push carrying no instrument) and across a reconnect (a burst of pushes is coalesced into one re-read). They are labelled **stale** while the socket is not `live`, and **unavailable** when the venue-truth read comes back `Unknown` (venue unreachable) or refused / failed rather than a confirmed reading — so an empty overlay never reads as a confirmed flat book (R-13 / R-19).
+- **Landed** (gh#727, increment 4 — closes the epic): **fill markers** — the operator's recent fills draw as arrow markers on the candle series (a buy is an up-arrow below the bar, a sell a down-arrow above, coloured by side and labelled with the size). This adds the **second overlay primitive** beside the price line — a `MarkerSpec` + `fillsToMarkers` mapper (`chart/overlays.ts`), rendered through Lightweight Charts' `createSeriesMarkers` and sorted ascending by time (a series-marker precondition). They come from the gh#792 journal read (`GET /accounts/{id}/fills` with `?instrument=&from=&to=`), owner-scoped for the active account over a **fixed recent window** (not the chart's window, which at coarse resolutions would exceed the read's fill cap). A `useFillMarkers` hook re-reads on every fill push and across a reconnect (coalesced into one re-read) — the live-only, account-wide fill push (gh#683) is a refresh *signal*, and the instrument-scoped re-read is what narrows it to the charted symbol. They are labelled **stale** while the socket is not `live` and **unavailable** on a refused / failed read, so an empty overlay never reads as "no trades" (R-19).
+- **Landed** (gh#760): the **instant per-issue / per-supersede refresh** the increment-2 entry awaited. The SPA realtime client now consumes the `realtimeSuggestion` push (ADR-0021), so `useSuggestionZones` re-derives the zones on **every** issue / supersede rather than only on reconnect, and the **suggestion panel** is no longer load-once. Both still re-fetch on reconnect (owner-scoped pushes are live-only, so the drop's pushes are never replayed); the **zones** stay self-labelled **stale** while the socket is not `live` (R-19), the panel relying on the global connection indicator for the same signal.
+- **Spike the DOM / order-flow renderer** (canvas vs. WebGL — e.g. PixiJS / regl) against `GatewayDepth` / `GatewayTrade` volumes (§12; Phase 3).

@@ -1,0 +1,7 @@
+# Scoped override, not a new root: the repo root .editorconfig still supplies LF, UTF-8 and the
+# final-newline rules. Only the indent width differs -- the JS/TS toolchain (Prettier, ESLint's
+# stylistic defaults, every published Vite/React example) is built around 2, and fighting that would
+# make every copied snippet a formatting diff.
+
+[*.{ts,tsx,js,jsx,mjs,cjs,css,html}]
+indent_size = 2

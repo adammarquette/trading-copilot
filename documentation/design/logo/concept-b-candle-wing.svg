@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512" role="img" aria-label="Trading Co-Pilot">
+  <title>Trading Co-Pilot — Candle Sequence</title>
+  <rect width="64" height="64" rx="14" fill="#101318"/>
+  <rect x=".5" y=".5" width="63" height="63" rx="13.5" fill="none" stroke="#29313F"/>
+  <g stroke="#9DC3FF" stroke-width="2.5" stroke-linecap="round">
+    <g opacity=".35">
+      <path d="M21 32.5 V46.5"/>
+      <rect x="17.5" y="35" width="7" height="10" rx="2" fill="#9DC3FF" stroke="none"/>
+    </g>
+    <g opacity=".65">
+      <path d="M32 24.5 V39.5"/>
+      <rect x="28.5" y="27" width="7" height="11" rx="2" fill="#9DC3FF" stroke="none"/>
+    </g>
+    <g>
+      <path d="M43 16.5 V32.5"/>
+      <rect x="39.5" y="19" width="7" height="11" rx="2" fill="#9DC3FF" stroke="none"/>
+    </g>
+  </g>
+</svg>

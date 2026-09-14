@@ -1,0 +1,518 @@
+# Executable tests for the alerting rules (gh#245, ADR-0019). Run by `promtool test rules`.
+#
+# THE CLEAN-SESSION FIXTURE IS THE POINT. gh#245's first acceptance criterion is that a normal day with a normal
+# flatten produces ZERO P1 and ZERO P2 pushes — "a rule that pages on a healthy day is a defect in the rule, not
+# noise to tolerate". That is asserted here as a test rather than reasoned about in a PR description, so it stays
+# true as rules are added.
+#
+# These are unit tests over PromQL, so they also catch the failure this whole file exists to prevent: a rule whose
+# metric name or label does not match what the app emits produces no series, fires nothing, and looks healthy. A
+# renamed instrument turns these red.
+
+rule_files:
+  - ../trading-alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # ---------------------------------------------------------------------------------------------------------
+  # THE CLEAN SESSION — the criterion that matters most.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "a clean session pages nobody"
+    input_series:
+      # The flatten loop evaluates on every pass and finds nothing to do, then closes out normally at the
+      # deadline. This is what an ordinary day looks like in metrics.
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="nothing-to-do"}'
+        values: "0+1x60"
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="executed"}'
+        values: "0+0x40 1+0x20"
+      - series: "trading_killswitch_engaged"
+        values: "0x60"
+      - series: "trading_stops_orphaned"
+        values: "0x60"
+      - series: "trading_positions_open"
+        values: "1x60"
+      - series: "trading_positions_unprotected"
+        values: "0x60"
+      - series: "trading_venue_connected"
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: FlattenEscalated
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: FlattenMissed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: OrphanedStopsWithExposure
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: TelemetryPipelineSilent
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: NotificationDeliveryRefused
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WatchdogSaved
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: KillSwitchEngaged
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: FlattenDisabledWithExposure
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: EventLogRetentionGap
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: UnprotectedPosition
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: FlattenWarning
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: FlattenUnconfiguredWithExposure
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: WatchdogCloseRejected
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: VenueDisconnectedWithExposure
+        exp_alerts: []
+      # The two P2s that shipped without a test (gh#537): a healthy day records no backfill shortfall, and no
+      # time-to-flat histogram is being fed, so neither can fire. Their firing paths are asserted below.
+      - eval_time: 12m
+        alertname: BackfillShortfall
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: TimeToFlatSlow
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------------------------------------
+  # P1 conditions actually fire — and only after the direct push has had its chance.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "an escalated flatten pages, but not before the direct push wins the race"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="escalated"}'
+        values: "0+0x8 1+0x60"
+    alert_rule_test:
+      # The escalation lands at 2m. `for: 2m` means this layer stays quiet until 4m — the gh#242 backstop
+      # contract: the app's direct push is faster and should win.
+      - eval_time: 3m
+        alertname: FlattenEscalated
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: FlattenEscalated
+        exp_alerts:
+          - exp_labels:
+              priority: P1
+              component: flatten
+              tier: primary
+              outcome: escalated
+            exp_annotations:
+              summary: "Auto-flatten ESCALATED — exposure remains after the primary's close attempts"
+              description: >-
+                The primary auto-flatten exhausted its close attempts with a position still open. Three closes
+                failed against the venue, and the watchdog uses the same venue. Flatten manually NOW.
+              runbook: "documentation/deployment-runbook.md#auto-flatten-failure"
+
+  - interval: 15s
+    name: "an orphaned working stop pages"
+    input_series:
+      - series: "trading_stops_orphaned"
+        values: "0x8 2x60"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: OrphanedStopsWithExposure
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: OrphanedStopsWithExposure
+        exp_alerts:
+          - exp_labels:
+              priority: P1
+              component: execution
+            exp_annotations:
+              summary: "2 working stop(s) ORPHANED — protection is platform-held, not exchange-held"
+              description: >-
+                A venue-connection drop moved working stops to Orphaned. The native safety stop is still the
+                physical floor, but the working stop is no longer where the plan says it is.
+              runbook: "documentation/deployment-runbook.md#orphaned-stops"
+
+  # ---------------------------------------------------------------------------------------------------------
+  # A silent app is itself a P1 — the failure class ADR-0019 exists to close.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "no metrics at all is a page, not a healthy silence"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TelemetryPipelineSilent
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: TelemetryPipelineSilent
+        exp_alerts:
+          - exp_labels:
+              priority: P1
+              component: observability
+            exp_annotations:
+              summary: "No flatten-deadline metrics for 15m — the app is not reporting"
+              description: >-
+                The auto-flatten loop emits a deadline metric on EVERY evaluation, including idle ones, so
+                silence here means the app is down, the collector is broken, or remote write has stopped. Every
+                other rule in this file is blind until it clears — assume unmonitored, not healthy.
+              runbook: "documentation/deployment-runbook.md#telemetry-pipeline"
+
+  # ---------------------------------------------------------------------------------------------------------
+  # P2s fire as notifications — the watchdog saving the day is not a page, but it is not nothing either.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "a watchdog save notifies without paging"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="watchdog",outcome="executed"}'
+        values: "0+0x4 1+0x60"
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="nothing-to-do"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: WatchdogSaved
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: flatten
+              tier: watchdog
+              outcome: executed
+            exp_annotations:
+              summary: "The WATCHDOG flattened — the primary tier did not"
+              description: >-
+                Exposure was closed by the last line rather than the first. Nothing is open now, but the primary
+                tier is broken and must be fixed before the next session.
+      # It must NOT also page. The watchdog executing is a broken primary, not live exposure.
+      - eval_time: 3m
+        alertname: FlattenEscalated
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: FlattenMissed
+        exp_alerts: []
+
+  - interval: 15s
+    name: "a retention gap notifies the consumer that lost events"
+    input_series:
+      - series: 'trading_eventlog_retention_gaps_total{consumer_group="stop-promotion"}'
+        values: "0+0x4 1+0x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: EventLogRetentionGap
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: eventlog
+              consumer_group: stop-promotion
+            exp_annotations:
+              summary: "Consumer stop-promotion fell behind the event-log retention window"
+              # Kept in step with the rule: gh#482 rewrote this description when BackfillShortfall landed, but the
+              # test was never updated (promtool does not gate CI — gh#537 note). The two had drifted.
+              description: >-
+                Its cursor dropped off the back of the 24h window. gh#306 backfills the blind window from the
+                clean-historical store where it can. If any of it could NOT be covered, BackfillShortfall fires
+                alongside this with the contract and the uncovered duration — this alert alone does not mean data
+                was lost.
+
+  # ---------------------------------------------------------------------------------------------------------
+  # The heartbeat must always fire. Its absence is the alarm, so a broken heartbeat breaks the alarm.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "the heartbeat always fires"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels:
+              priority: heartbeat
+            exp_annotations:
+              summary: "Alerting pipeline heartbeat — its absence means the pipeline is dead"
+
+  # ---------------------------------------------------------------------------------------------------------
+  # The conditions gh#245 could not write, now that gh#370 instruments them.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "a position with no stop at the exchange pages — but not during a bracket attach"
+    input_series:
+      # A position appears at 1m and stays unprotected. `for: 2m` means a normal entry, where the bracket lands
+      # seconds after the fill, never reaches the pager.
+      - series: "trading_positions_unprotected"
+        values: "0x4 1x60"
+      - series: "trading_positions_open"
+        values: "0x4 1x60"
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="nothing-to-do"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: UnprotectedPosition
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: UnprotectedPosition
+        exp_alerts:
+          - exp_labels:
+              priority: P1
+              component: execution
+            exp_annotations:
+              summary: "1 live position(s) have NO stop resting at the exchange"
+              description: >-
+                The venue reports open exposure with no protective stop order behind it. This is the failure the
+                staged-stop model exists to prevent. Place a stop manually NOW, or flatten.
+              runbook: "documentation/deployment-runbook.md#unprotected-position"
+
+  - interval: 15s
+    name: "a venue disconnect only alerts while something is actually exposed"
+    input_series:
+      - series: "trading_venue_connected"
+        values: "0x60"
+      - series: "trading_positions_open"
+        values: "0x20 1x60"
+    alert_rule_test:
+      # Down the whole time, but flat for the first five minutes: nothing at risk, so nothing to say.
+      - eval_time: 4m
+        alertname: VenueDisconnectedWithExposure
+        exp_alerts: []
+      # Exposure appears at 5m; two more minutes of `for:` and it fires.
+      - eval_time: 8m
+        alertname: VenueDisconnectedWithExposure
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: execution
+            exp_annotations:
+              summary: "Venue connection down for over 2 minutes with a position open"
+              description: >-
+                Synthetic protection depends on this process reaching the venue. Hidden stops have been orphaned
+                and the native safety stop is the floor until the connection returns.
+
+  - interval: 15s
+    name: "a rejected watchdog close is distinct from an escalation"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="watchdog",outcome="rejected"}'
+        values: "0+0x4 1+0x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: WatchdogCloseRejected
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: flatten
+              tier: watchdog
+              outcome: rejected
+            exp_annotations:
+              summary: "A watchdog close was rejected or left exposure open"
+              description: >-
+                The watchdog attempted a close and the venue did not fully honour it. It retries next pass; if it
+                keeps failing, the P1 escalation or missed alert follows.
+      # It must NOT read as the tier giving up — that is the distinction gh#370 drew.
+      - eval_time: 3m
+        alertname: FlattenEscalated
+        exp_alerts: []
+
+  - interval: 15s
+    name: "an unconfigured product with a live position notifies"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="unconfigured"}'
+        values: "0+0x4 1+0x60"
+      - series: "trading_positions_open"
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: FlattenUnconfiguredWithExposure
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: flatten
+              tier: primary
+              outcome: unconfigured
+            exp_annotations:
+              summary: "Open position in a product with NO configured flatten deadline"
+              description: >-
+                A live position sits in a product that has no auto-flatten deadline configured, so R-13 cannot
+                time its flatten. Configure a deadline for it, or do not hold it overnight.
+      # And it must NOT be reported as merely "disabled" — the two are different operator errors (gh#370).
+      - eval_time: 3m
+        alertname: FlattenDisabledWithExposure
+        exp_alerts: []
+
+  - interval: 15s
+    name: "a disabled deadline on a FLAT book says nothing"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="disabled"}'
+        values: "0+0x4 1+0x60"
+      - series: "trading_positions_open"
+        values: "0x60"
+    alert_rule_test:
+      # gh#245's version fired here, despite its own name promising "with exposure". Nothing is at risk on a
+      # flat book, and a disabled deadline is a configuration choice.
+      - eval_time: 3m
+        alertname: FlattenDisabledWithExposure
+        exp_alerts: []
+
+  - interval: 15s
+    name: "the pre-deadline warning notifies while it can still be acted on"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="warning"}'
+        values: "0+0x4 1+0x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: FlattenWarning
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: flatten
+              tier: primary
+              outcome: warning
+            exp_annotations:
+              summary: "Auto-flatten deadline approaching with a position still open"
+              description: "The flatten will run shortly. Close on your own terms first if you would rather."
+
+  # ---------------------------------------------------------------------------------------------------------
+  # The three rules that shipped without a promtool assertion (gh#537). Two of them — FlattenExecuted and
+  # TimeToFlatSlow — are on the R-13 flatten path, so they are the least appropriate three to have gone untested.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "a normal primary flatten sends its P3 confirmation"
+    input_series:
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="executed"}'
+        values: "0+0x4 1+0x60"
+    alert_rule_test:
+      # No `for:` — the confirmation lands as soon as an executed flatten is seen. It is a P3 quiet push, not a
+      # page, so it is the one flatten alert that firing on a healthy day is correct.
+      - eval_time: 3m
+        alertname: FlattenExecuted
+        exp_alerts:
+          - exp_labels:
+              priority: P3
+              component: flatten
+              tier: primary
+              outcome: executed
+            exp_annotations:
+              summary: "Auto-flatten completed normally"
+              description: "The primary tier closed exposure at the deadline. Nothing to do."
+
+  - interval: 15s
+    name: "a blind-window shortfall notifies with the contract it could not cover"
+    input_series:
+      # The histogram's _count is the "did it happen" signal; it is emitted ONLY on a shortfall, so any increase
+      # means a real one. The contract label rides through to the summary.
+      - series: 'trading_stops_backfill_shortfall_milliseconds_count{contract="CON.F.US.EP.U26"}'
+        values: "0+0x4 1+0x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BackfillShortfall
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: execution
+              contract: "CON.F.US.EP.U26"
+            exp_annotations:
+              summary: "Blind-window recovery could not cover CON.F.US.EP.U26 — hidden stops may be unprotected"
+              description: >-
+                The clean-historical store had no bars for part of the window the consumer was blind for, so hidden
+                stops on this contract may have crossed their promotion band unobserved and were NOT promoted. The
+                native safety stop is the only floor on them until the next quote re-evaluates. Check open positions
+                on this contract before the session close.
+              runbook: "documentation/deployment-runbook.md#backfill-shortfall"
+
+  - interval: 15s
+    name: "time-to-flat p95 over 60s warns — but only after for: 5m"
+    input_series:
+      # Every flatten lands in the 60-120s band (le=60000 stays flat, the mass accrues in le=120000), so the p95
+      # sits above the 60s threshold the whole time.
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="60000",tier="primary"}'
+        values: "0+0x120"
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="120000",tier="primary"}'
+        values: "0+1x120"
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="+Inf",tier="primary"}'
+        values: "0+1x120"
+    alert_rule_test:
+      # The p95 is over threshold early, but `for: 5m` holds the warning back until it has persisted.
+      - eval_time: 4m
+        alertname: TimeToFlatSlow
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: TimeToFlatSlow
+        exp_alerts:
+          - exp_labels:
+              priority: P2
+              component: flatten
+              tier: primary
+            exp_annotations:
+              summary: "Time-to-flat p95 above 60s on primary"
+              description: >-
+                Flattens are completing, but slowly enough that the margin before the close is being consumed.
+
+  - interval: 15s
+    name: "a fast flatten does not trip the slow-flatten warning"
+    input_series:
+      # Everything completes under 30s, so the p95 is nowhere near the 60s threshold — the healthy-day case.
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="30000",tier="primary"}'
+        values: "0+1x120"
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="60000",tier="primary"}'
+        values: "0+1x120"
+      - series: 'trading_flatten_time_to_flat_milliseconds_bucket{le="+Inf",tier="primary"}'
+        values: "0+1x120"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: TimeToFlatSlow
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------------------------------------
+  # gh#1077 — the alerting path reporting its own failure. This is the ONE condition Layer 1 structurally cannot
+  # self-report: the push it would send is the push that did not go, so if this rule does not carry it, nothing
+  # does. It fires per `kind`, because a refused resolve and a refused page are different problems.
+  # ---------------------------------------------------------------------------------------------------------
+  - interval: 15s
+    name: "a refused notification pages, per kind"
+    input_series:
+      # A wedged transport: the queue fills with pages, refuses further ones, and then refuses the resolve that
+      # would have closed the incident.
+      - series: 'trading_notifications_refused_total{kind="page"}'
+        values: "0+0x20 1+1x40"
+      - series: 'trading_notifications_refused_total{kind="resolve"}'
+        values: "0+0x20 1+0x40"
+      # The app is otherwise alive and reporting, so TelemetryPipelineSilent stays quiet and this alert is the
+      # only thing saying anything is wrong.
+      - series: 'trading_flatten_deadlines_total{tier="primary",outcome="nothing-to-do"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NotificationDeliveryRefused
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: NotificationDeliveryRefused
+        exp_alerts:
+          - exp_labels:
+              priority: P1
+              component: alerting
+              kind: page
+            exp_annotations:
+              summary: "Operator notifications REFUSED — the app cannot page"
+              description: >-
+                The in-process notification queue refused at least one notification, so a page the app raised did
+                not reach the transport. Assume the operator has NOT been told about whatever raised it — check
+                the API logs for "Notification queue is full" and treat every flatten condition as unreported
+                until this clears. The `kind` label says page or resolve; alertmanager.yml groups on [priority,
+                component, alertname] and not on `kind`, so both can be behind one push — read the label list,
+                not the summary.
+              runbook: "documentation/deployment-runbook.md#notifications-refused"
+          - exp_labels:
+              priority: P1
+              component: alerting
+              kind: resolve
+            exp_annotations:
+              summary: "Operator notifications REFUSED — the app cannot page"
+              description: >-
+                The in-process notification queue refused at least one notification, so a page the app raised did
+                not reach the transport. Assume the operator has NOT been told about whatever raised it — check
+                the API logs for "Notification queue is full" and treat every flatten condition as unreported
+                until this clears. The `kind` label says page or resolve; alertmanager.yml groups on [priority,
+                component, alertname] and not on `kind`, so both can be behind one push — read the label list,
+                not the summary.
+              runbook: "documentation/deployment-runbook.md#notifications-refused"

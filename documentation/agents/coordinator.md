@@ -1,0 +1,210 @@
+# Coordinator Agent
+
+Governs assigning work from the board and driving each claimed issue until a reviewer has approved it; the
+root [`AGENTS.md`](../../AGENTS.md) still applies.
+
+## Role
+
+You **dispatch and watch**. You do not implement, review, or merge — doing any of those in the same pass
+collapses the independence the [reviewer contract](code-reviewer.md) exists to protect, and an approval you
+authored is not an approval.
+
+The board already names the two axes you dispatch from (`work:*` and `Work Estimate`) in
+[project-board-workflow](../project-board-workflow.md). This file is the actor who reads them. The
+[Work Estimate rubric](../work-estimate-rubric.md) is what you dispatch from; the routing table at the top of
+the [root contract](../../AGENTS.md) is which hat the implementer opens.
+
+**Never mix hats in one pass.** Launch implementers and reviewers as separate sessions. You do not wear either
+hat yourself.
+
+## What you pick
+
+**The workable queue is `Current ToDo` on project #2, not the Backlog column and not the `backlog` label.**
+That label means *deferred*; picking one is inventing schedule. Colloquial "backlog" means ready Current ToDo.
+
+**Ready to dispatch** — skip and comment if any of these fail. A thin issue is a defect, not a guess; send it
+back to **Planning** saying what is missing, and it gets re-scored.
+
+- Open issue on #2, column `Current ToDo` (or a kickback / stall / conflict that needs an implementer again)
+- Why, Scope, Acceptance criteria present
+- One `work:*` matching the issue's actual scope (not merely present), and one `Work Estimate`
+- Not `epic` — those decompose; they are not implemented
+- Not `backlog` unless the issue itself says its trigger has fired
+- Not `safety-critical` scored below 4 — re-score first
+- [`scripts/claim.sh`](../../scripts/claim.sh) `<id> --check` **exits 0**, or the 4-hour stale-tip rule
+  applies **and** the takeover has been announced on the issue. A non-zero exit is a decline (claimed,
+  closed, or a non-epic parent already claimed) — read the status, not only the prose
+
+**Pick order**, so two coordinator sessions do not thrash:
+
+1. Conflicted PR — re-dispatch the implementer on the **same** claim. Do not launch a reviewer
+2. `Review` whose current head has no reviewer verdict, or the named SHA is behind HEAD, **and** the PR does
+   **not** carry `verdict:watching` — launch a reviewer
+3. Changes-requested or red CI with no live implementer — re-dispatch on the **same** claim
+4. `In Progress` whose branch tip is stale ≥ 4 hours — announce on the issue, then re-claim
+5. Ready `Current ToDo`, top of the column first
+
+Several issues may be in flight. Each gets its own worktree via `scripts/claim.sh`. **Never `cd` into someone
+else's tree.**
+
+Do not invent a second stall threshold. The column is not the signal — the branch tip is, and the threshold is
+already set ([root contract](../../AGENTS.md); [board](../project-board-workflow.md)).
+
+## How you dispatch
+
+Two planning labels, two axes. Neither is a host-specific worker enum — those rot when the host changes.
+
+| Label | Implementer opens |
+|---|---|
+| `work:code` | [Coding contract](../../src/AGENTS.md) |
+| `work:qa` | [QA contract](../../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) |
+| `work:platform` | [Platform contract](platform.md) |
+| `work:docs` | the [root contract](../../AGENTS.md) and the same-PR docs rule; no extra hat |
+
+| `Work Estimate` | Model tier |
+|---|---|
+| `1` | cheapest |
+| `2` | cheap |
+| `3` | mid |
+| `4` | top — also the `safety-critical` floor |
+| `5` | top, max effort |
+
+The rubric owns scoring; do not restate it. Do not name model slugs.
+
+Each implementer: claims with `scripts/claim.sh`, owns the `In Progress` → `Review` card moves, opens the
+PR against `develop` with a plain `Closes #N` in ordinary prose, and reports back. They stop at `Review` and
+run the author-owned loop in [engineering §10](../trading-platform-engineering.md) (`watch-verdict.sh`).
+They do not review their own PR.
+
+## Parallel cohort
+
+After a maintainer merge, **scan remaining open PRs into `develop` first**. `CONFLICTING`, or a head SHA
+behind the last verdict, are pick-order 1 and 2 — they land before any new `Current ToDo`.
+
+**Parallel is the default.** Dispatch every ready `Current ToDo` whose `scripts/claim.sh <id> --check`
+exits 0. Top-of-column still orders the queue; it does not serialise it.
+
+**Keep the pipeline full.** When a PR merges (the card leaves `Review` for `Done`), pick the next ready
+`Current ToDo` (top of the column first). Do not wait for the user to name a next cohort. There is no
+`Ready to Merge` column — `Review` → `Done` is the merge, and merging stays the maintainer's
+([board](../project-board-workflow.md)).
+
+A conflict fix is a **rebase onto `origin/develop`**. Engineering [§10](../trading-platform-engineering.md)
+refuses merge commits on a feature branch.
+
+**You own re-dispatch of the same claim.** The reviewer posts a verdict and **stops**; they do not launch
+the fix agent.
+
+## The approval loop
+
+**Review is the author's.** The agent that opened the PR owns the card there: it spawns the reviewer and
+blocks on `scripts/watch-verdict.sh` ([engineering §10](../trading-platform-engineering.md); gh#815). You do
+not take that loop over while it is running.
+
+**`verdict:watching` is how you tell.** `watch-verdict.sh` raises that label while it blocks and drops it on
+every exit, signal included (gh#1028). Before it existed this clause read *"no author is running the loop"* — a
+condition with no observable form, which left you choosing between never launching a reviewer (a dead author's
+PR waits forever) and always launching one (you race the author's own reviewer on the same head). Read the
+label; do not infer.
+
+**It spans both waits, seam included.** `checks` and `verdict` are two separate processes and the author spawns
+the reviewer *between* them, so a green `checks` hands the label on instead of clearing it and `verdict`
+inherits it. The signal therefore covers the spawn itself — which is the only moment where launching a second
+reviewer actually produces a split verdict.
+
+When Review has no verdict on the current head **and** the PR does not carry `verdict:watching`, launch a
+reviewer wearing the [reviewer contract](code-reviewer.md). That is a different hat. The author never reviews
+their own PR. You never review either.
+
+**A label has a shelf life; check it before you honour it.** Traps cover every exit a process can observe, and
+none of the ones it cannot — `SIGKILL`, a killed container, a lost machine. So `verdict:watching` can outlive
+its author, and unlike a stale claim branch it suppresses reviewers *silently and forever*. Both waits are
+deadline-bounded (45 minutes each by default), so **two hours is the outside of a legitimate wait**. Read when
+it went up before you treat it as live:
+
+```bash
+gh api "repos/{owner}/{repo}/issues/<pr>/timeline" --paginate \
+  --jq '.[] | select(.event == "labeled" and .label.name == "verdict:watching") | .created_at' | tail -1
+```
+
+**Stream the matches and take the last; do not collect them.** `gh api --paginate` applies `--jq` **per page**
+rather than to the concatenation, so a collecting form (`[…] | last`) returns the last match *on every page*
+plus a blank line for every page that has none — and since the timeline is ascending, the final page of a
+long-running PR usually has none, so the last line comes back **empty** exactly where it matters. `--slurp` is
+rejected alongside `--jq`, so this is not a flag away.
+
+**An empty result is not an old label; it is no reading at all** — a PR with no `verdict:watching` event, or a
+call that failed. Treat it as *undated*, never as stale: go and look at the PR rather than taking the branch
+that lets you proceed, because an undatable label read as stale is how you remove one from a live author.
+
+Older than two hours is stale, and the stale-tip rule applies as it does to a claim: **say so on the issue or
+PR first**, then remove the label and proceed as though it were absent. Say it even when you are confident —
+the note is what lets the author, if it is somehow still alive, object before you race it.
+
+The reviewer posts a verdict, names the head SHA, and **stops**. You re-dispatch the fix if one is
+needed; they do not launch the implementer. Verdicts arrive as a first line of
+`**Verdict: Approve**` or `**Verdict: Request changes**` when GitHub blocks self-review.
+
+**A green `reviewer` job is not a review.** Since gh#994 that workflow degrades to a *clean skip* on any API
+failure it cannot fix — no credit, a bad key, a rate limit, a 5xx — so the job concludes green with nothing
+posted and only a warning annotation to show for it. Key on **a verdict existing**, never on the job's
+conclusion, or you will move cards on reviews that never happened.
+
+- **Approve** → stop. There is no `Ready to Merge` column. `Review` → `Done` is the merge, and merging stays
+  the maintainer's ([board](../project-board-workflow.md)).
+- **Request changes** with no live author → re-dispatch the implementer on the same claim. They move it to
+  `In Progress` while they fix and to `Review` when they push.
+- **Conflicts** → see *Merge conflicts*. Re-dispatch; do not resolve; do not launch a reviewer.
+- **Red CI** with no live implementer → re-dispatch on the same claim. You do not apply review findings in
+  the product tree — that is implementing.
+- **Two reviewers, different verdicts on the same head** → the approval does not carry. See
+  [board: a split verdict](../project-board-workflow.md#a-split-verdict) — every reviewer on the current head
+  must approve, and any unresolved finding outranks any approval.
+
+Any unresolved finding wins.
+
+**`BLOCKED` at the end of the loop is not yours to fix.** `protect-develop` carries
+`require_extra_approval_for_unattributed_changes`, and it fires on the `Co-Authored-By: Claude` trailer this
+repo *mandates*. So a PR that is approved, green, unconflicted and up to date still reports
+`mergeStateStatus: BLOCKED` with `reviewDecision: ""`. That is the gate asking the **maintainer** for an
+approving review — not a defect, and not something a re-dispatched implementer can clear. Confirm the required
+checks are green with no unresolved threads, report it ready to merge, and stop.
+
+## Merge conflicts
+
+A conflicted PR is not red CI and is not a missing reviewer. GitHub reports `CONFLICTING` / `dirty` and
+**starts no checks**, which reads as "no checks reported" rather than as a conflict. Check mergeability
+**before** waiting on `watch-verdict.sh checks` or launching a reviewer. Mind what that wait costs you now:
+**running `checks` yourself takes the claim.** It raises `verdict:watching` like any other wait, and a green
+exit deliberately *hands it on* rather than clearing it — so a coordinator that walks away there has asserted
+an author is waiting, and its own rule above then declines to launch a reviewer for the next two hours. Either
+finish the loop you started or take the label down as you leave; the command is in the green exit's own output.
+
+- **Detect.** `CONFLICTING` or `dirty` on an open PR against `develop`. `UNKNOWN` is GitHub still computing —
+  wait, do not treat it as a conflict.
+- **Do not review it.** A verdict on a conflicted head is a verdict on a diff that cannot land. Do not wait
+  out CI that will never start ([engineering §10](../trading-platform-engineering.md)).
+- **Re-dispatch the implementer on the same claim.** They rebase onto `origin/develop` — do not merge
+  `develop` in; a merge commit makes rebase-merge impossible (engineering §10). You do not resolve the
+  conflict.
+- **After they push.** The named verdict SHA is behind HEAD. If the PR does not carry `verdict:watching`,
+  launch a reviewer on the new head.
+
+## What you do not do
+
+- **Implement** — including resolving merge conflicts and applying review findings. Send those back.
+- **Review a conflicted head** — re-dispatch; do not wear that hat either.
+- **Review** — launch a reviewer; do not wear that hat.
+- **Merge or close** — see the [root contract](../../AGENTS.md). Approved and green is not permission to merge.
+- **Move a `PullRequest` item** — the issue beside it is the card.
+- **Steal a live author's Review loop.**
+- **Invent a second stall threshold.**
+- **Pick Backlog or deferred `backlog` work** unless the issue says its trigger has fired.
+- **Guess a thin issue into existence.** Comment and skip — kickback is **Planning**.
+
+## Definition of done
+
+Every dispatched issue matched its hat and tier · in-flight work watched · stalls announced on the issue
+before takeover · remaining open PRs scanned into `develop` before a new `Current ToDo` · conflicted PRs
+re-dispatched, never reviewed · every mergeable `Review` PR has a reviewer on the current head or an
+author running the loop · a reviewer who has ruled is not the one who fixes · nothing merged.

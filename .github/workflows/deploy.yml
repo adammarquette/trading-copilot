@@ -1,0 +1,188 @@
+name: Redeploy or roll back a published version
+
+# Dispatch from main, not from a tag and not from a feature branch:
+#
+#   gh workflow run deploy.yml --ref main -f version=0.4.0 -f environment=staging
+#
+# GitHubDeploy-staging trusts `ref:refs/heads/main` and the `v*` tag pattern, exactly two.
+# A dispatch carries `sub = …:ref:refs/heads/<branch>`, so any other ref is a role the
+# staging job cannot assume. Production trusts `environment:aws-production`. This workflow
+# never rebuilds: it resolves the digest from the version tag on GHCR.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Published image tag to deploy (with or without the leading v).
+          Dispatch from main: gh workflow run deploy.yml --ref main -f version=<tag> -f environment=staging
+        required: true
+        type: string
+      environment:
+        description: Target environment. production waits on the aws-production approval.
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-staging:
+    name: Deploy staging
+    if: inputs.environment == 'staging'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the version looks like a release
+        run: |
+          raw="${{ inputs.version }}"
+          [ -n "$raw" ] || { echo "::error::version is empty"; exit 1; }
+          case "$raw" in
+            v*) tag="$raw" ;;
+            *) tag="v${raw}" ;;
+          esac
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Version '$raw' is not a vMAJOR.MINOR.PATCH release tag."
+            exit 1
+          fi
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve the image digest from the version tag
+        run: |
+          ref="$(./scripts/image-reference.sh)"
+          [ -n "$ref" ] || { echo "::error::image-reference.sh exited 0 without naming a reference"; exit 1; }
+          raw="$(docker buildx imagetools inspect "${ref}:${VERSION}" --format '{{json .Manifest.Digest}}')"
+          [ -n "$raw" ] || { echo "::error::imagetools inspect returned no digest for ${ref}:${VERSION}"; exit 1; }
+          digest="$(printf '%s' "$raw" | tr -d '"')"
+          [ -n "$digest" ] || { echo "::error::digest was empty after stripping quotes"; exit 1; }
+          echo "DIGEST=$digest" >> "$GITHUB_ENV"
+
+      - name: The deploy role account and region are variables, not literals
+        run: |
+          account="${{ vars.AWS_ACCOUNT_ID }}"
+          [ -n "$account" ] || { echo "::error::repository variable AWS_ACCOUNT_ID is empty"; exit 1; }
+          region="${{ vars.AWS_REGION }}"
+          [ -n "$region" ] || { echo "::error::repository variable AWS_REGION is empty"; exit 1; }
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/GitHubDeploy-staging
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+
+      - name: Install the pinned CDK CLI
+        working-directory: infra
+        run: npm ci --no-audit --no-fund
+
+      - name: Deploy the resolved digest
+        env:
+          DEPLOY_OUTBOUND: ${{ vars.AWS_OUTBOUND }}
+          DEPLOY_ROOT_DOMAIN: ${{ vars.AWS_ROOT_DOMAIN_STAGING }}
+          DEPLOY_HOSTNAME: ${{ vars.AWS_HOSTNAME_STAGING }}
+          DEPLOY_PROJECTX_DATA_TIER: ${{ vars.AWS_PROJECTX_DATA_TIER_STAGING }}
+          DEPLOY_ALERTS_EMAIL: ${{ vars.AWS_ALERTS_EMAIL }}
+        run: |
+          digest="${DIGEST}"
+          [ -n "$digest" ] || { echo "::error::digest is empty"; exit 1; }
+          version="${VERSION}"
+          [ -n "$version" ] || { echo "::error::version is empty"; exit 1; }
+          ./scripts/deploy-environment.sh staging "$version" "$digest"
+
+  deploy-production:
+    name: Deploy production
+    if: inputs.environment == 'production'
+    runs-on: ubuntu-latest
+    environment: aws-production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the version looks like a release
+        run: |
+          raw="${{ inputs.version }}"
+          [ -n "$raw" ] || { echo "::error::version is empty"; exit 1; }
+          case "$raw" in
+            v*) tag="$raw" ;;
+            *) tag="v${raw}" ;;
+          esac
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Version '$raw' is not a vMAJOR.MINOR.PATCH release tag."
+            exit 1
+          fi
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve the image digest from the version tag
+        run: |
+          ref="$(./scripts/image-reference.sh)"
+          [ -n "$ref" ] || { echo "::error::image-reference.sh exited 0 without naming a reference"; exit 1; }
+          raw="$(docker buildx imagetools inspect "${ref}:${VERSION}" --format '{{json .Manifest.Digest}}')"
+          [ -n "$raw" ] || { echo "::error::imagetools inspect returned no digest for ${ref}:${VERSION}"; exit 1; }
+          digest="$(printf '%s' "$raw" | tr -d '"')"
+          [ -n "$digest" ] || { echo "::error::digest was empty after stripping quotes"; exit 1; }
+          echo "DIGEST=$digest" >> "$GITHUB_ENV"
+
+      - name: The deploy role account and region are variables, not literals
+        run: |
+          account="${{ vars.AWS_ACCOUNT_ID }}"
+          [ -n "$account" ] || { echo "::error::repository variable AWS_ACCOUNT_ID is empty"; exit 1; }
+          region="${{ vars.AWS_REGION }}"
+          [ -n "$region" ] || { echo "::error::repository variable AWS_REGION is empty"; exit 1; }
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/GitHubDeploy-production
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+
+      - name: Install the pinned CDK CLI
+        working-directory: infra
+        run: npm ci --no-audit --no-fund
+
+      - name: Deploy the resolved digest
+        env:
+          DEPLOY_OUTBOUND: ${{ vars.AWS_OUTBOUND }}
+          DEPLOY_ROOT_DOMAIN: ${{ vars.AWS_ROOT_DOMAIN_PRODUCTION }}
+          DEPLOY_HOSTNAME: ${{ vars.AWS_HOSTNAME_PRODUCTION }}
+          DEPLOY_PROJECTX_DATA_TIER: ${{ vars.AWS_PROJECTX_DATA_TIER_PRODUCTION }}
+          DEPLOY_ALERTS_EMAIL: ${{ vars.AWS_ALERTS_EMAIL }}
+        run: |
+          digest="${DIGEST}"
+          [ -n "$digest" ] || { echo "::error::digest is empty"; exit 1; }
+          version="${VERSION}"
+          [ -n "$version" ] || { echo "::error::version is empty"; exit 1; }
+          ./scripts/deploy-environment.sh production "$version" "$digest"

@@ -1,0 +1,8 @@
+{
+  "name": "marqspec-tradingcopilot-infra",
+  "private": true,
+  "description": "Pins the AWS CDK CLI that cdk synth runs through in CI. Constructs are Amazon.CDK.Lib on NuGet.",
+  "devDependencies": {
+    "aws-cdk": "2.1140.0"
+  }
+}

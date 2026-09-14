@@ -1,0 +1,75 @@
+<Project>
+
+  <!-- Central Package Management: versions declared once here; .csproj files carry none.
+       License cap: FluentAssertions pinned < 8.0.0 (v8+ is commercially licensed). -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageVersion Include="FakeItEasy" Version="8.3.0" />
+    <PackageVersion Include="FluentAssertions" Version="6.12.2" />
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Data layer: EF Core + Postgres (Npgsql). TimescaleDB / pgvector are Postgres extensions wired later. -->
+    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.4" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.4" />
+    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <!-- pgvector (gh#109): the typed `Vector` mapping + the similarity operators EF has no vocabulary for.
+         MIT, by the pgvector author. Without it, every read, write and nearest-neighbour query on the embedding
+         store would be raw SQL, which the contract allows for extension features but not for a core storage type. -->
+    <PackageVersion Include="Pgvector" Version="0.3.2" />
+    <PackageVersion Include="Pgvector.EntityFrameworkCore" Version="0.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- API host & Integration Testing -->
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.4" />
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.4" />
+    <!-- Real-Postgres pre-merge integration tier (gh#121): throwaway containers on the compose DB image. MIT. -->
+    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.13.0" />
+    <!-- Transitive pin (CentralPackageTransitivePinningEnabled, above). Testcontainers 4.13.0 (already the latest)
+         floors SSH.NET at 2025.1.0 for its Docker-over-SSH support, which carries a HIGH advisory
+         (GHSA-q939-rpr3-3284: ScpClient recursive download writes outside the target dir on a malicious server;
+         fixed in 2026.0.0). NuGetAudit fails the IntegrationTests restore (NU1903) on it, correctly, so we override
+         the transitive to the patched 2026.0.0. The vulnerable path is unreachable here (Docker is local, never over
+         SSH), but the gate is right to demand the patched package. -->
+    <PackageVersion Include="SSH.NET" Version="2026.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Self-documenting API surface (gh#604, R-10): an OpenAPI 3 document generated from the actual minimal-API
+         routes, and a Scalar reference UI over it. The generated spec replaces the hand-maintained README endpoint
+         table (correct by construction vs. a table that drifts, #605). Both MIT; Microsoft.AspNetCore.OpenApi
+         tracks the 10.0.4 framework version above. -->
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.4" />
+    <PackageVersion Include="Scalar.AspNetCore" Version="2.16.17" />
+    <!-- Transitive pin (CentralPackageTransitivePinningEnabled, above). Microsoft.AspNetCore.OpenApi 10.0.4 floors
+         Microsoft.OpenApi at 2.0.0, which carries a HIGH advisory (GHSA-v5pm-xwqc-g5wc: a circular schema
+         reference can terminate parsing; fixed in 2.7.5). NuGetAudit fails restore (NU1903) on it, correctly, so
+         we override the transitive to the patched latest 2.x. -->
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.11.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Observability (ADR-0002, gh#230): OpenTelemetry SDK + OTLP export, and the instrumentations §7 names.
+         The exporter is OTLP only: the LGTM stack it points at is a deployment concern (gh#231), so nothing
+         here binds us to a specific backend. -->
+    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.17.0" />
+    <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.17.0" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.Http" Version="1.17.0" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.Runtime" Version="1.17.0" />
+    <!-- EF Core's Postgres provider emits its own ActivitySource; this registers it rather than adding a
+         separate EF instrumentation package (which is still pre-release). -->
+    <PackageVersion Include="Npgsql.OpenTelemetry" Version="10.0.3" />
+  </ItemGroup>
+
+</Project>

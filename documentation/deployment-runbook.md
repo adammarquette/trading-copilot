@@ -1,0 +1,1141 @@
+# Deployment Runbook — Trading Co-Pilot
+
+**Operational companion** to [engineering §8](trading-platform-engineering.md) (config / secrets, environments) and
+[§10](trading-platform-engineering.md) (Git workflow, CI/CD) — those hold the *practices*; this runbook holds the
+concrete **resources and procedures** for deploying and operating the platform.
+
+**Status:** living — the local stack and the CI → GHCR image pipeline are **real** (`src/` is the actual solution;
+pipeline steps 1–3 below run on every merge). **Steps 4 and 6 — deploy and verify — are now wired in
+`ci.yml` (`gh#379`) but inert**: they skip until the operator creates the `dev` / `staging` Railway environments
+and sets the deploy-hook secrets (*Operator setup* steps 4–5). Step 5, the staging integration tier, is now
+**wired** (`.github/workflows/staging-gates.yml`, `gh#1019`) and inert until its `STAGING_*` secrets are set. The
+cloud environments still need creating, so nothing deploys today.
+
+**Contents** — this is a runbook, so open the procedure you need; nobody should be reading it end to end.
+
+| Section | Read it when |
+|---|---|
+| [Platform](#platform) | you need the Railway project, the GHCR image, or the database shape |
+| [AWS environment stack](#aws-environment-stack) | you need the resources the `infra/` app creates, the staging inventory, or how to tell staging is up |
+| [AWS release / deploy (OIDC)](#aws-release--deploy-oidc) | you need the GitHub OIDC roles, the release/rollback workflows, or `scripts/bootstrap.sh` |
+| [Local development (docker-compose)](#local-development-docker-compose) | standing the stack up on your machine |
+| [Environments ↔ branches](#environments--branches) | working out which branch deploys where |
+| [Secrets & config (per environment)](#secrets--config-per-environment) | a variable is missing or wrong — also [operator password recovery](#operator-password-recovery-r-18-adr-0017-operator-lifecycle) |
+| [Services (as they are built)](#services-as-they-are-built) | you want the list of what actually runs |
+| [CI/CD pipeline (GitHub Actions → GHCR → Railway)](#cicd-pipeline-github-actions--ghcr--railway) | **38% of the file — jump to the sub-section, not the section**: [operator setup](#operator-setup--console-actions-ci-cannot-do-adr-0018) · [automated code review](#automated-code-review--a-ruleset-not-a-workflow) · [branch protection](#branch-protection--required-check-rulesets-gh45) · [combining-PR protection](#combining-pr-protection-on-develop--strict-because-the-merge-queue-is-unavailable-gh357-gh575) · [merge queue](#merge-queue-on-develop--the-design-if-it-ever-becomes-available-gh357) · [reviewer identity](#reviewer-identity--a-github-app-for-agent-verdicts-gh141) |
+| [Observability stack (local, opt-in)](#observability-stack-local-opt-in) | bringing up Prometheus / Loki / Tempo / Grafana — [dashboards](#dashboards-gh366) · [alert receivers](#alerting--receiver-configuration-gh245-adr-0019) |
+| [When a page arrives](#when-a-page-arrives) | **you were paged — start here**, then the matching runbook: [auto-flatten failure](#auto-flatten-failure) · [unprotected position](#unprotected-position) · [orphaned stops](#orphaned-stops) · [backfill shortfall](#backfill-shortfall) · [telemetry pipeline](#telemetry-pipeline). *Those five headings are the live targets of Prometheus `runbook` annotations — link to them, never rename them* |
+| [The dead-man's switch](#the-dead-mans-switch-operator-setup--required-before-live) | before enabling live — the only alerting tier that survives this process dying |
+| [Deploy procedure](#deploy-procedure) | shipping a build |
+| [Rollback procedure](#rollback-procedure) | a build is bad and needs backing out |
+| [Verification / smoke tests](#verification--smoke-tests) | confirming a deploy actually works |
+| [Cost](#cost) | budget questions |
+| [Open items](#open-items) | you are picking up unfinished platform work |
+
+## Platform
+- **Cloud (running):** [Railway](https://railway.com) — project **`soothing-illumination`**
+  (`2601eb74-b5f9-411f-bb9a-0cd19e6fd540`).
+- **Cloud (intended):** AWS — ECS Fargate + ALB, two environments (staging + production), GHCR by digest
+  ([ADR-0030](adr/0030-aws-deployment-topology.md)). This runbook still describes the running Railway cloud.
+  The CDK app is under [`infra/`](../infra/) (gh#1186 / gh#1188); see [AWS environment stack](#aws-environment-stack).
+  Operator inventory (2026-09-12, gh#1188 — do not invent others): account `045296582762`, region `us-east-1`,
+  staging hostname `trading-copilot.staging.marqspec.com`. GitHub OIDC deploy roles and the release/rollback
+  workflows landed with **gh#1187**; see [AWS release / deploy](#aws-release--deploy-oidc). Production
+  (`trading-copilot.marqspec.com`) is not this card.
+- **Image registry:** **GHCR** — `ghcr.io/adammarquette/trading-copilot`, **public** ([ADR-0018](adr/0018-image-registry-ghcr.md)).
+  CI builds once per merge and pushes; local and Railway both **pull** this artifact. Tags: `:develop` / `:staging` /
+  `:main` per environment, plus `:sha-<short>` for an exact rollback target.
+- **Data:** one Postgres with **TimescaleDB** + **pgvector** (Railway-managed plugin vs. self-hosted — *Decide*),
+  three shapes in one database (engineering §2). Factor into the Decide: the `AddEventBackbone` migration
+  **degrades gracefully on non-Timescale Postgres** (the `Events` log stays a plain table, `RAISE WARNING`, no
+  hypertable/retention/continuous-aggregates) — the app runs, but the ADR-0001 backbone only gets its Timescale
+  behaviors on a Timescale-enabled instance (locally: the compose `timescaledb-ha` image, which bundles both
+  extensions).
+
+## AWS environment stack
+
+The C# CDK app under [`infra/`](../infra/) (gh#1186 / gh#1188) matches [ADR-0030](adr/0030-aws-deployment-topology.md).
+Railway remains the **running** cloud until that record's sunset (gh#1189). GitHub OIDC deploy roles and the
+release workflow are [below](#aws-release--deploy-oidc) (gh#1187).
+
+### Operator inventory (2026-09-12, gh#1188)
+
+Pinned on the issue. Do not invent others. Production hostnames are recorded for later and are **not** this card.
+
+| | Staging (this card) | Production (later) |
+|---|---|---|
+| Account | `045296582762` (same AWS account as TopstepX) | same |
+| Region | `us-east-1` | same |
+| `RootDomain` | `staging.marqspec.com` | `marqspec.com` |
+| `Hostname` | `trading-copilot.staging.marqspec.com` | `trading-copilot.marqspec.com` |
+| Hosted zone | **Lookup** `Z00545362JA49XMTT3U7Q` | later |
+| Outbound synth context | `PublicIpPerTask` (match TopstepX standing staging; not a `Program.cs` literal) | unset |
+| `ProjectXDataTier` | `Simulated` ([R-14](trading-platform-prd.md)) | `Live` only on the live rung |
+
+**Staging looks up the existing zone.** TopstepX already uses hosted zone `Z00545362JA49XMTT3U7Q` for
+`staging.marqspec.com` (Cloudflare delegates its NS). Creating a second public zone for that name would mint
+new NS and undo that swap (TopstepX `ZoneMode.Lookup`, gh#519). The zone id lives here, not as a hardcoded
+surprise in product code — apply passes `-c account=045296582762 -c region=us-east-1 -c rootDomain=staging.marqspec.com`
+and CDK looks the zone up. A default AWS CLI region of `us-east-2` reports `Stack does not exist` — pass
+`--region us-east-1` (same trap TopstepX recorded).
+
+`AlertsEmail` is still operator-supplied. First apply cannot invent an inbox; pass it as
+`--parameters AlertsEmail=…` / `DEPLOY_ALERTS_EMAIL` / repository variable `AWS_ALERTS_EMAIL`. SNS will send a
+confirmation to that address.
+
+Shape (pattern library: TopstepX `EnvironmentStack` in `MarqSpec.Mcp.TopstepX` — cite it; do not copy Cognito
+or MCP bits):
+
+| Resource | How it is named | Notes |
+|---|---|---|
+| Two stacks | `trading-copilot-production`, `trading-copilot-staging` | Same class. No third AWS env for `develop` (compose stays local). |
+| VPC + four security groups | `trading-copilot/<env>/{alb,app,postgres,efs}` | Internet → ALB 443/80 → app 8080 → Postgres 5432 → EFS 2049. |
+| Outbound path | context `-c outbound=…` | Required. ADR-0030 left NAT vs public IP vs VPC endpoints undecided. CI synths every shape. |
+| ECS cluster | `trading-copilot-<env>` | Fargate. Desired count ≥ 1. Circuit breaker + rollback. |
+| App task | `ghcr.io/adammarquette/trading-copilot@${ImageDigest}` | Digest is a CloudFormation parameter, no default. Never `:latest` or a floating branch tag ([ADR-0018](adr/0018-image-registry-ghcr.md)). Public image — no registry credential. |
+| Store task | `timescale/timescaledb-ha` by digest on EFS | Same image compose tests. Access point uid/gid 1000. Cloud Map `postgres.<env>.tradingcopilot.internal`. |
+| ALB | `trading-copilot-<env>` | TLS at the edge; HTTP → HTTPS; host-header is the `Hostname` parameter; `/health` on 8080. Idle timeout 600 s (SignalR). |
+| Hosted zone | **Lookup** on staging apply; **Create** in tests / `cdk synth --no-lookups` | Staging apply must not Create: a second `staging.marqspec.com` zone breaks the Cloudflare swap (gh#1188). |
+| Secret shells | `trading-copilot/<env>/{postgres,jwt,bootstrap,projectx,providers,llm,pushover,checkin}` | Empty JSON keys. ECS `valueFrom`. **Never edit a shell literal after values are written.** |
+| Deploy history | `/trading-copilot/<env>/{image-digest,version}` | SSM, written by the stack from the same parameters the task reads. |
+| OTLP sidecar | `otel/opentelemetry-collector-contrib` by digest | Loopback only, `Essential=false`. CloudWatch via SigV4. ADR-0019 paging is not dropped. |
+| Alarms | `trading-copilot-<env>-{app,postgres}-running-tasks`, `unhealthy-hosts`, 5xx, deployment-failed | SNS to the `AlertsEmail` parameter. |
+| App auth | JWT (`Jwt__SigningKey` shell) | R-18. No Cognito. `ASPNETCORE_ENVIRONMENT` is `Production` or `Staging` so R-14 mapping stays honest. |
+
+**Parameters on every apply** (no defaults that would silently pick a digest or a hostname): `ImageDigest`,
+`Version`, `RootDomain`, `Hostname`, `ProjectXDataTier` (`Simulated` / `Live`), `AlertsEmail`. Apply-time synth
+context: `-c outbound=PublicIpPerTask -c account=045296582762 -c region=us-east-1 -c rootDomain=staging.marqspec.com`.
+Never `:latest` or a floating branch tag ([ADR-0018](adr/0018-image-registry-ghcr.md)).
+
+### How to deploy staging
+
+Always-on: desired count ≥ 1 ([ADR-0030](adr/0030-aws-deployment-topology.md) decision 10 — staging stays ≥ 1
+while flatten is proven on practice). Digest-only image from GHCR. Practice credentials only.
+
+```bash
+# from infra/, pinned CLI (`npm ci` then `npx cdk`). Never :latest.
+# ImageDigest is sha256:<64 hex> from `docker buildx imagetools inspect ghcr.io/adammarquette/trading-copilot:<tag>`.
+# AlertsEmail is operator-supplied — do not invent one.
+
+npx cdk bootstrap aws://045296582762/us-east-1 \
+  -c outbound=PublicIpPerTask -c account=045296582762 -c region=us-east-1 \
+  -c rootDomain=staging.marqspec.com
+
+# OIDC roles (operator credentials, not GitHub Actions — the roles do not exist yet).
+# account/region make Program.cs Lookup staging, so rootDomain is required even for this stack.
+npx cdk deploy trading-copilot-github-oidc \
+  -c outbound=PublicIpPerTask -c account=045296582762 -c region=us-east-1 \
+  -c rootDomain=staging.marqspec.com \
+  --require-approval never
+
+npx cdk deploy trading-copilot-staging \
+  -c outbound=PublicIpPerTask -c account=045296582762 -c region=us-east-1 \
+  -c rootDomain=staging.marqspec.com \
+  --parameters ImageDigest=sha256:<64 hex> \
+  --parameters Version=<MAJOR.MINOR.PATCH> \
+  --parameters RootDomain=staging.marqspec.com \
+  --parameters Hostname=trading-copilot.staging.marqspec.com \
+  --parameters ProjectXDataTier=Simulated \
+  --parameters AlertsEmail="$ALERTS_EMAIL"
+```
+
+The release path after OIDC exists: `scripts/deploy-environment.sh staging <version> <digest>` (or
+`gh workflow run deploy.yml --ref main -f version=<tag> -f environment=staging`). That script passes
+account/region as context from the assumed role and does **not** pass `--no-lookups`. Do not `cdk deploy`
+production from this card.
+
+### How to tell staging is up
+
+```bash
+curl -sSI https://trading-copilot.staging.marqspec.com/health
+
+aws ecs describe-services --region us-east-1 \
+  --cluster trading-copilot-staging \
+  --services trading-copilot-staging-app \
+  --query 'services[0].{desired:desiredCount,running:runningCount,taskDef:taskDefinition}'
+
+aws ssm get-parameter --region us-east-1 --name /trading-copilot/staging/image-digest
+aws ssm get-parameter --region us-east-1 --name /trading-copilot/staging/version
+```
+
+`/health` must be 200. Desired/running **1**. SSM digest must match the task definition image
+(`ghcr.io/adammarquette/trading-copilot@sha256:…`). Do **not** `put-parameter`; the stack writes these
+([ADR-0030](adr/0030-aws-deployment-topology.md) decision 5).
+
+### Flatten / liveness on staging
+
+Staging hosts the same always-on app task as production will, on **practice** only ([R-14](trading-platform-prd.md)).
+The CloudWatch alarms that page `AlertsEmail` are `trading-copilot-staging-app-running-tasks` (RunningTaskCount < 1,
+missing data breaching), `trading-copilot-staging-unhealthy-hosts`, 5xx, and `trading-copilot-staging-deployment-failed`.
+Those sit beside [ADR-0019](adr/0019-alerting-channel-and-thresholds.md) flatten / liveness / Pushover paging; they
+do not replace it. The dead-man's switch check-in must **not** share this host
+([below](#the-dead-mans-switch-operator-setup--required-before-live)).
+
+### After first apply — write the secret shells
+
+Shells stay empty in git. After the stack exists, the operator writes values by hand (console or CLI).
+**Do not invent** JWT, ProjectX, bootstrap, or provider values. **Never edit a shell literal in the
+template after values are written** — CloudFormation creates a new secret version whenever `SecretString`
+changes.
+
+```bash
+# names the stack created. Fill only practice ProjectX credentials on staging (R-14).
+aws secretsmanager put-secret-value --region us-east-1 \
+  --secret-id trading-copilot/staging/postgres \
+  --secret-string '{"password":"<generated>","connectionString":"Host=postgres.staging.tradingcopilot.internal;Port=5432;Database=tradingcopilot;Username=copilot;Password=<same>"}'
+
+aws secretsmanager put-secret-value --region us-east-1 \
+  --secret-id trading-copilot/staging/jwt \
+  --secret-string '{"signingKey":"<≥32 random bytes>"}'
+
+# bootstrap / projectx / providers / llm / pushover / checkin — same shape, operator values.
+# checkin.heartbeatUrl must point at infrastructure that is not this stack.
+```
+
+The postgres `connectionString` host is `postgres.staging.tradingcopilot.internal`. JWT signing key ≥ 32
+bytes. An empty postgres shell makes the store task exit and trips the ECS circuit breaker — fill it during
+`CREATE_IN_PROGRESS` if the first create races the task.
+
+Synth without credentials (what CI runs — Create path, no account/region, no lookup):
+
+```bash
+cd infra
+npx cdk synth --no-lookups -c outbound=NatGateway
+```
+
+## AWS release / deploy (OIDC)
+
+The OIDC stack and the release/rollback workflows (gh#1187) match [ADR-0030](adr/0030-aws-deployment-topology.md)
+decisions 4, 8 and 11. Shape is TopstepX `GitHubOidcStack` + `release.yml` / `deploy.yml` in
+`MarqSpec.Mcp.TopstepX` — cite it; do not copy Cognito or MCP bits. Railway remains the **running** cloud.
+Staging apply and the live hostname are [above](#aws-environment-stack) (gh#1188).
+
+| Piece | Name / trigger | Notes |
+|---|---|---|
+| OIDC stack | `trading-copilot-github-oidc` | One provider, two roles (`GitHubDeploy-staging`, `GitHubDeploy-production`). Environment-agnostic: ARNs use `AWS::AccountId` / `AWS::Region`. No thumbprint list. |
+| Staging trust | `v*` tags **and** `refs/heads/main` | Release path + `workflow_dispatch` rollback. The subject is this repo's **immutable** Actions prefix (`owner@id/name@id`), read from `GET /repos/…/actions/oidc/customization/sub` — a name-only `repo:owner/name` trust never matches. |
+| Production trust | `environment:aws-production` | No wildcard. The reviewer rule on that GitHub Environment is the approval **and** the credential's precondition ([ADR-0030](adr/0030-aws-deployment-topology.md) decision 8). |
+| `release.yml` | published GitHub Release | Retags the merge-published `:sha-<short>` as `:VERSION` (does not rebuild, never `:latest`). Deploys that **digest** to staging, then the same digest to production behind `aws-production`. |
+| `deploy.yml` | `workflow_dispatch` on `main` | Rollback / redeploy. Resolves the digest from the version tag (`imagetools inspect`). Staging has no `environment:` key; production is the literal `aws-production`. |
+| Deploy script | `scripts/deploy-environment.sh` | `cdk deploy --parameters ImageDigest=… Version=…` plus `-c account= -c region= -c rootDomain=` (no `--no-lookups`). Never `put-parameter`, never `{{resolve:ssm}}`. |
+
+**No long-lived AWS keys** in GitHub secrets, workflow files, or source. The workflows assume the deploy
+roles through OIDC (`id-token: write`) and read the account / region from repository **variables**
+(`AWS_ACCOUNT_ID`, `AWS_REGION`) — empty is a hard fail, never a guessed literal.
+
+### Operator setup — console actions CI cannot do (gh#1187)
+
+1. **Create the approval environments.** `scripts/bootstrap.sh adammarquette/trading-copilot` creates
+   `production` (gates the version-tag publish) and `aws-production` (gates what runs), each with the
+   running account as the required reviewer. Create-only: a re-run that finds an environment leaves it
+   untouched. An `environment:` key that names a missing environment is **not** a gate — GitHub
+   auto-creates it unprotected.
+2. **Set repository variables** (Settings → Secrets and variables → Actions → Variables). Staging
+   pins (gh#1188): `AWS_ACCOUNT_ID=045296582762`, `AWS_REGION=us-east-1`, `AWS_OUTBOUND=PublicIpPerTask`,
+   `AWS_ROOT_DOMAIN_STAGING=staging.marqspec.com`, `AWS_HOSTNAME_STAGING=trading-copilot.staging.marqspec.com`,
+   `AWS_PROJECTX_DATA_TIER_STAGING=Simulated`. Do **not** set a single `AWS_ROOT_DOMAIN` — production
+   Create would mint a second `staging.marqspec.com` zone. Still operator-supplied, never invent:
+   `AWS_ALERTS_EMAIL`, `AWS_ROOT_DOMAIN_PRODUCTION`, `AWS_HOSTNAME_PRODUCTION`,
+   `AWS_PROJECTX_DATA_TIER_PRODUCTION`.
+3. **First apply of the OIDC stack** uses the operator's own credentials, not GitHub Actions — the
+   roles do not exist yet, so the circular "assume the role that creates the role" cannot run. See
+   [How to deploy staging](#how-to-deploy-staging).
+4. **CDK bootstrap** in that account (`cdk bootstrap aws://045296582762/us-east-1`) before any apply.
+
+`./scripts/check-release-gate.sh` fails CI when a workflow-named environment is missing or has no
+reviewer. `./scripts/check-deploy-workflows.sh` fails CI when a deploy job references `:latest`,
+writes SSM, names a twelve-digit account ARN, or uses an expression-named environment.
+
+## Local development (docker-compose)
+`docker compose up -d` from the repo root stands up the local stack ([ADR-0012](adr/0012-containerization-local-dev.md),
+[ADR-0018](adr/0018-image-registry-ghcr.md), engineering §8). The `app` service **pulls the GHCR image** — the same
+artifact Railway runs — so **local ≡ cloud** literally, not just the same Dockerfile.
+
+**The client is inside that image** ([ADR-0020](adr/0020-spa-served-by-the-bff.md), gh#646). The Dockerfile's `client`
+stage runs `npm ci && npm run build` and the bundle is copied into the API's `wwwroot`, so the app and the API answer
+on **one origin** — browse the running stack and the SPA is simply there, no second service and no CORS to configure.
+Nothing extra to deploy: a client change rides the same image promotion as any API change.
+
+> **That stage copies a *subset* of the repo, and everything `npm ci` needs must be in the manifests layer** —
+> `package.json`, `package-lock.json` **and `.npmrc`** (gh#691). `.npmrc` carries `legacy-peer-deps=true`, without
+> which the install ERESOLVEs on `openapi-typescript`'s stale peer range. Every other check runs from a full
+> checkout where that file is simply present, so the image is the only place a missing-input bug can exist. It
+> cost **seven** develop commits with no publishable image, because `publish image (GHCR)` runs only after merge.
+> Adding a build-time input to the client means adding it to that `COPY`.
+>
+> **`build image (no publish)` now closes that window** (gh#692): it builds this same Dockerfile on every PR,
+> pushing nothing, so a missing-input break fails the PR that introduced it instead of surfacing on `develop`.
+
+**While developing the client**, `npm run dev` in `src/MarqSpec.TradingCopilot.Client` is faster than rebuilding the
+image. Vite serves the SPA on its own port, so set **`VITE_BFF_ORIGIN`** to the running BFF (e.g.
+`http://localhost:8080`) and the dev server proxies to it — **today only `/health`, which is all the scaffold calls**;
+the proxy list grows with the API client (gh#648). There is deliberately **no default target**: a guessed host is a
+wrong host, so with the variable unset the probe honestly reports unreachable rather than silently hitting Vite.
+
+A plain `dotnet run` with no bundle built is unaffected — static-file serving finds nothing and the API behaves
+exactly as before.
+
+**Two modes:**
+
+| Goal | Command |
+| --- | --- |
+| Run the published build (default) | `docker compose up -d` |
+| Run **my local changes** | `docker compose down` then `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build` |
+
+`docker compose up` **pulls, never builds** — fast, and works on a machine that cannot build the image.
+`IMAGE_TAG` selects the published build (default `develop`; e.g. `IMAGE_TAG=staging docker compose up -d`).
+The dev override (`docker-compose.dev.yml`) builds from your working tree and tags it `trading-copilot:local`, a
+distinct name so a later `docker compose pull` cannot clobber your build. Building needs a **recursive clone**
+(the Dockerfile copies the four `external/` client submodules).
+
+> **Before the image is published-and-public, the default pull fails.** The GHCR package is created on the first
+> merge to `develop`, **private** until the operator flips it public (below). Until that flip, `docker compose up`
+> returns `unauthorized`/`not found` — so the **dev-override build is the working local path**, or authenticate
+> with `docker login ghcr.io` (`read:packages`). This is a startup-window caveat, not a steady state: once the
+> package is public, the plain pull is the default again.
+- **The API documents itself** (gh#604). Once up, it serves an **OpenAPI 3 spec at `/openapi/v1.json`** and a
+  browsable **Scalar reference UI at `/scalar/v1`**, generated from the live routes so the spec never drifts from
+  the endpoints (the source of truth the README links to, #605). **Production exposure policy:** the **spec JSON is
+  served in every environment**, but the **interactive Scalar UI is disabled in production** (`ScalarUiPolicy` —
+  enabled in dev/staging only, keyed off the R-14 environment), because its "try it" console would put a one-click
+  trigger for `POST /accounts/{id}/orders` and `POST /kill-switch` against the **live** venue in front of anyone
+  who reaches the page. Every endpoint already requires a JWT, so this is defence in depth; flip the policy to put
+  the UI behind auth in production if preferred — the spec itself is always available. The spec + UI are served
+  **anonymously** (they expose only the API *shape*, never data or an action), which the R-18 authorization-surface
+  sweep sanctions by name (`AuthorizationSurfaceIntegrationTests.DocsAnonymous`) rather than leaving them ungated.
+- **Database is config-driven** — `docker-compose.yml` includes a **TimescaleDB + pgvector** service for convenience,
+  but the app takes its **connection string from config** (`ConnectionStrings__*` env / `appsettings`), so you can
+  point at the compose DB, a local Postgres, or a managed instance instead.
+- **Secrets** stay in a **gitignored `.env`** (copy `.env.example`) — never committed; cloud secrets come from Railway (§8).
+- **`.env` under compose is an allowlist, not a passthrough.** The app service's `environment:` block names every
+  key compose forwards; anything else in `.env` is used for interpolation and then **silently dropped**.
+  **Verify a flatten override actually took by reading the startup log** (gh#255) — do not assume a clean start
+  means it applied. The app reports every governed market on boot, naming the deadline **and its source**:
+
+  ```
+  info: Auto-flatten armed for ES at 14:15 CT (2026-07-25 19:15:00Z) — ConfiguredOverride.
+  info: Auto-flatten armed for NQ at 14:30 CT (2026-07-25 19:30:00Z) — BuiltInDefault.
+  warn: Auto-flatten is DISABLED for GC (ConfiguredOverride) — positions will NOT be closed at 12:15 CT.
+  ```
+
+  `ConfiguredOverride` means your setting reached the app; `BuiltInDefault` on a market you *did* configure means
+  it was **dropped** — check the allowlist below first. A market you configured that reads `ConfiguredAddition`
+  when you expected an override is a **misspelled symbol**: it added a new market beside the untouched default. A
+  **disabled** market logs at `warn`, never `info`.
+
+  **Adding a bound `Options` section is not done until its keys are on that list** — the omission is invisible at
+  runtime, because the app simply uses its own defaults and says nothing (gh#236 was exactly that, for the
+  `Flatten__` auto-flatten deadlines).
+- **Two entry shapes, and the difference is load-bearing** (gh#236). The `environment:` block is a **map**, so:
+  - `KEY: "${KEY:-default}"` — **always sets** `KEY`, with a compose-level fallback. Use only where compose must
+    impose a value the app cannot know (the DB host, the local-dev signing key).
+  - `KEY:` — a **null** value **passes through only if defined** in `.env` or the shell; when undefined the key is
+    **absent from the container**, not empty (identical to a bare `- KEY` list entry — verified via
+    `docker compose config`). Use this for anything the **app already defaults**.
+
+  The distinction matters because an empty string **binds** and overwrites the app's default. On the `Flatten__`
+  safety path that would mean a zeroed attempt cap or an unparseable deadline, and on a `required` field
+  (`Flatten__Instruments__N__Symbol`) a startup crash. **Absent is the only value that means "the app decides."**
+- **The per-instrument flatten slots are capped at four** (`Flatten__Instruments__0__` … `__3__`) — compose cannot
+  forward an open-ended indexed list. Four covers every market with a built-in deadline (ES, NQ, CL, GC). A fifth
+  needs its keys added to `docker-compose.yml`: a deliberate edit, not a silent limit. The slots are
+  **independent, not positional** — the .NET binder collects whatever indices are present, so gaps are harmless.
+- **Per-instrument contract specs** (`InstrumentSpecs__Instruments__0__` … `__3__`, gh#541) follow the same capped,
+  independent-slot shape and the same absent-vs-empty rule. They supply the **tick size, point value and
+  catastrophic safety-stop distance** a *server-originated* suggestion needs to become an order ticket — a manual
+  ticket carries them on the request, a suggestion has no author to ask, and the browser is deliberately not allowed
+  to supply them. The app ships built-in specs for the same four markets (ES 0.25/$50, NQ 0.25/$20, CL 0.01/$1000,
+  GC 0.10/$100), so these settings only **override or add**. An entry replaces a default **wholesale** — set all four
+  fields together, because a new tick size against an old point value is a silently wrong contract. A non-positive
+  `TickSize`, `PointValue` or `SafetyStopTicks` **fails startup by design**: a zero here would not fail loudly, it
+  would silently mis-size every risk calculation downstream.
+- **`Suggestions__ValidityMinutes`** (gh#544) is how long a newly issued suggestion stays actionable *before* the
+  auto-flatten clamp: the system stamps `min(this window, time to the market's flatten deadline)`, so a suggestion can
+  never outlive the flatten about to close the position. It **must be positive** — a non-positive value fails startup
+  by design, because it would emit a row the `CK_Suggestions_ExpiresAfterCreated` constraint refuses.
+- Schema changes apply via **`dotnet ef database update`** against the configured connection (as the data layer lands).
+  **`AddSuggestionIssuanceFields` (gh#542/#543/#544) backfills**: existing suggestions get
+  `ExpiresAt = CreatedAt + 1 second` — already expired, the fail-safe direction, and strictly greater so the new CHECK
+  applies cleanly. Backfilling to `CreatedAt` exactly would violate the strict inequality and abort the migration.
+
+## Environments ↔ branches
+Each long-lived branch deploys to its own Railway environment (engineering §10). Never wire a **live** account into a
+non-prod environment — non-prod is **practice-only** (real execution path, no real money).
+
+| Branch | Railway env | Trading mode | Data | Deploy approval |
+|---|---|---|---|---|
+| `develop` | dev | **practice** (ProjectX) | seeded from a prod snapshot | auto on merge |
+| `staging` | staging | **practice** | prod snapshot · integration tests run here | auto on merge |
+| `main` | production | **live** — real money, the *only* live env | authoritative | **human-approved** |
+
+*(A new Railway project starts with a single environment; the `dev` + `staging` environments still need creating —
+see *Operator setup* steps 4–5. The pipeline half is wired and inert until they exist, `gh#379`.)*
+
+## Secrets & config (per environment)
+Server-side only, from the Railway environment — **never in source** (Options pattern, validate-on-start; §8):
+- **Broker (ProjectX):** account id + credentials + endpoints, **per environment** (practice vs. live).
+- **Auth:** JWT signing key (ADR-0003).
+- **Embeddings:** Cohere API key.
+- **LLM (agent review):** `Llm__ApiKey` — the Anthropic key the reviewer wakes a live model with (gh#402/#423); a
+  **real secret** like the Cohere key. Absent, the stub reviewer stands in, so production never fabricates geometry.
+- **Data providers:** Finnhub + Tiingo API tokens (free tier). These live in **two** places, for two different consumers, and both are needed: the deployment reads `Finnhub__ApiKey` / `Tiingo__ApiKey` from its Railway environment, and the **live-provider test tier** (gh#1122) reads them from the **GitHub Actions repository secrets** `FINNHUB__APIKEY` / `TIINGO__APIKEY`, forwarded only by [`live-provider-gates.yml`](../.github/workflows/live-provider-gates.yml). A secret set in one place does nothing for the other. **Entitlements are not implied by a valid key** — Tiingo's news endpoint is a paid add-on its free tier refuses with `403` while `/api/test` still answers `200` (gh#1125), so "the key works" and "the feed works" are separate questions.
+- **News lookback vs. provider latency (gh#1123):** `News__LookbackMinutes` sizes how far back each poll re-fetches, not an API call parameter — Finnhub's `general` endpoint takes no time bound at all and always returns its own latest set regardless of what is asked for. It exists to compensate for the feed being **stale on arrival**: measured live, the newest article in a 100-article payload was already 98 minutes old, the second 200. A window narrower than roughly a day (the shipped default, 1440) admits almost none of a normal day's 13–37 articles — not an empty result, a "successful" pass that silently stores nothing. Overlap across passes is intentional and safe: the `NewsDedupKey` dedup makes a re-fetched window idempotent, so widening it costs re-checking already-known rows, never a duplicate row.
+- **Database:** connection string (Railway-managed).
+- **Ingestion:** poll intervals; the `Ingestion:Symbols` allowlist; news relevance config (or DB-stored).
+- **AI-spend governor (gh#448, ADR-0008):** `Governor__DailyBudgetUsd` + `Governor__AlertThresholdFraction` — the
+  platform-wide daily AI budget and pre-alert fraction (not secrets; unset leaves the governor inert).
+- **Telemetry (gh#230, ADR-0002):** `Telemetry__OtlpEndpoint` — the OTLP collector endpoint (e.g.
+  `http://otel-collector:4317`). **Leave it unset to disable export**: the SDK stays wired and the app runs
+  normally, it simply ships nothing. `Telemetry__ServiceName` overrides the service name stamped on every signal
+  (default `trading-copilot-api`); the deployment environment is taken from `ASPNETCORE_ENVIRONMENT`. Neither is
+  a secret — the collector endpoint is an address, not a credential.
+
+### Operator password recovery (R-18, ADR-0017 operator lifecycle)
+The operator controls the deployment, so the environment can recover the account — **host control = account
+control**. There is no email reset (no mail infrastructure, no need) and no second admin. Forgot the password:
+
+1. Set **`Bootstrap__Password`** to the **new** password and **`Bootstrap__ResetPassword=true`** in the
+   environment (`.env` locally; Railway variables in the cloud).
+2. **Restart the app once.** On startup it re-hashes the new password onto the **existing** operator — same user
+   row, same id, so every R-20-scoped row in the workspace (firms, conventions, orders, journal) stays yours.
+   *Never* recover by deleting the user row: the reseeded user gets a new id and the default-deny filter strands
+   the entire workspace as orphaned data.
+3. Sign in, then **remove `Bootstrap__ResetPassword`** (and rotate `Bootstrap__Password` out if you prefer).
+   The flag is a deliberate one-restart opt-in — without it, a stale env password can never silently overwrite
+   the stored credential.
+
+## Services (as they are built)
+The microservices ([architecture](trading-platform-architecture.md)) deploy as **separate Railway services**, scaled
+independently: ingestion (websocket) · poller · processor(s) · trigger engine · BFF/API + agents · the React SPA
+(static). *(Fill in service names / start commands as they land.)*
+
+## CI/CD pipeline (GitHub Actions → GHCR → Railway)
+`lint → build → test → publish image → deploy → verify` (engineering §10, [ADR-0018](adr/0018-image-registry-ghcr.md)):
+1. Push / merge to a long-lived branch triggers the pipeline.
+2. `dotnet format --verify-no-changes` + **unit tests** + the **pre-merge integration suite** (venue-independent,
+   on a throwaway real-Postgres container — gh#121) must pass.
+   - **Env forwarding (`gh#325`).** `./scripts/check-env-forwarding.sh` fails the build when a key documented in
+     `.env.example` is not forwarded by `docker-compose.yml`. The compose `environment:` map is an **allowlist**,
+     so a missing key is read for interpolation and then dropped — the operator sets it, the app never sees it,
+     nothing says so. That has hit the **R-13 flatten deadlines** (`gh#236`) and the **watchlist** (`gh#304`).
+     **When it fails:** add the key to the app service's `environment:` map, using the **null pass-through**
+     (`Key__Name:` with no value) for anything the app already defaults — an empty string *binds* and overwrites
+     that default. For an indexed list, add the specific index; the caps are deliberate and documented in
+     `.env.example`. **Run it locally** before a PR that adds configuration; it needs only Docker.
+3. **Publish image to GHCR** — CI builds the `Dockerfile` **once** and pushes `ghcr.io/adammarquette/trading-copilot`
+   tagged `:<branch>` + `:sha-<short>`. Merge-only (`if: github.event_name == 'push'`); a PR never publishes.
+4. **Railway deploys that image** (the pushed tag) to the branch's environment — the tested artifact, not a rebuild.
+   The `deploy` job is **wired** (`gh#379`) for `develop` → dev and `staging` → staging, and it **skips with a
+   notice** until the branch's `RAILWAY_DEPLOY_HOOK_*` secret is set — so the pipeline stays green while the
+   console steps below are outstanding, rather than going red on every merge. **`main` is deliberately excluded:**
+   production deploy and rollback are human-approved, never automatic, so a merge-triggered production deploy is
+   refused *by construction* rather than by a setting someone can forget. Promoting to production stays the
+   manual *Deploy procedure* below.
+5. **Integration tests** run against **staging** after a merge to `staging` *(not yet wired — this is the staging
+   tier; the venue-independent **pre-merge tier already runs in CI**, step 2 / gh#121)*.
+6. On **production** deploy, a **smoke-test subset** runs; a failure **flags the release for rollback** — pin the
+   previous `:sha-<short>` tag to roll back to an exact prior build *(the smoke subset is not yet wired, with
+   step 5)*. The **`verify` job is wired** (`gh#379`) for the environments step 4 deploys: it probes
+   **`GET /ready`** on the deployed instance via `scripts/verify-deploy.sh`, retrying while the container starts
+   and applies migrations. `/ready` rather than `/health` on purpose — `/health` answers from the process and
+   returns 200 even when the database is unreachable, which is precisely the failure a post-deploy check exists
+   to catch. A deploy whose base URL secret is missing **fails**: an unverified deploy is not a successful one.
+   The script is runnable locally (`scripts/verify-deploy.sh http://localhost:8080`), so the local check and the
+   gate cannot disagree.
+
+### Operator setup — console actions CI cannot do (ADR-0018)
+The build/push half is code (`.github/workflows/ci.yml`). These are one-time console steps, recorded here because
+configuration that lives only in a provider console is otherwise invisible to anyone reading the pipeline:
+1. **After the first CI publish**, set the GHCR package `trading-copilot` visibility to **public** — GHCR creates
+   packages **private** by default, so the first pull (local or Railway) fails until this is flipped.
+2. **Reconfigure the Railway service** to deploy from the image `ghcr.io/adammarquette/trading-copilot:<branch>`
+   rather than building from the repo source. No pull credential is needed (public image).
+3. Until step 2 is done, Railway still builds from source; the GHCR image is used by local dev only. The pipeline
+   is deliberately left this way rather than half-wiring a deploy trigger against a not-yet-image-sourced service.
+   The `deploy` job added by `gh#379` honours that: with no hook secret it **skips**, so it cannot fire against a
+   service that would rebuild from source instead of pulling the tested artifact.
+4. **Create the `dev` and `staging` environments** in the Railway project and map them per *Environments ↔
+   branches*. A new Railway project starts with a single environment, so both are missing today.
+5. **Set the per-environment secrets.** Two of them turn the pipeline on, and nothing else does:
+
+   | Secret (GitHub Actions) | Purpose |
+   |---|---|
+   | `RAILWAY_DEPLOY_HOOK_DEV` / `RAILWAY_DEPLOY_HOOK_STAGING` | Railway deploy-hook URL. **Absent ⇒ the deploy job skips.** |
+   | `DEPLOY_BASE_URL_DEV` / `DEPLOY_BASE_URL_STAGING` | Public base URL of the deployed instance, for the `/ready` probe. **Absent after a deploy ⇒ the verify job fails.** |
+
+   The application's own secrets (ProjectX credentials + endpoints, DB connection, OTLP) are **Railway
+   environment variables**, never GitHub secrets and never in source — CI triggers a deploy, it does not carry
+   the app's configuration.
+
+   **The staging integration tier is the exception — its `STAGING_*` values ARE GitHub Actions secrets**, because
+   the `staging-gates.yml` gates (`gh#1019`) run *in CI*, not in the app, and read them from the job environment.
+   They are **PRACTICE-ONLY** (R-14 — the warning below applies to them in full); absent, the gates **skip by
+   construction** (reported in the run, never a silent green). The canonical list is `StagingConfig` — set all of
+   these for the venue-execution and direct-gateway bracket gates (`gh#1012`, `gh#293`, `gh#269`):
+
+   | Secret (GitHub Actions) | Purpose |
+   |---|---|
+   | `STAGING_API_BASE_URL` | The deployed staging API the gates place their order *through* (its real risk gate). |
+   | `STAGING_OPERATOR_EMAIL` / `STAGING_OPERATOR_PASSWORD` | A staging operator login for the gates. |
+   | `STAGING_PROJECTX_CREDENTIAL_KEY` | The ProjectX credential key the staging app serves. |
+   | `STAGING_PROJECTX_PRACTICE_ACCOUNT` | The **reserved practice account** key the gates trade on. |
+   | `STAGING_EXECUTION_INSTRUMENT` | The instrument the gates trade (e.g. `MES`). |
+   | `STAGING_PROJECTX_API_KEY` / `STAGING_PROJECTX_API_SECRET` | Direct ProjectX **practice** credentials, to read the resting protective-stop leg the app does not surface (bracket gates). |
+   | `STAGING_PROJECTX_API_BASE_URL` | *(optional)* the ProjectX gateway URL; the client defaults it. |
+
+   Run them from the **Actions** tab (*Staging execution gates* → **Run workflow**), **after** a staging promotion
+   has deployed. *(An automatic on-promotion trigger is deferred on purpose: firing on `push:staging` would race
+   the asynchronous Railway deploy and false-green the just-promoted code — it needs a deploy-completion signal, a
+   follow-up once staging deploy is wired. See the workflow header.)*
+
+   > ⚠️ **The ProjectX credential mapping is the safety-critical step in this entire setup.** `dev` and `staging`
+   > are **practice-only**; a **live** account belongs to `production` and nowhere else (R-14). Nothing below this
+   > mapping can catch a mistake — the application cannot tell it was handed live credentials in staging, and the
+   > first symptom is a real order on real money. Verify the account for each non-prod environment **at the
+   > broker** after setting it, not from the value you believe you pasted.
+
+6. **Running the gates against a local compose stack instead of a deployed one (gh#1074).** There is no staging
+   environment and none is planned right now — development runs on Docker locally — so step 5's *Run workflow*
+   button has nothing to point at yet. It does not have to: `StagingApiClient` only needs a running base URL, and
+   `StagingProjectXGateway` reads venue truth straight from ProjectX, so a `docker compose up -d` instance on
+   `http://localhost:8080` satisfies the same contract a deployed one would. This is a **second** way to run the
+   same `Category=Staging` suite, not a replacement for step 5 — keep both.
+
+   1. Bring up the local stack (*Local development (docker-compose)* above) and confirm it answers at
+      `http://localhost:8080/ready`.
+   2. Sign in once as the local operator (`Bootstrap__Email` / `Bootstrap__Password` in your `.env`) so you have a
+      login to hand the gates.
+   3. Set the same `STAGING_*` variables as the table above in your shell — **never committed**, and
+      `STAGING_API_BASE_URL=http://localhost:8080` instead of the deployed URL. `STAGING_PROJECTX_API_KEY` /
+      `_API_SECRET` / `STAGING_PROJECTX_PRACTICE_ACCOUNT` are still the **reserved practice account's** direct
+      credentials — the same ones step 5 uses, not new ones; this path changes only which app the gates place
+      their entry order *through*, never which broker account they trade on.
+   4. Run `scripts/run-staging-gates-local.sh` from the repo root. It refuses to start rather than run a partial
+      set (prints exactly which `STAGING_*` variables are missing), waits for `/ready` the same way the CI job
+      does, and then runs the identical `dotnet test … --filter "Category=Staging"` the workflow runs.
+
+   > ⚠️ **R-14 holds here by construction, not only by care.** `StagingProjectXGateway.ResolvePracticeAccountId`
+   > derives the account's trading mode the **same way production does** for a ProjectX `FirmType.PropFirm`
+   > connection — classifies the account's **name** (`ProjectXAccountStage.Resolve`, the same classifier the
+   > production adapter uses) and resolves it through the **same declared `FirmConventions`** the harness's own
+   > app-side connection registers (`StagingFirmConvention`), never the venue's own `Simulated` flag. That flag is
+   > deliberately **not** consulted at all — not even as a secondary check — because gh#780 established it is not
+   > trustworthy for this venue: a prop-firm funded account can report `Simulated=true` while real payout is at
+   > stake, and production's own `FirmConventions.For` (`ModeFollowsVenue: false`) never reads it either. A
+   > `STAGING_PROJECTX_API_KEY`/`_SECRET` pair accidentally pointed at a live or funded account cannot be traded
+   > through either path, proven by `StagingProjectXGatewayPracticeGuardTests` — including a case where
+   > `Simulated=true` and the declaration says the account is not practice, which must still fail closed. That
+   > guard is the backstop, not the plan: confirm the account really is the reserved practice account before
+   > running this, the same as step 5's warning above.
+
+   **Never run this at the same time as a `staging-gates.yml` workflow_dispatch run.** Both trade on the *same*
+   reserved account and nothing serializes a local run against a concurrent CI run — check the Actions tab is
+   idle first. Record whichever direction the run turns out on the gh#1012 issue and PR #1013, exactly as it ran;
+   a run that could not start (missing credentials) is reported as *not run*, never as a pass.
+
+### Automated code review — one workflow, one dormant ruleset
+Two mechanisms have carried this name. Only the first is live.
+
+**1. The `reviewer` workflow (`.github/workflows/reviewer.yml`, gh#802) — live.** On every non-draft PR it runs
+the [code-reviewer contract](agents/code-reviewer.md) over the diff and posts the result **as
+`trading-copilot-reviewer[bot]`** through [`.github/scripts/reviewer-review.sh`](../.github/scripts/reviewer-review.sh)
+(gh#141) — a distinct App identity, because GitHub blocks self-review and `gh` here authenticates as the PR's own
+author.
+
+It is **advisory by construction**: it posts `COMMENT`, and it prepends a fixed header so the first line of what
+it posts can never be a `**Verdict: …**` marker. That matters because `review-verdict` (gh#783) reads that marker
+**regardless of the review's state** — emitting one would let the bot satisfy the human-review gate by itself.
+`VERDICT_MODE` in the workflow is the single switch; promoting it is a reviewable change, and the thing to watch
+before promoting is its **block rate**, not its throughput. A reviewer that approves everything converts the gate
+into a rubber stamp.
+
+| Secret | Purpose | Set |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | Runs the reviewer. **Set (gh#811)** — but see the credit note below: the key authenticates, yet the model call still needs a funded account. | ☑ |
+| `REVIEWER_APP_ID` · `REVIEWER_APP_INSTALLATION_ID` · `REVIEWER_APP_PRIVATE_KEY` | Mint the App token the review is posted under (setup below). | ☑ 2026-07-24 |
+
+**The key's Anthropic account must hold credit — a console-only setting the pipeline cannot see.** With the
+key provisioned but its account unfunded, the model call returns HTTP 400 `Credit balance is too low` on
+**every** PR (gh#994). The `Review` step now classifies that (and any API-layer refusal the PR author cannot
+fix — a bad key, a rate limit, an overloaded/5xx backend) as **infra** and **skips with a `::warning::`
+rather than reddening the PR** — the same posture as an absent key, because a red check nobody can fix trains
+people to ignore reds. A *genuine* reviewer/workflow failure (a crash, a non-API error) still reddens. So a
+red `reviewer` check now means a real bug; a **warning-and-skip** means *fund the account* (add credit at the
+Anthropic console for the key's org). The classifier is `scripts/lib/reviewer-outcome.sh`, pinned by
+`scripts/tests/reviewer-outcome.test.sh` in CI.
+
+**Neither of these is what supplies a binding verdict today.** That is the reviewer an **author agent spawns**
+once its PR is green (`gh#815`) — same contract, but its verdict line *is* binding, and the author blocks on it
+with `scripts/watch-verdict.sh` instead of ending its turn (loop:
+[engineering §10](trading-platform-engineering.md)). So the unset key above costs the *pre-review*, not the gate.
+It is still worth setting — an independent second opinion on every push is exactly what a single-operator repo is
+short of.
+
+#### Agent review identity — the gate is not satisfiable without one ☐
+
+**Open item, and the honest state of it: `review-verdict` does not clear from a session that cannot create a
+review.** The check reads review **bodies**; creating one takes `pull_requests: write`. The App row above is
+marked *set* — but those secrets are set **in GitHub Actions**, and a spawned reviewer does not run there. Unless
+it can read them from the operator's own environment, its two options are:
+
+| Identity | Where it comes from | What it needs |
+| --- | --- | --- |
+| Reviewer App (preferred — a formal `APPROVED` state, no marker needed) | `REVIEWER_APP_ID` · `REVIEWER_APP_INSTALLATION_ID` · `REVIEWER_APP_PRIVATE_KEY_FILE` in the *session's* environment, from the same App as the CI secrets (setup below) | the App installed on the repo |
+| The session's own `gh` | already authenticated | a token holding `pull_requests: write`; the review goes up as `COMMENT` and the first-line marker carries the verdict |
+
+A **Cursor cloud-agent session has neither** — its installation token is refused on `POST /pulls/{n}/reviews` with
+`Resource not accessible by integration`, and GitHub names the missing permission in
+`X-Accepted-GitHub-Permissions: pull_requests=write`. That is not theoretical: `gh#812`, `gh#813` and `gh#814` each
+**merged with `review-verdict` never satisfied**, and `verdict-state.sh 813` still answers `NONE`. The reviews on
+those PRs are PR comments and empty-bodied inline threads — visible to a human, invisible to the check.
+
+**Which identities the gate accepts** is a separate question from which can post, and it is an operator setting
+rather than a session's choice. A ruling counts only from **write standing** — `author_association` of `OWNER`,
+`MEMBER` or `COLLABORATOR` — or from a login on `verdict-state.sh`'s allowlist, which defaults to the reviewer App
+alone (`trading-copilot-reviewer[bot]`) because an App is always `NONE`. This repo is public and read access is
+enough to submit a review, so the filter is what stops a passer-by satisfying the gate with a marker line
+(§10, PR #818 security review). **Sanctioning another bot means changing that default here and in the script** —
+`VERDICT_TRUSTED_LOGINS` overrides it, and a verdict from an unlisted identity reads as `NONE` with the reason in
+the answer, which is the symptom to expect if a provisioned reviewer's ruling never lands.
+
+Until an identity is provisioned, `.github/scripts/post-verdict.sh` makes the failure **loud instead of silent**:
+`preflight <pr>` answers before a reviewer spends a review finding out, the posting path refuses to report success
+it cannot prove, and the verdict comes back to the operator to post. Provisioning is `gh#811`; the reviewer's side
+of it is its [contract](agents/code-reviewer.md), *Ruling takes an identity*.
+
+**2. `copilot-review-develop` — present but `enforcement: disabled`.** The rule still exists in repository
+settings and therefore still shows up in `gh api repos/<owner>/<repo>/rulesets`, but a disabled ruleset gates
+nothing: PRs into `develop` merge without Copilot responding. Verified live 2026-08-12.
+
+| Ruleset | Target | Rule | Enforcement |
+| --- | --- | --- | --- |
+| `copilot-review-develop` | `refs/heads/develop` | `copilot_code_review` (`review_on_push: true`, drafts excluded) | **disabled** |
+
+Read that state before concluding anything from a "stuck" PR — `enforcement` is the field that decides, not the
+rule's presence. **Were it re-enabled**, the historical failure mode returns and is worth knowing: a ruleset rule
+is **not a status check**, so while it is outstanding the PR reads `mergeStateStatus: BLOCKED` with every check
+green, 0 required approvals, and nothing in the checks tab to point at — a merge click silently does not take.
+Quota exhaustion delayed that but never deadlocked it: Copilot still replied with a `COMMENTED` review saying it
+had hit its quota, and the reply satisfied the rule (observed on PR #195 and PR #237). The ruleset carries **no
+bypass actors**, so a genuine deadlock could only be cleared by editing it in repo settings.
+
+Diagnose either mechanism with `gh pr view <n> --json mergeStateStatus,reviewDecision,latestReviews`.
+
+The other **blocking** gates are the required status checks enforced by the branch-protection rulesets below
+(gh#45): `build & unit tests`, `commit-hygiene`, the pre-merge integration suite (gh#121), and `ladder` on the
+promoted branches. Repo-specific review guidance lives in
+[`.github/copilot-instructions.md`](../.github/copilot-instructions.md); update it when a review repeatedly
+misses something this codebase cares about.
+
+### Branch protection — required-check rulesets (gh#45)
+Rulesets make the CI checks **blocking** on the long-lived branches. They live in repo settings, recorded here
+because settings-only config is otherwise invisible to anyone reading the pipeline. Applied 2026-07-24 via the
+rulesets API (possible once the repo went public, `gh#58`); the disabled, mis-targeted `default-main` leftover —
+whose `required_deployments` / `code_scanning` / `code_quality` rules reference features this repo does not have
+and would have deadlocked every merge if enabled — was deleted at the same time.
+
+| Ruleset | Target | Required status checks | Other rules |
+| --- | --- | --- | --- |
+| `protect-develop` (**active**) | `refs/heads/develop` | `build & unit tests` · `commit-hygiene` · `integration tests (pre-merge)` | PR required (0 approvals) · **`strict` ON** — must be up to date with `develop` (gh#575) · block force-push · block deletion |
+| `protect-staging` (**active**) | `refs/heads/staging` | the develop set **+ `ladder`** | PR required (0 approvals) · block force-push · block deletion |
+| `protect-main` (**active**) | `refs/heads/main` | the develop set **+ `ladder`** | PR required (0 approvals) · block force-push · block deletion |
+
+- **`ladder` is required on `staging`/`main`**, so a promotion PR from a disallowed source fails the check and
+  cannot merge — this is what turns the advisory ladder guard into hard enforcement of `staging ← develop` and
+  `main ← staging`.
+- **`stale-base` and `publish image (GHCR)` are deliberately NOT required** — `stale-base` is skipped on the
+  long-lived branches and `publish image` runs only on `push`, so requiring either would leave a required check
+  forever pending and **deadlock the merge**. This is the trap to remember before adding any required check:
+  confirm it actually runs on that branch's PRs.
+- **`build image (no publish)` is the one that CAN be required** (gh#692). It builds the same Dockerfile as
+  `publish image` but pushes nothing, and it is guarded `if: github.event_name != 'push'` — the exact complement
+  of `publish image` — so it runs on **pull requests** (and on `merge_group`, if a queue ever becomes available
+  here). It therefore does not hit the deadlock above.
+  **Maintainer action, not yet applied:** adding it to `protect-develop`'s required set is a **ruleset change in
+  the web UI** and is not done by this repo's code. Until it is, a red `build image` is *visible* on the PR but
+  does not *block* the merge. Add it, and add it to `protect-staging` / `protect-main` alongside their existing
+  sets, to make the gate binding.
+- **`submodule-guard` CAN and SHOULD be required — on `protect-develop` ONLY** (gh#774). It fails a PR that
+  moves an `external/**` pin without declaring it, and always fails a backward move — the exact failure PR #690
+  slipped through, silently reverting a merged fix for five days. It attributes a pin change to the PR that made
+  it by diffing from the **merge-base** of base and head (three-dot), not the two branch tips, so a bump already
+  merged to `develop` is never misread as an unrelated open PR reverting it — the false alarm that would otherwise
+  fire on every open PR at once (gh#839). It is guarded
+  `if: github.event_name == 'pull_request' && github.base_ref == 'develop'`, so it **only runs on PRs into
+  `develop`** (feature work lands there; a promotion PR re-carries an already-vetted bump). That scoping is
+  exactly why it must **not** be added to `protect-staging` / `protect-main`: it is skipped on their PRs, and a
+  required check that never runs deadlocks the merge — the same trap as `stale-base` above.
+  **Maintainer action, not yet applied:** add `submodule-guard` to `protect-develop`'s required set in the web
+  UI. Until it is, a red guard is *visible* on the PR but does not *block* the merge.
+### Combining-PR protection on `develop` — `strict`, because the merge queue is unavailable (gh#357, gh#575)
+
+> **The merge queue cannot be enabled on this repository.** Adding the `merge_queue` rule to `protect-develop`
+> fails with `422 — Invalid rule 'merge_queue'`, and retrying with **no parameters at all** gives the identical
+> error, so it is the rule *type* being rejected rather than a bad payload. **Cause:** the repo is
+> `owner.type = User` — merge queue requires an **organization-owned** repository, and public visibility alone is
+> not enough. That is why the checkbox is absent from the ruleset UI. (gh#357 assessed availability on visibility
+> and missed ownership.) Moving the repo under an organisation would unlock it — a real option, and its own decision.
+>
+> **In force instead: `strict_required_status_checks_policy = true`** on `protect-develop`, applied 2026-07-30 via
+> `PUT /repos/adammarquette/trading-copilot/rulesets/19715669`. A PR must be **up to date with `develop`** before it
+> can merge, so CI always compiles the combination that will actually land. Same gap closed, by **serialising**
+> rather than batching — at the cost gh#357 documented: each merge invalidates every other open PR, which then needs
+> a rebase and a full (~4 min) CI re-run. With many parallel sessions that is a real tax; it is accepted because a
+> broken `develop` blocks every downstream PR, and some guard beats none.
+>
+> **The `merge_group:` triggers in `ci.yml` / `branch-policy.yml` stay** (gh#357). They are **inert** with no queue
+> — the event never fires — and cost nothing. Keeping them means enabling the queue is a one-checkbox change if this
+> repo ever moves under an organisation. **Do not delete them as dead config.**
+
+The rest of this section describes the gap being closed and why a queue was preferred; it stands regardless of which
+mechanism enforces it.
+
+### Merge queue on `develop` — the design, if it ever becomes available (gh#357)
+
+**The gap it closes.** Required checks prove each PR green **against its own base**. Two PRs that are each green
+can still break `develop` once both land — different files, so no git conflict, and no CI run ever compiled the
+combination. That is exactly what happened on 2026-07-28 (`gh#351`): two PRs merged 23 seconds apart, one adding a
+4-arg constructor and the other a test constructing it with 2. The merge queue closes it by testing each queued PR
+**stacked on the base plus everything ahead of it in the queue**, and merging only what is green.
+
+`stale-base` is **not** the guard for this and is unchanged — it catches a *stacked* PR whose base already merged
+(`gh#72`), a different failure. The `gh#351` write-up misattributed it; `gh#357` corrected that.
+
+**Why a queue *would be* preferred over "require branches to be up to date" (`strict`) — the trade being paid for now.** `strict` works, but every merge to
+`develop` invalidates every other open PR, each then needing a rebase and a full ~4-minute CI re-run. This repo runs
+many parallel agent sessions, so that serialises merges and produces near-constant rebasing. A queue batches instead
+of serialising. (`strict` remains the interim fallback if the queue proves awkward.)
+
+**Settings that *would* apply — recorded for the org-owned future, not currently actionable.** The order matters:
+enabling a queue **before** the workflow triggers exist leaves every queued PR waiting on checks that never run.
+
+1. **The workflow triggers are already landed** — `ci.yml` and `branch-policy.yml` both carry `merge_group:`
+   (`gh#357`). A required check that does not run on `merge_group` deadlocks the queue, the same trap recorded
+   above for `stale-base` and `publish image`.
+2. **Then** it would be enabled on `protect-develop` → *Require merge queue*, with:
+   - **Merge method: `Rebase`** — **set this explicitly.** The default is a merge commit, which would break
+     `gh#104` ("PRs land by rebase-merge; every branch commit becomes permanent history") and put merge commits on
+     `develop`, where they are reserved for `develop → staging → main` promotions.
+   - Build concurrency and batch size left at the defaults until there is evidence to tune them.
+3. `protect-staging` / `protect-main` are **deliberately not queued**: each takes exactly one curated source
+   (`develop`, then `staging`), so there is no combination to test and a queue would only add latency.
+
+**Interaction with `copilot-review-develop`.** The Copilot-review rule is a **pull-request** requirement, satisfied
+before a PR can be queued, so it should not interact with the queue at all. That is the expectation, not a verified
+fact — **confirm it on the first queued PR**, because this rule has already been observed to block merges silently
+with every check green and nothing in the checks tab (see *Automated code review* above).
+
+**What it would look like.** Merging would become *Merge when ready*: the PR joins the queue, GitHub creates a
+temporary `gh-readonly-queue/develop/...` ref, CI runs against it, and the PR merges only if that run is green — so
+a PR can now be rejected by the queue after passing its own checks. That is the mechanism working, not a fault: it
+means the combination broke, and the fix is to rebase onto the new `develop` and resolve it.
+
+- **`issue-link` is deliberately NOT required, and never fails** (gh#406). It warns when a PR references issues
+  but will close none of them — the shape that let `#385` stay open after PR #391 delivered it, costing a full
+  duplicate implementation (PR #401, closed unmergeable). It is advisory *by design*: a PR against an epic, or a
+  QA suite that **pins** a defect rather than fixing it, legitimately closes nothing, so a hard failure would
+  train authors to add `Closes` where it does not belong — and a wrongly-closed issue is harder to notice than
+  one left open. Promoting it to required would need the false-positive rate measured first.
+  It reads GitHub's own **`closingIssuesReferences`** rather than pattern-matching the body, because that is the
+  set that will actually close on merge; a keyword in the **title** binds nothing, which is a real recurring
+  mistake here (PRs #369, #376, #425 all carried one). It additionally names two near-misses it finds: a keyword
+  in the title, and prose like *"Settles #307"* that reads like a link and is not.
+- **Non-strict** (no forced up-to-date-before-merge), **0 required approvals** (single operator — the checks and
+  the ladder are the gate), **no bypass list** (the rules bind even for the admin; that is the point of
+  enforcement). An approval requirement can be added later — `trading-copilot-reviewer[bot]` (gh#141) can satisfy
+  it on your own promotion PRs — as can an emergency bypass if a broken required check ever needs overriding.
+
+### Reviewer identity — a GitHub App for agent verdicts (gh#141)
+The [Code Reviewer contract](agents/code-reviewer.md) requires an agent to render a **formal verdict** — Approve
+or Request changes — not a bare comment. But **GitHub forbids approving or requesting changes on your own PR**,
+and every agent here authenticates as the maintainer (`adammarquette`), who authors the PRs. So the verdict needs
+a **distinct identity that is not the author.**
+
+**Decision (gh#141): a GitHub App**, not a second machine-user account — it needs no extra login or email, its
+token is scoped and revocable, its reviews post as `…[bot]` (a separate actor, so not self-review), and a fork
+recreates it without a second person (ADR-0015).
+
+**One-time operator setup — GitHub UI, cannot be scripted** (the App-manifest flow and the private key are
+console-only, recorded here because they are otherwise invisible to anyone reading the pipeline):
+1. **Settings → Developer settings → GitHub Apps → New GitHub App.** Name e.g. `trading-copilot-reviewer`; any
+   valid Homepage URL; **uncheck Webhook → Active**.
+2. **Permissions → Repository:** **Pull requests → Read & write**; **Contents → Read-only**; **Metadata →
+   Read-only** (auto). Nothing else.
+3. **Create**, then **Generate a private key** (a `.pem` downloads) and note the **App ID**.
+4. **Install App → this account → Only select repositories → `trading-copilot`**; note the **Installation ID**.
+5. Provide these to the reviewer agent as environment values (never in source): `REVIEWER_APP_ID`,
+   `REVIEWER_APP_INSTALLATION_ID`, and the private key. **For the key, prefer a file:** save the downloaded
+   `.pem` **unmodified** somewhere git-ignored (outside the repo is simplest — no `.gitignore` to trust) and set
+   `REVIEWER_APP_PRIVATE_KEY_FILE` to its path. A path has no newline/quote pitfalls; **cramming a multi-line PEM
+   into a line-based `.env` corrupts it** (the BEGIN header fuses to the base64). Inline `REVIEWER_APP_PRIVATE_KEY`
+   is also accepted (multi-line or `\n`-escaped, double-quoted) if you must. Locally: the operator's env / a
+   git-ignored `.env`; in CI: repository secrets.
+
+**How the reviewer agent uses it** — the committed helper
+[`.github/scripts/reviewer-review.sh`](../.github/scripts/reviewer-review.sh) does the token dance (JWT signed
+with the private key → `POST /app/installations/{id}/access_tokens` → a ~1 h installation token → the review),
+reading the three secrets from the environment. The key is written only to a private (0600) temp file for the
+openssl call and removed immediately (native-Windows openssl cannot read a process-substitution FD); neither key
+nor token is ever printed.
+- `reviewer-review.sh verify` — mints a token and reports what the installation can reach; **posts nothing**. Run
+  this first.
+- `reviewer-review.sh review <pr> REQUEST_CHANGES <body-file>` (or `APPROVE` / `COMMENT`) — submits the verdict;
+  it posts as `trading-copilot-reviewer[bot]`, a different actor from the author, so GitHub accepts it. The script
+  prints the bot login it posted as — the proof self-review was bypassed.
+
+**Where the App identity is not available**, an agent review falls back to a **review** whose **first line is the
+verdict** (`**Verdict: Request changes**` / `**Verdict: Approve**`) so the signal is unambiguous even without a
+formal state. Once the App is reachable from wherever reviewers run, this fallback is retired and (with `gh#45`)
+its approval can become a required check. The distinction that matters: the fallback is still a **review**, not a
+PR comment — a comment carries no verdict the gate can read, whatever its first line says (*Agent review
+identity*, above). Choosing between the two, and proving the result is readable, is
+[`.github/scripts/post-verdict.sh`](../.github/scripts/post-verdict.sh)'s job rather than the reviewer's judgment;
+[`reviewer-prompt-verdict.md`](../.github/reviewer-prompt-verdict.md) points it there.
+
+## Observability stack (local, opt-in)
+
+The self-hosted LGTM stack (`gh#231`, [ADR-0002](adr/0002-observability.md)) sits behind the **`observability`
+compose profile**, so it is **off by default**:
+
+```bash
+docker compose up -d                              # app + db only
+docker compose --profile observability up -d      # ...plus the stack
+```
+
+| Service | Port | What it holds |
+|---|---|---|
+| Grafana | 3000 | the single pane; datasources **and dashboards** provisioned from `./observability/grafana` (`gh#366`) |
+| Prometheus | 9090 | metrics (remote-write receiver + exemplar storage enabled); evaluates `./observability/rules` |
+| Alertmanager | 9093 | routing, dedup, quiet hours and the Pushover receivers (`gh#245`, ADR-0019) |
+| Loki | 3100 | logs |
+| Tempo | 3200 | traces |
+| OTel Collector | 4317 / 4318 | the only address the app exports to |
+
+**The app exports to the collector and knows no backend.** Swapping a backend, adding a second destination, or
+sampling is a change to `./observability/otel-collector-config.yaml`, not to application configuration.
+
+**Footprint** (measured 2026-07-26, idle): the five backends running then totalled **~263 MB RAM** — Tempo 102,
+Grafana 63, Loki 40, collector 33, Prometheus 25. **Alertmanager** was added afterward (2026-07-27, `gh#245`) and is
+**not** in that figure — it is capped at `mem_limit` 256m, so budget a little more for the **six-service** stack.
+Limits are set well above measured usage (`mem_limit` **256–512 MB** each) so a busy stack has headroom without
+being able to exhaust the host. Images total ~1.7 GB on first pull. Retention is **7 days** on all three backends.
+
+**Grafana credentials** default to `admin`/`admin` for local development only, from `GF_SECURITY_ADMIN_USER` /
+`GF_SECURITY_ADMIN_PASSWORD`. A deployed Grafana takes them from that environment's secret store — never from a
+committed file, and never left at the default.
+
+### Dashboards (`gh#366`)
+
+**Four** dashboards provision from `./observability/grafana/dashboards`, in the **Trading Co-Pilot** folder:
+
+| Dashboard | UID | What it answers |
+|---|---|---|
+| Auto-flatten reliability | `tc-auto-flatten` | Did R-13's obligation run, how fast, did the backstop save it |
+| Execution & risk gate | `tc-execution-gate` | Gate coverage, which limit binds, order-ack latency, kill switch, unprotected exposure |
+| Synthetic risk & pipeline health | `tc-synthetic-risk` | Platform-held protection, and whether the log's consumers keep up |
+| AI usage & spend (`gh#412`) | `tc-ai-spend` | What the AI is costing — 24h/30d spend, governor headroom, LLM-vs-embed split, spend by tier, outcomes, tokens, p95/p99 latency (`ai_llm_*` gh#477 + `ai_embed_*` gh#403) |
+
+> **The headroom panel reads the budget from the app, not from a constant (`gh#506`).** *"Governor headroom — % of
+> daily budget"* divides by the **`ai_governor_daily_budget_usd`** gauge, which the app publishes from its own
+> `Governor__DailyBudgetUsd` config. So changing the governor's budget is a **single** change — the panel follows it,
+> and cannot silently report against a stale denominator. (It briefly *was* a hand-synced Grafana `constant`; gh#506
+> replaced that precisely because the two could drift apart.)
+
+**They are read-only in the UI on purpose.** The provider sets `allowUiUpdates: false` and the mount is
+read-only, so a dashboard cannot drift into console state that no PR reviewed. **To change one, edit the JSON and
+commit it** — Grafana re-reads every 30 s, so a local edit shows up without a restart.
+
+**The most important thing to know when reading them:** on the auto-flatten board, **a blank panel is the alarm,
+not a quiet day.** The deadline metric is emitted on every evaluation including `nothing-to-do`, so absence means
+the loop did not run. The board says this in a text panel and reports *reporting / SILENT* as a stat rather than
+leaving it to be inferred.
+
+To check they loaded after a change:
+
+```bash
+curl -s -u admin:admin "http://localhost:3000/api/search?type=dash-db"
+```
+
+### Alerting — receiver configuration (`gh#245`, ADR-0019)
+
+Alerting is **Layer 1** of ADR-0019: Prometheus evaluates `./observability/rules/*.yml`, Alertmanager routes them
+to Pushover. Layer 2 — the dead-man's switch (`gh#244`) — is external by design and does **not** depend on any of
+this.
+
+Set three values in `.env`:
+
+| Variable | What it is |
+|---|---|
+| `PUSHOVER_USER_KEY` | your Pushover user key |
+| `PUSHOVER_API_TOKEN` | the Pushover **application** token |
+| `ALERTMANAGER_HEARTBEAT_URL` | a dead-man's-switch check URL (healthchecks.io, Dead Man's Snitch, …) |
+
+**These are separate variables from the app's `Pushover__*` settings on purpose.** Those configure the app's own
+direct push (the fast path, `gh#243`); these configure the rule engine's backstop. They may hold the same values,
+but they are read by different processes — and a stack whose alerting silently inherited the app's config would
+give you no way to test one without the other.
+
+**Alertmanager has no environment-variable expansion in its config**, unlike almost everything else in this
+stack. A `${PUSHOVER_API_TOKEN}` written into `alertmanager.yml` would be sent to Pushover as that literal
+string — the config loads, the stack looks healthy, and every page fails authentication. The receivers therefore
+use `token_file` / `user_key_file` / `url_file`, and compose materialises those files from `.env` through a
+`secrets:` block. **Do not "simplify" this back to `environment:`.**
+
+An unset token does not stop the container starting — deliberately, so a bad credential cannot take down the
+thing that reports every other failure. Which is why the next step is not optional.
+
+#### Send a test page (do this after any credential change)
+
+Do **not** wait for a real incident to discover the pager is broken. Fire a synthetic alert straight at
+Alertmanager:
+
+```bash
+curl -s -XPOST http://localhost:9093/api/v2/alerts -H 'Content-Type: application/json' -d '[{"labels":{"alertname":"TestPage","priority":"P1","component":"flatten"},"annotations":{"summary":"Test page — ignore","description":"Verifying the Pushover receiver end to end."}}]'
+```
+
+A P1 must arrive as a Pushover **Emergency** notification that repeats until you acknowledge it. If nothing
+arrives, check `docker compose --profile observability logs alertmanager` — an authentication failure appears
+there as a notify error.
+
+Substitute `"priority":"P2"` to check the quiet-hours behaviour: it should arrive between 06:00–17:00 CT and be
+suppressed outside that window. **A P1 is never suppressed** — that is the entire point of the tier.
+
+#### Verify the rules without deploying
+
+The rules carry executable tests, including a **clean-session fixture** asserting a normal day pages nobody. CI
+runs both `promtool check rules` (lint) and `promtool test rules` (the assertions) on **every PR** via
+`scripts/check-alert-rules.sh` — a step in the `build & unit tests` job (gh#585) — so a rule shipping with no test,
+or a test drifting from its rule, now **fails the PR** rather than being caught only by hand. Run the same script
+locally before pushing:
+
+```bash
+./scripts/check-alert-rules.sh
+```
+
+It uses the pinned `prom/prometheus:v3.0.1` image (the version compose runs), so the local check is the CI check.
+To run a single assertion pass by hand instead:
+
+```bash
+docker run --rm -v "$PWD/observability:/obs" -w /obs/rules/tests --entrypoint promtool prom/prometheus:v3.0.1 test rules trading-alerts-test.yml
+```
+
+#### Confirm the alerting chain is alive
+
+The `Watchdog` rule fires **permanently** by design and posts to `ALERTMANAGER_HEARTBEAT_URL` every 5 minutes;
+its **absence** is what the external check alarms on. To confirm the chain end to end:
+
+```bash
+curl -s http://localhost:9090/api/v1/alertmanagers   # Prometheus must list the Alertmanager
+curl -s http://localhost:9093/api/v2/alerts          # Watchdog must be present and firing
+```
+
+While `ALERTMANAGER_HEARTBEAT_URL` is left at its placeholder default, that route logs a delivery failure every
+5 minutes. That is intentional — an unconfigured dead-man's switch should be visible rather than silent — and it
+stops as soon as a real URL is set.
+
+**Everything is provisioned as code.** Nothing in this stack is configured by clicking, and
+`docker compose --profile observability down && up` returns the same stack (verified, including datasource
+re-provisioning and volume persistence). `prometheus.yml` already mounts a `rules/` directory, so `gh#245`'s
+alerting rules arrive as reviewable files rather than console state.
+
+## When a page arrives
+
+Every alert's `runbook` annotation links to one of the sections below — these are what you read at 03:00, so
+they lead with the action, not the explanation. **Assume the system is already doing what it can**: the
+always-native safety stop is the physical floor throughout every one of these.
+
+*(These four sections exist because `gh#245` shipped rules whose `runbook` annotations pointed at anchors that
+did not exist. A page linking nowhere is worse than one with no link — `gh#370` added them.)*
+
+### Auto-flatten failure
+
+**Alert:** `FlattenEscalated` (P1) · `FlattenMissed` (P1)
+
+Exposure is open past its deadline and the system could not close it. `FlattenEscalated` means the primary tier
+exhausted its attempts; `FlattenMissed` means the firing window passed with exposure remaining — on the
+`watchdog` tier that is the last line having failed.
+
+1. **Flatten manually, now**, in the broker platform. Do not wait for the next watchdog pass — if it is escalating,
+   three closes already failed against the same venue.
+2. Check whether the venue is rejecting orders generally (`VenueDisconnectedWithExposure`, broker status page).
+3. Afterwards: `flatten.escalated` / `flatten.missed` journal entries carry the reason per attempt.
+
+Prop-firm note: Topstep's own backstop runs ~15:10 CT. `FlattenMissed` fires **after** it, so a P1 here means the
+firm may already have acted.
+
+### Unprotected position
+
+**Alert:** `UnprotectedPosition` (P1)
+
+The venue reports a live position with **no stop order resting behind it** — the state the staged-stop model
+exists to make impossible. The census (`gh#370`) compares venue positions against venue working orders every
+30 s, so this is venue truth, not a local belief.
+
+1. **Place a protective stop manually, or flatten the position.**
+2. Then find out why: was the entry's bracket rejected at attach; did a cancel remove the wrong leg; is the
+   working stop still `Hidden` and not yet promoted (which is normal, but the *safety* stop should be native
+   regardless)?
+3. `trading_positions_unprotected` and the `ERROR` log from `ProtectionMonitorService` name the count.
+
+This fires only after 2 minutes: a bracket attaches on fill, so a brief unprotected window during entry is
+normal and deliberately not paged.
+
+### Orphaned stops
+
+**Alert:** `OrphanedStopsWithExposure` (P1)
+
+A venue-connection drop moved working stops to `Orphaned` — protection is platform-held rather than
+exchange-held (ADR-0007's `synthetic_risk`). The native safety stop is still resting at the exchange.
+
+1. Check the connection first — the orphan guard **re-arms automatically on reconnect** and re-validates each
+   stop against venue truth, so a brief drop needs no action.
+2. If the connection is up and stops stay orphaned, they could not be re-validated (venue unreachable per-stop).
+   Verify each position's protection at the broker directly.
+3. Persisting past a session: treat as unprotected and act as above.
+
+### Backfill shortfall
+
+**Alert:** `BackfillShortfall` (P2)
+
+A consumer fell off the back of the 24h event-log retention window, and the gh#306 recovery could **not** cover
+all of it from the clean-historical bar store. The label carries the contract; the histogram carries how much of
+the window has no bars.
+
+**What it means concretely:** hidden stop plans on that contract may have crossed their promotion band while the
+system was blind, and were **not** promoted to venue-held stops. The **native safety stop is still resting at the
+exchange** — this is a degraded floor, not an unprotected position, which is why it is a P2 rather than a page.
+
+1. **Identify the exposure.** Which open positions are on the labelled contract, and do they have a working stop
+   at the venue or only the safety stop? Check the broker directly — a local record is a belief, and this alert
+   exists because a belief was wrong.
+2. **The next quote self-heals it.** `StopPromotionService` re-evaluates hidden plans on every quote, so a
+   contract that is still trading will promote on its own once price revisits the band. No action is needed for a
+   position you are happy to leave on its safety stop until then.
+3. **Act before the session close** if the tighter stop matters — promote by hand at the broker, or flatten.
+   After hours there are no quotes, so nothing will self-heal.
+4. **Repeating shortfalls are a bar-coverage problem, not an alerting one.** Check that the instrument is in
+   `Backfill__Instruments` and that ingestion is actually storing bars for it; a contract that is traded but never
+   backfilled will shortfall on every gap.
+
+### Telemetry pipeline
+
+**Alert:** `TelemetryPipelineSilent` (P1)
+
+No flatten-deadline metric for 15 minutes. The flatten loop emits one on **every** evaluation including idle
+ones, so silence means the app is down, the collector is broken, or remote write stopped.
+
+**Read this as *unmonitored*, not as *healthy*.** Every other rule in the file is blind while it fires, which is
+why the flatten alerts are inhibited by it — the actionable page is this one.
+
+1. Is the app running? `docker compose ps`, then its logs.
+2. Is the collector up and receiving? `docker compose --profile observability logs otel-collector`.
+3. Until it clears, **check positions manually at the broker** — the automation may be fine and merely unobserved,
+   or it may be down. You cannot tell from here, which is the point of the alert.
+
+### Notifications refused
+
+**Alert:** `NotificationDeliveryRefused` (P1, `gh#1077`)
+
+The app's in-process notification queue refused a notification, so a page it raised never reached Pushover. Read
+this exactly like `TelemetryPipelineSilent`: **assume unreported, not healthy.** Whatever raised the refused
+notification — an auto-flatten escalation, the watchdog, the kill switch — the operator was not told about it, and
+this rule is the only reason you know.
+
+**This is the one condition Layer 1 cannot report itself**, because the push it would use is the push that did not
+go. It reaches you through Layer 2 (Prometheus → Alertmanager) or not at all.
+
+1. **Check positions manually at the broker**, first and before anything else.
+2. `kind="page"` — the queue was at its budget. The page is **not lost**: it stays owed in the outbox and is
+   re-offered on the next relay pass, so it delivers by itself once the transport drains.
+3. `kind="resolve"` — an incident could not be closed. The dedup key is released **exactly once**: immediately,
+   when nothing is queued that could re-arm it, and otherwise once the backlog of pages already queued for that
+   incident has drained. So later incidents are still reported, and the backlog reaches you as **one** push —
+   not one per queued page, and not one per refusal, even though a wedge refuses again on every pass. **Any
+   Emergency page already raised keeps nagging** until it expires or you acknowledge it in Pushover. One gap
+   remains: a page that *failed* to deliver inside the refusal window is re-offered later under a fresh ordinal
+   and re-arms the key, so once this alert clears, **confirm you are still being paged** for anything that recurs
+   on the same incident.
+4. Find the cause in the API logs: `Notification queue is full`, then whatever is upstream of it — Pushover
+   returning slowly or not at all (`PushoverNotificationChannel` carries a 10-second timeout), or the notification
+   pump having stopped (`The notification pump stopped` is logged at Critical).
+
+## The dead-man's switch (operator setup — required before live)
+
+The **only** alerting tier that survives this process dying (R-13, `gh#244`,
+[ADR-0019](adr/0019-alerting-channel-and-thresholds.md)). Every other alert assumes something is alive to raise it;
+if the host dies before an auto-flatten deadline, the flatten never fires **and nothing alerts**. The app reports to
+an external monitor, which pages when the report **fails to arrive**.
+
+**A deployment without it is silently missing its most important safety net.** The app starts and warns loudly, but
+nothing else notices.
+
+0. **Set `Pushover__AppToken` and `Pushover__UserKey`** — the app's *own* alerting channel (`gh#243`), separate from
+   the monitor's. Without them the app still runs and still detects everything; it just writes the alert to the log
+   instead of your phone, warning at startup that it is doing so. A Page that reaches no one logs as an **error**.
+   Under compose these are forwarded only because they are named in the app service's `environment:` map.
+1. **Create the Pushover application** and note the user key + app token (ADR-0019 — Emergency priority repeats until
+   acknowledged and bypasses Do Not Disturb; a channel without both is not a pager).
+2. **Create the monitor checks** on a cron-monitor (healthchecks.io or equivalent) — **on infrastructure independent
+   of this app.** One sharing this host, this Railway project, or the AWS staging hostname
+   (`trading-copilot.staging.marqspec.com`, gh#1188) is not a dead-man's switch, it is a second thing that
+   dies at the same moment.
+   - **Liveness:** period 1 min, grace 3 min.
+   - **Per instrument:** expected on **weekdays**, by that market's flatten deadline **+ 5 min** (ES/NQ ~14:35 CT,
+     CL ~13:20, GC ~12:20 — confirm against your configured deadlines, not these examples).
+3. **Route every check to Pushover** at **Emergency** priority.
+4. **Set the environment variables** (`CheckIn__HeartbeatUrl`, `CheckIn__Instruments__N__Symbol` / `__Url`) — see
+   `.env.example`. Under compose, only the keys named in the app service's `environment:` map are forwarded, and
+   **four instrument slots (0–3)** are wired; a fifth market needs another pair added there.
+5. **Verify it pages.** Stop the app before a deadline and confirm the page arrives. An unverified dead-man's switch
+   is an assumption, not a safety net.
+
+**Ping URLs are capability URLs** — whoever holds one can forge an all-clear on a safety path. Treat them as secrets:
+environment only, never committed, never pasted into an issue. The app never logs them.
+
+**If you deliberately disable auto-flatten for a market** (R-13's warned, own-risk override), **pause that market's
+monitor check too** — the app will correctly refuse to vouch for a market nothing is watching, so the absent check-in
+would otherwise page every day.
+
+## Deploy procedure
+- **Non-prod (dev / staging):** automatic on merge — CI builds + deploys **Railway** (the running cloud).
+- **Production (Railway):** **human-approved** (§9). Promote `staging → main`; CI deploys; smoke tests verify. A person must be
+  aware of and approve any production deploy.
+- **AWS staging:** first apply is [How to deploy staging](#how-to-deploy-staging) (gh#1188). After OIDC exists, a
+  published GitHub Release retags the merge-published digest and deploys it to staging, then the same digest to
+  production behind the `aws-production` reviewer rule ([AWS release / deploy](#aws-release--deploy-oidc),
+  [ADR-0030](adr/0030-aws-deployment-topology.md)). Do not cut a release expecting production to move — that is
+  not this card.
+- **Before the first production deploy:** the dead-man's switch above is provisioned and **proven to page**.
+
+## Rollback procedure
+- Triggered by a **failed production smoke test** or an operator decision.
+- **Human-approved** (§9): roll back via Railway (redeploy the previous release) and confirm with smoke tests. Any
+  rollback is an explicit, approved action — never automatic.
+- **AWS rollback** (once applied): `gh workflow run deploy.yml --ref main -f version=<previous> -f environment=staging`
+  (or `production`, which waits on `aws-production`). Never `:latest`. See [AWS release / deploy](#aws-release--deploy-oidc).
+
+## Verification / smoke tests
+**AWS staging health (gh#1188):** `https://trading-copilot.staging.marqspec.com/health` must return 200 after
+the first apply. See [How to tell staging is up](#how-to-tell-staging-is-up).
+
+Post-deploy, the tagged **smoke** subset (engineering §5) confirms the critical paths. **The set exists**
+(gh#131): `SystemSmokeIntegrationTests`, tagged `Category=Smoke`, **strictly read-only** — `GET /health`,
+`GET /auth/me`, `/firms`, `/connections`, `/connections/{id}/accounts`, `/accounts/{id}/risk`. Nothing
+execution-shaped carries the smoke tag, by design: execution-path checks belong to the staging integration tier,
+because a smoke test runs against **production**. Pointing the suite at a deployed target starts **no** local
+container and needs no Docker (gh#152), and CI excludes `Category=Smoke` from the pre-merge integration job
+(gh#159). *(Extend the set as read-only surfaces land — the auto-flatten path is verified on **staging**, in a
+practice context, not here.)*
+
+## Cost
+Monthly Railway spend ceiling is **Q-10** (open) — watch always-on ingestion + database costs.
+
+## Open items
+- Postgres / Timescale / pgvector on Railway: managed plugin vs. self-hosted service.
+  **What a Postgres without pgvector actually costs (gh#109, settled):** the app **still starts and still trades** — the `Embeddings` table is simply not created and semantic retrieval is off. That is deliberate: refusing to start would let a retrieval feature take down the safety-critical auto-flatten (R-13), and nothing on the trading path depends on embeddings. It is **not silent** — the migration raises a `WARNING` naming the consequence, and the embedding provider reports itself unavailable so retrieval refuses rather than returning empty results that read as "nothing is relevant". **The provider half landed in gh#474** — before it, a key set on a Postgres without the extension embedded on every poll (real spend) and faulted at the upsert; availability is now probed at startup and means the whole round trip. Verified both ways: `timescale/timescaledb-ha:pg17` creates the table and its HNSW index; plain `postgres:17` skips it and creates the other 24 tables normally. **Timescale is the harder constraint** — its degrade loses compression and retention on the data path; pgvector's loses an optional feature.
+- The Railway deploy integration (CLI / MCP / GitHub trigger) — the GitHub Actions workflows themselves exist
+  (`ci.yml` + `branch-policy.yml`; §CI/CD above).
+- Create the `dev` + `staging` Railway environments and map branch → environment.
+- **The Railway environments above still won't carry a DEPLOYED news poller.** `Finnhub__ApiKey` / `Tiingo__ApiKey` became repository secrets on 2026-09-05 and are forwarded by [`live-provider-gates.yml`](../.github/workflows/live-provider-gates.yml) (gh#1122) — the live news QA no longer waits on this item, since that suite needs a throwaway Postgres container, not a deployed app. What remains here is gh#464's deployment-only residue: creating the `dev` / `staging` Railway environments (above) is what a deployed news poller would additionally need, since neither exists yet. What the credentials revealed once used is tracked separately — **gh#1125** (Tiingo's plan excludes the News API, so R-2 multi-source news has one live feed), **gh#1123** (the then-shipped 60-minute lookback admitted roughly 0–1% of Finnhub's feed — **fixed** by gh#1146 widening the default to 1440 minutes) and **gh#1124** (its general category tags no tickers).
+- Non-prod **snapshot refresh** cadence + mechanism (§8).
+- Define the **smoke-test set** and the health / verify checks.
