@@ -63,6 +63,35 @@ public sealed class EdgeTests(EnvironmentTemplates templates) : IClassFixture<En
 
     [Theory]
     [MemberData(nameof(EnvironmentTemplates.Both), MemberType = typeof(EnvironmentTemplates))]
+    public void The_a_record_name_is_absolute_and_does_not_repeat_the_zone(string env)
+    {
+        var t = templates.For(env);
+        var (_, record) = t.Single("AWS::Route53::RecordSet");
+        var name = t.Properties(record)["Name"];
+
+        // RecordName is relative to the zone unless it ends with ".": Hostname is already the
+        // full FQDN, so the record must be made absolute rather than let CDK append the zone
+        // name again (gh#1205). A correct join is exactly [{Ref: Hostname}, "."] — anything
+        // that also references the zone (RootDomain here; a literal zone name under Lookup,
+        // asserted separately below) means the zone got appended a second time.
+        var parts = name!["Fn::Join"]![1]!.AsArray();
+        parts.Should().HaveCount(2, "the join must be just the Hostname ref plus the absolute-name dot, not a second zone reference");
+        parts[0]!["Ref"]!.GetValue<string>().Should().Be("Hostname");
+        parts[1]!.GetValue<string>().Should().Be(".");
+    }
+
+    [Fact]
+    public void The_a_record_name_under_lookup_is_the_hostname_alone_not_suffixed_with_the_looked_up_zone()
+    {
+        var t = Synthesised.StagingLookup(EnvironmentTemplates.FixtureShape);
+        var (_, record) = t.Single("AWS::Route53::RecordSet");
+        var name = Synthesised.Text(t.Properties(record)["Name"]);
+
+        name.Should().NotContain("staging.marqspec.com", "the looked-up zone name must not be appended to the already-fully-qualified Hostname (gh#1205)");
+    }
+
+    [Theory]
+    [MemberData(nameof(EnvironmentTemplates.Both), MemberType = typeof(EnvironmentTemplates))]
     public void The_hosted_zone_is_created_in_stack_from_the_root_domain_parameter(string env)
     {
         var t = templates.For(env);
