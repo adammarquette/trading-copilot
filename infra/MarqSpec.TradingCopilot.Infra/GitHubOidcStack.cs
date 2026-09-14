@@ -5,14 +5,20 @@ using Constructs;
 namespace MarqSpec.TradingCopilot.Infra;
 
 /// <summary>
-/// The GitHub OIDC provider and the two deploy roles (ADR-0030 decision 4 / 8 / 11). No long-lived
-/// AWS key exists in GitHub, in a workflow, or anywhere else: each run presents a token bound to a
-/// ref or an environment, and each role trusts exactly the claims the pipeline runs under.
+/// The two deploy roles, trusting an OIDC provider this stack imports rather than creates
+/// (ADR-0030 decision 4 / 8 / 11; gh#1201). No long-lived AWS key exists in GitHub, in a
+/// workflow, or anywhere else: each run presents a token bound to a ref or an environment, and
+/// each role trusts exactly the claims the pipeline runs under.
 /// </summary>
 /// <remarks>
-/// Shape is the TopstepX <c>GitHubOidcStack</c> in MarqSpec.Mcp.TopstepX (pattern library). This
-/// product's repository, environment name, and SSM prefix are ours. No account IDs, hostnames,
-/// Cognito, or MCP bits copied from that repo.
+/// Shape is the TopstepX <c>GitHubOidcStack</c> in MarqSpec.Mcp.TopstepX (pattern library), with
+/// two account-global collisions deliberately NOT copied (gh#1201): the role names are
+/// project-scoped (<c>trading-copilot-GitHubDeploy-&lt;env&gt;</c>, not TopstepX's
+/// <c>GitHubDeploy-&lt;env&gt;</c>), and the OIDC provider is imported by ARN rather than
+/// created, because TopstepX's <c>topstepx-mcp-github-oidc</c> stack already owns the only
+/// provider for this issuer in the shared account. This product's repository, environment name,
+/// and SSM prefix are otherwise ours. No account IDs, hostnames, Cognito, or MCP bits copied from
+/// that repo.
 /// <para>
 /// The GitHub-side settings this pairs with — the <c>production</c> and <c>aws-production</c>
 /// environments and their reviewer rules — are created by <c>scripts/bootstrap.sh</c> (console
@@ -41,18 +47,15 @@ public sealed class GitHubOidcStack : Stack
     {
         Amazon.CDK.Tags.Of(this).Add("Project", "trading-copilot");
 
-        // The L1 rather than the L2 OpenIdConnectProvider: the L2 is a custom resource — a Lambda
-        // and a role with wildcard permissions — from before CloudFormation supported the type
-        // natively.
-        //
-        // NO THUMBPRINT LIST. AWS has verified GitHub's issuer against its own trusted CA library
-        // since 2023 and ignores the property for it. A 40-hex-character literal nobody re-verifies
-        // reads exactly like a current one after the CA rotates; the template test refuses one.
-        var provider = new CfnOIDCProvider(this, "GitHub", new CfnOIDCProviderProps
-        {
-            Url = $"https://{Issuer}",
-            ClientIdList = ["sts.amazonaws.com"],
-        });
+        // IMPORT, never create (gh#1201). An IAM OIDC provider is unique per URL per account, and
+        // MarqSpec.Mcp.TopstepX's topstepx-mcp-github-oidc stack already owns the only one for this
+        // issuer in the shared account (045296582762) — a second AWS::IAM::OIDCProvider for the
+        // same URL is refused by CloudFormation before any resource is created. The ARN is built
+        // from pseudo-parameters rather than a literal or a cross-stack lookup: ADR-0030 decision
+        // 14 forbids inventing an account id, and this stack must not depend on TopstepX's stack
+        // outputs or exports to stay independently deployable.
+        var providerArn = $"arn:{Aws.PARTITION}:iam::{Aws.ACCOUNT_ID}:oidc-provider/{Issuer}";
+        var provider = OpenIdConnectProvider.FromOpenIdConnectProviderArn(this, "GitHubProvider", providerArn);
 
         // Staging: the release path (a v* tag) AND the workflow_dispatch redeploy/rollback path,
         // which runs on main exactly. Trusting the tag alone would refuse every rollback.
@@ -84,7 +87,7 @@ public sealed class GitHubOidcStack : Stack
         });
     }
 
-    private void DeployRole(CfnOIDCProvider provider, string envName, IDictionary<string, object> conditions)
+    private void DeployRole(IOpenIdConnectProvider provider, string envName, IDictionary<string, object> conditions)
     {
         // Pseudo-parameters rather than this stack's Account and Region: under a concrete
         // environment those resolve to literals, and ADR-0030 decision 14 forbids inventing an
@@ -113,9 +116,11 @@ public sealed class GitHubOidcStack : Stack
 
         _ = new Role(this, $"{envName}DeployRole", new RoleProps
         {
-            RoleName = $"GitHubDeploy-{envName}",
+            // Project-scoped (gh#1201): IAM role names are unique per account, and the shared
+            // account already has TopstepX's own GitHubDeploy-<env> roles.
+            RoleName = $"trading-copilot-GitHubDeploy-{envName}",
             Description = $"GitHub Actions deploys the {envName} environment through OIDC (ADR-0030); no long-lived key exists.",
-            AssumedBy = new FederatedPrincipal(provider.AttrArn, conditions, "sts:AssumeRoleWithWebIdentity"),
+            AssumedBy = new FederatedPrincipal(provider.OpenIdConnectProviderArn, conditions, "sts:AssumeRoleWithWebIdentity"),
             MaxSessionDuration = Duration.Hours(1),
             InlinePolicies = new Dictionary<string, PolicyDocument>
             {

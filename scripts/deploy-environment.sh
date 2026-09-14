@@ -16,7 +16,7 @@
 #
 # WHAT IT DOES NOT DO. It does not build an image, assume an IAM role, install the SDK or the
 # CDK CLI, invent an account / region / hostname, or probe a live origin (prove-live is gh#1188).
-# The workflow that calls it has already assumed GitHubDeploy-<env>.
+# The workflow that calls it has already assumed trading-copilot-GitHubDeploy-<env>.
 #
 # Outbound is still a fork (ADR-0030). Pass it as DEPLOY_OUTBOUND — a default here would choose
 # for the operator. Account and region are passed as synth context (never literals in this

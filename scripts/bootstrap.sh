@@ -8,7 +8,7 @@
 # `environment: aws-production` does not create or require anything. If the environment does not
 # exist, GitHub CREATES IT AT RUN TIME WITH NO PROTECTION RULES and the job passes straight
 # through — no warning, no annotation, no error. The production deploy would then assume
-# GitHubDeploy-production with a token that environment minted for anyone who named it.
+# trading-copilot-GitHubDeploy-production with a token that environment minted for anyone who named it.
 #
 # That setting is a repository console action CI cannot do. Configuration that exists only in a
 # provider's web console does not exist (platform contract). This script is the recorded procedure.
@@ -72,7 +72,7 @@ step "Approval environments"
 #   - production       gates the version-tag publish on release.yml's `gate` job — a public
 #                      GHCR version tag cannot be un-pulled;
 #   - aws-production   gates WHAT RUNS — the production deploy jobs declare it, and
-#                      GitHubDeploy-production trusts ONLY a token carrying
+#                      trading-copilot-GitHubDeploy-production trusts ONLY a token carrying
 #                      `sub = repo:<immutable>:environment:aws-production`.
 #
 # The names are hardcoded rather than parsed out of the workflows: this script takes a repo
@@ -136,7 +136,7 @@ if [ "$oidc_status" -eq 0 ]; then
   else
     info "  Actions OIDC sub_claim_prefix=$oidc_prefix"
     case "$oidc_prefix" in
-      *@*) ok "  prefix is immutable (owner@id/name@id) — GitHubDeploy-* must trust this exact segment" ;;
+      *@*) ok "  prefix is immutable (owner@id/name@id) — trading-copilot-GitHubDeploy-* must trust this exact segment" ;;
       *) warn "  prefix is name-only ($oidc_prefix). A stack that trusts owner@id/name@id will not assume." ;;
     esac
   fi

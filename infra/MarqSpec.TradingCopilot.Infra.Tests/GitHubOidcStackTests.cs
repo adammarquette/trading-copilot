@@ -26,21 +26,31 @@ public sealed class GitHubOidcStackTests
     }
 
     [Fact]
-    public void One_provider_for_github_with_the_sts_audience()
+    public void No_oidc_provider_resource_is_created_every_role_trusts_the_imported_one()
     {
+        // MarqSpec.Mcp.TopstepX's topstepx-mcp-github-oidc stack already owns the only
+        // AWS::IAM::OIDCProvider for this issuer in the shared account (gh#1201) — a second one
+        // for the same URL collides at CloudFormation validation before any resource is created.
         var providers = _stack.Json["Resources"]!.AsObject()
             .Where(r => r.Value!["Type"]!.GetValue<string>().Contains("OIDCProvider", StringComparison.Ordinal))
             .ToList();
-        var provider = providers.Should().ContainSingle().Which.Value!.AsObject();
-        var props = _stack.Properties(provider);
-        props["Url"]!.GetValue<string>().Should().Be("https://token.actions.githubusercontent.com");
-        props["ClientIdList"]!.AsArray().Select(c => c!.GetValue<string>()).Should().Equal("sts.amazonaws.com");
+        providers.Should().BeEmpty("the provider is imported by ARN, never created by this stack");
+
+        foreach (var name in new[] { "trading-copilot-GitHubDeploy-staging", "trading-copilot-GitHubDeploy-production" })
+        {
+            var (_, statement) = DeployRole(name);
+            var federated = Synthesised.Text(statement["Principal"]!["Federated"]);
+            federated.Should().Contain(":oidc-provider/token.actions.githubusercontent.com",
+                "{0}: the principal is the existing TopstepX-owned provider, referenced by ARN", name);
+            federated.Should().Contain("{\"Ref\":\"AWS::Partition\"}", "{0}: the imported ARN's partition is a pseudo-parameter", name);
+            federated.Should().Contain("{\"Ref\":\"AWS::AccountId\"}", "{0}: the imported ARN's account is a pseudo-parameter", name);
+        }
     }
 
     [Fact]
     public void The_staging_role_trusts_release_tags_and_main_exactly_and_nothing_wider()
     {
-        var (_, statement) = DeployRole("GitHubDeploy-staging");
+        var (_, statement) = DeployRole("trading-copilot-GitHubDeploy-staging");
 
         statement["Action"]!.GetValue<string>().Should().Be("sts:AssumeRoleWithWebIdentity");
         var condition = statement["Condition"]!;
@@ -53,7 +63,7 @@ public sealed class GitHubOidcStackTests
     [Fact]
     public void The_production_role_trusts_the_aws_production_environment_claim_only()
     {
-        var (_, statement) = DeployRole("GitHubDeploy-production");
+        var (_, statement) = DeployRole("trading-copilot-GitHubDeploy-production");
 
         var condition = statement["Condition"]!;
         Synthesised.Text(condition["StringEquals"]!["token.actions.githubusercontent.com:aud"]).Should().Be("\"sts.amazonaws.com\"");
@@ -73,8 +83,8 @@ public sealed class GitHubOidcStackTests
     }
 
     [Theory]
-    [InlineData("GitHubDeploy-staging", "staging")]
-    [InlineData("GitHubDeploy-production", "production")]
+    [InlineData("trading-copilot-GitHubDeploy-staging", "staging")]
+    [InlineData("trading-copilot-GitHubDeploy-production", "production")]
     public void Each_role_reads_ssm_under_its_own_environment_only(string roleName, string env)
     {
         var (role, _) = DeployRole(roleName);
@@ -106,12 +116,11 @@ public sealed class GitHubOidcStackTests
     /// audience; only the <c>sub</c> condition says whose run may assume the role.
     /// </summary>
     [Fact]
-    public void Every_role_is_assumable_only_through_this_stacks_provider_by_a_token_bound_to_aud_and_a_sub_of_this_repository()
+    public void Every_role_is_assumable_only_through_the_imported_provider_by_a_token_bound_to_aud_and_a_sub_of_this_repository()
     {
-        var (providerId, _) = _stack.Single("AWS::IAM::OIDCProvider");
         var roles = _stack.Resources("AWS::IAM::Role");
         roles.Values.Select(r => _stack.Properties(r)["RoleName"]!.GetValue<string>())
-            .Should().BeEquivalentTo(["GitHubDeploy-staging", "GitHubDeploy-production"], "the two roles the workflows assume, and no third");
+            .Should().BeEquivalentTo(["trading-copilot-GitHubDeploy-staging", "trading-copilot-GitHubDeploy-production"], "the two roles the workflows assume, and no third");
 
         foreach (var (id, role) in roles)
         {
@@ -121,8 +130,10 @@ public sealed class GitHubOidcStackTests
             var statement = props["AssumeRolePolicyDocument"]!["Statement"]!.AsArray().Should().ContainSingle(id).Which!.AsObject();
             statement["Effect"]!.GetValue<string>().Should().Be("Allow");
             Values(statement["Action"]).Should().Equal("sts:AssumeRoleWithWebIdentity");
-            Synthesised.LogicalIdOf(statement["Principal"]!["Federated"]).Should().Be(providerId,
-                "{0}: the principal is the provider this stack creates, never a provider ARN literal", id);
+            Synthesised.LogicalIdOf(statement["Principal"]!["Federated"]).Should().BeNull(
+                "{0}: the provider is imported by ARN, never a Ref/GetAtt to a resource this stack creates", id);
+            Synthesised.Text(statement["Principal"]!["Federated"]).Should().Contain(":oidc-provider/token.actions.githubusercontent.com",
+                "{0}: the principal is the existing TopstepX-owned provider, referenced by ARN", id);
 
             var condition = statement["Condition"]!.AsObject();
             condition.Select(op => op.Key).Should().BeSubsetOf(["StringEquals", "StringLike"], id);
@@ -158,8 +169,10 @@ public sealed class GitHubOidcStackTests
         Regex.IsMatch(text, @"\b\d{12}\b").Should().BeFalse("no twelve-digit account id anywhere in the template");
         Regex.IsMatch(text, "[0-9a-f]{40}").Should().BeFalse("no certificate thumbprint anywhere in the template");
 
-        var (_, provider) = _stack.Single("AWS::IAM::OIDCProvider");
-        _stack.Properties(provider).ContainsKey("ThumbprintList").Should().BeFalse("AWS ignores the thumbprints for GitHub's issuer; the property is omitted rather than filled with a value nobody re-verifies");
+        // No thumbprint property to omit: the provider is imported by ARN (gh#1201), so this
+        // stack has no AWS::IAM::OIDCProvider resource at all — the L1's ThumbprintList only
+        // ever applied to a resource this stack creates, and it does not create one.
+        _stack.Resources("AWS::IAM::OIDCProvider").Should().BeEmpty("the provider is imported, not created");
 
         var statements = _stack.PolicyStatements().ToList();
         statements.Should().NotBeEmpty();
@@ -177,7 +190,7 @@ public sealed class GitHubOidcStackTests
     [Fact]
     public void The_environment_the_production_role_trusts_is_one_bootstrap_sh_creates()
     {
-        var (_, statement) = DeployRole("GitHubDeploy-production");
+        var (_, statement) = DeployRole("trading-copilot-GitHubDeploy-production");
         var sub = statement["Condition"]!["StringEquals"]!["token.actions.githubusercontent.com:sub"]!.GetValue<string>();
         var environment = sub[(sub.LastIndexOf(':') + 1)..];
         environment.Should().Be(GitHubOidcStack.ProductionEnvironment);

@@ -2,7 +2,7 @@ name: Release container image
 
 # Triggered by a published GitHub release (ADR-0030 decision 11). CI already published
 # :sha-<short> on merge (ADR-0018); this workflow retags that digest as :VERSION — it does
-# not rebuild and it never references :latest. deploy-staging assumes GitHubDeploy-staging
+# not rebuild and it never references :latest. deploy-staging assumes trading-copilot-GitHubDeploy-staging
 # with no environment: key. deploy-production waits on the literal aws-production
 # environment and deploys the same digest. Rollback is deploy.yml, dispatched on main.
 
@@ -125,7 +125,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/GitHubDeploy-staging
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/trading-copilot-GitHubDeploy-staging
           aws-region: ${{ vars.AWS_REGION }}
 
       - uses: actions/setup-dotnet@v4
@@ -177,7 +177,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/GitHubDeploy-production
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/trading-copilot-GitHubDeploy-production
           aws-region: ${{ vars.AWS_REGION }}
 
       - uses: actions/setup-dotnet@v4
