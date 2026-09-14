@@ -547,7 +547,11 @@ public sealed class EnvironmentStack : Stack
         _ = new ARecord(this, "AppAlias", new ARecordProps
         {
             Zone = zone,
-            RecordName = hostname.ValueAsString,
+            // ARecordProps.RecordName is relative to the zone unless it ends with "." (absolute).
+            // Hostname is documented and used elsewhere (Certificate, ALB host-header rule) as the
+            // full FQDN, so make it absolute here too — otherwise CDK appends the zone name again,
+            // producing "<fqdn>.<zone>" (gh#1205).
+            RecordName = $"{hostname.ValueAsString}.",
             Target = RecordTarget.FromAlias(new LoadBalancerTarget(alb)),
         });
 
