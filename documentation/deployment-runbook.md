@@ -212,7 +212,7 @@ Staging apply and the live hostname are [above](#aws-environment-stack) (gh#1188
 
 | Piece | Name / trigger | Notes |
 |---|---|---|
-| OIDC stack | `trading-copilot-github-oidc` | One provider, two roles (`GitHubDeploy-staging`, `GitHubDeploy-production`). Environment-agnostic: ARNs use `AWS::AccountId` / `AWS::Region`. No thumbprint list. |
+| OIDC stack | `trading-copilot-github-oidc` | Two project-scoped roles (`trading-copilot-GitHubDeploy-staging`, `trading-copilot-GitHubDeploy-production`); the provider is **imported** by ARN, not created — `MarqSpec.Mcp.TopstepX`'s `topstepx-mcp-github-oidc` stack already owns the only OIDC provider for this issuer in the shared account (gh#1201). Environment-agnostic: ARNs use `AWS::AccountId` / `AWS::Region`. |
 | Staging trust | `v*` tags **and** `refs/heads/main` | Release path + `workflow_dispatch` rollback. The subject is this repo's **immutable** Actions prefix (`owner@id/name@id`), read from `GET /repos/…/actions/oidc/customization/sub` — a name-only `repo:owner/name` trust never matches. |
 | Production trust | `environment:aws-production` | No wildcard. The reviewer rule on that GitHub Environment is the approval **and** the credential's precondition ([ADR-0030](adr/0030-aws-deployment-topology.md) decision 8). |
 | `release.yml` | published GitHub Release | Retags the merge-published `:sha-<short>` as `:VERSION` (does not rebuild, never `:latest`). Deploys that **digest** to staging, then the same digest to production behind `aws-production`. |
