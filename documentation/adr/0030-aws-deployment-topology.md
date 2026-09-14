@@ -182,6 +182,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 |---|---|
 | 2026-09-12 | GitHub OIDC deploy roles + release/rollback workflows; production-gate environment is `aws-production` (gh#1187) |
 | 2026-09-12 | Operator inventory + staging zone Lookup for first AWS apply (gh#1188) |
+| 2026-09-13 | Project-scoped role names + imported (not created) OIDC provider — the shared account already had both (gh#1201) |
 
 ## Update (2026-09-12) — OIDC roles and digest-only release/rollback workflows (gh#1187)
 
@@ -217,10 +218,31 @@ the Create fixture so CI makes no AWS call. Railway stays the running cloud; the
 `AlertsEmail` and the secret-shell values stay operator-written after apply — this Update does not invent
 them.
 
+## Update (2026-09-13) — project-scoped role names, imported OIDC provider (gh#1201)
+
+The *Decision* stands; this is a defect fix in gh#1187, not a topology change. `GitHubOidcStack` never
+applied: it named its two deploy roles exactly what `MarqSpec.Mcp.TopstepX`'s `topstepx-mcp-github-oidc`
+stack already named its own in the same shared account (`045296582762`) — IAM role names are unique per
+account — and it created a second `AWS::IAM::OIDCProvider` for `token.actions.githubusercontent.com`, which
+is unique per URL per account and TopstepX already owns the only one. Both collisions trace to copying the
+TopstepX pattern library more literally than the *Decision*'s own caution against it intended.
+
+The fix is a **create-vs-import decision change**, not a rename alone: the roles become
+`trading-copilot-GitHubDeploy-staging` / `trading-copilot-GitHubDeploy-production` (project-scoped, so no
+future sibling collides on the same pattern), and the stack now **imports** the existing provider by ARN —
+built from `Aws.PARTITION` / `Aws.ACCOUNT_ID` per decision 14, never looked up or exported from TopstepX's
+stack, so this stack still deploys independently of it. Nothing of TopstepX's changes; its roles, trust
+policies, and provider are untouched. No account id, region, or hostname is invented. `cdk synth` and the
+unit tests are the evidence here — the live apply is the operator's step (gh#1188 remains the tracker for
+the first `cdk deploy` of the environment stack; this record's roles are a separate stack applied
+independently).
+
 ## Follow-ups
 
 - CDK app under `infra/` — landed with gh#1186.
 - OIDC roles + the release-triggered deploy workflow — landed with gh#1187. Not a merge-to-`main` deploy.
+  Its role-name and provider collisions with the shared account were fixed by gh#1201; the stack still has
+  not had a successful `cdk deploy`.
 - Operator inventory + staging Lookup — this increment (gh#1188). First apply still needs operator
   `AlertsEmail` and secret-shell values; production hostname apply is later.
 - Dated **Update** on this record when Railway sunsets, after AWS staging has proven R-13 on practice (gh#1189).

@@ -187,12 +187,12 @@ if require_file "$RELEASE"; then
   require_in_job "$RELEASE" "deploy-staging" "needs: publish" "deploy-staging needs publish"
   require_no_environment "$RELEASE" "deploy-staging"
   require_in_job "$RELEASE" "deploy-staging" "id-token: write" "deploy-staging requests an OIDC token"
-  require_in_job "$RELEASE" "deploy-staging" "GitHubDeploy-staging" "deploy-staging assumes GitHubDeploy-staging"
+  require_in_job "$RELEASE" "deploy-staging" "trading-copilot-GitHubDeploy-staging" "deploy-staging assumes trading-copilot-GitHubDeploy-staging"
 
   require_in_job "$RELEASE" "deploy-production" "needs: deploy-staging" "deploy-production needs deploy-staging"
   require_literal_environment "$RELEASE" "deploy-production" "aws-production"
   require_in_job "$RELEASE" "deploy-production" "id-token: write" "deploy-production requests an OIDC token"
-  require_in_job "$RELEASE" "deploy-production" "GitHubDeploy-production" "deploy-production assumes GitHubDeploy-production"
+  require_in_job "$RELEASE" "deploy-production" "trading-copilot-GitHubDeploy-production" "deploy-production assumes trading-copilot-GitHubDeploy-production"
 
   for job in deploy-staging deploy-production; do
     require_in_job "$RELEASE" "$job" "deploy-environment.sh" "$job runs the shared deploy script"
@@ -216,8 +216,8 @@ if require_file "$DEPLOY"; then
   require_in_job "$DEPLOY" "deploy-production" "inputs.environment == 'production'" "production job is guarded by the production choice"
   require_no_environment "$DEPLOY" "deploy-staging"
   require_literal_environment "$DEPLOY" "deploy-production" "aws-production"
-  require_in_job "$DEPLOY" "deploy-staging" "GitHubDeploy-staging" "dispatch staging assumes GitHubDeploy-staging"
-  require_in_job "$DEPLOY" "deploy-production" "GitHubDeploy-production" "dispatch production assumes GitHubDeploy-production"
+  require_in_job "$DEPLOY" "deploy-staging" "trading-copilot-GitHubDeploy-staging" "dispatch staging assumes trading-copilot-GitHubDeploy-staging"
+  require_in_job "$DEPLOY" "deploy-production" "trading-copilot-GitHubDeploy-production" "dispatch production assumes trading-copilot-GitHubDeploy-production"
 
   for job in deploy-staging deploy-production; do
     require_in_job "$DEPLOY" "$job" "deploy-environment.sh" "$job runs the shared deploy script"
