@@ -1,6 +1,6 @@
 # Trading Co-Pilot
 
-An **open-source futures day-trading co-pilot** — a decision-support *and* execution system with a
+A **source-available futures day-trading co-pilot** — a decision-support *and* execution system with a
 human in the loop. It ingests market data, order flow, news, and social signals; generates fully specified trade
 suggestions (direction, entry, stop, targets, size) with cited reasoning; lets the trader execute *through* the
 system so intent and outcome are captured natively; and journals every suggestion and trade to close the learning
@@ -9,6 +9,8 @@ loop. Its one autonomous action is risk-reducing: **auto-flattening open positio
 **You run your own instance.** Fork it, deploy it, point it at your own broker credentials — broker API keys are
 tied to an individual login, so the system is built to be operated by the person whose account it trades. It is
 authenticated because it is web-exposed, with data isolation enforced at the data layer — but it is **one operator per deployment**, not a service with a user base.
+(That describes how the system is **built** to be run — the repository currently carries no licence, so it is
+not itself a grant to do so. See [Licence](#licence--none-currently-granted).)
 
 > ### ⚠️ No warranty. Not financial advice.
 > This software places **real orders against a real broker account**. It is provided **as-is, without warranty of
@@ -195,8 +197,27 @@ for the branching model, commit conventions, and the test-first Definition of Do
 Contributions are reviewed on their merits and on fit with the direction here; there is no obligation to accept
 any change, and a declined PR is not a judgement on its quality. If you want the project to go somewhere it
 isn't going, **fork it** — and treat a fork as a legitimate outcome rather than a
-failure. Safety-critical areas (the risk gate, execution, auto-flatten, the kill switch) carry a higher bar:
+failure. (Note the [licence position](#licence--none-currently-granted) first.) Safety-critical areas (the risk
+gate, execution, auto-flatten, the kill switch) carry a higher bar:
 expect design discussion before implementation.
+
+## Licence — none currently granted
+
+**This repository carries no licence.** `LICENSE` and `NOTICE` were removed on 2026-08-29 by
+[`a21f158`](https://github.com/adammarquette/trading-copilot/commit/a21f158a5d89211c3be86468b1187037e5932fc4),
+along with this README's licence section and the `license` fields in `package.json` and
+`src/Directory.Packages.props`. GitHub reports no detected licence for the repository.
+
+Default copyright therefore applies: the source is **public to read, but no rights to use, copy, modify, or
+distribute it are granted.** That cuts both ways — inbound contributions carry no licence grant either, and there
+is no CLA or DCO. If you need any of those rights, **ask first.**
+
+**This is recorded, not resolved.** [ADR-0015](documentation/adr/0015-distribution-licensing-governance.md) holds
+the earlier Apache-2.0 decision and the fork-first reasoning behind it; that decision is **not in force in the
+tree**, and the removal commit recorded no rationale. Two things a superseding ADR still needs to settle: the
+intended posture going forward, and the standing of copies taken while Apache-2.0 applied (2026-07-20 →
+2026-08-29) — the repo is public, it has a fork, and the Apache-2.0 grant is by its own terms irrevocable. Until
+then treat the licence question as **open**, rather than reading a grant into the fork-first framing above.
 
 ## Related projects
 

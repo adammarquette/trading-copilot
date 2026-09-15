@@ -78,6 +78,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 | 2026-09-11 | factory repo exists; `develop` carries Tier 1+2 ([MarqSpec.Repo.Factory](https://github.com/adammarquette/MarqSpec.Repo.Factory)) (gh#1178) |
 | 2026-09-12 | Tier 3 spines on Factory PR #9; not yet the template tree (gh#1179) |
 | 2026-09-12 | Tier 3 spines on factory `develop` (Factory PR #9 merged) (gh#1179) |
+| 2026-09-15 | the product repo now carries no licence; this record's "same as this product" linkage has lapsed (ADR-0015) |
 
 ## Update (2026-09-11) — factory repo exists (gh#1178)
 
@@ -111,6 +112,24 @@ Platform), `.github/copilot-instructions.md`, `documentation/engineering.md`,
 fill-ins stay `{{PLACEHOLDER}}`s. **This product's contracts are unchanged as
 this product** — no wholesale replace. The *Decision* is unchanged. Tier 4
 stays here.
+
+## Update (2026-09-15) — the product's licence declarations were removed (2026-08-29)
+
+This record's *Decision* is unchanged. Three of its cross-references to **this product** no longer hold: the
+header's "Apache-2.0 and the rest of 0015's *Decision* stand", decision 3's "Apache-2.0, **same as this
+product**", and the consequence "one licence across product and factory".
+
+Since 2026-08-29 the product repo carries **no licence at all** — `LICENSE` and `NOTICE` were removed by
+[`a21f158`](https://github.com/adammarquette/trading-copilot/commit/a21f158a5d89211c3be86468b1187037e5932fc4);
+[ADR-0015](0015-distribution-licensing-governance.md)'s 2026-09-15 update records it. This record was accepted
+on 2026-09-11, **after** that removal, so its restatement of 0015's licence limb was already stale when written.
+The "same as this product" linkage therefore describes nothing, and product and factory are not known to share a
+licence.
+
+**This says nothing about [`MarqSpec.Repo.Factory`](https://github.com/adammarquette/MarqSpec.Repo.Factory)'s own
+licence**, which lives in a separate repository and was not inspected here. Apache-2.0 for the factory stands as
+this record's decision; only the claim that it *matches the product* has lapsed — and re-establishing that
+match depends on the superseding ADR that 0015's follow-ups now call for.
 
 ## Follow-ups
 

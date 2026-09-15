@@ -1,6 +1,6 @@
 # ADR-0015: Distribution, licensing & governance — self-hosted, Apache-2.0, maintainer-led
 
-**Status:** Accepted · refined by [ADR-0017](0017-single-operator-data-isolation.md) · software-factory packaging recorded by [ADR-0029](0029-software-factory-packaging.md) · **Date:** 2026-07-20 · **Deciders:** Adam (operator/maintainer)
+**Status:** Accepted · **licence limb not in force — the declarations were removed from the tree 2026-08-29; see the [2026-09-15 update](#update-2026-09-15--the-licence-declarations-were-removed-from-the-tree-2026-08-29)** · refined by [ADR-0017](0017-single-operator-data-isolation.md) · software-factory packaging recorded by [ADR-0029](0029-software-factory-packaging.md) · **Date:** 2026-07-20 · **Deciders:** Adam (operator/maintainer)
 **Relates to:** PRD `R-14` (practice vs. live), `R-17` (venue abstraction), `R-18` (auth), `R-20` (tenancy);
 [ADR-0011](0011-multi-user-tenancy.md) (refined here; since **superseded by [ADR-0017](0017-single-operator-data-isolation.md)**), [ADR-0013](0013-failure-recovery-model.md)
 (auto-flatten), [ADR-0012](0012-containerization-local-dev.md) (deployment); `README.md`, `CONTRIBUTING.md`.
@@ -99,6 +99,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 |---|---|
 | 2026-07-20 | narrowed to one operator per deployment |
 | 2026-09-11 | software-factory packaging recorded by [ADR-0029](0029-software-factory-packaging.md) (gh#1177) |
+| 2026-09-15 | licence declarations removed from the tree (2026-08-29); Apache-2.0 not in force, the question reopened |
 
 ## Update (2026-07-20) — narrowed to one operator per deployment
 
@@ -132,6 +133,31 @@ deployment model they assumed. `0011`'s tenancy mechanism in particular is still
 The factory is **packaging, not a licence change**. Delivery, sync, name, and home are recorded in
 [ADR-0029](0029-software-factory-packaging.md); Apache-2.0 and the rest of this ADR's *Decision* stand.
 
+## Update (2026-09-15) — the licence declarations were removed from the tree (2026-08-29)
+
+**The *Decision* above stands as a record; it is simply no longer reflected in the repository.** Commit
+[`a21f158`](https://github.com/adammarquette/trading-copilot/commit/a21f158a5d89211c3be86468b1187037e5932fc4)
+("chore: remove repository license declarations", 2026-08-29) deleted **`LICENSE`** — the 202-line Apache-2.0
+text — and **`NOTICE`** (19 lines), stripped the README's licence section, and dropped the `license` fields from
+`package.json` and `src/Directory.Packages.props`. Confirmed against the GitHub API on `develop` rather than a
+local checkout: neither file exists, and the repository reports no detected licence.
+
+So the third bullet of the *Decision* — Apache-2.0, the express patent grant, the explicit trademark non-grant,
+and the `NOTICE` that carries attribution into every fork — **is not in force in the tree.** With no licence at
+all, the fork-first distribution model this record rests on has nothing granting it, and the "read, clone, and
+run it without friction" constraint from *Context* is not met.
+
+**The rationale is unrecorded.** The removal carries a bare `chore:` subject with no body, no issue reference,
+and no ADR update; the same-PR docs rule in `AGENTS.md` was not applied, which is why this record and
+[ADR-0029](0029-software-factory-packaging.md) went on asserting Apache-2.0 for a further two weeks —
+ADR-0029 was accepted on 2026-09-11, *after* the removal, restating that "Apache-2.0 and the rest of 0015's
+*Decision* stand."
+
+This entry therefore records **what** happened and deliberately does not invent a **why**. Per the
+[ADR index](README.md) an Accepted decision is superseded by a later record rather than reversed in place, and
+an update is not that record — **the licence question is open until a superseding ADR settles it** (follow-up
+below).
+
 ## Follow-ups
 
 - Reconcile the **PRD's pervasive "multi-user" framing** with "multi-user capable, single-operator deployment"
@@ -146,3 +172,8 @@ The factory is **packaging, not a licence change**. Delivery, sync, name, and ho
 - **Liability wording is not settled by a licence.** The Apache disclaimer covers software warranty, not
   another person's trading losses. The README disclaimer and the human-in-the-loop design carry that weight; take
   legal advice before any commercial offering.
+- **Settle the licence in a superseding ADR** (see the 2026-09-15 update). It needs to say whether the removal
+  was deliberate and what the posture now is; if any grant is intended, restore `LICENSE` and `NOTICE` in the
+  same change. It also needs to address the standing of copies taken while Apache-2.0 applied
+  (2026-07-20 → 2026-08-29) — the repo is public, it has a fork, and that grant is by its own terms
+  irrevocable. **Take legal advice**; as the bullet above notes, a licence does not settle liability either way.
