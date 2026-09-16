@@ -8,9 +8,9 @@ right moment.
 |---|---|---|
 | **Coding Agent** — production code + unit tests, test-first | [`src/AGENTS.md`](../../src/AGENTS.md) | **automatically**, editing `src/` |
 | **QA Agent** — integration + smoke tests, written independently | [`src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md`](../../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) | **automatically**, in that project |
-| **Code Reviewer** — reviewing changes anywhere | [`code-reviewer.md`](code-reviewer.md) | **on demand** — open it when you take the hat; also **passed explicitly** to the reviewer an author agent spawns once its PR is green (gh#815) |
-| **Platform Agent** — CI/CD, image, compose, deploy | [`platform.md`](platform.md) | **on demand** (a stub sits in `.github/workflows/`) |
-| **Coordinator** — assigning work from the board, driving a task to approval | [`coordinator.md`](coordinator.md) | **on demand** — open it yourself; never auto-loads |
+| **Code Reviewer** — reviewing changes anywhere | [`code-reviewer.md`](code-reviewer.md) | **on demand** — open it when you take the hat; also **passed explicitly** to the reviewer an author agent spawns once its PR is green (gh#815). Claude Code: the `code-reviewer` skill, or the [`code-reviewer` subagent](../../.claude/agents/code-reviewer.md) for the spawned case |
+| **Platform Agent** — CI/CD, image, compose, deploy | [`platform.md`](platform.md) | **on demand** (a stub sits in `.github/workflows/`). Claude Code: the `platform` skill |
+| **Coordinator** — assigning work from the board, driving a task to approval | [`coordinator.md`](coordinator.md) | **on demand** — open it yourself; never auto-loads. Claude Code: the `coordinator` skill |
 
 Universal rules that bind all five: the root [`AGENTS.md`](../../AGENTS.md).
 
@@ -32,6 +32,21 @@ The rule, in one line: **put a contract where it must be to load when it applies
 its contract is the most common way agents get this repo wrong, which is why the routing table at the top of
 [`AGENTS.md`](../../AGENTS.md) says so out loud. A contract that does not auto-load is also the one whose
 absence nothing catches — no check fails, no reviewer sees a diff, the work is simply done without it.
+
+## Skills narrow that gap; they do not close it
+
+Each role contract has a Claude Code **skill** beside it in [`.claude/skills/`](../../.claude/skills/) whose
+`description` names the work that should trigger it, so the contract can arrive on intent rather than on the agent
+remembering. The Code Reviewer additionally exists as a
+**[subagent](../../.claude/agents/code-reviewer.md)**, because *never mix hats* is a statement about context: a
+skill loads into the caller's, while a subagent runs in one that never saw the change being written — which is
+exactly what the author-spawns-a-reviewer loop needs (gh#815).
+
+**A skill is a trigger, not a contract.** Every one of them is a pointer to the file in this folder and restates
+none of it, so a rule still has one home, `check-doc-duplication.sh` stays satisfied, and deleting a skill loses
+the prompt, never the rule. Two things it does not fix: the trigger is a *match*, not a guarantee, and other
+tools read `AGENTS.md` and see no skills at all. Opening the contract yourself remains the thing you are
+accountable for.
 
 ## Never mix hats in one pass
 

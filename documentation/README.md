@@ -39,6 +39,11 @@ read its Decision, then the update that matches your increment — not the whole
 Loaded **on demand by role**, not by directory. See the table at the top of the root
 [`AGENTS.md`](../AGENTS.md).
 
+Each has a Claude Code **skill** in [`.claude/skills/`](../.claude/skills/) that triggers on the work and then
+sends you here, and the reviewer also has a [**subagent**](../.claude/agents/code-reviewer.md) for the isolated
+context gh#815 needs. Those are pointers, not copies — the files below stay the only home, and they cost the same
+to read either way. Why they are shaped that way: [`agents/README.md`](agents/README.md).
+
 | Contract | ~tok | Read it when |
 |---|---:|---|
 | [`agents/code-reviewer.md`](agents/code-reviewer.md) | 3.4K | You are reviewing any change, anywhere. |
