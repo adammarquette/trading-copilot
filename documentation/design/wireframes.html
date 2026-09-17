@@ -1943,7 +1943,7 @@
       <div class="sh-dlg">
         <div class="sh-head">
           <h4>Suggestion history</h4>
-          <span class="cnt">50K Topstep · 12 proposals</span>
+          <span class="cnt">50K Topstep · 12 proposals · 10 never became a trade</span>
           <span class="sh-x">✕</span>
         </div>
 
@@ -1959,7 +1959,7 @@
           <span class="t">09:41</span>
           <span class="sym long">LONG ES</span>
           <span class="lv">5230.25 → <b>5248.00</b> · stop 5216.00 · 2.0R</span>
-          <span class="rt"><span class="chip ghost">conf 74%</span><span class="chip good">Taken</span></span>
+          <span class="rt"><span class="chip ghost">conf 74%</span><span class="chip good">Taken</span><span class="chip info">journal ›</span></span>
         </div>
 
         <div class="sh-row open">
@@ -1995,7 +1995,7 @@
           <span class="t">14:30</span>
           <span class="sym long">LONG ES</span>
           <span class="lv">5194.50 → <b>5211.25</b> · stop 5186.00 · 2.0R</span>
-          <span class="rt"><span class="chip ghost">conf 68%</span><span class="chip info">Modified</span></span>
+          <span class="rt"><span class="chip ghost">conf 68%</span><span class="chip info">Modified</span><span class="chip info">journal ›</span></span>
         </div>
 
         <div class="sh-foot">
@@ -2006,6 +2006,28 @@
     </div>
 
     <div class="ann" style="margin-top:16px">
+      <div class="annitem"><b>The journal already covers the taken half — this dialog must not re-answer it.</b>
+        <code>JournalTradeCard</code> reads <code>trade.suggestionId</code>, fetches the suggestion and renders
+        <code>SuggestionDelta</code>: the field-by-field <b>taken-vs-suggested</b> delta off the server's deviation
+        bitmask (gh#659, R-9). For anything the operator acted on, that is already the better surface — it sits beside
+        the realized P&amp;L. <b>The gap is everything that never became a trade.</b>
+        <code>DayDetailResponse</code> is <code>(Date, RealizedPnL, Trades)</code>, so a <b>passed</b> or
+        <b>expired</b> suggestion has no trade card to hang off and appears on <i>no</i> surface at all. Hence the
+        header count above — <i>12 proposals &middot; 10 never became a trade</i> — and the <b>journal &rsaquo;</b>
+        chip on the two rows that did: they hand off rather than duplicate.</div>
+
+      <div class="annitem"><b>Their outcomes are already composed — but an outcome is not a row you can read.</b>
+        gh#939's second sweep in <code>OutcomeJournalService</code> writes an <code>Outcome</code> for every terminal
+        unfilled suggestion: <code>ExpiredVoid</code> &rarr; <code>Expired</code>, passed &rarr;
+        <code>NoFillScratch</code>. So the fact of a non-take is journalled, owner-scoped, and
+        <code>GET /outcomes</code> is live. It is <b>not</b> a backing for this dialog:
+        <code>OutcomeResponse</code> carries ids, a resolution and the R-15 flags and <b>no instrument, prices,
+        timestamp or disposition</b>, and the read takes no account, date or page bound. It also has <b>no client
+        consumer at all</b> today. And it answers <i>that</i> you did not take it, never <i>what it would have
+        done</i> — the untaken-suggestion simulation and the calibration pair are <b>[J2] / [J3]</b> (gh#832),
+        unbuilt. Until they land, <i>&ldquo;passed setups that later worked: 38%&rdquo;</i> on the
+        <i>Strategy performance</i> board above is a drawn number with nothing computing it.</div>
+
       <div class="annitem"><b>A read over the journal, not a new store.</b> Every row already exists: <code>Suggestion</code>
         is an <b>append-only</b> journal, and each row already carries the levels, the size, the mode, the confidence,
         the rationale, the cited factor, the origin and its lifecycle state. The dialog re-renders the
@@ -2049,10 +2071,14 @@
         applies with nothing extra to write — the dialog inherits the same tenancy the panel has.</div>
     </div>
 
-    <div class="rej-why" style="margin-top:12px">Today the suggestion panel answers <i>what can I act on right now?</i> —
-      <code>listActionableSuggestions</code> deliberately shows only <b>Active and un-dispositioned</b> rows, so a setup
-      you passed at 10:09 vanishes the moment you pass it, and a setup that expired while you were away leaves no trace
-      on any surface. Everything needed to answer <i>what did the co-pilot offer me this week, and what did I do about
+    <div class="rej-why" style="margin-top:12px">Two surfaces already answer part of this and neither answers the middle. The <b>journal</b> answers
+      <i>what did I trade, and how did it compare to what was proposed?</i> — but only for suggestions that became
+      trades. <b>Strategy performance</b> (R-9, unbuilt) would answer <i>does my discretion add edge?</i> in
+      <b>aggregate</b> — expectancy, top pass reasons, a percentage — never as rows you can look through. Between
+      them sits the question neither takes: <i>what did the co-pilot offer me this week that I did not take, and
+      why?</i> The suggestion panel cannot answer it either — <code>listActionableSuggestions</code> deliberately
+      shows only <b>Active and un-dispositioned</b> rows, so a setup you passed at 10:09 vanishes the moment you pass
+      it, and one that expired while you were away leaves no trace on any surface. Everything needed to answer <i>what did the co-pilot offer me this week, and what did I do about
       it?</i> is <b>already in the database</b> and reachable by id — it simply has no list read and no surface. This
       dialog is the cheapest honest way to give it one: same card, same tenancy, same journal, one button on the chat
       composer, <b>no new storage and no deletion</b>. Drawn now so the shape can be argued with before the increment
