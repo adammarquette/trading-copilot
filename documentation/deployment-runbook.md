@@ -16,8 +16,8 @@ cloud environments still need creating, so nothing deploys today.
 | Section | Read it when |
 |---|---|
 | [Platform](#platform) | you need the Railway project, the GHCR image, or the database shape |
-| [AWS environment stack](#aws-environment-stack) | you need the resources the `infra/` app creates, the staging inventory, or how to tell staging is up |
-| [AWS release / deploy (OIDC)](#aws-release--deploy-oidc) | you need the GitHub OIDC roles, the release/rollback workflows, or `scripts/bootstrap.sh` |
+| [AWS environment stack](#aws-environment-stack) — **withdrawn, history only (gh#1215)** | you need the resources the `infra/` app creates, the staging inventory, or how to tell staging is up |
+| [AWS release / deploy (OIDC)](#aws-release--deploy-oidc) — **withdrawn, history only (gh#1215)** | you need the GitHub OIDC roles, the release/rollback workflows, or `scripts/bootstrap.sh` |
 | [Local development (docker-compose)](#local-development-docker-compose) | standing the stack up on your machine |
 | [Environments ↔ branches](#environments--branches) | working out which branch deploys where |
 | [Secrets & config (per environment)](#secrets--config-per-environment) | a variable is missing or wrong — also [operator password recovery](#operator-password-recovery-r-18-adr-0017-operator-lifecycle) |
@@ -1121,7 +1121,7 @@ would otherwise page every day.
   (or `production`, which waits on `aws-production`). Never `:latest`. See [AWS release / deploy](#aws-release--deploy-oidc).
 
 ## Verification / smoke tests
-**AWS staging health (gh#1188):** `https://trading-copilot.staging.marqspec.com/health` must return 200 after
+**AWS staging health (withdrawn, gh#1215 — history only; gh#1188):** `https://trading-copilot.staging.marqspec.com/health` was to return 200 after
 the first apply. See [How to tell staging is up](#how-to-tell-staging-is-up).
 
 Post-deploy, the tagged **smoke** subset (engineering §5) confirms the critical paths. **The set exists**
