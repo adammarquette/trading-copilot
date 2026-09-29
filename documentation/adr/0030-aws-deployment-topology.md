@@ -1,6 +1,6 @@
 # ADR-0030: AWS deployment topology — Fargate behind an ALB, Timescale on EFS, CDK in C#, GHCR by digest
 
-**Status:** Accepted · **Date:** 2026-09-12 · **Deciders:** Adam (operator/maintainer)
+**Status:** Withdrawn (2026-09-29, gh#1215 — see the last *Update*; Railway remains the running cloud) · **Date:** 2026-09-12 · **Deciders:** Adam (operator/maintainer)
 **Extends:** [ADR-0012](0012-containerization-local-dev.md) (containerize / compose / config-driven DB / no
 secrets in the image) and [ADR-0018](0018-image-registry-ghcr.md) (build once in CI, publish to GHCR). Neither
 Decision is rewritten; this record names the AWS consumer of that image.
@@ -183,6 +183,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 | 2026-09-12 | GitHub OIDC deploy roles + release/rollback workflows; production-gate environment is `aws-production` (gh#1187) |
 | 2026-09-12 | Operator inventory + staging zone Lookup for first AWS apply (gh#1188) |
 | 2026-09-13 | Project-scoped role names + imported (not created) OIDC provider — the shared account already had both (gh#1201) |
+| 2026-09-29 | **Withdrawn** — the AWS plan is dropped; Railway remains the running cloud (gh#1215) |
 
 ## Update (2026-09-12) — OIDC roles and digest-only release/rollback workflows (gh#1187)
 
@@ -236,6 +237,22 @@ policies, and provider are untouched. No account id, region, or hostname is inve
 unit tests are the evidence here — the live apply is the operator's step (gh#1188 remains the tracker for
 the first `cdk deploy` of the environment stack; this record's roles are a separate stack applied
 independently).
+
+## Update (2026-09-29) — the AWS plan is withdrawn; Railway remains the running cloud (gh#1215)
+
+The operator decided to drop the AWS deployment. **This record's Decision is not rewritten** — it stays as the
+trail of what was chosen and why — but it is no longer the plan, and nothing should be built toward it.
+
+- **What changes:** Railway stays the running always-on cloud; there is no AWS staging or production to prove and
+  no sunset to schedule. The epic (gh#1184) and its open children (gh#1188, gh#1189, gh#1206, gh#1207) were closed
+  as not planned. Railway is being set up again in a new project (gh#1211).
+- **What does not change:** ADR-0012 and ADR-0018 (GHCR image, config-driven database, no secrets in the image)
+  never depended on AWS, and stand. The **R-13** always-on requirement, **R-14** and the human-approved
+  production rule are platform-independent and bind whichever cloud runs the watchdog.
+- **What this update does not do:** it does not delete `infra/`, the AWS-only `deploy.yml` / `release.yml`
+  paths, or anything already deployed in AWS. **Those workflows deploy only to AWS today, so no CI job deploys to
+  Railway**; what replaces or removes them is a separate decision and issue.
+- **Decision 12** ("Railway runs in parallel until AWS staging has proven R-13") is moot.
 
 ## Follow-ups
 
