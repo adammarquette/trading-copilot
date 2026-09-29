@@ -16,6 +16,7 @@ Sizes below are approximate tokens, so you can see what a read costs before you 
 | [`trading-platform-engineering.md`](trading-platform-engineering.md) | 15.7K | You need stack, standards, testing, observability, deployment or the Definition of Done. Numbered §1–§12; cite and open by section. |
 | [`data-dictionary.md`](data-dictionary.md) | 4.0K | You need the **data model**. This is now an **index**: the ERD, *Conventions* and a routing table over 12 domain pages in [`data-dictionary/`](data-dictionary/) (~2.1K each). Open the index, then the one domain — not the catalog. `§N` numbers are stable and cited from C# XML docs. |
 | [`deployment-runbook.md`](deployment-runbook.md) | 14.1K | You are deploying, on call, or setting up locally. Alert runbooks live under *When a page arrives*. |
+| [`code-map.md`](code-map.md) | 2.3K | You need to get from a **task to the code**: which `src/` project implements a requirement, which ADR and `R-#` specify it, which tests pin it. The safety spine (risk gate, execution, flatten, kill switch) is findable in one hop. Read it before grepping. |
 
 ## Working agreements
 
