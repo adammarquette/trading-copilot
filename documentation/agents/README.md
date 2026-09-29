@@ -16,8 +16,8 @@ right moment.
 | **Multi-agent board** — more than one agent tool sharing the board | [`multi-agent.md`](multi-agent.md) | **on demand** — open it yourself. *Imported* |
 | **Task sizing** — cheapest model that can do the job; a shared rubric, not a role | [`task-sizing.md`](task-sizing.md) | **on demand** — cited by roles. *Imported* |
 
-[`imported/`](imported/) holds the sibling project's generic versions of the four contracts above that share a name
-with this repo's tailored ones. **They are not contracts here** and nothing routes to them: they are there to be
+[`imported/`](imported/) holds the sibling project's generic `README`, `code-reviewer`, `coordinator` and `platform`, which share
+names with this repo's tailored contracts. **They are not contracts here** and nothing routes to them: they are there to be
 diffed and merged from.
 
 Universal rules that bind every contract here: the root [`AGENTS.md`](../../AGENTS.md).
