@@ -11,8 +11,16 @@ right moment.
 | **Code Reviewer** — reviewing changes anywhere | [`code-reviewer.md`](code-reviewer.md) | **on demand** — open it when you take the hat; also **passed explicitly** to the reviewer an author agent spawns once its PR is green (gh#815). Claude Code: the `code-reviewer` skill, or the [`code-reviewer` subagent](../../.claude/agents/code-reviewer.md) for the spawned case |
 | **Platform Agent** — CI/CD, image, compose, deploy | [`platform.md`](platform.md) | **on demand** (a stub sits in `.github/workflows/`). Claude Code: the `platform` skill |
 | **Coordinator** — assigning work from the board, driving a task to approval | [`coordinator.md`](coordinator.md) | **on demand** — open it yourself; never auto-loads. Claude Code: the `coordinator` skill |
+| **Wiki Editor** — fixing what stopped being true after a batch of wiki changes | [`wiki-editor.md`](wiki-editor.md) | **on demand** — open it yourself. *Imported, not yet adapted (gh#1212)* |
+| **Doc Simplifier** — regenerating short front-door docs from the full ones | [`doc-simplifier.md`](doc-simplifier.md) | **on demand** — open it yourself. *Imported, not yet adapted (gh#1212)* |
+| **Multi-agent board** — more than one agent tool sharing the board | [`multi-agent.md`](multi-agent.md) | **on demand** — open it yourself. *Imported* |
+| **Task sizing** — cheapest model that can do the job; a shared rubric, not a role | [`task-sizing.md`](task-sizing.md) | **on demand** — cited by roles. *Imported* |
 
-Universal rules that bind all five: the root [`AGENTS.md`](../../AGENTS.md).
+[`imported/`](imported/) holds the sibling project's generic versions of the four contracts above that share a name
+with this repo's tailored ones. **They are not contracts here** and nothing routes to them: they are there to be
+diffed and merged from.
+
+Universal rules that bind every contract here: the root [`AGENTS.md`](../../AGENTS.md).
 
 ## Why they are not all in this folder
 
