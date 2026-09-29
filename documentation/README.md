@@ -26,6 +26,17 @@ Sizes below are approximate tokens, so you can see what a read costs before you 
 | [`AGENT-MEMORY.md`](AGENT-MEMORY.md) | 0.9K | **Before starting any work** — the catch-all for practices with no formal home. Cheap; just read it. |
 | [`integration-test-audit.md`](integration-test-audit.md) | 17.7K | You are writing integration tests and need the existing inventory. §2 is the inventory; live per-issue status is **the tracker**, not this file. |
 
+## Reference material — imported, not authoritative
+
+Copied from a sibling project as material to work from. **None of it describes this repo**; the authority for each
+is named in the file's own banner. Nothing routes an agent to follow them.
+
+| Document | ~tok | Read it when |
+|---|---:|---|
+| [`engineering-standards.md`](engineering-standards.md) | 26.5K | You want to see a complete engineering-standards document to adapt from. **Authority here is [`trading-platform-engineering.md`](trading-platform-engineering.md).** Numbered sections; open the one you need, not the file. |
+| [`examples/pr-workflow.md`](examples/pr-workflow.md) | 15.5K | You want an example of a mature change-to-`main` workflow (GitLab-era; MR = PR). **This repo's process is [`project-board-workflow.md`](project-board-workflow.md).** |
+| [`examples/pipeline-reproduction.md`](examples/pipeline-reproduction.md) | 11.5K | You want the **target shape** of the CI/CD pipeline this project is aiming for. **The real pipeline is `.github/workflows/`.** |
+
 ## Decisions — [`adr/`](adr/) (30 records, ~84K)
 
 **Never read the folder.** [`adr/README.md`](adr/README.md) indexes every record; open the one ADR you need.
