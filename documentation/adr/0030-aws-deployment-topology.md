@@ -250,8 +250,10 @@ trail of what was chosen and why — but it is no longer the plan, and nothing s
   never depended on AWS, and stand. The **R-13** always-on requirement, **R-14** and the human-approved
   production rule are platform-independent and bind whichever cloud runs the watchdog.
 - **What this update does not do:** it does not delete `infra/`, the AWS-only `deploy.yml` / `release.yml`
-  paths, or anything already deployed in AWS. **Those workflows deploy only to AWS today, so no CI job deploys to
-  Railway**; what replaces or removes them is a separate decision and issue.
+  paths, or anything already deployed in AWS. `deploy.yml` (redeploy/rollback) and `release.yml` deploy only to AWS today, so **there is
+  no Railway release or rollback workflow**; the `deploy (Railway)` job in `ci.yml` still fires the Railway deploy hooks on
+  pushes to `develop` and `staging` and skips when the hook secret is unset. What replaces or removes the AWS
+  workflows is a separate decision and issue.
 - **Decision 12** ("Railway runs in parallel until AWS staging has proven R-13") is moot.
 
 ## Follow-ups
