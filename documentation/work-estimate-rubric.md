@@ -57,6 +57,11 @@ Each factor pushes the estimate. Read left-to-right; the task's score is anchore
 | **`Work Estimate: 4`** | **Complex.** Ambiguous, cross-cutting, cross-repo, or subtle domain correctness; or any safety-critical path (floored here). | top (Opus) |
 | **`Work Estimate: 5`** | **Critical / deep.** High blast radius *and* subtle correctness — the safety-critical spine, unattended actions, money-at-risk logic. | top (Opus), max reasoning effort |
 
+The model column names a **band**. The current model for each band — Sonnet 5.5 wherever a row says Sonnet,
+Opus 5.5 for `4`–`5`, plus the Cursor equivalents — lives in
+[`agents/task-sizing.md`](agents/task-sizing.md) §*Model slugs*, which also says why a cheaper model never moves a
+safety-critical item off the top band.
+
 ## Calibration anchors (real items, for consistency)
 Scored against work already in this repo, so future estimating has fixed reference points:
 

@@ -64,7 +64,7 @@ to read either way. Why they are shaped that way: [`agents/README.md`](agents/RE
 | [`agents/doc-simplifier.md`](agents/doc-simplifier.md) | 10.2K | You are writing the short "front door" versions of the root documents from their full references. *Imported; not yet adapted to this repo.* |
 | [`agents/wiki-editor.md`](agents/wiki-editor.md) | 5.0K | A batch of changes has landed in the wiki and you are fixing what stopped being true. *Imported; not yet adapted to this repo.* |
 | [`agents/multi-agent.md`](agents/multi-agent.md) | 1.5K | More than one agent tool shares the board — one lead, the others until review. *Imported.* |
-| [`agents/task-sizing.md`](agents/task-sizing.md) | 1.6K | You are choosing the cheapest model that can finish a task, or estimating time to complete. A shared rubric, not a role. *Imported.* |
+| [`agents/task-sizing.md`](agents/task-sizing.md) | 1.9K | You are choosing the cheapest model that can finish a task (Claude and Cursor models per band, Sonnet 5.5 for S/M coding work), or estimating time to complete. A shared rubric, not a role. *Imported.* |
 
 The two subtree contracts — [`src/AGENTS.md`](../src/AGENTS.md) (Coding) and
 [`IntegrationTests/AGENTS.md`](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) (QA) — load from their

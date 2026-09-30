@@ -10,8 +10,9 @@ what the task *touches* and what it would cost to be wrong.
 
 ## The tiers
 
-Tier names (**Haiku**, **Sonnet**, **Opus**) are capability bands. Pick the band from the task, then the Cursor
-slug from *Model slugs* below.
+Tier names (**Haiku**, **Sonnet**, **Opus**) are capability bands. Pick the band from the task, then the model
+from *Model slugs* below. The bands are the same ones the `Work Estimate` label routes on
+([`work-estimate-rubric.md`](../work-estimate-rubric.md)), so an issue's label and a tier name the same band.
 
 | Tier | Looks like | Band | Effort |
 |---|---|---|---|
@@ -23,22 +24,35 @@ slug from *Model slugs* below.
 
 ## Model slugs
 
-When spawning a subagent in Cursor, pass the slug in the `model` parameter. This repo dispatches on **Cursor
-models only** — **`composer-2.5-fast`** for fast, localized work and **`grok-4.7-high-fast`** for anything
-that needs depth. **`inherit`** is fine when the parent session is already at or above the band the task needs.
-**Ties round up** (*Applying it*, below): between the two slugs, take Grok.
+This repo dispatches on two model families, and a band has a model in each. In **Claude Code**, pass the id in the
+`model` parameter of a subagent. In **Cursor**, pass the slug: **`composer-2.5-fast`** for fast, localized work
+and **`grok-4.7-high-fast`** for anything that needs depth. **`inherit`** is fine when the parent session is
+already at or above the band the task needs. **Ties round up** (*Applying it*, below): between two models, take
+the stronger.
 
-| Band | Cursor slug |
-|---|---|
-| **Haiku** | `composer-2.5-fast` |
-| **Sonnet** | `composer-2.5-fast` |
-| **Opus** | `grok-4.7-high-fast` |
+| Band | Claude (Claude Code) | Cursor slug |
+|---|---|---|
+| **Haiku** | Haiku 4.5 — `claude-haiku-4-5-20251001` | `composer-2.5-fast` |
+| **Sonnet** | **Sonnet 5.5 — `claude-sonnet-5-5`** | `composer-2.5-fast` |
+| **Opus** | Opus 5.5 — `claude-opus-5-5` | `grok-4.7-high-fast` |
 
-**Escalate, do not downgrade.** A Floor task stays on Grok even if Composer is cheaper or available. Sonnet-band
-work that fails twice on Composer moves to Grok, not the other way around.
+**Sonnet 5.5 is the Claude model for S and M work** — localized and single-project coding where the tier table
+above already says Sonnet. It is a good coding model and costs less than Opus 5.5, so it is the default for that
+work rather than reaching for Opus (the operator's judgment, 2026-09-30). **Opus 5.5 is for L and the Floor.** Like
+the rest of this table it is a guideline that changes as we see what each model handles well
+([`work-estimate-rubric.md`](../work-estimate-rubric.md)), not a contract.
 
-**Coordinator dispatch.** Name both the band and the slug: "Floor — Code Reviewer on !662,
-`grok-4.7-high-fast`."
+**Cheaper does not move the Floor.** Sonnet 5.5 being a good and inexpensive coding model changes nothing about
+*The floor* below: a Floor task takes the strongest model at any size, and in this repo any `safety-critical` item
+is a Floor by the rubric's own rule (`Work Estimate` at least 4). Do not size such work down because the edit is
+small.
+
+**Escalate, do not downgrade.** A Floor task stays on the top model (Opus 5.5, or Grok in Cursor) even if a cheaper
+one is available. Sonnet-band work that fails twice moves up — Sonnet 5.5 to Opus 5.5, Composer to Grok — never
+the other way around.
+
+**Coordinator dispatch.** Name both the band and the model: "Floor — Code Reviewer on PR #1234,
+`claude-opus-5-5`." (Cursor: `grok-4.7-high-fast`.)
 
 ## The floor — category beats size
 
