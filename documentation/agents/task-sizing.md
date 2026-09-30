@@ -38,7 +38,7 @@ the stronger.
 
 **Sonnet 5.5 is the Claude model for S and M work** — localized and single-project coding where the tier table
 above already says Sonnet. It is a good coding model and costs less than Opus 5.5, so it is the default for that
-work rather than reaching for Opus (the operator's judgment, 2026-09-30). **Opus 5.5 is for L and the Floor.** Like
+work rather than reaching for Opus (the operator's judgment, 2026-09-29). **Opus 5.5 is for L and the Floor.** Like
 the rest of this table it is a guideline that changes as we see what each model handles well
 ([`work-estimate-rubric.md`](../work-estimate-rubric.md)), not a contract.
 
