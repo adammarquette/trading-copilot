@@ -207,10 +207,9 @@ npx cdk deploy trading-copilot-staging \
   --parameters AlertsEmail="$ALERTS_EMAIL"
 ```
 
-The release path after OIDC exists: `scripts/deploy-environment.sh staging <version> <digest>` (or
-`gh workflow run deploy.yml --ref main -f version=<tag> -f environment=staging`). That script passes
-account/region as context from the assumed role and does **not** pass `--no-lookups`. Do not `cdk deploy`
-production from this card.
+*(History.)* The release path after OIDC existed was `scripts/deploy-environment.sh` and `deploy.yml`, both **removed
+in gh#1232** with the AWS plan. That script passed account/region as context from the assumed role and did **not**
+pass `--no-lookups`. Do not `cdk deploy` production from this card.
 
 ### How to tell staging is up
 
@@ -273,7 +272,8 @@ npx cdk synth --no-lookups -c outbound=NatGateway
 
 ## AWS release / deploy (OIDC)
 
-> **Withdrawn (2026-09-29, gh#1215).** History only; see the note under *AWS environment stack*.
+> **Withdrawn (2026-09-29, gh#1215); the AWS deploy workflows and script were removed (gh#1232).** History only; see
+> the note under *AWS environment stack*. What still exists is `release.yml`'s approval gate and retag, in the row below.
 
 The OIDC stack and the release/rollback workflows (gh#1187) match [ADR-0030](adr/0030-aws-deployment-topology.md)
 decisions 4, 8 and 11. Shape is TopstepX `GitHubOidcStack` + `release.yml` / `deploy.yml` in
@@ -285,9 +285,9 @@ Staging apply and the live hostname are [above](#aws-environment-stack) (gh#1188
 | OIDC stack | `trading-copilot-github-oidc` | Two project-scoped roles (`trading-copilot-GitHubDeploy-staging`, `trading-copilot-GitHubDeploy-production`); the provider is **imported** by ARN, not created — `MarqSpec.Mcp.TopstepX`'s `topstepx-mcp-github-oidc` stack already owns the only OIDC provider for this issuer in the shared account (gh#1201). Environment-agnostic: ARNs use `AWS::AccountId` / `AWS::Region`. |
 | Staging trust | `v*` tags **and** `refs/heads/main` | Release path + `workflow_dispatch` rollback. The subject is this repo's **immutable** Actions prefix (`owner@id/name@id`), read from `GET /repos/…/actions/oidc/customization/sub` — a name-only `repo:owner/name` trust never matches. |
 | Production trust | `environment:aws-production` | No wildcard. The reviewer rule on that GitHub Environment is the approval **and** the credential's precondition ([ADR-0030](adr/0030-aws-deployment-topology.md) decision 8). |
-| `release.yml` | published GitHub Release | Retags the merge-published `:sha-<short>` as `:VERSION` (does not rebuild, never `:latest`). Deploys that **digest** to staging, then the same digest to production behind `aws-production`. |
-| `deploy.yml` | `workflow_dispatch` on `main` | Rollback / redeploy. Resolves the digest from the version tag (`imagetools inspect`). Staging has no `environment:` key; production is the literal `aws-production`. |
-| Deploy script | `scripts/deploy-environment.sh` | `cdk deploy --parameters ImageDigest=… Version=…` plus `-c account= -c region= -c rootDomain=` (no `--no-lookups`). Never `put-parameter`, never `{{resolve:ssm}}`. |
+| `release.yml` | published GitHub Release | **Still live, retag only.** Waits for a human approval (`production`), then retags the merge-published `:sha-<short>` as `:VERSION` (does not rebuild, never `:latest`) and exposes the digest and version as outputs. Its two AWS deploy jobs (staging, then production behind `aws-production`) were **removed in gh#1232**. |
+| `deploy.yml` | `workflow_dispatch` on `main` | **Removed in gh#1232** (AWS-only rollback / redeploy). |
+| Deploy script | `scripts/deploy-environment.sh` | **Removed in gh#1232** (with its selftest). |
 
 **No long-lived AWS keys** in GitHub secrets, workflow files, or source. The workflows assume the deploy
 roles through OIDC (`id-token: write`) and read the account / region from repository **variables**
@@ -313,8 +313,9 @@ roles through OIDC (`id-token: write`) and read the account / region from reposi
 4. **CDK bootstrap** in that account (`cdk bootstrap aws://045296582762/us-east-1`) before any apply.
 
 `./scripts/check-release-gate.sh` fails CI when a workflow-named environment is missing or has no
-reviewer. `./scripts/check-deploy-workflows.sh` fails CI when a deploy job references `:latest`,
-writes SSM, names a twelve-digit account ARN, or uses an expression-named environment.
+reviewer. `./scripts/check-deploy-workflows.sh` fails CI when `release.yml`'s approval gate is an expression-named
+environment or missing, when `publish` skips the approval, rebuilds instead of retagging, references `:latest` or
+exposes no digest; `scripts/tests/check-deploy-workflows.test.sh` proves it goes red for each of those.
 
 ## Local development (docker-compose)
 `docker compose up -d` from the repo root stands up the local stack ([ADR-0012](adr/0012-containerization-local-dev.md),
@@ -1167,8 +1168,8 @@ would otherwise page every day.
 - Triggered by a **failed production smoke test** or an operator decision.
 - **Human-approved** (§9): roll back via Railway (redeploy the previous release) and confirm with smoke tests. Any
   rollback is an explicit, approved action — never automatic.
-- **AWS rollback** (withdrawn, gh#1215 — history only): `gh workflow run deploy.yml --ref main -f version=<previous> -f environment=staging`
-  (or `production`, which waits on `aws-production`). Never `:latest`. See [AWS release / deploy](#aws-release--deploy-oidc).
+- **AWS rollback** (withdrawn, gh#1215; the `deploy.yml` it used was removed in gh#1232 — history only). Never `:latest`. See
+  [AWS release / deploy](#aws-release--deploy-oidc).
 
 ## Verification / smoke tests
 **AWS staging health (withdrawn, gh#1215 — history only; gh#1188):** `https://trading-copilot.staging.marqspec.com/health` was to return 200 after
