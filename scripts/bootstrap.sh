@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-# bootstrap.sh — create the GitHub Environments the AWS release/deploy path depends on.
+# bootstrap.sh — create the GitHub Environments the release workflow's approval gate depends on.
 #
 #   scripts/bootstrap.sh [owner/repo] [--dry-run]
 #
 # WHY THIS EXISTS (gh#1187)
 # -------------------------
-# `environment: aws-production` does not create or require anything. If the environment does not
+# `environment: production` does not create or require anything. If the environment does not
 # exist, GitHub CREATES IT AT RUN TIME WITH NO PROTECTION RULES and the job passes straight
-# through — no warning, no annotation, no error. The production deploy would then assume
-# trading-copilot-GitHubDeploy-production with a token that environment minted for anyone who named it.
+# through — no warning, no annotation, no error. release.yml's `gate` would then approve nothing
+# and `publish` would push a public version tag unattended.
 #
 # That setting is a repository console action CI cannot do. Configuration that exists only in a
 # provider's web console does not exist (platform contract). This script is the recorded procedure.
 #
 # WHAT IT DOES NOT DO. It does not rewrite rulesets, labels, or the branch ladder — those already
-# live on this repository. It does not `cdk deploy`. It does not invent an AWS account id, region,
-# or hostname. The first apply of `trading-copilot-github-oidc` is the operator's, with their own
-# credentials, because the workflows cannot assume a role that does not exist yet (gh#1188).
+# live on this repository. It deploys nothing and sets no repository variable or secret.
+#
+# HISTORY. It also created `aws-production` and read the repository's Actions OIDC subject for
+# the AWS deploy roles. Both went with the AWS plan (ADR-0030, gh#1215, gh#1232). Deleting that
+# environment from an existing repository is the operator's, in Settings > Environments; this
+# script never deletes.
 #
 # CREATE-ONLY, NEVER OVERWRITE. An environment that already exists is read and reported, never
 # written. An environment PUT that names `reviewers` replaces the whole reviewer list.
@@ -66,19 +69,16 @@ Stopping rather than guessing. Nothing further has been written."
 # ---------------------------------------------------------------------------
 step "Approval environments"
 
-# TWO environments, each a separate human approval on a separate consequence (ADR-0030
-# decision 8 / 11, gh#1187):
+# ONE environment, a human approval on an irreversible consequence (ADR-0018, gh#1187):
 #
-#   - production       gates the version-tag publish on release.yml's `gate` job — a public
-#                      GHCR version tag cannot be un-pulled;
-#   - aws-production   gates WHAT RUNS — the production deploy jobs declare it, and
-#                      trading-copilot-GitHubDeploy-production trusts ONLY a token carrying
-#                      `sub = repo:<immutable>:environment:aws-production`.
+#   - production  gates the version-tag publish on release.yml's `gate` job — a public GHCR
+#                  version tag cannot be un-pulled.
 #
 # The names are hardcoded rather than parsed out of the workflows: this script takes a repo
-# SLUG and may be run from anywhere, with no checkout to read. The other direction is held
-# by a template test: GitHubOidcStackTests reads this line.
-ENV_NAMES="production aws-production"
+# SLUG and may be run from anywhere, with no checkout to read. The other direction is held by
+# scripts/tests/bootstrap-environments.test.sh, which reads this line and fails when it names
+# more or fewer environments than the workflows do (gh#1232).
+ENV_NAMES="production"
 
 ENV_REVIEWERS_JQ='[.protection_rules[]?|select(.type=="required_reviewers")|.reviewers[]?|"\(.type):\(.reviewer.login // .reviewer.slug)"]|join(", ")'
 
@@ -120,36 +120,6 @@ whatever is there, reviewers included. Nothing further has been written."
   fi
 done
 
-# ---------------------------------------------------------------------------
-# Actions OIDC subject — READ ONLY.
-# ---------------------------------------------------------------------------
-step "Actions OIDC subject (read-only)"
-
-# Repositories created after 2026-07-15 mint an immutable Actions OIDC sub
-# (owner@id/name@id). A trust policy written for repo:owner/name never matches.
-# This read reports the prefix the tokens actually carry. It WRITES NOTHING.
-oidc_status=0
-oidc_prefix="$(gh api "repos/$REPO/actions/oidc/customization/sub" --jq .sub_claim_prefix 2>&1)" || oidc_status=$?
-if [ "$oidc_status" -eq 0 ]; then
-  if [ -z "$oidc_prefix" ]; then
-    warn "  actions/oidc/customization/sub answered with an empty sub_claim_prefix"
-  else
-    info "  Actions OIDC sub_claim_prefix=$oidc_prefix"
-    case "$oidc_prefix" in
-      *@*) ok "  prefix is immutable (owner@id/name@id) — trading-copilot-GitHubDeploy-* must trust this exact segment" ;;
-      *) warn "  prefix is name-only ($oidc_prefix). A stack that trusts owner@id/name@id will not assume." ;;
-    esac
-  fi
-else
-  warn "  could not read actions/oidc/customization/sub (exit $oidc_status)"
-  printf '%s\n' "$oidc_prefix" | sed 's/^/  | /' >&2
-fi
-
 step "Done"
 ok "$REPO environment bootstrap recorded."
-info ""
-info "Still operator-supplied, never invented here (ADR-0030 decision 14):"
-info "  GitHub Actions variables AWS_ACCOUNT_ID and AWS_REGION"
-info "  first cdk deploy of trading-copilot-github-oidc (your credentials, not OIDC — the roles do not exist yet)"
-info "  RootDomain, Hostname, ProjectXDataTier, AlertsEmail, -c outbound= on the first environment apply"
-info "Do not cdk deploy from this script. Prove-live staging is gh#1188."
+info "Verify with: scripts/check-release-gate.sh (fails when a workflow-named environment is missing or unprotected)."
