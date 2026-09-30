@@ -184,6 +184,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 | 2026-09-12 | Operator inventory + staging zone Lookup for first AWS apply (gh#1188) |
 | 2026-09-13 | Project-scoped role names + imported (not created) OIDC provider — the shared account already had both (gh#1201) |
 | 2026-09-29 | **Withdrawn** — the AWS plan is dropped; Railway remains the running cloud (gh#1215) |
+| 2026-09-30 | The AWS deploy workflows and script are removed; `release.yml` keeps its approval gate and retag (gh#1232) |
 
 ## Update (2026-09-12) — OIDC roles and digest-only release/rollback workflows (gh#1187)
 
@@ -255,6 +256,22 @@ trail of what was chosen and why — but it is no longer the plan, and nothing s
   pushes to `develop` and `staging` and skips when the hook secret is unset. What replaces or removes the AWS
   workflows is a separate decision and issue.
 - **Decision 12** ("Railway runs in parallel until AWS staging has proven R-13") is moot.
+
+## Update (2026-09-30) — the AWS deploy workflows and script are removed (gh#1232)
+
+The 2026-09-29 Update left the AWS-only deploy path in the tree and named removing it as a separate step. This is
+that step's first half; the Decision is still not rewritten.
+
+- **Removed:** `.github/workflows/deploy.yml` (the AWS redeploy / rollback), the `deploy-staging` and
+  `deploy-production` jobs of `.github/workflows/release.yml`, and `scripts/deploy-environment.sh` with its selftest.
+- **Kept:** `release.yml`'s `verify-gate`, `gate` (the human approval, `environment: production`) and `publish` (the
+  retag of the merge-published digest as `:VERSION`), which were never AWS-specific, and `scripts/image-reference.sh`.
+  `scripts/check-deploy-workflows.sh` now asserts that gate and retag instead of the AWS deploy jobs, and a test
+  proves it goes red for each broken shape.
+- **Not yet removed:** `infra/` (the CDK app and its CI steps), `aws-production` in `scripts/bootstrap.sh`, and the
+  `aws-production` GitHub environment and `AWS_*` repository variables (repository settings, the operator's).
+  `GitHubOidcStackTests` reads `bootstrap.sh`, so those go together in the next step.
+- **Still true:** nothing deploys to Railway from CI yet; that is the step after (gh#1232).
 
 ## Follow-ups
 

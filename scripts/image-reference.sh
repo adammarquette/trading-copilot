@@ -4,7 +4,7 @@
 #   scripts/image-reference.sh [owner/repo]     default: $GITHUB_REPOSITORY, else the git remote
 #
 # An OCI repository name must be lowercase. `${{ github.repository }}` carries the repository's
-# DISPLAY case. Both release.yml and deploy.yml ask this script so a mixed-case reference fails
+# DISPLAY case. release.yml asks this script (deploy.yml did too, until gh#1232 removed it) so a mixed-case reference fails
 # a pull request (or a local run) instead of a release. Pattern: TopstepX scripts/image-reference.sh
 # (their gh#115); this product's image is ghcr.io/adammarquette/trading-copilot (ADR-0018).
 
