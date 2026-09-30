@@ -129,8 +129,8 @@ jobs:
       # job that skips the approval, rebuilds instead of retagging, or references :latest. The checker reads the
       # workflow file; its own test runs it against deliberately broken copies so it cannot rot into a gate that
       # passes everything. No credentials. The live environment setting is check-release-gate.sh, which talks to
-      # the API — a missing `production` / `aws-production` is the inert-gate class; scripts/bootstrap.sh
-      # creates them.
+      # the API — a missing `production` is the inert-gate class; scripts/bootstrap.sh creates it (and still
+      # creates `aws-production`, an orphan no workflow uses until gh#1232's second step removes it).
       - name: Release workflow shape
         run: ./scripts/check-deploy-workflows.sh
 

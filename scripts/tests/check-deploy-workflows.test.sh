@@ -16,7 +16,7 @@ CHECKER="${CHECKER:-$DIR/../check-deploy-workflows.sh}"
 REAL="${REAL_WORKFLOWS:-$DIR/../../.github/workflows}"
 
 # A new suite declares how many assertions it expects, so a dropped case cannot stay green (platform contract).
-EXPECTED_ASSERTIONS=8
+EXPECTED_ASSERTIONS=12
 assertions=0
 failures=0
 
@@ -78,6 +78,23 @@ run_checker "$d"; [ $? -ne 0 ]; check "a publish job that exposes no digest is r
 # 8. A missing workflow file is a failure, not a pass.
 mkdir -p "$TMP/empty"
 run_checker "$TMP/empty"; [ $? -ne 0 ]; check "a workflows directory with no release.yml is refused" "$?"
+
+# 9. The approval gate must wait for the check that the approval environment is real (an inert-gate check that runs
+#    after the approval it vouches for cannot vouch for it).
+d="$(variant gate-unordered '/^  gate:/,/^  publish:/ { /^    needs: verify-gate$/d }')"
+run_checker "$d"; [ $? -ne 0 ]; check "a gate job that does not wait for verify-gate is refused" "$?"
+
+# 10. publish must not rebuild through an action either.
+d="$(variant_append publish-action '      - uses: docker/build-push-action@v6')"
+run_checker "$d"; [ $? -ne 0 ]; check "a publish job that rebuilds through build-push-action is refused" "$?"
+
+# 11. publish must actually retag.
+d="$(variant publish-no-retag 's/imagetools create/imagetools inspect/')"
+run_checker "$d"; [ $? -ne 0 ]; check "a publish job that never retags is refused" "$?"
+
+# 12. publish must expose the version a deploy would pin, as well as the digest.
+d="$(variant publish-no-version '/^      version: /d')"
+run_checker "$d"; [ $? -ne 0 ]; check "a publish job that exposes no version is refused" "$?"
 
 echo "----"
 [ "$assertions" -eq "$EXPECTED_ASSERTIONS" ] || { echo "::error::ran $assertions assertions, expected $EXPECTED_ASSERTIONS"; exit 1; }
