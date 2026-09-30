@@ -10,13 +10,24 @@ so they cost context only when they apply.
 |---|---|---|
 | writing production code or unit tests | [`src/AGENTS.md`](src/AGENTS.md) — Coding | on your first read of a file in `src/` |
 | writing integration or smoke tests | [`IntegrationTests/AGENTS.md`](src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) — QA | on your first read in that project |
-| **reviewing any change** | [`agents/code-reviewer.md`](documentation/agents/code-reviewer.md) | **open it yourself** |
-| **touching CI/CD, the image, compose, or deploy** | [`agents/platform.md`](documentation/agents/platform.md) | **open it yourself** |
-| **assigning work from the board, or driving a task to approval** | [`agents/coordinator.md`](documentation/agents/coordinator.md) | **open it yourself** |
+| **reviewing any change** | [`agents/code-reviewer.md`](documentation/agents/code-reviewer.md) | **open it yourself**, or the `code-reviewer` skill / subagent |
+| **touching CI/CD, the image, compose, or deploy** | [`agents/platform.md`](documentation/agents/platform.md) | **open it yourself**, or the `platform` skill |
+| **assigning work from the board, or driving a task to approval** | [`agents/coordinator.md`](documentation/agents/coordinator.md) | **open it yourself**, or the `coordinator` skill |
+| reading the wiki after a batch of changes and fixing what stopped being true | [`agents/wiki-editor.md`](documentation/agents/wiki-editor.md) — *imported, not yet adapted* | **open it yourself** |
+| regenerating short front-door docs from the full ones, on request | [`agents/doc-simplifier.md`](documentation/agents/doc-simplifier.md) — *imported, not yet adapted* | **open it yourself** |
+| sharing the board with another agent tool | [`agents/multi-agent.md`](documentation/agents/multi-agent.md) — *imported* | **open it yourself** |
+| sizing a task or choosing the cheapest model that can do it | [`agents/task-sizing.md`](documentation/agents/task-sizing.md) — *imported; a rubric, not a role* | **open it yourself** |
 
 The subtree contracts load by directory proximity — **lazily, when you first read a file there, not at session
 start**. The role contracts follow *what you are doing* rather than where a file sits, and never auto-load.
 **Wearing one of those hats without opening its contract is the most common way agents get this repo wrong.**
+In Claude Code each is also reachable as a **skill** under [`.claude/skills/`](.claude/skills/), and the reviewer
+additionally as a **subagent** ([`.claude/agents/code-reviewer.md`](.claude/agents/code-reviewer.md)) so an author
+can spawn a verdict it did not form (gh#815). **A skill is a trigger, not the contract** — it is a pointer to the
+file named above, never a copy of it, so the rule still has one home and you still read that file.
+**Rows marked *imported* come from a sibling project and are reference, not rules, until adapted** (gh#1212). The
+engineering standards and the PR-workflow and pipeline examples are routed the same way, in the
+[routing map](documentation/README.md)'s *Reference material* section (gh#1218) — none of them overrides this repo's own contracts.
 
 > Each `AGENTS.md` has a one-line `CLAUDE.md` beside it holding `@AGENTS.md`. **Those shims are load-bearing** —
 > Claude Code reads `CLAUDE.md`, not `AGENTS.md`. Deleting one as "redundant" silently unloads that contract.

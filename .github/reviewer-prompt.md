@@ -10,14 +10,12 @@ observations.
 Verify the PR body's claims against the diff — a claim the diff does not support is itself a finding.
 
 <!--
-This file is the SUBSTANCE of the review and is shared by both reviewers, which is why it says nothing about
-how the diff reaches you or what you do with the result. Those differ, and each has its own clause appended
-after this one:
+This file is the SUBSTANCE of the review, which is why it says nothing about how the diff reaches you or what
+you do with the result. That differs by reviewer, and each has its own clause appended after this one:
 
-  reviewer-prompt-advisory.md   the CI reviewer in .github/workflows/reviewer.yml — diff on stdin, and
-                                FORBIDDEN from writing a verdict line
   reviewer-prompt-verdict.md    the reviewer an author agent spawns — derives the diff itself, and its
                                 verdict is binding (gh#815)
 
-Split rather than copied: two prompts drifting apart is two different reviews claiming the same contract.
+A second clause, for an advisory CI reviewer that ran the Claude CLI, was retired in gh#1227. Keeping the
+substance apart from the clause is what lets a reviewer be added again without forking the contract.
 -->
