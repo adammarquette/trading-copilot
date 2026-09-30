@@ -81,9 +81,17 @@ mint_token() {
     || die "JWT signing failed — is the private key a valid PEM?"
   [ -n "$tmpkey" ] && { rm -f "$tmpkey"; trap - EXIT; }
   jwt="${unsigned}.${sig}"
-  ghapi -H "Authorization: Bearer ${jwt}" -X POST \
+  # The Bearer JWT below is the ONLY credential for this call. `gh` nevertheless refuses to run inside GitHub
+  # Actions without GH_TOKEN set, even when the caller passes its own Authorization header (gh#1225): it printed
+  # "To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable" and this step failed
+  # on every PR. Locally gh has stored auth, so it never showed. An explicit -H wins over GH_TOKEN (`gh api
+  # --verbose` sends a single "Authorization: Bearer" header), so a placeholder satisfies the guard without
+  # changing what authenticates the exchange. It is deliberately not github.token: that would be a real credential
+  # passed to a call that must not use it.
+  GH_TOKEN="${GH_TOKEN:-unused-the-bearer-jwt-below-authenticates-this-call}" \
+    ghapi -H "Authorization: Bearer ${jwt}" -X POST \
     "/app/installations/${REVIEWER_APP_INSTALLATION_ID}/access_tokens" --jq '.token' \
-    || die "installation-token exchange failed — check REVIEWER_APP_ID / REVIEWER_APP_INSTALLATION_ID and that the App is installed on ${REPO}"
+    || die "installation-token exchange failed — check REVIEWER_APP_ID / REVIEWER_APP_INSTALLATION_ID and that the App is installed on ${REPO}; if gh reports that GH_TOKEN is not set, this call ran in Actions without one (gh#1225)"
 }
 
 cmd="${1:-}"
